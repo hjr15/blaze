@@ -1,0 +1,68 @@
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { loadConfig } from "../scripts/config.mjs";
+
+function withConfig(json) {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  if (json !== null) writeFileSync(join(dir, "blaze.config.json"), JSON.stringify(json));
+  return dir;
+}
+
+test("applies defaults when no config file exists", () => {
+  const dir = withConfig(null);
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.key, "TASK");
+  assert.equal(cfg.boardTitle, "Blaze");
+  assert.equal(cfg.codeRepo, null);
+  assert.equal(cfg.codeRepoPath, null);
+  assert.deepEqual(cfg.terminal, ["done", "canceled", "duplicate"]);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("file overrides defaults; loops deep-merge", () => {
+  const dir = withConfig({ key: "PROJ", loops: { groomer: { intervalSec: 99 } } });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.key, "PROJ");
+  assert.equal(cfg.loops.groomer.intervalSec, 99);
+  assert.equal(cfg.loops.groomer.enabled, true); // default preserved
+  assert.equal(cfg.loops.reconcile.intervalSec, 60); // default branch intact
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("env overrides win over file", () => {
+  const dir = withConfig({ key: "PROJ", port: 4321 });
+  const cfg = loadConfig({ root: dir, env: { BLAZE_KEY: "OPS", BLAZE_PORT: "8080", BLAZE_CODE_REPO: "../app" } });
+  assert.equal(cfg.key, "OPS");
+  assert.equal(cfg.port, 8080);
+  assert.equal(cfg.codeRepo, "../app");
+  assert.ok(cfg.codeRepoPath.endsWith("/app"));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("idFromRef extracts the key id case-insensitively", () => {
+  const dir = withConfig({ key: "DEV" });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.idFromRef("jordan/DEV-12-foo"), "DEV-12");
+  assert.equal(cfg.idFromRef("epic/dev-9-bar"), "DEV-9");
+  assert.equal(cfg.idFromRef("main"), null);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("fileRegex matches ticket files only", () => {
+  const dir = withConfig({ key: "TASK" });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.ok(cfg.fileRegex.test("TASK-1-fix-thing.md"));
+  assert.ok(!cfg.fileRegex.test("README.md"));
+  assert.ok(!cfg.fileRegex.test("TASK-.md"));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("throws a clear error on malformed JSON", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(dir, "blaze.config.json"), "{ not json");
+  assert.throws(() => loadConfig({ root: dir, env: {} }), /cannot parse/);
+  rmSync(dir, { recursive: true, force: true });
+});
