@@ -1,5 +1,5 @@
 <p align="center">
-  <img src="brand/logo-primary.png" alt="Blaze" width="420">
+  <img src="brand/readme_graphic.jpg" alt="Blaze" width="420">
 </p>
 
 <p align="center"><b>Agentic AI for App Development</b><br>
