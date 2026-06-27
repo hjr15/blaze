@@ -5,77 +5,141 @@
 
 ## One-liner
 
-Blaze is a file-based, git-native issue board that AI coding agents can drive.
-Tickets are markdown files; a ticket's status is the folder it sits in. A reconcile
-engine mirrors a code repo's git/PR state onto the board automatically. No app, no
-database, no login — plain text, versioned in git, greppable.
+Blaze is a local **app** for a file-based, git-native issue board — and its backend
+is agent loops that act on the board through git. Tickets are markdown files; a
+ticket's status is the folder it sits in. You launch `blaze`, a browser tab opens
+onto the board, and behind it a supervisor runs two loops: a deterministic
+**reconcile** loop that mirrors a code repo's git/PR state onto the board, and an
+agentic **groomer** loop that drives a coding agent (`claude -p` by default) to
+triage, label, dedupe, and flesh out tickets — committing every change as a small,
+revertable git commit. No database, no login, no API keys inside Blaze.
 
-It is a clean, generalized extraction of the private `carelia-tracker` tool. Blaze
-ships generic and configurable; `carelia-tracker` stays exactly as it is and is not
-touched by this work.
+It is a clean, generalized extraction of the private `carelia-tracker` tool, with an
+app shell and the groomer loop added. `carelia-tracker` stays exactly as it is and
+is not touched by this work.
 
 ## Why it exists / the agent angle
 
-The board is already the ideal shape for an AI coding agent to drive: it is plain
-text and git, so an agent reads, writes, and moves tickets with the file tools it
-already has — no API client, no auth, no SDK. Blaze leans into that with a universal
-`AGENTS.md` describing the loop and a Claude Code plugin that makes it first-class
-where the tool originated.
+The board is already the ideal substrate for AI coding agents: plain text and git,
+so an agent reads, writes, and moves tickets with the file tools it already has — no
+API client, no auth, no SDK. Blaze leans all the way into that: the *backend itself*
+is agent loops whose only way of affecting the world is git. The groomer doesn't call
+a hosted service; it shells out to whatever coding agent you already run, exactly as
+the reconcile engine shells out to `git` and `gh`.
 
 ## Goals
 
-- A generic, publishable OSS repo (MIT) that anyone can clone and use as either a
+- A generic, publishable OSS app (MIT) anyone can clone and run as either a
   standalone markdown kanban or a live mirror of their own code repo.
-- Everything that was Carelia-specific (the `DEV` key, the `carelia-web` sibling path,
-  the NDIS/shifts label taxonomy) becomes configuration, not hardcoded values.
-- Preserve the original's character exactly: zero runtime dependencies, Node
-  built-ins only, "the directory is the status" as the single rule.
-- A documented, first-class way for AI agents to drive the board.
+- Everything Carelia-specific (the `DEV` key, the `carelia-web` sibling path, the
+  NDIS/shifts label taxonomy) becomes configuration.
+- Preserve the original's character: **zero runtime dependencies**, Node built-ins
+  only, "the directory is the status" as the single rule. The groomer adds no
+  dependency — it spawns an external agent CLI the same way reconcile spawns git/gh.
+- A launch-it-like-an-app experience: one command, a live board, agent activity you
+  can watch and control.
 
 ## Non-goals (YAGNI)
 
-- No MCP server.
-- No second git provider (GitLab/Forgejo) — GitHub via `gh` only, but with a clean
-  `provider` seam so one can be added later.
-- No web-based editing, no database, no auth. Files are the source of truth; anything
-  that hides them behind an API is a different product.
+- **No code-writing worker loops.** The loops keep the *board*; they never cut
+  branches or write code in the mirrored repo. (This was an explicit fork in the
+  brainstorm — autonomous implementers are deferred.)
+- No embedded Anthropic SDK and no API key handling inside Blaze — the agent CLI owns
+  auth. (A provider seam is possible later; not built now.)
+- No MCP server; no second git provider (GitHub via `gh` only, with a clean
+  `provider` seam); no database; no login.
 - No migration of `carelia-tracker` onto Blaze, and no changes to `carelia-web`.
   carelia-web appears only as the README's worked example.
 
 ## Relationship to carelia-tracker (decided: clean extraction)
 
 ```
-blaze/ (public, generic)              carelia-tracker/ (private, unchanged)
-   key configurable                       DEV hardcoded
-   codeRepo configurable        │         mirrors carelia-web as today
-   published to GitHub          │         you keep using it as-is
-        └────── no link, they diverge ──────┘
+blaze/ (public, generic, app + loops)     carelia-tracker/ (private, unchanged)
+   key configurable                            DEV hardcoded
+   codeRepo configurable          │            mirrors carelia-web as today
+   supervisor + groomer + web app │            scripts only, no groomer
+   published to GitHub            │            you keep using it as-is
+        └────── no link, they diverge ──────────┘
 ```
 
 Blaze is built fresh from the *shape* of carelia-tracker (its scripts and docs are
-the reference), not by mutating carelia-tracker in place. No private ticket history
-enters the public repo.
+the reference), not by mutating it in place. No private ticket history enters the
+public repo.
 
-## Two modes
+## Architecture
 
-This is the core generalization over the original, which assumed exactly one paired
-repo.
+```
+  $ blaze                                  one command
+     │
+     ▼
+  supervisor (scripts/supervisor.mjs, node, zero-dep)
+     │
+     ├── serves the web app ──────────►  http://localhost:4321
+     │      board columns + live agent-activity feed (SSE)
+     │      controls: ▶ reconcile  ▶ groomer  ⏸ stop  ↩ revert
+     │
+     └── runs the loops ───────────────┐
+                                        │
+            ┌───────────────────────────┴───────────────────┐
+            ▼                                                ▼
+     reconcile loop (deterministic)              groomer loop (agentic)
+       git/PR state → board columns                spawn: claude -p "<prompt>"
+       fills branch:/pr: frontmatter               (cwd = board repo)
+       self-disables in standalone mode            → agent edits ticket .md files
+            │                                       → supervisor commits chore(groom):
+            └──────────── all effects go through GIT (the board repo) ─────────────┘
+                          (moves · edits · commits)   + reconcile READS the code repo
+```
 
-1. **Standalone board** (`codeRepo: null`, the default) — a personal/team markdown
-   kanban. You change status by hand: `git mv todo/TASK-008-*.md in-progress/`.
-   `reconcile` is a no-op. This is the zero-config on-ramp for anyone not pairing the
-   board 1:1 with a single repo.
+- The **supervisor** is a plain orchestrator (not itself an agent): it owns the loop
+  lifecycle, the SSE event bus, and a tiny local control API the web app calls.
+- **reconcile** is the original engine, generalized — a deterministic loop, not an
+  agent.
+- **groomer** is the agentic loop: it builds a prompt, spawns the configured agent
+  command against the board repo, lets the agent edit ticket files, then commits the
+  diff. Every grooming change is one small `chore(groom):` commit.
+- The board repo is the shared blackboard; git is the bus. The only thing Blaze
+  *reads* from outside the board repo is the mirrored code repo's git/PR state.
 
-2. **Mirror mode** (`codeRepo` set) — exactly the original behaviour. `reconcile`
-   reads the code repo's branches + PRs and drives `in-progress → in-review → done`
-   automatically. The manual columns (`backlog`, `todo`) stay the human's. The join
-   key is the `<key>-<n>` embedded in every branch name / PR head ref — there is no
-   API, webhook, or stored ID on the code side; the branch name *is* the link.
+## Two modes (unchanged generalization)
+
+1. **Standalone board** (`codeRepo: null`, default) — a personal/team markdown
+   kanban. Reconcile is a clean no-op; you move tickets by hand (`git mv`). The
+   groomer still runs (it grooms the board regardless of any code repo).
+2. **Mirror mode** (`codeRepo` set) — reconcile reads the code repo's branches + PRs
+   and drives `in-progress → in-review → done` automatically, joining on the
+   `<key>-<n>` in branch names. The carelia-web walkthrough is the README's example.
+
+## The groomer loop (the new agentic part)
+
+**Trigger:** a filesystem watch on the groomed columns (default: `backlog/`) plus a
+timer (default 300s) plus a manual "run groomer now" button in the web app.
+
+**What it does** (one ticket at a time, defined once in `AGENTS.md` so the human rules
+and the agent prompt share a source):
+- triage a new backlog ticket — set `type` and `priority`,
+- apply labels from the configured taxonomy,
+- draft acceptance criteria when missing,
+- flag likely duplicates (point at the surviving id),
+- link related tickets.
+
+**How a pass runs:**
+1. supervisor picks an ungroomed ticket, builds the grooming prompt (ticket body +
+   the `AGENTS.md` grooming rules + the label taxonomy from config),
+2. spawns `agentCommand` (default `claude -p "<prompt>"`) with `cwd` = the board repo,
+3. the agent edits the ticket `.md` file(s) in place,
+4. the supervisor stages just those files and commits
+   `chore(groom): <id> <one-line summary>`,
+5. the commit streams to the web app's activity feed with a one-click **revert**
+   (`git revert` of that commit).
+
+**Autonomy & safety:** auto-commit, review via git — the same posture reconcile
+already uses for moves. Bounded by construction: the groomer only ever touches ticket
+`.md` files in the board repo (never the code repo, never code), each change is its
+own small revertable commit, and config scopes which columns it grooms and how often.
+A `groomer.enabled: false` switch turns it off entirely.
 
 ## Configuration — `blaze.config.json`
-
-A single JSON file at the repo root holds everything that used to be hardcoded.
-JSON is zero-dependency and equally editable by a human or an agent.
 
 ```json
 {
@@ -85,153 +149,150 @@ JSON is zero-dependency and equally editable by a human or an agent.
   "provider": "github",
   "columns": ["backlog", "todo", "in-progress", "in-review", "done", "canceled", "duplicate"],
   "terminal": ["done", "canceled", "duplicate"],
-  "defaultLabels": ["frontend", "backend", "infra", "docs", "bug", "chore"]
+  "defaultLabels": ["frontend", "backend", "infra", "docs", "bug", "chore"],
+  "port": 4321,
+  "agentCommand": "claude -p",
+  "loops": {
+    "reconcile": { "enabled": true, "intervalSec": 60 },
+    "groomer":   { "enabled": true, "intervalSec": 300, "columns": ["backlog"] }
+  }
 }
 ```
 
 | Field | Meaning | Default |
 |---|---|---|
-| `key` | Ticket id prefix. `TASK-001`; branch `you/TASK-001-slug` | `"TASK"` |
-| `boardTitle` | Dashboard heading + `<title>` | `"Blaze"` |
+| `key` | Ticket id prefix; `TASK-001`, branch `you/TASK-001-slug` | `"TASK"` |
+| `boardTitle` | Web app heading + `<title>` | `"Blaze"` |
 | `codeRepo` | Path to the repo to mirror; `null` = standalone | `null` |
 | `provider` | Reconcile provider; only `github` implemented | `"github"` |
-| `columns` | Lifecycle columns reconcile may move into | the seven shown |
-| `terminal` | Sticky columns reconcile never drags a ticket back out of | `done/canceled/duplicate` |
-| `defaultLabels` | Suggested label taxonomy (docs + scaffolder hint) | generic set |
+| `columns` / `terminal` | Lifecycle columns / sticky terminal columns | the seven shown |
+| `defaultLabels` | Label taxonomy (docs + groomer prompt + scaffolder) | generic set |
+| `port` | Web app port | `4321` |
+| `agentCommand` | Command the groomer spawns (the prompt is appended) | `"claude -p"` |
+| `loops` | Per-loop enable / cadence / groomed columns | shown above |
 
-A small `scripts/config.mjs` loads this file, applies defaults for any missing field,
-and lets env vars override (e.g. `BLAZE_CODE_REPO`, `BLAZE_KEY`) — preserving the
-original's `CARELIA_WEB_DIR` escape hatch in generic form.
+`scripts/config.mjs` loads this with defaults + env overrides (`BLAZE_CODE_REPO`,
+`BLAZE_KEY`, `BLAZE_PORT`, `BLAZE_AGENT_COMMAND`), and exports the key→regex derivation
+so reconcile, the scaffolder, and the groomer share one source of truth for the key.
 
 ## Repo layout
 
 ```
 blaze/
-├── README.md            # generic rewrite; keeps the "why this shape" section,
-│                        #   drops NDIS/shifts examples, adds the agent pitch +
-│                        #   the carelia-web-style mirror walkthrough as the example
-├── AGENTS.md            # the universal agent loop (any agent reads this)
+├── README.md            # generic rewrite; "why this shape" + agent pitch +
+│                        #   the carelia-web mirror walkthrough as the example
+├── AGENTS.md            # the universal agent loop AND the groomer's grooming rules
 ├── CONVENTIONS.md       # ticket shape + generic label taxonomy
 ├── TEMPLATE.md          # generic ticket template
 ├── LICENSE              # MIT
 ├── blaze.config.json    # the one config file
-├── package.json         # bin: blaze; scripts: board / new / reconcile
+├── package.json         # bin: blaze; scripts: start / board / new / reconcile / groom
 ├── .claude/
-│   ├── skills/          # new-ticket, reconcile, board
-│   └── commands/        # /blaze-new, /blaze-board, /blaze-reconcile
+│   ├── skills/          # new-ticket, reconcile, board, groom
+│   └── commands/        # /blaze-new, /blaze-board, /blaze-reconcile, /blaze-groom
 ├── scripts/
 │   ├── config.mjs       # NEW — loads blaze.config.json + env overrides
+│   ├── supervisor.mjs   # NEW — boots web app + runs the loops; SSE bus; control API
+│   ├── serve.mjs        # generalized + agent-activity feed + controls (web app)
+│   ├── reconcile.mjs    # generalized; pure decide() extracted; usable as a loop
 │   ├── new-ticket.sh    # generalized (key + padding from config)
-│   ├── reconcile.mjs    # generalized (key + codeRepo + provider from config)
-│   └── serve.mjs        # generalized (title + columns from config)
-├── tests/               # NEW — node:test for the pure reconcile logic
+│   └── loops/
+│       └── groomer.mjs  # NEW — prompt build → spawn agentCommand → commit
+├── tests/               # NEW — node:test for the pure logic (see Testing)
 ├── docs/
 │   └── design.md        # this file
 └── backlog/ todo/ in-progress/ in-review/ done/ canceled/ duplicate/
-                         # shipped empty except 1–2 example tickets
 ```
 
 ## Component behaviour & the generalization deltas
 
-The three scripts keep their current logic; only the hardcoded values move to config.
+The three original scripts keep their logic; hardcoded values move to config. The
+supervisor, the groomer, and the web-app additions are new.
 
 ### `scripts/config.mjs` (new)
-
-Resolves the repo root, reads `blaze.config.json`, applies defaults, overlays env
-overrides, and exports a frozen config object plus a couple of derived helpers — most
-importantly the id regex `new RegExp("\\b" + key + "-(\\d+)", "i")` so both reconcile
-and the scaffolder share one source of truth for the key.
+Resolves repo root, reads `blaze.config.json`, applies defaults, overlays env
+overrides, exports a frozen config plus the id regex
+`new RegExp("\\b" + key + "-(\\d+)", "i")`.
 
 ### `scripts/reconcile.mjs`
-
 Delta from the original:
+- `WEB` → `config.codeRepo` (absolute-resolved, `BLAZE_CODE_REPO` override). If
+  `null`, reconcile is a clean no-op (`"standalone board — nothing to reconcile"`).
+- id matchers, `DIRS`/`TERMINAL` → driven by config.
+- **Refactor:** extract the pure decision `decide(state, currentDir, config) →
+  { target, branchVal, prVal, moved }`; this is what the tests exercise. The
+  file-moving/committing shell wraps it, behaviour unchanged.
+- GitHub via `gh` retained; the PR-gathering step is the future `provider` seam.
+- Exposed both as a CLI (today's flags) and as a callable the supervisor runs on a
+  timer, emitting each move to the SSE bus.
 
-- `WEB` (hardcoded `../carelia-web`) → `config.codeRepo` (absolute-resolved), with
-  `BLAZE_CODE_REPO` override. If `codeRepo` is `null`, reconcile is a clean no-op that
-  prints "standalone board — nothing to reconcile" and exits 0.
-- `idFromRef` and the `^DEV-\d+.*\.md$` / `id: (DEV-\d+)` matchers → driven by
-  `config.key`.
-- `DIRS` / `TERMINAL` → `config.columns` / `config.terminal`.
-- The `<user>/dev-<n>` vs `epic/...` branch-preference heuristic stays, but
-  key-aware.
-- **Refactor:** extract the pure decision — given `{ pr, branch }` for an id and the
-  ticket's current column, return `{ target, branchVal, prVal, moved }` — into an
-  exported function `decide(state, currentDir, config)`. This is what the new tests
-  exercise. The file-moving/committing shell stays around it, unchanged in behaviour.
-- GitHub via `gh` retained; the PR-gathering step is the one place a future
-  `provider` switch would branch.
+### `scripts/loops/groomer.mjs` (new)
+Selects an ungroomed ticket in the configured columns, builds the prompt, spawns
+`config.agentCommand` (cwd = board repo) via `child_process`, waits, stages the
+touched ticket files, commits `chore(groom): <id> <summary>`, emits the commit to the
+SSE bus. Pure, testable helpers: prompt assembly, "which ticket next", commit-message
+formatting, and parsing the changed-files set from `git diff --name-only`.
 
-The state→column mapping is unchanged:
+### `scripts/supervisor.mjs` (new)
+Boots the web app and the enabled loops; owns timers + filesystem watches; runs an
+in-process event bus that the web app subscribes to over SSE; exposes a tiny
+localhost control API (`POST /control/{loop}/{start|stop|run}`, `POST /control/revert
+{sha}`) the web app calls. Zero-dep (`http`, `child_process`, `fs`).
 
-```
-PR merged ............ done/
-PR open .............. in-review/
-PR closed (unmerged) . in-progress/   (canceled stays a manual decision)
-branch, no PR ........ in-progress/
-no branch, no PR ..... left where it is
-```
+### `scripts/serve.mjs` (web app)
+`boardTitle` + `columns` from config. Adds: a live **agent-activity** panel fed by an
+`EventSource` over SSE (reconcile moves + groom commits, each with a timestamp, ticket
+id, summary; groom commits carry a revert control); and a control strip (start/stop
+each loop, run-now, revert). The kanban itself and the fresh-markdown auto-reload are
+unchanged.
 
-Commit + push remain on by default with the same `--no-commit` / `--no-push` /
-`--quiet` flags; the board server runs it on startup and every 60s.
-
-### `scripts/new-ticket.sh`
-
-Id prefix and zero-padding read from config (via a small `node scripts/config.mjs
---get key` style read, or by sourcing a generated value) instead of the literal
-`DEV-%03d`. Slug logic, template patching, and "refuse to overwrite" are unchanged.
-
-### `scripts/serve.mjs`
-
-`<title>`, the `<h1>`, and the console line read `config.boardTitle`; the rendered
-columns read `config.columns`. The reconcile-on-startup-and-every-60s loop calls the
-generalized reconcile, which already self-disables in standalone mode. All HTML/CSS/JS
-of the dashboard is otherwise unchanged.
+### `bin` / scripts
+`blaze` (bin) boots the supervisor (web app + loops) — the "launch like an app" entry.
+Subcommands stay available: `blaze new "title"`, `blaze reconcile`, `blaze groom`
+(one groomer pass), `blaze board` (viewer only). npm scripts mirror these.
 
 ## Agent-native layer
 
-### `AGENTS.md` (universal)
-
-The contract any agent reads before touching the board:
-
-- The one rule: a ticket's status is the directory it sits in; there is no `status:`
-  field, so it cannot drift.
-- The loop: create in `backlog/` → human moves to `todo/` (intent) → from there
-  reconcile drives `in-progress → in-review → done` from git state. Never hand-move a
-  ticket through the reconcile-owned columns.
-- The join key: branch names embed `<key>-<n>`; that is the only coupling to code.
-- How to create a ticket, how to query the board with `ls`/`grep`, the frontmatter
-  fields, and the standalone-vs-mirror distinction.
+### `AGENTS.md` (universal, and the groomer's source of rules)
+The contract any agent reads before touching the board: the directory-is-status rule,
+the create→move→reconcile loop, the `<key>-<n>` join key, the frontmatter fields, and
+the standalone-vs-mirror distinction. It *also* contains the grooming rules section,
+which the groomer loads verbatim into its prompt — so the human-facing rules and the
+agent's instructions are one source.
 
 ### `.claude/` plugin (Claude Code, first-class)
-
-- **Skills:** `new-ticket` (scaffold), `reconcile` (sync), `board` (open/print the
-  board) — thin wrappers over the scripts so a Claude Code user gets them without
-  reading `AGENTS.md` first.
-- **Commands:** `/blaze-new "title"`, `/blaze-board`, `/blaze-reconcile`.
+- **Skills:** `new-ticket`, `reconcile`, `board`, `groom` — thin wrappers over the
+  scripts.
+- **Commands:** `/blaze-new "title"`, `/blaze-board`, `/blaze-reconcile`, `/blaze-groom`.
 
 ## Testing
 
-The original ships no tests. Blaze adds a `node:test` suite (built-in runner — keeps
-the zero-dependency promise) covering:
+Built-in `node:test` runner (keeps zero-dep). The agent call is shelled out, so the
+groomer is testable end-to-end with a **stub `agentCommand`** — a tiny shell script
+that deterministically edits a ticket file — letting us assert the full
+spawn→edit→commit→event path without a live model.
 
-- `decide(...)` — every row of the state→column table, plus the terminal-column
-  stickiness and the idempotent "no git signal → leave it" case.
+- `reconcile.decide(...)` — every row of the state→column table, terminal stickiness,
+  and the idempotent "no git signal → leave it" case.
 - `config.mjs` — defaults applied, env overrides win, key→regex derivation.
 - `new-ticket` id/slug derivation — next-id = max+1, slug normalization, padding.
+- `groomer` — next-ticket selection, prompt assembly, changed-files parsing,
+  commit-message formatting, and a stub-agent end-to-end pass producing one
+  `chore(groom):` commit.
 
 Run with `node --test`. No vitest, no deps.
 
 ## Docs, license, publishing
 
-- **README** rewritten generic: keep the "why this shape" rationale, replace
-  NDIS/shifts examples with neutral ones, add the agent pitch and the carelia-web
-  mirror walkthrough as the worked example.
-- **CONVENTIONS.md** label taxonomy genericized to `defaultLabels`.
-- **LICENSE:** MIT.
-- **Publishing:** ready to `gh repo create blaze --public --source . --push`. npm
-  publish is optional and out of scope for v1 (clone-and-run); if ever done, the
-  package name can be suffixed/scoped while the `blaze` command name is unaffected.
+- README rewritten generic: keep the "why this shape" rationale, add the agent pitch,
+  the app/loops overview, and the carelia-web mirror walkthrough as the worked example.
+- CONVENTIONS.md label taxonomy genericized to `defaultLabels`.
+- **MIT** license.
+- Ready to `gh repo create blaze --public --source . --push`. npm publish is optional
+  and out of scope for v1 (clone-and-run); if ever done, the package name can be
+  suffixed/scoped while the `blaze` command name is unaffected.
 
 ## Open questions
 
-None blocking. Deferred by YAGNI: GitLab/Forgejo provider, MCP server, npm publish.
+None blocking. Deferred by YAGNI: code-writing worker loops, embedded SDK provider,
+GitLab/Forgejo provider, MCP server.
