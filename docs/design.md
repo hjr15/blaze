@@ -199,6 +199,7 @@ blaze/
 │   └── loops/
 │       └── groomer.mjs  # NEW — prompt build → spawn agentCommand → commit
 ├── tests/               # NEW — node:test for the pure logic (see Testing)
+├── brand/               # logo assets + BRAND.md (palette, type, usage)
 ├── docs/
 │   └── design.md        # this file
 └── backlog/ todo/ in-progress/ in-review/ done/ canceled/ duplicate/
@@ -281,6 +282,26 @@ spawn→edit→commit→event path without a live model.
   `chore(groom):` commit.
 
 Run with `node --test`. No vitest, no deps.
+
+## Brand
+
+Blaze ships with a brand kit (`brand/`): a comet/meteor mark with a flame trail and a
+white **ticket card** embedded in its head — a task card moving fast, tying the name
+to the product. Full token reference in `brand/BRAND.md`.
+
+- **Palette** (CSS tokens in `serve.mjs`): Blaze Red `#FF3B1F`, Blaze Orange `#FF7A00`,
+  Blaze Amber `#FFC107`, Deep Charcoal `#0F172A`, Light Neutral `#F6F7F9`.
+- **Web app:** Light Neutral background, Deep Charcoal text, Blaze Orange accents and a
+  Red↕Amber "live" pulse on the activity feed; header carries the icon-only mark +
+  wordmark + tagline. Dark-background lockup is on hand for a future dark mode.
+- **Priority heat ramp:** the warm palette *is* the kanban priority colour-coding —
+  urgent = Red, high = Orange, medium = Amber, low/none = charcoal tints. No extra
+  colours.
+- **Type:** bold/modern/confident headings, clean/readable body — system stack by
+  default to stay zero-dependency; a self-hosted webfont can be added later.
+- **Tagline:** "Agentic AI for App Development." Copy reads "resolves issues" as
+  triage/prioritize/drive-to-resolution via the board (matching the v1 board-keeper
+  scope), not autonomous code fixes.
 
 ## Docs, license, publishing
 
