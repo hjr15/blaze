@@ -105,7 +105,7 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   }
 
   execFileSync("git", ["-C", root, "add", ...changed]);
-  execFileSync("git", ["-C", root, "commit", "-m", commitMessage(ticket.id, changed)]);
+  execFileSync("git", ["-C", root, "commit", "-m", commitMessage(ticket.id, changed), "--", ...changed]);
   const sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   record();
   return { type: "groom", id: ticket.id, sha, files: changed, ts: today };
