@@ -79,10 +79,52 @@ const ACTIVITY_SCRIPT = `
 export function createApp(cfg, { root = ROOT } = {}) {
   const bus = createBus();
 
-  function runReconcile() { /* implemented in Task 6 */ }
-  function runGroomer() { /* implemented in Task 6 */ }
-  function startLoop() { /* implemented in Task 6 */ }
-  function stopLoop() { /* implemented in Task 6 */ }
+  const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
+
+  function runReconcile() {
+    if (!cfg.codeRepoPath || loops.reconcile.busy) return;
+    loops.reconcile.busy = true;
+    try {
+      const r = reconcile({ fetch: true, commit: true, push: true });
+      if (r && r.ok && r.changes) {
+        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
+      } else if (r && !r.ok) {
+        bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
+      }
+    } catch (e) {
+      bus.publish({ type: "error", loop: "reconcile", message: e.message, ts: today() });
+    } finally {
+      loops.reconcile.busy = false;
+    }
+  }
+
+  function runGroomer() {
+    if (loops.groomer.busy) return;
+    loops.groomer.busy = true;
+    try {
+      let agentsMd = "";
+      try { agentsMd = readFileSync(join(root, "AGENTS.md"), "utf8"); } catch {}
+      const evt = groomOnce({ root, cfg, agentsMd, today: today() });
+      if (evt) bus.publish(evt);
+    } catch (e) {
+      bus.publish({ type: "error", loop: "groomer", message: e.message, ts: today() });
+    } finally {
+      loops.groomer.busy = false;
+    }
+  }
+
+  function startLoop(name) {
+    const fn = name === "reconcile" ? runReconcile : runGroomer;
+    if (loops[name].timer) return;
+    fn();
+    loops[name].timer = setInterval(fn, cfg.loops[name].intervalSec * 1000);
+    bus.publish({ type: "status", loop: name, state: "started", ts: today() });
+  }
+
+  function stopLoop(name) {
+    if (loops[name].timer) { clearInterval(loops[name].timer); loops[name].timer = null; }
+    bus.publish({ type: "status", loop: name, state: "stopped", ts: today() });
+  }
 
   const server = createServer((req, res) => {
     if (req.url === "/api/hash") {
@@ -107,7 +149,30 @@ export function createApp(cfg, { root = ROOT } = {}) {
       res.end(pageHtml({ afterHeader: CONTROLS_HTML, beforeBodyEnd: ACTIVITY_SCRIPT }));
       return;
     }
-    // Control routes are added in Task 6.
+    const ctl = req.url && req.url.match(/^\/control\/(reconcile|groomer)\/(start|stop|run)$/);
+    if (ctl && req.method === "POST") {
+      const [, name, action] = ctl;
+      if (action === "start") startLoop(name);
+      else if (action === "stop") stopLoop(name);
+      else (name === "reconcile" ? runReconcile : runGroomer)();
+      res.writeHead(204); res.end();
+      return;
+    }
+    if (req.url === "/control/revert" && req.method === "POST") {
+      let body = "";
+      req.on("data", (c) => (body += c));
+      req.on("end", () => {
+        try {
+          const { sha } = JSON.parse(body || "{}");
+          execFileSync("git", ["-C", root, "revert", "--no-edit", sha]);
+          bus.publish({ type: "status", loop: "groomer", state: `reverted ${sha.slice(0, 7)}`, ts: today() });
+        } catch (e) {
+          bus.publish({ type: "error", loop: "groomer", message: `revert failed: ${e.message}`, ts: today() });
+        }
+        res.writeHead(204); res.end();
+      });
+      return;
+    }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
   });
@@ -119,5 +184,9 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const cfg = loadConfig();
   const app = createApp(cfg);
   const port = Number(process.env.PORT) || cfg.port;
-  app.server.listen(port, () => console.log(`${cfg.boardTitle} app → http://localhost:${port}`));
+  app.server.listen(port, () => {
+    console.log(`${cfg.boardTitle} app → http://localhost:${port}`);
+    if (cfg.loops.reconcile.enabled && cfg.codeRepoPath) app.startLoop("reconcile");
+    if (cfg.loops.groomer.enabled) app.startLoop("groomer");
+  });
 }
