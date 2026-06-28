@@ -16,6 +16,8 @@ test("buildForest: epic with two children", () => {
   assert.deepEqual(f.roots.map((t) => t.id), ["E"]);
   assert.deepEqual(f.childrenOf.get("E").map((t) => t.id), ["C1", "C2"]);
   assert.ok(f.epicIds.has("E"));
+  assert.equal(f.byId.get("E").id, "E");
+  assert.equal(f.byId.size, 3);
 });
 
 test("buildForest: unresolvable or self parent becomes a root", () => {
