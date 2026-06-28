@@ -1,12 +1,12 @@
 ---
 id: TASK-002
 title: Try mirror mode against a code repo
-type: feature
+type: chore
 priority: low
-labels: [docs]
+labels: [docs, chore]
 assignee: unassigned
 created: 2026-06-27
-updated: 2026-06-27
+updated: 2026-06-28
 ---
 
 ## Context
