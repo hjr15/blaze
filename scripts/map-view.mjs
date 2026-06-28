@@ -127,3 +127,24 @@ export function layoutTree(forest) {
   const height = PAD + cursor * ROW_H;
   return { nodes, edges, width, height, standaloneY };
 }
+
+// ---- pure: visibility (keep epic as context) ---------------------------
+
+export function computeVisible(tickets, matchedIds) {
+  const byId = new Map(tickets.map((t) => [t.id, t]));
+  const visibleIds = new Set();
+  const contextOnlyIds = new Set();
+  for (const id of matchedIds) {
+    visibleIds.add(id);
+    let cur = byId.get(id);
+    const guard = new Set([id]);
+    while (cur && cur.parent && byId.has(cur.parent) && !guard.has(cur.parent)) {
+      const pid = cur.parent;
+      guard.add(pid);
+      visibleIds.add(pid);
+      if (!matchedIds.has(pid)) contextOnlyIds.add(pid);
+      cur = byId.get(pid);
+    }
+  }
+  return { visibleIds, contextOnlyIds };
+}

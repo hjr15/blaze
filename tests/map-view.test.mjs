@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildForest, layoutTree, NODE_H, ROW_H, PAD, ticketMatches } from "../scripts/map-view.mjs";
+import { buildForest, layoutTree, NODE_H, ROW_H, PAD, ticketMatches, computeVisible } from "../scripts/map-view.mjs";
 
 const tk = (id, parent = "") => ({ id, parent, status: "todo", updated: "2026-06-28" });
 
@@ -87,4 +87,28 @@ test("ticketMatches: status sets", () => {
 test("ticketMatches: filters AND together", () => {
   // active but stale -> excluded by window
   assert.equal(ticketMatches(at("2020-01-01", "in-progress"), { window: 7, status: "active", now: NOW }), false);
+});
+
+const tree = [tk("E"), tk("C1", "E"), tk("C2", "E"), tk("G", "C1")];
+
+test("computeVisible: matched child pulls in its epic as context", () => {
+  const { visibleIds, contextOnlyIds } = computeVisible(tree, new Set(["C1"]));
+  assert.deepEqual([...visibleIds].sort(), ["C1", "E"]);
+  assert.deepEqual([...contextOnlyIds], ["E"]);
+});
+
+test("computeVisible: matched epic does NOT pull in its children", () => {
+  const { visibleIds } = computeVisible(tree, new Set(["E"]));
+  assert.deepEqual([...visibleIds], ["E"]);
+});
+
+test("computeVisible: whole ancestor chain is context", () => {
+  const { visibleIds, contextOnlyIds } = computeVisible(tree, new Set(["G"]));
+  assert.deepEqual([...visibleIds].sort(), ["C1", "E", "G"]);
+  assert.deepEqual([...contextOnlyIds].sort(), ["C1", "E"]);
+});
+
+test("computeVisible: empty match is empty", () => {
+  const { visibleIds } = computeVisible(tree, new Set());
+  assert.equal(visibleIds.size, 0);
 });
