@@ -14,6 +14,7 @@ import { readdirSync, readFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig } from "./config.mjs";
+import { MAP_STYLES } from "./map-view.mjs";
 
 const cfg = loadConfig();
 
@@ -230,8 +231,49 @@ export function boardData() {
   return { cols, total };
 }
 
+// Flatten every ticket to a JSON-friendly shape for the Map view. bodyHtml is
+// pre-rendered here so the browser needs no markdown renderer.
+export function mapData() {
+  const { cols } = boardData();
+  const out = [];
+  for (const c of cols) {
+    for (const t of c.tickets) {
+      const m = t.meta;
+      out.push({
+        id: m.id || t.file,
+        title: m.title || t.file,
+        type: m.type || "",
+        priority: m.priority || "none",
+        labels: m.labels || [],
+        project: m.project || "",
+        assignee: m.assignee || "",
+        estimate: m.estimate || "",
+        parent: m.parent || "",
+        status: c.dir,
+        pr: m.pr || "",
+        created: m.created || "",
+        updated: m.updated || "",
+        bodyHtml: mdLite(t.body),
+      });
+    }
+  }
+  return out;
+}
+
+// Serve the Map view's browser module verbatim. Both servers call this early.
+export function tryServeAsset(req, res) {
+  if (req.url === "/assets/map-view.js") {
+    res.writeHead(200, { "content-type": "text/javascript; charset=utf-8" });
+    res.end(readFileSync(join(ROOT, "scripts", "map-view.mjs"), "utf8"));
+    return true;
+  }
+  return false;
+}
+
 export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
   const { cols, total } = boardData();
+  // `<` is escaped so a ticket title can never break out of the <script> tag.
+  const mapJson = JSON.stringify(mapData()).replace(/</g, "\\u003c");
   const columnsHtml = cols
     .map(
       (c) => `
@@ -362,8 +404,10 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
   .viewtoggle .pill.on { color: var(--charcoal); background: var(--blaze-orange); }
 
   /* ---- view switching ---- */
-  html[data-view="board"] .list { display: none; }
-  html[data-view="list"]  .board { display: none; }
+  html[data-view="board"] .list, html[data-view="board"] .mapview,
+  html[data-view="list"]  .board, html[data-view="list"]  .mapview,
+  html[data-view="map"]   .board, html[data-view="map"]   .list { display: none; }
+${MAP_STYLES}
 
   /* ---- list view ---- */
   .list { display: flex; flex-direction: column; gap: 8px; padding: 16px 20px; width: 100%; }
@@ -417,12 +461,39 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
     <div class="viewtoggle" role="group" aria-label="View" style="margin-left:auto">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
+      <button type="button" class="pill" data-view="map">Map</button>
     </div>
     <span class="sub" id="live">live</span>
   </header>
   ${afterHeader}
   <div class="board">${columnsHtml}</div>
   <div class="list">${groupsHtml}</div>
+  <script type="application/json" id="blaze-map-data">${mapJson}</script>
+  <div class="mapview">
+    <div class="map-tb">
+      <div class="map-tbgroup">
+        <span class="map-tblabel">Time</span>
+        <button class="map-pill" data-filter="window" data-value="7">7</button>
+        <button class="map-pill" data-filter="window" data-value="14">14</button>
+        <button class="map-pill" data-filter="window" data-value="30">30</button>
+        <button class="map-pill" data-filter="window" data-value="all">All</button>
+      </div>
+      <div class="map-tbgroup">
+        <span class="map-tblabel">Status</span>
+        <button class="map-pill" data-filter="status" data-value="active">Active</button>
+        <button class="map-pill" data-filter="status" data-value="inactive">Inactive</button>
+        <button class="map-pill" data-filter="status" data-value="all">All</button>
+      </div>
+    </div>
+    <div class="map-body">
+      <div class="map-scroll"></div>
+      <aside class="map-panel"></aside>
+    </div>
+  </div>
+  <script type="module">
+    import { initMap } from "/assets/map-view.js";
+    initMap();
+  </script>
   <script>
     // View toggle (Board / List), persisted to localStorage.
     const VIEW_KEY = "tracker.view";
@@ -461,6 +532,7 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   createServer((req, res) => {
+    if (tryServeAsset(req, res)) return;
     if (req.url === "/api/hash") {
       res.writeHead(200, { "content-type": "text/plain" });
       res.end(contentHash());
