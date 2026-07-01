@@ -2,7 +2,7 @@
 // configured agent command to edit it, then auto-commit the change.
 import { createHash } from "node:crypto";
 import {
-  readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync,
+  readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync,
 } from "node:fs";
 import { join } from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -75,6 +75,18 @@ export function commitMessage(id, files) {
   return `chore(groom): ${id} ${files.length} file(s) groomed`;
 }
 
+// A groom pass is in scope only when the sole change is an in-place edit of the
+// target ticket. Anything else — a second ticket swept in, a stray new file, a
+// staged change (e.g. `git mv`), or the target moved/deleted to another column
+// (which would silently change its status) — is out of bounds and gets reverted.
+export function groomWithinScope({ unstaged, staged, untracked, targetExists }, targetRel) {
+  return targetExists
+    && staged.length === 0
+    && untracked.length === 0
+    && unstaged.length === 1
+    && unstaged[0] === targetRel;
+}
+
 export function groomOnce({ root, cfg, agentsMd, today }) {
   const state = loadState(root);
   const ticket = selectNextTicket(root, cfg, state);
@@ -91,24 +103,51 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
     return { type: "groom", id: ticket.id, error: ((r.stderr || "agent command failed") + "").slice(0, 200), ts: today };
   }
 
-  const diff = execFileSync("git", ["-C", root, "diff", "--name-only"], { encoding: "utf8" });
-  const changed = parseChangedFiles(diff).filter((f) => cfg.columns.some((c) => f.startsWith(`${c}/`)));
+  // Look at everything the agent touched: tracked edits (unstaged + staged) and any
+  // new files, scoped to the board's columns.
+  const inCols = (f) => cfg.columns.some((c) => f.startsWith(`${c}/`));
+  const gitLines = (args) =>
+    parseChangedFiles(execFileSync("git", ["-C", root, ...args], { encoding: "utf8" })).filter(inCols);
+  const unstaged = gitLines(["diff", "--name-only"]);
+  const staged = gitLines(["diff", "--name-only", "--cached"]);
+  const untracked = gitLines(["ls-files", "--others", "--exclude-standard"]);
+  const targetExists = existsSync(join(root, ticket.rel));
+
   const record = () => {
-    const raw = readFileSync(join(root, ticket.rel), "utf8");
+    const raw = existsSync(join(root, ticket.rel))
+      ? readFileSync(join(root, ticket.rel), "utf8")
+      : "";
     state.groomed[ticket.id] = hashContent(raw);
     saveState(root, state);
   };
 
-  if (!changed.length) {
+  if (!unstaged.length && !staged.length && !untracked.length) {
     record(); // mark groomed so we don't re-run on a no-op
     return { type: "groom", id: ticket.id, noop: true, ts: today };
   }
 
-  execFileSync("git", ["-C", root, "add", ...changed]);
-  execFileSync("git", ["-C", root, "commit", "-m", commitMessage(ticket.id, changed), "--", ...changed]);
+  // Out of bounds: revert whatever the agent did (never commit a partial or
+  // status-changing groom) and report it instead of committing.
+  if (!groomWithinScope({ unstaged, staged, untracked, targetExists }, ticket.rel)) {
+    if (staged.length) execFileSync("git", ["-C", root, "reset", "-q", "--", ...staged]);
+    const tracked = [...new Set([...unstaged, ...staged])];
+    if (tracked.length) execFileSync("git", ["-C", root, "checkout", "-q", "--", ...tracked]);
+    for (const f of untracked) rmSync(join(root, f), { force: true });
+    record(); // mark groomed so we don't loop on the same out-of-bounds edit
+    return {
+      type: "groom",
+      id: ticket.id,
+      blocked: true,
+      files: [...new Set([...unstaged, ...staged, ...untracked])],
+      ts: today,
+    };
+  }
+
+  execFileSync("git", ["-C", root, "add", ...unstaged]);
+  execFileSync("git", ["-C", root, "commit", "-m", commitMessage(ticket.id, unstaged), "--", ...unstaged]);
   const sha = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   record();
-  return { type: "groom", id: ticket.id, sha, files: changed, ts: today };
+  return { type: "groom", id: ticket.id, sha, files: unstaged, ts: today };
 }
 
 // CLI: `node scripts/loops/groomer.mjs` runs one grooming pass.
