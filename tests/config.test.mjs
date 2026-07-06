@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { execFileSync } from "node:child_process";
 import { loadConfig } from "../scripts/config.mjs";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
 function withConfig(json) {
   const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
@@ -65,4 +69,41 @@ test("throws a clear error on malformed JSON", () => {
   writeFileSync(join(dir, "blaze.config.json"), "{ not json");
   assert.throws(() => loadConfig({ root: dir, env: {} }), /cannot parse/);
   rmSync(dir, { recursive: true, force: true });
+});
+
+test("commitMode defaults to per-op", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(cfg.commitMode, "per-op");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("commitMode is read from blaze.config.json", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(cfg.commitMode, "batch");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_COMMIT_MODE env overrides the file", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
+  const cfg = loadConfig({ root, env: { BLAZE_COMMIT_MODE: "per-op" } });
+  assert.equal(cfg.commitMode, "per-op");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("--get CLI reads the resolved data root's config, not the engine tree's own", () => {
+  const data = mkdtempSync(join(tmpdir(), "blaze-get-"));
+  const projectsDir = join(data, "projects");
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(join(data, "blaze.config.json"), JSON.stringify({ boardTitle: "Distinctive Board Title" }));
+  const out = execFileSync(process.execPath, [join(REPO, "scripts", "config.mjs"), "--get", "boardTitle"], {
+    cwd: REPO,
+    env: { ...process.env, BLAZE_PROJECTS_DIR: projectsDir },
+    encoding: "utf8",
+  });
+  assert.equal(out.trim(), "Distinctive Board Title");
+  rmSync(data, { recursive: true, force: true });
 });

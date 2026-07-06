@@ -5,7 +5,7 @@ import { createServer } from "node:http";
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, ROOT } from "./config.mjs";
+import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
 import { pageHtml, contentHash } from "./serve.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
@@ -76,13 +76,13 @@ const ACTIVITY_SCRIPT = `
           fetch("/control/" + g.dataset.loop + "/" + b.dataset.act, { method: "POST" }))));
   </script>`;
 
-export function createApp(cfg, { root = ROOT } = {}) {
+export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
   const bus = createBus();
 
   const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
 
   function runReconcile() {
-    if (!cfg.codeRepoPath || loops.reconcile.busy) return;
+    if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
     try {
       const r = reconcile({ fetch: true, commit: true, push: true });
@@ -181,12 +181,12 @@ export function createApp(cfg, { root = ROOT } = {}) {
 }
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const cfg = loadConfig();
+  const cfg = loadConfig({ root: resolveRoots().dataRoot });
   const app = createApp(cfg);
   const port = Number(process.env.PORT) || cfg.port;
   app.server.listen(port, "127.0.0.1", () => {
     console.log(`${cfg.boardTitle} app → http://localhost:${port}`);
-    if (cfg.loops.reconcile.enabled && cfg.codeRepoPath) app.startLoop("reconcile");
+    if (cfg.loops.reconcile.enabled && listProjects(cfg).length) app.startLoop("reconcile");
     if (cfg.loops.groomer.enabled) app.startLoop("groomer");
   });
 }

@@ -3,80 +3,108 @@
 </p>
 
 <p align="center"><b>Agentic AI for App Development</b><br>
-A file-based, git-native issue board that AI coding agents can drive.</p>
+A file-based, git-native issue tracker built for AI coding agents to drive.</p>
 
 ---
 
-Blaze is a super-clean issue tracker that lives next to your code. **Tickets are
-markdown files. Their status is the directory they sit in.** No app, no database, no
-login — plain text, versioned in git, greppable, and trivial for an AI coding agent to
-drive with the file tools it already has.
+Blaze is plain files, all the way down:
 
-```
-blaze/
-├── backlog/        ← captured, not yet committed to
-├── todo/           ← committed to, ready to pick up
-├── in-progress/    ← actively being worked
-├── in-review/      ← PR open / awaiting review
-├── done/           ← shipped
-├── canceled/  duplicate/
-└── blaze.config.json
-```
+- **A ticket is a markdown file** — frontmatter + a body. No database, no login.
+- **A ticket's status is the directory it sits in.** There is no `status:` field, so
+  it cannot drift out of sync with reality.
+- **Git is the history.** `git log --follow` on a ticket file is its full audit trail;
+  every mutation is a small, revertable commit.
+- **The board is a rendering, never a second source of truth** — `blaze board` reads
+  the same files you'd `ls` / `grep` / `git mv` by hand.
 
-## The one rule
+It's built AI-first: an agent drives the tracker with the file tools it already has,
+or with the `blaze` CLI. No API client, no auth, no SDK required either way.
 
-A ticket's status is **which folder it's in**. To change status, move the file:
+## Install
 
 ```bash
-git mv todo/TASK-008-fix-thing.md in-progress/
+npm i -g @hjr15/blaze-board
+# or, without installing:
+npx @hjr15/blaze-board <command>
 ```
 
-`git log --follow` on a file is its full history.
+Requires Node 20+ and `git` on `PATH`.
 
-## Two ways to run it
+## The engine ⟂ data split
 
-**Standalone** (default) — a personal/team markdown kanban. You move tickets by hand.
+This package is the **engine** — the `blaze` CLI and its web board. Your tickets
+live in a separate **data repo**: a `blaze.config.json` plus a
+`projects/<KEY>/<status>/` tree, versioned in its own git history.
+
+Attach the engine to a data repo one of two ways:
+
+- run `blaze` from inside the data repo (it looks for a `projects/` directory in
+  the current working directory), **or**
+- set `BLAZE_PROJECTS_DIR` to the data repo's `projects/` directory, from anywhere.
+
+One global `npm i -g @hjr15/blaze-board` install can drive any number of unrelated
+data repos this way — upgrade the engine once, keep every board's ticket history in
+its own repo.
+
+## Quickstart
 
 ```bash
-npm run new "Fix the export bug"     # scaffolds backlog/TASK-001-fix-the-export-bug.md
-npm run board                        # → http://localhost:4321
+# 1. a data repo — just a directory with its own git history
+mkdir my-tracker && cd my-tracker && git init
+
+# 2. the engine needs a key and at least one project
+mkdir -p projects/ENG
+cat > blaze.config.json <<'EOF'
+{ "key": "ENG", "projects": ["ENG"] }
+EOF
+git add -A && git commit -m "init board"
+
+# 3. create a ticket — task/story/bug require --estimate; every type gets a
+#    scaffolded description body
+blaze new --project ENG --type task "Fix the export bug" --estimate 30
+
+# 4. open the board
+blaze board   # → http://localhost:4321
 ```
 
-**Mirror mode** — point Blaze at a code repo and it tracks status from git automatically.
-Set `codeRepo` in `blaze.config.json` (and `key` to match your branch convention):
+`blaze new` writes the ticket, validates it against the schema, and commits it — one
+small commit per ticket, scoped to the files it actually touched.
 
-```json
-{ "key": "TASK", "codeRepo": "../my-app" }
-```
+## CLI verbs
 
-Now the branch name *is* the link. A branch `you/TASK-12-add-export` in `../my-app`
-moves ticket `TASK-12` to `in-progress/`; opening its PR moves it to `in-review/`;
-merging moves it to `done/` — all via `npm run reconcile` (needs `gh` authed).
+| Command | Does |
+|---|---|
+| `blaze new --project <KEY> --type <type> "<title>" [--estimate m] [--parent ID] [--priority p] [--labels a,b]` | Create a ticket in its type's initial status |
+| `blaze move <id> <status>` | Change status (validates the transition; auto-sets `resolution` on a terminal status) |
+| `blaze resolve <id> <done\|wont-do\|duplicate\|cannot-reproduce>` | Set a non-default resolution without moving the file |
+| `blaze log <id> <minutes>` | Append a worklog entry |
+| `blaze rollup [<id>]` | Print rolled-up estimate/logged time for one node, or a summary of every goal/epic |
+| `blaze reconcile [--apply] [--fetch]` | Mirror a linked code repo's branch/PR state onto delivery-workflow tickets (dry-run by default) |
+| `blaze edit <id> ...` | Edit ticket fields |
+| `blaze reindex` | Rebuild/validate the on-disk index |
+| `blaze commit` | Flush queued ops into one commit (`commitMode: batch`) |
+| `blaze migrate [--dry-run\|--live] [--project <KEY>]` | Import tickets from an external tracker via a reviewed disposition ledger (`--project` optional — falls back to `blaze.config.json`'s `projects` list) |
+| `blaze board` | Serve the read-only kanban view |
 
-### Worked example: mirroring a real repo
-
-Say your code repo uses `DEV-<n>` branch names (e.g. `jordan/DEV-309-ics-feed`). Drop
-Blaze in as a sibling and configure:
-
-```json
-{ "key": "DEV", "boardTitle": "My Dev Board", "codeRepo": "../my-app" }
-```
-
-`reconcile` reads `../my-app`'s branches + PRs, greps the `DEV-<n>` out of each branch
-name, and drives the matching ticket through the columns. There is nothing to install
-in the code repo — the naming convention is the whole integration.
-
-## Driving it with an AI agent
-
-See [`AGENTS.md`](AGENTS.md) — the create → move → reconcile loop, the join key, and the
-grooming rules, written for any coding agent. Claude Code users also get a plugin under
-`.claude/` (commands `/blaze-new`, `/blaze-board`, `/blaze-reconcile`).
+See [`AGENTS.md`](AGENTS.md) for the full contract — types, workflows, the git join
+key, and how an agent should drive the board.
 
 ## Configuration
 
-Everything lives in [`blaze.config.json`](blaze.config.json): the ticket `key`, the
-`codeRepo` to mirror (`null` = standalone), `columns`, `defaultLabels`, the board
-`port`, and more. See [`docs/design.md`](docs/design.md) for the full reference.
+`blaze.config.json` lives at the data repo's root. Minimally:
+
+```json
+{ "key": "ENG", "projects": ["ENG"] }
+```
+
+`key` is the ticket id prefix (`ENG-1`, `ENG-2`, ...); `projects` lists which
+`projects/<KEY>/` directories the board renders. Per-project settings (labels,
+`codeRepos` to mirror, `requireWorklogBeforeTerminal`, `workflowOverrides`) live in
+`projects/<KEY>/project.json` — see [`AGENTS.md`](AGENTS.md#configuration).
+
+## Origin
+
+This is a public continuation of [`sychyoboN/blaze`](https://github.com/sychyoboN/blaze).
 
 ## License
 
