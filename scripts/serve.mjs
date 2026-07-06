@@ -10,7 +10,7 @@
 // never reloads while the files are untouched — so it won't fight you mid-read.
 
 import { createServer } from "node:http";
-import { readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync, readFileSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -21,6 +21,7 @@ import { rollUp } from "./model/rollup.mjs";
 import { formatMinutes } from "./model/time.mjs";
 import { WORKFLOWS } from "./model/workflows.mjs";
 import { PRIORITIES } from "./model/schema.mjs";
+import { parseActivity, groupByTicket } from "./model/activity.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
@@ -115,6 +116,18 @@ export function contentHash() {
     }
   }
   return String(h);
+}
+
+// Live-activity model: tail <dataRoot>/.blaze/activity.jsonl, group by ticket,
+// attach each ticket's current column from the board index. Missing/empty file
+// degrades to no groups. Read-only; the feed is written by the claude-config hook.
+export function liveModel(dataRoot, projectsDir, { now = Date.now() } = {}) {
+  let text = "";
+  try { text = readFileSync(join(dataRoot, ".blaze", "activity.jsonl"), "utf8"); } catch { text = ""; }
+  const events = parseActivity(text);
+  const statusByKey = {};
+  for (const r of buildIndex(projectsDir).rows) if (r.id) statusByKey[r.id] = r.status;
+  return { groups: groupByTicket(events, { now, statusByKey }) };
 }
 
 // ---- render -------------------------------------------------------------
@@ -405,6 +418,18 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
   /* ---- view switching ---- */
   html[data-view="board"] .list { display: none; }
   html[data-view="list"]  .board { display: none; }
+  html[data-view="live"] .board, html[data-view="live"] .list { display: none; }
+  html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
+  .live { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 16px 20px; }
+  .livecard { background: #161b22; border: 1px solid #21262d; border-left: 3px solid #444c56; border-radius: 10px; padding: 10px 12px; }
+  .livecard.active { border-left-color: var(--blaze-orange); }
+  .lc-top { display: flex; align-items: center; gap: 8px; }
+  .lc-dot { width: 8px; height: 8px; border-radius: 999px; background: #444c56; }
+  .lc-dot.on { background: var(--blaze-orange); box-shadow: 0 0 0 3px #ff7a0033; }
+  .lc-age { margin-left: auto; color: #7d8590; font-size: 11px; }
+  .lc-now { margin-top: 6px; color: #c9d1d9; }
+  .lc-meta { margin-top: 6px; display: flex; gap: 8px; color: #7d8590; font-size: 11px; flex-wrap: wrap; }
+  .lc-col { background: #21314a; color: #79c0ff; padding: 1px 6px; border-radius: 999px; }
 
   /* ---- list view ---- */
   .list { display: flex; flex-direction: column; gap: 8px; padding: 16px 20px; width: 100%; }
@@ -471,6 +496,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
     <div class="viewtoggle" role="group" aria-label="View" style="margin-left:auto">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
+      <button type="button" class="pill" data-view="live">Live</button>
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -479,6 +505,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
   ${afterHeader}
   <div class="board">${columnsHtml}</div>
   <div class="list">${groupsHtml}</div>
+  <div class="live"><div class="empty">Loading live activity…</div></div>
   <script>
     // View toggle (Board / List), persisted to localStorage.
     const VIEW_KEY = "tracker.view";
@@ -580,6 +607,25 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
       toast(lines.length ? lines.length + " code-bound move(s) — apply via 'blaze reconcile --apply'" : "no code-bound changes");
     });
   </script>
+  <script>
+    // Live view: poll /api/live and render cards. Runs only meaningful work when
+    // the Live view is active; degrades to a no-data message on error/empty.
+    function fmtAge(ms){var s=Math.floor(Math.max(0,ms)/1000);if(s<5)return"now";if(s<60)return s+"s ago";var m=Math.floor(s/60);if(m<60)return m+"m ago";var h=Math.floor(m/60);if(h<24)return h+"h ago";return Math.floor(h/24)+"d ago";}
+    function esc(x){return String(x==null?"":x).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}
+    async function pollLive(){
+      const el=document.querySelector(".live"); if(!el) return;
+      try{
+        const {groups}=await (await fetch("/api/live")).json();
+        if(!groups||!groups.length){ el.innerHTML='<div class="empty">No recent activity.</div>'; return; }
+        el.innerHTML=groups.map(function(g){return '<article class="livecard '+(g.active?"active":"idle")+'">'
+          +'<div class="lc-top"><span class="id">'+esc(g.key)+'</span><span class="lc-dot '+(g.active?"on":"")+'"></span><span class="lc-age">'+esc(fmtAge(g.ageMs))+'</span></div>'
+          +'<div class="lc-now">now: <strong>'+esc(g.tool)+'</strong></div>'
+          +'<div class="lc-meta">'+(g.column?'<span class="lc-col">'+esc(g.column)+'</span>':'')+'<span class="lc-branch">'+esc(g.branch)+'</span></div>'
+          +'</article>';}).join("");
+      }catch(e){ el.innerHTML='<div class="empty">live activity offline</div>'; }
+    }
+    pollLive(); setInterval(pollLive, 3000);
+  </script>
   ${beforeBodyEnd}
 </body>
 </html>`;
@@ -596,6 +642,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       res.writeHead(200, { "content-type": "text/plain" }); res.end(contentHash()); return;
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
+    if (req.method === "GET" && u.pathname === "/api/live") {
+      return json(200, liveModel(root, projectsDir));
+    }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
       const { reconcile } = await import("./reconcile.mjs");
       const r = reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });

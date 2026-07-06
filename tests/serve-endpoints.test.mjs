@@ -226,3 +226,39 @@ test("GET /api/reconcile-preview sees tickets under a custom-named projectsDir",
     rmSync(codeRepo, { recursive: true, force: true });
   }
 });
+
+import { mkdtempSync as _mk } from "node:fs";
+import { writeFileSync as _wf, mkdirSync as _md } from "node:fs";
+
+test("GET /api/live groups fresh events and degrades to [] with no file", async () => {
+  const fx = repo();                                  // OBA-1 lives in OBA/in-review
+  // no .blaze yet -> empty
+  let { server, base } = await boot(fx);
+  let j = await (await fetch(base + "/api/live")).json();
+  assert.deepEqual(j.groups, []);
+  server.close();
+
+  // now drop a fresh event for OBA-1 and a stale one
+  _md(join(fx.root, ".blaze"), { recursive: true });
+  const fresh = new Date().toISOString();
+  const stale = new Date(Date.now() - 10 * 60_000).toISOString();
+  _wf(join(fx.root, ".blaze", "activity.jsonl"),
+    `{"ts":"${stale}","key":"OBA-1","branch":"OBA-1-x","tool":"Read","cwd":"/c"}\n` +
+    `{"ts":"${fresh}","key":"OBA-1","branch":"OBA-1-x","tool":"Bash","cwd":"/c"}\n` +
+    `garbage line\n`);
+  ({ server, base } = await boot(fx));
+  j = await (await fetch(base + "/api/live")).json();
+  assert.equal(j.groups.length, 1);
+  assert.equal(j.groups[0].key, "OBA-1");
+  assert.equal(j.groups[0].tool, "Bash");             // latest wins
+  assert.equal(j.groups[0].active, true);
+  assert.equal(j.groups[0].column, "in-review");      // from the board index
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("pageHtml wires the Live view pill, region and poll", () => {
+  const html = pageHtml({ project: "all" });
+  assert.match(html, /data-view="live"/);
+  assert.match(html, /class="live"/);
+  assert.match(html, /\/api\/live/);
+});
