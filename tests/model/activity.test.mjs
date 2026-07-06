@@ -46,6 +46,15 @@ test("groupByTicket keeps the latest event per key and marks active within TTL",
   assert.equal(inf2.column, null);
 });
 
+test("groupByTicket active boundary is inclusive at exactly ttlMs", () => {
+  const now = 1_000_000;
+  const evs = [mk("INF-9", "Bash", now - 120_000)]; // exactly ttlMs old
+  const [g] = groupByTicket(evs, { now, ttlMs: 120_000 });
+  assert.equal(g.active, true);                       // ageMs === ttlMs -> active
+  const [g2] = groupByTicket([mk("INF-9", "Bash", now - 120_001)], { now, ttlMs: 120_000 });
+  assert.equal(g2.active, false);                     // one ms past -> idle
+});
+
 test("relativeTime buckets", () => {
   assert.equal(relativeTime(2_000), "now");
   assert.equal(relativeTime(6_000), "6s ago");
