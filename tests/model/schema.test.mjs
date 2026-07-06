@@ -2,7 +2,8 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  TYPES, allTypes, isType, hierarchyLevel, workflowFor, requiredFields, canParent,
+  TYPES, DEFAULT_TYPES, mergeTypes,
+  allTypes, isType, hierarchyLevel, workflowFor, requiredFields, canParent,
 } from "../../scripts/model/schema.mjs";
 
 test("the 7 Jira types exist with correct hierarchy levels", () => {
@@ -40,4 +41,42 @@ test("canParent enforces the hierarchy", () => {
 test("unknown types throw", () => {
   assert.equal(isType("nope"), false);
   assert.throws(() => hierarchyLevel("nope"), /unknown type/);
+});
+
+test("DEFAULT_TYPES holds today's exact registry (regression anchor)", () => {
+  assert.deepEqual(DEFAULT_TYPES, {
+    goal:    { level: 2,  workflow: "goal",     parentTypes: [],                       required: ["title", "description"] },
+    epic:    { level: 1,  workflow: "delivery", parentTypes: ["goal"],                 required: ["title", "description"] },
+    risk:    { level: 1,  workflow: "risk",     parentTypes: ["goal", "epic"],         required: ["title", "description", "likelihood", "impact"] },
+    story:   { level: 0,  workflow: "delivery", parentTypes: ["epic"],                 required: ["title", "description", "estimate"] },
+    task:    { level: 0,  workflow: "delivery", parentTypes: ["epic"],                 required: ["title", "description", "estimate"] },
+    bug:     { level: 0,  workflow: "delivery", parentTypes: ["epic"],                 required: ["title", "description", "estimate"] },
+    subtask: { level: -1, workflow: "delivery", parentTypes: ["story", "task", "bug"], required: ["title", "description"] },
+  });
+});
+
+test("with no ambient override, resolved TYPES == DEFAULT_TYPES (byte-identical default)", () => {
+  assert.deepEqual(TYPES, DEFAULT_TYPES);
+});
+
+test("mergeTypes with null/undefined/non-object override returns a copy of defaults", () => {
+  assert.deepEqual(mergeTypes(DEFAULT_TYPES, null), DEFAULT_TYPES);
+  assert.deepEqual(mergeTypes(DEFAULT_TYPES, undefined), DEFAULT_TYPES);
+  assert.deepEqual(mergeTypes(DEFAULT_TYPES, "nope"), DEFAULT_TYPES);
+  assert.notEqual(mergeTypes(DEFAULT_TYPES, null), DEFAULT_TYPES); // fresh object, not the same ref
+});
+
+test("mergeTypes adds a new type without touching the defaults", () => {
+  const feature = { level: 0, workflow: "delivery", parentTypes: ["epic"], required: ["title", "description"] };
+  const merged = mergeTypes(DEFAULT_TYPES, { feature });
+  assert.deepEqual(merged.feature, feature);
+  assert.ok(merged.epic); // defaults preserved
+  assert.equal(DEFAULT_TYPES.feature, undefined); // defaults not mutated
+});
+
+test("mergeTypes replaces an existing type entry wholesale", () => {
+  const merged = mergeTypes(DEFAULT_TYPES, { epic: { level: 1, workflow: "kanban", parentTypes: ["goal"], required: ["title"] } });
+  assert.equal(merged.epic.workflow, "kanban");
+  assert.deepEqual(merged.epic.required, ["title"]);
+  assert.equal(DEFAULT_TYPES.epic.workflow, "delivery"); // defaults intact
 });
