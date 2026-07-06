@@ -1,5 +1,5 @@
 // config.mjs — load blaze.config.json with defaults + env overrides, and derive
-// the key-based regexes that reconcile.mjs and new-ticket.sh share.
+// the key-based regexes that reconcile.mjs and new-runner.mjs share.
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -87,7 +87,8 @@ export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoo
   return Object.freeze({ engineRoot, dataRoot: engineRoot, projectsDir: join(engineRoot, "projects") });
 }
 
-// CLI: `node scripts/config.mjs --get <field>` prints one field (for new-ticket.sh).
+// CLI: `node scripts/config.mjs --get <field>` prints one resolved config field —
+// for scripts/tooling that need a config value directly in shell.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const i = process.argv.indexOf("--get");
   if (i !== -1) {

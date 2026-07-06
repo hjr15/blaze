@@ -175,6 +175,10 @@ A `groomer.enabled: false` switch turns it off entirely.
 `BLAZE_KEY`, `BLAZE_PORT`, `BLAZE_AGENT_COMMAND`), and exports the key→regex derivation
 so reconcile, the scaffolder, and the groomer share one source of truth for the key.
 
+**Historical (pre multi-project port):** the layout below reflects the original
+single-board design; see `AGENTS.md` / `README.md` for the current
+`projects/<KEY>/...` layout.
+
 ## Repo layout
 
 ```
