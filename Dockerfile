@@ -14,6 +14,10 @@ COPY scripts/ ./scripts/
 # below) point resolveRoots() at it:
 #   docker run -v <data-repo>:/data -p 4321:4321 <image>
 ENV BLAZE_PROJECTS_DIR=/data/projects
+# serve.mjs binds HOST || 127.0.0.1 by default, which is loopback *inside*
+# the container netns — unreachable via a published -p port from the host.
+# Bind all interfaces here; host-level exposure is still gated by -p.
+ENV HOST=0.0.0.0
 # node:alpine ships a uid-1000 `node` user; match the laptop owner so the
 # bind-mounted .git/projects are writable and git raises no dubious-ownership.
 USER node

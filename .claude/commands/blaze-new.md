@@ -1,5 +1,5 @@
 ---
-description: Scaffold a new Blaze ticket in backlog/ from a title.
+description: Scaffold a new Blaze ticket from a title, created in its type's initial status.
 ---
 
 Run `blaze new --project <KEY> --type <type> "$ARGUMENTS"` from the data repo root
