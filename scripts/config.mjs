@@ -89,7 +89,7 @@ export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoo
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const i = process.argv.indexOf("--get");
   if (i !== -1) {
-    const cfg = loadConfig();
+    const cfg = loadConfig({ root: resolveRoots().dataRoot });
     const v = cfg[process.argv[i + 1]];
     console.log(v === undefined || v === null ? "" : v);
   }
