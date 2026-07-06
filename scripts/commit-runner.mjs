@@ -1,6 +1,8 @@
 // scripts/commit-runner.mjs — `blaze commit`: drain .blaze/pending-commit.jsonl
 // into ONE commit (subject summary + per-op body), staging only recorded files.
 import { spawnSync } from "node:child_process";
+import { existsSync } from "node:fs";
+import { join } from "node:path";
 import { readEntries, clearLedger } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
 
@@ -24,7 +26,14 @@ const date = new Date().toISOString().slice(0, 10);
 const subject = `blaze: ${date} board update (${summary})`;
 const body = entries.map((e) => `- ${e.message}`).join("\n");
 
-const files = [...new Set(entries.flatMap((e) => e.files))];
+// A path created then relocated again within one batch (e.g. a ticket moved
+// twice) is neither on disk nor in HEAD by the time the batch drains — drop
+// it, there is nothing to stage for it.
+const isTracked = (f) =>
+  spawnSync("git", ["-C", dataRoot, "ls-files", "--error-unmatch", "--", f], { stdio: "ignore" }).status === 0;
+const files = [...new Set(entries.flatMap((e) => e.files))].filter(
+  (f) => existsSync(join(dataRoot, f)) || isTracked(f),
+);
 
 const add = spawnSync("git", ["-C", dataRoot, "add", "--", ...files], { stdio: "ignore" });
 if (add.status !== 0) {
