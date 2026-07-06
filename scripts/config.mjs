@@ -114,9 +114,9 @@ export function listProjects(cfg, { root = ROOT } = {}) {
   return Array.isArray(c.projects) ? c.projects.slice() : [];
 }
 
-export function loadProject(key, { root = ROOT } = {}) {
+export function loadProject(key, { root = ROOT, projectsDir = join(root, "projects") } = {}) {
   const cfg = loadConfig({ root });
-  const path = join(root, "projects", key, "project.json");
+  const path = join(projectsDir, key, "project.json");
   let file = {};
   if (existsSync(path)) {
     try { file = JSON.parse(readFileSync(path, "utf8")); }

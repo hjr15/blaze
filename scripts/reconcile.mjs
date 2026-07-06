@@ -124,7 +124,7 @@ export function reconcile({
   if (!keys.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false };
 
   const sig = new Map();
-  for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root }), { fetch }));
+  for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
 
   const changes = [];
   for (const t of walkTickets(projectsDir)) {

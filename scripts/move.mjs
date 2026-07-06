@@ -29,7 +29,7 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
   let requireWorklog = opts.requireWorklog;
   if (requireWorklog === undefined) {
     try {
-      const proj = loadProject(found.frontmatter.project, { root: dirname(projectsDir) });
+      const proj = loadProject(found.frontmatter.project, { root: dirname(projectsDir), projectsDir });
       requireWorklog = proj.requireWorklogBeforeTerminal;
     } catch { requireWorklog = false; }
   }

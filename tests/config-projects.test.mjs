@@ -49,3 +49,14 @@ test("loadProject falls back to global codeRepos when project declares none", ()
   assert.ok(inf.codeRepoPaths[0].endsWith("/fallback-repo"));
   rmSync(root, { recursive: true, force: true });
 });
+
+test("loadProject honours an explicit projectsDir not named projects", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-proj-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["ZZZ"] }));
+  const projectsDir = join(root, "tickets");
+  mkdirSync(join(projectsDir, "ZZZ"), { recursive: true });
+  writeFileSync(join(projectsDir, "ZZZ", "project.json"), JSON.stringify({ key: "ZZZ", name: "Zeta" }));
+  const zzz = loadProject("ZZZ", { root, projectsDir });
+  assert.equal(zzz.name, "Zeta");
+  rmSync(root, { recursive: true, force: true });
+});
