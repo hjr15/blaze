@@ -9,5 +9,18 @@
 # Node
 node_modules/
 
+# Coverage output (c8)
+coverage/
+.nyc_output/
+
 # Blaze runtime state (Plan 2)
 .blaze/
+
+# Migration raw-pull cache (Phase 5) — populated by the jira-export-migrator agent
+.migration-cache/
+
+# SDD scratch (briefs, reports, review diffs)
+.superpowers/
+
+# git worktrees created by parallel Claude sessions (never track; blaze log git-add-all sweeps these)
+.claude/worktrees/

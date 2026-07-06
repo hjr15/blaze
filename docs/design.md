@@ -215,6 +215,15 @@ Resolves repo root, reads `blaze.config.json`, applies defaults, overlays env
 overrides, exports a frozen config plus the id regex
 `new RegExp("\\b" + key + "-(\\d+)", "i")`.
 
+**Data root.** The engine (this install) and the data (`blaze.config.json`,
+`projects/`, `.blaze/`) may live in separate trees. `resolveRoots()` returns
+`{ engineRoot, dataRoot, projectsDir }` via a ladder: `BLAZE_PROJECTS_DIR` env
+(dataRoot = its parent) → `./projects` under the CWD → the engine tree itself
+(single-tree back-compat). Empty env counts as unset. Every entrypoint (CLI
+runners, `serve.mjs`, `supervisor.mjs`, `reconcile.mjs`, the groomer) resolves
+roots once and passes `dataRoot`/`projectsDir` through rather than assuming the
+engine tree.
+
 ### `scripts/reconcile.mjs`
 Delta from the original:
 - `WEB` → `config.codeRepo` (absolute-resolved, `BLAZE_CODE_REPO` override). If

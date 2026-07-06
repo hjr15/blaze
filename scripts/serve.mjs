@@ -10,89 +10,108 @@
 // never reloads while the files are untouched — so it won't fight you mid-read.
 
 import { createServer } from "node:http";
-import { readdirSync, readFileSync, statSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { readdirSync, statSync } from "node:fs";
+import { join, dirname, basename } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig } from "./config.mjs";
+import { randomUUID } from "node:crypto";
+import { spawnSync } from "node:child_process";
+import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
+import { walkTickets, buildIndex } from "./model/index.mjs";
+import { rollUp } from "./model/rollup.mjs";
+import { formatMinutes } from "./model/time.mjs";
+import { WORKFLOWS } from "./model/workflows.mjs";
+import { PRIORITIES } from "./model/schema.mjs";
+import { applyMove } from "./move.mjs";
+import { applyResolve } from "./resolve.mjs";
+import { applyLog } from "./log.mjs";
+import { applyEdit, applyToggleAc } from "./edit.mjs";
+import { commitFile } from "./serve-commit.mjs";
 
-const cfg = loadConfig();
+const cfg = loadConfig({ root: resolveRoots().dataRoot });
 
-const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 const PORT = Number(process.env.PORT) || cfg.port;
 
-// Columns derived from config, title-cased from their directory names.
-const COLUMNS = cfg.columns.map((dir) => ({
-  dir,
-  label: dir.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase()),
-}));
+const PRIORITY_ORDER = { highest: 0, high: 1, medium: 2, low: 3, lowest: 4, none: 5, urgent: 0 };
 
-const PRIORITY_ORDER = { urgent: 0, high: 1, medium: 2, low: 3, none: 4 };
+export const CSRF = randomUUID();
 
-// ---- read + parse -------------------------------------------------------
-
-function readColumn(dir) {
-  let files = [];
-  try {
-    files = readdirSync(join(ROOT, dir)).filter((f) => f.endsWith(".md"));
-  } catch {
-    return [];
-  }
-  const tickets = files.map((file) => {
-    const raw = readFileSync(join(ROOT, dir, file), "utf8");
-    const { meta, body } = parse(raw);
-    return { file, meta, body };
+function readJson(req) {
+  return new Promise((resolve, reject) => {
+    let data = "", size = 0, settled = false;
+    req.on("data", (c) => {
+      if (settled) return;
+      size += c.length;
+      if (size > 256 * 1024) {
+        settled = true;
+        req.destroy();
+        reject(new Error("too large"));
+      } else {
+        data += c;
+      }
+    });
+    req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
+    req.on("error", (e) => { if (!settled) reject(e); });
   });
-  // Sort by priority then id so the column reads top-down by urgency.
-  tickets.sort((a, b) => {
-    const pa = PRIORITY_ORDER[a.meta.priority] ?? 5;
-    const pb = PRIORITY_ORDER[b.meta.priority] ?? 5;
-    return pa - pb || (a.meta.id || "").localeCompare(b.meta.id || "");
-  });
-  return tickets;
 }
 
-function parse(raw) {
-  const meta = {};
-  let body = raw;
-  const m = raw.match(/^---\n([\s\S]*?)\n---\n?([\s\S]*)$/);
-  if (m) {
-    body = m[2];
-    for (const line of m[1].split("\n")) {
-      const kv = line.match(/^([a-zA-Z_]+):\s*(.*)$/);
-      if (!kv) continue;
-      const key = kv[1];
-      let val = kv[2].trim();
-      if (key === "labels") {
-        val = val
-          .replace(/^\[|\]$/g, "")
-          .split(",")
-          .map((s) => s.trim())
-          .filter(Boolean);
-      }
-      meta[key] = val;
-    }
+function aheadCount(root) {
+  const r = spawnSync("git", ["-C", root, "rev-list", "--count", "@{u}..HEAD"], { encoding: "utf8" });
+  return r.status === 0 ? Number(r.stdout.trim()) || 0 : 0;
+}
+
+// The canonical column order = the union of every workflow's statuses, in
+// declaration order, deduped. (delivery, then goal-only, then risk-only.)
+const STATUS_ORDER = [...new Set(Object.values(WORKFLOWS).flatMap((w) => w.statuses))];
+
+const title = (s) => s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase());
+
+// Pure board model: read every ticket under projectsDir, optionally filter to one
+// project, and group into status columns. Read-only (the editable board is Phase 6).
+export function boardModel(projectsDir, { project = "all" } = {}) {
+  const all = [...walkTickets(projectsDir)].map((t) => ({
+    file: basename(t.file), meta: t.frontmatter, body: t.body,
+    status: t.status, project: t.frontmatter.project,
+  }));
+  const projectsCount = all.reduce((acc, t) => {
+    acc[t.project] = (acc[t.project] || 0) + 1; return acc;
+  }, {});
+  const rows = project === "all" ? all : all.filter((t) => t.project === project);
+
+  const byStatus = new Map();
+  for (const t of rows) {
+    if (!byStatus.has(t.status)) byStatus.set(t.status, []);
+    byStatus.get(t.status).push(t);
   }
-  return { meta, body: body.trim() };
+  const statuses = [
+    ...STATUS_ORDER.filter((s) => byStatus.has(s)),
+    ...[...byStatus.keys()].filter((s) => !STATUS_ORDER.includes(s)),
+  ];
+  const columns = statuses.map((dir) => ({
+    dir, label: title(dir),
+    tickets: byStatus.get(dir).sort((a, b) => {
+      const pa = PRIORITY_ORDER[a.meta.priority] ?? 6, pb = PRIORITY_ORDER[b.meta.priority] ?? 6;
+      return pa - pb || String(a.meta.id || "").localeCompare(String(b.meta.id || ""));
+    }),
+  }));
+  const rollup = rollUp(buildIndex(projectsDir));
+  return { selected: project, projects: projectsCount, columns, total: rows.length, rollup };
 }
 
 // A cheap hash of all ticket files' size+mtime, for the auto-reload poll.
 export function contentHash() {
   let h = 0;
-  for (const { dir } of COLUMNS) {
-    let files = [];
-    try {
-      files = readdirSync(join(ROOT, dir));
-    } catch {
-      continue;
-    }
-    for (const f of files) {
-      try {
-        const s = statSync(join(ROOT, dir, f));
-        const sig = `${dir}/${f}:${s.size}:${s.mtimeMs}`;
-        for (let i = 0; i < sig.length; i++) {
-          h = (h * 31 + sig.charCodeAt(i)) | 0;
-        }
-      } catch {}
+  const projectsDir = resolveRoots().projectsDir;
+  const stack = [projectsDir];
+  while (stack.length) {
+    const dir = stack.pop();
+    let entries = [];
+    try { entries = readdirSync(dir); } catch { continue; }
+    for (const e of entries) {
+      const p = join(dir, e);
+      let s; try { s = statSync(p); } catch { continue; }
+      if (s.isDirectory()) { stack.push(p); continue; }
+      const sig = `${p}:${s.size}:${s.mtimeMs}`;
+      for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) | 0;
     }
   }
   return String(h);
@@ -107,10 +126,15 @@ const esc = (s) =>
   );
 
 // Minimal markdown for the ticket body: headings, lists, checkboxes, bold, code.
+// AC checkboxes (under `## Acceptance Criteria`) are live: they carry data-ac-index
+// matching the ordinal used by applyToggleAc (0-based, AC section only).
+// Checkboxes outside the AC section remain disabled.
 function mdLite(src) {
   const lines = esc(src).split("\n");
   const out = [];
   let inList = false;
+  let inAc = false;   // true while inside the ## Acceptance Criteria section
+  let acIndex = 0;    // ordinal counter — AC checkboxes only, mirrors applyToggleAc
   const closeList = () => {
     if (inList) {
       out.push("</ul>");
@@ -121,6 +145,8 @@ function mdLite(src) {
     const t = line.trim();
     if (/^#{1,6}\s/.test(t)) {
       closeList();
+      // Mirror applyToggleAc: inAc = true on "## Acceptance Criteria", false on any other heading
+      inAc = /^#{1,6}\s+acceptance criteria\s*$/i.test(t);
       out.push(`<h4>${inline(t.replace(/^#{1,6}\s/, ""))}</h4>`);
     } else if (/^- \[[ xX]\]\s/.test(t)) {
       if (!inList) {
@@ -129,9 +155,15 @@ function mdLite(src) {
       }
       const checked = /^- \[[xX]\]/.test(t);
       const text = t.replace(/^- \[[ xX]\]\s/, "");
-      out.push(
-        `<li class="task"><input type="checkbox" disabled ${checked ? "checked" : ""}> ${inline(text)}</li>`,
-      );
+      if (inAc) {
+        out.push(
+          `<li class="task"><input type="checkbox" data-ac-index="${acIndex++}" ${checked ? "checked" : ""}> ${inline(text)}</li>`,
+        );
+      } else {
+        out.push(
+          `<li class="task"><input type="checkbox" disabled ${checked ? "checked" : ""}> ${inline(text)}</li>`,
+        );
+      }
     } else if (/^- \s*/.test(t)) {
       if (!inList) {
         out.push('<ul class="md">');
@@ -167,22 +199,27 @@ function prLink(pr) {
 function metaPieces(m) {
   return [
     m.assignee && m.assignee !== "unassigned" ? `@${esc(m.assignee)}` : "",
-    m.estimate ? `${esc(m.estimate)} pts` : "",
+    m.estimate ? esc(formatMinutes(m.estimate)) : "",
     m.parent ? `↳ ${esc(m.parent)}` : "",
     m.project ? esc(m.project) : "",
     prLink(m.pr),
   ].filter(Boolean);
 }
 
-function card(t) {
+function card(t, rollup) {
   const m = t.meta;
   const prio = m.priority || "none";
   const labels = (m.labels || [])
     .map((l) => `<span class="label">${esc(l)}</span>`)
     .join("");
   const meta = metaPieces(m).join(" · ");
+  const ru = rollup && rollup.get(m.id);
+  const isParent = m.type === "goal" || m.type === "epic";
+  const rolled = (isParent && ru && (ru.rolled_estimate || ru.rolled_worklog))
+    ? `<div class="rollup">Σ ${esc(formatMinutes(ru.rolled_estimate) || "0m")} est · ${esc(formatMinutes(ru.rolled_worklog) || "0m")} logged</div>`
+    : "";
   return `
-    <details class="card prio-${esc(prio)}">
+    <details class="card prio-${esc(prio)}" draggable="true" data-id="${esc(m.id || t.file)}">
       <summary>
         <div class="card-top">
           <span class="id">${esc(m.id || t.file)}</span>
@@ -194,8 +231,14 @@ function card(t) {
         <div class="title">${esc(m.title || t.file)}</div>
         ${labels ? `<div class="labels">${labels}</div>` : ""}
         ${meta ? `<div class="cardmeta">${meta}</div>` : ""}
+        ${rolled}
+        <div class="editmeta" data-ticket="${esc(m.id)}">
+          <span class="editable" data-edit="priority" data-value="${esc(prio)}">${esc(prio)}</span>
+          <span class="editable" data-edit="assignee" data-value="${esc(m.assignee || "")}">@${esc(m.assignee || "unassigned")}</span>
+          <span class="editable" data-edit="estimate" data-value="${esc(m.estimate || "")}">${esc(formatMinutes(m.estimate) || "—")}</span>
+        </div>
       </summary>
-      <div class="body">${mdLite(t.body)}</div>
+      <div class="body" data-ticket="${esc(m.id)}">${mdLite(t.body)}</div>
     </details>`;
 }
 
@@ -208,7 +251,7 @@ function row(t) {
     .join("");
   const meta = metaPieces(m).join(" · ");
   return `
-    <details class="row prio-${esc(prio)}">
+    <details class="row prio-${esc(prio)}" draggable="true" data-id="${esc(m.id || t.file)}">
       <summary>
         <span class="rcaret">▸</span>
         <span class="id">${esc(m.id || t.file)}</span>
@@ -220,44 +263,37 @@ function row(t) {
         </span>
         ${meta ? `<span class="rmeta">${meta}</span>` : ""}
       </summary>
-      <div class="body">${mdLite(t.body)}</div>
+      <div class="body" data-ticket="${esc(m.id)}">${mdLite(t.body)}</div>
     </details>`;
 }
 
-export function boardData() {
-  const cols = COLUMNS.map((c) => ({ ...c, tickets: readColumn(c.dir) }));
-  const total = cols.reduce((n, c) => n + c.tickets.length, 0);
-  return { cols, total };
-}
-
-export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
-  const { cols, total } = boardData();
+export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = "", projectsDir: _pDir } = {}) {
+  const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project });
+  const { columns: cols, total, projects, selected, rollup } = m;
   const columnsHtml = cols
     .map(
       (c) => `
-      <section class="col">
+      <section class="col" data-status="${esc(c.dir)}">
         <header class="colhead">
           <span class="colname">${esc(c.label)}</span>
           <span class="count">${c.tickets.length}</span>
         </header>
         <div class="cards">
-          ${c.tickets.map(card).join("") || '<div class="empty">—</div>'}
+          ${c.tickets.map((t) => card(t, rollup)).join("") || '<div class="empty">—</div>'}
         </div>
       </section>`,
     )
     .join("");
 
-  // List view ordering: preferred-first, then any extra columns in config order.
-  const PREFERRED = ["in-review", "in-progress", "todo", "backlog", "done", "canceled", "duplicate"];
-  const LIST_ORDER = [...PREFERRED.filter((d) => cfg.columns.includes(d)),
-                      ...cfg.columns.filter((d) => !PREFERRED.includes(d))];
+  // List view ordering: derived from the rendered columns (already status-ordered).
+  const LIST_ORDER = cols.map((c) => c.dir);
   const groupsHtml = LIST_ORDER
     .map((dir) => cols.find((c) => c.dir === dir))
     .filter(Boolean)
     .filter((c) => c.dir !== "in-review" || c.tickets.length > 0)
     .map(
       (c) => `
-      <details class="group" open data-group="${esc(c.dir)}">
+      <details class="group" open data-group="${esc(c.dir)}" data-status="${esc(c.dir)}">
         <summary class="grouphead">
           <span class="gcaret">▸</span>
           <span class="colname">${esc(c.label)}</span>
@@ -277,6 +313,7 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${cfg.boardTitle}</title>
 <script>
+  window.__csrf = "${CSRF}";
   // Set the saved view before paint so there's no flash of the wrong layout.
   try { document.documentElement.dataset.view = localStorage.getItem("tracker.view") || "board"; } catch {}
 </script>
@@ -334,6 +371,10 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
   .labels { margin-top: 6px; display: flex; flex-wrap: wrap; gap: 4px; }
   .label { background: #21314a; color: #79c0ff; text-transform: none; letter-spacing: 0; }
   .cardmeta { margin-top: 6px; color: #7d8590; font-size: 11px; }
+  .rollup { color: var(--blaze-amber); font-size: 11px; font-weight: 600; margin-top: 2px; }
+  .editmeta { margin-top: 6px; display: flex; gap: 8px; flex-wrap: wrap; font-size: 11px; }
+  .editable { color: #adbac7; border-bottom: 1px dotted #444c56; cursor: text; }
+  .editable:hover { color: var(--neutral); }
   .prio.prio-urgent { background: #4b1113; color: var(--blaze-red); }
   .prio.prio-high   { background: #4a2410; color: var(--blaze-orange); }
   .prio.prio-medium { background: #4a3a0c; color: var(--blaze-amber); }
@@ -405,20 +446,35 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
   .row.prio-high    { border-left-color: var(--blaze-orange); }
   .row.prio-medium  { border-left-color: var(--blaze-amber); }
   #live { color: var(--blaze-orange); }
+  .proj { color: #7d8590; text-decoration: none; font-size: 12px; font-weight: 600; padding: 2px 8px; border-radius: 6px; }
+  .proj:hover { color: #adbac7; }
+  .proj.on { color: var(--charcoal); background: var(--blaze-amber); }
   @media (max-width: 640px) {
     .row .rmeta, .row .rbadges .label { display: none; }
   }
+  #toast { position: fixed; bottom: 16px; left: 50%; transform: translateX(-50%); background: #4b1113;
+    color: var(--neutral); border: 1px solid var(--blaze-red); padding: 8px 14px; border-radius: 8px;
+    font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; max-width: 80vw; }
+  #toast.show { opacity: 1; }
+  .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
+  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
 </style>
 </head>
 <body>
+  <div id="toast" role="status"></div>
   <header class="top">
     <h1>${cfg.boardTitle}</h1>
     <span class="sub">${total} tickets · ${cols.filter((c) => ["todo","in-progress","in-review"].includes(c.dir)).reduce((n,c)=>n+c.tickets.length,0)} in flight</span>
+    ${["all", ...Object.keys(projects)].map((k) =>
+      `<a class="proj ${k === selected ? "on" : ""}" href="${k === "all" ? "/" : "/?project=" + esc(k)}">${k === "all" ? "All" : esc(k)}${k === "all" ? "" : ` <span class="count">${projects[k]}</span>`}</a>`
+    ).join("")}
     <div class="viewtoggle" role="group" aria-label="View" style="margin-left:auto">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
     </div>
+    <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
+    <span class="sub" id="sync"></span>
   </header>
   ${afterHeader}
   <div class="board">${columnsHtml}</div>
@@ -438,6 +494,7 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
   </script>
   <script>
     // Poll a cheap content hash; reload only when ticket files actually change.
+    // Also updates the sync badge with unsynced-commits count.
     let last = null;
     async function poll() {
       try {
@@ -445,6 +502,8 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
         if (last !== null && h !== last) location.reload();
         last = h;
         document.getElementById("live").textContent = "live";
+        const s = await (await fetch("/api/sync")).json();
+        document.getElementById("sync").textContent = s.ahead > 0 ? "⇧ " + s.ahead + " ahead" : "";
       } catch {
         document.getElementById("live").textContent = "offline";
       }
@@ -452,38 +511,148 @@ export function pageHtml({ afterHeader = "", beforeBodyEnd = "" } = {}) {
     poll();
     setInterval(poll, 3000);
   </script>
+  <script>
+    const CSRF = window.__csrf;
+    function toast(msg) {
+      const el = document.getElementById("toast");
+      el.textContent = msg; el.classList.add("show");
+      clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 4000);
+    }
+    async function blazePost(path, body) {
+      try {
+        const res = await fetch(path, { method: "POST",
+          headers: { "content-type": "application/json", "x-blaze-csrf": CSRF }, body: JSON.stringify(body) });
+        if (res.ok) { location.reload(); return true; }
+        const j = await res.json().catch(() => ({ errors: [res.statusText] }));
+        toast((j.errors || ["error"]).join("; ")); return false;
+      } catch (e) { toast("network error: " + e.message); return false; }
+    }
+    // Drag-to-transition: we never move the DOM ourselves — success reloads,
+    // failure leaves the card where it was (automatic snap-back).
+    let dragId = null, dragSourceStatus = null;
+    document.addEventListener("dragstart", (e) => {
+      const c = e.target.closest("[data-id]"); if (!c) return;
+      dragId = c.dataset.id; e.dataTransfer.effectAllowed = "move";
+      const col = c.closest("[data-status]");
+      dragSourceStatus = col ? col.dataset.status : null;
+    });
+    for (const zone of document.querySelectorAll("[data-status]")) {
+      zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
+      zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
+      zone.addEventListener("drop", (e) => {
+        e.preventDefault(); zone.classList.remove("drop-hover");
+        if (dragId && dragSourceStatus !== zone.dataset.status) blazePost("/api/move", { id: dragId, to: zone.dataset.status });
+        dragId = null; dragSourceStatus = null;
+      });
+    }
+    const PRIORITIES = ${JSON.stringify(PRIORITIES)};
+    function blazeEdit(span) {
+      const field = span.dataset.edit, id = span.closest("[data-ticket]").dataset.ticket;
+      const cur = span.dataset.value || "";
+      let input;
+      if (field === "priority") {
+        input = document.createElement("select");
+        const opts = PRIORITIES.includes(cur) ? PRIORITIES : [cur, ...PRIORITIES];
+        input.innerHTML = opts.map((p) => "<option" + (p === cur ? " selected" : "") + ">" + p + "</option>").join("");
+      } else { input = document.createElement("input"); input.value = cur; input.size = 10; }
+      span.replaceWith(input); input.focus();
+      let done = false;
+      const commit = () => {
+        if (done) return; done = true;
+        const v = input.value.trim();
+        if (v === cur) { location.reload(); return; }
+        blazePost("/api/edit", { id, patch: { [field]: v } });
+      };
+      input.addEventListener("blur", commit);
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { done = true; location.reload(); } });
+    }
+    document.addEventListener("click", (e) => {
+      const span = e.target.closest(".editable"); if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); }
+    });
+    document.addEventListener("change", (e) => {
+      const cb = e.target.closest("input[type=checkbox][data-ac-index]"); if (!cb) return;
+      const id = cb.closest("[data-ticket]").dataset.ticket;
+      blazePost("/api/ac", { id, index: Number(cb.dataset.acIndex), checked: cb.checked });
+    });
+    document.getElementById("reconcileBtn")?.addEventListener("click", async () => {
+      const j = await (await fetch("/api/reconcile-preview")).json();
+      const lines = (j.changes || []).map((c) => c.id + ": " + c.from + " → " + c.to);
+      toast(lines.length ? lines.length + " code-bound move(s) — apply via 'blaze reconcile --apply'" : "no code-bound changes");
+    });
+  </script>
   ${beforeBodyEnd}
 </body>
 </html>`;
 }
 
-// ---- server (standalone only) -------------------------------------------
+// ---- server factory ---------------------------------------------------------
+
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = PORT, host = process.env.HOST || "127.0.0.1" } = {}) {
+  return createServer(async (req, res) => {
+    const u = new URL(req.url, "http://localhost");
+    const json = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+
+    if (req.method === "GET" && u.pathname === "/api/hash") {
+      res.writeHead(200, { "content-type": "text/plain" }); res.end(contentHash()); return;
+    }
+    if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
+    if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
+      const { reconcile } = await import("./reconcile.mjs");
+      const r = reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
+      return json(200, { changes: r.changes || [] });
+    }
+    if (req.method === "GET" && u.pathname === "/") {
+      const project = u.searchParams.get("project") || "all";
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      res.end(pageHtml({ project })); return;
+    }
+    if (req.method === "POST") {
+      if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
+
+      let payload;
+      try { payload = await readJson(req); } catch { return json(400, { errors: ["bad json body"] }); }
+      const today = new Date().toISOString().slice(0, 10);
+      // in-place ops only — use the inline path for ops that rename (see /api/move)
+      const done = (r, msg, extra = {}) => {
+        if (!r.ok) return json(422, { errors: r.errors });
+        const c = commitFile(root, r.file, msg);
+        if (!c.ok) return json(500, { errors: [`written but commit failed (status ${c.status})`] });
+        return json(200, { ok: true, ...extra });
+      };
+
+      if (u.pathname === "/api/move") {
+        const r = applyMove(projectsDir, payload.id, payload.to, { today });
+        if (!r.ok) return json(422, { errors: r.errors });
+        const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
+        const c = commitFile(root, r.file, `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, extraFiles);
+        if (!c.ok) return json(500, { errors: [`written but commit failed (status ${c.status})`] });
+        return json(200, { ok: true, resolution: r.resolution });
+      }
+      if (u.pathname === "/api/edit") {
+        const r = applyEdit(projectsDir, payload.id, payload.patch || {}, { today });
+        return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`);
+      }
+      if (u.pathname === "/api/resolve") {
+        const r = applyResolve(projectsDir, payload.id, payload.resolution, { today });
+        return done(r, `${payload.id}: resolve ${payload.resolution}`);
+      }
+      if (u.pathname === "/api/log") {
+        const r = applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today });
+        return done(r, `${payload.id}: log ${payload.minutes}m`);
+      }
+      if (u.pathname === "/api/ac") {
+        const r = applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today });
+        return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`);
+      }
+      return json(404, { errors: ["not found"] });
+    }
+    res.writeHead(404, { "content-type": "text/plain" }); res.end("not found");
+  }).listen(port, host);
+}
+
+// ---- standalone entry -------------------------------------------------------
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  createServer((req, res) => {
-    if (req.url === "/api/hash") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(contentHash());
-      return;
-    }
-    if (req.url === "/" || req.url === "") {
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(pageHtml());
-      return;
-    }
-    res.writeHead(404, { "content-type": "text/plain" });
-    res.end("not found");
-  }).listen(PORT, "127.0.0.1", () => {
-    console.log(`${cfg.boardTitle} board → http://localhost:${PORT}`);
-  });
-
-  // Auto-reconcile timer — only runs in mirror mode (codeRepoPath configured and
-  // reconcile loop enabled). In standalone mode the board is a pure viewer.
-  if (cfg.codeRepoPath && cfg.loops.reconcile.enabled) {
-    import("./reconcile.mjs").then(({ reconcile }) => {
-      const tick = () => { try { reconcile({ fetch: true, commit: true, push: true }); } catch {} };
-      tick();
-      setInterval(tick, cfg.loops.reconcile.intervalSec * 1000);
-    }).catch((err) => console.error("reconcile import failed:", err));
-  }
+  const server = startServer();
+  server.on("listening", () => console.log(`${cfg.boardTitle} board → http://localhost:${server.address().port}`));
 }

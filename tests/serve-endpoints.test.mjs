@@ -186,7 +186,7 @@ test("GET /api/reconcile-preview returns a change list and writes nothing", asyn
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
-// INF-399 review fix 2: /api/reconcile-preview must reuse the server's resolved
+// Review fix: /api/reconcile-preview must reuse the server's resolved
 // projectsDir, not recompute join(root, "projects"). With a custom-named
 // projects dir (documented via BLAZE_PROJECTS_DIR — tests/roots.test.mjs) the
 // board rendered tickets but the preview silently returned { changes: [] }.

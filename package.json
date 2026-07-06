@@ -3,15 +3,24 @@
   "version": "0.1.0",
   "description": "A file-based, git-native issue board that AI coding agents can drive. Tickets are markdown; status is the directory.",
   "type": "module",
-  "bin": { "blaze": "scripts/cli.mjs" },
+  "bin": {
+    "blaze": "scripts/cli.mjs"
+  },
   "scripts": {
     "start": "node scripts/supervisor.mjs",
     "board": "node scripts/serve.mjs",
     "new": "bash scripts/new-ticket.sh",
     "reconcile": "node scripts/reconcile.mjs",
     "groom": "node scripts/loops/groomer.mjs",
-    "test": "node --test"
+    "commit": "node scripts/commit-runner.mjs",
+    "test": "node --test",
+    "test:coverage": "c8 node --test --test-concurrency=1"
   },
-  "engines": { "node": ">=16" },
-  "license": "MIT"
+  "engines": {
+    "node": ">=16"
+  },
+  "license": "MIT",
+  "devDependencies": {
+    "c8": "11.0.0"
+  }
 }

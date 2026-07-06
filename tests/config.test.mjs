@@ -66,3 +66,26 @@ test("throws a clear error on malformed JSON", () => {
   assert.throws(() => loadConfig({ root: dir, env: {} }), /cannot parse/);
   rmSync(dir, { recursive: true, force: true });
 });
+
+test("commitMode defaults to per-op", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(cfg.commitMode, "per-op");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("commitMode is read from blaze.config.json", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(cfg.commitMode, "batch");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_COMMIT_MODE env overrides the file", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
+  const cfg = loadConfig({ root, env: { BLAZE_COMMIT_MODE: "per-op" } });
+  assert.equal(cfg.commitMode, "per-op");
+  rmSync(root, { recursive: true, force: true });
+});
