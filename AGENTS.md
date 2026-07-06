@@ -89,6 +89,19 @@ roots the same way:
    directory containing projects/` instead of silently falling back to the
    engine's own tree.
 
+## Live activity feed
+
+`<dataRoot>/.blaze/activity.jsonl` is an **append-only, gitignored, truncatable**
+feed of agent activity — one JSON object per line:
+`{ts, key, branch, tool, cwd}` (`ts` ISO-8601 UTC, `key` a `<KEY>-<n>`). It is a
+*view input*, not a source of truth: delete or `truncate` it any time; the board
+rebuilds the Live view from whatever remains. Producer: the claude-config
+`blaze-activity.sh` PostToolUse hook (writes only for branches whose `KEY-n` this
+board tracks). Consumer: the board's **Live** view (`scripts/model/activity.mjs`
+→ `/api/live`), which tails the last N lines, groups by ticket, and marks a
+ticket active when its latest event is within a ~2-minute TTL. Malformed lines
+are skipped, never fatal. Read it yourself with `tail -f .blaze/activity.jsonl`.
+
 ## Commit modes
 
 `blaze.config.json`'s `commitMode` decides how CLI verbs commit:
