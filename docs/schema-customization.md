@@ -3,15 +3,20 @@
 Blaze ships a built-in **default** schema — the seven types and three workflows
 described in [`AGENTS.md`](../AGENTS.md#types--workflow). A data repo customizes it
 **without editing engine source** by adding a `schema` block to its config. The
-engine resolves `default → top-level → per-project` at load, so validation, the
-board columns, and the CLI all read the resolved schema.
+engine applies the **top-level** override at load, so validation, the board
+columns, and the CLI all read it. A `resolveSchema` helper additionally layers
+`default → top-level → per-project` for features that call it directly — see
+[What reads the resolved schema](#what-reads-the-resolved-schema) below for which
+scope actually takes effect where.
 
 ## Where overrides live
 
 - **Top-level** — `blaze.config.json` at the data repo root. Applies to every
   project.
-- **Per-project** — `projects/<KEY>/project.json`. Applies to that project and
-  wins over the top-level block for the same entry.
+- **Per-project** — `projects/<KEY>/project.json`. Resolved by `resolveSchema`
+  to win over the top-level block for the same entry, for features that call
+  it. The built-in `blaze new`/`move`/board commands don't call it yet — see
+  [What reads the resolved schema](#what-reads-the-resolved-schema).
 
 Both use the same shape:
 
@@ -77,15 +82,20 @@ are unchanged.
 An agent customizes the schema with ordinary file tools — no engine change:
 
 1. **Read** this page and the current `blaze.config.json`.
-2. **Edit** `blaze.config.json` (or `projects/<KEY>/project.json` for one project)
-   to add the `schema` block, using the shapes above.
+2. **Edit** `blaze.config.json` at the data repo root to add the `schema`
+   block, using the shapes above.
 3. **Verify** with `blaze` — e.g. create a ticket of the new type and confirm it
    lands in the new initial status, or open the board and confirm the columns.
 4. **Commit** the config change to the data repo. The engine picks it up on its
    next load; no engine source is touched and no version bump is needed.
 
-Scope a change to one project by putting the same `schema` block in that
-project's `project.json` instead of the top-level file.
+**Scoping to one project:** you can put the same `schema` block in
+`projects/<KEY>/project.json` instead. That block is resolved by
+`resolveSchema` and consumed by features that call it (e.g. a per-workflow
+board) — but the built-in `blaze new`/`move`/board commands don't call
+`resolveSchema` yet, so a per-project block has no effect on them today.
+Verifying a per-project override with step 3 above won't show anything;
+verify it against whatever feature actually consumes `resolveSchema`.
 
 ## What reads the resolved schema
 

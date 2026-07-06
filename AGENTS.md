@@ -26,10 +26,12 @@ non-default resolution (`wont-do`, `duplicate`, `cannot-reproduce`) without movi
 the file. These are the engine's **defaults**, defined once in `scripts/model/schema.mjs`
 (`DEFAULT_TYPES`) and `scripts/model/workflows.mjs` (`DEFAULT_WORKFLOWS`). A data
 repo can override or extend them — add or modify types and workflows — via a
-`schema` block in `blaze.config.json` (all projects) or `projects/<KEY>/project.json`
-(one project), resolved `default → top-level → per-project`. With no override the
-table above applies unchanged. See
-[`docs/schema-customization.md`](docs/schema-customization.md).
+`schema` block in `blaze.config.json` (all projects); the engine applies this
+**top-level** override at load, so `blaze new`/`move`, validation, and the board
+all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
+`resolveSchema` helper for features that call it directly, but isn't yet
+consumed by the built-in commands. With no override the table above applies
+unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 
 ## The loop
 
