@@ -1,0 +1,37 @@
+name: Build blaze image
+# Build + push the container image for the board engine. The engine is a
+# zero-dependency Node app; data (projects/ + .git) is bind-mounted at runtime,
+# never baked (see Dockerfile). Consumers pin the pushed image by digest.
+on:
+  push:
+    branches: [main]
+    paths: ["scripts/**", "package.json", "Dockerfile", ".github/workflows/build-image.yml"]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+  packages: write
+
+jobs:
+  build:
+    # Public repo → free GitHub-hosted runner.
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+      - name: Build and push
+        id: push
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          push: true
+          tags: |
+            ghcr.io/hjr15/blaze:latest
+            ghcr.io/hjr15/blaze:${{ github.sha }}
+      - name: Report digest
+        run: echo "digest=${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
