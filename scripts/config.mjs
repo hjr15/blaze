@@ -71,15 +71,18 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
 //   1. BLAZE_PROJECTS_DIR env — explicit projects dir; dataRoot is its parent
 //   2. ./projects under CWD — running from a data repo checkout
 //   3. the engine tree itself — single-tree back-compat (pre-split behaviour)
-export function resolveRoots({ env = process.env, cwd = process.cwd() } = {}) {
+export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoot = ROOT } = {}) {
   if (env.BLAZE_PROJECTS_DIR) {
     const projectsDir = resolve(cwd, env.BLAZE_PROJECTS_DIR);
-    return Object.freeze({ engineRoot: ROOT, dataRoot: dirname(projectsDir), projectsDir });
+    return Object.freeze({ engineRoot, dataRoot: dirname(projectsDir), projectsDir });
   }
   if (existsSync(join(cwd, "projects"))) {
-    return Object.freeze({ engineRoot: ROOT, dataRoot: cwd, projectsDir: join(cwd, "projects") });
+    return Object.freeze({ engineRoot, dataRoot: cwd, projectsDir: join(cwd, "projects") });
   }
-  return Object.freeze({ engineRoot: ROOT, dataRoot: ROOT, projectsDir: join(ROOT, "projects") });
+  if (engineRoot.includes("/node_modules/")) {
+    throw new Error("blaze: no data dir found — set BLAZE_PROJECTS_DIR or run from a directory containing projects/");
+  }
+  return Object.freeze({ engineRoot, dataRoot: engineRoot, projectsDir: join(engineRoot, "projects") });
 }
 
 // CLI: `node scripts/config.mjs --get <field>` prints one field (for new-ticket.sh).

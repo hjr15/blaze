@@ -60,3 +60,22 @@ test("result is frozen", () => {
   const r = resolveRoots({ env: {}, cwd: tmpdir() });
   assert.throws(() => { r.dataRoot = "/x"; }, TypeError);
 });
+
+test("rung 3 throws instead of falling back when the engine tree lives under node_modules", () => {
+  const empty = mkdtempSync(join(tmpdir(), "blaze-roots-"));
+  const vendoredEngine = join(empty, "node_modules", "@hjr15", "blaze");
+  assert.throws(
+    () => resolveRoots({ env: {}, cwd: empty, engineRoot: vendoredEngine }),
+    /blaze: no data dir found — set BLAZE_PROJECTS_DIR or run from a directory containing projects\//
+  );
+  rmSync(empty, { recursive: true, force: true });
+});
+
+test("rung 3 still falls back to the engine tree when engineRoot is not under node_modules (back-compat)", () => {
+  const empty = mkdtempSync(join(tmpdir(), "blaze-roots-"));
+  const devEngine = join(empty, "vendored-engine");
+  const r = resolveRoots({ env: {}, cwd: empty, engineRoot: devEngine });
+  assert.equal(r.dataRoot, devEngine);
+  assert.equal(r.projectsDir, join(devEngine, "projects"));
+  rmSync(empty, { recursive: true, force: true });
+});
