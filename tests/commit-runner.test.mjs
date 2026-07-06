@@ -62,3 +62,63 @@ test("drains the ledger into one commit and truncates it — even when invoked f
   assert.deepEqual(readEntries(root), []);
   rmSync(root, { recursive: true, force: true });
 });
+
+test("drops a stale intermediate path from a ticket moved twice in one batch", () => {
+  const root = gitRepo();
+
+  // Ticket starts out committed at defined/.
+  mkdirSync(join(root, "projects", "INF", "defined"), { recursive: true });
+  writeFileSync(join(root, "projects", "INF", "defined", "X.md"), "x v1");
+  execFileSync("git", ["-C", root, "add", "projects/INF/defined/X.md"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed ticket"]);
+  const beforeCount = Number(
+    execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim(),
+  );
+
+  // Move 1: defined -> in-progress (on-disk relocation, matching what applyMove does).
+  mkdirSync(join(root, "projects", "INF", "in-progress"), { recursive: true });
+  writeFileSync(join(root, "projects", "INF", "in-progress", "X.md"), "x v2");
+  rmSync(join(root, "projects", "INF", "defined", "X.md"));
+  appendEntry(root, {
+    id: "INF-1",
+    op: "move",
+    message: "INF-1: defined → in-progress",
+    files: ["projects/INF/defined/X.md", "projects/INF/in-progress/X.md"],
+    ts: "t",
+  });
+
+  // Move 2: in-progress -> in-review, within the SAME batch. in-progress/X.md
+  // (created by move 1, relocated again by move 2) is now neither on disk nor in HEAD.
+  mkdirSync(join(root, "projects", "INF", "in-review"), { recursive: true });
+  writeFileSync(join(root, "projects", "INF", "in-review", "X.md"), "x v3");
+  rmSync(join(root, "projects", "INF", "in-progress", "X.md"));
+  appendEntry(root, {
+    id: "INF-1",
+    op: "move",
+    message: "INF-1: in-progress → in-review",
+    files: ["projects/INF/in-progress/X.md", "projects/INF/in-review/X.md"],
+    ts: "t",
+  });
+
+  writeFileSync(join(root, "untracked-other"), "should NOT be committed");
+
+  const out = runCommit(root);
+  assert.match(out, /blaze commit: flushed 2 op/);
+
+  const afterCount = Number(
+    execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim(),
+  );
+  assert.equal(afterCount, beforeCount + 1, "exactly one new commit");
+
+  const changed = execFileSync("git", ["-C", root, "show", "--name-status", "--format=", "HEAD"], {
+    encoding: "utf8",
+  });
+  assert.match(changed, /^D\s+projects\/INF\/defined\/X\.md$/m);
+  assert.match(changed, /^A\s+projects\/INF\/in-review\/X\.md$/m);
+  assert.doesNotMatch(changed, /in-progress\/X\.md/);
+
+  const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
+  assert.match(status, /\?\? untracked-other/);
+  assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
