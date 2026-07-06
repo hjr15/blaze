@@ -4,11 +4,16 @@ FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb
 RUN apk add --no-cache git
 WORKDIR /app
 COPY package.json ./
+COPY scripts/ ./scripts/
 # No blaze.config.json here — engine and data are separate (the engine/data
 # split): the data repo (blaze.config.json + projects/ + its own .git) is
-# bind-mounted at runtime, not baked into the image. Point resolveRoots() at it
-# with BLAZE_PROJECTS_DIR, or mount it at /app so ./projects resolves directly.
-COPY scripts/ ./scripts/
+# bind-mounted at runtime, not baked into the image. Do NOT mount the data
+# repo at /app — that hides the image's own scripts/ (serve.mjs et al) and
+# the container fails with "Cannot find module '/app/scripts/serve.mjs'".
+# Mount it at its own path instead and let BLAZE_PROJECTS_DIR (defaulted
+# below) point resolveRoots() at it:
+#   docker run -v <data-repo>:/data -p 4321:4321 <image>
+ENV BLAZE_PROJECTS_DIR=/data/projects
 # node:alpine ships a uid-1000 `node` user; match the laptop owner so the
 # bind-mounted .git/projects are writable and git raises no dubious-ownership.
 USER node

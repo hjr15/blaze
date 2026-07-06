@@ -70,7 +70,9 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
 // Resolution ladder:
 //   1. BLAZE_PROJECTS_DIR env — explicit projects dir; dataRoot is its parent
 //   2. ./projects under CWD — running from a data repo checkout
-//   3. the engine tree itself — single-tree back-compat (pre-split behaviour)
+//   3. the engine tree itself — single-tree back-compat (pre-split behaviour),
+//      but only when engineRoot isn't under node_modules; a packaged install
+//      with no data dir found throws instead of silently falling back
 export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoot = ROOT } = {}) {
   if (env.BLAZE_PROJECTS_DIR) {
     const projectsDir = resolve(cwd, env.BLAZE_PROJECTS_DIR);

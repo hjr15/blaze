@@ -83,7 +83,7 @@ small commit per ticket, scoped to the files it actually touched.
 | `blaze edit <id> ...` | Edit ticket fields |
 | `blaze reindex` | Rebuild/validate the on-disk index |
 | `blaze commit` | Flush queued ops into one commit (`commitMode: batch`) |
-| `blaze migrate [--dry-run\|--live] --project <KEY>` | Import tickets from an external tracker via a reviewed disposition ledger |
+| `blaze migrate [--dry-run\|--live] [--project <KEY>]` | Import tickets from an external tracker via a reviewed disposition ledger (`--project` optional — falls back to `blaze.config.json`'s `projects` list) |
 | `blaze board` | Serve the read-only kanban view |
 
 See [`AGENTS.md`](AGENTS.md) for the full contract — types, workflows, the git join

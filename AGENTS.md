@@ -82,8 +82,12 @@ roots the same way:
    its parent.
 2. `./projects` under the current working directory — running from inside the
    data repo.
-3. The engine tree itself — single-tree back-compat only; not for production use
-   once the data repo is separated.
+3. The engine tree itself — single-tree back-compat only, and **only when the
+   engine isn't installed under `node_modules`**. For a global/npx install
+   (the normal packaged case), if neither rung 1 nor 2 matched, `resolveRoots`
+   throws `blaze: no data dir found — set BLAZE_PROJECTS_DIR or run from a
+   directory containing projects/` instead of silently falling back to the
+   engine's own tree.
 
 ## Commit modes
 
