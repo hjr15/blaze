@@ -29,9 +29,9 @@ repo can override or extend them — add or modify types and workflows — via a
 `schema` block in `blaze.config.json` (all projects); the engine applies this
 **top-level** override at load, so `blaze new`/`move`, validation, and the board
 all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
-`resolveSchema` helper for features that call it directly, but isn't yet
-consumed by the built-in commands. With no override the table above applies
-unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
+`resolveSchema` helper, available to any future feature that calls it — as of
+today nothing in the engine does, including the built-in commands. With no
+override the table above applies unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 
 ## The loop
 

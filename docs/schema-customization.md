@@ -5,7 +5,8 @@ described in [`AGENTS.md`](../AGENTS.md#types--workflow). A data repo customizes
 **without editing engine source** by adding a `schema` block to its config. The
 engine applies the **top-level** override at load, so validation, the board
 columns, and the CLI all read it. A `resolveSchema` helper additionally layers
-`default → top-level → per-project` for features that call it directly — see
+`default → top-level → per-project`, available to any future feature that
+calls it — as of today nothing in the engine does. See
 [What reads the resolved schema](#what-reads-the-resolved-schema) below for which
 scope actually takes effect where.
 
@@ -14,8 +15,9 @@ scope actually takes effect where.
 - **Top-level** — `blaze.config.json` at the data repo root. Applies to every
   project.
 - **Per-project** — `projects/<KEY>/project.json`. Resolved by `resolveSchema`
-  to win over the top-level block for the same entry, for features that call
-  it. The built-in `blaze new`/`move`/board commands don't call it yet — see
+  to win over the top-level block for the same entry, available to any future
+  feature that calls it. The built-in `blaze new`/`move`/board commands don't
+  call it — see
   [What reads the resolved schema](#what-reads-the-resolved-schema).
 
 Both use the same shape:
@@ -91,16 +93,16 @@ An agent customizes the schema with ordinary file tools — no engine change:
 
 **Scoping to one project:** you can put the same `schema` block in
 `projects/<KEY>/project.json` instead. That block is resolved by
-`resolveSchema` and consumed by features that call it (e.g. a per-workflow
-board) — but the built-in `blaze new`/`move`/board commands don't call
-`resolveSchema` yet, so a per-project block has no effect on them today.
-Verifying a per-project override with step 3 above won't show anything;
-verify it against whatever feature actually consumes `resolveSchema`.
+`resolveSchema`, available to any future feature that calls it — as of today
+nothing in the engine does, so a per-project block has no effect on the
+built-in `blaze new`/`move`/board commands. Verifying a per-project override
+with step 3 above won't show anything; there is no feature yet to verify it
+against.
 
 ## What reads the resolved schema
 
 The top-level resolved registry is what `blaze` validation (required fields,
 parent rules, transition legality) and the board columns read. For per-project
-resolution, features consume `resolveSchema({ config, project })` from
-`scripts/model/schema-config.mjs` after loading `config`/`project` via
-`scripts/config.mjs`.
+resolution, any future feature would call `resolveSchema({ config, project })`
+from `scripts/model/schema-config.mjs` after loading `config`/`project` via
+`scripts/config.mjs` — as of today nothing does.
