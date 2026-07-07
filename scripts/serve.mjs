@@ -614,6 +614,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
     function esc(x){return String(x==null?"":x).replace(/[&<>"]/g,function(c){return{"&":"&amp;","<":"&lt;",">":"&gt;","\\"":"&quot;"}[c];});}
     async function pollLive(){
       const el=document.querySelector(".live"); if(!el) return;
+      if(document.documentElement.dataset.view!=="live") return;
       try{
         const {groups}=await (await fetch("/api/live")).json();
         if(!groups||!groups.length){ el.innerHTML='<div class="empty">No recent activity.</div>'; return; }
@@ -624,6 +625,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
           +'</article>';}).join("");
       }catch(e){ el.innerHTML='<div class="empty">live activity offline</div>'; }
     }
+    document.querySelectorAll('.viewtoggle .pill[data-view="live"]').forEach(function(b){b.addEventListener("click", pollLive);});
     pollLive(); setInterval(pollLive, 3000);
   </script>
   ${beforeBodyEnd}

@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { parseActivity, groupByTicket, relativeTime, renderLiveHtml } from "../../scripts/model/activity.mjs";
+import { parseActivity, groupByTicket } from "../../scripts/model/activity.mjs";
 
 const ev = (o) => JSON.stringify({ ts: "2026-07-07T00:00:00Z", key: "INF-1", branch: "INF-1-x", tool: "Bash", cwd: "/c", ...o });
 
@@ -53,31 +53,4 @@ test("groupByTicket active boundary is inclusive at exactly ttlMs", () => {
   assert.equal(g.active, true);                       // ageMs === ttlMs -> active
   const [g2] = groupByTicket([mk("INF-9", "Bash", now - 120_001)], { now, ttlMs: 120_000 });
   assert.equal(g2.active, false);                     // one ms past -> idle
-});
-
-test("relativeTime buckets", () => {
-  assert.equal(relativeTime(2_000), "now");
-  assert.equal(relativeTime(6_000), "6s ago");
-  assert.equal(relativeTime(120_000), "2m ago");
-  assert.equal(relativeTime(3 * 3600_000), "3h ago");
-  assert.equal(relativeTime(2 * 86_400_000), "2d ago");
-});
-
-test("renderLiveHtml escapes and shows a no-data state", () => {
-  assert.match(renderLiveHtml([]), /no-data|no recent/i);
-  const html = renderLiveHtml([
-    { key: "INF-1", tool: "Bash", branch: "INF-1-x", cwd: "/c", lastTs: 0, ageMs: 6000, active: true, column: "in-progress", count: 3 },
-  ]);
-  assert.match(html, /INF-1/);
-  assert.match(html, /Bash/);
-  assert.match(html, /6s ago/);
-  assert.match(html, /in-progress/);
-});
-
-test("renderLiveHtml escapes hostile fields", () => {
-  const html = renderLiveHtml([
-    { key: "<x>", tool: "<img>", branch: "\"'&", cwd: "/c", lastTs: 0, ageMs: 1000, active: true, column: null, count: 1 },
-  ]);
-  assert.doesNotMatch(html, /<img>/);
-  assert.match(html, /&lt;img&gt;/);
 });

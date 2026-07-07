@@ -227,9 +227,6 @@ test("GET /api/reconcile-preview sees tickets under a custom-named projectsDir",
   }
 });
 
-import { mkdtempSync as _mk } from "node:fs";
-import { writeFileSync as _wf, mkdirSync as _md } from "node:fs";
-
 test("GET /api/live groups fresh events and degrades to [] with no file", async () => {
   const fx = repo();                                  // OBA-1 lives in OBA/in-review
   // no .blaze yet -> empty
@@ -239,10 +236,10 @@ test("GET /api/live groups fresh events and degrades to [] with no file", async 
   server.close();
 
   // now drop a fresh event for OBA-1 and a stale one
-  _md(join(fx.root, ".blaze"), { recursive: true });
+  mkdirSync(join(fx.root, ".blaze"), { recursive: true });
   const fresh = new Date().toISOString();
   const stale = new Date(Date.now() - 10 * 60_000).toISOString();
-  _wf(join(fx.root, ".blaze", "activity.jsonl"),
+  writeFileSync(join(fx.root, ".blaze", "activity.jsonl"),
     `{"ts":"${stale}","key":"OBA-1","branch":"OBA-1-x","tool":"Read","cwd":"/c"}\n` +
     `{"ts":"${fresh}","key":"OBA-1","branch":"OBA-1-x","tool":"Bash","cwd":"/c"}\n` +
     `garbage line\n`);
