@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
-import { loadConfig } from "../scripts/config.mjs";
+import { loadConfig, loadProject, ambientSchemaOverride } from "../scripts/config.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -105,5 +105,69 @@ test("--get CLI reads the resolved data root's config, not the engine tree's own
     encoding: "utf8",
   });
   assert.equal(out.trim(), "Distinctive Board Title");
+  rmSync(data, { recursive: true, force: true });
+});
+
+test("loadConfig exposes schema:null when no schema block is present", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-schemacfg-"));
+  writeFileSync(join(dir, "blaze.config.json"), JSON.stringify({ key: "X" }));
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.schema, null);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("loadConfig passes through a schema override block", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-schemacfg-"));
+  const schema = { types: { feature: { level: 0, workflow: "delivery", parentTypes: ["epic"], required: ["title"] } } };
+  writeFileSync(join(dir, "blaze.config.json"), JSON.stringify({ key: "X", schema }));
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.deepEqual(cfg.schema, schema);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("loadConfig normalizes a non-object schema to null", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-schemacfg-"));
+  writeFileSync(join(dir, "blaze.config.json"), JSON.stringify({ key: "X", schema: "nope" }));
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.schema, null);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("loadProject exposes a per-project schema override (schema:null by default)", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-projschema-"));
+  const projectsDir = join(root, "projects");
+  mkdirSync(join(projectsDir, "ENG"), { recursive: true });
+  let proj = loadProject("ENG", { root, projectsDir });
+  assert.equal(proj.schema, null);
+  const schema = { workflows: { kanban: { statuses: ["todo", "doing", "done"], terminal: ["done"], transitions: [["todo", "doing"], ["doing", "done"]], reopenTo: "todo", resolutionOnTerminal: { done: "done" } } } };
+  writeFileSync(join(projectsDir, "ENG", "project.json"), JSON.stringify({ schema }));
+  proj = loadProject("ENG", { root, projectsDir });
+  assert.deepEqual(proj.schema, schema);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("ambientSchemaOverride reads the top-level override from the data root", () => {
+  const data = mkdtempSync(join(tmpdir(), "blaze-ambient-"));
+  const projectsDir = join(data, "projects");
+  mkdirSync(projectsDir, { recursive: true });
+  const schema = { types: { feature: { level: 0, workflow: "delivery", parentTypes: ["epic"], required: ["title"] } } };
+  writeFileSync(join(data, "blaze.config.json"), JSON.stringify({ key: "X", schema }));
+  const got = ambientSchemaOverride({ env: { BLAZE_PROJECTS_DIR: projectsDir }, cwd: data });
+  assert.deepEqual(got, schema);
+  rmSync(data, { recursive: true, force: true });
+});
+
+test("ambientSchemaOverride returns null (never throws) when root resolution fails", () => {
+  const throwing = () => { throw new Error("no data dir"); };
+  assert.equal(ambientSchemaOverride({ resolveRoots: throwing }), null);
+});
+
+test("ambientSchemaOverride returns null when the data root has no schema block", () => {
+  const data = mkdtempSync(join(tmpdir(), "blaze-ambient-none-"));
+  const projectsDir = join(data, "projects");
+  mkdirSync(projectsDir, { recursive: true });
+  writeFileSync(join(data, "blaze.config.json"), JSON.stringify({ key: "X" }));
+  const got = ambientSchemaOverride({ env: { BLAZE_PROJECTS_DIR: projectsDir }, cwd: data });
+  assert.equal(got, null);
   rmSync(data, { recursive: true, force: true });
 });

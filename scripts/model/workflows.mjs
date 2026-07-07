@@ -1,11 +1,18 @@
-// scripts/model/workflows.mjs — Blaze type-scoped workflow definitions and
-// the pure resolvers over them (statuses, terminal, transitions, resolution
-// post-function). Config-driven; no I/O. Consumes the schema's type→workflow map.
+// scripts/model/workflows.mjs — Blaze type-scoped workflow definitions and the
+// pure resolvers over them (statuses, terminal, transitions, resolution).
+//
+// DEFAULT_WORKFLOWS is the built-in set the engine ships. The exported WORKFLOWS
+// is DEFAULT_WORKFLOWS merged with the ambient data repo's top-level
+// `schema.workflows` override (guarded — falls back to defaults with no data repo
+// or no override), so the board columns and transition enforcement read the
+// resolved set with no consumer change. With no override, WORKFLOWS deep-equals
+// DEFAULT_WORKFLOWS. Consumes the schema's type→workflow map.
 import { workflowFor } from "./schema.mjs";
+import { ambientSchemaOverride } from "../config.mjs";
 
 export const RESOLUTIONS = ["done", "wont-do", "duplicate", "cannot-reproduce"];
 
-export const WORKFLOWS = {
+export const DEFAULT_WORKFLOWS = {
   delivery: {
     statuses: ["defined", "in-progress", "in-review", "done"],
     terminal: ["done"],
@@ -28,6 +35,15 @@ export const WORKFLOWS = {
     resolutionOnTerminal: { mitigated: "done", accepted: "done", obsolete: "wont-do" },
   },
 };
+
+/** Per-entry replace/add merge: each override entry replaces or adds a whole workflow. */
+export function mergeWorkflows(defaults, override) {
+  if (!override || typeof override !== "object" || Array.isArray(override)) return { ...defaults };
+  return { ...defaults, ...override };
+}
+
+/** Resolved definitions: built-in defaults + ambient top-level override. */
+export const WORKFLOWS = mergeWorkflows(DEFAULT_WORKFLOWS, ambientSchemaOverride()?.workflows);
 
 export function workflowDef(type) {
   const name = workflowFor(type); // throws on unknown type

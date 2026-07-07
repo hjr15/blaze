@@ -99,8 +99,13 @@ key, and how an agent should drive the board.
 
 `key` is the ticket id prefix (`ENG-1`, `ENG-2`, ...); `projects` lists which
 `projects/<KEY>/` directories the board renders. Per-project settings (labels,
-`codeRepos` to mirror, `requireWorklogBeforeTerminal`, `workflowOverrides`) live in
+`codeRepos` to mirror, `requireWorklogBeforeTerminal`) live in
 `projects/<KEY>/project.json` — see [`AGENTS.md`](AGENTS.md#configuration).
+
+The type registry and workflows are themselves configurable: add a `schema` block
+(top-level or per-project) to override or extend the built-in defaults without
+editing engine source — see
+[`docs/schema-customization.md`](docs/schema-customization.md).
 
 ## Origin
 

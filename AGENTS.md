@@ -23,11 +23,15 @@ sequence of statuses:
 A terminal move auto-sets `resolution` (`done` for `achieved`/`done`/`mitigated`/
 `accepted`; `wont-do` for `obsolete`). Use `blaze resolve <id> <resolution>` for a
 non-default resolution (`wont-do`, `duplicate`, `cannot-reproduce`) without moving
-the file. These are the engine's **defaults**, defined once in
-`scripts/model/schema.mjs` / `workflows.mjs`. A project's `project.json` can carry
-a `workflowOverrides` field reserved for future per-project workflow
-customisation (see Configuration below) — it is not yet consumed by the engine,
-so every project uses the table above unconditionally today.
+the file. These are the engine's **defaults**, defined once in `scripts/model/schema.mjs`
+(`DEFAULT_TYPES`) and `scripts/model/workflows.mjs` (`DEFAULT_WORKFLOWS`). A data
+repo can override or extend them — add or modify types and workflows — via a
+`schema` block in `blaze.config.json` (all projects); the engine applies this
+**top-level** override at load, so `blaze new`/`move`, validation, and the board
+all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
+`resolveSchema` helper, available to any future feature that calls it — as of
+today nothing in the engine does, including the built-in commands. With no
+override the table above applies unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 
 ## The loop
 
@@ -136,6 +140,5 @@ board renders), `commitMode`, `port`, and more.
 `requireWorklogBeforeTerminal` (default `false` — when `true`, a leaf ticket
 (story/task/bug/subtask) needs at least one `worklog` entry before it can enter a
 terminal status; epics/goals/risks are exempt since their time rolls up from
-children), and `workflowOverrides` (reserved for a future per-type
-statuses/transitions override — currently stored but not read by the engine, so
-it has no effect yet).
+children), and `schema` (a per-project type/workflow override — see
+[`docs/schema-customization.md`](docs/schema-customization.md)).

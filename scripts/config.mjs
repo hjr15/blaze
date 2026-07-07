@@ -61,6 +61,11 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   cfg.fileRegex = new RegExp("^" + cfg.key + "-\\d+.*\\.md$");
   cfg.idLineRegex = new RegExp(`^id:\\s*(${cfg.key}-\\d+)`, "m");
 
+  // Declarative schema override block (types/workflows). Passed through verbatim;
+  // resolved against the built-in defaults by the model layer. Non-object → null.
+  cfg.schema = (file.schema && typeof file.schema === "object" && !Array.isArray(file.schema))
+    ? file.schema : null;
+
   return Object.freeze(cfg);
 }
 
@@ -87,6 +92,25 @@ export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoo
   return Object.freeze({ engineRoot, dataRoot: engineRoot, projectsDir: join(engineRoot, "projects") });
 }
 
+// Read the ambient data root's top-level schema override, guarded: any failure
+// (packaged install with no data dir, unreadable/malformed config) yields null so
+// the model layer falls back to its built-in defaults. resolveRoots/loadConfig are
+// injectable so the failure path is testable.
+export function ambientSchemaOverride({
+  resolveRoots: rr = resolveRoots,
+  loadConfig: lc = loadConfig,
+  env = process.env,
+  cwd = process.cwd(),
+} = {}) {
+  try {
+    const { dataRoot } = rr({ env, cwd });
+    const cfg = lc({ root: dataRoot, env });
+    return cfg.schema || null;
+  } catch {
+    return null;
+  }
+}
+
 // CLI: `node scripts/config.mjs --get <field>` prints one resolved config field —
 // for scripts/tooling that need a config value directly in shell.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
@@ -109,7 +133,7 @@ const PROJECT_DEFAULTS = {
   labels: [],
   codeRepos: [],
   requireWorklogBeforeTerminal: false,
-  workflowOverrides: null,
+  schema: null,
 };
 
 export function listProjects(cfg, { root = ROOT } = {}) {
@@ -131,5 +155,7 @@ export function loadProject(key, { root = ROOT, projectsDir = join(root, "projec
   merged.idRegex = new RegExp("\\b" + key + "-(\\d+)", "i");
   merged.idFromRef = (ref) => { const m = merged.idRegex.exec(ref || ""); return m ? `${key}-${m[1]}` : null; };
   merged.fileRegex = new RegExp("^" + key + "-\\d+.*\\.md$");
+  merged.schema = (merged.schema && typeof merged.schema === "object" && !Array.isArray(merged.schema))
+    ? merged.schema : null;
   return Object.freeze(merged);
 }

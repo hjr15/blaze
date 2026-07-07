@@ -2,7 +2,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  WORKFLOWS, workflowDef, statusesFor, isTerminal, initialStatus,
+  WORKFLOWS, DEFAULT_WORKFLOWS, mergeWorkflows, workflowDef, statusesFor, isTerminal, initialStatus,
   canTransition, resolutionForTerminal, RESOLUTIONS,
 } from "../../scripts/model/workflows.mjs";
 
@@ -45,4 +45,55 @@ test("resolution post-function maps terminal statuses", () => {
 test("workflowDef throws on unknown type", () => {
   assert.throws(() => workflowDef("nope"), /unknown type/);
   assert.ok(WORKFLOWS.delivery && WORKFLOWS.goal && WORKFLOWS.risk);
+});
+
+test("DEFAULT_WORKFLOWS holds today's exact three definitions (regression anchor)", () => {
+  assert.deepEqual(DEFAULT_WORKFLOWS, {
+    delivery: {
+      statuses: ["defined", "in-progress", "in-review", "done"],
+      terminal: ["done"],
+      transitions: [["defined", "in-progress"], ["in-progress", "in-review"], ["in-review", "done"]],
+      reopenTo: "defined",
+      resolutionOnTerminal: { done: "done" },
+    },
+    goal: {
+      statuses: ["defined", "in-progress", "achieved"],
+      terminal: ["achieved"],
+      transitions: [["defined", "in-progress"], ["in-progress", "achieved"]],
+      reopenTo: "defined",
+      resolutionOnTerminal: { achieved: "done" },
+    },
+    risk: {
+      statuses: ["identified", "mitigated", "accepted", "obsolete"],
+      terminal: ["mitigated", "accepted", "obsolete"],
+      transitions: [["identified", "mitigated"], ["identified", "accepted"], ["identified", "obsolete"]],
+      reopenTo: "identified",
+      resolutionOnTerminal: { mitigated: "done", accepted: "done", obsolete: "wont-do" },
+    },
+  });
+});
+
+test("with no ambient override, resolved WORKFLOWS == DEFAULT_WORKFLOWS (byte-identical default)", () => {
+  assert.deepEqual(WORKFLOWS, DEFAULT_WORKFLOWS);
+});
+
+test("mergeWorkflows with null/non-object override returns a copy of defaults", () => {
+  assert.deepEqual(mergeWorkflows(DEFAULT_WORKFLOWS, null), DEFAULT_WORKFLOWS);
+  assert.deepEqual(mergeWorkflows(DEFAULT_WORKFLOWS, undefined), DEFAULT_WORKFLOWS);
+  assert.deepEqual(mergeWorkflows(DEFAULT_WORKFLOWS, 42), DEFAULT_WORKFLOWS);
+  assert.notEqual(mergeWorkflows(DEFAULT_WORKFLOWS, null), DEFAULT_WORKFLOWS);
+});
+
+test("mergeWorkflows adds a new workflow without touching the defaults", () => {
+  const kanban = { statuses: ["todo", "doing", "done"], terminal: ["done"], transitions: [["todo", "doing"], ["doing", "done"]], reopenTo: "todo", resolutionOnTerminal: { done: "done" } };
+  const merged = mergeWorkflows(DEFAULT_WORKFLOWS, { kanban });
+  assert.deepEqual(merged.kanban, kanban);
+  assert.ok(merged.delivery); // defaults preserved
+  assert.equal(DEFAULT_WORKFLOWS.kanban, undefined); // defaults not mutated
+});
+
+test("mergeWorkflows replaces an existing workflow entry wholesale", () => {
+  const merged = mergeWorkflows(DEFAULT_WORKFLOWS, { delivery: { statuses: ["open", "closed"], terminal: ["closed"], transitions: [["open", "closed"]], reopenTo: "open", resolutionOnTerminal: { closed: "done" } } });
+  assert.deepEqual(merged.delivery.statuses, ["open", "closed"]);
+  assert.deepEqual(DEFAULT_WORKFLOWS.delivery.statuses, ["defined", "in-progress", "in-review", "done"]); // intact
 });
