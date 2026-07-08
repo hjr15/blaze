@@ -21,7 +21,10 @@ export function activeStatuses(statuses, workflows = WORKFLOWS) {
   return statuses.filter((s) => !term.has(s));
 }
 
-// null == no status constraint (show all). Otherwise a Set of allowed statuses.
+// The canonical status-filter rule. null == no constraint (show all); otherwise
+// a Set of allowed statuses. The browser can't import this .mjs, so page.mjs's
+// inline `allowedStatuses()` mirrors this exact rule (all/empty/unknown -> null)
+// — keep the two in step.
 export function statusFilter(value, statuses, workflows = WORKFLOWS) {
   const v = String(value ?? "all").toLowerCase();
   if (v === "all" || v === "") return null;

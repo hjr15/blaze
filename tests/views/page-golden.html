@@ -450,7 +450,10 @@
       const col = c.closest("[data-status]");
       dragSourceStatus = col ? col.dataset.status : null;
     });
-    for (const zone of document.querySelectorAll("[data-status]")) {
+    // Drop zones are the board columns and list groups only. The status chips
+    // also carry data-status (for filtering) but must never be move targets, so
+    // scope the selector rather than matching every [data-status].
+    for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
       zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
       zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
       zone.addEventListener("drop", (e) => {
@@ -512,16 +515,21 @@
       const search = document.getElementById("board-search");
       const chipbar = document.querySelector(".chipbar");
       const ACTIVE_STATUSES = ["in-review","todo"];
+      const ALL_STATUSES = ["in-review","todo"];
       const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
       function hashStatus() { return (hashParams().get("status") || "all").toLowerCase(); }
       function setHashStatus(v) {
         const h = hashParams(); h.set("status", v);
         location.hash = h.toString();   // fires hashchange -> applyFilters
       }
+      // Mirrors model/filters.mjs statusFilter: all/empty/unknown -> null (show
+      // all), so a stale or shared #status= for a renamed status doesn't blank
+      // the board with no way to recover.
       function allowedStatuses(v) {
-        if (!v || v === "all") return null;                 // no constraint
+        if (!v || v === "all") return null;
         if (v === "active") return new Set(ACTIVE_STATUSES);
-        return new Set([v]);
+        if (ALL_STATUSES.includes(v)) return new Set([v]);
+        return null;
       }
       function applyFilters() {
         const q = ((search && search.value) || "").trim().toLowerCase();
@@ -587,7 +595,9 @@
         content.innerHTML = res.ok ? await res.text()
           : '<div class="panel-empty">Ticket not found.</div>';
       } catch (err) {
-        content.innerHTML = '<div class="panel-empty">Failed to load ' + id + '.</div>';
+        // Static message — never interpolate id into innerHTML (dataset decodes
+        // the server's escaping, so a markup-bearing id would execute here).
+        content.innerHTML = '<div class="panel-empty">Failed to load ticket.</div>';
       }
     },
     close() { const p = document.getElementById("blaze-panel"); if (p) p.hidden = true; },
@@ -597,7 +607,11 @@
     const drill = e.target.closest("[data-panel-open]");
     if (drill) { e.preventDefault(); window.blazePanel.open(drill.getAttribute("data-panel-open")); }
   });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.blazePanel.close(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const p = document.getElementById("blaze-panel");
+    if (p && !p.hidden) window.blazePanel.close();   // no-op when already closed
+  });
 
     (function () {
       var PALETTE = ["#79c0ff","#3fb950","#d29922","#f85149","#a371f7","#56d4dd","#ffa657","#7ee787"];

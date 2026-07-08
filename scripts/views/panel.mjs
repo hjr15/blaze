@@ -61,7 +61,9 @@ export const clientScript = `
         content.innerHTML = res.ok ? await res.text()
           : '<div class="panel-empty">Ticket not found.</div>';
       } catch (err) {
-        content.innerHTML = '<div class="panel-empty">Failed to load ' + id + '.</div>';
+        // Static message — never interpolate id into innerHTML (dataset decodes
+        // the server's escaping, so a markup-bearing id would execute here).
+        content.innerHTML = '<div class="panel-empty">Failed to load ticket.</div>';
       }
     },
     close() { const p = document.getElementById("blaze-panel"); if (p) p.hidden = true; },
@@ -71,5 +73,9 @@ export const clientScript = `
     const drill = e.target.closest("[data-panel-open]");
     if (drill) { e.preventDefault(); window.blazePanel.open(drill.getAttribute("data-panel-open")); }
   });
-  document.addEventListener("keydown", (e) => { if (e.key === "Escape") window.blazePanel.close(); });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const p = document.getElementById("blaze-panel");
+    if (p && !p.hidden) window.blazePanel.close();   // no-op when already closed
+  });
 `;

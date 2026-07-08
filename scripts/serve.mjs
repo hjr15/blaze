@@ -66,9 +66,16 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       return json(200, liveModel(root, projectsDir));
     }
     if (req.method === "GET" && u.pathname === "/api/panel") {
-      const html = panelHtml(projectsDir, u.searchParams.get("id"));
-      if (html === null) return json(404, { errors: ["not found"] });
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(html); return;
+      // Guard the render: panelHtml re-reads the ticket file after the index
+      // walk, so a concurrent move/edit could ENOENT between the two — catch it
+      // as a 500 rather than letting the async handler crash the process.
+      try {
+        const html = panelHtml(projectsDir, u.searchParams.get("id"));
+        if (html === null) return json(404, { errors: ["not found"] });
+        res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(html); return;
+      } catch {
+        return json(500, { errors: ["panel render failed"] });
+      }
     }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
       const { reconcile } = await import("./reconcile.mjs");

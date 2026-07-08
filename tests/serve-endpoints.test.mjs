@@ -292,6 +292,23 @@ test("pageHtml wires a card/row click to open the detail panel", () => {
   assert.match(html, /blazePanel\.open/);   // clicking a ticket id opens the panel
 });
 
+test("pageHtml client shows-all for an unknown #status (mirrors model statusFilter, no blank board)", () => {
+  const html = pageHtml({ project: "all" });
+  // The client must guard the hash status against the known status list before
+  // constraining — an unknown/stale/shared value falls through to show-all
+  // instead of hiding every card (which diverges from model/filters.mjs).
+  assert.match(html, /const ALL_STATUSES =/);
+  assert.match(html, /ALL_STATUSES\.includes\(v\)/);
+});
+
+test("pageHtml scopes drag-drop drop zones to columns/groups so chips are not move targets", () => {
+  const html = pageHtml({ project: "all" });
+  // Status chips also carry data-status (for filtering); the drop-zone query
+  // must not treat them as move targets, or dropping a card on a chip moves it.
+  assert.match(html, /querySelectorAll\("\.col\[data-status\], \.group\[data-status\]"\)/);
+  assert.doesNotMatch(html, /querySelectorAll\("\[data-status\]"\)/);
+});
+
 test("pageHtml wires the Live view pill, region and poll", () => {
   const html = pageHtml({ project: "all" });
   assert.match(html, /data-view="live"/);

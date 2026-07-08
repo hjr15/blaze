@@ -228,7 +228,10 @@ export function pageHtml({
       const col = c.closest("[data-status]");
       dragSourceStatus = col ? col.dataset.status : null;
     });
-    for (const zone of document.querySelectorAll("[data-status]")) {
+    // Drop zones are the board columns and list groups only. The status chips
+    // also carry data-status (for filtering) but must never be move targets, so
+    // scope the selector rather than matching every [data-status].
+    for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
       zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
       zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
       zone.addEventListener("drop", (e) => {
@@ -289,17 +292,22 @@ export function pageHtml({
     (function () {
       const search = document.getElementById("board-search");
       const chipbar = document.querySelector(".chipbar");
-      const ACTIVE_STATUSES = ${JSON.stringify(activeStatuses(statuses))};
+      const ACTIVE_STATUSES = ${JSON.stringify(activeStatuses(statuses)).replace(/</g, "\\u003c")};
+      const ALL_STATUSES = ${JSON.stringify(statuses).replace(/</g, "\\u003c")};
       const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
       function hashStatus() { return (hashParams().get("status") || "all").toLowerCase(); }
       function setHashStatus(v) {
         const h = hashParams(); h.set("status", v);
         location.hash = h.toString();   // fires hashchange -> applyFilters
       }
+      // Mirrors model/filters.mjs statusFilter: all/empty/unknown -> null (show
+      // all), so a stale or shared #status= for a renamed status doesn't blank
+      // the board with no way to recover.
       function allowedStatuses(v) {
-        if (!v || v === "all") return null;                 // no constraint
+        if (!v || v === "all") return null;
         if (v === "active") return new Set(ACTIVE_STATUSES);
-        return new Set([v]);
+        if (ALL_STATUSES.includes(v)) return new Set([v]);
+        return null;
       }
       function applyFilters() {
         const q = ((search && search.value) || "").trim().toLowerCase();

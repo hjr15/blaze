@@ -44,8 +44,11 @@ export function panelContentHtml(model) {
   const crumb = parent
     ? `<div class="panel-crumb">↳ <button type="button" class="panel-link" data-panel-open="${esc(parent.id)}">${esc(parent.id)}${parent.title ? " · " + esc(parent.title) : ""}</button></div>`
     : "";
+  // Keys with their own dedicated surface (title heading, PR link, Links
+  // section) are skipped here so the Fields table isn't a redundant JSON dump.
+  const SURFACED = new Set(["title", "pr", "links"]);
   const fmRows = Object.entries(meta)
-    .filter(([, v]) => v !== null && v !== undefined && v !== "")
+    .filter(([k, v]) => !SURFACED.has(k) && v !== null && v !== undefined && v !== "")
     .map(([k, v]) => `<tr><th>${esc(k)}</th><td>${esc(fmValue(v))}</td></tr>`)
     .join("");
   const childrenHtml = children.length
