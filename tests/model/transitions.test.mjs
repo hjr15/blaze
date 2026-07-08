@@ -11,27 +11,27 @@ test("parseTransitions extracts status moves and skips pure-slug renames", () =>
   const NUL = "\0";
   const log =
     `${NUL}abc${NUL}2026-07-01T10:00:00+00:00\n` +
-    `R100\tprojects/INF/defined/INF-1-old.md\tprojects/INF/in-progress/INF-1-old.md\n` +
-    `R096\tprojects/INF/in-progress/INF-2-a.md\tprojects/INF/in-review/INF-2-b.md\n` +  // slug also changed
-    `R100\tprojects/INF/done/INF-3-x.md\tprojects/INF/done/INF-3-y.md\n`;              // pure slug -> skip
+    `R100\tprojects/DEMO/defined/DEMO-1-old.md\tprojects/DEMO/in-progress/DEMO-1-old.md\n` +
+    `R096\tprojects/DEMO/in-progress/DEMO-2-a.md\tprojects/DEMO/in-review/DEMO-2-b.md\n` +  // slug also changed
+    `R100\tprojects/DEMO/done/DEMO-3-x.md\tprojects/DEMO/done/DEMO-3-y.md\n`;              // pure slug -> skip
   const out = parseTransitions(log);
   assert.equal(out.length, 2);
-  assert.deepEqual(out[0], { id: "INF-1", from: "defined", to: "in-progress", ts: "2026-07-01T10:00:00+00:00" });
-  assert.equal(out[1].id, "INF-2"); assert.equal(out[1].from, "in-progress"); assert.equal(out[1].to, "in-review");
+  assert.deepEqual(out[0], { id: "DEMO-1", from: "defined", to: "in-progress", ts: "2026-07-01T10:00:00+00:00" });
+  assert.equal(out[1].id, "DEMO-2"); assert.equal(out[1].from, "in-progress"); assert.equal(out[1].to, "in-review");
 });
 
 test("parseTransitions handles multiple records and unparseable paths", () => {
   const NUL = "\0";
   const log =
     `${NUL}sha1${NUL}2026-07-01T10:00:00+00:00\n` +
-    `R100\tprojects/INF/defined/INF-1-old.md\tprojects/INF/in-progress/INF-1-old.md\n` +
+    `R100\tprojects/DEMO/defined/DEMO-1-old.md\tprojects/DEMO/in-progress/DEMO-1-old.md\n` +
     `${NUL}sha2${NUL}2026-07-02T11:00:00+00:00\n` +
     `R100\treadme.md\tREADME.md\n` +  // no project/status/id structure -> skip
-    `R100\tprojects/INF/in-progress/INF-4-a.md\tprojects/INF/done/INF-4-a.md\n`;
+    `R100\tprojects/DEMO/in-progress/DEMO-4-a.md\tprojects/DEMO/done/DEMO-4-a.md\n`;
   const out = parseTransitions(log);
   assert.equal(out.length, 2);
-  assert.deepEqual(out[0], { id: "INF-1", from: "defined", to: "in-progress", ts: "2026-07-01T10:00:00+00:00" });
-  assert.deepEqual(out[1], { id: "INF-4", from: "in-progress", to: "done", ts: "2026-07-02T11:00:00+00:00" });
+  assert.deepEqual(out[0], { id: "DEMO-1", from: "defined", to: "in-progress", ts: "2026-07-01T10:00:00+00:00" });
+  assert.deepEqual(out[1], { id: "DEMO-4", from: "in-progress", to: "done", ts: "2026-07-02T11:00:00+00:00" });
 });
 
 test("parseTransitions returns [] on empty input", () => {
