@@ -9,6 +9,7 @@ import { esc } from "./render-lib.mjs";
 import { activeStatuses } from "../model/filters.mjs";
 import { boardModel } from "./data.mjs";
 import { metricsModel } from "../model/metrics.mjs";
+import { graphModel } from "../model/graph.mjs";
 import { loadTransitions } from "../model/transitions.mjs";
 import * as live from "./live.mjs";
 import * as board from "./board.mjs";
@@ -64,6 +65,7 @@ export function pageHtml({
   const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
   const mm = metricsModel({ board: m, transitions: txns, now, project });
   const metricsHtml = metrics.render(mm);
+  const gm = graphModel({ projectsDir: _pDir ?? resolveRoots().projectsDir, project });
 
   return `<!doctype html>
 <html lang="en" data-view="board">
@@ -123,6 +125,8 @@ export function pageHtml({
   html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
   html:not([data-view="metrics"]) .metricsview { display: none; }
   html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
+  html:not([data-view="map"]) .mapview { display: none; }
+  html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
 
   /* ---- board switching (per-workflow) ---- */
   .boardtoggle { display: flex; gap: 2px; padding: 2px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
@@ -184,6 +188,7 @@ export function pageHtml({
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
       <button type="button" class="pill" data-view="metrics">Metrics</button>
+      <button type="button" class="pill" data-view="map">Map</button>
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -196,6 +201,7 @@ export function pageHtml({
   ${listHtml}
   ${live.render()}
   <div class="metricsview">${metricsHtml}</div>
+  <div class="mapview">${map.render(gm)}</div>
   <script>
     // View toggle (Board / List), persisted to localStorage.
     const VIEW_KEY = "tracker.view";
