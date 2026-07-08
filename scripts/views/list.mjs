@@ -28,15 +28,14 @@ export function row(t) {
 }
 
 export function render(model) {
-  const cols = model.columns;
-  // List view ordering: derived from the rendered columns (already status-ordered).
-  const LIST_ORDER = cols.map((c) => c.dir);
-  const groupsHtml = LIST_ORDER
-    .map((dir) => cols.find((c) => c.dir === dir))
-    .filter(Boolean)
-    .filter((c) => c.dir !== "in-review" || c.tickets.length > 0)
-    .map(
-      (c) => `
+  const boards = model.boards || [{ name: "delivery", columns: model.columns || [] }];
+  return boards
+    .map((b) => {
+      const cols = b.columns;
+      const groupsHtml = cols
+        .filter((c) => c.dir !== "in-review" || c.tickets.length > 0)
+        .map(
+          (c) => `
       <details class="group" open data-group="${esc(c.dir)}" data-status="${esc(c.dir)}">
         <summary class="grouphead">
           <span class="gcaret">▸</span>
@@ -47,9 +46,11 @@ export function render(model) {
           ${c.tickets.map(row).join("") || '<div class="empty">No tickets</div>'}
         </div>
       </details>`,
-    )
+        )
+        .join("");
+      return `<div class="list" data-board="${esc(b.name)}">${groupsHtml}</div>`;
+    })
     .join("");
-  return `<div class="list">${groupsHtml}</div>`;
 }
 
 // List-container CSS moved verbatim from serve.mjs.
