@@ -160,6 +160,26 @@ test("pageHtml includes reconcileBtn", () => {
   assert.match(html, /id="reconcileBtn"/);
 });
 
+test("pageHtml renders a client-side search box wired to a filter pass", () => {
+  const html = pageHtml({ project: "all" });
+  assert.match(html, /id="board-search"/);
+  assert.match(html, /applyFilters/);
+  // filtered-out cards/rows are hidden purely client-side (no round-trip)
+  assert.match(html, /\.filtered-out/);
+});
+
+test("pageHtml renders a status chip bar with counts, All/Active presets, hash wiring", () => {
+  const fixDir = ticketFixture();   // T-1 lives in the 'todo' status dir
+  const html = pageHtml({ project: "all", projectsDir: fixDir });
+  rmSync(fixDir, { recursive: true, force: true });
+  assert.match(html, /class="chipbar"/);
+  assert.match(html, /data-chip="all"/);
+  assert.match(html, /data-chip="active"/);
+  assert.match(html, /class="chip"[^>]*data-status="todo"/); // one chip per resolved status
+  assert.match(html, /chip-n">1</);                          // live count on the chip
+  assert.match(html, /hashchange/);                          // chip state round-trips via the URL hash
+});
+
 test("pageHtml priority select includes none and urgent (Fix 2 — unified enum)", () => {
   // The client-side PRIORITIES array must be injected from the canonical server constant,
   // covering all enum values including none and urgent (previously absent from the narrow list).
@@ -174,6 +194,20 @@ test("pageHtml client script contains self-drop guard (Fix 3)", () => {
   // before POSTing, so a same-column drop is a no-op without a network request.
   const html = pageHtml({ project: "all" });
   assert.match(html, /dragSourceStatus !== zone\.dataset\.status/, "self-drop guard missing");
+});
+
+test("GET /api/panel returns the rendered detail panel, 404 for an unknown id", async () => {
+  const fx = repo();                                   // OBA-1 in OBA/in-review, has one AC
+  const { server, base } = await boot(fx);
+  const res = await fetch(base + "/api/panel?id=OBA-1");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /html/);
+  const html = await res.text();
+  assert.match(html, /data-ticket="OBA-1"/);           // AC-toggle hook
+  assert.match(html, /data-ac-index/);                 // live AC checkbox in the rendered body
+  const miss = await fetch(base + "/api/panel?id=NOPE");
+  assert.equal(miss.status, 404);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
 test("GET /api/reconcile-preview returns a change list and writes nothing", async () => {
@@ -251,6 +285,28 @@ test("GET /api/live groups fresh events and degrades to [] with no file", async 
   assert.equal(j.groups[0].active, true);
   assert.equal(j.groups[0].column, "in-review");      // from the board index
   server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("pageHtml wires a card/row click to open the detail panel", () => {
+  const html = pageHtml({ project: "all" });
+  assert.match(html, /blazePanel\.open/);   // clicking a ticket id opens the panel
+});
+
+test("pageHtml client shows-all for an unknown #status (mirrors model statusFilter, no blank board)", () => {
+  const html = pageHtml({ project: "all" });
+  // The client must guard the hash status against the known status list before
+  // constraining — an unknown/stale/shared value falls through to show-all
+  // instead of hiding every card (which diverges from model/filters.mjs).
+  assert.match(html, /const ALL_STATUSES =/);
+  assert.match(html, /ALL_STATUSES\.includes\(v\)/);
+});
+
+test("pageHtml scopes drag-drop drop zones to columns/groups so chips are not move targets", () => {
+  const html = pageHtml({ project: "all" });
+  // Status chips also carry data-status (for filtering); the drop-zone query
+  // must not treat them as move targets, or dropping a card on a chip moves it.
+  assert.match(html, /querySelectorAll\("\.col\[data-status\], \.group\[data-status\]"\)/);
+  assert.doesNotMatch(html, /querySelectorAll\("\[data-status\]"\)/);
 });
 
 test("pageHtml wires the Live view pill, region and poll", () => {

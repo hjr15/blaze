@@ -25,7 +25,7 @@
   }
   header.top {
     position: sticky; top: 0; z-index: 5; display: flex; align-items: baseline;
-    gap: 12px; padding: 14px 20px; background: #0F172Aee;
+    flex-wrap: wrap; gap: 12px; padding: 14px 20px; background: #0F172Aee;
     border-bottom: 1px solid #21262d; backdrop-filter: blur(6px);
   }
   header.top h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
@@ -164,13 +164,46 @@
   #toast.show { opacity: 1; }
   .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
   .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
+  .search { background: #161b22; border: 1px solid #21262d; border-radius: 8px; color: var(--neutral);
+    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); }
+  .search:focus { outline: none; border-color: var(--blaze-orange); }
+  .search::placeholder { color: #7d8590; }
+  .card.filtered-out, .row.filtered-out { display: none !important; }
+  .chipbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 20px;
+    background: #0F172Acc; border-bottom: 1px solid #21262d; }
+  .chip { appearance: none; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid #21262d; background: #161b22; color: #adbac7; }
+  .chip:hover { color: var(--neutral); border-color: #30363d; }
+  .chip.on { color: var(--charcoal); background: var(--blaze-amber); border-color: var(--blaze-amber); }
+  .chip .chip-n { color: #7d8590; font-size: 11px; font-weight: 600; }
+  .chip.on .chip-n { color: var(--charcoal); }
   .panel[hidden] { display: none; }
   .panel { position: fixed; inset: 0; z-index: 30; }
   .panel-backdrop { position: absolute; inset: 0; background: #0008; }
-  .panel-body { position: absolute; top: 0; right: 0; height: 100%; width: min(480px, 90vw);
+  .panel-body { position: absolute; top: 0; right: 0; height: 100%; width: min(520px, 92vw);
     background: #161b22; border-left: 1px solid #21262d; padding: 16px 20px; overflow: auto; }
   .panel-x { position: absolute; top: 10px; right: 12px; background: none; border: 0; color: #7d8590;
     font-size: 20px; cursor: pointer; }
+  .panel-content { color: #c9d1d9; }
+  .panel-crumb { font-size: 12px; margin-bottom: 6px; }
+  .panel-id { color: #7d8590; font-family: ui-monospace, monospace; font-size: 12px; font-weight: 600; }
+  .panel-title { margin: 2px 0 10px; font-size: 16px; color: var(--neutral); }
+  .panel-pr { margin-bottom: 8px; }
+  .panel-md { margin: 6px 0 14px; }
+  .panel-sec { margin: 12px 0; }
+  .panel-sec h4 { margin: 0 0 6px; font-size: 12px; text-transform: uppercase; color: #adbac7; letter-spacing: .4px; }
+  .panel-fm { width: 100%; border-collapse: collapse; font-size: 12px; }
+  .panel-fm th { text-align: left; color: #7d8590; font-weight: 600; padding: 3px 8px 3px 0; vertical-align: top; white-space: nowrap; width: 1%; }
+  .panel-fm td { color: #c9d1d9; padding: 3px 0; word-break: break-word; }
+  .panel-children, .panel-links { list-style: none; margin: 0; padding: 0; font-size: 13px; }
+  .panel-children li, .panel-links li { padding: 3px 0; }
+  .panel-link { appearance: none; background: none; border: 0; padding: 0; cursor: pointer;
+    color: #58a6ff; font: inherit; font-weight: 600; }
+  .panel-link:hover { text-decoration: underline; }
+  .panel-status { color: #7d8590; font-size: 11px; }
+  .panel-linktype { color: var(--blaze-amber); font-weight: 600; font-size: 11px; text-transform: uppercase; }
+  .panel-empty { color: #7d8590; padding: 24px 0; text-align: center; }
 
   .tiles { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 20px; }
   .tile {
@@ -208,7 +241,8 @@
     <h1>Blaze</h1>
     <span class="sub">2 tickets · 2 in flight</span>
     <a class="proj on" href="/">All</a><a class="proj " href="/?project=T">T <span class="count">2</span></a>
-    <div class="viewtoggle" role="group" aria-label="View" style="margin-left:auto">
+    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
@@ -218,6 +252,11 @@
     <span class="sub" id="live">live</span>
     <span class="sub" id="sync"></span>
   </header>
+  <nav class="chipbar" aria-label="Filter by status">
+    <button type="button" class="chip" data-chip="all">All <span class="chip-n">2</span></button>
+    <button type="button" class="chip" data-chip="active">Active <span class="chip-n">2</span></button>
+    <button type="button" class="chip" data-status="in-review">In Review <span class="chip-n">1</span></button><button type="button" class="chip" data-status="todo">Todo <span class="chip-n">1</span></button>
+  </nav>
   
   <div class="board">
       <section class="col" data-status="in-review">
@@ -227,7 +266,7 @@
         </header>
         <div class="cards">
           
-    <details class="card prio-high" draggable="true" data-id="T-2">
+    <details class="card prio-high" draggable="true" data-id="T-2" data-search="t-2 fixture two">
       <summary>
         <div class="card-top">
           <span class="id">T-2</span>
@@ -257,7 +296,7 @@
         </header>
         <div class="cards">
           
-    <details class="card prio-medium" draggable="true" data-id="T-1">
+    <details class="card prio-medium" draggable="true" data-id="T-1" data-search="t-1 fixture one ryan">
       <summary>
         <div class="card-top">
           <span class="id">T-1</span>
@@ -297,7 +336,7 @@
         </summary>
         <div class="rows">
           
-    <details class="row prio-high" draggable="true" data-id="T-2">
+    <details class="row prio-high" draggable="true" data-id="T-2" data-search="t-2 fixture two">
       <summary>
         <span class="rcaret">▸</span>
         <span class="id">T-2</span>
@@ -321,7 +360,7 @@
         </summary>
         <div class="rows">
           
-    <details class="row prio-medium" draggable="true" data-id="T-1">
+    <details class="row prio-medium" draggable="true" data-id="T-1" data-search="t-1 fixture one ryan">
       <summary>
         <span class="rcaret">▸</span>
         <span class="id">T-1</span>
@@ -411,7 +450,10 @@
       const col = c.closest("[data-status]");
       dragSourceStatus = col ? col.dataset.status : null;
     });
-    for (const zone of document.querySelectorAll("[data-status]")) {
+    // Drop zones are the board columns and list groups only. The status chips
+    // also carry data-status (for filtering) but must never be move targets, so
+    // scope the selector rather than matching every [data-status].
+    for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
       zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
       zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
       zone.addEventListener("drop", (e) => {
@@ -442,7 +484,15 @@
       input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { done = true; location.reload(); } });
     }
     document.addEventListener("click", (e) => {
-      const span = e.target.closest(".editable"); if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); }
+      const span = e.target.closest(".editable");
+      if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); return; }
+      // Clicking a card/row ticket id opens the detail panel. preventDefault +
+      // stopPropagation so it doesn't also toggle the inline <details> expand.
+      const idEl = e.target.closest(".id");
+      if (idEl) {
+        const host = idEl.closest("[data-id]");
+        if (host) { e.preventDefault(); e.stopPropagation(); window.blazePanel.open(host.dataset.id); }
+      }
     });
     document.addEventListener("change", (e) => {
       const cb = e.target.closest("input[type=checkbox][data-ac-index]"); if (!cb) return;
@@ -454,6 +504,56 @@
       const lines = (j.changes || []).map((c) => c.id + ": " + c.from + " → " + c.to);
       toast(lines.length ? lines.length + " code-bound move(s) — apply via 'blaze reconcile --apply'" : "no code-bound changes");
     });
+  </script>
+  <script>
+    // Client-side filtering: search + status chips COMPOSE — a card/row is
+    // visible iff it passes both. Search matches the data-search index; a chip
+    // constrains to a status set. Chip state lives in the URL hash
+    // (#status=all|active|<status>) so filtered views are shareable and survive
+    // reload. Zero server round-trip; edits/moves reload and re-render counts.
+    (function () {
+      const search = document.getElementById("board-search");
+      const chipbar = document.querySelector(".chipbar");
+      const ACTIVE_STATUSES = ["in-review","todo"];
+      const ALL_STATUSES = ["in-review","todo"];
+      const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      function hashStatus() { return (hashParams().get("status") || "all").toLowerCase(); }
+      function setHashStatus(v) {
+        const h = hashParams(); h.set("status", v);
+        location.hash = h.toString();   // fires hashchange -> applyFilters
+      }
+      // Mirrors model/filters.mjs statusFilter: all/empty/unknown -> null (show
+      // all), so a stale or shared #status= for a renamed status doesn't blank
+      // the board with no way to recover.
+      function allowedStatuses(v) {
+        if (!v || v === "all") return null;
+        if (v === "active") return new Set(ACTIVE_STATUSES);
+        if (ALL_STATUSES.includes(v)) return new Set([v]);
+        return null;
+      }
+      function applyFilters() {
+        const q = ((search && search.value) || "").trim().toLowerCase();
+        const sv = hashStatus();
+        const allowed = allowedStatuses(sv);
+        document.querySelectorAll("[data-id][data-search]").forEach((el) => {
+          const passSearch = !q || (el.getAttribute("data-search") || "").includes(q);
+          const container = el.closest("[data-status]");    // column / group carries the status
+          const st = container ? container.getAttribute("data-status") : null;
+          const passStatus = !allowed || (st !== null && allowed.has(st));
+          el.classList.toggle("filtered-out", !(passSearch && passStatus));
+        });
+        if (chipbar) chipbar.querySelectorAll(".chip").forEach((chip) =>
+          chip.classList.toggle("on", (chip.dataset.chip || chip.dataset.status) === sv));
+      }
+      if (search) search.addEventListener("input", applyFilters);
+      if (chipbar) chipbar.addEventListener("click", (e) => {
+        const chip = e.target.closest(".chip"); if (!chip) return;
+        setHashStatus(chip.dataset.chip || chip.dataset.status);
+      });
+      window.addEventListener("hashchange", applyFilters);
+      window.blazeFilters = { apply: applyFilters };
+      applyFilters();
+    })();
   </script>
   <script>
     // Live view: poll /api/live and render cards. Runs only meaningful work when
@@ -485,17 +585,32 @@
   </div>
   <script>
   window.blazePanel = {
-    open(id) {
-      const p = document.getElementById("blaze-panel"); if (!p) return;
-      const src = document.querySelector('[data-id="' + (window.CSS ? CSS.escape(id) : id) + '"] .body');
-      p.querySelector(".panel-content").innerHTML = src ? src.innerHTML
-        : '<div class="empty">' + id + '</div>';
+    async open(id) {
+      const p = document.getElementById("blaze-panel"); if (!p || !id) return;
+      const content = p.querySelector(".panel-content");
+      content.innerHTML = '<div class="panel-empty">Loading…</div>';
       p.hidden = false;
+      try {
+        const res = await fetch("/api/panel?id=" + encodeURIComponent(id));
+        content.innerHTML = res.ok ? await res.text()
+          : '<div class="panel-empty">Ticket not found.</div>';
+      } catch (err) {
+        // Static message — never interpolate id into innerHTML (dataset decodes
+        // the server's escaping, so a markup-bearing id would execute here).
+        content.innerHTML = '<div class="panel-empty">Failed to load ticket.</div>';
+      }
     },
     close() { const p = document.getElementById("blaze-panel"); if (p) p.hidden = true; },
   };
   document.addEventListener("click", (e) => {
-    if (e.target.closest("[data-panel-close]")) window.blazePanel.close();
+    if (e.target.closest("[data-panel-close]")) { window.blazePanel.close(); return; }
+    const drill = e.target.closest("[data-panel-open]");
+    if (drill) { e.preventDefault(); window.blazePanel.open(drill.getAttribute("data-panel-open")); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const p = document.getElementById("blaze-panel");
+    if (p && !p.hidden) window.blazePanel.close();   // no-op when already closed
   });
 
     (function () {

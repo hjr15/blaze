@@ -26,3 +26,10 @@ test("board.render emits a column section with a draggable card", () => {
 test("board.render wires inline-edit affordances", () => {
   assert.match(board.render(model), /data-edit="priority"/);
 });
+
+test("board.render stamps a lowercased data-search index (id/title/labels/assignee)", () => {
+  const m = { columns: [{ dir: "todo", label: "Todo", tickets: [
+    { file: "T-9.md", meta: { id: "T-9", title: "Alpha", labels: ["Beta"], assignee: "Ryan", priority: "low", type: "task" }, body: "" },
+  ] }], rollup: new Map() };
+  assert.match(board.render(m), /data-search="t-9 alpha beta ryan"/);
+});

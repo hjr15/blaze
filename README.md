@@ -89,6 +89,19 @@ small commit per ticket, scoped to the files it actually touched.
 See [`AGENTS.md`](AGENTS.md) for the full contract — types, workflows, the git join
 key, and how an agent should drive the board.
 
+## The board
+
+`blaze board` serves a live rendering over the files — never a second source of truth:
+
+- **Search** over id / title / labels / assignee, filtering every view live.
+- **Status filter chips** with live counts plus `All` / `Active` presets; the
+  selection lives in the URL hash, so a filtered board is a shareable link.
+  Search and chips compose.
+- **Board, List, Metrics and Live** views, switchable in the header.
+- A **detail panel** — click a ticket id for the rendered description, full
+  frontmatter, parent/children and links; Acceptance-Criteria checkboxes toggle
+  in place and commit.
+
 ## Configuration
 
 `blaze.config.json` lives at the data repo's root. Minimally:

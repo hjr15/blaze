@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { loadConfig, resolveRoots } from "../config.mjs";
 import { PRIORITIES } from "../model/schema.mjs";
 import { esc } from "./render-lib.mjs";
+import { activeStatuses } from "../model/filters.mjs";
 import { boardModel } from "./data.mjs";
 import { metricsModel } from "../model/metrics.mjs";
 import { loadTransitions } from "../model/transitions.mjs";
@@ -34,6 +35,17 @@ export function pageHtml({
   const { columns: cols, total, projects, selected } = m;
   const boardHtml = board.render(m);
   const listHtml = list.render(m);
+  // Status filter chips: one per resolved-schema status (with a live count),
+  // plus All and Active presets. Counts come straight off the board columns —
+  // no new source of truth. Active = the schema-driven non-terminal set.
+  const statuses = cols.map((c) => c.dir);
+  const activeSet = new Set(activeStatuses(statuses));
+  const activeCount = cols.filter((c) => activeSet.has(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
+  const chipbar = `<nav class="chipbar" aria-label="Filter by status">
+    <button type="button" class="chip" data-chip="all">All <span class="chip-n">${total}</span></button>
+    <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
+    ${cols.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
+  </nav>`;
   // Hermetic by default only when the caller opts in (tests pass `transitions: []`
   // + a fixed `now`) — otherwise resolve the real transitions cache, same as any
   // other live render.
@@ -68,7 +80,7 @@ export function pageHtml({
   }
   header.top {
     position: sticky; top: 0; z-index: 5; display: flex; align-items: baseline;
-    gap: 12px; padding: 14px 20px; background: #0F172Aee;
+    flex-wrap: wrap; gap: 12px; padding: 14px 20px; background: #0F172Aee;
     border-bottom: 1px solid #21262d; backdrop-filter: blur(6px);
   }
   header.top h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
@@ -117,7 +129,21 @@ export function pageHtml({
     font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; max-width: 80vw; }
   #toast.show { opacity: 1; }
   .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
-  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }${panel.styles}${metrics.styles}${map.styles}
+  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
+  .search { background: #161b22; border: 1px solid #21262d; border-radius: 8px; color: var(--neutral);
+    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); }
+  .search:focus { outline: none; border-color: var(--blaze-orange); }
+  .search::placeholder { color: #7d8590; }
+  .card.filtered-out, .row.filtered-out { display: none !important; }
+  .chipbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 20px;
+    background: #0F172Acc; border-bottom: 1px solid #21262d; }
+  .chip { appearance: none; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid #21262d; background: #161b22; color: #adbac7; }
+  .chip:hover { color: var(--neutral); border-color: #30363d; }
+  .chip.on { color: var(--charcoal); background: var(--blaze-amber); border-color: var(--blaze-amber); }
+  .chip .chip-n { color: #7d8590; font-size: 11px; font-weight: 600; }
+  .chip.on .chip-n { color: var(--charcoal); }${panel.styles}${metrics.styles}${map.styles}
 </style>
 </head>
 <body>
@@ -128,7 +154,8 @@ export function pageHtml({
     ${["all", ...Object.keys(projects)].map((k) =>
       `<a class="proj ${k === selected ? "on" : ""}" href="${k === "all" ? "/" : "/?project=" + esc(k)}">${k === "all" ? "All" : esc(k)}${k === "all" ? "" : ` <span class="count">${projects[k]}</span>`}</a>`
     ).join("")}
-    <div class="viewtoggle" role="group" aria-label="View" style="margin-left:auto">
+    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
@@ -138,6 +165,7 @@ export function pageHtml({
     <span class="sub" id="live">live</span>
     <span class="sub" id="sync"></span>
   </header>
+  ${chipbar}
   ${afterHeader}
   ${boardHtml}
   ${listHtml}
@@ -200,7 +228,10 @@ export function pageHtml({
       const col = c.closest("[data-status]");
       dragSourceStatus = col ? col.dataset.status : null;
     });
-    for (const zone of document.querySelectorAll("[data-status]")) {
+    // Drop zones are the board columns and list groups only. The status chips
+    // also carry data-status (for filtering) but must never be move targets, so
+    // scope the selector rather than matching every [data-status].
+    for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
       zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
       zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
       zone.addEventListener("drop", (e) => {
@@ -231,7 +262,15 @@ export function pageHtml({
       input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { done = true; location.reload(); } });
     }
     document.addEventListener("click", (e) => {
-      const span = e.target.closest(".editable"); if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); }
+      const span = e.target.closest(".editable");
+      if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); return; }
+      // Clicking a card/row ticket id opens the detail panel. preventDefault +
+      // stopPropagation so it doesn't also toggle the inline <details> expand.
+      const idEl = e.target.closest(".id");
+      if (idEl) {
+        const host = idEl.closest("[data-id]");
+        if (host) { e.preventDefault(); e.stopPropagation(); window.blazePanel.open(host.dataset.id); }
+      }
     });
     document.addEventListener("change", (e) => {
       const cb = e.target.closest("input[type=checkbox][data-ac-index]"); if (!cb) return;
@@ -243,6 +282,56 @@ export function pageHtml({
       const lines = (j.changes || []).map((c) => c.id + ": " + c.from + " → " + c.to);
       toast(lines.length ? lines.length + " code-bound move(s) — apply via 'blaze reconcile --apply'" : "no code-bound changes");
     });
+  </script>
+  <script>
+    // Client-side filtering: search + status chips COMPOSE — a card/row is
+    // visible iff it passes both. Search matches the data-search index; a chip
+    // constrains to a status set. Chip state lives in the URL hash
+    // (#status=all|active|<status>) so filtered views are shareable and survive
+    // reload. Zero server round-trip; edits/moves reload and re-render counts.
+    (function () {
+      const search = document.getElementById("board-search");
+      const chipbar = document.querySelector(".chipbar");
+      const ACTIVE_STATUSES = ${JSON.stringify(activeStatuses(statuses)).replace(/</g, "\\u003c")};
+      const ALL_STATUSES = ${JSON.stringify(statuses).replace(/</g, "\\u003c")};
+      const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      function hashStatus() { return (hashParams().get("status") || "all").toLowerCase(); }
+      function setHashStatus(v) {
+        const h = hashParams(); h.set("status", v);
+        location.hash = h.toString();   // fires hashchange -> applyFilters
+      }
+      // Mirrors model/filters.mjs statusFilter: all/empty/unknown -> null (show
+      // all), so a stale or shared #status= for a renamed status doesn't blank
+      // the board with no way to recover.
+      function allowedStatuses(v) {
+        if (!v || v === "all") return null;
+        if (v === "active") return new Set(ACTIVE_STATUSES);
+        if (ALL_STATUSES.includes(v)) return new Set([v]);
+        return null;
+      }
+      function applyFilters() {
+        const q = ((search && search.value) || "").trim().toLowerCase();
+        const sv = hashStatus();
+        const allowed = allowedStatuses(sv);
+        document.querySelectorAll("[data-id][data-search]").forEach((el) => {
+          const passSearch = !q || (el.getAttribute("data-search") || "").includes(q);
+          const container = el.closest("[data-status]");    // column / group carries the status
+          const st = container ? container.getAttribute("data-status") : null;
+          const passStatus = !allowed || (st !== null && allowed.has(st));
+          el.classList.toggle("filtered-out", !(passSearch && passStatus));
+        });
+        if (chipbar) chipbar.querySelectorAll(".chip").forEach((chip) =>
+          chip.classList.toggle("on", (chip.dataset.chip || chip.dataset.status) === sv));
+      }
+      if (search) search.addEventListener("input", applyFilters);
+      if (chipbar) chipbar.addEventListener("click", (e) => {
+        const chip = e.target.closest(".chip"); if (!chip) return;
+        setHashStatus(chip.dataset.chip || chip.dataset.status);
+      });
+      window.addEventListener("hashchange", applyFilters);
+      window.blazeFilters = { apply: applyFilters };
+      applyFilters();
+    })();
   </script>
   <script>${live.clientScript}</script>
   ${panel.render()}

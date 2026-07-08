@@ -1,6 +1,7 @@
 // scripts/views/board.mjs — the Board (kanban columns) view.
 import { esc, mdLite, metaPieces } from "./render-lib.mjs";
 import { formatMinutes } from "../model/time.mjs";
+import { searchText } from "../model/search.mjs";
 
 export function card(t, rollup) {
   const m = t.meta;
@@ -15,7 +16,7 @@ export function card(t, rollup) {
     ? `<div class="rollup">Σ ${esc(formatMinutes(ru.rolled_estimate) || "0m")} est · ${esc(formatMinutes(ru.rolled_worklog) || "0m")} logged</div>`
     : "";
   return `
-    <details class="card prio-${esc(prio)}" draggable="true" data-id="${esc(m.id || t.file)}">
+    <details class="card prio-${esc(prio)}" draggable="true" data-id="${esc(m.id || t.file)}" data-search="${esc(searchText(t))}">
       <summary>
         <div class="card-top">
           <span class="id">${esc(m.id || t.file)}</span>
