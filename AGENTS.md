@@ -106,6 +106,13 @@ board tracks). Consumer: the board's **Live** view (`scripts/model/activity.mjs`
 ticket active when its latest event is within a ~2-minute TTL. Malformed lines
 are skipped, never fatal. Read it yourself with `tail -f .blaze/activity.jsonl`.
 
+## Derived caches
+
+`.blaze/index.json` (the ticket index) and `.blaze/transitions.json` (status-move
+history derived from git rename history, powering the Metrics view's cumulative-flow
+diagram) are both derived, regenerable caches — safe to delete any time. `blaze
+reindex` rebuilds both from `projects/` and git history respectively.
+
 ## Commit modes
 
 `blaze.config.json`'s `commitMode` decides how CLI verbs commit:
