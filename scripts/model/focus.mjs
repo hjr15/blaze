@@ -26,5 +26,6 @@ export function focusScope(index, id) {
       if (!descendantIds.has(c)) { descendantIds.add(c); stack.push(c); }
     }
   }
+  descendantIds.delete(id);
   return { crumbs, descendantIds };
 }

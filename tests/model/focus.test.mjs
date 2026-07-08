@@ -28,3 +28,12 @@ test("unknown id degrades to empty scope", () => {
   assert.deepEqual(r.crumbs, []);
   assert.equal(r.descendantIds.size, 0);
 });
+test("descendant traversal excludes focus id under a cyclic parent graph", () => {
+  const cyclic = fakeIndex([
+    { id: "A", parent: "B", title: "a" },
+    { id: "B", parent: "A", title: "b" },
+  ]);
+  const { descendantIds } = focusScope(cyclic, "A");
+  assert.equal(descendantIds.has("A"), false);
+  assert.deepEqual([...descendantIds].sort(), ["B"]);
+});
