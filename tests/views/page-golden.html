@@ -233,6 +233,33 @@
   .cfd-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12px; color: #adbac7; }
   .cfd-legend-item { display: flex; align-items: center; gap: 5px; }
   .cfd-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .mapwrap { position: relative; padding: 0 20px 20px; }
+  svg.graph {
+    display: block; width: 100%; height: auto; max-width: 100%; min-height: 320px;
+    background: #0d1117; border: 1px solid #21262d; border-radius: 10px;
+    cursor: grab; touch-action: none;
+  }
+  svg.graph.panning { cursor: grabbing; }
+  .mapwrap.no-data svg.graph { display: none; }
+  .node { cursor: pointer; }
+  .node:focus { outline: none; }
+  .node:focus rect:first-of-type { stroke-width: 2.5; }
+  .node-id { fill: #7d8590; font: 600 10px ui-monospace, monospace; }
+  .node-title { fill: #c9d1d9; font: 12px ui-sans-serif, system-ui, sans-serif; }
+  .edge-label { fill: #8b949e; font: 9px ui-sans-serif, system-ui, sans-serif; }
+  .mapzoom { position: absolute; top: 8px; right: 28px; display: flex; gap: 4px; z-index: 2; }
+  .mzoom {
+    appearance: none; border: 1px solid #21262d; background: #161b22; color: #adbac7;
+    font: inherit; font-size: 13px; font-weight: 600; width: 28px; height: 28px;
+    border-radius: 6px; cursor: pointer;
+  }
+  .mzoom[data-zoom="reset"] { width: auto; padding: 0 8px; }
+  .mzoom:hover { color: var(--neutral); border-color: #30363d; }
+  .map-empty {
+    display: none; color: #444c56; text-align: center; padding: 40px 0;
+    border: 1px dashed #21262d; border-radius: 10px;
+  }
+  .mapwrap.no-data .map-empty { display: block; }
 </style>
 </head>
 <body>
@@ -689,7 +716,64 @@
       });
       drawCfd();
     })();
-  </script>
+  
+  (function () {
+    var svg = document.querySelector("svg.graph");
+    if (!svg) return;
+    var W = Number(svg.dataset.w) || 0, H = Number(svg.dataset.h) || 0;
+    var vb = { x: 0, y: 0, w: W || 1, h: H || 1 };
+    function apply() { svg.setAttribute("viewBox", vb.x + " " + vb.y + " " + vb.w + " " + vb.h); }
+    function zoomAt(factor, cx, cy) {
+      var scale = W / (vb.w * factor);
+      if (scale < 0.2 || scale > 8) return;
+      vb.x = cx - (cx - vb.x) * factor;
+      vb.y = cy - (cy - vb.y) * factor;
+      vb.w *= factor; vb.h *= factor; apply();
+    }
+    function reset() { vb = { x: 0, y: 0, w: W || 1, h: H || 1 }; apply(); }
+    function toVb(clientX, clientY) {
+      var r = svg.getBoundingClientRect();
+      return { x: vb.x + ((clientX - r.left) / r.width) * vb.w, y: vb.y + ((clientY - r.top) / r.height) * vb.h };
+    }
+    document.querySelectorAll(".mzoom").forEach(function (b) {
+      b.addEventListener("click", function () {
+        if (b.dataset.zoom === "reset") return reset();
+        zoomAt(b.dataset.zoom === "in" ? 0.8 : 1.25, vb.x + vb.w / 2, vb.y + vb.h / 2);
+      });
+    });
+    svg.addEventListener("wheel", function (e) {
+      e.preventDefault();
+      var p = toVb(e.clientX, e.clientY);
+      zoomAt(e.deltaY < 0 ? 0.9 : 1.111, p.x, p.y);
+    }, { passive: false });
+    var dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    svg.addEventListener("pointerdown", function (e) {
+      dragging = true; moved = false; sx = e.clientX; sy = e.clientY; ox = vb.x; oy = vb.y;
+      svg.classList.add("panning");
+      try { svg.setPointerCapture(e.pointerId); } catch (x) {}
+    });
+    svg.addEventListener("pointermove", function (e) {
+      if (!dragging) return;
+      if (Math.abs(e.clientX - sx) + Math.abs(e.clientY - sy) > 4) moved = true;
+      var r = svg.getBoundingClientRect();
+      vb.x = ox - ((e.clientX - sx) / r.width) * vb.w;
+      vb.y = oy - ((e.clientY - sy) / r.height) * vb.h;
+      apply();
+    });
+    svg.addEventListener("pointerup", function (e) {
+      dragging = false; svg.classList.remove("panning");
+      try { svg.releasePointerCapture(e.pointerId); } catch (x) {}
+      if (moved) return; // it was a pan, not a click
+      var g = e.target.closest("[data-node-id]");
+      if (g && window.blazePanel) window.blazePanel.open(g.getAttribute("data-node-id"));
+    });
+    svg.addEventListener("keydown", function (e) {
+      if (e.key !== "Enter" && e.key !== " ") return;
+      var g = e.target.closest("[data-node-id]");
+      if (g && window.blazePanel) { e.preventDefault(); window.blazePanel.open(g.getAttribute("data-node-id")); }
+    });
+  })();
+</script>
   
 </body>
 </html>
