@@ -7,8 +7,7 @@ import { walkTickets } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { roundEstimate } from "./model/time.mjs";
-
-const EDITABLE = new Set(["assignee", "priority", "labels", "components", "estimate", "parent", "likelihood", "impact"]);
+import { EDITABLE_FIELDS } from "./model/fields.mjs";
 
 // Same id resolution as move.mjs/log.mjs: prefer the project-dir-matching id.
 function locate(projectsDir, id) {
@@ -30,7 +29,7 @@ function asArray(v) {
 
 export function applyEdit(projectsDir, id, patch, opts = {}) {
   const { today = null } = opts;
-  const bad = Object.keys(patch).filter((k) => !EDITABLE.has(k));
+  const bad = Object.keys(patch).filter((k) => !EDITABLE_FIELDS.has(k));
   if (bad.length) return { ok: false, errors: [`field(s) not editable: ${bad.join(", ")}`] };
 
   const found = locate(projectsDir, id);
