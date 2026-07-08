@@ -12,7 +12,7 @@ export const EDITABLE_FIELDS = new Set([
 const SURFACED = new Set(["title", "pr", "links"]);
 
 function displayValue(k, v) {
-  if (Array.isArray(v)) return v.join(", ");
+  if (Array.isArray(v)) return v.map((x) => (x && typeof x === "object" ? JSON.stringify(x) : String(x))).join(", ");
   if (v && typeof v === "object") return JSON.stringify(v);
   return v == null ? "" : String(v);
 }
