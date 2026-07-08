@@ -75,6 +75,9 @@
   .card.prio-urgent { border-left-color: var(--blaze-red); }
   .card.prio-high   { border-left-color: var(--blaze-orange); }
   .card.prio-medium { border-left-color: var(--blaze-amber); }
+  .statusbadge { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .3px; background: #1a3326; color: #57ab5a; }
+  .statusbadge.muted { background: #30363d; color: #7d8590; }
   .body {
     margin-top: 10px; padding-top: 10px; border-top: 1px solid #2d333b;
     color: #c9d1d9; font-size: 13px;
@@ -258,7 +261,25 @@
     <button type="button" class="chip" data-status="in-review">In Review <span class="chip-n">1</span></button><button type="button" class="chip" data-status="todo">Todo <span class="chip-n">1</span></button>
   </nav>
   
-  <div class="board">
+  <div class="board" data-board="delivery">
+      <section class="col" data-status="defined">
+        <header class="colhead">
+          <span class="colname">Defined</span>
+          <span class="count">0</span>
+        </header>
+        <div class="cards">
+          <div class="empty">—</div>
+        </div>
+      </section>
+      <section class="col" data-status="in-progress">
+        <header class="colhead">
+          <span class="colname">In Progress</span>
+          <span class="count">0</span>
+        </header>
+        <div class="cards">
+          <div class="empty">—</div>
+        </div>
+      </section>
       <section class="col" data-status="in-review">
         <header class="colhead">
           <span class="colname">In Review</span>
@@ -273,6 +294,7 @@
           <span class="badges">
             <span class="prio prio-high">high</span>
             <span class="type">epic</span>
+            
           </span>
         </div>
         <div class="title">fixture two</div>
@@ -289,6 +311,15 @@
     </details>
         </div>
       </section>
+      <section class="col" data-status="done">
+        <header class="colhead">
+          <span class="colname">Done</span>
+          <span class="count">0</span>
+        </header>
+        <div class="cards">
+          <div class="empty">—</div>
+        </div>
+      </section>
       <section class="col" data-status="todo">
         <header class="colhead">
           <span class="colname">Todo</span>
@@ -303,6 +334,7 @@
           <span class="badges">
             <span class="prio prio-medium">medium</span>
             <span class="type">task</span>
+            
           </span>
         </div>
         <div class="title">fixture one</div>
