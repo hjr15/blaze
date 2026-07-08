@@ -25,6 +25,9 @@ import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import * as live from "./views/live.mjs";
 import * as board from "./views/board.mjs";
 import * as list from "./views/list.mjs";
+import * as panel from "./views/panel.mjs";
+import * as metrics from "./views/metrics.mjs";
+import * as map from "./views/map.mjs";
 export { boardModel, contentHash, liveModel }; // back-compat for tests + supervisor.mjs
 
 const cfg = loadConfig({ root: resolveRoots().dataRoot });
@@ -139,7 +142,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
     font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; max-width: 80vw; }
   #toast.show { opacity: 1; }
   .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
-  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
+  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }${panel.styles}${metrics.styles}${map.styles}
 </style>
 </head>
 <body>
@@ -265,6 +268,8 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
     });
   </script>
   <script>${live.clientScript}</script>
+  ${panel.render()}
+  <script>${panel.clientScript}${metrics.clientScript}${map.clientScript}</script>
   ${beforeBodyEnd}
 </body>
 </html>`;
