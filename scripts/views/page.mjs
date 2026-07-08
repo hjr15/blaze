@@ -6,6 +6,7 @@ import { randomUUID } from "node:crypto";
 import { loadConfig, resolveRoots } from "../config.mjs";
 import { PRIORITIES } from "../model/schema.mjs";
 import { esc } from "./render-lib.mjs";
+import { activeStatuses } from "../model/filters.mjs";
 import { boardModel } from "./data.mjs";
 import { metricsModel } from "../model/metrics.mjs";
 import { loadTransitions } from "../model/transitions.mjs";
@@ -34,6 +35,17 @@ export function pageHtml({
   const { columns: cols, total, projects, selected } = m;
   const boardHtml = board.render(m);
   const listHtml = list.render(m);
+  // Status filter chips: one per resolved-schema status (with a live count),
+  // plus All and Active presets. Counts come straight off the board columns —
+  // no new source of truth. Active = the schema-driven non-terminal set.
+  const statuses = cols.map((c) => c.dir);
+  const activeSet = new Set(activeStatuses(statuses));
+  const activeCount = cols.filter((c) => activeSet.has(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
+  const chipbar = `<nav class="chipbar" aria-label="Filter by status">
+    <button type="button" class="chip" data-chip="all">All <span class="chip-n">${total}</span></button>
+    <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
+    ${cols.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
+  </nav>`;
   // Hermetic by default only when the caller opts in (tests pass `transitions: []`
   // + a fixed `now`) — otherwise resolve the real transitions cache, same as any
   // other live render.
@@ -122,7 +134,16 @@ export function pageHtml({
     font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); }
   .search:focus { outline: none; border-color: var(--blaze-orange); }
   .search::placeholder { color: #7d8590; }
-  .card.filtered-out, .row.filtered-out { display: none !important; }${panel.styles}${metrics.styles}${map.styles}
+  .card.filtered-out, .row.filtered-out { display: none !important; }
+  .chipbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 20px;
+    background: #0F172Acc; border-bottom: 1px solid #21262d; }
+  .chip { appearance: none; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    display: inline-flex; align-items: center; gap: 6px; padding: 3px 10px; border-radius: 999px;
+    border: 1px solid #21262d; background: #161b22; color: #adbac7; }
+  .chip:hover { color: var(--neutral); border-color: #30363d; }
+  .chip.on { color: var(--charcoal); background: var(--blaze-amber); border-color: var(--blaze-amber); }
+  .chip .chip-n { color: #7d8590; font-size: 11px; font-weight: 600; }
+  .chip.on .chip-n { color: var(--charcoal); }${panel.styles}${metrics.styles}${map.styles}
 </style>
 </head>
 <body>
@@ -144,6 +165,7 @@ export function pageHtml({
     <span class="sub" id="live">live</span>
     <span class="sub" id="sync"></span>
   </header>
+  ${chipbar}
   ${afterHeader}
   ${boardHtml}
   ${listHtml}
@@ -251,20 +273,46 @@ export function pageHtml({
     });
   </script>
   <script>
-    // Client-side filtering. Search hides any card/row whose data-search
-    // index doesn't contain the query. Status chips extend applyFilters()
-    // with a status predicate; both compose (an element is visible iff it
-    // passes every active filter). Zero server round-trip.
+    // Client-side filtering: search + status chips COMPOSE — a card/row is
+    // visible iff it passes both. Search matches the data-search index; a chip
+    // constrains to a status set. Chip state lives in the URL hash
+    // (#status=all|active|<status>) so filtered views are shareable and survive
+    // reload. Zero server round-trip; edits/moves reload and re-render counts.
     (function () {
       const search = document.getElementById("board-search");
+      const chipbar = document.querySelector(".chipbar");
+      const ACTIVE_STATUSES = ${JSON.stringify(activeStatuses(statuses))};
+      const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      function hashStatus() { return (hashParams().get("status") || "all").toLowerCase(); }
+      function setHashStatus(v) {
+        const h = hashParams(); h.set("status", v);
+        location.hash = h.toString();   // fires hashchange -> applyFilters
+      }
+      function allowedStatuses(v) {
+        if (!v || v === "all") return null;                 // no constraint
+        if (v === "active") return new Set(ACTIVE_STATUSES);
+        return new Set([v]);
+      }
       function applyFilters() {
         const q = ((search && search.value) || "").trim().toLowerCase();
+        const sv = hashStatus();
+        const allowed = allowedStatuses(sv);
         document.querySelectorAll("[data-id][data-search]").forEach((el) => {
           const passSearch = !q || (el.getAttribute("data-search") || "").includes(q);
-          el.classList.toggle("filtered-out", !passSearch);
+          const container = el.closest("[data-status]");    // column / group carries the status
+          const st = container ? container.getAttribute("data-status") : null;
+          const passStatus = !allowed || (st !== null && allowed.has(st));
+          el.classList.toggle("filtered-out", !(passSearch && passStatus));
         });
+        if (chipbar) chipbar.querySelectorAll(".chip").forEach((chip) =>
+          chip.classList.toggle("on", (chip.dataset.chip || chip.dataset.status) === sv));
       }
       if (search) search.addEventListener("input", applyFilters);
+      if (chipbar) chipbar.addEventListener("click", (e) => {
+        const chip = e.target.closest(".chip"); if (!chip) return;
+        setHashStatus(chip.dataset.chip || chip.dataset.status);
+      });
+      window.addEventListener("hashchange", applyFilters);
       window.blazeFilters = { apply: applyFilters };
       applyFilters();
     })();

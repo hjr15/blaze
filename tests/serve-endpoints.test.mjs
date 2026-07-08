@@ -168,6 +168,18 @@ test("pageHtml renders a client-side search box wired to a filter pass", () => {
   assert.match(html, /\.filtered-out/);
 });
 
+test("pageHtml renders a status chip bar with counts, All/Active presets, hash wiring", () => {
+  const fixDir = ticketFixture();   // T-1 lives in the 'todo' status dir
+  const html = pageHtml({ project: "all", projectsDir: fixDir });
+  rmSync(fixDir, { recursive: true, force: true });
+  assert.match(html, /class="chipbar"/);
+  assert.match(html, /data-chip="all"/);
+  assert.match(html, /data-chip="active"/);
+  assert.match(html, /class="chip"[^>]*data-status="todo"/); // one chip per resolved status
+  assert.match(html, /chip-n">1</);                          // live count on the chip
+  assert.match(html, /hashchange/);                          // chip state round-trips via the URL hash
+});
+
 test("pageHtml priority select includes none and urgent (Fix 2 — unified enum)", () => {
   // The client-side PRIORITIES array must be injected from the canonical server constant,
   // covering all enum values including none and urgent (previously absent from the narrow list).
