@@ -132,6 +132,28 @@ blaze rollup            # every goal/epic's rolled-up estimate + logged time
 blaze rollup KEY-12      # one ticket's own vs. rolled totals, with child breakdown
 ```
 
+## Board UI — search, filter chips, detail panel
+
+All three are pure client-side **views over the served model** — no new source of
+truth, full CLI/`grep` parity preserved:
+
+- **Search** — a header search box filters visible cards/rows by a `data-search`
+  index (id + title + labels + assignee, lowercased) that each card/row carries.
+  Pure substring match, no round-trip. Model seam: `scripts/model/search.mjs`.
+- **Status chips** — one chip per resolved-schema status with a live count, plus
+  `All` and `Active` presets (`Active` = every non-terminal status, schema-driven
+  via `scripts/model/filters.mjs`). Selection serialises to the URL hash
+  (`#status=all|active|<status>`) so a filtered board is a shareable link. Search
+  and chips **compose** — a card is visible iff it passes both. Counts re-render on
+  the existing reload-on-mutation path.
+- **Detail panel** — clicking a card/row id opens a side panel with the rendered
+  description, a full frontmatter table, parent breadcrumb + children list, and
+  links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content
+  HTML (`scripts/views/panel-content.mjs`); 404 JSON for an unknown id. AC
+  checkboxes in the panel toggle via the existing commit-on-edit `/api/ac` path.
+  `window.blazePanel.open(id)` / `.close()` is the shared seam other views (map
+  node-click, field editing) build on.
+
 ## Grooming rules
 
 When grooming a freshly-captured ticket (in its type's initial status), make these

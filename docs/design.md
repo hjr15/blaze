@@ -260,6 +260,18 @@ id, summary; groom commits carry a revert control); and a control strip (start/s
 each loop, run-now, revert). The kanban itself and the fresh-markdown auto-reload are
 unchanged.
 
+**Board core UX (views over the served model — no new source of truth):** a
+client-side **search** box (matches a `data-search` index of id/title/labels/assignee
+stamped on each card/row; model seam `scripts/model/search.mjs`); **status filter
+chips** with live counts and `All`/`Active` presets, `Active` being the schema-driven
+non-terminal set (`scripts/model/filters.mjs`) and the selection serialised to the URL
+hash so a filtered board is a shareable link — search and chips compose in one
+`applyFilters()` pass; and a **detail panel** served by `GET /api/panel?id=` (pure
+`scripts/views/panel-content.mjs` → rendered description, full frontmatter table,
+parent/children from the derived index, links; 404 for an unknown id). The panel is the
+shared `window.blazePanel.open(id)` seam the map node-click and field-editing views
+reuse; AC checkboxes toggle through the existing commit-on-edit `/api/ac` path.
+
 ### `bin` / scripts
 `blaze` (bin) boots the supervisor (web app + loops) — the "launch like an app" entry.
 Subcommands stay available: `blaze new "title"`, `blaze reconcile`, `blaze groom`
