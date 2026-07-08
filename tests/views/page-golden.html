@@ -75,6 +75,11 @@
   .card.prio-urgent { border-left-color: var(--blaze-red); }
   .card.prio-high   { border-left-color: var(--blaze-orange); }
   .card.prio-medium { border-left-color: var(--blaze-amber); }
+  .statusbadge { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .3px; background: #1a3326; color: #57ab5a; }
+  .statusbadge.muted { background: #30363d; color: #7d8590; }
+  .drilldown { display: inline-block; margin-top: 6px; color: var(--blaze-amber); font-size: 11px; font-weight: 600; text-decoration: none; }
+  .drilldown:hover { text-decoration: underline; }
   .body {
     margin-top: 10px; padding-top: 10px; border-top: 1px solid #2d333b;
     color: #c9d1d9; font-size: 13px;
@@ -101,6 +106,16 @@
   html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
   html:not([data-view="metrics"]) .metricsview { display: none; }
   html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
+  html:not([data-view="map"]) .mapview { display: none; }
+  html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
+
+  /* ---- board switching (per-workflow) ---- */
+  .boardtoggle { display: flex; gap: 2px; padding: 2px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
+  .boardtoggle .bpill { appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    padding: 4px 12px; border-radius: 6px; color: #7d8590; background: transparent; }
+  .boardtoggle .bpill:hover { color: #adbac7; }
+  .boardtoggle .bpill.on { color: var(--charcoal); background: var(--blaze-amber); }
+  .board.board-hidden, .list.board-hidden { display: none !important; }
   .live { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 16px 20px; }
   .livecard { background: #161b22; border: 1px solid #21262d; border-left: 3px solid #444c56; border-radius: 10px; padding: 10px 12px; }
   .livecard.active { border-left-color: var(--blaze-orange); }
@@ -145,8 +160,6 @@
   }
   .row .rbadges { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; }
   .row .rmeta { color: #7d8590; font-size: 11px; white-space: nowrap; }
-  html:not([data-view="map"]) .mapview { display: none; }
-  html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
   .prlink { color: #58a6ff; text-decoration: none; font-weight: 600; }
   .prlink:hover { text-decoration: underline; }
   .row > .body { margin: 0 12px 12px 12px; }
@@ -180,6 +193,9 @@
   .chip.on { color: var(--charcoal); background: var(--blaze-amber); border-color: var(--blaze-amber); }
   .chip .chip-n { color: #7d8590; font-size: 11px; font-weight: 600; }
   .chip.on .chip-n { color: var(--charcoal); }
+  .crumbs { padding: 8px 20px; font-size: 12px; color: #7d8590; background: #0F172Acc; border-bottom: 1px solid #21262d; }
+  .crumbs a { color: #58a6ff; text-decoration: none; font-weight: 600; }
+  .crumbs a:hover { text-decoration: underline; }
   .panel[hidden] { display: none; }
   .panel { position: fixed; inset: 0; z-index: 30; }
   .panel-backdrop { position: absolute; inset: 0; background: #0008; }
@@ -206,6 +222,9 @@
   .panel-status { color: #7d8590; font-size: 11px; }
   .panel-linktype { color: var(--blaze-amber); font-weight: 600; font-size: 11px; text-transform: uppercase; }
   .panel-empty { color: #7d8590; padding: 24px 0; text-align: center; }
+  .panel-fm input, .panel-fm select, .panel-title input {
+    background: #0d1117; color: var(--neutral); border: 1px solid #30363d;
+    border-radius: 5px; padding: 1px 4px; font: inherit; font-size: 12px; }
 
   .tiles { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 20px; }
   .tile {
@@ -271,6 +290,7 @@
     <span class="sub">2 tickets · 2 in flight</span>
     <a class="proj on" href="/">All</a><a class="proj " href="/?project=T">T <span class="count">2</span></a>
     <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    
     <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
@@ -288,7 +308,26 @@
     <button type="button" class="chip" data-status="in-review">In Review <span class="chip-n">1</span></button><button type="button" class="chip" data-status="todo">Todo <span class="chip-n">1</span></button>
   </nav>
   
-  <div class="board">
+  
+  <div class="board" data-board="delivery">
+      <section class="col" data-status="defined">
+        <header class="colhead">
+          <span class="colname">Defined</span>
+          <span class="count">0</span>
+        </header>
+        <div class="cards">
+          <div class="empty">—</div>
+        </div>
+      </section>
+      <section class="col" data-status="in-progress">
+        <header class="colhead">
+          <span class="colname">In Progress</span>
+          <span class="count">0</span>
+        </header>
+        <div class="cards">
+          <div class="empty">—</div>
+        </div>
+      </section>
       <section class="col" data-status="in-review">
         <header class="colhead">
           <span class="colname">In Review</span>
@@ -303,12 +342,14 @@
           <span class="badges">
             <span class="prio prio-high">high</span>
             <span class="type">epic</span>
+            
           </span>
         </div>
         <div class="title">fixture two</div>
         
         <div class="cardmeta">30m · T</div>
         <div class="rollup">Σ 30m est · 0m logged</div>
+        
         <div class="editmeta" data-ticket="T-2">
           <span class="editable" data-edit="priority" data-value="high">high</span>
           <span class="editable" data-edit="assignee" data-value="">@unassigned</span>
@@ -317,6 +358,15 @@
       </summary>
       <div class="body" data-ticket="T-2"><p>body</p></div>
     </details>
+        </div>
+      </section>
+      <section class="col" data-status="done">
+        <header class="colhead">
+          <span class="colname">Done</span>
+          <span class="count">0</span>
+        </header>
+        <div class="cards">
+          <div class="empty">—</div>
         </div>
       </section>
       <section class="col" data-status="todo">
@@ -333,11 +383,13 @@
           <span class="badges">
             <span class="prio prio-medium">medium</span>
             <span class="type">task</span>
+            
           </span>
         </div>
         <div class="title">fixture one</div>
         
         <div class="cardmeta">@ryan · 5m · T</div>
+        
         
         <div class="editmeta" data-ticket="T-1">
           <span class="editable" data-edit="priority" data-value="medium">medium</span>
@@ -357,7 +409,27 @@
     </details>
         </div>
       </section></div>
-  <div class="list">
+  <div class="list" data-board="delivery">
+      <details class="group" open data-group="defined" data-status="defined">
+        <summary class="grouphead">
+          <span class="gcaret">▸</span>
+          <span class="colname">Defined</span>
+          <span class="count">0</span>
+        </summary>
+        <div class="rows">
+          <div class="empty">No tickets</div>
+        </div>
+      </details>
+      <details class="group" open data-group="in-progress" data-status="in-progress">
+        <summary class="grouphead">
+          <span class="gcaret">▸</span>
+          <span class="colname">In Progress</span>
+          <span class="count">0</span>
+        </summary>
+        <div class="rows">
+          <div class="empty">No tickets</div>
+        </div>
+      </details>
       <details class="group" open data-group="in-review" data-status="in-review">
         <summary class="grouphead">
           <span class="gcaret">▸</span>
@@ -375,11 +447,22 @@
           
           <span class="prio prio-high">high</span>
           <span class="type">epic</span>
+          
         </span>
         <span class="rmeta">30m · T</span>
       </summary>
       <div class="body" data-ticket="T-2"><p>body</p></div>
     </details>
+        </div>
+      </details>
+      <details class="group" open data-group="done" data-status="done">
+        <summary class="grouphead">
+          <span class="gcaret">▸</span>
+          <span class="colname">Done</span>
+          <span class="count">0</span>
+        </summary>
+        <div class="rows">
+          <div class="empty">No tickets</div>
         </div>
       </details>
       <details class="group" open data-group="todo" data-status="todo">
@@ -399,6 +482,7 @@
           
           <span class="prio prio-medium">medium</span>
           <span class="type">task</span>
+          
         </span>
         <span class="rmeta">@ryan · 5m · T</span>
       </summary>
@@ -446,6 +530,29 @@
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
       b.addEventListener("click", () => applyView(b.dataset.view)));
     applyView(document.documentElement.dataset.view || "board");
+  </script>
+  <script>
+    (function () {
+      const pills = [...document.querySelectorAll(".boardtoggle .bpill")];
+      if (!pills.length) return;
+      const names = pills.map((p) => p.dataset.boardPill);
+      const params = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      function show(sel) {
+        document.querySelectorAll(".board[data-board], .list[data-board]").forEach((el) =>
+          el.classList.toggle("board-hidden", el.dataset.board !== sel));
+        pills.forEach((p) => p.classList.toggle("on", p.dataset.boardPill === sel));
+      }
+      function pick(name) {
+        const sel = names.includes(name) ? name : names[0];
+        show(sel);
+        try { localStorage.setItem("tracker.board", sel); } catch {}
+        const h = params(); h.set("board", sel); location.hash = h.toString();  // preserves status=
+      }
+      pills.forEach((p) => p.addEventListener("click", () => pick(p.dataset.boardPill)));
+      const fromHash = params().get("board");
+      let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
+      show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+    })();
   </script>
   <script>
     // Poll a cheap content hash; reload only when ticket files actually change.

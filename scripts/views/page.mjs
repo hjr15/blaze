@@ -26,16 +26,23 @@ export const CSRF = randomUUID();
 
 export function pageHtml({
   project = "all",
+  focus = null,
   afterHeader = "",
   beforeBodyEnd = "",
   projectsDir: _pDir,
   now = Date.now(),
   transitions,
 } = {}) {
-  const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project });
+  const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project, focus });
   const { columns: cols, total, projects, selected } = m;
   const boardHtml = board.render(m);
   const listHtml = list.render(m);
+  const boards = m.boards || [];
+  const boardToggle = boards.length > 1
+    ? `<div class="boardtoggle" role="group" aria-label="Board">${boards
+        .map((b, i) => `<button type="button" class="bpill${i === 0 ? " on" : ""}" data-board-pill="${esc(b.name)}">${esc(b.label)}</button>`)
+        .join("")}</div>`
+    : "";
   // Status filter chips: one per resolved-schema status (with a live count),
   // plus All and Active presets. Counts come straight off the board columns —
   // no new source of truth. Active = the schema-driven non-terminal set.
@@ -47,6 +54,11 @@ export function pageHtml({
     <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
     ${cols.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
   </nav>`;
+  const crumbsHtml = m.focus
+    ? `<nav class="crumbs"><a href="?">All</a>${m.focus.crumbs
+        .map((c) => ` › <a href="?focus=${esc(c.id)}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
+        .join("")}</nav>`
+    : "";
   // Hermetic by default only when the caller opts in (tests pass `transitions: []`
   // + a fixed `now`) — otherwise resolve the real transitions cache, same as any
   // other live render.
@@ -112,9 +124,17 @@ export function pageHtml({
   html[data-view="live"] .board, html[data-view="live"] .list { display: none; }
   html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
   html:not([data-view="metrics"]) .metricsview { display: none; }
-  html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }${live.styles}${list.styles}
+  html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
   html:not([data-view="map"]) .mapview { display: none; }
   html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
+
+  /* ---- board switching (per-workflow) ---- */
+  .boardtoggle { display: flex; gap: 2px; padding: 2px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
+  .boardtoggle .bpill { appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    padding: 4px 12px; border-radius: 6px; color: #7d8590; background: transparent; }
+  .boardtoggle .bpill:hover { color: #adbac7; }
+  .boardtoggle .bpill.on { color: var(--charcoal); background: var(--blaze-amber); }
+  .board.board-hidden, .list.board-hidden { display: none !important; }${live.styles}${list.styles}
   .prlink { color: #58a6ff; text-decoration: none; font-weight: 600; }
   .prlink:hover { text-decoration: underline; }
   .row > .body { margin: 0 12px 12px 12px; }
@@ -147,7 +167,10 @@ export function pageHtml({
   .chip:hover { color: var(--neutral); border-color: #30363d; }
   .chip.on { color: var(--charcoal); background: var(--blaze-amber); border-color: var(--blaze-amber); }
   .chip .chip-n { color: #7d8590; font-size: 11px; font-weight: 600; }
-  .chip.on .chip-n { color: var(--charcoal); }${panel.styles}${metrics.styles}${map.styles}
+  .chip.on .chip-n { color: var(--charcoal); }
+  .crumbs { padding: 8px 20px; font-size: 12px; color: #7d8590; background: #0F172Acc; border-bottom: 1px solid #21262d; }
+  .crumbs a { color: #58a6ff; text-decoration: none; font-weight: 600; }
+  .crumbs a:hover { text-decoration: underline; }${panel.styles}${metrics.styles}${map.styles}
 </style>
 </head>
 <body>
@@ -159,6 +182,7 @@ export function pageHtml({
       `<a class="proj ${k === selected ? "on" : ""}" href="${k === "all" ? "/" : "/?project=" + esc(k)}">${k === "all" ? "All" : esc(k)}${k === "all" ? "" : ` <span class="count">${projects[k]}</span>`}</a>`
     ).join("")}
     <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    ${boardToggle}
     <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
@@ -171,6 +195,7 @@ export function pageHtml({
     <span class="sub" id="sync"></span>
   </header>
   ${chipbar}
+  ${crumbsHtml}
   ${afterHeader}
   ${boardHtml}
   ${listHtml}
@@ -189,6 +214,29 @@ export function pageHtml({
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
       b.addEventListener("click", () => applyView(b.dataset.view)));
     applyView(document.documentElement.dataset.view || "board");
+  </script>
+  <script>
+    (function () {
+      const pills = [...document.querySelectorAll(".boardtoggle .bpill")];
+      if (!pills.length) return;
+      const names = pills.map((p) => p.dataset.boardPill);
+      const params = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      function show(sel) {
+        document.querySelectorAll(".board[data-board], .list[data-board]").forEach((el) =>
+          el.classList.toggle("board-hidden", el.dataset.board !== sel));
+        pills.forEach((p) => p.classList.toggle("on", p.dataset.boardPill === sel));
+      }
+      function pick(name) {
+        const sel = names.includes(name) ? name : names[0];
+        show(sel);
+        try { localStorage.setItem("tracker.board", sel); } catch {}
+        const h = params(); h.set("board", sel); location.hash = h.toString();  // preserves status=
+      }
+      pills.forEach((p) => p.addEventListener("click", () => pick(p.dataset.boardPill)));
+      const fromHash = params().get("board");
+      let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
+      show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+    })();
   </script>
   <script>
     // Poll a cheap content hash; reload only when ticket files actually change.

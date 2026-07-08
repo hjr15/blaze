@@ -3,7 +3,7 @@ import { esc, mdLite, metaPieces } from "./render-lib.mjs";
 import { formatMinutes } from "../model/time.mjs";
 import { searchText } from "../model/search.mjs";
 
-export function card(t, rollup) {
+export function card(t, rollup, selected) {
   const m = t.meta;
   const prio = m.priority || "none";
   const labels = (m.labels || [])
@@ -23,12 +23,14 @@ export function card(t, rollup) {
           <span class="badges">
             <span class="prio prio-${esc(prio)}">${esc(prio)}</span>
             ${m.type ? `<span class="type">${esc(m.type)}</span>` : ""}
+            ${t.badge ? `<span class="statusbadge${t.badge === "obsolete" ? " muted" : ""}">${esc(t.badge)}</span>` : ""}
           </span>
         </div>
         <div class="title">${esc(m.title || t.file)}</div>
         ${labels ? `<div class="labels">${labels}</div>` : ""}
         ${meta ? `<div class="cardmeta">${meta}</div>` : ""}
         ${rolled}
+        ${t.childCount ? `<a class="drilldown" href="?focus=${esc(m.id)}${selected && selected !== "all" ? "&project=" + esc(selected) : ""}" title="Focus children">⤵ ${t.childCount}</a>` : ""}
         <div class="editmeta" data-ticket="${esc(m.id)}">
           <span class="editable" data-edit="priority" data-value="${esc(prio)}">${esc(prio)}</span>
           <span class="editable" data-edit="assignee" data-value="${esc(m.assignee || "")}">@${esc(m.assignee || "unassigned")}</span>
@@ -40,22 +42,21 @@ export function card(t, rollup) {
 }
 
 export function render(model) {
-  const { columns: cols, rollup } = model;
-  const columnsHtml = cols
-    .map(
-      (c) => `
+  const rollup = model.rollup;
+  const boards = model.boards || [{ name: "delivery", columns: model.columns || [] }];
+  return boards.map((b) => {
+    const columnsHtml = b.columns.map((c) => `
       <section class="col" data-status="${esc(c.dir)}">
         <header class="colhead">
           <span class="colname">${esc(c.label)}</span>
           <span class="count">${c.tickets.length}</span>
         </header>
         <div class="cards">
-          ${c.tickets.map((t) => card(t, rollup)).join("") || '<div class="empty">—</div>'}
+          ${c.tickets.map((t) => card(t, rollup, model.selected)).join("") || '<div class="empty">—</div>'}
         </div>
-      </section>`,
-    )
-    .join("");
-  return `<div class="board">${columnsHtml}</div>`;
+      </section>`).join("");
+    return `<div class="board" data-board="${esc(b.name)}">${columnsHtml}</div>`;
+  }).join("");
 }
 
 // Board-container CSS moved verbatim from serve.mjs.
@@ -119,6 +120,11 @@ export const styles = `
   .prio.prio-none   { background: #30363d; color: #7d8590; }
   .card.prio-urgent { border-left-color: var(--blaze-red); }
   .card.prio-high   { border-left-color: var(--blaze-orange); }
-  .card.prio-medium { border-left-color: var(--blaze-amber); }`;
+  .card.prio-medium { border-left-color: var(--blaze-amber); }
+  .statusbadge { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600;
+    text-transform: uppercase; letter-spacing: .3px; background: #1a3326; color: #57ab5a; }
+  .statusbadge.muted { background: #30363d; color: #7d8590; }
+  .drilldown { display: inline-block; margin-top: 6px; color: var(--blaze-amber); font-size: 11px; font-weight: 600; text-decoration: none; }
+  .drilldown:hover { text-decoration: underline; }`;
 
 export const clientScript = "";

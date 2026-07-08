@@ -32,6 +32,10 @@ all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
 `resolveSchema` helper, available to any future feature that calls it — as of
 today nothing in the engine does, including the built-in commands. With no
 override the table above applies unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
+`validateSchema` (also in `scripts/model/schema-config.mjs`) is a pure structural
+check — every type's `workflow` must name a declared workflow — returning a list
+of human-readable errors (`[]` when valid); nothing in the engine calls it
+automatically yet.
 
 ## The loop
 
@@ -132,10 +136,10 @@ blaze rollup            # every goal/epic's rolled-up estimate + logged time
 blaze rollup KEY-12      # one ticket's own vs. rolled totals, with child breakdown
 ```
 
-## Board UI — search, filter chips, detail panel
+## Board UI — search, filter chips, board switcher, focus drill, detail panel
 
-All three are pure client-side **views over the served model** — no new source of
-truth, full CLI/`grep` parity preserved:
+All of these are pure client-side **views over the served model** — no new source
+of truth, full CLI/`grep` parity preserved:
 
 - **Search** — a header search box filters visible cards/rows by a `data-search`
   index (id + title + labels + assignee, lowercased) that each card/row carries.
@@ -146,6 +150,20 @@ truth, full CLI/`grep` parity preserved:
   (`#status=all|active|<status>`) so a filtered board is a shareable link. Search
   and chips **compose** — a card is visible iff it passes both. Counts re-render on
   the existing reload-on-mutation path.
+- **Board switcher** (`.boardtoggle`) — a workflow can produce more than one
+  board (`scripts/model/boards.mjs` → `deriveBoards`, fed the resolved
+  `types`/`workflows` so a data-repo schema override flows through): the
+  primary board folds any workflow whose non-terminal statuses are a subset of
+  its own, and every other workflow gets its own standalone board. The default
+  schema shows one `delivery` board (epic/story/task/bug/subtask) and one
+  `risk` board; a single-workflow config shows one board and no switcher pills.
+  Switching boards composes into the same `#status=` hash as the chips — it
+  never clobbers an active chip filter, and there's no hash write on load.
+- **Focus drill** — `?focus=<id>` on `/` scopes the board/list to that
+  ticket's descendants only (`scripts/model/focus.mjs` → `focusScope`, walked
+  over the derived index). A `.crumbs` breadcrumb bar renders the ancestor
+  chain back to `All` for drilling up. A card/row with children shows a
+  `⤵ N` drill-down link to `?focus=<id>`, preserving the active `?project=`.
 - **Detail panel** — clicking a card/row id opens a side panel with the rendered
   description, a full frontmatter table, parent breadcrumb + children list, and
   links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content
@@ -153,6 +171,15 @@ truth, full CLI/`grep` parity preserved:
   checkboxes in the panel toggle via the existing commit-on-edit `/api/ac` path.
   `window.blazePanel.open(id)` / `.close()` is the shared seam other views (map
   node-click, field editing) build on.
+- **Inline field editing** — the panel's Fields table and title heading are
+  schema-driven off `scripts/model/fields.mjs`: `fieldInputs` turns a ticket's
+  frontmatter into per-field descriptors (editable or not, `text` or `select`
+  kind), and the single `EDITABLE_FIELDS` allowlist there is consumed by both
+  the panel (what renders as an editable span) and **`POST /api/edit`**'s
+  `applyEdit` (what it accepts) — no field the UI offers can be one the server
+  rejects. `id`/`type`/`status`/`resolution`/`project`/dates are always
+  read-only; status/resolution only change via drag/move + resolve. An edit
+  commits through the same commit-on-mutation path as move/log/resolve.
 
 ## Grooming rules
 

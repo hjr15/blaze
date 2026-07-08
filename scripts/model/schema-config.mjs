@@ -15,3 +15,16 @@ export function resolveSchema({ config = null, project = null } = {}) {
     workflows: mergeWorkflows(mergeWorkflows(DEFAULT_WORKFLOWS, topWorkflows), projWorkflows),
   };
 }
+
+/** Pure structural check: every type's workflow must be a declared workflow.
+ *  Returns a list of human-readable errors ([] when valid). */
+export function validateSchema({ types = {}, workflows = {} } = {}) {
+  const errors = [];
+  for (const [name, def] of Object.entries(types)) {
+    const wf = def && def.workflow;
+    if (wf && !Object.prototype.hasOwnProperty.call(workflows, wf)) {
+      errors.push(`type "${name}" maps to undeclared workflow "${wf}"`);
+    }
+  }
+  return errors;
+}
