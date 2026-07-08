@@ -123,3 +123,40 @@ test("layoutGraph: deterministic (same input, identical output)", () => {
   ];
   assert.deepEqual(laidOut(rows), laidOut(rows));
 });
+
+import { graphModel } from "../../scripts/model/graph.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+
+function fixtureDir() {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-graph-"));
+  mkdirSync(join(dir, "A", "defined"), { recursive: true });
+  mkdirSync(join(dir, "A", "todo"), { recursive: true });
+  mkdirSync(join(dir, "B", "todo"), { recursive: true });
+  writeFileSync(join(dir, "A", "defined", "A-1.md"),
+    "---\nid: A-1\ntitle: epic\ntype: epic\nproject: A\n---\nbody\n");
+  writeFileSync(join(dir, "A", "todo", "A-2.md"),
+    "---\nid: A-2\ntitle: task\ntype: task\nproject: A\nestimate: 5\nparent: A-1\n---\nbody\n");
+  // A second project so the project filter has something to exclude.
+  writeFileSync(join(dir, "B", "todo", "B-1.md"),
+    "---\nid: B-1\ntitle: other\ntype: task\nproject: B\nestimate: 5\n---\nbody\n");
+  return dir;
+}
+
+test("graphModel: builds a laid-out graph from ticket files", () => {
+  const gm = graphModel({ projectsDir: fixtureDir(), project: "all" });
+  assert.equal(gm.nodes.length, 3);
+  assert.equal(gm.edges.filter((e) => e.kind === "parent").length, 1);
+  assert.ok(gm.width > 0 && gm.height > 0);
+  // epic (level 1) is left of task (level 0)
+  const x = (id) => gm.nodes.find((n) => n.id === id).x;
+  assert.ok(x("A-1") < x("A-2"));
+});
+
+test("graphModel: project filter restricts the node set (excludes other projects)", () => {
+  const gm = graphModel({ projectsDir: fixtureDir(), project: "A" });
+  assert.equal(gm.nodes.length, 2);
+  assert.ok(gm.nodes.every((n) => n.project === "A"));
+  assert.equal(gm.nodes.find((n) => n.id === "B-1"), undefined);
+});

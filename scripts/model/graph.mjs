@@ -3,6 +3,7 @@
 // layered coordinates (layoutGraph), and wraps the FS read (graphModel). Zero
 // dependency; no Date/random so the golden snapshot stays stable.
 import { hierarchyLevel, isType } from "./schema.mjs";
+import { buildIndex } from "./index.mjs";
 
 const FALLBACK_LEVEL = -2; // unknown/null types sink below subtask (-1)
 
@@ -105,4 +106,12 @@ export function layoutGraph(graph, opts = {}) {
   const width = nodes.length ? PAD + (levels.length - 1) * COL_STRIDE + NODE_W + PAD : 2 * PAD;
   const height = nodes.length ? maxBottom + PAD : 2 * PAD;
   return { nodes: placed, edges, width, height };
+}
+
+// FS wrapper: read every ticket, optionally restrict to one project, and return
+// the laid-out graph. Built in page.mjs from the same projectsDir the board uses.
+export function graphModel({ projectsDir, project = "all" } = {}) {
+  const index = buildIndex(projectsDir);
+  const rows = project === "all" ? index.rows : index.rows.filter((r) => r.project === project);
+  return layoutGraph(buildGraph({ rows, links: index.links }));
 }
