@@ -48,3 +48,17 @@ test("boardModel omits an empty board (single visible board, no switcher)", () =
   assert.equal(m.boards.length, 1);
   assert.equal(m.boards[0].name, "delivery");
 });
+
+test("boardModel focus filters to a parent's descendants + exposes crumbs", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-focus-"));
+  mkdirSync(join(dir, "INF", "defined"), { recursive: true });
+  writeFileSync(join(dir, "INF", "defined", "INF-9.md"), "---\nid: INF-9\ntitle: epic\ntype: epic\nproject: INF\n---\nx\n");
+  writeFileSync(join(dir, "INF", "defined", "INF-10.md"), "---\nid: INF-10\ntitle: kid\ntype: task\nproject: INF\nparent: INF-9\n---\nx\n");
+  writeFileSync(join(dir, "INF", "defined", "INF-11.md"), "---\nid: INF-11\ntitle: other\ntype: task\nproject: INF\n---\nx\n");
+
+  const m = boardModel(dir, { focus: "INF-9" });
+  assert.equal(m.focus.id, "INF-9");
+  assert.deepEqual(m.focus.crumbs.map((c) => c.id), ["INF-9"]);
+  const ids = m.boards.flatMap((b) => b.columns.flatMap((c) => c.tickets.map((t) => t.meta.id)));
+  assert.deepEqual(ids.sort(), ["INF-10"]);  // only the descendant
+});

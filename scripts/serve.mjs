@@ -84,8 +84,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "GET" && u.pathname === "/") {
       const project = u.searchParams.get("project") || "all";
+      const focus = u.searchParams.get("focus") || null;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(pageHtml({ project })); return;
+      res.end(pageHtml({ project, focus })); return;
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });

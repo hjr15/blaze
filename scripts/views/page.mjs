@@ -25,13 +25,14 @@ export const CSRF = randomUUID();
 
 export function pageHtml({
   project = "all",
+  focus = null,
   afterHeader = "",
   beforeBodyEnd = "",
   projectsDir: _pDir,
   now = Date.now(),
   transitions,
 } = {}) {
-  const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project });
+  const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project, focus });
   const { columns: cols, total, projects, selected } = m;
   const boardHtml = board.render(m);
   const listHtml = list.render(m);

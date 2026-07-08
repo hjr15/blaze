@@ -8,6 +8,7 @@ import { TYPES, workflowFor } from "../model/schema.mjs";
 import { deriveBoards, columnForStatus } from "../model/boards.mjs";
 import { parseActivity, groupByTicket } from "../model/activity.mjs";
 import { resolveRoots } from "../config.mjs";
+import { focusScope } from "../model/focus.mjs";
 
 const PRIORITY_ORDER = { highest: 0, high: 1, medium: 2, low: 3, lowest: 4, none: 5, urgent: 0 };
 
@@ -19,7 +20,7 @@ const title = (s) => s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase(
 
 // Pure board model: read every ticket under projectsDir, optionally filter to one
 // project, and group into status columns. Read-only (the editable board is Phase 6).
-export function boardModel(projectsDir, { project = "all" } = {}) {
+export function boardModel(projectsDir, { project = "all", focus = null } = {}) {
   const all = [...walkTickets(projectsDir)].map((t) => ({
     file: basename(t.file), meta: t.frontmatter, body: t.body,
     status: t.status, project: t.frontmatter.project,
@@ -29,8 +30,13 @@ export function boardModel(projectsDir, { project = "all" } = {}) {
   }, {});
   const rows = project === "all" ? all : all.filter((t) => t.project === project);
 
+  const index = buildIndex(projectsDir);
+  const scope = focus ? focusScope(index, focus) : null;
+  const focused = scope && index.get(focus);
+  const scoped = focused ? rows.filter((t) => scope.descendantIds.has(t.meta.id)) : rows;
+
   const byStatus = new Map();
-  for (const t of rows) {
+  for (const t of scoped) {
     if (!byStatus.has(t.status)) byStatus.set(t.status, []);
     byStatus.get(t.status).push(t);
   }
@@ -45,7 +51,7 @@ export function boardModel(projectsDir, { project = "all" } = {}) {
       return pa - pb || String(a.meta.id || "").localeCompare(String(b.meta.id || ""));
     }),
   }));
-  const rollup = rollUp(buildIndex(projectsDir));
+  const rollup = rollUp(index);
 
   // --- additive: per-workflow boards (INF-475). columns above stays the single
   // source metrics/chips/header read; boards is a second view over the same rows.
@@ -60,7 +66,7 @@ export function boardModel(projectsDir, { project = "all" } = {}) {
   }));
   const byName = new Map(boardViews.map((b) => [b.name, b]));
   const extra = new Map(); // `${board} ${status}` -> ad-hoc column (degrade path)
-  for (const t of rows) {
+  for (const t of scoped) {
     const bd = boardOf(t);
     const bv = byName.get(bd.name);
     const col = columnForStatus(bd, t.status);
@@ -82,7 +88,10 @@ export function boardModel(projectsDir, { project = "all" } = {}) {
   const nonEmpty = boardViews.filter((b) => b.columns.some((c) => c.tickets.length));
   const boards = nonEmpty.length ? nonEmpty : [boardViews[0]].filter(Boolean);
 
-  return { selected: project, projects: projectsCount, columns, total: rows.length, rollup, boards };
+  return {
+    selected: project, projects: projectsCount, columns, total: scoped.length, rollup, boards,
+    focus: focused ? { id: focus, crumbs: scope.crumbs } : null,
+  };
 }
 
 // A cheap hash of all ticket files' size+mtime, for the auto-reload poll.
