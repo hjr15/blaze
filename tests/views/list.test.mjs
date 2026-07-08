@@ -19,3 +19,10 @@ test("list.render emits a group with a row", () => {
   assert.match(html, /class="row/);
   assert.match(html, /data-id="T-1"/);
 });
+
+test("list.render stamps a lowercased data-search index on each row", () => {
+  const m = { columns: [{ dir: "todo", label: "Todo", tickets: [
+    { file: "T-9.md", meta: { id: "T-9", title: "Alpha", labels: ["Beta"], assignee: "Ryan", priority: "low", type: "task" }, body: "" },
+  ] }] };
+  assert.match(list.render(m), /data-search="t-9 alpha beta ryan"/);
+});

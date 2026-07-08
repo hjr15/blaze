@@ -1,5 +1,6 @@
 // scripts/views/list.mjs — the List (Linear-style grouped rows) view.
 import { esc, mdLite, metaPieces } from "./render-lib.mjs";
+import { searchText } from "../model/search.mjs";
 
 // A compact one-line row for the List view (Linear-style). Same expandable body.
 export function row(t) {
@@ -10,7 +11,7 @@ export function row(t) {
     .join("");
   const meta = metaPieces(m).join(" · ");
   return `
-    <details class="row prio-${esc(prio)}" draggable="true" data-id="${esc(m.id || t.file)}">
+    <details class="row prio-${esc(prio)}" draggable="true" data-id="${esc(m.id || t.file)}" data-search="${esc(searchText(t))}">
       <summary>
         <span class="rcaret">▸</span>
         <span class="id">${esc(m.id || t.file)}</span>

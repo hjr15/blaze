@@ -117,7 +117,12 @@ export function pageHtml({
     font-size: 13px; opacity: 0; transition: opacity .2s; pointer-events: none; z-index: 20; max-width: 80vw; }
   #toast.show { opacity: 1; }
   .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
-  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }${panel.styles}${metrics.styles}${map.styles}
+  .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
+  .search { background: #161b22; border: 1px solid #21262d; border-radius: 8px; color: var(--neutral);
+    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); }
+  .search:focus { outline: none; border-color: var(--blaze-orange); }
+  .search::placeholder { color: #7d8590; }
+  .card.filtered-out, .row.filtered-out { display: none !important; }${panel.styles}${metrics.styles}${map.styles}
 </style>
 </head>
 <body>
@@ -128,7 +133,8 @@ export function pageHtml({
     ${["all", ...Object.keys(projects)].map((k) =>
       `<a class="proj ${k === selected ? "on" : ""}" href="${k === "all" ? "/" : "/?project=" + esc(k)}">${k === "all" ? "All" : esc(k)}${k === "all" ? "" : ` <span class="count">${projects[k]}</span>`}</a>`
     ).join("")}
-    <div class="viewtoggle" role="group" aria-label="View" style="margin-left:auto">
+    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
@@ -243,6 +249,25 @@ export function pageHtml({
       const lines = (j.changes || []).map((c) => c.id + ": " + c.from + " → " + c.to);
       toast(lines.length ? lines.length + " code-bound move(s) — apply via 'blaze reconcile --apply'" : "no code-bound changes");
     });
+  </script>
+  <script>
+    // Client-side filtering. Search hides any card/row whose data-search
+    // index doesn't contain the query. Status chips extend applyFilters()
+    // with a status predicate; both compose (an element is visible iff it
+    // passes every active filter). Zero server round-trip.
+    (function () {
+      const search = document.getElementById("board-search");
+      function applyFilters() {
+        const q = ((search && search.value) || "").trim().toLowerCase();
+        document.querySelectorAll("[data-id][data-search]").forEach((el) => {
+          const passSearch = !q || (el.getAttribute("data-search") || "").includes(q);
+          el.classList.toggle("filtered-out", !passSearch);
+        });
+      }
+      if (search) search.addEventListener("input", applyFilters);
+      window.blazeFilters = { apply: applyFilters };
+      applyFilters();
+    })();
   </script>
   <script>${live.clientScript}</script>
   ${panel.render()}

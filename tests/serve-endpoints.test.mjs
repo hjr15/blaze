@@ -160,6 +160,14 @@ test("pageHtml includes reconcileBtn", () => {
   assert.match(html, /id="reconcileBtn"/);
 });
 
+test("pageHtml renders a client-side search box wired to a filter pass", () => {
+  const html = pageHtml({ project: "all" });
+  assert.match(html, /id="board-search"/);
+  assert.match(html, /applyFilters/);
+  // filtered-out cards/rows are hidden purely client-side (no round-trip)
+  assert.match(html, /\.filtered-out/);
+});
+
 test("pageHtml priority select includes none and urgent (Fix 2 — unified enum)", () => {
   // The client-side PRIORITIES array must be injected from the canonical server constant,
   // covering all enum values including none and urgent (previously absent from the narrow list).
