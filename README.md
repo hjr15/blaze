@@ -46,6 +46,39 @@ One global `npm i -g @hjr15/blaze-board` install can drive any number of unrelat
 data repos this way — upgrade the engine once, keep every board's ticket history in
 its own repo.
 
+<!-- DIAGRAM:BEGIN docs/diagrams/engine-data-split.md -->
+```mermaid
+flowchart TB
+    subgraph Engine["Engine — npm @hjr15/blaze-board (public)"]
+        direction TB
+        Bin["blaze CLI · supervisor · serve"]
+        Model["scripts/model/ + scripts/views/"]
+        Note["no tickets, no config — pure engine"]
+    end
+
+    subgraph Resolve["resolveRoots ladder (config.mjs) — first match wins"]
+        direction TB
+        L1["1 · BLAZE_PROJECTS_DIR env<br/>explicit projects/ dir; dataRoot = its parent"]
+        L2["2 · ./projects under CWD<br/>run from inside the data repo"]
+        L3["3 · engine tree itself<br/>single-tree back-compat only;<br/>refuses when installed under node_modules"]
+        L1 --> L2 --> L3
+    end
+
+    subgraph DataA["Data repo A (own git)"]
+        DA["blaze.config.json · projects/ · .blaze/"]
+    end
+    subgraph DataB["Data repo B (own git)"]
+        DB["blaze.config.json · projects/ · .blaze/"]
+    end
+
+    Engine --> Resolve
+    Resolve -->|dataRoot / projectsDir| DataA
+    Resolve -->|dataRoot / projectsDir| DataB
+```
+<!-- DIAGRAM:END -->
+
+See [`docs/architecture.md`](docs/architecture.md) for the full as-built picture.
+
 ## Quickstart
 
 ```bash
