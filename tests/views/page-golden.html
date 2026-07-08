@@ -145,6 +145,8 @@
   }
   .row .rbadges { display: flex; align-items: center; gap: 4px; flex-wrap: nowrap; }
   .row .rmeta { color: #7d8590; font-size: 11px; white-space: nowrap; }
+  html:not([data-view="map"]) .mapview { display: none; }
+  html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
   .prlink { color: #58a6ff; text-decoration: none; font-weight: 600; }
   .prlink:hover { text-decoration: underline; }
   .row > .body { margin: 0 12px 12px 12px; }
@@ -274,6 +276,7 @@
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
       <button type="button" class="pill" data-view="metrics">Metrics</button>
+      <button type="button" class="pill" data-view="map">Map</button>
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -420,6 +423,17 @@
   <div class="cfd-legend"></div>
 </div>
 <script type="application/json" id="cfd-series">[]</script></div>
+  <div class="mapview"><div class="mapwrap">
+  <div class="mapzoom" role="group" aria-label="Zoom">
+    <button type="button" class="mzoom" data-zoom="in" aria-label="Zoom in">+</button>
+    <button type="button" class="mzoom" data-zoom="out" aria-label="Zoom out">−</button>
+    <button type="button" class="mzoom" data-zoom="reset">Reset</button>
+  </div>
+  <svg class="graph" viewBox="0 0 480 124" data-w="480" data-h="124" role="img" aria-label="Ticket map">
+    <g class="graph-pan"><g class="node" data-node-id="T-2" tabindex="0" role="button" aria-label="T-2: fixture two" transform="translate(40,40)"><rect width="160" height="44" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5" /><rect width="4" height="44" rx="2" fill="#58a6ff" /><text class="node-id" x="12" y="18">T-2</text><text class="node-title" x="12" y="34">fixture two</text></g><g class="node" data-node-id="T-1" tabindex="0" role="button" aria-label="T-1: fixture one" transform="translate(280,40)"><rect width="160" height="44" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5" /><rect width="4" height="44" rx="2" fill="#3fb950" /><text class="node-id" x="12" y="18">T-1</text><text class="node-title" x="12" y="34">fixture one</text></g></g>
+  </svg>
+  <div class="map-empty empty">No tickets to map.</div>
+</div></div>
   <script>
     // View toggle (Board / List), persisted to localStorage.
     const VIEW_KEY = "tracker.view";
