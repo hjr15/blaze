@@ -46,3 +46,63 @@ export function buildGraph(index) {
     cmp(String(a.target), String(b.target)));
   return { nodes, edges };
 }
+
+// Deterministic layered layout: one column per distinct type level (highest
+// level leftmost), nodes stacked within a column and grouped into project
+// swimlanes (an extra gap on each project change). Coordinates are pure — no
+// measurement, no Date, no random.
+// Lanes are grouped by project explicitly, independent of the input node order.
+export function layoutGraph(graph, opts = {}) {
+  const NODE_W = opts.nodeW ?? 160;
+  const NODE_H = opts.nodeH ?? 44;
+  const COL_STRIDE = opts.colStride ?? 240; // x distance between columns
+  const ROW_STRIDE = opts.rowStride ?? 60; // y distance between stacked nodes
+  const LANE_GAP = opts.laneGap ?? 24; // extra y on a project change
+  const PAD = opts.pad ?? 40;
+
+  const nodes = graph.nodes ?? [];
+  const levels = [...new Set(nodes.map((n) => n.level))].sort((a, b) => b - a);
+  const colOf = new Map(levels.map((lv, i) => [lv, i]));
+
+  const placed = [];
+  const posById = new Map();
+  let maxBottom = 0;
+  for (const lv of levels) {
+    const x = PAD + colOf.get(lv) * COL_STRIDE;
+    const colNodes = nodes.filter((nn) => nn.level === lv);
+    // Group nodes into project swimlanes explicitly (do not rely on the caller's
+    // ordering): deterministic lane order via cmp, each lane keeps its node order.
+    const byProject = new Map();
+    for (const n of colNodes) {
+      if (!byProject.has(n.project)) byProject.set(n.project, []);
+      byProject.get(n.project).push(n);
+    }
+    let y = PAD;
+    let firstLane = true;
+    for (const proj of [...byProject.keys()].sort(cmp)) {
+      if (!firstLane) y += LANE_GAP;
+      firstLane = false;
+      for (const n of byProject.get(proj)) {
+        const node = { ...n, x, y, w: NODE_W, h: NODE_H };
+        placed.push(node);
+        posById.set(n.id, node);
+        maxBottom = Math.max(maxBottom, y + NODE_H);
+        y += ROW_STRIDE;
+      }
+    }
+  }
+
+  const edges = (graph.edges ?? []).map((e) => {
+    const s = posById.get(e.src), t = posById.get(e.target);
+    if (!s || !t) return null;
+    return {
+      ...e,
+      x1: s.x + s.w / 2, y1: s.y + s.h / 2,
+      x2: t.x + t.w / 2, y2: t.y + t.h / 2,
+    };
+  }).filter(Boolean);
+
+  const width = nodes.length ? PAD + (levels.length - 1) * COL_STRIDE + NODE_W + PAD : 2 * PAD;
+  const height = nodes.length ? maxBottom + PAD : 2 * PAD;
+  return { nodes: placed, edges, width, height };
+}
