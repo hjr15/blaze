@@ -35,6 +35,10 @@ export function boardModel(projectsDir, { project = "all", focus = null } = {}) 
   const focused = scope && index.get(focus);
   const scoped = focused ? rows.filter((t) => scope.descendantIds.has(t.meta.id)) : rows;
 
+  const childTally = {};
+  for (const r of index.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;
+  for (const t of scoped) t.childCount = childTally[t.meta.id] || 0;
+
   const byStatus = new Map();
   for (const t of scoped) {
     if (!byStatus.has(t.status)) byStatus.set(t.status, []);

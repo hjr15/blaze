@@ -3,7 +3,7 @@ import { esc, mdLite, metaPieces } from "./render-lib.mjs";
 import { searchText } from "../model/search.mjs";
 
 // A compact one-line row for the List view (Linear-style). Same expandable body.
-export function row(t) {
+export function row(t, selected) {
   const m = t.meta;
   const prio = m.priority || "none";
   const labels = (m.labels || [])
@@ -20,6 +20,7 @@ export function row(t) {
           ${labels}
           <span class="prio prio-${esc(prio)}">${esc(prio)}</span>
           ${m.type ? `<span class="type">${esc(m.type)}</span>` : ""}
+          ${t.childCount ? `<a class="drilldown" href="?focus=${esc(m.id)}${selected && selected !== "all" ? "&project=" + esc(selected) : ""}" title="Focus children">⤵ ${t.childCount}</a>` : ""}
         </span>
         ${meta ? `<span class="rmeta">${meta}</span>` : ""}
       </summary>
@@ -43,7 +44,7 @@ export function render(model) {
           <span class="count">${c.tickets.length}</span>
         </summary>
         <div class="rows">
-          ${c.tickets.map(row).join("") || '<div class="empty">No tickets</div>'}
+          ${c.tickets.map((t) => row(t, model.selected)).join("") || '<div class="empty">No tickets</div>'}
         </div>
       </details>`,
         )

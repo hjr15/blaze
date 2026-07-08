@@ -53,6 +53,11 @@ export function pageHtml({
     <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
     ${cols.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
   </nav>`;
+  const crumbsHtml = m.focus
+    ? `<nav class="crumbs"><a href="?">All</a>${m.focus.crumbs
+        .map((c) => ` › <a href="?focus=${esc(c.id)}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
+        .join("")}</nav>`
+    : "";
   // Hermetic by default only when the caller opts in (tests pass `transitions: []`
   // + a fixed `now`) — otherwise resolve the real transitions cache, same as any
   // other live render.
@@ -158,7 +163,10 @@ export function pageHtml({
   .chip:hover { color: var(--neutral); border-color: #30363d; }
   .chip.on { color: var(--charcoal); background: var(--blaze-amber); border-color: var(--blaze-amber); }
   .chip .chip-n { color: #7d8590; font-size: 11px; font-weight: 600; }
-  .chip.on .chip-n { color: var(--charcoal); }${panel.styles}${metrics.styles}${map.styles}
+  .chip.on .chip-n { color: var(--charcoal); }
+  .crumbs { padding: 8px 20px; font-size: 12px; color: #7d8590; background: #0F172Acc; border-bottom: 1px solid #21262d; }
+  .crumbs a { color: #58a6ff; text-decoration: none; font-weight: 600; }
+  .crumbs a:hover { text-decoration: underline; }${panel.styles}${metrics.styles}${map.styles}
 </style>
 </head>
 <body>
@@ -182,6 +190,7 @@ export function pageHtml({
     <span class="sub" id="sync"></span>
   </header>
   ${chipbar}
+  ${crumbsHtml}
   ${afterHeader}
   ${boardHtml}
   ${listHtml}

@@ -3,7 +3,7 @@ import { esc, mdLite, metaPieces } from "./render-lib.mjs";
 import { formatMinutes } from "../model/time.mjs";
 import { searchText } from "../model/search.mjs";
 
-export function card(t, rollup) {
+export function card(t, rollup, selected) {
   const m = t.meta;
   const prio = m.priority || "none";
   const labels = (m.labels || [])
@@ -30,6 +30,7 @@ export function card(t, rollup) {
         ${labels ? `<div class="labels">${labels}</div>` : ""}
         ${meta ? `<div class="cardmeta">${meta}</div>` : ""}
         ${rolled}
+        ${t.childCount ? `<a class="drilldown" href="?focus=${esc(m.id)}${selected && selected !== "all" ? "&project=" + esc(selected) : ""}" title="Focus children">⤵ ${t.childCount}</a>` : ""}
         <div class="editmeta" data-ticket="${esc(m.id)}">
           <span class="editable" data-edit="priority" data-value="${esc(prio)}">${esc(prio)}</span>
           <span class="editable" data-edit="assignee" data-value="${esc(m.assignee || "")}">@${esc(m.assignee || "unassigned")}</span>
@@ -51,7 +52,7 @@ export function render(model) {
           <span class="count">${c.tickets.length}</span>
         </header>
         <div class="cards">
-          ${c.tickets.map((t) => card(t, rollup)).join("") || '<div class="empty">—</div>'}
+          ${c.tickets.map((t) => card(t, rollup, model.selected)).join("") || '<div class="empty">—</div>'}
         </div>
       </section>`).join("");
     return `<div class="board" data-board="${esc(b.name)}">${columnsHtml}</div>`;
@@ -122,6 +123,8 @@ export const styles = `
   .card.prio-medium { border-left-color: var(--blaze-amber); }
   .statusbadge { font-size: 10px; padding: 1px 6px; border-radius: 999px; font-weight: 600;
     text-transform: uppercase; letter-spacing: .3px; background: #1a3326; color: #57ab5a; }
-  .statusbadge.muted { background: #30363d; color: #7d8590; }`;
+  .statusbadge.muted { background: #30363d; color: #7d8590; }
+  .drilldown { display: inline-block; margin-top: 6px; color: var(--blaze-amber); font-size: 11px; font-weight: 600; text-decoration: none; }
+  .drilldown:hover { text-decoration: underline; }`;
 
 export const clientScript = "";

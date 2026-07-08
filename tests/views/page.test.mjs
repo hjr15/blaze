@@ -31,3 +31,16 @@ test("pageHtml renders a board switcher when >1 workflow board has tickets", () 
   assert.match(html, /class="boardtoggle"/);
   assert.match(html, /data-board-pill="risk"/);
 });
+
+test("pageHtml shows a breadcrumb when focused and a drill-down link on parents", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-crumb-"));
+  mkdirSync(join(dir, "INF", "defined"), { recursive: true });
+  writeFileSync(join(dir, "INF", "defined", "INF-9.md"), "---\nid: INF-9\ntitle: epic\ntype: epic\nproject: INF\n---\nx\n");
+  writeFileSync(join(dir, "INF", "defined", "INF-10.md"), "---\nid: INF-10\ntitle: kid\ntype: task\nproject: INF\nparent: INF-9\n---\nx\n");
+  const focused = pageHtml({ project: "all", projectsDir: dir, focus: "INF-9", now: 1751932800000, transitions: [] });
+  assert.match(focused, /class="crumbs"/);
+
+  const unfocused = pageHtml({ project: "all", projectsDir: dir, now: 1751932800000, transitions: [] });
+  assert.doesNotMatch(unfocused, /class="crumbs"/);
+  assert.match(unfocused, /href="\?focus=INF-9"/);  // epic has a child → drill-down link
+});
