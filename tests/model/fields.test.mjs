@@ -29,3 +29,9 @@ test("arrays render comma-joined text", () => {
   assert.equal(f.kind, "text");
   assert.equal(f.value, "a, b");
 });
+
+test("an array of objects (e.g. worklog) renders as JSON-joined, not [object Object]", () => {
+  const f = fieldInputs({ worklog: [{ date: "2026-07-02", minutes: 120 }] }).find((x) => x.key === "worklog");
+  assert.equal(f.value, '{"date":"2026-07-02","minutes":120}');
+  assert.doesNotMatch(f.value, /\[object Object\]/);
+});
