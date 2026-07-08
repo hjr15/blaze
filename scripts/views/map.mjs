@@ -117,9 +117,10 @@ export const clientScript = `
       var p = toVb(e.clientX, e.clientY);
       zoomAt(e.deltaY < 0 ? 0.9 : 1.111, p.x, p.y);
     }, { passive: false });
-    var dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0;
+    var dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0, downNode = null;
     svg.addEventListener("pointerdown", function (e) {
       dragging = true; moved = false; sx = e.clientX; sy = e.clientY; ox = vb.x; oy = vb.y;
+      downNode = e.target.closest("[data-node-id]");
       svg.classList.add("panning");
       try { svg.setPointerCapture(e.pointerId); } catch (x) {}
     });
@@ -134,9 +135,9 @@ export const clientScript = `
     svg.addEventListener("pointerup", function (e) {
       dragging = false; svg.classList.remove("panning");
       try { svg.releasePointerCapture(e.pointerId); } catch (x) {}
-      if (moved) return; // it was a pan, not a click
-      var g = e.target.closest("[data-node-id]");
-      if (g && window.blazePanel) window.blazePanel.open(g.getAttribute("data-node-id"));
+      if (moved) { downNode = null; return; } // it was a pan, not a click
+      if (downNode && window.blazePanel) window.blazePanel.open(downNode.getAttribute("data-node-id"));
+      downNode = null;
     });
     svg.addEventListener("keydown", function (e) {
       if (e.key !== "Enter" && e.key !== " ") return;
