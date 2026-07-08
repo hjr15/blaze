@@ -104,6 +104,14 @@
   html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
   html:not([data-view="metrics"]) .metricsview { display: none; }
   html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
+
+  /* ---- board switching (per-workflow) ---- */
+  .boardtoggle { display: flex; gap: 2px; padding: 2px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
+  .boardtoggle .bpill { appearance: none; border: 0; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    padding: 4px 12px; border-radius: 6px; color: #7d8590; background: transparent; }
+  .boardtoggle .bpill:hover { color: #adbac7; }
+  .boardtoggle .bpill.on { color: var(--charcoal); background: var(--blaze-amber); }
+  .board.board-hidden, .list.board-hidden { display: none !important; }
   .live { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 16px 20px; }
   .livecard { background: #161b22; border: 1px solid #21262d; border-left: 3px solid #444c56; border-radius: 10px; padding: 10px 12px; }
   .livecard.active { border-left-color: var(--blaze-orange); }
@@ -245,6 +253,7 @@
     <span class="sub">2 tickets · 2 in flight</span>
     <a class="proj on" href="/">All</a><a class="proj " href="/?project=T">T <span class="count">2</span></a>
     <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    
     <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
@@ -467,6 +476,29 @@
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
       b.addEventListener("click", () => applyView(b.dataset.view)));
     applyView(document.documentElement.dataset.view || "board");
+  </script>
+  <script>
+    (function () {
+      const pills = [...document.querySelectorAll(".boardtoggle .bpill")];
+      if (!pills.length) return;
+      const names = pills.map((p) => p.dataset.boardPill);
+      const params = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
+      function show(sel) {
+        document.querySelectorAll(".board[data-board], .list[data-board]").forEach((el) =>
+          el.classList.toggle("board-hidden", el.dataset.board !== sel));
+        pills.forEach((p) => p.classList.toggle("on", p.dataset.boardPill === sel));
+      }
+      function pick(name) {
+        const sel = names.includes(name) ? name : names[0];
+        show(sel);
+        try { localStorage.setItem("tracker.board", sel); } catch {}
+        const h = params(); h.set("board", sel); location.hash = h.toString();  // preserves status=
+      }
+      pills.forEach((p) => p.addEventListener("click", () => pick(p.dataset.boardPill)));
+      const fromHash = params().get("board");
+      let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
+      show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+    })();
   </script>
   <script>
     // Poll a cheap content hash; reload only when ticket files actually change.
