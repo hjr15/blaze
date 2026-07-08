@@ -21,7 +21,7 @@ const norm = (h) => h.replace(/window\.__csrf = "[0-9a-f-]+"/, 'window.__csrf = 
 const goldenPath = fileURLToPath(new URL("./page-golden.html", import.meta.url));
 
 test("pageHtml output matches the golden snapshot (byte-level; guards CSS + markup)", () => {
-  const html = norm(pageHtml({ project: "all", projectsDir: fixture() }));
+  const html = norm(pageHtml({ project: "all", projectsDir: fixture(), now: 1751932800000, transitions: [] }));
   if (!existsSync(goldenPath)) writeFileSync(goldenPath, html);  // first run captures the baseline
   assert.equal(html, readFileSync(goldenPath, "utf8"),
     "pageHtml output drifted from the golden snapshot — if this change is intended (e.g. Task 6 panel), delete tests/views/page-golden.html, re-run to regenerate, and review the diff.");

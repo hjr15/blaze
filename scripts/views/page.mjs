@@ -7,6 +7,8 @@ import { loadConfig, resolveRoots } from "../config.mjs";
 import { PRIORITIES } from "../model/schema.mjs";
 import { esc } from "./render-lib.mjs";
 import { boardModel } from "./data.mjs";
+import { metricsModel } from "../model/metrics.mjs";
+import { loadTransitions } from "../model/transitions.mjs";
 import * as live from "./live.mjs";
 import * as board from "./board.mjs";
 import * as list from "./list.mjs";
@@ -20,11 +22,24 @@ export const CSRF = randomUUID();
 
 // ---- render -------------------------------------------------------------
 
-export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = "", projectsDir: _pDir } = {}) {
+export function pageHtml({
+  project = "all",
+  afterHeader = "",
+  beforeBodyEnd = "",
+  projectsDir: _pDir,
+  now = Date.now(),
+  transitions,
+} = {}) {
   const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project });
   const { columns: cols, total, projects, selected } = m;
   const boardHtml = board.render(m);
   const listHtml = list.render(m);
+  // Hermetic by default only when the caller opts in (tests pass `transitions: []`
+  // + a fixed `now`) — otherwise resolve the real transitions cache, same as any
+  // other live render.
+  const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
+  const mm = metricsModel({ board: m, transitions: txns, now, project });
+  const metricsHtml = metrics.render(mm);
 
   return `<!doctype html>
 <html lang="en" data-view="board">
@@ -81,7 +96,9 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
   html[data-view="board"] .list { display: none; }
   html[data-view="list"]  .board { display: none; }
   html[data-view="live"] .board, html[data-view="live"] .list { display: none; }
-  html[data-view="board"] .live, html[data-view="list"] .live { display: none; }${live.styles}${list.styles}
+  html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
+  html:not([data-view="metrics"]) .metricsview { display: none; }
+  html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }${live.styles}${list.styles}
   .prlink { color: #58a6ff; text-decoration: none; font-weight: 600; }
   .prlink:hover { text-decoration: underline; }
   .row > .body { margin: 0 12px 12px 12px; }
@@ -115,6 +132,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
+      <button type="button" class="pill" data-view="metrics">Metrics</button>
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -124,6 +142,7 @@ export function pageHtml({ project = "all", afterHeader = "", beforeBodyEnd = ""
   ${boardHtml}
   ${listHtml}
   ${live.render()}
+  <div class="metricsview">${metricsHtml}</div>
   <script>
     // View toggle (Board / List), persisted to localStorage.
     const VIEW_KEY = "tracker.view";

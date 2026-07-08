@@ -99,6 +99,8 @@
   html[data-view="list"]  .board { display: none; }
   html[data-view="live"] .board, html[data-view="live"] .list { display: none; }
   html[data-view="board"] .live, html[data-view="list"] .live { display: none; }
+  html:not([data-view="metrics"]) .metricsview { display: none; }
+  html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
   .live { display: grid; grid-template-columns: repeat(auto-fill, minmax(240px, 1fr)); gap: 10px; padding: 16px 20px; }
   .livecard { background: #161b22; border: 1px solid #21262d; border-left: 3px solid #444c56; border-radius: 10px; padding: 10px 12px; }
   .livecard.active { border-left-color: var(--blaze-orange); }
@@ -170,6 +172,34 @@
   .panel-x { position: absolute; top: 10px; right: 12px; background: none; border: 0; color: #7d8590;
     font-size: 20px; cursor: pointer; }
 
+  .tiles { display: flex; flex-wrap: wrap; gap: 10px; padding: 16px 20px; }
+  .tile {
+    flex: 1 1 140px; min-width: 120px; background: #161b22; border: 1px solid #21262d;
+    border-radius: 10px; padding: 10px 14px;
+  }
+  .tile-label { color: #7d8590; font-size: 11px; font-weight: 600; text-transform: uppercase; letter-spacing: .4px; }
+  .tile-value { margin-top: 4px; font-size: 20px; font-weight: 700; color: var(--neutral); }
+  .metrics { padding: 0 20px 20px; }
+  .mrange-group { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+  .mrange {
+    appearance: none; border: 1px solid #21262d; background: #161b22; color: #7d8590;
+    font: inherit; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .mrange:hover { color: #adbac7; }
+  .mrange.on { color: var(--charcoal); background: var(--blaze-orange); border-color: var(--blaze-orange); }
+  svg.cfd {
+    display: block; width: 100%; height: auto; max-width: 100%;
+    background: #161b22; border: 1px solid #21262d; border-radius: 10px;
+  }
+  .metrics.no-data svg.cfd { display: none; }
+  .cfd-empty {
+    display: none; color: #444c56; text-align: center; padding: 30px 0;
+    border: 1px dashed #21262d; border-radius: 10px;
+  }
+  .metrics.no-data .cfd-empty { display: block; }
+  .cfd-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12px; color: #adbac7; }
+  .cfd-legend-item { display: flex; align-items: center; gap: 5px; }
+  .cfd-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
 </style>
 </head>
 <body>
@@ -182,6 +212,7 @@
       <button type="button" class="pill" data-view="board">Board</button>
       <button type="button" class="pill" data-view="list">List</button>
       <button type="button" class="pill" data-view="live">Live</button>
+      <button type="button" class="pill" data-view="metrics">Metrics</button>
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -315,6 +346,14 @@
         </div>
       </details></div>
   <div class="live"><div class="empty">Loading live activity…</div></div>
+  <div class="metricsview"><div class="tiles"><div class="tile"><div class="tile-label">Total</div><div class="tile-value">2</div></div><div class="tile"><div class="tile-label">In Flight</div><div class="tile-value">2</div></div><div class="tile"><div class="tile-label">Done %</div><div class="tile-value">0%</div></div><div class="tile"><div class="tile-label">Throughput (14d)</div><div class="tile-value">0</div></div><div class="tile"><div class="tile-label">Median Cycle Time</div><div class="tile-value">—</div></div></div>
+<div class="metrics no-data">
+  <div class="mrange-group" role="group" aria-label="Range"><button type="button" class="mrange" data-range="30">30d</button><button type="button" class="mrange" data-range="90">90d</button><button type="button" class="mrange" data-range="180">180d</button><button type="button" class="mrange on" data-range="all">All</button></div>
+  <svg class="cfd" viewBox="0 0 800 300" preserveAspectRatio="none" role="img" aria-label="Cumulative flow diagram"></svg>
+  <div class="cfd-empty empty">No data yet.</div>
+  <div class="cfd-legend"></div>
+</div>
+<script type="application/json" id="cfd-series">[]</script></div>
   <script>
     // View toggle (Board / List), persisted to localStorage.
     const VIEW_KEY = "tracker.view";
@@ -458,7 +497,84 @@
   document.addEventListener("click", (e) => {
     if (e.target.closest("[data-panel-close]")) window.blazePanel.close();
   });
-</script>
+
+    (function () {
+      var PALETTE = ["#79c0ff","#3fb950","#d29922","#f85149","#a371f7","#56d4dd","#ffa657","#7ee787"];
+      var DAY_MS = 24 * 60 * 60 * 1000;
+      var currentRange = "all";
+
+      function readSeries() {
+        var el = document.getElementById("cfd-series");
+        if (!el) return [];
+        try { return JSON.parse(el.textContent || "[]"); } catch (e) { return []; }
+      }
+
+      function windowed(series, range) {
+        if (range === "all" || !series.length) return series;
+        var days = Number(range);
+        var lastMs = Date.parse(series[series.length - 1].date + "T00:00:00Z");
+        var cutoff = lastMs - (days - 1) * DAY_MS;
+        return series.filter(function (d) { return Date.parse(d.date + "T00:00:00Z") >= cutoff; });
+      }
+
+      function drawCfd() {
+        if (document.documentElement.dataset.view !== "metrics") return;
+        var wrap = document.querySelector(".metrics");
+        var host = document.querySelector("svg.cfd");
+        if (!wrap || !host) return;
+        var series = windowed(readSeries(), currentRange);
+        while (host.firstChild) host.removeChild(host.firstChild);
+        if (!series.length) { wrap.classList.add("no-data"); return; }
+        wrap.classList.remove("no-data");
+
+        var statuses = Object.keys(series[0].counts);
+        var W = 800, H = 300;
+        var maxTotal = 1;
+        series.forEach(function (d) {
+          var total = statuses.reduce(function (a, s) { return a + (d.counts[s] || 0); }, 0);
+          if (total > maxTotal) maxTotal = total;
+        });
+        var n = series.length;
+        var xStep = n > 1 ? W / (n - 1) : W;
+        var ns = "http://www.w3.org/2000/svg";
+        var cumBottom = series.map(function () { return 0; });
+        statuses.forEach(function (status, i) {
+          var topPts = [], botPts = [];
+          series.forEach(function (d, idx) {
+            var v = d.counts[status] || 0;
+            var bottom = cumBottom[idx];
+            var top = bottom + v;
+            cumBottom[idx] = top;
+            var x = n > 1 ? idx * xStep : W / 2;
+            topPts.push([x, H - (top / maxTotal) * H]);
+            botPts.push([x, H - (bottom / maxTotal) * H]);
+          });
+          var pts = topPts.concat(botPts.slice().reverse());
+          var d0 = pts.map(function (p, idx2) {
+            return (idx2 === 0 ? "M" : "L") + p[0].toFixed(1) + "," + p[1].toFixed(1);
+          }).join(" ") + " Z";
+          var path = document.createElementNS(ns, "path");
+          path.setAttribute("d", d0);
+          path.setAttribute("fill", PALETTE[i % PALETTE.length]);
+          path.setAttribute("stroke", "none");
+          path.setAttribute("data-status", status);
+          host.appendChild(path);
+        });
+      }
+
+      document.querySelectorAll(".mrange").forEach(function (btn) {
+        btn.addEventListener("click", function () {
+          currentRange = btn.dataset.range;
+          document.querySelectorAll(".mrange").forEach(function (b) { b.classList.toggle("on", b === btn); });
+          drawCfd();
+        });
+      });
+      document.querySelectorAll('.viewtoggle .pill[data-view="metrics"]').forEach(function (b) {
+        b.addEventListener("click", drawCfd);
+      });
+      drawCfd();
+    })();
+  </script>
   
 </body>
 </html>
