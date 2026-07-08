@@ -4,6 +4,8 @@ import { join, basename } from "node:path";
 import { walkTickets, buildIndex } from "../model/index.mjs";
 import { rollUp } from "../model/rollup.mjs";
 import { WORKFLOWS } from "../model/workflows.mjs";
+import { TYPES, workflowFor } from "../model/schema.mjs";
+import { deriveBoards, columnForStatus } from "../model/boards.mjs";
 import { parseActivity, groupByTicket } from "../model/activity.mjs";
 import { resolveRoots } from "../config.mjs";
 
@@ -44,7 +46,43 @@ export function boardModel(projectsDir, { project = "all" } = {}) {
     }),
   }));
   const rollup = rollUp(buildIndex(projectsDir));
-  return { selected: project, projects: projectsCount, columns, total: rows.length, rollup };
+
+  // --- additive: per-workflow boards (INF-475). columns above stays the single
+  // source metrics/chips/header read; boards is a second view over the same rows.
+  const boardsDef = deriveBoards({ types: TYPES, workflows: WORKFLOWS });
+  const boardOf = (t) => {
+    let wf; try { wf = workflowFor(t.meta.type); } catch { wf = null; }
+    return boardsDef.find((b) => b.workflows.includes(wf)) || boardsDef[0];
+  };
+  const boardViews = boardsDef.map((bd) => ({
+    name: bd.name, label: bd.label,
+    columns: bd.columns.map((c) => ({ dir: c.key, label: c.label, tickets: [] })),
+  }));
+  const byName = new Map(boardViews.map((b) => [b.name, b]));
+  const extra = new Map(); // `${board} ${status}` -> ad-hoc column (degrade path)
+  for (const t of rows) {
+    const bd = boardOf(t);
+    const bv = byName.get(bd.name);
+    const col = columnForStatus(bd, t.status);
+    if (col) {
+      t.badge = (col.folds.length > 1 && t.status !== col.key) ? t.status : null;
+      bv.columns.find((c) => c.dir === col.key).tickets.push(t);
+    } else {
+      t.badge = null;
+      const ek = `${bd.name} ${t.status}`;
+      if (!extra.has(ek)) { const nc = { dir: t.status, label: title(t.status), tickets: [] }; extra.set(ek, nc); bv.columns.push(nc); }
+      extra.get(ek).tickets.push(t);
+    }
+  }
+  const sortTickets = (arr) => arr.sort((a, b) => {
+    const pa = PRIORITY_ORDER[a.meta.priority] ?? 6, pb = PRIORITY_ORDER[b.meta.priority] ?? 6;
+    return pa - pb || String(a.meta.id || "").localeCompare(String(b.meta.id || ""));
+  });
+  for (const b of boardViews) for (const c of b.columns) sortTickets(c.tickets);
+  const nonEmpty = boardViews.filter((b) => b.columns.some((c) => c.tickets.length));
+  const boards = nonEmpty.length ? nonEmpty : [boardViews[0]].filter(Boolean);
+
+  return { selected: project, projects: projectsCount, columns, total: rows.length, rollup, boards };
 }
 
 // A cheap hash of all ticket files' size+mtime, for the auto-reload poll.
