@@ -19,3 +19,9 @@ test("panel.clientScript defines the window.blazePanel open/close contract", () 
   assert.match(panel.clientScript, /open/);
   assert.match(panel.clientScript, /close/);
 });
+
+test("panel.clientScript fetches /api/panel (no DOM-clone) and supports drill navigation", () => {
+  assert.match(panel.clientScript, /\/api\/panel/);      // fetches server-escaped HTML
+  assert.match(panel.clientScript, /data-panel-open/);   // parent/children drill
+  assert.doesNotMatch(panel.clientScript, /\.body['"]/); // no longer clones the board card body
+});

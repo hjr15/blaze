@@ -196,6 +196,20 @@ test("pageHtml client script contains self-drop guard (Fix 3)", () => {
   assert.match(html, /dragSourceStatus !== zone\.dataset\.status/, "self-drop guard missing");
 });
 
+test("GET /api/panel returns the rendered detail panel, 404 for an unknown id", async () => {
+  const fx = repo();                                   // OBA-1 in OBA/in-review, has one AC
+  const { server, base } = await boot(fx);
+  const res = await fetch(base + "/api/panel?id=OBA-1");
+  assert.equal(res.status, 200);
+  assert.match(res.headers.get("content-type") || "", /html/);
+  const html = await res.text();
+  assert.match(html, /data-ticket="OBA-1"/);           // AC-toggle hook
+  assert.match(html, /data-ac-index/);                 // live AC checkbox in the rendered body
+  const miss = await fetch(base + "/api/panel?id=NOPE");
+  assert.equal(miss.status, 404);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
 test("GET /api/reconcile-preview returns a change list and writes nothing", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
@@ -271,6 +285,11 @@ test("GET /api/live groups fresh events and degrades to [] with no file", async 
   assert.equal(j.groups[0].active, true);
   assert.equal(j.groups[0].column, "in-review");      // from the board index
   server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("pageHtml wires a card/row click to open the detail panel", () => {
+  const html = pageHtml({ project: "all" });
+  assert.match(html, /blazePanel\.open/);   // clicking a ticket id opens the panel
 });
 
 test("pageHtml wires the Live view pill, region and poll", () => {

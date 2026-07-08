@@ -259,7 +259,15 @@ export function pageHtml({
       input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { done = true; location.reload(); } });
     }
     document.addEventListener("click", (e) => {
-      const span = e.target.closest(".editable"); if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); }
+      const span = e.target.closest(".editable");
+      if (span) { e.preventDefault(); e.stopPropagation(); blazeEdit(span); return; }
+      // Clicking a card/row ticket id opens the detail panel. preventDefault +
+      // stopPropagation so it doesn't also toggle the inline <details> expand.
+      const idEl = e.target.closest(".id");
+      if (idEl) {
+        const host = idEl.closest("[data-id]");
+        if (host) { e.preventDefault(); e.stopPropagation(); window.blazePanel.open(host.dataset.id); }
+      }
     });
     document.addEventListener("change", (e) => {
       const cb = e.target.closest("input[type=checkbox][data-ac-index]"); if (!cb) return;

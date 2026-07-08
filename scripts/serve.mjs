@@ -19,6 +19,7 @@ import { applyLog } from "./log.mjs";
 import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { commitFile } from "./serve-commit.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
+import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, CSRF } from "./views/page.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
@@ -63,6 +64,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {
       return json(200, liveModel(root, projectsDir));
+    }
+    if (req.method === "GET" && u.pathname === "/api/panel") {
+      const html = panelHtml(projectsDir, u.searchParams.get("id"));
+      if (html === null) return json(404, { errors: ["not found"] });
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(html); return;
     }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
       const { reconcile } = await import("./reconcile.mjs");
