@@ -80,7 +80,7 @@ export function pageHtml({
   }
   header.top {
     position: sticky; top: 0; z-index: 5; display: flex; align-items: baseline;
-    gap: 12px; padding: 14px 20px; background: #0F172Aee;
+    flex-wrap: wrap; gap: 12px; padding: 14px 20px; background: #0F172Aee;
     border-bottom: 1px solid #21262d; backdrop-filter: blur(6px);
   }
   header.top h1 { font-size: 15px; margin: 0; letter-spacing: .3px; }
