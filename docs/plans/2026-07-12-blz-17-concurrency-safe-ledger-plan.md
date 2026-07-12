@@ -72,14 +72,16 @@ test("session queues are isolated from each other and the fallback", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("listQueues: fallback first, then session queues sorted", () => {
+test("listQueues: fallback first, then session queues sorted by session name", () => {
   const root = tmp();
   assert.deepEqual(listQueues(root), []);
-  appendEntry(root, { id: "X-2", op: "new", message: "m", files: [], ts: "t", session: "beta" }, "beta");
-  appendEntry(root, { id: "X-1", op: "new", message: "m", files: [], ts: "t", session: "alpha" }, "alpha");
+  appendEntry(root, { id: "X-2", op: "new", message: "m", files: [], ts: "t", session: "main-2" }, "main-2");
+  appendEntry(root, { id: "X-1", op: "new", message: "m", files: [], ts: "t", session: "main" }, "main");
+  appendEntry(root, { id: "X-4", op: "new", message: "m", files: [], ts: "t", session: "alpha" }, "alpha");
   appendEntry(root, { id: "X-3", op: "new", message: "m", files: [], ts: "t" });
   const qs = listQueues(root);
-  assert.deepEqual(qs.map((q) => q.session), [null, "alpha", "beta"]);
+  // "main" before "main-2" proves name-sort, not filename-sort ("-" < "." would flip it)
+  assert.deepEqual(qs.map((q) => q.session), [null, "alpha", "main", "main-2"]);
   assert.ok(qs.every((q) => q.path.endsWith(".jsonl")));
   rmSync(root, { recursive: true, force: true });
 });
@@ -141,15 +143,19 @@ export function clearLedger(root, session = null) {
 }
 
 // Every queue that exists: the shared fallback first (session: null), then
-// each .blaze/pending/<session>.jsonl sorted by session name.
+// each .blaze/pending/<session>.jsonl sorted by session name. Sort the
+// extracted NAMES, not filenames: "main" vs "main-2" order flips otherwise
+// because "-" < "." in the filename comparison.
 export function listQueues(root) {
   const queues = [];
   if (existsSync(ledgerPath(root))) queues.push({ session: null, path: ledgerPath(root) });
   const dir = join(root, ".blaze", "pending");
   if (existsSync(dir)) {
-    for (const f of readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort()) {
-      queues.push({ session: f.slice(0, -".jsonl".length), path: join(dir, f) });
-    }
+    const sessions = readdirSync(dir)
+      .filter((n) => n.endsWith(".jsonl"))
+      .map((n) => n.slice(0, -".jsonl".length))
+      .sort();
+    for (const s of sessions) queues.push({ session: s, path: join(dir, `${s}.jsonl`) });
   }
   return queues;
 }
