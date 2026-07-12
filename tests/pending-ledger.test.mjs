@@ -77,11 +77,14 @@ test("session queues are isolated from each other and the fallback", () => {
 test("listQueues: fallback first, then session queues sorted", () => {
   const root = tmp();
   assert.deepEqual(listQueues(root), []);
-  appendEntry(root, { id: "X-2", op: "new", message: "m", files: [], ts: "t", session: "beta" }, "beta");
-  appendEntry(root, { id: "X-1", op: "new", message: "m", files: [], ts: "t", session: "alpha" }, "alpha");
+  // "main" vs "main-2" catches filename-vs-name sorting: as filenames,
+  // "main-2.jsonl" < "main.jsonl" ('-' < '.'), but as names "main" < "main-2".
+  appendEntry(root, { id: "X-2", op: "new", message: "m", files: [], ts: "t", session: "main-2" }, "main-2");
+  appendEntry(root, { id: "X-1", op: "new", message: "m", files: [], ts: "t", session: "main" }, "main");
+  appendEntry(root, { id: "X-4", op: "new", message: "m", files: [], ts: "t", session: "alpha" }, "alpha");
   appendEntry(root, { id: "X-3", op: "new", message: "m", files: [], ts: "t" });
   const qs = listQueues(root);
-  assert.deepEqual(qs.map((q) => q.session), [null, "alpha", "beta"]);
+  assert.deepEqual(qs.map((q) => q.session), [null, "alpha", "main", "main-2"]);
   assert.ok(qs.every((q) => q.path.endsWith(".jsonl")));
   rmSync(root, { recursive: true, force: true });
 });

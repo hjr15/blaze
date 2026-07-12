@@ -52,9 +52,13 @@ export function listQueues(root) {
   if (existsSync(ledgerPath(root))) queues.push({ session: null, path: ledgerPath(root) });
   const dir = join(root, ".blaze", "pending");
   if (existsSync(dir)) {
-    for (const f of readdirSync(dir).filter((n) => n.endsWith(".jsonl")).sort()) {
-      queues.push({ session: f.slice(0, -".jsonl".length), path: join(dir, f) });
-    }
+    // Sort by session NAME, not filename: "main-2.jsonl" < "main.jsonl" as
+    // filenames ('-' < '.'), but "main" < "main-2" as names.
+    const sessions = readdirSync(dir)
+      .filter((n) => n.endsWith(".jsonl"))
+      .map((n) => n.slice(0, -".jsonl".length))
+      .sort();
+    for (const s of sessions) queues.push({ session: s, path: join(dir, `${s}.jsonl`) });
   }
   return queues;
 }
