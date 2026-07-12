@@ -1,6 +1,6 @@
 {
   "name": "@hjr15/blaze-board",
-  "version": "0.4.1",
+  "version": "0.4.2",
   "description": "A file-based, git-native issue board that AI coding agents can drive. Tickets are markdown; status is the directory.",
   "type": "module",
   "bin": {
