@@ -48,7 +48,7 @@ flowchart TB
     subgraph Data["Data repo (own git history)"]
         direction TB
         Files["projects/&lt;KEY&gt;/&lt;status&gt;/&lt;id&gt;-slug.md<br/>(source of truth)"]
-        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl · pending-commit.jsonl<br/>(derived, disposable)"]
+        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)<br/>pending/&lt;session&gt;.jsonl + fallback queue<br/>commit.lock/ (write coordination)"]
     end
 
     CLI --> Runners
