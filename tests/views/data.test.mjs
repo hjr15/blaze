@@ -4,6 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boardModel } from "../../scripts/views/data.mjs";
+import { buildIndex } from "../../scripts/model/index.mjs";
 
 test("boardModel groups tickets into status columns", () => {
   const dir = mkdtempSync(join(tmpdir(), "blaze-data-"));
@@ -13,6 +14,21 @@ test("boardModel groups tickets into status columns", () => {
   const m = boardModel(dir, { project: "all" });
   assert.equal(m.total, 1);
   assert.ok(m.columns.some((c) => c.dir === "todo" && c.tickets.length === 1));
+});
+
+test("boardModel returns the index it built, and reuses a prebuilt one when passed", () => {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-data-idx-"));
+  mkdirSync(join(dir, "T", "todo"), { recursive: true });
+  writeFileSync(join(dir, "T", "todo", "T-1.md"),
+    "---\nid: T-1\ntitle: t\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");
+
+  const built = boardModel(dir, { project: "all" });
+  assert.equal(built.index.count(), 1);
+  assert.equal(built.index.get("T-1").title, "t");
+
+  const prebuilt = buildIndex(dir);
+  const reused = boardModel(dir, { project: "all", index: prebuilt });
+  assert.equal(reused.index, prebuilt); // same object, not rebuilt
 });
 
 test("boardModel adds per-workflow boards while leaving columns intact", () => {

@@ -33,7 +33,8 @@ export function pageHtml({
   now = Date.now(),
   transitions,
 } = {}) {
-  const m = boardModel(_pDir ?? resolveRoots().projectsDir, { project, focus });
+  const pDir = _pDir ?? resolveRoots().projectsDir;
+  const m = boardModel(pDir, { project, focus });
   const { columns: cols, total, projects, selected } = m;
   const boardHtml = board.render(m);
   const listHtml = list.render(m);
@@ -65,7 +66,7 @@ export function pageHtml({
   const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
   const mm = metricsModel({ board: m, transitions: txns, now, project });
   const metricsHtml = metrics.render(mm);
-  const gm = graphModel({ projectsDir: _pDir ?? resolveRoots().projectsDir, project });
+  const gm = graphModel({ projectsDir: pDir, project, index: m.index });
 
   return `<!doctype html>
 <html lang="en" data-view="board">

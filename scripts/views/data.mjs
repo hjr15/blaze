@@ -20,8 +20,9 @@ const title = (s) => s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase(
 
 // Pure board model: read every ticket under projectsDir, optionally filter to one
 // project, and group into status columns. Read-only (the editable board is Phase 6).
-export function boardModel(projectsDir, { project = "all", focus = null } = {}) {
-  const all = [...walkTickets(projectsDir)].map((t) => ({
+export function boardModel(projectsDir, { project = "all", focus = null, flat = false, index = null } = {}) {
+  const walked = [...walkTickets(projectsDir)];
+  const all = walked.map((t) => ({
     file: basename(t.file), meta: t.frontmatter, body: t.body,
     status: t.status, project: t.frontmatter.project,
   }));
@@ -30,13 +31,13 @@ export function boardModel(projectsDir, { project = "all", focus = null } = {}) 
   }, {});
   const rows = project === "all" ? all : all.filter((t) => t.project === project);
 
-  const index = buildIndex(projectsDir);
-  const scope = focus ? focusScope(index, focus) : null;
-  const focused = scope && index.get(focus);
+  const idx = index ?? buildIndex(projectsDir, { tickets: walked });
+  const scope = focus ? focusScope(idx, focus) : null;
+  const focused = scope && idx.get(focus);
   const scoped = focused ? rows.filter((t) => scope.descendantIds.has(t.meta.id)) : rows;
 
   const childTally = {};
-  for (const r of index.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;
+  for (const r of idx.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;
   for (const t of scoped) t.childCount = childTally[t.meta.id] || 0;
 
   const byStatus = new Map();
@@ -55,7 +56,7 @@ export function boardModel(projectsDir, { project = "all", focus = null } = {}) 
       return pa - pb || String(a.meta.id || "").localeCompare(String(b.meta.id || ""));
     }),
   }));
-  const rollup = rollUp(index);
+  const rollup = rollUp(idx);
 
   // --- additive: per-workflow boards (INF-475). columns above stays the single
   // source metrics/chips/header read; boards is a second view over the same rows.
@@ -95,6 +96,7 @@ export function boardModel(projectsDir, { project = "all", focus = null } = {}) 
   return {
     selected: project, projects: projectsCount, columns, total: scoped.length, rollup, boards,
     focus: focused ? { id: focus, crumbs: scope.crumbs } : null,
+    index: idx,
   };
 }
 
