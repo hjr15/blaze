@@ -219,3 +219,30 @@ test("--all sweeps every queue + fallback into one commit with session-tagged bo
   assert.deepEqual(readEntries(root), []);
   rmSync(root, { recursive: true, force: true });
 });
+
+test("warns (stderr) when origin/main is ahead, and still commits", () => {
+  const root = gitRepo();
+  // Fabricate an already-fetched origin/main one commit ahead of HEAD.
+  execFileSync("git", ["-C", root, "commit", "--allow-empty", "-q", "-m", "remote-only"]);
+  execFileSync("git", ["-C", root, "update-ref", "refs/remotes/origin/main", "HEAD"]);
+  execFileSync("git", ["-C", root, "reset", "-q", "--hard", "HEAD~1"]);
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-9.md"), "x");
+  appendEntry(root, { id: "OBA-9", op: "new", message: "OBA-9: x", files: ["projects/OBA/backlog/OBA-9.md"], ts: "t" });
+  const r = runCommit(root);
+  assert.equal(r.status, 0);
+  assert.match(r.stderr, /1 commit\(s\) behind origin\/main/);
+  assert.match(r.stdout, /flushed 1 op/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("no warning when origin/main is absent", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-10.md"), "x");
+  appendEntry(root, { id: "OBA-10", op: "new", message: "OBA-10: x", files: ["projects/OBA/backlog/OBA-10.md"], ts: "t" });
+  const r = runCommit(root);
+  assert.equal(r.status, 0);
+  assert.doesNotMatch(r.stderr, /behind origin\/main/);
+  rmSync(root, { recursive: true, force: true });
+});

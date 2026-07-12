@@ -24,6 +24,17 @@ if (entries.length === 0) {
   process.exit(0);
 }
 
+// Cheap divergence signal against already-fetched refs — no network, so the
+// verb stays fast and offline-safe. Publishing handles the real rebase.
+const hasUpstream = spawnSync("git", ["-C", dataRoot, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"], { stdio: "ignore" });
+if (hasUpstream.status === 0) {
+  const behind = spawnSync("git", ["-C", dataRoot, "rev-list", "--count", "HEAD..origin/main"], { encoding: "utf8" });
+  const n = Number((behind.stdout || "").trim());
+  if (behind.status === 0 && n > 0) {
+    console.error(`blaze commit: warning — ${n} commit(s) behind origin/main (no fetch run); rebase before publishing`);
+  }
+}
+
 // Counts by op → "2 new, 3 logged, 1 moved, 1 resolved"
 const LABEL = { new: "new", log: "logged", move: "moved", resolve: "resolved" };
 const counts = {};
