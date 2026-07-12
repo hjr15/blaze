@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
 import { appendEntry, readEntries } from "../scripts/pending-ledger.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -24,17 +24,20 @@ function gitRepo() {
 }
 // Invoke the temp repo's OWN copy of the runner. cwdSub (a relative subdir)
 // proves ROOT is script-relative, not cwd-based.
-function runCommit(root, cwdSub) {
+function runCommit(root, cwdSub, { session, args = [] } = {}) {
   const runner = join(root, "scripts", "commit-runner.mjs");
   const cwd = cwdSub ? join(root, cwdSub) : root;
-  return execFileSync(process.execPath, [runner], { cwd, encoding: "utf8" });
+  const env = { ...process.env, ...(session ? { BLAZE_SESSION: session } : {}) };
+  if (!session) delete env.BLAZE_SESSION;
+  const r = spawnSync(process.execPath, [runner, ...args], { cwd, env, encoding: "utf8" });
+  return { stdout: r.stdout, stderr: r.stderr, status: r.status };
 }
 const headOf = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 test("empty ledger is a friendly no-op", () => {
   const root = gitRepo();
   const before = headOf(root);
-  const out = runCommit(root);
+  const out = runCommit(root).stdout;
   assert.match(out, /nothing to flush/);
   assert.equal(headOf(root), before);
   rmSync(root, { recursive: true, force: true });
@@ -102,7 +105,7 @@ test("drops a stale intermediate path from a ticket moved twice in one batch", (
 
   writeFileSync(join(root, "untracked-other"), "should NOT be committed");
 
-  const out = runCommit(root);
+  const out = runCommit(root).stdout;
   assert.match(out, /blaze commit: flushed 2 op/);
 
   const afterCount = Number(
@@ -119,6 +122,61 @@ test("drops a stale intermediate path from a ticket moved twice in one batch", (
 
   const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
   assert.match(status, /\?\? untracked-other/);
+  assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("REPRO OBA-484: default flush does NOT bundle a foreign session's queued ops", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "mine");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-2.md"), "foreign wip");
+  appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: mine", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t", session: "me" }, "me");
+  appendEntry(root, { id: "OBA-2", op: "new", message: "OBA-2: foreign", files: ["projects/OBA/backlog/OBA-2.md"], ts: "t", session: "sister" }, "sister");
+
+  runCommit(root, null, { session: "me" });
+
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-1: mine \[me\]/);
+  assert.doesNotMatch(body, /OBA-2/);
+  const shown = execFileSync("git", ["-C", root, "show", "--stat", "--format=", "HEAD"], { encoding: "utf8" });
+  assert.doesNotMatch(shown, /OBA-2\.md/);
+  assert.equal(readEntries(root, "sister").length, 1); // sister's WIP still queued
+  assert.deepEqual(readEntries(root, "me"), []);       // mine drained
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("unset session drains only the shared fallback queue", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-3.md"), "legacy");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-4.md"), "sessioned");
+  appendEntry(root, { id: "OBA-3", op: "new", message: "OBA-3: legacy", files: ["projects/OBA/backlog/OBA-3.md"], ts: "t" });
+  appendEntry(root, { id: "OBA-4", op: "new", message: "OBA-4: sessioned", files: ["projects/OBA/backlog/OBA-4.md"], ts: "t", session: "s1" }, "s1");
+  runCommit(root);
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-3: legacy/);
+  assert.doesNotMatch(body, /OBA-4/);
+  assert.equal(readEntries(root, "s1").length, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("--all sweeps every queue + fallback into one commit with session-tagged body", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  for (const n of ["OBA-5", "OBA-6", "OBA-7"]) writeFileSync(join(root, "projects", "OBA", "backlog", `${n}.md`), n);
+  appendEntry(root, { id: "OBA-5", op: "new", message: "OBA-5: a", files: ["projects/OBA/backlog/OBA-5.md"], ts: "t", session: "a" }, "a");
+  appendEntry(root, { id: "OBA-6", op: "new", message: "OBA-6: b", files: ["projects/OBA/backlog/OBA-6.md"], ts: "t", session: "b" }, "b");
+  appendEntry(root, { id: "OBA-7", op: "new", message: "OBA-7: legacy", files: ["projects/OBA/backlog/OBA-7.md"], ts: "t" });
+  runCommit(root, null, { args: ["--all"] });
+  const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(subject, /\(3 new\)$/);
+  assert.match(body, /OBA-5: a \[a\]/);
+  assert.match(body, /OBA-6: b \[b\]/);
+  assert.match(body, /- OBA-7: legacy(?!.*\[)/m);
+  assert.deepEqual(readEntries(root, "a"), []);
+  assert.deepEqual(readEntries(root, "b"), []);
   assert.deepEqual(readEntries(root), []);
   rmSync(root, { recursive: true, force: true });
 });

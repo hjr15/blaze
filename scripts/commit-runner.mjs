@@ -1,14 +1,23 @@
-// scripts/commit-runner.mjs — `blaze commit`: drain .blaze/pending-commit.jsonl
-// into ONE commit (subject summary + per-op body), staging only recorded files.
+// scripts/commit-runner.mjs — `blaze commit`: drain the caller's OWN pending
+// queue (session-keyed via BLAZE_SESSION, else the shared fallback) into ONE
+// commit, staging only recorded files. `--all` sweeps every queue + fallback
+// (the bundler / end-of-day path). A failed flush keeps the queue files.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readEntries, clearLedger } from "./pending-ledger.mjs";
+import { readEntries, clearLedger, listQueues, sessionId } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
 
 const { dataRoot } = resolveRoots();
+const all = process.argv.slice(2).includes("--all");
 
-const entries = readEntries(dataRoot);
+// Which queues to drain: every existing queue with --all, else only the caller's own.
+const targets = all ? listQueues(dataRoot) : [{ session: sessionId() }];
+const drained = targets
+  .map((q) => ({ session: q.session, entries: readEntries(dataRoot, q.session) }))
+  .filter((q) => q.entries.length > 0);
+const entries = drained.flatMap((q) => q.entries.map((e) => ({ ...e, session: q.session })));
+
 if (entries.length === 0) {
   console.log("blaze commit: nothing to flush");
   process.exit(0);
@@ -24,7 +33,7 @@ const summary = Object.entries(counts)
 
 const date = new Date().toISOString().slice(0, 10);
 const subject = `blaze: ${date} board update (${summary})`;
-const body = entries.map((e) => `- ${e.message}`).join("\n");
+const body = entries.map((e) => `- ${e.message}${e.session ? ` [${e.session}]` : ""}`).join("\n");
 
 // A path created then relocated again within one batch (e.g. a ticket moved
 // twice) is neither on disk nor in HEAD by the time the batch drains — drop
@@ -45,5 +54,5 @@ if (commit.status !== 0) {
   console.error(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
   process.exit(1);
 }
-clearLedger(dataRoot);
+for (const q of drained) clearLedger(dataRoot, q.session);
 console.log(`blaze commit: flushed ${entries.length} op(s) → ${subject}`);
