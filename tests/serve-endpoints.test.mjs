@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { startServer, CSRF } from "../scripts/serve.mjs";
+import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
 function repo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-ep-"));
@@ -97,6 +98,21 @@ test("POST /api/log appends a worklog entry and commits", async () => {
   const res = await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" });
   assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
   server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("POST /api/log responds 503 when the commit lock is held (not a generic 500)", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  assert.equal(acquireLock(fx.root, { session: "other" }).ok, true);
+  try {
+    const res = await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" });
+    const body = await res.json();
+    assert.equal(res.status, 503, JSON.stringify(body));
+    assert.match(body.errors[0], /commit lock held/);
+  } finally {
+    releaseLock(fx.root);
+    server.close(); rmSync(fx.root, { recursive: true, force: true });
+  }
 });
 
 test("POST /api/resolve overrides resolution and commits", async () => {

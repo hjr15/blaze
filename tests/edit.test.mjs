@@ -64,3 +64,9 @@ test("applyEdit rejects a parent that violates the hierarchy, no write", () => {
   assert.ok(r.errors.some((e) => /invalid parent/.test(e)));
   rmSync(root, { recursive: true, force: true });
 });
+
+test("applyEdit accepts a title change", () => {
+  const { projects } = fixture();
+  const r = applyEdit(projects, "OBA-1", { title: "renamed" }, {});
+  assert.equal(r.ok, true);
+});

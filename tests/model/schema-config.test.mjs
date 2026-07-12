@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { resolveSchema } from "../../scripts/model/schema-config.mjs";
+import { resolveSchema, validateSchema } from "../../scripts/model/schema-config.mjs";
 import { DEFAULT_TYPES } from "../../scripts/model/schema.mjs";
 import { DEFAULT_WORKFLOWS } from "../../scripts/model/workflows.mjs";
 
@@ -38,4 +38,17 @@ test("resolveSchema tolerates a config/project without a schema block", () => {
   const { types, workflows } = resolveSchema({ config: { key: "X" }, project: { key: "ENG" } });
   assert.deepEqual(types, DEFAULT_TYPES);
   assert.deepEqual(workflows, DEFAULT_WORKFLOWS);
+});
+
+test("validateSchema: accepts the resolved default schema", () => {
+  const { types, workflows } = resolveSchema({});
+  assert.deepEqual(validateSchema({ types, workflows }), []);
+});
+
+test("validateSchema: rejects a type mapped to an undeclared workflow", () => {
+  const types = { task: { level: 0, workflow: "ghost", parentTypes: [], required: [] } };
+  const workflows = { delivery: { statuses: ["defined"], terminal: [], transitions: [], reopenTo: "defined", resolutionOnTerminal: {} } };
+  const errs = validateSchema({ types, workflows });
+  assert.equal(errs.length, 1);
+  assert.match(errs[0], /task.*ghost/);
 });

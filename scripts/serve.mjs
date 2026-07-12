@@ -84,8 +84,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "GET" && u.pathname === "/") {
       const project = u.searchParams.get("project") || "all";
+      const focus = u.searchParams.get("focus") || null;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(pageHtml({ project })); return;
+      res.end(pageHtml({ project, focus })); return;
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
@@ -94,10 +95,22 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       try { payload = await readJson(req); } catch { return json(400, { errors: ["bad json body"] }); }
       const today = new Date().toISOString().slice(0, 10);
       // in-place ops only — use the inline path for ops that rename (see /api/move)
+      // A lock-contended request stalls only for these bounded retries (~0.4s)
+      // rather than acquireLock's own default (~2s) — a board click should
+      // fail fast into a 503 rather than hang the request.
+      const LOCK_OPTS = { retries: 2 };
+      // Writes the error response for a failed commit and reports whether it
+      // did so (true = handled, caller must not also write a success response).
+      const commitFailed = (c) => {
+        if (c.ok) return false;
+        if (c.locked) json(503, { errors: ["written but not committed — commit lock held, retry shortly"] });
+        else json(500, { errors: [`written but commit failed (status ${c.status})`] });
+        return true;
+      };
       const done = (r, msg, extra = {}) => {
         if (!r.ok) return json(422, { errors: r.errors });
-        const c = commitFile(root, r.file, msg);
-        if (!c.ok) return json(500, { errors: [`written but commit failed (status ${c.status})`] });
+        const c = commitFile(root, r.file, msg, [], LOCK_OPTS);
+        if (commitFailed(c)) return;
         return json(200, { ok: true, ...extra });
       };
 
@@ -105,8 +118,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         const r = applyMove(projectsDir, payload.id, payload.to, { today });
         if (!r.ok) return json(422, { errors: r.errors });
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
-        const c = commitFile(root, r.file, `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, extraFiles);
-        if (!c.ok) return json(500, { errors: [`written but commit failed (status ${c.status})`] });
+        const c = commitFile(root, r.file, `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, extraFiles, LOCK_OPTS);
+        if (commitFailed(c)) return;
         return json(200, { ok: true, resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {

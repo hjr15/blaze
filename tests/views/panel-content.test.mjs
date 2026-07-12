@@ -67,3 +67,18 @@ test("panelContentHtml renders description, a full frontmatter table, children a
 test("panelContentHtml on a null model shows a not-found state (no crash)", () => {
   assert.match(panelContentHtml(null), /not found/i);
 });
+
+test("panelContentHtml: editable spans for allowlisted fields, read-only for governed, editable title heading", () => {
+  const model = {
+    id: "INF-1",
+    meta: { id: "INF-1", title: "t", type: "task", status: "defined", priority: "high", assignee: "ryan", project: "INF" },
+    bodyHtml: "<p>x</p>", parent: null, children: [], links: [],
+  };
+  const html = panelContentHtml(model);
+  assert.match(html, /class="editable"[^>]*data-edit="assignee"/);
+  assert.match(html, /data-edit="priority"/);
+  assert.doesNotMatch(html, /data-edit="type"/);       // governed → read-only
+  assert.doesNotMatch(html, /data-edit="project"/);    // not allowlisted → read-only
+  assert.match(html, /class="panel-fm"[^>]*data-ticket="INF-1"/);
+  assert.match(html, /data-edit="title"/);             // title editable via heading
+});

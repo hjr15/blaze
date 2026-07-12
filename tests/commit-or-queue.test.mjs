@@ -25,7 +25,14 @@ test("batch mode appends to the ledger and makes no commit", () => {
   writeFileSync(f, "one");
   const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
-  const r = commitOrQueue({ root, mode: "batch", op: "new", id: "OBA-1", message: "OBA-1: create task", files: [f] });
+  const prev = process.env.BLAZE_SESSION;
+  delete process.env.BLAZE_SESSION;
+  let r;
+  try {
+    r = commitOrQueue({ root, mode: "batch", op: "new", id: "OBA-1", message: "OBA-1: create task", files: [f] });
+  } finally {
+    if (prev !== undefined) process.env.BLAZE_SESSION = prev;
+  }
 
   assert.deepEqual(r, { ok: true, queued: true });
   const after = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -50,5 +57,37 @@ test("per-op mode commits only the given files", () => {
   const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
   assert.match(status, /\?\? untracked-other/); // not swept in
   assert.doesNotMatch(status, /OBA-1\.md/);      // committed
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("batch mode routes to the session queue and stamps session", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
+  const prev = process.env.BLAZE_SESSION;
+  process.env.BLAZE_SESSION = "alpha";
+  try {
+    commitOrQueue({ root, mode: "batch", op: "new", id: "X-1", message: "X-1: create", files: [join(root, "projects/X/backlog/X-1.md")] });
+  } finally {
+    if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
+  }
+  assert.deepEqual(readEntries(root), []); // fallback untouched
+  const entries = readEntries(root, "alpha");
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].session, "alpha");
+  assert.equal(entries[0].id, "X-1");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("batch mode without BLAZE_SESSION keeps the legacy queue with no session field", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
+  const prev = process.env.BLAZE_SESSION;
+  delete process.env.BLAZE_SESSION;
+  try {
+    commitOrQueue({ root, mode: "batch", op: "new", id: "X-2", message: "X-2: create", files: [join(root, "projects/X/backlog/X-2.md")] });
+  } finally {
+    if (prev !== undefined) process.env.BLAZE_SESSION = prev;
+  }
+  const entries = readEntries(root);
+  assert.equal(entries.length, 1);
+  assert.equal("session" in entries[0], false);
   rmSync(root, { recursive: true, force: true });
 });

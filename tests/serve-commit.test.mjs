@@ -1,10 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitFile } from "../scripts/serve-commit.mjs";
+import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
 function gitRepo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-commit-"));
@@ -28,5 +29,18 @@ test("commitFile stages and commits only the given file", () => {
   const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
   assert.match(status, /\?\? untracked-other/);
   assert.doesNotMatch(status, /OBA-1\.md/); // committed, so not in status
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("commitFile refuses instead of racing when the lock is held by a live owner", () => {
+  const root = gitRepo();
+  assert.equal(acquireLock(root, { session: "other" }).ok, true);
+  writeFileSync(join(root, "f.md"), "x");
+  const r = commitFile(root, "f.md", "msg", [], { retries: 1, delayMs: 10 });
+  assert.deepEqual(r, { ok: false, locked: true, status: -1 });
+  releaseLock(root);
+  const r2 = commitFile(root, "f.md", "msg");
+  assert.equal(r2.ok, true);
+  assert.ok(!existsSync(join(root, ".blaze", "commit.lock"))); // released after commit
   rmSync(root, { recursive: true, force: true });
 });
