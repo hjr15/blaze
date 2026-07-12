@@ -328,6 +328,58 @@ test("pageHtml scopes drag-drop drop zones to columns/groups so chips are not mo
 test("pageHtml wires the Live view pill, region and poll", () => {
   const html = pageHtml({ project: "all" });
   assert.match(html, /data-view="live"/);
-  assert.match(html, /class="live"/);
   assert.match(html, /\/api\/live/);
+});
+
+test("GET /view/list returns a JSON envelope with only the list markup", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/view/list`);
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.view, "list");
+  assert.match(j.html, /class="list"/);
+  assert.doesNotMatch(j.html, /class="board"/);
+  assert.match(j.chipbar, /class="chipbar"/);
+  assert.equal(typeof j.total, "number");
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET /view/nope 404s", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/view/nope`);
+  assert.equal(res.status, 404);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET / gzips when asked", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/`, { headers: { "accept-encoding": "gzip" } });
+  assert.equal(res.headers.get("content-encoding"), "gzip"); // fetch auto-decodes body
+  assert.match(await res.text(), /<!doctype html>/);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET / renders only the active view's markup", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/`);
+  const html = await res.text();
+  assert.match(html, /id="viewhost" data-rendered="board"/);
+  assert.doesNotMatch(html, /class="list" data-board/); // list not inlined
+  assert.doesNotMatch(html, /svg class="graph"/);       // map not inlined
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET /view/live envelope carries the class=\"live\" markup", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/view/live`);
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.view, "live");
+  assert.match(j.html, /class="live"/);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
 });

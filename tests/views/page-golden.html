@@ -309,7 +309,7 @@
   </nav>
   
   
-  <div class="board" data-board="delivery">
+  <div id="viewhost" data-rendered="board"><div class="board" data-board="delivery">
       <section class="col" data-status="defined">
         <header class="colhead">
           <span class="colname">Defined</span>
@@ -408,118 +408,11 @@
 </ul></div>
     </details>
         </div>
-      </section></div>
-  <div class="list" data-board="delivery">
-      <details class="group" open data-group="defined" data-status="defined">
-        <summary class="grouphead">
-          <span class="gcaret">▸</span>
-          <span class="colname">Defined</span>
-          <span class="count">0</span>
-        </summary>
-        <div class="rows">
-          <div class="empty">No tickets</div>
-        </div>
-      </details>
-      <details class="group" open data-group="in-progress" data-status="in-progress">
-        <summary class="grouphead">
-          <span class="gcaret">▸</span>
-          <span class="colname">In Progress</span>
-          <span class="count">0</span>
-        </summary>
-        <div class="rows">
-          <div class="empty">No tickets</div>
-        </div>
-      </details>
-      <details class="group" open data-group="in-review" data-status="in-review">
-        <summary class="grouphead">
-          <span class="gcaret">▸</span>
-          <span class="colname">In Review</span>
-          <span class="count">1</span>
-        </summary>
-        <div class="rows">
-          
-    <details class="row prio-high" draggable="true" data-id="T-2" data-search="t-2 fixture two">
-      <summary>
-        <span class="rcaret">▸</span>
-        <span class="id">T-2</span>
-        <span class="rtitle">fixture two</span>
-        <span class="rbadges">
-          
-          <span class="prio prio-high">high</span>
-          <span class="type">epic</span>
-          
-        </span>
-        <span class="rmeta">30m · T</span>
-      </summary>
-      <div class="body" data-ticket="T-2"><p>body</p></div>
-    </details>
-        </div>
-      </details>
-      <details class="group" open data-group="done" data-status="done">
-        <summary class="grouphead">
-          <span class="gcaret">▸</span>
-          <span class="colname">Done</span>
-          <span class="count">0</span>
-        </summary>
-        <div class="rows">
-          <div class="empty">No tickets</div>
-        </div>
-      </details>
-      <details class="group" open data-group="todo" data-status="todo">
-        <summary class="grouphead">
-          <span class="gcaret">▸</span>
-          <span class="colname">Todo</span>
-          <span class="count">1</span>
-        </summary>
-        <div class="rows">
-          
-    <details class="row prio-medium" draggable="true" data-id="T-1" data-search="t-1 fixture one ryan">
-      <summary>
-        <span class="rcaret">▸</span>
-        <span class="id">T-1</span>
-        <span class="rtitle">fixture one</span>
-        <span class="rbadges">
-          
-          <span class="prio prio-medium">medium</span>
-          <span class="type">task</span>
-          
-        </span>
-        <span class="rmeta">@ryan · 5m · T</span>
-      </summary>
-      <div class="body" data-ticket="T-1"><h4>Acceptance Criteria</h4>
-<ul class="md">
-<li class="task"><input type="checkbox" data-ac-index="0" > one</li>
-<li class="task"><input type="checkbox" data-ac-index="1" checked> two</li>
-</ul>
-<h4>Notes</h4>
-<ul class="md">
-<li>plain</li>
-</ul></div>
-    </details>
-        </div>
-      </details></div>
-  <div class="live"><div class="empty">Loading live activity…</div></div>
-  <div class="metricsview"><div class="tiles"><div class="tile"><div class="tile-label">Total</div><div class="tile-value">2</div></div><div class="tile"><div class="tile-label">In Flight</div><div class="tile-value">2</div></div><div class="tile"><div class="tile-label">Done %</div><div class="tile-value">0%</div></div><div class="tile"><div class="tile-label">Throughput (14d)</div><div class="tile-value">0</div></div><div class="tile"><div class="tile-label">Median Cycle Time</div><div class="tile-value">—</div></div></div>
-<div class="metrics no-data">
-  <div class="mrange-group" role="group" aria-label="Range"><button type="button" class="mrange" data-range="30">30d</button><button type="button" class="mrange" data-range="90">90d</button><button type="button" class="mrange" data-range="180">180d</button><button type="button" class="mrange on" data-range="all">All</button></div>
-  <svg class="cfd" viewBox="0 0 800 300" preserveAspectRatio="none" role="img" aria-label="Cumulative flow diagram"></svg>
-  <div class="cfd-empty empty">No data yet.</div>
-  <div class="cfd-legend"></div>
-</div>
-<script type="application/json" id="cfd-series">[]</script></div>
-  <div class="mapview"><div class="mapwrap">
-  <div class="mapzoom" role="group" aria-label="Zoom">
-    <button type="button" class="mzoom" data-zoom="in" aria-label="Zoom in">+</button>
-    <button type="button" class="mzoom" data-zoom="out" aria-label="Zoom out">−</button>
-    <button type="button" class="mzoom" data-zoom="reset">Reset</button>
-  </div>
-  <svg class="graph" viewBox="0 0 480 124" data-w="480" data-h="124" role="img" aria-label="Ticket map">
-    <g class="graph-pan"><g class="node" data-node-id="T-2" tabindex="0" role="button" aria-label="T-2: fixture two" transform="translate(40,40)"><rect width="160" height="44" rx="8" fill="#161b22" stroke="#58a6ff" stroke-width="1.5" /><rect width="4" height="44" rx="2" fill="#58a6ff" /><text class="node-id" x="12" y="18">T-2</text><text class="node-title" x="12" y="34">fixture two</text></g><g class="node" data-node-id="T-1" tabindex="0" role="button" aria-label="T-1: fixture one" transform="translate(280,40)"><rect width="160" height="44" rx="8" fill="#161b22" stroke="#3fb950" stroke-width="1.5" /><rect width="4" height="44" rx="2" fill="#3fb950" /><text class="node-id" x="12" y="18">T-1</text><text class="node-title" x="12" y="34">fixture one</text></g></g>
-  </svg>
-  <div class="map-empty empty">No tickets to map.</div>
-</div></div>
+      </section></div></div>
   <script>
-    // View toggle (Board / List), persisted to localStorage.
+    // View toggle (Board / List), persisted to localStorage. Synchronous only —
+    // flips data-view + pill state + localStorage. Fetching/swapping the actual
+    // view markup is swapView's job (defined below, after toast/blazePost).
     const VIEW_KEY = "tracker.view";
     function applyView(v) {
       document.documentElement.dataset.view = v;
@@ -528,8 +421,7 @@
       try { localStorage.setItem(VIEW_KEY, v); } catch {}
     }
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
-      b.addEventListener("click", () => applyView(b.dataset.view)));
-    applyView(document.documentElement.dataset.view || "board");
+      b.addEventListener("click", () => window.blazeSwapView(b.dataset.view)));
   </script>
   <script>
     (function () {
@@ -549,9 +441,14 @@
         const h = params(); h.set("board", sel); location.hash = h.toString();  // preserves status=
       }
       pills.forEach((p) => p.addEventListener("click", () => pick(p.dataset.boardPill)));
-      const fromHash = params().get("board");
-      let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
-      show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+      // Re-applied on every board/list init (multi-board markup swaps in with
+      // the right board hidden, since #viewhost's DOM was just replaced).
+      window.blazeApplyBoardPill = function () {
+        const fromHash = params().get("board");
+        let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
+        show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+      };
+      window.blazeApplyBoardPill();
     })();
   </script>
   <script>
@@ -600,16 +497,20 @@
     });
     // Drop zones are the board columns and list groups only. The status chips
     // also carry data-status (for filtering) but must never be move targets, so
-    // scope the selector rather than matching every [data-status].
-    for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
-      zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
-      zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
-      zone.addEventListener("drop", (e) => {
-        e.preventDefault(); zone.classList.remove("drop-hover");
-        if (dragId && dragSourceStatus !== zone.dataset.status) blazePost("/api/move", { id: dragId, to: zone.dataset.status });
-        dragId = null; dragSourceStatus = null;
-      });
-    }
+    // scope the selector rather than matching every [data-status]. Bound fresh
+    // on every view init — listeners die with the swapped-out nodes, so
+    // re-binding each time cannot duplicate them.
+    window.blazeBindZones = function () {
+      for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
+        zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
+        zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
+        zone.addEventListener("drop", (e) => {
+          e.preventDefault(); zone.classList.remove("drop-hover");
+          if (dragId && dragSourceStatus !== zone.dataset.status) blazePost("/api/move", { id: dragId, to: zone.dataset.status });
+          dragId = null; dragSourceStatus = null;
+        });
+      }
+    };
     const PRIORITIES = ["highest","high","medium","low","lowest","none","urgent"];
     function blazeEdit(span) {
       const field = span.dataset.edit, id = span.closest("[data-ticket]").dataset.ticket;
@@ -654,6 +555,29 @@
     });
   </script>
   <script>
+    // View swap: fetch the fragment for a view, replace #viewhost + chipbar +
+    // crumbs + subline, then re-run that view's init(). Defined after the
+    // toast/blazePost block above so toast() is in scope.
+    async function swapView(v) {
+      const q = new URLSearchParams(location.search);
+      q.delete("view"); const qs = q.toString();
+      const r = await fetch("/view/" + v + (qs ? "?" + qs : ""));
+      if (!r.ok) { toast("view fetch failed"); return; }
+      const j = await r.json();
+      const host = document.getElementById("viewhost");
+      host.innerHTML = j.html; host.dataset.rendered = v;
+      document.querySelector(".chipbar").outerHTML = j.chipbar;
+      var crumbs = document.querySelector(".crumbs");
+      if (crumbs) crumbs.outerHTML = j.crumbs; // j.crumbs may be "" — that removes stale crumbs correctly
+      else if (j.crumbs) document.querySelector(".chipbar").insertAdjacentHTML("afterend", j.crumbs);
+      document.querySelector("header.top .sub").textContent = j.subline;
+      applyView(v);
+      (window.blazeViews[v] || { init: function () {} }).init();
+      window.blazeFilters && window.blazeFilters.apply();
+    }
+    window.blazeSwapView = swapView;
+  </script>
+  <script>
     // Client-side filtering: search + status chips COMPOSE — a card/row is
     // visible iff it passes both. Search matches the data-search index; a chip
     // constrains to a status set. Chip state lives in the URL hash
@@ -661,7 +585,6 @@
     // reload. Zero server round-trip; edits/moves reload and re-render counts.
     (function () {
       const search = document.getElementById("board-search");
-      const chipbar = document.querySelector(".chipbar");
       const ACTIVE_STATUSES = ["in-review","todo"];
       const ALL_STATUSES = ["in-review","todo"];
       const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
@@ -680,6 +603,7 @@
         return null;
       }
       function applyFilters() {
+        const chipbar = document.querySelector(".chipbar"); // re-queried: chipbar is replaced on every view swap
         const q = ((search && search.value) || "").trim().toLowerCase();
         const sv = hashStatus();
         const allowed = allowedStatuses(sv);
@@ -694,8 +618,11 @@
           chip.classList.toggle("on", (chip.dataset.chip || chip.dataset.status) === sv));
       }
       if (search) search.addEventListener("input", applyFilters);
-      if (chipbar) chipbar.addEventListener("click", (e) => {
-        const chip = e.target.closest(".chip"); if (!chip) return;
+      // Chipbar fix: the chipbar node itself gets replaced on every view swap
+      // (swapView sets .chipbar.outerHTML), so a listener bound to the node
+      // dies with it. Delegate at document level instead.
+      document.addEventListener("click", (e) => {
+        const chip = e.target.closest(".chipbar .chip"); if (!chip) return;
         setHashStatus(chip.dataset.chip || chip.dataset.status);
       });
       window.addEventListener("hashchange", applyFilters);
@@ -703,7 +630,18 @@
       applyFilters();
     })();
   </script>
+  <div id="blaze-panel" class="panel" hidden>
+    <div class="panel-backdrop" data-panel-close></div>
+    <aside class="panel-body" role="dialog" aria-label="Ticket detail">
+      <button type="button" class="panel-x" data-panel-close aria-label="Close">×</button>
+      <div class="panel-content"></div>
+    </aside>
+  </div>
   <script>
+    window.blazeViews = {
+      board: { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
+      list:  { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
+      live:  { init: function () { 
     // Live view: poll /api/live and render cards. Runs only meaningful work when
     // the Live view is active; degrades to a no-data message on error/empty.
     function fmtAge(ms){var s=Math.floor(Math.max(0,ms)/1000);if(s<5)return"now";if(s<60)return s+"s ago";var m=Math.floor(s/60);if(m<60)return m+"m ago";var h=Math.floor(m/60);if(h<24)return h+"h ago";return Math.floor(h/24)+"d ago";}
@@ -721,46 +659,10 @@
           +'</article>';}).join("");
       }catch(e){ el.innerHTML='<div class="empty">live activity offline</div>'; }
     }
-    document.querySelectorAll('.viewtoggle .pill[data-view="live"]').forEach(function(b){b.addEventListener("click", pollLive);});
-    pollLive(); setInterval(pollLive, 3000);
-  </script>
-  <div id="blaze-panel" class="panel" hidden>
-    <div class="panel-backdrop" data-panel-close></div>
-    <aside class="panel-body" role="dialog" aria-label="Ticket detail">
-      <button type="button" class="panel-x" data-panel-close aria-label="Close">×</button>
-      <div class="panel-content"></div>
-    </aside>
-  </div>
-  <script>
-  window.blazePanel = {
-    async open(id) {
-      const p = document.getElementById("blaze-panel"); if (!p || !id) return;
-      const content = p.querySelector(".panel-content");
-      content.innerHTML = '<div class="panel-empty">Loading…</div>';
-      p.hidden = false;
-      try {
-        const res = await fetch("/api/panel?id=" + encodeURIComponent(id));
-        content.innerHTML = res.ok ? await res.text()
-          : '<div class="panel-empty">Ticket not found.</div>';
-      } catch (err) {
-        // Static message — never interpolate id into innerHTML (dataset decodes
-        // the server's escaping, so a markup-bearing id would execute here).
-        content.innerHTML = '<div class="panel-empty">Failed to load ticket.</div>';
-      }
-    },
-    close() { const p = document.getElementById("blaze-panel"); if (p) p.hidden = true; },
-  };
-  document.addEventListener("click", (e) => {
-    if (e.target.closest("[data-panel-close]")) { window.blazePanel.close(); return; }
-    const drill = e.target.closest("[data-panel-open]");
-    if (drill) { e.preventDefault(); window.blazePanel.open(drill.getAttribute("data-panel-open")); }
-  });
-  document.addEventListener("keydown", (e) => {
-    if (e.key !== "Escape") return;
-    const p = document.getElementById("blaze-panel");
-    if (p && !p.hidden) window.blazePanel.close();   // no-op when already closed
-  });
-
+    if (!window.__blazeLiveTimer) window.__blazeLiveTimer = setInterval(pollLive, 3000);
+    pollLive();
+   } },
+      metrics: { init: function () { 
     (function () {
       var PALETTE = ["#79c0ff","#3fb950","#d29922","#f85149","#a371f7","#56d4dd","#ffa657","#7ee787"];
       var DAY_MS = 24 * 60 * 60 * 1000;
@@ -832,12 +734,10 @@
           drawCfd();
         });
       });
-      document.querySelectorAll('.viewtoggle .pill[data-view="metrics"]').forEach(function (b) {
-        b.addEventListener("click", drawCfd);
-      });
       drawCfd();
     })();
-  
+   } },
+      map:   { init: function () { 
   (function () {
     var svg = document.querySelector("svg.graph");
     if (!svg) return;
@@ -895,7 +795,50 @@
       if (g && window.blazePanel) { e.preventDefault(); window.blazePanel.open(g.getAttribute("data-node-id")); }
     });
   })();
-</script>
+ } },
+    };
+    
+  window.blazePanel = {
+    async open(id) {
+      const p = document.getElementById("blaze-panel"); if (!p || !id) return;
+      const content = p.querySelector(".panel-content");
+      content.innerHTML = '<div class="panel-empty">Loading…</div>';
+      p.hidden = false;
+      try {
+        const res = await fetch("/api/panel?id=" + encodeURIComponent(id));
+        content.innerHTML = res.ok ? await res.text()
+          : '<div class="panel-empty">Ticket not found.</div>';
+      } catch (err) {
+        // Static message — never interpolate id into innerHTML (dataset decodes
+        // the server's escaping, so a markup-bearing id would execute here).
+        content.innerHTML = '<div class="panel-empty">Failed to load ticket.</div>';
+      }
+    },
+    close() { const p = document.getElementById("blaze-panel"); if (p) p.hidden = true; },
+  };
+  document.addEventListener("click", (e) => {
+    if (e.target.closest("[data-panel-close]")) { window.blazePanel.close(); return; }
+    const drill = e.target.closest("[data-panel-open]");
+    if (drill) { e.preventDefault(); window.blazePanel.open(drill.getAttribute("data-panel-open")); }
+  });
+  document.addEventListener("keydown", (e) => {
+    if (e.key !== "Escape") return;
+    const p = document.getElementById("blaze-panel");
+    if (p && !p.hidden) window.blazePanel.close();   // no-op when already closed
+  });
+
+  </script>
+  <script>
+    // First-load init runs exactly once: if the client's saved view differs
+    // from the server-rendered view, swap (fetches + inits); otherwise just
+    // apply pill/localStorage state and run that view's init directly.
+    (function () {
+      const host = document.getElementById("viewhost");
+      const saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      if (saved !== host.dataset.rendered) { swapView(saved); }        // fetches + inits
+      else { applyView(saved); (window.blazeViews[saved] || { init: function () {} }).init(); }
+    })();
+  </script>
   
 </body>
 </html>

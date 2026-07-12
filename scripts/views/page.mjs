@@ -22,11 +22,76 @@ const cfg = loadConfig({ root: resolveRoots().dataRoot });
 
 export const CSRF = randomUUID();
 
+// ---- view registry --------------------------------------------------------
+
+// How to render each view's fragment. metrics/map compute their models
+// lazily — only when that view is actually requested — so GET / (which
+// always renders "board") never pays for the metrics/graph walk.
+export function renderView(name, { m, pDir, project, now, transitions }) {
+  switch (name) {
+    case "board": return board.render(m);
+    case "list": return list.render(m);
+    case "live": return live.render();
+    case "metrics": {
+      const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
+      return `<div class="metricsview">${metrics.render(metricsModel({ board: m, transitions: txns, now, project }))}</div>`;
+    }
+    case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, project, index: m.index }))}</div>`;
+    default: return null;
+  }
+}
+export const VIEW_NAMES = ["board", "list", "live", "metrics", "map"];
+
+// ---- shared fragments (chipbar / crumbs / subline) -------------------------
+// Extracted so pageHtml (full document) and viewEnvelope (JSON fragment for a
+// swap) render byte-identical chrome from one source.
+
+export function chipbarHtml(m) {
+  const statuses = m.columns.map((c) => c.dir);
+  const activeSet = new Set(activeStatuses(statuses));
+  const activeCount = m.columns.filter((c) => activeSet.has(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
+  return `<nav class="chipbar" aria-label="Filter by status">
+    <button type="button" class="chip" data-chip="all">All <span class="chip-n">${m.total}</span></button>
+    <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
+    ${m.columns.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
+  </nav>`;
+}
+
+export function crumbsHtml(m, project) {
+  if (!m.focus) return "";
+  const proj = project && project !== "all" ? `project=${esc(project)}` : "";
+  return `<nav class="crumbs"><a href="?${proj}">All</a>${m.focus.crumbs
+    .map((c) => ` › <a href="?focus=${esc(c.id)}${proj ? "&" + proj : ""}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
+    .join("")}</nav>`;
+}
+
+export function sublineHtml(m) {
+  const inflight = m.columns.filter((c) => ["todo", "in-progress", "in-review"].includes(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
+  return `${m.total} tickets · ${inflight} in flight`;
+}
+
+// ---- JSON fragment envelope (client swap target) ---------------------------
+
+export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions } = {}) {
+  if (!VIEW_NAMES.includes(view)) return null;
+  const pDir = _pDir ?? resolveRoots().projectsDir;
+  const m = boardModel(pDir, { project, focus, flat });
+  return {
+    view,
+    html: renderView(view, { m, pDir, project, now, transitions }),
+    chipbar: chipbarHtml(m),
+    crumbs: crumbsHtml(m, project),
+    total: m.total,
+    subline: sublineHtml(m),
+  };
+}
+
 // ---- render -------------------------------------------------------------
 
 export function pageHtml({
   project = "all",
   focus = null,
+  view = "board",
   afterHeader = "",
   beforeBodyEnd = "",
   projectsDir: _pDir,
@@ -35,38 +100,16 @@ export function pageHtml({
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const m = boardModel(pDir, { project, focus });
-  const { columns: cols, total, projects, selected } = m;
-  const boardHtml = board.render(m);
-  const listHtml = list.render(m);
+  const { columns: cols, projects, selected } = m;
   const boards = m.boards || [];
   const boardToggle = boards.length > 1
     ? `<div class="boardtoggle" role="group" aria-label="Board">${boards
         .map((b, i) => `<button type="button" class="bpill${i === 0 ? " on" : ""}" data-board-pill="${esc(b.name)}">${esc(b.label)}</button>`)
         .join("")}</div>`
     : "";
-  // Status filter chips: one per resolved-schema status (with a live count),
-  // plus All and Active presets. Counts come straight off the board columns —
-  // no new source of truth. Active = the schema-driven non-terminal set.
+  const chipbar = chipbarHtml(m);
+  const crumbs = crumbsHtml(m, project);
   const statuses = cols.map((c) => c.dir);
-  const activeSet = new Set(activeStatuses(statuses));
-  const activeCount = cols.filter((c) => activeSet.has(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
-  const chipbar = `<nav class="chipbar" aria-label="Filter by status">
-    <button type="button" class="chip" data-chip="all">All <span class="chip-n">${total}</span></button>
-    <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
-    ${cols.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
-  </nav>`;
-  const crumbsHtml = m.focus
-    ? `<nav class="crumbs"><a href="?">All</a>${m.focus.crumbs
-        .map((c) => ` › <a href="?focus=${esc(c.id)}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
-        .join("")}</nav>`
-    : "";
-  // Hermetic by default only when the caller opts in (tests pass `transitions: []`
-  // + a fixed `now`) — otherwise resolve the real transitions cache, same as any
-  // other live render.
-  const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
-  const mm = metricsModel({ board: m, transitions: txns, now, project });
-  const metricsHtml = metrics.render(mm);
-  const gm = graphModel({ projectsDir: pDir, project, index: m.index });
 
   return `<!doctype html>
 <html lang="en" data-view="board">
@@ -178,7 +221,7 @@ export function pageHtml({
   <div id="toast" role="status"></div>
   <header class="top">
     <h1>${cfg.boardTitle}</h1>
-    <span class="sub">${total} tickets · ${cols.filter((c) => ["todo","in-progress","in-review"].includes(c.dir)).reduce((n,c)=>n+c.tickets.length,0)} in flight</span>
+    <span class="sub">${sublineHtml(m)}</span>
     ${["all", ...Object.keys(projects)].map((k) =>
       `<a class="proj ${k === selected ? "on" : ""}" href="${k === "all" ? "/" : "/?project=" + esc(k)}">${k === "all" ? "All" : esc(k)}${k === "all" ? "" : ` <span class="count">${projects[k]}</span>`}</a>`
     ).join("")}
@@ -196,15 +239,13 @@ export function pageHtml({
     <span class="sub" id="sync"></span>
   </header>
   ${chipbar}
-  ${crumbsHtml}
+  ${crumbs}
   ${afterHeader}
-  ${boardHtml}
-  ${listHtml}
-  ${live.render()}
-  <div class="metricsview">${metricsHtml}</div>
-  <div class="mapview">${map.render(gm)}</div>
+  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions })}</div>
   <script>
-    // View toggle (Board / List), persisted to localStorage.
+    // View toggle (Board / List), persisted to localStorage. Synchronous only —
+    // flips data-view + pill state + localStorage. Fetching/swapping the actual
+    // view markup is swapView's job (defined below, after toast/blazePost).
     const VIEW_KEY = "tracker.view";
     function applyView(v) {
       document.documentElement.dataset.view = v;
@@ -213,8 +254,7 @@ export function pageHtml({
       try { localStorage.setItem(VIEW_KEY, v); } catch {}
     }
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
-      b.addEventListener("click", () => applyView(b.dataset.view)));
-    applyView(document.documentElement.dataset.view || "board");
+      b.addEventListener("click", () => window.blazeSwapView(b.dataset.view)));
   </script>
   <script>
     (function () {
@@ -234,9 +274,14 @@ export function pageHtml({
         const h = params(); h.set("board", sel); location.hash = h.toString();  // preserves status=
       }
       pills.forEach((p) => p.addEventListener("click", () => pick(p.dataset.boardPill)));
-      const fromHash = params().get("board");
-      let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
-      show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+      // Re-applied on every board/list init (multi-board markup swaps in with
+      // the right board hidden, since #viewhost's DOM was just replaced).
+      window.blazeApplyBoardPill = function () {
+        const fromHash = params().get("board");
+        let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {}
+        show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0]));
+      };
+      window.blazeApplyBoardPill();
     })();
   </script>
   <script>
@@ -285,16 +330,20 @@ export function pageHtml({
     });
     // Drop zones are the board columns and list groups only. The status chips
     // also carry data-status (for filtering) but must never be move targets, so
-    // scope the selector rather than matching every [data-status].
-    for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
-      zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
-      zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
-      zone.addEventListener("drop", (e) => {
-        e.preventDefault(); zone.classList.remove("drop-hover");
-        if (dragId && dragSourceStatus !== zone.dataset.status) blazePost("/api/move", { id: dragId, to: zone.dataset.status });
-        dragId = null; dragSourceStatus = null;
-      });
-    }
+    // scope the selector rather than matching every [data-status]. Bound fresh
+    // on every view init — listeners die with the swapped-out nodes, so
+    // re-binding each time cannot duplicate them.
+    window.blazeBindZones = function () {
+      for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]")) {
+        zone.addEventListener("dragover", (e) => { e.preventDefault(); zone.classList.add("drop-hover"); });
+        zone.addEventListener("dragleave", () => zone.classList.remove("drop-hover"));
+        zone.addEventListener("drop", (e) => {
+          e.preventDefault(); zone.classList.remove("drop-hover");
+          if (dragId && dragSourceStatus !== zone.dataset.status) blazePost("/api/move", { id: dragId, to: zone.dataset.status });
+          dragId = null; dragSourceStatus = null;
+        });
+      }
+    };
     const PRIORITIES = ${JSON.stringify(PRIORITIES)};
     function blazeEdit(span) {
       const field = span.dataset.edit, id = span.closest("[data-ticket]").dataset.ticket;
@@ -339,6 +388,29 @@ export function pageHtml({
     });
   </script>
   <script>
+    // View swap: fetch the fragment for a view, replace #viewhost + chipbar +
+    // crumbs + subline, then re-run that view's init(). Defined after the
+    // toast/blazePost block above so toast() is in scope.
+    async function swapView(v) {
+      const q = new URLSearchParams(location.search);
+      q.delete("view"); const qs = q.toString();
+      const r = await fetch("/view/" + v + (qs ? "?" + qs : ""));
+      if (!r.ok) { toast("view fetch failed"); return; }
+      const j = await r.json();
+      const host = document.getElementById("viewhost");
+      host.innerHTML = j.html; host.dataset.rendered = v;
+      document.querySelector(".chipbar").outerHTML = j.chipbar;
+      var crumbs = document.querySelector(".crumbs");
+      if (crumbs) crumbs.outerHTML = j.crumbs; // j.crumbs may be "" — that removes stale crumbs correctly
+      else if (j.crumbs) document.querySelector(".chipbar").insertAdjacentHTML("afterend", j.crumbs);
+      document.querySelector("header.top .sub").textContent = j.subline;
+      applyView(v);
+      (window.blazeViews[v] || { init: function () {} }).init();
+      window.blazeFilters && window.blazeFilters.apply();
+    }
+    window.blazeSwapView = swapView;
+  </script>
+  <script>
     // Client-side filtering: search + status chips COMPOSE — a card/row is
     // visible iff it passes both. Search matches the data-search index; a chip
     // constrains to a status set. Chip state lives in the URL hash
@@ -346,7 +418,6 @@ export function pageHtml({
     // reload. Zero server round-trip; edits/moves reload and re-render counts.
     (function () {
       const search = document.getElementById("board-search");
-      const chipbar = document.querySelector(".chipbar");
       const ACTIVE_STATUSES = ${JSON.stringify(activeStatuses(statuses)).replace(/</g, "\\u003c")};
       const ALL_STATUSES = ${JSON.stringify(statuses).replace(/</g, "\\u003c")};
       const hashParams = () => new URLSearchParams((location.hash || "").replace(/^#/, ""));
@@ -365,6 +436,7 @@ export function pageHtml({
         return null;
       }
       function applyFilters() {
+        const chipbar = document.querySelector(".chipbar"); // re-queried: chipbar is replaced on every view swap
         const q = ((search && search.value) || "").trim().toLowerCase();
         const sv = hashStatus();
         const allowed = allowedStatuses(sv);
@@ -379,8 +451,11 @@ export function pageHtml({
           chip.classList.toggle("on", (chip.dataset.chip || chip.dataset.status) === sv));
       }
       if (search) search.addEventListener("input", applyFilters);
-      if (chipbar) chipbar.addEventListener("click", (e) => {
-        const chip = e.target.closest(".chip"); if (!chip) return;
+      // Chipbar fix: the chipbar node itself gets replaced on every view swap
+      // (swapView sets .chipbar.outerHTML), so a listener bound to the node
+      // dies with it. Delegate at document level instead.
+      document.addEventListener("click", (e) => {
+        const chip = e.target.closest(".chipbar .chip"); if (!chip) return;
         setHashStatus(chip.dataset.chip || chip.dataset.status);
       });
       window.addEventListener("hashchange", applyFilters);
@@ -388,9 +463,28 @@ export function pageHtml({
       applyFilters();
     })();
   </script>
-  <script>${live.clientScript}</script>
   ${panel.render()}
-  <script>${panel.clientScript}${metrics.clientScript}${map.clientScript}</script>
+  <script>
+    window.blazeViews = {
+      board: { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
+      list:  { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
+      live:  { init: function () { ${live.clientScript} } },
+      metrics: { init: function () { ${metrics.clientScript} } },
+      map:   { init: function () { ${map.clientScript} } },
+    };
+    ${panel.clientScript}
+  </script>
+  <script>
+    // First-load init runs exactly once: if the client's saved view differs
+    // from the server-rendered view, swap (fetches + inits); otherwise just
+    // apply pill/localStorage state and run that view's init directly.
+    (function () {
+      const host = document.getElementById("viewhost");
+      const saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      if (saved !== host.dataset.rendered) { swapView(saved); }        // fetches + inits
+      else { applyView(saved); (window.blazeViews[saved] || { init: function () {} }).init(); }
+    })();
+  </script>
   ${beforeBodyEnd}
 </body>
 </html>`;

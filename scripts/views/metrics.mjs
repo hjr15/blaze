@@ -187,9 +187,6 @@ export const clientScript = `
           drawCfd();
         });
       });
-      document.querySelectorAll('.viewtoggle .pill[data-view="metrics"]').forEach(function (b) {
-        b.addEventListener("click", drawCfd);
-      });
       drawCfd();
     })();
   `;
