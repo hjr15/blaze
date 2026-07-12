@@ -45,6 +45,20 @@ test("same size + forced same mtime still re-parses when content differs is NOT 
   assert.notEqual(before.frontmatter, after.frontmatter);
 });
 
+test("mtime-only change (identical size/content) still invalidates the cache", () => {
+  // Kills an `&&`→`||` mutant on the cache-hit condition: writing the exact
+  // same bytes leaves size unchanged, then bumping mtime alone must still
+  // force a re-parse (a `||` mutant would treat matching size as a hit).
+  const dir = fixture();
+  const p = join(dir, "T", "todo", "T-1.md");
+  const before = [...walkTickets(dir)][0];
+  const bumped = new Date(Date.now() + 5000); // comfortably past filesystem mtime resolution
+  utimesSync(p, bumped, bumped);
+  const after = [...walkTickets(dir)][0];
+  assert.notEqual(before.frontmatter, after.frontmatter); // new object identity: cache was invalidated
+  assert.equal(after.frontmatter.title, before.frontmatter.title); // content unchanged
+});
+
 test("buildIndex accepts pre-walked tickets and skips its own walk", () => {
   const dir = fixture();
   const tickets = [...walkTickets(dir)];

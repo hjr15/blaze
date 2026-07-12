@@ -44,6 +44,16 @@ export function* walkTickets(projectsDir) {
   }
   // Lazy prune: drop cache entries whose file vanished (moved/deleted) so a
   // long-lived server doesn't accumulate one stale entry per ticket move.
+  // This only runs on a FULL drain of the generator — code here is reached
+  // only when the loop above finishes on its own. A caller that breaks early
+  // (move/edit/log/resolve all `break` once they find the id they're after)
+  // calls the generator's implicit .return(), which unwinds at the last
+  // `yield` and skips straight past this block; wrapping it in try/finally
+  // would not change that, since `seen` at break time is partial and pruning
+  // against a partial `seen` would wrongly evict entries for tickets the walk
+  // simply hadn't reached yet, not entries that actually vanished. So partial
+  // walks intentionally skip pruning; boardModel's full walk on every page
+  // render is the reliable prune point that keeps the cache bounded.
   if (parseCache.size > seen.size) {
     for (const k of parseCache.keys()) if (!seen.has(k)) parseCache.delete(k);
   }
