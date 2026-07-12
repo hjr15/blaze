@@ -179,11 +179,9 @@ git commit -m "BLZ-74: per-session pending queues in pending-ledger" -- scripts/
 - Consumes: `sessionId()`, `appendEntry(root, entry, session)` from Task 1.
 - Produces: batch-mode queue entries carry a `session` field when `BLAZE_SESSION` is set and land in that session's queue file; unset-env behavior byte-identical to v0.3.0.
 
-- [ ] **Step 1: Write the failing test** — append to `tests/commit-or-queue.test.mjs` (match the file's existing imports/helpers; add these tests using a temp dir helper like the ledger tests):
+- [ ] **Step 1: Write the failing test** — append to `tests/commit-or-queue.test.mjs`. NOTE: `readEntries` is **already imported** at line 8 of that file — do not re-import it (duplicate declaration = SyntaxError). Match the file's existing imports/helpers; add these tests using a temp dir helper like the ledger tests:
 
 ```js
-import { readEntries } from "../scripts/pending-ledger.mjs";
-
 test("batch mode routes to the session queue and stamps session", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
   const prev = process.env.BLAZE_SESSION;
@@ -245,16 +243,20 @@ and inside `commitOrQueue`:
   }
 ```
 
-- [ ] **Step 4: Run tests to verify they pass**
+- [ ] **Step 4: Harden existing tests against an ambient `BLAZE_SESSION`** — the operator's sessions will export `BLAZE_SESSION` globally (Task 8 docs tell them to), which would re-route these tests' queue writes and break their fallback-file assertions. Make them env-independent:
+  - `tests/runner-batch.test.mjs` (lines ~34 and ~56): the spawned log/move runners inherit `process.env`. Build the env explicitly and strip the var: `const env = { ...process.env, BLAZE_COMMIT_MODE: "batch" }; delete env.BLAZE_SESSION;` (adapt to however the file currently builds its spawn env).
+  - The pre-existing in-process test in `tests/commit-or-queue.test.mjs` (batch assertion around line 28): wrap the `commitOrQueue` call with save/delete/restore of `process.env.BLAZE_SESSION`, same pattern as the new tests above.
 
-Run: `node --test tests/commit-or-queue.test.mjs tests/runner-batch.test.mjs`
-Expected: PASS (runner-batch proves unset-env back-compat end to end).
+- [ ] **Step 5: Run tests to verify they pass — including with the var ambient**
 
-- [ ] **Step 5: Commit**
+Run: `node --test tests/commit-or-queue.test.mjs tests/runner-batch.test.mjs && BLAZE_SESSION=ambient-check node --test tests/commit-or-queue.test.mjs tests/runner-batch.test.mjs`
+Expected: PASS both runs (runner-batch proves unset-env back-compat end to end; the second run proves ambient-env independence).
+
+- [ ] **Step 6: Commit**
 
 ```bash
-git add scripts/commit-or-queue.mjs tests/commit-or-queue.test.mjs
-git commit -m "BLZ-75: batch ops queue to the caller's session ledger" -- scripts/commit-or-queue.mjs tests/commit-or-queue.test.mjs
+git add scripts/commit-or-queue.mjs tests/commit-or-queue.test.mjs tests/runner-batch.test.mjs
+git commit -m "BLZ-75: batch ops queue to the caller's session ledger" -- scripts/commit-or-queue.mjs tests/commit-or-queue.test.mjs tests/runner-batch.test.mjs
 ```
 
 ---
@@ -282,7 +284,7 @@ function runCommit(root, cwdSub, { session, args = [] } = {}) {
 }
 ```
 
-Update the two existing call sites: `runCommit(root)` → `runCommit(root).stdout` where the return value is matched, and `runCommit(root, "projects/OBA")` stays valid (returns the object, result unused). Add `spawnSync` to the imports from `node:child_process`.
+Update the **three** existing call sites (lines ~37, ~53, ~105): the two that match the return value (`const out = runCommit(root)` at ~37 and ~105) become `runCommit(root).stdout`; `runCommit(root, "projects/OBA")` at ~53 stays valid (returns the object, result unused). Add `spawnSync` to the imports from `node:child_process`.
 
 - [ ] **Step 2: Write the failing repro test** — this is the 2026-07-11 incident, asserted as *fixed* behavior (red on current code):
 
@@ -414,7 +416,7 @@ console.log(`blaze commit: flushed ${entries.length} op(s) → ${subject}`);
 - [ ] **Step 5: Run the full suite**
 
 Run: `npm test`
-Expected: PASS — including the two pre-existing commit-runner tests (they queue to the fallback with no session, and the runner with no session drains exactly that).
+Expected: PASS — including the three pre-existing commit-runner tests (they queue to the fallback with no session, and the runner with no session drains exactly that).
 
 - [ ] **Step 6: Commit**
 
@@ -613,6 +615,8 @@ git commit -m "BLZ-77: advisory mkdir commit lock with stale-steal" -- scripts/c
 - Produces: `commitFile(root, file, message, extraFiles = [], lockOpts = {})` — new optional `lockOpts` forwarded to `acquireLock`; locked failure returns `{ ok: false, locked: true, status: -1 }`. Runner exits 1 with "commit.lock held" and keeps queues when locked out.
 
 - [ ] **Step 1: Write the failing tests**
+
+**Import note for BOTH test files in this task:** the new tests use `existsSync`, which neither file currently imports — extend each file's `node:fs` import (e.g. `import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, existsSync } from "node:fs";`).
 
 Append to `tests/serve-commit.test.mjs`:
 
