@@ -179,9 +179,20 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
       res.end(JSON.stringify(envelope));
       return;
     }
-    if (req.url === "/" || req.url === "") {
+    if (req.method === "GET" && (req.url === "" || req.url === "/" || req.url.startsWith("/?"))) {
+      // Parse the query so ?project=/?focus=/?flat=/?view= scope the initial
+      // full-page render — matches serve.mjs's GET / (a drilldown link is a
+      // full-page ?focus= navigation, so an exact "/" match would 404 it).
+      const u = new URL(req.url || "/", "http://localhost");
       res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(pageHtml({ afterHeader: CONTROLS_HTML, beforeBodyEnd: ACTIVITY_SCRIPT }));
+      res.end(pageHtml({
+        project: u.searchParams.get("project") || "all",
+        focus: u.searchParams.get("focus") || null,
+        flat: u.searchParams.get("flat") === "1",
+        view: u.searchParams.get("view") || "board",
+        afterHeader: CONTROLS_HTML,
+        beforeBodyEnd: ACTIVITY_SCRIPT,
+      }));
       return;
     }
     const ctl = req.url && req.url.match(/^\/control\/(reconcile|groomer)\/(start|stop|run)$/);

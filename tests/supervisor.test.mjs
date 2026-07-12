@@ -85,6 +85,35 @@ test("control/groomer/run publishes a groom event on the SSE stream and commits"
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("GET / routes with query params (?focus=/?flat=/?project=/?view=), not just bare /", async () => {
+  const dir = gitBoard();
+  const cfg = loadConfig({ root: dir, env: {} });
+  const app = createApp(cfg, { root: dir });
+  await new Promise((r) => app.server.listen(0, r));
+  const port = app.server.address().port;
+
+  // Bare / renders the board (unfocused ⇒ default view), not a 404.
+  const bare = await get(port, "/");
+  assert.equal(bare.status, 200);
+  assert.match(bare.body, /<!doctype html>/i);
+  assert.match(bare.body, /data-rendered="board"/);
+  // Query-param URLs must route (not 404): a drilldown link is a full-page
+  // ?focus= navigation; the flat escape hatch and project scope are the same.
+  // (pageHtml resolves projectsDir from cwd, so these assert routing, not the
+  // fixture's own data — the ?view= case below proves the param is forwarded.)
+  assert.equal((await get(port, "/?focus=TASK-001")).status, 200);
+  assert.equal((await get(port, "/?flat=1")).status, 200);
+  assert.equal((await get(port, "/?project=TASK")).status, 200);
+  // ?view= is forwarded to pageHtml: a fixture-independent proof that the query
+  // reaches the render (bare renders board; ?view=list renders the list view).
+  const listView = await get(port, "/?view=list");
+  assert.equal(listView.status, 200);
+  assert.match(listView.body, /data-rendered="list"/);
+
+  app.server.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("GET /view/<name> serves a JSON fragment like serve.mjs, 404s on an unknown view", async () => {
   const dir = gitBoard();
   const cfg = loadConfig({ root: dir, env: {} });
