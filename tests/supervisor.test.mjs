@@ -50,6 +50,20 @@ function post(port, path) {
   });
 }
 
+function get(port, path) {
+  return new Promise((resolve, reject) => {
+    import("node:http").then(({ request }) => {
+      const req = request({ port, path, method: "GET" }, (res) => {
+        let buf = "";
+        res.on("data", (c) => (buf += c));
+        res.on("end", () => resolve({ status: res.statusCode, body: buf }));
+      });
+      req.on("error", reject);
+      req.end();
+    });
+  });
+}
+
 test("control/groomer/run publishes a groom event on the SSE stream and commits", async () => {
   const dir = gitBoard();
   const cfg = loadConfig({ root: dir, env: {} });
@@ -66,6 +80,25 @@ test("control/groomer/run publishes a groom event on the SSE stream and commits"
   assert.equal(evt.id, "TASK-001");
   const log = execFileSync("git", ["-C", dir, "log", "--oneline"], { encoding: "utf8" });
   assert.match(log, /chore\(groom\): TASK-001/);
+
+  app.server.close();
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("GET /view/<name> serves a JSON fragment like serve.mjs, 404s on an unknown view", async () => {
+  const dir = gitBoard();
+  const cfg = loadConfig({ root: dir, env: {} });
+  const app = createApp(cfg, { root: dir });
+  await new Promise((r) => app.server.listen(0, r));
+  const port = app.server.address().port;
+
+  const board = await get(port, "/view/board");
+  assert.equal(board.status, 200);
+  const envelope = JSON.parse(board.body);
+  assert.equal(envelope.view, "board");
+
+  const unknown = await get(port, "/view/nope");
+  assert.equal(unknown.status, 404);
 
   app.server.close();
   rmSync(dir, { recursive: true, force: true });

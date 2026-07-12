@@ -4,10 +4,11 @@
 //   node scripts/serve.mjs            # serves http://localhost:<cfg.port>
 //   PORT=8080 node scripts/serve.mjs  # custom port
 //
-// Reads the markdown tickets fresh on every request, so editing a file in your
-// IDE and refreshing shows the change. The page also auto-reloads within a few
-// seconds when any ticket file changes (it polls a cheap content hash), but
-// never reloads while the files are untouched — so it won't fight you mid-read.
+// Stats every ticket file on each request and re-parses only those whose
+// mtime+size changed — an on-disk edit is always reflected, but unchanged
+// files skip the parse. The page also auto-reloads within a few seconds when
+// any ticket file changes (it polls a cheap content hash), but never reloads
+// while the files are untouched — so it won't fight you mid-read.
 
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
