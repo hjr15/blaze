@@ -34,7 +34,8 @@ export function renderView(name, { m, pDir, project, now, transitions }) {
     case "live": return live.render();
     case "metrics": {
       const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
-      return `<div class="metricsview">${metrics.render(metricsModel({ board: m, transitions: txns, now, project }))}</div>`;
+      const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
+      return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
     case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, project, index: m.index }))}</div>`;
     default: return null;
@@ -57,12 +58,20 @@ export function chipbarHtml(m) {
   </nav>`;
 }
 
-export function crumbsHtml(m, project) {
-  if (!m.focus) return "";
+export function crumbsHtml(m, project, flat = false) {
+  if (!m.focus && !flat) return "";
   const proj = project && project !== "all" ? `project=${esc(project)}` : "";
+  // Goals-first nesting (BLZ-87) is the default: no-focus shows parentless
+  // tickets only, focus shows direct children only. `flat` is the escape
+  // hatch back to the old whole-corpus wall — toggle it beside the crumbs
+  // (or on its own when there's no focus but flat=1 is set).
+  const flatToggle = flat
+    ? `<a href="?${proj}">nested</a>`
+    : `<a href="?flat=1${proj ? "&" + proj : ""}">flat</a>`;
+  if (!m.focus) return `<nav class="crumbs">Flat view · ${flatToggle}</nav>`;
   return `<nav class="crumbs"><a href="?${proj}">All</a>${m.focus.crumbs
     .map((c) => ` › <a href="?focus=${esc(c.id)}${proj ? "&" + proj : ""}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
-    .join("")}</nav>`;
+    .join("")} · ${flatToggle}</nav>`;
 }
 
 export function sublineHtml(m) {
@@ -80,7 +89,7 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
     view,
     html: renderView(view, { m, pDir, project, now, transitions }),
     chipbar: chipbarHtml(m),
-    crumbs: crumbsHtml(m, project),
+    crumbs: crumbsHtml(m, project, flat),
     total: m.total,
     subline: sublineHtml(m),
   };
@@ -91,6 +100,7 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
 export function pageHtml({
   project = "all",
   focus = null,
+  flat = false,
   view = "board",
   afterHeader = "",
   beforeBodyEnd = "",
@@ -99,7 +109,7 @@ export function pageHtml({
   transitions,
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
-  const m = boardModel(pDir, { project, focus });
+  const m = boardModel(pDir, { project, focus, flat });
   const { columns: cols, projects, selected } = m;
   const boards = m.boards || [];
   const boardToggle = boards.length > 1
@@ -108,7 +118,7 @@ export function pageHtml({
         .join("")}</div>`
     : "";
   const chipbar = chipbarHtml(m);
-  const crumbs = crumbsHtml(m, project);
+  const crumbs = crumbsHtml(m, project, flat);
   const statuses = cols.map((c) => c.dir);
 
   return `<!doctype html>

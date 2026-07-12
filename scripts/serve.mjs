@@ -113,8 +113,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     if (req.method === "GET" && u.pathname === "/") {
       const project = u.searchParams.get("project") || "all";
       const focus = u.searchParams.get("focus") || null;
+      const flat = u.searchParams.get("flat") === "1";
       const view = u.searchParams.get("view") || "board";
-      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, view }));
+      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, view }));
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
