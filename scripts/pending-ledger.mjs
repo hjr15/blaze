@@ -46,11 +46,15 @@ export function readEntries(root, session = null) {
 
 // Read a queue for draining: entries plus the byte length consumed, so the
 // drainer can clear exactly what it read and preserve ops appended meanwhile.
+// bytes is measured on the RAW buffer — the same offset space clearLedger
+// subarrays. Measuring the decoded string would inflate the offset when the
+// file ends in a partial multibyte char (process killed mid-append): the
+// invalid byte decodes to U+FFFD, which re-encodes at 3 bytes.
 export function readForDrain(root, session = null) {
   const path = ledgerPath(root, session);
   if (!existsSync(path)) return { entries: [], bytes: 0 };
-  const text = readFileSync(path, "utf8");
-  return { entries: parseLines(text), bytes: Buffer.byteLength(text) };
+  const buf = readFileSync(path);
+  return { entries: parseLines(buf.toString("utf8")), bytes: buf.length };
 }
 
 export function clearLedger(root, session = null, consumedBytes = null) {
@@ -62,8 +66,8 @@ export function clearLedger(root, session = null, consumedBytes = null) {
   }
   // Drain-exact clear: keep only bytes appended AFTER the drain read, so an op
   // queued by another session mid-commit isn't lost. A microsecond
-  // read-rewrite window remains between readForDrain() and this write (an
-  // append landing in that gap is included in consumedBytes and dropped) —
+  // read-rewrite window remains between the readFileSync and writeFileSync
+  // below (an append landing in that gap is overwritten by the rewrite) —
   // acceptable for this advisory, single-host design; not distributed-safe.
   const buf = readFileSync(path);
   writeFileSync(path, buf.subarray(consumedBytes));

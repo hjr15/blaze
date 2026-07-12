@@ -70,6 +70,28 @@ test("drain-exact: an op appended after the drain read survives clearLedger(byte
   rmSync(root, { recursive: true, force: true });
 });
 
+test("drain-exact: bytes measured on the raw buffer — a trailing partial multibyte char must not inflate the offset", () => {
+  const root = tmp();
+  const op1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t1" };
+  const op2 = { id: "X-2", op: "new", message: "X-2: late op after crash residue", files: ["projects/X/backlog/X-2.md"], ts: "t2" };
+  appendEntry(root, op1);
+  // Process killed mid-append: raw partial UTF-8 on disk (0xe6 is a 3-byte
+  // lead with no continuation bytes), no trailing newline. Decoding turns the
+  // invalid byte into U+FFFD, which RE-encodes at 3 bytes — so measuring bytes
+  // on the decoded string overstates the on-disk length by 2 here, and a later
+  // clearLedger(bytes) subarray would chop the head off the next line.
+  appendFileSync(ledgerPath(root), Buffer.from([0x7b, 0x22, 0xe6]));
+  const { entries, bytes } = readForDrain(root);
+  assert.deepEqual(entries, [op1]); // the corrupt partial line is skipped
+  assert.equal(bytes, Buffer.byteLength(JSON.stringify(op1) + "\n") + 3); // raw on-disk bytes, not re-encoded length
+  // The late op lands on its own clean line after the crash residue.
+  appendFileSync(ledgerPath(root), "\n");
+  appendEntry(root, op2);
+  clearLedger(root, null, bytes);
+  assert.deepEqual(readEntries(root), [op2]); // op2 survives intact — no head-chop
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("readEntries tolerates a trailing partial/corrupt line", () => {
   const root = tmp();
   appendEntry(root, { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" });
