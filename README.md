@@ -148,6 +148,12 @@ key, and how an agent should drive the board.
 `codeRepos` to mirror, `requireWorklogBeforeTerminal`) live in
 `projects/<KEY>/project.json` — see [`AGENTS.md`](AGENTS.md#configuration).
 
+A `views` block toggles which of Board / List / Live / Metrics / Map are
+available — every view defaults to `true`, so an existing config sees no
+change. Set one to `false` (e.g. `"views": { "map": false }`) to hide its
+pill and 404 its fragment endpoint until it's ready; `board` can't be
+disabled since the shell always needs a default view.
+
 The type registry and workflows are themselves configurable: add a `schema` block
 (top-level or per-project) to override or extend the built-in defaults without
 editing engine source — see

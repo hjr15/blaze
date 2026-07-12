@@ -68,7 +68,7 @@ function send(req, res, code, type, body) {
 
 // ---- server factory ---------------------------------------------------------
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = PORT, host = process.env.HOST || "127.0.0.1" } = {}) {
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = PORT, host = process.env.HOST || "127.0.0.1", views } = {}) {
   return createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
@@ -106,6 +106,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
         projectsDir,
+        views,
       });
       if (!envelope) return json(404, { errors: ["unknown view"] });
       return send(req, res, 200, "application/json", JSON.stringify(envelope));
@@ -115,7 +116,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       const focus = u.searchParams.get("focus") || null;
       const flat = u.searchParams.get("flat") === "1";
       const view = u.searchParams.get("view") || "board";
-      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, view }));
+      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, view, views }));
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });

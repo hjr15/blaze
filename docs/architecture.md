@@ -103,6 +103,7 @@ guards the writes):
 | Method | Route | Purpose |
 |---|---|---|
 | GET | `/` | The board page (`views/page.mjs`) |
+| GET | `/view/<name>` | JSON fragment (`{ view, html, chipbar, crumbs, total, subline }`) for a client-side view swap; 404 for an unknown or config-disabled view (`views.<name>: false`, see [AGENTS.md — Configuration](../AGENTS.md#configuration)) |
 | GET | `/api/hash` | Cheap content hash — the client reloads only when tickets change |
 | GET | `/api/sync` | Unsynced-commit count for the `⇧ N ahead` badge |
 | GET | `/api/live` | Live agent-activity feed (`model/activity.mjs`) |

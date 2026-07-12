@@ -384,6 +384,26 @@ test("GET /view/nope 404s", async () => {
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
+test("startServer views option disables a view: /view/map 404s, no map pill, board pill present", async () => {
+  const fx = repo();
+  const server = startServer({
+    projectsDir: fx.projects, root: fx.root, port: 0,
+    views: { board: true, list: true, live: true, metrics: true, map: false },
+  });
+  await new Promise((res) => server.once("listening", res));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const viewRes = await fetch(`${base}/view/map`);
+    assert.equal(viewRes.status, 404);
+    const html = await (await fetch(`${base}/`)).text();
+    assert.doesNotMatch(html, /class="pill" data-view="map"/);
+    assert.match(html, /class="pill" data-view="board"/);
+  } finally {
+    server.close(); rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
 test("GET / gzips when asked", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);

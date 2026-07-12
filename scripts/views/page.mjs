@@ -81,8 +81,8 @@ export function sublineHtml(m) {
 
 // ---- JSON fragment envelope (client swap target) ---------------------------
 
-export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions } = {}) {
-  if (!VIEW_NAMES.includes(view)) return null;
+export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views = cfg.views } = {}) {
+  if (!VIEW_NAMES.includes(view) || !views[view]) return null;
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const m = boardModel(pDir, { project, focus, flat });
   return {
@@ -107,6 +107,7 @@ export function pageHtml({
   projectsDir: _pDir,
   now = Date.now(),
   transitions,
+  views = cfg.views,
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const m = boardModel(pDir, { project, focus, flat });
@@ -238,11 +239,9 @@ export function pageHtml({
     <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
     ${boardToggle}
     <div class="viewtoggle" role="group" aria-label="View">
-      <button type="button" class="pill" data-view="board">Board</button>
-      <button type="button" class="pill" data-view="list">List</button>
-      <button type="button" class="pill" data-view="live">Live</button>
-      <button type="button" class="pill" data-view="metrics">Metrics</button>
-      <button type="button" class="pill" data-view="map">Map</button>
+      ${VIEW_NAMES.filter((v) => views[v]).map((v) =>
+        `<button type="button" class="pill" data-view="${v}">${v.charAt(0).toUpperCase()}${v.slice(1)}</button>`
+      ).join("\n      ")}
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -495,7 +494,10 @@ export function pageHtml({
     // apply pill/localStorage state and run that view's init directly.
     (function () {
       const host = document.getElementById("viewhost");
-      const saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      let saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      // Fall back to "board" when the saved view's pill is absent (e.g. the
+      // config disabled that view since it was last saved to localStorage).
+      document.querySelector('.viewtoggle .pill[data-view="'+saved+'"]') || (saved = "board");
       if (saved !== host.dataset.rendered) { swapView(saved); }        // fetches + inits
       else { applyView(saved); (window.blazeViews[saved] || { init: function () {} }).init(); }
     })();

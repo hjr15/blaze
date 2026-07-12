@@ -236,3 +236,11 @@ board renders), `commitMode`, `port`, and more.
 terminal status; epics/goals/risks are exempt since their time rolls up from
 children), and `schema` (a per-project type/workflow override — see
 [`docs/schema-customization.md`](docs/schema-customization.md)).
+
+`views` (top-level, `blaze.config.json`): `{ board, list, live, metrics, map }`,
+each defaulting to `true` — set any to `false` to hide that view's pill and
+404 its `/view/<name>` fragment endpoint (zero model computation for a disabled
+view). `board` cannot be disabled — it is forced back to `true` after the merge,
+since the shell always needs a default view to render. A board with a view
+disabled and a stale `localStorage` save for it falls back to `board` on
+first load.
