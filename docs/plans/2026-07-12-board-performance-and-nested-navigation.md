@@ -257,7 +257,7 @@ git commit -m "BLZ-90: per-file parse cache + one shared index per render"
 
 - [ ] **Step 1: Failing endpoint test**
 
-Append to `tests/serve-endpoints.test.mjs` (reuse its existing fixture/server-start pattern — read the file first and copy the local helper names exactly):
+Append to `tests/serve-endpoints.test.mjs` — **its real pattern is a per-test `boot()` helper (lines ~26–31), there is no shared `base`**; read the file first and copy the local helper names exactly, adapting the snippets below (which use `base` as shorthand for the booted server's URL):
 
 ```js
 test("GET /view/list returns a JSON envelope with only the list markup", async () => {
@@ -337,14 +337,53 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
 }
 ```
 
-   Extract `chipbarHtml(m)` / `crumbsHtml(m, project)` / `sublineHtml(m)` as small exported helpers so `pageHtml` and `viewEnvelope` share them (DRY; `pageHtml` calls the same three).
-4. Wrap each view's `clientScript` into the registry instead of bare inline execution. In the page template replace `<script>${live.clientScript}</script>` and `<script>${panel.clientScript}${metrics.clientScript}${map.clientScript}</script>` with:
+   Extract the three shared helpers by moving today's inline template code verbatim out of `pageHtml` (exported so `viewEnvelope` + tests reach them):
+
+```js
+export function chipbarHtml(m) {
+  const statuses = m.columns.map((c) => c.dir);
+  const activeSet = new Set(activeStatuses(statuses));
+  const activeCount = m.columns.filter((c) => activeSet.has(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
+  return `<nav class="chipbar" aria-label="Filter by status">
+    <button type="button" class="chip" data-chip="all">All <span class="chip-n">${m.total}</span></button>
+    <button type="button" class="chip" data-chip="active">Active <span class="chip-n">${activeCount}</span></button>
+    ${m.columns.map((c) => `<button type="button" class="chip" data-status="${esc(c.dir)}">${esc(c.label)} <span class="chip-n">${c.tickets.length}</span></button>`).join("")}
+  </nav>`;
+}
+
+export function crumbsHtml(m, project) {
+  if (!m.focus) return "";
+  const proj = project && project !== "all" ? `project=${esc(project)}` : "";
+  return `<nav class="crumbs"><a href="?${proj}">All</a>${m.focus.crumbs
+    .map((c) => ` › <a href="?focus=${esc(c.id)}${proj ? "&" + proj : ""}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
+    .join("")}</nav>`;
+}
+
+export function sublineHtml(m) {
+  const inflight = m.columns.filter((c) => ["todo", "in-progress", "in-review"].includes(c.dir)).reduce((n, c) => n + c.tickets.length, 0);
+  return `${m.total} tickets · ${inflight} in flight`;
+}
+```
+
+   `pageHtml` calls the same three (its inline copies are deleted). Note `crumbsHtml` deliberately fixes the crumb hrefs to preserve `project` (was dropped before — Task 4 relies on this).
+4. Wrap each view's `clientScript` into the registry instead of bare inline execution. **Init contract: `init()` runs after EVERY swap-in (and once on first load for the server-rendered view); it must rebind element-level listeners inside `#viewhost` and must NOT duplicate global side effects (intervals, listeners on nodes outside `#viewhost`).** Three view-module edits make the scripts honour that contract:
+   - `scripts/views/live.mjs` `clientScript`: delete the pill-binding line (`document.querySelectorAll('.viewtoggle .pill[data-view="live"]')…` — the registry now triggers polls) and replace the tail `pollLive(); setInterval(pollLive, 3000);` with:
+
+```js
+    if (!window.__blazeLiveTimer) window.__blazeLiveTimer = setInterval(pollLive, 3000);
+    pollLive();
+```
+
+   - `scripts/views/metrics.mjs` `clientScript`: delete its pill-binding block (`document.querySelectorAll('.viewtoggle .pill[data-view="metrics"]')…`) — `.mrange` bindings and the trailing `drawCfd()` stay (they target swapped-in nodes, so re-running per swap is exactly right; there are no intervals).
+   - `scripts/views/map.mjs` `clientScript`: unchanged — it binds only the swapped-in `svg` and must re-run per swap.
+
+   In the page template replace `<script>${live.clientScript}</script>` and `<script>${panel.clientScript}${metrics.clientScript}${map.clientScript}</script>` with:
 
 ```js
 <script>
   window.blazeViews = {
-    board: { init: function () { window.blazeBindZones && window.blazeBindZones(); } },
-    list:  { init: function () { window.blazeBindZones && window.blazeBindZones(); } },
+    board: { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
+    list:  { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
     live:  { init: function () { ${live.clientScript} } },
     metrics: { init: function () { ${metrics.clientScript} } },
     map:   { init: function () { ${map.clientScript} } },
@@ -353,8 +392,11 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
 </script>
 ```
 
-   and move the existing drop-zone binding loop (`for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]"))`) into a `window.blazeBindZones = function () { … }` that first removes nothing (listeners die with swapped nodes) and binds zones fresh; call it once at load.
-5. The view toggle's `applyView(v)` becomes async: if `document.querySelector("#viewhost").dataset.rendered !== v`, call `swapView(v)`; else just flip `data-view` + pills. Add:
+   and:
+   - move the existing drop-zone binding loop (`for (const zone of document.querySelectorAll(".col[data-status], .group[data-status]"))`) into a `window.blazeBindZones = function () { … }` (listeners die with swapped nodes; binding fresh each init cannot duplicate);
+   - in the boardtoggle IIFE, expose the saved-selection re-apply as `window.blazeApplyBoardPill = function () { const fromHash = params().get("board"); let saved = null; try { saved = localStorage.getItem("tracker.board"); } catch {} show(names.includes(fromHash) ? fromHash : (names.includes(saved) ? saved : names[0])); }` and call it at load — board/list init re-applies it so multi-board markup (delivery+risk) swaps in with the right board hidden;
+   - **chipbar fix (it gets replaced by swaps):** in the filters IIFE, stop capturing the chipbar node — bind the chip-click handler at `document` level (`document.addEventListener("click", (e) => { const chip = e.target.closest(".chipbar .chip"); … })`) and have `applyFilters` re-query `document.querySelector(".chipbar")` each call.
+5. Split view-state from fetching: `applyView(v)` stays synchronous and ONLY flips `data-view` + pill `.on` classes + localStorage (delete its parse-time invocation at the bottom of the toggle script — first-load init is handled once, after the registry, see item 6). Pill clicks call `swapView(v)`. Add (AFTER the toast/blazePost script block, so `toast` exists):
 
 ```js
 async function swapView(v) {
@@ -370,15 +412,23 @@ async function swapView(v) {
   if (crumbs) crumbs.outerHTML = j.crumbs; // j.crumbs may be "" — that removes stale crumbs correctly
   else if (j.crumbs) document.querySelector(".chipbar").insertAdjacentHTML("afterend", j.crumbs);
   document.querySelector("header.top .sub").textContent = j.subline;
-  document.documentElement.dataset.view = v;
+  applyView(v);
   (window.blazeViews[v] || { init: function () {} }).init();
   window.blazeFilters && window.blazeFilters.apply();
 }
 window.blazeSwapView = swapView;
 ```
 
-   Note: `toast` is defined in a later inline script than the toggle script today — consolidate: move the toggle/swap script AFTER the toast/blazePost script block so `toast` exists (script order within the one page is ours to choose).
-6. First-load reconciliation: the pre-paint localStorage snippet stays; after `blazeViews` is defined, if `localStorage view !== data-rendered`, call `swapView(saved)`.
+6. First-load init runs exactly once, in the FINAL script block (registry + panel already defined; nothing racy earlier — `applyView`'s old parse-time call is gone per item 5):
+
+```js
+(function () {
+  const host = document.getElementById("viewhost");
+  const saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+  if (saved !== host.dataset.rendered) { swapView(saved); }        // fetches + inits
+  else { applyView(saved); (window.blazeViews[saved] || { init: function () {} }).init(); }
+})();
+```
 7. Keep ALL views' `styles` inlined as today (CSS is not the weight; avoids FOUC on swap).
 
 `scripts/serve.mjs`:
@@ -421,7 +471,10 @@ if (vm) {
 
 `rm tests/views/page-golden.html && node --test tests/views/page-golden.test.mjs` (captures new baseline) then `git diff --stat` and eyeball `tests/views/page-golden.html` — it must contain board markup only.
 
-- [ ] **Step 5: Full suite** — `node --test tests/` → PASS. Some existing `page.test.mjs`/`serve.test.mjs` assertions reference list/map markup on `GET /` — update those assertions to hit `/view/list` / `/view/map` instead (behaviour moved, not removed).
+- [ ] **Step 5: Full suite** — `node --test tests/` → PASS. Known casualties to update (behaviour moved, not removed):
+  - `tests/serve-endpoints.test.mjs:331` `"pageHtml wires the Live view pill, region and poll"` — asserts `class="live"` on `GET /` markup; keep the `data-view="live"` pill + `/api/live` assertions against the page, move the `class="live"` markup assertion to the `/view/live` envelope.
+  - `tests/views/page.test.mjs:18-19` — multi-view inlining assertions; re-point list/map markup checks at `viewEnvelope({view:"list"…})` / `viewEnvelope({view:"map"…})`.
+  - `tests/serve.test.mjs` has NO markup assertions (boardModel only) — do not touch it.
 
 - [ ] **Step 6: Commit**
 
@@ -451,7 +504,7 @@ git commit -m "BLZ-91: render only the active view; /view fragments; gzip" -m "G
 
 ```js
 test("contentHash scoped to a project ignores other projects' changes", () => {
-  const dir = fixtureTwoProjects(); // T + U, copy local fixture pattern from this file
+  const dir = fixtureTwoProjects(); // does NOT exist yet — write it in this file, following its existing single-project fixture helper's style (T + U projects, one ticket each)
   const scopedBefore = contentHash({ projectsDir: dir, project: "T" });
   const wholeBefore = contentHash({ projectsDir: dir });
   writeFileSync(join(dir, "U", "todo", "U-1.md"), "---\nid: U-1\ntitle: changed\ntype: task\nproject: U\nestimate: 5\n---\nx\n");
@@ -479,7 +532,14 @@ export function contentHash({ projectsDir = resolveRoots().projectsDir, project 
 }
 ```
 
-`serve.mjs`: `/api/hash` reads `u.searchParams.get("project")` and passes it through (null for "all"). Keep the bare route back-compatible.
+`serve.mjs`: `/api/hash` MUST pass the server's own resolved projectsDir (the ambient default hashes the wrong tree under the test fixture server — confirmed blocker):
+
+```js
+if (req.method === "GET" && u.pathname === "/api/hash") {
+  res.writeHead(200, { "content-type": "text/plain" });
+  res.end(contentHash({ projectsDir, project: u.searchParams.get("project") || null })); return;
+}
+```
 
 `page.mjs` client changes:
 1. The poll script builds its URL from the page's own scope: `const HASH_URL = "/api/hash" + (new URLSearchParams(location.search).get("project") ? "?project=" + encodeURIComponent(new URLSearchParams(location.search).get("project")) : "");` and on change calls `window.blazeSwapView(document.documentElement.dataset.view)` instead of `location.reload()`. (Focus scoping of the hash is deliberately project-granular — a focused view still refreshes on any change within its project; that's cheap now because refresh = one fragment fetch, not a document reload.)
@@ -527,12 +587,12 @@ git commit -m "BLZ-92: scoped /api/hash + fragment refresh replaces location.rel
 
 - [ ] **Step 1: Failing model tests**
 
-`tests/model/focus.test.mjs` — add (copy the file's local index-stub pattern):
+`tests/model/focus.test.mjs` — add (**the file's stub helper is named `fakeIndex`** — use it, adapting the row shape to its real signature):
 
 ```js
 test("focusScope exposes direct children separately from descendants", () => {
   // G-1 ← E-1 ← T-1 ; G-1 ← E-2
-  const idx = stubIndex([
+  const idx = fakeIndex([
     { id: "G-1", parent: null }, { id: "E-1", parent: "G-1" },
     { id: "E-2", parent: "G-1" }, { id: "T-1", parent: "E-1" },
   ]);
@@ -566,6 +626,18 @@ const scoped = focused
 
 `serve.mjs` — `GET /` passes `flat: u.searchParams.get("flat") === "1"` into `pageHtml`; `pageHtml` forwards it to `boardModel` and into the poll/fragment query (Task 2's `swapView` already forwards `location.search`, which carries `flat=1`).
 
+**Metrics keeps whole-scope data (confirmed regression otherwise):** `metricsModel` flattens the board columns it's given, so a parentless-only default board would silently rescope Metrics to goals/epics. In `renderView`'s `metrics` case, build the metrics input from an explicitly flat model, reusing the already-built index:
+
+```js
+case "metrics": {
+  const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
+  const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
+  return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
+}
+```
+
+Add a data.test.mjs assertion: `viewEnvelope({view:"metrics"})`'s html reflects all four fixture tickets (not just the parentless two).
+
 `page.mjs` — crumbs: root crumb href becomes `?${project !== "all" ? "project=" + esc(project) : ""}` (keep project on drill-up); add a `Flat` link beside the crumbs when nested (`<a href="?flat=1${project…}">flat</a>`) and a crumb-style link back when `flat=1`. Card/row drilldown links (board.mjs/list.mjs) already carry `?focus=` + project — unchanged.
 
 - [ ] **Step 4: Full suite + golden** — the golden fixture (T-1 task, T-2 epic, both parentless) still renders both at top level, but if bytes change (crumb/flat link), regenerate deliberately as before.
@@ -590,22 +662,26 @@ git commit -m "BLZ-87: goals-first nesting — direct-children focus, parentless
 
 **Interfaces:**
 - Produces: `cfg.views` — `{ board: true, list: true, live: true, metrics: true, map: true }` merged over file's `views` object; `board` is forced `true` (the default render needs one view).
+- Produces: **`views` plumbed as an option** — `pageHtml({ …, views })` and `viewEnvelope({ …, views })` default to the module-level `cfg.views`; `startServer({ …, views })` forwards its value to both. (page.mjs's `cfg` is loaded once at import from the ambient root, so a fixture `blaze.config.json` can never reach it in-process — the option is what makes this testable AND what lets a future supervisor pass per-board config.)
 - Produces: disabled view ⇒ no pill in the toggle, `/view/<name>` → 404, zero model computation.
 
 - [ ] **Step 1: Failing tests**
 
-`tests/config.test.mjs`:
+`tests/config.test.mjs` (this file's helper is `withConfig` — reuse it, do not invent `mkTmpConfig`):
 
 ```js
 test("views config merges over all-on defaults and cannot disable board", () => {
-  const dir = mkTmpConfig({ views: { map: false, board: false } }); // copy this file's tmp-config helper pattern
-  const cfg = loadConfig({ root: dir });
-  assert.deepEqual(cfg.views, { board: true, list: true, live: true, metrics: true, map: false });
-  // board: false in the file is overridden — the shell always needs its default view
+  withConfig({ views: { map: false, board: false } }, (root) => {
+    const cfg = loadConfig({ root });
+    assert.deepEqual(cfg.views, { board: true, list: true, live: true, metrics: true, map: false });
+    // board: false in the file is overridden — the shell always needs its default view
+  });
 });
 ```
 
-`tests/serve-endpoints.test.mjs`: with a fixture config disabling map — `GET /view/map` → 404; `GET /` HTML contains no `data-view="map"` pill.
+(Match `withConfig`'s real signature from the file before writing — adapt the callback/return shape to the local pattern.)
+
+`tests/serve-endpoints.test.mjs` — boot the fixture server with the option, not a config file: `startServer({ projectsDir: projects, root, port: 0, views: { …allOn, map: false } })` (copy the file's per-test `boot()` pattern) — then `GET /view/map` → 404 and `GET /` HTML has no `data-view="map"` pill while still having the board pill.
 
 - [ ] **Step 2: Verify failure.**
 
@@ -618,9 +694,11 @@ cfg.views = { ...DEFAULTS.views, ...(file.views && typeof file.views === "object
 cfg.views.board = true; // the shell always needs its default view
 ```
 
-`page.mjs`: the viewtoggle maps over `VIEW_NAMES.filter((v) => cfg.views[v])`; `renderView`/`viewEnvelope` return null for a disabled name (serve.mjs already 404s null envelopes); the first-load saved-view reconciliation falls back to "board" when the saved view is disabled.
+`config.mjs` also: `loadConfig` forces `cfg.views.board = true` after the merge.
 
-`serve.mjs`: nothing beyond the null-envelope 404 (from Task 2) — verify a disabled view really is unreachable.
+`page.mjs`: `pageHtml`/`viewEnvelope` gain `views = cfg.views` in their options; the viewtoggle maps over `VIEW_NAMES.filter((v) => views[v])`; `viewEnvelope` returns null when `!views[view]` (serve.mjs already 404s null envelopes); the first-load saved-view reconciliation falls back to "board" when the saved view's pill is absent (`document.querySelector('.viewtoggle .pill[data-view="'+saved+'"]') || (saved = "board")`).
+
+`serve.mjs`: `startServer({ …, views })` — default `undefined` (page.mjs falls back to its cfg) — forwarded into every `pageHtml`/`viewEnvelope` call; verify a disabled view really is unreachable via the endpoint test.
 
 - [ ] **Step 4: Full suite + golden** (pill markup unchanged for default config → golden should NOT change this task; if it does, stop and find out why).
 
