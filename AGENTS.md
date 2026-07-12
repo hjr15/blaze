@@ -119,9 +119,31 @@ reindex` rebuilds both from `projects/` and git history respectively.
 
 - `per-op` (default) — each `new`/`move`/`log`/`resolve`/`edit` commits immediately,
   scoped to exactly the file(s) it touched (never a broad `git add -A`).
-- `batch` — the op is appended to `.blaze/pending-commit.jsonl` instead; run
-  `blaze commit` to flush everything queued into one commit (subject = a per-op
-  count summary, body = one line per queued op).
+- `batch` — the op is appended to a pending queue instead; run `blaze commit` to
+  flush your queue into one commit (subject = a per-op count summary, body = one
+  line per queued op).
+
+### Sessions (parallel agents on one board)
+
+Export a unique `BLAZE_SESSION` (letters, digits, `._-`) at session start — e.g.
+your harness session UUID. Batch ops then queue to your own
+`.blaze/pending/<session>.jsonl`, and:
+
+- `blaze commit` flushes **only your queue** — a parallel session's queued WIP
+  never rides your commit.
+- `blaze commit --all` sweeps every session queue plus the shared fallback
+  (end-of-day / bundler path); body lines are tagged `[<session>]`.
+- No `BLAZE_SESSION` → the shared `.blaze/pending-commit.jsonl` fallback, exactly
+  the pre-0.4 behavior.
+
+Concurrent commits serialize on an advisory `.blaze/commit.lock/` (stale locks
+from dead processes are stolen automatically). If your flush is behind an
+already-fetched `origin/main`, `blaze commit` warns — rebase before publishing;
+the engine itself never pushes.
+
+Working-tree cross-talk is tolerated by design: sessions sharing one checkout
+see each other's on-disk ticket moves in `git status` until the owning session
+flushes. Use a git worktree per session when you need hard isolation.
 
 ## Querying the board
 
