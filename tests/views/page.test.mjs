@@ -33,6 +33,16 @@ test("viewEnvelope renders each view's markup on demand (moved out of pageHtml s
   assert.match(live.html, /class="live"/);
 });
 
+test("pageHtml({view:'map'}) falls back to board when views.map is disabled (review fix: ?view= bypass)", () => {
+  const html = pageHtml({
+    project: "all",
+    view: "map",
+    views: { board: true, list: true, live: true, metrics: true, map: false },
+  });
+  assert.doesNotMatch(html, /class="mapview"/);
+  assert.match(html, /data-rendered="board"/);
+});
+
 test("pageHtml renders a board switcher when >1 workflow board has tickets", () => {
   const dir = mkdtempSync(join(tmpdir(), "blaze-page-"));
   mkdirSync(join(dir, "INF", "identified"), { recursive: true });

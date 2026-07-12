@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { boardModel, contentHash } from "../../scripts/views/data.mjs";
 import { buildIndex } from "../../scripts/model/index.mjs";
+import { viewEnvelope } from "../../scripts/views/page.mjs";
 
 // Two-project fixture (T + U, one ticket each) for contentHash project-scoping
 // tests — follows the single-project inline style used by the tests above.
@@ -90,6 +91,49 @@ test("boardModel focus filters to a parent's descendants + exposes crumbs", () =
   assert.deepEqual(m.focus.crumbs.map((c) => c.id), ["INF-9"]);
   const ids = m.boards.flatMap((b) => b.columns.flatMap((c) => c.tickets.map((t) => t.meta.id)));
   assert.deepEqual(ids.sort(), ["INF-10"]);  // only the descendant
+});
+
+// Goals-first nesting fixture: G-1 (goal) ← E-1, E-2 (epics) ; E-1 ← T-1 (task).
+function fixtureNesting() {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-nesting-"));
+  mkdirSync(join(dir, "N", "defined"), { recursive: true });
+  writeFileSync(join(dir, "N", "defined", "G-1.md"),
+    "---\nid: G-1\ntitle: goal\ntype: goal\nproject: N\n---\nx\n");
+  writeFileSync(join(dir, "N", "defined", "E-1.md"),
+    "---\nid: E-1\ntitle: epic one\ntype: epic\nproject: N\nparent: G-1\n---\nx\n");
+  writeFileSync(join(dir, "N", "defined", "E-2.md"),
+    "---\nid: E-2\ntitle: epic two\ntype: epic\nproject: N\nparent: G-1\n---\nx\n");
+  writeFileSync(join(dir, "N", "defined", "T-1.md"),
+    "---\nid: T-1\ntitle: task\ntype: task\nproject: N\nparent: E-1\nestimate: 5\n---\nx\n");
+  return dir;
+}
+
+test("boardModel with no focus and flat:false shows only parentless tickets (goals-first default)", () => {
+  const dir = fixtureNesting();
+  const m = boardModel(dir, { project: "N" });
+  const ids = m.columns.flatMap((c) => c.tickets.map((t) => t.meta.id));
+  assert.deepEqual(ids.sort(), ["G-1"]);
+});
+
+test("boardModel focus:G-1 shows exactly its direct children, not grandchildren", () => {
+  const dir = fixtureNesting();
+  const m = boardModel(dir, { project: "N", focus: "G-1" });
+  const ids = m.columns.flatMap((c) => c.tickets.map((t) => t.meta.id));
+  assert.deepEqual(ids.sort(), ["E-1", "E-2"]);
+});
+
+test("boardModel flat:true shows the whole corpus", () => {
+  const dir = fixtureNesting();
+  const m = boardModel(dir, { project: "N", flat: true });
+  const ids = m.columns.flatMap((c) => c.tickets.map((t) => t.meta.id));
+  assert.deepEqual(ids.sort(), ["E-1", "E-2", "G-1", "T-1"]);
+});
+
+test("viewEnvelope metrics keeps whole-project scope even though the default board is parentless-only", () => {
+  const dir = fixtureNesting();
+  const envelope = viewEnvelope({ view: "metrics", project: "N", projectsDir: dir, transitions: [] });
+  // all four fixture tickets should be reflected, not just the parentless goal.
+  assert.match(envelope.html, /class="tile-value">4</);
 });
 
 test("contentHash scoped to a project ignores other projects' changes", () => {

@@ -839,7 +839,10 @@
     // apply pill/localStorage state and run that view's init directly.
     (function () {
       const host = document.getElementById("viewhost");
-      const saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      let saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      // Fall back to "board" when the saved view's pill is absent (e.g. the
+      // config disabled that view since it was last saved to localStorage).
+      document.querySelector('.viewtoggle .pill[data-view="'+saved+'"]') || (saved = "board");
       if (saved !== host.dataset.rendered) { swapView(saved); }        // fetches + inits
       else { applyView(saved); (window.blazeViews[saved] || { init: function () {} }).init(); }
     })();

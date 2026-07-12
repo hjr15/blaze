@@ -34,7 +34,8 @@ export function renderView(name, { m, pDir, project, now, transitions }) {
     case "live": return live.render();
     case "metrics": {
       const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
-      return `<div class="metricsview">${metrics.render(metricsModel({ board: m, transitions: txns, now, project }))}</div>`;
+      const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
+      return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
     case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, project, index: m.index }))}</div>`;
     default: return null;
@@ -57,12 +58,20 @@ export function chipbarHtml(m) {
   </nav>`;
 }
 
-export function crumbsHtml(m, project) {
-  if (!m.focus) return "";
+export function crumbsHtml(m, project, flat = false) {
+  if (!m.focus && !flat) return "";
   const proj = project && project !== "all" ? `project=${esc(project)}` : "";
+  // Goals-first nesting (BLZ-87) is the default: no-focus shows parentless
+  // tickets only, focus shows direct children only. `flat` is the escape
+  // hatch back to the old whole-corpus wall — toggle it beside the crumbs
+  // (or on its own when there's no focus but flat=1 is set).
+  const flatToggle = flat
+    ? `<a href="?${proj}">nested</a>`
+    : `<a href="?flat=1${proj ? "&" + proj : ""}">flat</a>`;
+  if (!m.focus) return `<nav class="crumbs">Flat view · ${flatToggle}</nav>`;
   return `<nav class="crumbs"><a href="?${proj}">All</a>${m.focus.crumbs
     .map((c) => ` › <a href="?focus=${esc(c.id)}${proj ? "&" + proj : ""}">${esc(c.id)}${c.title ? " · " + esc(c.title) : ""}</a>`)
-    .join("")}</nav>`;
+    .join("")} · ${flatToggle}</nav>`;
 }
 
 export function sublineHtml(m) {
@@ -72,15 +81,19 @@ export function sublineHtml(m) {
 
 // ---- JSON fragment envelope (client swap target) ---------------------------
 
-export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions } = {}) {
-  if (!VIEW_NAMES.includes(view)) return null;
+export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views = cfg.views } = {}) {
+  // Clamp: board must always be enabled regardless of what the caller passes
+  // (config.mjs already forces this for cfg.views, but a direct caller — e.g.
+  // a future supervisor — could pass { board: false } and strand every view).
+  const V = { ...views, board: true };
+  if (!VIEW_NAMES.includes(view) || !V[view]) return null;
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const m = boardModel(pDir, { project, focus, flat });
   return {
     view,
     html: renderView(view, { m, pDir, project, now, transitions }),
     chipbar: chipbarHtml(m),
-    crumbs: crumbsHtml(m, project),
+    crumbs: crumbsHtml(m, project, flat),
     total: m.total,
     subline: sublineHtml(m),
   };
@@ -91,15 +104,25 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
 export function pageHtml({
   project = "all",
   focus = null,
+  flat = false,
   view = "board",
   afterHeader = "",
   beforeBodyEnd = "",
   projectsDir: _pDir,
   now = Date.now(),
   transitions,
+  views = cfg.views,
 } = {}) {
+  // Clamp: board must always be enabled regardless of what the caller passes
+  // (belt-and-suspenders alongside config.mjs's own board:true enforcement).
+  const V = { ...views, board: true };
+  // Gate the full-page path the same way /view/<name> is gated — a disabled
+  // ?view=<name> must not reach renderView (which is where the metrics/map
+  // model compute happens, exactly what a disabled view is meant to avoid).
+  // board is guaranteed on above, so falling back to it is always safe.
+  if (!V[view]) view = "board";
   const pDir = _pDir ?? resolveRoots().projectsDir;
-  const m = boardModel(pDir, { project, focus });
+  const m = boardModel(pDir, { project, focus, flat });
   const { columns: cols, projects, selected } = m;
   const boards = m.boards || [];
   const boardToggle = boards.length > 1
@@ -108,7 +131,7 @@ export function pageHtml({
         .join("")}</div>`
     : "";
   const chipbar = chipbarHtml(m);
-  const crumbs = crumbsHtml(m, project);
+  const crumbs = crumbsHtml(m, project, flat);
   const statuses = cols.map((c) => c.dir);
 
   return `<!doctype html>
@@ -228,11 +251,9 @@ export function pageHtml({
     <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
     ${boardToggle}
     <div class="viewtoggle" role="group" aria-label="View">
-      <button type="button" class="pill" data-view="board">Board</button>
-      <button type="button" class="pill" data-view="list">List</button>
-      <button type="button" class="pill" data-view="live">Live</button>
-      <button type="button" class="pill" data-view="metrics">Metrics</button>
-      <button type="button" class="pill" data-view="map">Map</button>
+      ${VIEW_NAMES.filter((v) => V[v]).map((v) =>
+        `<button type="button" class="pill" data-view="${v}">${v.charAt(0).toUpperCase()}${v.slice(1)}</button>`
+      ).join("\n      ")}
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -485,7 +506,10 @@ export function pageHtml({
     // apply pill/localStorage state and run that view's init directly.
     (function () {
       const host = document.getElementById("viewhost");
-      const saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      let saved = document.documentElement.dataset.view || "board"; // set pre-paint from localStorage
+      // Fall back to "board" when the saved view's pill is absent (e.g. the
+      // config disabled that view since it was last saved to localStorage).
+      document.querySelector('.viewtoggle .pill[data-view="'+saved+'"]') || (saved = "board");
       if (saved !== host.dataset.rendered) { swapView(saved); }        // fetches + inits
       else { applyView(saved); (window.blazeViews[saved] || { init: function () {} }).init(); }
     })();

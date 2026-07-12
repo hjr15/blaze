@@ -34,7 +34,9 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
   const idx = index ?? buildIndex(projectsDir, { tickets: walked });
   const scope = focus ? focusScope(idx, focus) : null;
   const focused = scope && idx.get(focus);
-  const scoped = focused ? rows.filter((t) => scope.descendantIds.has(t.meta.id)) : rows;
+  const scoped = focused
+    ? rows.filter((t) => scope.childrenIds.has(t.meta.id))
+    : (flat ? rows : rows.filter((t) => !t.meta.parent));
 
   const childTally = {};
   for (const r of idx.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;

@@ -1,6 +1,6 @@
 // scripts/model/focus.mjs — pure hierarchy scoping over the derived index.
 export function focusScope(index, id) {
-  if (!id || !index || !index.get(id)) return { crumbs: [], descendantIds: new Set() };
+  if (!id || !index || !index.get(id)) return { crumbs: [], descendantIds: new Set(), childrenIds: new Set() };
 
   const crumbs = [];
   const guard = new Set();
@@ -27,5 +27,6 @@ export function focusScope(index, id) {
     }
   }
   descendantIds.delete(id);
-  return { crumbs, descendantIds };
+  const childrenIds = new Set(childrenOf.get(id) || []);
+  return { crumbs, descendantIds, childrenIds };
 }

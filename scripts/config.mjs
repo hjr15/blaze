@@ -23,6 +23,7 @@ const DEFAULTS = {
     reconcile: { enabled: true, intervalSec: 60 },
     groomer: { enabled: true, intervalSec: 300, columns: ["backlog"] },
   },
+  views: { board: true, list: true, live: true, metrics: true, map: true },
 };
 
 export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.config.json" } = {}) {
@@ -41,6 +42,8 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
     reconcile: { ...DEFAULTS.loops.reconcile, ...(file.loops && file.loops.reconcile) },
     groomer: { ...DEFAULTS.loops.groomer, ...(file.loops && file.loops.groomer) },
   };
+  cfg.views = { ...DEFAULTS.views, ...(file.views && typeof file.views === "object" ? file.views : {}) };
+  cfg.views.board = true; // the shell always needs its default view
 
   // Env overrides (highest precedence).
   if (env.BLAZE_KEY) cfg.key = env.BLAZE_KEY;

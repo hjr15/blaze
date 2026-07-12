@@ -37,3 +37,13 @@ test("descendant traversal excludes focus id under a cyclic parent graph", () =>
   assert.equal(descendantIds.has("A"), false);
   assert.deepEqual([...descendantIds].sort(), ["B"]);
 });
+test("focusScope exposes direct children separately from descendants", () => {
+  // G-1 ← E-1 ← T-1 ; G-1 ← E-2
+  const idx = fakeIndex([
+    { id: "G-1", parent: null }, { id: "E-1", parent: "G-1" },
+    { id: "E-2", parent: "G-1" }, { id: "T-1", parent: "E-1" },
+  ]);
+  const s = focusScope(idx, "G-1");
+  assert.deepEqual([...s.childrenIds].sort(), ["E-1", "E-2"]);
+  assert.deepEqual([...s.descendantIds].sort(), ["E-1", "E-2", "T-1"]);
+});

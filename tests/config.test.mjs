@@ -133,6 +133,21 @@ test("loadConfig normalizes a non-object schema to null", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
+test("views config merges over all-on defaults and cannot disable board", () => {
+  const dir = withConfig({ views: { map: false, board: false } });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.deepEqual(cfg.views, { board: true, list: true, live: true, metrics: true, map: false });
+  // board: false in the file is overridden — the shell always needs its default view
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("views defaults to all-on when no config file exists", () => {
+  const dir = withConfig(null);
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.deepEqual(cfg.views, { board: true, list: true, live: true, metrics: true, map: true });
+  rmSync(dir, { recursive: true, force: true });
+});
+
 test("loadProject exposes a per-project schema override (schema:null by default)", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-projschema-"));
   const projectsDir = join(root, "projects");
