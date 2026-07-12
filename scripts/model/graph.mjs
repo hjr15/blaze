@@ -110,8 +110,8 @@ export function layoutGraph(graph, opts = {}) {
 
 // FS wrapper: read every ticket, optionally restrict to one project, and return
 // the laid-out graph. Built in page.mjs from the same projectsDir the board uses.
-export function graphModel({ projectsDir, project = "all" } = {}) {
-  const index = buildIndex(projectsDir);
-  const rows = project === "all" ? index.rows : index.rows.filter((r) => r.project === project);
-  return layoutGraph(buildGraph({ rows, links: index.links }));
+export function graphModel({ projectsDir, project = "all", index = null } = {}) {
+  const idx = index ?? buildIndex(projectsDir);
+  const rows = project === "all" ? idx.rows : idx.rows.filter((r) => r.project === project);
+  return layoutGraph(buildGraph({ rows, links: idx.links }));
 }

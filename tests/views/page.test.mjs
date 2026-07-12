@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { pageHtml, CSRF } from "../../scripts/views/page.mjs";
+import { pageHtml, viewEnvelope, CSRF } from "../../scripts/views/page.mjs";
 
 test("page.mjs exports CSRF and a composing pageHtml", () => {
   assert.equal(typeof CSRF, "string");
@@ -13,12 +13,24 @@ test("page.mjs exports CSRF and a composing pageHtml", () => {
   assert.match(html, /blazePost/);
   assert.match(html, /id="toast"/);
   assert.match(html, /"urgent"/);            // injected PRIORITIES
-  // each view section wired
+  // GET / renders only the default (board) view's markup inline
   assert.match(html, /class="board"/);
-  assert.match(html, /class="list"/);
-  assert.match(html, /class="live"/);
+  assert.doesNotMatch(html, /class="list"/);
   assert.match(html, /id="blaze-panel"/);
   assert.match(html, /window\.blazePanel/);
+});
+
+test("viewEnvelope renders each view's markup on demand (moved out of pageHtml since it no longer inlines every view)", () => {
+  const list = viewEnvelope({ project: "all", view: "list" });
+  assert.match(list.html, /class="list"/);
+  assert.doesNotMatch(list.html, /class="board"/);
+
+  const map = viewEnvelope({ project: "all", view: "map" });
+  assert.match(map.html, /class="mapwrap/);
+  assert.doesNotMatch(map.html, /class="board"/);
+
+  const live = viewEnvelope({ project: "all", view: "live" });
+  assert.match(live.html, /class="live"/);
 });
 
 test("pageHtml renders a board switcher when >1 workflow board has tickets", () => {

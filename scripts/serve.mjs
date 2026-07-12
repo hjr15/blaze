@@ -4,14 +4,16 @@
 //   node scripts/serve.mjs            # serves http://localhost:<cfg.port>
 //   PORT=8080 node scripts/serve.mjs  # custom port
 //
-// Reads the markdown tickets fresh on every request, so editing a file in your
-// IDE and refreshing shows the change. The page also auto-reloads within a few
-// seconds when any ticket file changes (it polls a cheap content hash), but
-// never reloads while the files are untouched — so it won't fight you mid-read.
+// Stats every ticket file on each request and re-parses only those whose
+// mtime+size changed — an on-disk edit is always reflected, but unchanged
+// files skip the parse. The page also auto-reloads within a few seconds when
+// any ticket file changes (it polls a cheap content hash), but never reloads
+// while the files are untouched — so it won't fight you mid-read.
 
 import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { gzipSync } from "node:zlib";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
@@ -20,7 +22,7 @@ import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { commitFile } from "./serve-commit.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
-import { pageHtml, CSRF } from "./views/page.mjs";
+import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
 const cfg = loadConfig({ root: resolveRoots().dataRoot });
@@ -51,15 +53,29 @@ function aheadCount(root) {
   return r.status === 0 ? Number(r.stdout.trim()) || 0 : 0;
 }
 
+// Compresses when the client advertises gzip support and the body is large
+// enough that compression is worth the CPU (below 1KB, gzip overhead can
+// exceed the savings).
+function send(req, res, code, type, body) {
+  const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
+  if (buf.length >= 1024 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) {
+    res.writeHead(code, { "content-type": type, "content-encoding": "gzip" });
+    res.end(gzipSync(buf)); return;
+  }
+  res.writeHead(code, { "content-type": type });
+  res.end(buf);
+}
+
 // ---- server factory ---------------------------------------------------------
 
 export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = PORT, host = process.env.HOST || "127.0.0.1" } = {}) {
   return createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
-    const json = (code, obj) => { res.writeHead(code, { "content-type": "application/json" }); res.end(JSON.stringify(obj)); };
+    const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
 
     if (req.method === "GET" && u.pathname === "/api/hash") {
-      res.writeHead(200, { "content-type": "text/plain" }); res.end(contentHash()); return;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(contentHash({ projectsDir, project: u.searchParams.get("project") || null })); return;
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {
@@ -82,11 +98,23 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       const r = reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
       return json(200, { changes: r.changes || [] });
     }
+    const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
+    if (vm) {
+      const envelope = viewEnvelope({
+        view: vm[1],
+        project: u.searchParams.get("project") || "all",
+        focus: u.searchParams.get("focus") || null,
+        flat: u.searchParams.get("flat") === "1",
+        projectsDir,
+      });
+      if (!envelope) return json(404, { errors: ["unknown view"] });
+      return send(req, res, 200, "application/json", JSON.stringify(envelope));
+    }
     if (req.method === "GET" && u.pathname === "/") {
       const project = u.searchParams.get("project") || "all";
       const focus = u.searchParams.get("focus") || null;
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
-      res.end(pageHtml({ project, focus })); return;
+      const view = u.searchParams.get("view") || "board";
+      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, view }));
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });

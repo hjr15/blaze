@@ -30,8 +30,39 @@ async function boot({ root, projects }) {
   return { server, base: `http://127.0.0.1:${port}` };
 }
 
+// Two-project fixture (T + U, one ticket each) for scoped /api/hash tests.
+function repoTwoProjects() {
+  const root = mkdtempSync(join(tmpdir(), "blaze-ep-hash-"));
+  execFileSync("git", ["-C", root, "init", "-q"]);
+  execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+  const projects = join(root, "projects");
+  mkdirSync(join(projects, "T", "todo"), { recursive: true });
+  mkdirSync(join(projects, "U", "todo"), { recursive: true });
+  writeFileSync(join(projects, "T", "todo", "T-1.md"),
+    "---\nid: T-1\ntitle: t\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");
+  writeFileSync(join(projects, "U", "todo", "U-1.md"),
+    "---\nid: U-1\ntitle: u\ntype: task\nproject: U\nestimate: 5\n---\nbody\n");
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+  return { root, projects };
+}
+
 const post = (base, path, body, headers = {}) =>
   fetch(base + path, { method: "POST", headers: { "content-type": "application/json", "x-blaze-csrf": CSRF, ...headers }, body: JSON.stringify(body) });
+
+test("GET /api/hash?project=T is scoped and differs from /api/hash?project=U after touching only U", async () => {
+  const fx = repoTwoProjects();
+  const { server, base } = await boot(fx);
+  const beforeT = await (await fetch(base + "/api/hash?project=T")).text();
+  writeFileSync(join(fx.projects, "U", "todo", "U-1.md"),
+    "---\nid: U-1\ntitle: changed\ntype: task\nproject: U\nestimate: 5\n---\nx\n");
+  const afterT = await (await fetch(base + "/api/hash?project=T")).text();
+  const afterU = await (await fetch(base + "/api/hash?project=U")).text();
+  assert.equal(afterT, beforeT);       // T-scope blind to U's change
+  assert.notEqual(afterT, afterU);     // and the two scopes disagree
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
 
 test("GET /api/sync reports ahead count", async () => {
   const fx = repo();
@@ -328,6 +359,58 @@ test("pageHtml scopes drag-drop drop zones to columns/groups so chips are not mo
 test("pageHtml wires the Live view pill, region and poll", () => {
   const html = pageHtml({ project: "all" });
   assert.match(html, /data-view="live"/);
-  assert.match(html, /class="live"/);
   assert.match(html, /\/api\/live/);
+});
+
+test("GET /view/list returns a JSON envelope with only the list markup", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/view/list`);
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.view, "list");
+  assert.match(j.html, /class="list"/);
+  assert.doesNotMatch(j.html, /class="board"/);
+  assert.match(j.chipbar, /class="chipbar"/);
+  assert.equal(typeof j.total, "number");
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET /view/nope 404s", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/view/nope`);
+  assert.equal(res.status, 404);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET / gzips when asked", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/`, { headers: { "accept-encoding": "gzip" } });
+  assert.equal(res.headers.get("content-encoding"), "gzip"); // fetch auto-decodes body
+  assert.match(await res.text(), /<!doctype html>/);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET / renders only the active view's markup", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/`);
+  const html = await res.text();
+  assert.match(html, /id="viewhost" data-rendered="board"/);
+  assert.doesNotMatch(html, /class="list" data-board/); // list not inlined
+  assert.doesNotMatch(html, /svg class="graph"/);       // map not inlined
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+test("GET /view/live envelope carries the class=\"live\" markup", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const res = await fetch(`${base}/view/live`);
+  assert.equal(res.status, 200);
+  const j = await res.json();
+  assert.equal(j.view, "live");
+  assert.match(j.html, /class="live"/);
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
 });

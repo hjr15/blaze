@@ -160,3 +160,19 @@ test("graphModel: project filter restricts the node set (excludes other projects
   assert.ok(gm.nodes.every((n) => n.project === "A"));
   assert.equal(gm.nodes.find((n) => n.id === "B-1"), undefined);
 });
+
+test("graphModel: a passed index is used as-is, disk is never walked", () => {
+  // projectsDir points at a directory that doesn't exist — if graphModel fell
+  // back to walking disk it would find zero rows. Passing an index-shaped
+  // object must short-circuit that walk entirely.
+  const fakeIndex = {
+    rows: [
+      { id: "Z-1", type: "epic", title: "fake epic", status: "defined", project: "Z", parent: null },
+      { id: "Z-2", type: "task", title: "fake task", status: "todo", project: "Z", parent: "Z-1" },
+    ],
+    links: [],
+  };
+  const gm = graphModel({ projectsDir: "/nonexistent-dir-should-not-be-read", index: fakeIndex });
+  assert.deepEqual(gm.nodes.map((n) => n.id).sort(), ["Z-1", "Z-2"]);
+  assert.equal(gm.nodes.length, 2);
+});

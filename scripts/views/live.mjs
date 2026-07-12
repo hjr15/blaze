@@ -36,6 +36,6 @@ export const clientScript = `
           +'</article>';}).join("");
       }catch(e){ el.innerHTML='<div class="empty">live activity offline</div>'; }
     }
-    document.querySelectorAll('.viewtoggle .pill[data-view="live"]').forEach(function(b){b.addEventListener("click", pollLive);});
-    pollLive(); setInterval(pollLive, 3000);
+    if (!window.__blazeLiveTimer) window.__blazeLiveTimer = setInterval(pollLive, 3000);
+    pollLive();
   `;

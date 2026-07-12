@@ -7,6 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
 import { pageHtml, contentHash } from "./serve.mjs";
+import { viewEnvelope } from "./views/page.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
@@ -81,6 +82,17 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
 
   const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
 
+  // Mirrors serve.mjs's aheadCount() so the client's sync badge works the same
+  // under supervisor mode.
+  function aheadCount() {
+    try {
+      const out = execFileSync("git", ["-C", root, "rev-list", "--count", "@{u}..HEAD"], { encoding: "utf8" });
+      return Number(out.trim()) || 0;
+    } catch {
+      return 0;
+    }
+  }
+
   function runReconcile() {
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
@@ -132,6 +144,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
       res.end(contentHash());
       return;
     }
+    if (req.method === "GET" && req.url === "/api/sync") {
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify({ ahead: aheadCount() }));
+      return;
+    }
     if (req.url === "/events") {
       res.writeHead(200, {
         "content-type": "text/event-stream",
@@ -142,6 +159,24 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
       const off = bus.subscribe((evt) => res.write(`data: ${JSON.stringify(evt)}\n\n`));
       const hb = setInterval(() => res.write(": hb\n\n"), 15000);
       req.on("close", () => { clearInterval(hb); off(); });
+      return;
+    }
+    const vm = req.method === "GET" && req.url && req.url.match(/^\/view\/([a-z]+)(?:\?.*)?$/);
+    if (vm) {
+      const u = new URL(req.url, "http://localhost");
+      const envelope = viewEnvelope({
+        view: vm[1],
+        project: u.searchParams.get("project") || "all",
+        focus: u.searchParams.get("focus") || null,
+        flat: u.searchParams.get("flat") === "1",
+      });
+      if (!envelope) {
+        res.writeHead(404, { "content-type": "application/json" });
+        res.end(JSON.stringify({ errors: ["unknown view"] }));
+        return;
+      }
+      res.writeHead(200, { "content-type": "application/json" });
+      res.end(JSON.stringify(envelope));
       return;
     }
     if (req.url === "/" || req.url === "") {
