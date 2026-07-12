@@ -5,7 +5,7 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readEntries, clearLedger, listQueues, sessionId } from "./pending-ledger.mjs";
+import { readForDrain, clearLedger, listQueues, sessionId } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 
@@ -15,7 +15,7 @@ const all = process.argv.slice(2).includes("--all");
 // Which queues to drain: every existing queue with --all, else only the caller's own.
 const targets = all ? listQueues(dataRoot) : [{ session: sessionId() }];
 const drained = targets
-  .map((q) => ({ session: q.session, entries: readEntries(dataRoot, q.session) }))
+  .map((q) => ({ session: q.session, ...readForDrain(dataRoot, q.session) }))
   .filter((q) => q.entries.length > 0);
 const entries = drained.flatMap((q) => q.entries.map((e) => ({ ...e, session: q.session })));
 
@@ -70,6 +70,6 @@ const add = spawnSync("git", ["-C", dataRoot, "add", "--", ...files], { stdio: "
 if (add.status !== 0) bail(`blaze commit: git add failed (status ${add.status}) — ledger kept, resolve manually`);
 const commit = spawnSync("git", ["-C", dataRoot, "commit", "-m", subject, "-m", body, "--", ...files], { stdio: "inherit" });
 if (commit.status !== 0) bail(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
-for (const q of drained) clearLedger(dataRoot, q.session);
+for (const q of drained) clearLedger(dataRoot, q.session, q.bytes);
 releaseLock(dataRoot);
 console.log(`blaze commit: flushed ${entries.length} op(s) → ${subject}`);

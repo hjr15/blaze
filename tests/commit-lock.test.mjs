@@ -47,6 +47,15 @@ test("stale: aged-out live owner is stolen", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("stale: a live owner with a corrupt/garbage ts ages out (NaN age counts as stale)", () => {
+  const root = tmp();
+  mkdirSync(lockPath(root), { recursive: true });
+  writeFileSync(join(lockPath(root), "owner.json"), JSON.stringify({ pid: process.pid, session: "x", ts: "garbage" }));
+  assert.equal(acquireLock(root, FAST).ok, true);
+  releaseLock(root);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("ownerless lock dir: fresh is respected, old is stolen", () => {
   const root = tmp();
   mkdirSync(lockPath(root), { recursive: true }); // no owner.json — acquirer mid-write

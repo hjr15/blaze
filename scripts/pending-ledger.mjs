@@ -23,11 +23,9 @@ export function appendEntry(root, entry, session = null) {
   appendFileSync(path, JSON.stringify(entry) + "\n"); // append-mode: atomic for the small single-line writes this ledger produces
 }
 
-export function readEntries(root, session = null) {
-  const path = ledgerPath(root, session);
-  if (!existsSync(path)) return [];
+function parseLines(text) {
   const out = [];
-  for (const line of readFileSync(path, "utf8").split("\n")) {
+  for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
     try {
       out.push(JSON.parse(line));
@@ -40,9 +38,35 @@ export function readEntries(root, session = null) {
   return out;
 }
 
-export function clearLedger(root, session = null) {
+export function readEntries(root, session = null) {
   const path = ledgerPath(root, session);
-  if (existsSync(path)) writeFileSync(path, "");
+  if (!existsSync(path)) return [];
+  return parseLines(readFileSync(path, "utf8"));
+}
+
+// Read a queue for draining: entries plus the byte length consumed, so the
+// drainer can clear exactly what it read and preserve ops appended meanwhile.
+export function readForDrain(root, session = null) {
+  const path = ledgerPath(root, session);
+  if (!existsSync(path)) return { entries: [], bytes: 0 };
+  const text = readFileSync(path, "utf8");
+  return { entries: parseLines(text), bytes: Buffer.byteLength(text) };
+}
+
+export function clearLedger(root, session = null, consumedBytes = null) {
+  const path = ledgerPath(root, session);
+  if (!existsSync(path)) return;
+  if (consumedBytes === null) {
+    writeFileSync(path, ""); // back-compat: truncate to empty exactly as before
+    return;
+  }
+  // Drain-exact clear: keep only bytes appended AFTER the drain read, so an op
+  // queued by another session mid-commit isn't lost. A microsecond
+  // read-rewrite window remains between readForDrain() and this write (an
+  // append landing in that gap is included in consumedBytes and dropped) —
+  // acceptable for this advisory, single-host design; not distributed-safe.
+  const buf = readFileSync(path);
+  writeFileSync(path, buf.subarray(consumedBytes));
 }
 
 // Every queue that exists: the shared fallback first (session: null), then

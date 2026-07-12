@@ -23,6 +23,8 @@ function ownerAlive(owner) {
     process.kill(owner.pid, 0);
     return true;
   } catch {
+    // Any kill() error (ESRCH, but also e.g. EPERM for a pid owned by another
+    // user) is treated as dead — fine for this engine's single-user-host scope.
     return false;
   }
 }
@@ -58,7 +60,13 @@ export function acquireLock(root, {
         try { dirAgeMs = now() - statSync(dir).mtimeMs; } catch { /* vanished: retry */ }
         stale = dirAgeMs > OWNERLESS_GRACE_MS;
       } else {
-        stale = !ownerAlive(owner) || now() - Date.parse(owner.ts) > staleMs;
+        const age = now() - Date.parse(owner.ts);
+        // Written as `!(age <= staleMs)` rather than `age > staleMs`: a
+        // corrupt/garbage owner.ts makes Date.parse (and so age) NaN, and
+        // every comparison with NaN is false — `age > staleMs` would then
+        // read as "not stale" and pin the lock forever. Negating `<=` makes
+        // NaN age count as stale, so a garbage timestamp still ages out.
+        stale = !ownerAlive(owner) || !(age <= staleMs);
       }
       if (stale) {
         process.stderr.write(`blaze: stealing stale commit.lock (owner pid ${owner?.pid ?? "unknown"})\n`);

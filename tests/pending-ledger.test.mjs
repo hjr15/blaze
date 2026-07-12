@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, appendFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ledgerPath, appendEntry, readEntries, clearLedger } from "../scripts/pending-ledger.mjs";
+import { ledgerPath, appendEntry, readEntries, clearLedger, readForDrain } from "../scripts/pending-ledger.mjs";
 
 function tmp() { return mkdtempSync(join(tmpdir(), "blaze-ledger-")); }
 
@@ -29,6 +29,44 @@ test("clearLedger empties the ledger", () => {
   appendEntry(root, { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" });
   clearLedger(root);
   assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("clearLedger with no third arg still empties fully (back-compat)", () => {
+  const root = tmp();
+  appendEntry(root, { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" });
+  appendEntry(root, { id: "X-2", op: "new", message: "X-2: create task", files: ["projects/X/backlog/X-2.md"], ts: "t" });
+  clearLedger(root, null); // explicit session, no consumedBytes
+  assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readForDrain returns entries plus the exact byte length of the file", () => {
+  const root = tmp();
+  const e1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" };
+  appendEntry(root, e1);
+  const { entries, bytes } = readForDrain(root);
+  assert.deepEqual(entries, [e1]);
+  assert.equal(bytes, Buffer.byteLength(readFileSync(ledgerPath(root), "utf8")));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readForDrain on an absent ledger returns empty entries and zero bytes", () => {
+  const root = tmp();
+  assert.deepEqual(readForDrain(root), { entries: [], bytes: 0 });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("drain-exact: an op appended after the drain read survives clearLedger(bytes)", () => {
+  const root = tmp();
+  const op1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t1" };
+  const op2 = { id: "X-2", op: "new", message: "X-2: create task (late, mid-drain)", files: ["projects/X/backlog/X-2.md"], ts: "t2" };
+  appendEntry(root, op1);
+  const { entries, bytes } = readForDrain(root);
+  assert.deepEqual(entries, [op1]);
+  appendEntry(root, op2); // simulates another session appending while the drainer is mid-commit
+  clearLedger(root, null, bytes);
+  assert.deepEqual(readEntries(root), [op2]); // only the late op survives
   rmSync(root, { recursive: true, force: true });
 });
 

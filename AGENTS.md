@@ -132,7 +132,10 @@ your harness session UUID. Batch ops then queue to your own
 - `blaze commit` flushes **only your queue** — a parallel session's queued WIP
   never rides your commit.
 - `blaze commit --all` sweeps every session queue plus the shared fallback
-  (end-of-day / bundler path); body lines are tagged `[<session>]`.
+  (end-of-day / bundler path); body lines are tagged `[<session>]`. It's the
+  quiescent/end-of-day sweep: ops a session appends mid-sweep survive (each
+  queue clears exactly the bytes it read, so a late append isn't lost), but
+  prefer running it when sessions are idle.
 - No `BLAZE_SESSION` → the shared `.blaze/pending-commit.jsonl` fallback, exactly
   the pre-0.4 behavior.
 
