@@ -1,11 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync, spawnSync, execFile } from "node:child_process";
 import { appendEntry, readEntries } from "../scripts/pending-ledger.mjs";
+import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -123,6 +124,44 @@ test("drops a stale intermediate path from a ticket moved twice in one batch", (
   const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
   assert.match(status, /\?\? untracked-other/);
   assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("runner exits 1 and keeps the queue when the lock is held", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-8.md"), "x");
+  appendEntry(root, { id: "OBA-8", op: "new", message: "OBA-8: x", files: ["projects/OBA/backlog/OBA-8.md"], ts: "t" });
+  assert.equal(acquireLock(root, { session: "other" }).ok, true);
+  const r = runCommit(root); // waits out the bounded retry (~2 s), then fails
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /commit\.lock held/);
+  assert.equal(readEntries(root).length, 1); // queue kept
+  releaseLock(root);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("two concurrent session flushes serialize: two clean commits, nothing lost", async () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-A.md"), "a");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-B.md"), "b");
+  appendEntry(root, { id: "OBA-A", op: "new", message: "OBA-A: a", files: ["projects/OBA/backlog/OBA-A.md"], ts: "t", session: "a" }, "a");
+  appendEntry(root, { id: "OBA-B", op: "new", message: "OBA-B: b", files: ["projects/OBA/backlog/OBA-B.md"], ts: "t", session: "b" }, "b");
+  const run = (session) => new Promise((res, rej) => {
+    const env = { ...process.env, BLAZE_SESSION: session };
+    execFile(process.execPath, [join(root, "scripts", "commit-runner.mjs")], { cwd: root, env, encoding: "utf8" },
+      (err, stdout, stderr) => (err ? rej(Object.assign(err, { stdout, stderr })) : res({ stdout, stderr })));
+  });
+  await Promise.all([run("a"), run("b")]);
+  const count = execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim();
+  assert.equal(count, "3"); // seed + one commit per session
+  const log = execFileSync("git", ["-C", root, "log", "--format=%b", "-2"], { encoding: "utf8" });
+  assert.match(log, /OBA-A: a \[a\]/);
+  assert.match(log, /OBA-B: b \[b\]/);
+  assert.deepEqual(readEntries(root, "a"), []);
+  assert.deepEqual(readEntries(root, "b"), []);
+  assert.ok(!existsSync(join(root, ".blaze", "commit.lock")));
   rmSync(root, { recursive: true, force: true });
 });
 

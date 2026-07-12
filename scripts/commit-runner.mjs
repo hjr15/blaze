@@ -7,6 +7,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { readEntries, clearLedger, listQueues, sessionId } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
+import { acquireLock, releaseLock } from "./commit-lock.mjs";
 
 const { dataRoot } = resolveRoots();
 const all = process.argv.slice(2).includes("--all");
@@ -44,15 +45,20 @@ const files = [...new Set(entries.flatMap((e) => e.files))].filter(
   (f) => existsSync(join(dataRoot, f)) || isTracked(f),
 );
 
+const lock = acquireLock(dataRoot, { session: sessionId() });
+if (!lock.ok) {
+  console.error(`blaze commit: commit.lock held by pid ${lock.owner?.pid ?? "?"} (session ${lock.owner?.session ?? "?"}) — try again shortly; ledger kept`);
+  process.exit(1);
+}
+const bail = (msg) => {
+  console.error(msg);
+  releaseLock(dataRoot);
+  process.exit(1);
+};
 const add = spawnSync("git", ["-C", dataRoot, "add", "--", ...files], { stdio: "ignore" });
-if (add.status !== 0) {
-  console.error(`blaze commit: git add failed (status ${add.status}) — ledger kept, resolve manually`);
-  process.exit(1);
-}
+if (add.status !== 0) bail(`blaze commit: git add failed (status ${add.status}) — ledger kept, resolve manually`);
 const commit = spawnSync("git", ["-C", dataRoot, "commit", "-m", subject, "-m", body, "--", ...files], { stdio: "inherit" });
-if (commit.status !== 0) {
-  console.error(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
-  process.exit(1);
-}
+if (commit.status !== 0) bail(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
 for (const q of drained) clearLedger(dataRoot, q.session);
+releaseLock(dataRoot);
 console.log(`blaze commit: flushed ${entries.length} op(s) → ${subject}`);
