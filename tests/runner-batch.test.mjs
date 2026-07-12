@@ -31,7 +31,9 @@ const head = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { 
 test("batch mode: blaze log queues, no commit", () => {
   const root = board("batch");
   const before = head(root);
-  execFileSync(process.execPath, [join(root, "scripts", "log-runner.mjs"), "OBA-1", "30"], { cwd: root });
+  const env = { ...process.env };
+  delete env.BLAZE_SESSION;
+  execFileSync(process.execPath, [join(root, "scripts", "log-runner.mjs"), "OBA-1", "30"], { cwd: root, env });
   assert.equal(head(root), before, "HEAD must not move in batch mode");
   const entries = readEntries(root);
   assert.equal(entries.length, 1);
@@ -53,7 +55,9 @@ test("per-op mode: blaze log commits", () => {
 test("batch mode: blaze move queues a two-file entry, no commit", () => {
   const root = board("batch");
   const before = head(root);
-  execFileSync(process.execPath, [join(root, "scripts", "move-runner.mjs"), "OBA-1", "in-review"], { cwd: root });
+  const env = { ...process.env };
+  delete env.BLAZE_SESSION;
+  execFileSync(process.execPath, [join(root, "scripts", "move-runner.mjs"), "OBA-1", "in-review"], { cwd: root, env });
   assert.equal(head(root), before, "HEAD must not move in batch mode");
   const entries = readEntries(root);
   assert.equal(entries.length, 1);

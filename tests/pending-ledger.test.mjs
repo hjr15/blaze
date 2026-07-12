@@ -1,9 +1,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync, existsSync, appendFileSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, appendFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { ledgerPath, appendEntry, readEntries, clearLedger } from "../scripts/pending-ledger.mjs";
+import { ledgerPath, appendEntry, readEntries, clearLedger, readForDrain } from "../scripts/pending-ledger.mjs";
 
 function tmp() { return mkdtempSync(join(tmpdir(), "blaze-ledger-")); }
 
@@ -32,6 +32,66 @@ test("clearLedger empties the ledger", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
+test("clearLedger with no third arg still empties fully (back-compat)", () => {
+  const root = tmp();
+  appendEntry(root, { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" });
+  appendEntry(root, { id: "X-2", op: "new", message: "X-2: create task", files: ["projects/X/backlog/X-2.md"], ts: "t" });
+  clearLedger(root, null); // explicit session, no consumedBytes
+  assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readForDrain returns entries plus the exact byte length of the file", () => {
+  const root = tmp();
+  const e1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" };
+  appendEntry(root, e1);
+  const { entries, bytes } = readForDrain(root);
+  assert.deepEqual(entries, [e1]);
+  assert.equal(bytes, Buffer.byteLength(readFileSync(ledgerPath(root), "utf8")));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("readForDrain on an absent ledger returns empty entries and zero bytes", () => {
+  const root = tmp();
+  assert.deepEqual(readForDrain(root), { entries: [], bytes: 0 });
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("drain-exact: an op appended after the drain read survives clearLedger(bytes)", () => {
+  const root = tmp();
+  const op1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t1" };
+  const op2 = { id: "X-2", op: "new", message: "X-2: create task (late, mid-drain)", files: ["projects/X/backlog/X-2.md"], ts: "t2" };
+  appendEntry(root, op1);
+  const { entries, bytes } = readForDrain(root);
+  assert.deepEqual(entries, [op1]);
+  appendEntry(root, op2); // simulates another session appending while the drainer is mid-commit
+  clearLedger(root, null, bytes);
+  assert.deepEqual(readEntries(root), [op2]); // only the late op survives
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("drain-exact: bytes measured on the raw buffer — a trailing partial multibyte char must not inflate the offset", () => {
+  const root = tmp();
+  const op1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t1" };
+  const op2 = { id: "X-2", op: "new", message: "X-2: late op after crash residue", files: ["projects/X/backlog/X-2.md"], ts: "t2" };
+  appendEntry(root, op1);
+  // Process killed mid-append: raw partial UTF-8 on disk (0xe6 is a 3-byte
+  // lead with no continuation bytes), no trailing newline. Decoding turns the
+  // invalid byte into U+FFFD, which RE-encodes at 3 bytes — so measuring bytes
+  // on the decoded string overstates the on-disk length by 2 here, and a later
+  // clearLedger(bytes) subarray would chop the head off the next line.
+  appendFileSync(ledgerPath(root), Buffer.from([0x7b, 0x22, 0xe6]));
+  const { entries, bytes } = readForDrain(root);
+  assert.deepEqual(entries, [op1]); // the corrupt partial line is skipped
+  assert.equal(bytes, Buffer.byteLength(JSON.stringify(op1) + "\n") + 3); // raw on-disk bytes, not re-encoded length
+  // The late op lands on its own clean line after the crash residue.
+  appendFileSync(ledgerPath(root), "\n");
+  appendEntry(root, op2);
+  clearLedger(root, null, bytes);
+  assert.deepEqual(readEntries(root), [op2]); // op2 survives intact — no head-chop
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("readEntries tolerates a trailing partial/corrupt line", () => {
   const root = tmp();
   appendEntry(root, { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t" });
@@ -40,5 +100,51 @@ test("readEntries tolerates a trailing partial/corrupt line", () => {
   const entries = readEntries(root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].id, "X-1");
+  rmSync(root, { recursive: true, force: true });
+});
+
+import { sessionId, listQueues } from "../scripts/pending-ledger.mjs";
+
+test("sessionId: set, dirty, empty, unset", () => {
+  assert.equal(sessionId({ BLAZE_SESSION: "alpha-1" }), "alpha-1");
+  assert.equal(sessionId({ BLAZE_SESSION: "a b/c$!" }), "abc");
+  assert.equal(sessionId({ BLAZE_SESSION: "$$/ " }), null);
+  assert.equal(sessionId({}), null);
+});
+
+test("ledgerPath: session-keyed vs legacy fallback", () => {
+  assert.match(ledgerPath("/r"), /\.blaze\/pending-commit\.jsonl$/);
+  assert.match(ledgerPath("/r", "alpha"), /\.blaze\/pending\/alpha\.jsonl$/);
+});
+
+test("session queues are isolated from each other and the fallback", () => {
+  const root = tmp();
+  const mk = (id, session) => ({ id, op: "new", message: `${id}: create`, files: [`projects/X/backlog/${id}.md`], ts: "t", ...(session ? { session } : {}) });
+  appendEntry(root, mk("X-1", "a"), "a");
+  appendEntry(root, mk("X-2", "b"), "b");
+  appendEntry(root, mk("X-3", null));
+  assert.equal(readEntries(root, "a").length, 1);
+  assert.equal(readEntries(root, "a")[0].id, "X-1");
+  assert.equal(readEntries(root, "b")[0].id, "X-2");
+  assert.equal(readEntries(root)[0].id, "X-3");
+  clearLedger(root, "a");
+  assert.deepEqual(readEntries(root, "a"), []);
+  assert.equal(readEntries(root, "b").length, 1);
+  assert.equal(readEntries(root).length, 1);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("listQueues: fallback first, then session queues sorted", () => {
+  const root = tmp();
+  assert.deepEqual(listQueues(root), []);
+  // "main" vs "main-2" catches filename-vs-name sorting: as filenames,
+  // "main-2.jsonl" < "main.jsonl" ('-' < '.'), but as names "main" < "main-2".
+  appendEntry(root, { id: "X-2", op: "new", message: "m", files: [], ts: "t", session: "main-2" }, "main-2");
+  appendEntry(root, { id: "X-1", op: "new", message: "m", files: [], ts: "t", session: "main" }, "main");
+  appendEntry(root, { id: "X-4", op: "new", message: "m", files: [], ts: "t", session: "alpha" }, "alpha");
+  appendEntry(root, { id: "X-3", op: "new", message: "m", files: [], ts: "t" });
+  const qs = listQueues(root);
+  assert.deepEqual(qs.map((q) => q.session), [null, "alpha", "main", "main-2"]);
+  assert.ok(qs.every((q) => q.path.endsWith(".jsonl")));
   rmSync(root, { recursive: true, force: true });
 });
