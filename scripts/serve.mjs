@@ -73,7 +73,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
 
     if (req.method === "GET" && u.pathname === "/api/hash") {
-      res.writeHead(200, { "content-type": "text/plain" }); res.end(contentHash()); return;
+      res.writeHead(200, { "content-type": "text/plain" });
+      res.end(contentHash({ projectsDir, project: u.searchParams.get("project") || null })); return;
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {

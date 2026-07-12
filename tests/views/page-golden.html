@@ -452,13 +452,18 @@
     })();
   </script>
   <script>
-    // Poll a cheap content hash; reload only when ticket files actually change.
+    // Poll a cheap content hash, scoped to the page's own ?project=; refresh
+    // in place (swapView) only when ticket files actually change. Focus
+    // scoping is deliberately project-granular, not focus-granular — cheap
+    // now that refresh is one fragment fetch instead of a document reload.
     // Also updates the sync badge with unsynced-commits count.
+    const HASH_PROJECT = new URLSearchParams(location.search).get("project");
+    const HASH_URL = "/api/hash" + (HASH_PROJECT ? "?project=" + encodeURIComponent(HASH_PROJECT) : "");
     let last = null;
     async function poll() {
       try {
-        const h = await (await fetch("/api/hash")).text();
-        if (last !== null && h !== last) location.reload();
+        const h = await (await fetch(HASH_URL)).text();
+        if (last !== null && h !== last) window.blazeSwapView(document.documentElement.dataset.view);
         last = h;
         document.getElementById("live").textContent = "live";
         const s = await (await fetch("/api/sync")).json();
@@ -481,7 +486,7 @@
       try {
         const res = await fetch(path, { method: "POST",
           headers: { "content-type": "application/json", "x-blaze-csrf": CSRF }, body: JSON.stringify(body) });
-        if (res.ok) { location.reload(); return true; }
+        if (res.ok) { window.blazeSwapView(document.documentElement.dataset.view); return true; }
         const j = await res.json().catch(() => ({ errors: [res.statusText] }));
         toast((j.errors || ["error"]).join("; ")); return false;
       } catch (e) { toast("network error: " + e.message); return false; }
@@ -526,11 +531,11 @@
       const commit = () => {
         if (done) return; done = true;
         const v = input.value.trim();
-        if (v === cur) { location.reload(); return; }
+        if (v === cur) { window.blazeSwapView(document.documentElement.dataset.view); return; }
         blazePost("/api/edit", { id, patch: { [field]: v } });
       };
       input.addEventListener("blur", commit);
-      input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { done = true; location.reload(); } });
+      input.addEventListener("keydown", (e) => { if (e.key === "Enter") input.blur(); if (e.key === "Escape") { done = true; window.blazeSwapView(document.documentElement.dataset.view); } });
     }
     document.addEventListener("click", (e) => {
       const span = e.target.closest(".editable");

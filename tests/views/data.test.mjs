@@ -3,8 +3,21 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { boardModel } from "../../scripts/views/data.mjs";
+import { boardModel, contentHash } from "../../scripts/views/data.mjs";
 import { buildIndex } from "../../scripts/model/index.mjs";
+
+// Two-project fixture (T + U, one ticket each) for contentHash project-scoping
+// tests — follows the single-project inline style used by the tests above.
+function fixtureTwoProjects() {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-hash-"));
+  mkdirSync(join(dir, "T", "todo"), { recursive: true });
+  mkdirSync(join(dir, "U", "todo"), { recursive: true });
+  writeFileSync(join(dir, "T", "todo", "T-1.md"),
+    "---\nid: T-1\ntitle: t\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");
+  writeFileSync(join(dir, "U", "todo", "U-1.md"),
+    "---\nid: U-1\ntitle: u\ntype: task\nproject: U\nestimate: 5\n---\nbody\n");
+  return dir;
+}
 
 test("boardModel groups tickets into status columns", () => {
   const dir = mkdtempSync(join(tmpdir(), "blaze-data-"));
@@ -77,4 +90,13 @@ test("boardModel focus filters to a parent's descendants + exposes crumbs", () =
   assert.deepEqual(m.focus.crumbs.map((c) => c.id), ["INF-9"]);
   const ids = m.boards.flatMap((b) => b.columns.flatMap((c) => c.tickets.map((t) => t.meta.id)));
   assert.deepEqual(ids.sort(), ["INF-10"]);  // only the descendant
+});
+
+test("contentHash scoped to a project ignores other projects' changes", () => {
+  const dir = fixtureTwoProjects();
+  const scopedBefore = contentHash({ projectsDir: dir, project: "T" });
+  const wholeBefore = contentHash({ projectsDir: dir });
+  writeFileSync(join(dir, "U", "todo", "U-1.md"), "---\nid: U-1\ntitle: changed\ntype: task\nproject: U\nestimate: 5\n---\nx\n");
+  assert.equal(contentHash({ projectsDir: dir, project: "T" }), scopedBefore); // T-scope blind to U
+  assert.notEqual(contentHash({ projectsDir: dir }), wholeBefore);             // whole tree sees it
 });

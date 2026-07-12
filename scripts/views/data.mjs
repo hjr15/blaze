@@ -101,10 +101,12 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
 }
 
 // A cheap hash of all ticket files' size+mtime, for the auto-reload poll.
-export function contentHash() {
+// Scoped to projectsDir/<project> when project is given, so an edit in an
+// unrelated project doesn't invalidate a project-focused view's poll.
+export function contentHash({ projectsDir = resolveRoots().projectsDir, project = null } = {}) {
   let h = 0;
-  const projectsDir = resolveRoots().projectsDir;
-  const stack = [projectsDir];
+  const rootDir = project ? join(projectsDir, project) : projectsDir;
+  const stack = [rootDir];
   while (stack.length) {
     const dir = stack.pop();
     let entries = [];
