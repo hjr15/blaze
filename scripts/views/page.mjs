@@ -82,7 +82,11 @@ export function sublineHtml(m) {
 // ---- JSON fragment envelope (client swap target) ---------------------------
 
 export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views = cfg.views } = {}) {
-  if (!VIEW_NAMES.includes(view) || !views[view]) return null;
+  // Clamp: board must always be enabled regardless of what the caller passes
+  // (config.mjs already forces this for cfg.views, but a direct caller — e.g.
+  // a future supervisor — could pass { board: false } and strand every view).
+  const V = { ...views, board: true };
+  if (!VIEW_NAMES.includes(view) || !V[view]) return null;
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const m = boardModel(pDir, { project, focus, flat });
   return {
@@ -109,6 +113,14 @@ export function pageHtml({
   transitions,
   views = cfg.views,
 } = {}) {
+  // Clamp: board must always be enabled regardless of what the caller passes
+  // (belt-and-suspenders alongside config.mjs's own board:true enforcement).
+  const V = { ...views, board: true };
+  // Gate the full-page path the same way /view/<name> is gated — a disabled
+  // ?view=<name> must not reach renderView (which is where the metrics/map
+  // model compute happens, exactly what a disabled view is meant to avoid).
+  // board is guaranteed on above, so falling back to it is always safe.
+  if (!V[view]) view = "board";
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const m = boardModel(pDir, { project, focus, flat });
   const { columns: cols, projects, selected } = m;
@@ -239,7 +251,7 @@ export function pageHtml({
     <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
     ${boardToggle}
     <div class="viewtoggle" role="group" aria-label="View">
-      ${VIEW_NAMES.filter((v) => views[v]).map((v) =>
+      ${VIEW_NAMES.filter((v) => V[v]).map((v) =>
         `<button type="button" class="pill" data-view="${v}">${v.charAt(0).toUpperCase()}${v.slice(1)}</button>`
       ).join("\n      ")}
     </div>

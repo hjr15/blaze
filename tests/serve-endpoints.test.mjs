@@ -404,6 +404,49 @@ test("startServer views option disables a view: /view/map 404s, no map pill, boa
   }
 });
 
+// Review fix (BLZ-88): GET /?view=map must not bypass the views gate. Only
+// /view/<name> checked views[view] before this fix — pageHtml took ?view=
+// straight from the query string and rendered it (including running
+// graphModel), defeating the whole point of disabling a view.
+test("GET /?view=map falls back to board when map is disabled (no bypass, no graphModel compute)", async () => {
+  const fx = repo();
+  const server = startServer({
+    projectsDir: fx.projects, root: fx.root, port: 0,
+    views: { board: true, list: true, live: true, metrics: true, map: false },
+  });
+  await new Promise((res) => server.once("listening", res));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const res = await fetch(`${base}/?view=map`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.doesNotMatch(html, /class="mapview"/);
+    assert.match(html, /data-rendered="board"/);
+  } finally {
+    server.close(); rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
+test("GET /?view=board still works when map is disabled", async () => {
+  const fx = repo();
+  const server = startServer({
+    projectsDir: fx.projects, root: fx.root, port: 0,
+    views: { board: true, list: true, live: true, metrics: true, map: false },
+  });
+  await new Promise((res) => server.once("listening", res));
+  const { port } = server.address();
+  const base = `http://127.0.0.1:${port}`;
+  try {
+    const res = await fetch(`${base}/?view=board`);
+    assert.equal(res.status, 200);
+    const html = await res.text();
+    assert.match(html, /data-rendered="board"/);
+  } finally {
+    server.close(); rmSync(fx.root, { recursive: true, force: true });
+  }
+});
+
 test("GET / gzips when asked", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
