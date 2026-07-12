@@ -11,8 +11,10 @@ dispatch to thin `*-runner.mjs` wrappers around pure cores in `scripts/model/`,
 `blaze start` boots the supervisor (web board + the reconcile and groomer loops),
 and `blaze board` serves the read/write web board on its own. Every component
 reads and writes the same markdown ticket files under `projects/<KEY>/<status>/`;
-the `.blaze/` caches are all derived and disposable, and git is the history and
-the bus. The board is a rendering over the files, never a second source of truth.
+the derived `.blaze/` caches are disposable, while the pending queues hold
+queued-but-uncommitted batch ops (session-keyed since v0.4.0) and the advisory
+`commit.lock/` serializes git writes. Git is the history and the bus. The board
+is a rendering over the files, never a second source of truth.
 
 ```mermaid
 flowchart TB
@@ -45,7 +47,7 @@ flowchart TB
     subgraph Data["Data repo (own git history)"]
         direction TB
         Files["projects/&lt;KEY&gt;/&lt;status&gt;/&lt;id&gt;-slug.md<br/>(source of truth)"]
-        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl · pending-commit.jsonl<br/>(derived, disposable)"]
+        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)<br/>pending/&lt;session&gt;.jsonl + fallback queue<br/>commit.lock/ (write coordination)"]
     end
 
     CLI --> Runners

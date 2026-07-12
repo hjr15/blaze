@@ -54,7 +54,7 @@ flowchart TB
     subgraph Data["Data repo (own git history)"]
         direction TB
         Files["projects/&lt;KEY&gt;/&lt;status&gt;/&lt;id&gt;-slug.md<br/>(source of truth)"]
-        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl · pending-commit.jsonl<br/>(derived, disposable)"]
+        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)<br/>pending/&lt;session&gt;.jsonl + fallback queue<br/>commit.lock/ (write coordination)"]
     end
 
     CLI --> Runners
@@ -75,7 +75,12 @@ flowchart TB
 - **CLI + runners** — `cli.mjs` maps each verb (`new`, `move`, `edit`, `resolve`,
   `log`, `commit`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
   `*-runner.mjs` that wraps a pure `apply*`/model core and then commits via
-  `commit-or-queue.mjs` (per-op commit, or a queued entry in `batch` mode).
+  `commit-or-queue.mjs` (per-op commit, or a queued entry in `batch` mode —
+  session-keyed to `.blaze/pending/<BLAZE_SESSION>.jsonl` since v0.4.0, so
+  `blaze commit` flushes only the caller's queue and `--all` sweeps them all).
+  Both git-write surfaces serialize on the advisory `commit-lock.mjs`
+  (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
+  "Sessions (parallel agents on one board)".
 - **Model (`scripts/model/`)** — the single home for all rules: `schema`,
   `workflows`, `rules`, `move-plan`, `ticket` (validation + transitions); `index`,
   `rollup`, `time`, `ids`, `activity`, `transitions`, `search`, `filters`,
