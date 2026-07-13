@@ -19,7 +19,7 @@ import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
 import { applyEdit, applyToggleAc } from "./edit.mjs";
-import { commitFile } from "./serve-commit.mjs";
+import { commitOrQueue } from "./commit-or-queue.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
@@ -137,9 +137,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         else json(500, { errors: [`written but commit failed (status ${c.status})`] });
         return true;
       };
-      const done = (r, msg, extra = {}) => {
+      const done = (r, msg, op, extra = {}) => {
         if (!r.ok) return json(422, { errors: r.errors });
-        const c = commitFile(root, r.file, msg, [], LOCK_OPTS);
+        const c = commitOrQueue({ root, mode: cfg.commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
         return json(200, { ok: true, ...extra });
       };
@@ -148,25 +148,25 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         const r = applyMove(projectsDir, payload.id, payload.to, { today });
         if (!r.ok) return json(422, { errors: r.errors });
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
-        const c = commitFile(root, r.file, `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, extraFiles, LOCK_OPTS);
+        const c = commitOrQueue({ root, mode: cfg.commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
         return json(200, { ok: true, resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {
         const r = applyEdit(projectsDir, payload.id, payload.patch || {}, { today });
-        return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`);
+        return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`, "edit");
       }
       if (u.pathname === "/api/resolve") {
         const r = applyResolve(projectsDir, payload.id, payload.resolution, { today });
-        return done(r, `${payload.id}: resolve ${payload.resolution}`);
+        return done(r, `${payload.id}: resolve ${payload.resolution}`, "resolve");
       }
       if (u.pathname === "/api/log") {
         const r = applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today });
-        return done(r, `${payload.id}: log ${payload.minutes}m`);
+        return done(r, `${payload.id}: log ${payload.minutes}m`, "log");
       }
       if (u.pathname === "/api/ac") {
         const r = applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today });
-        return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`);
+        return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
       }
       return json(404, { errors: ["not found"] });
     }
