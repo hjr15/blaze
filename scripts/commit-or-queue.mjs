@@ -5,7 +5,7 @@ import { relative } from "node:path";
 import { commitFile } from "./serve-commit.mjs";
 import { appendEntry, sessionId } from "./pending-ledger.mjs";
 
-export function commitOrQueue({ root, mode, op, id, message, files }) {
+export function commitOrQueue({ root, mode, op, id, message, files, lockOpts = {} }) {
   const unique = [...new Set(files)];
   if (mode === "batch") {
     const session = sessionId();
@@ -20,5 +20,5 @@ export function commitOrQueue({ root, mode, op, id, message, files }) {
     return { ok: true, queued: true };
   }
   const [first, ...rest] = unique;
-  return commitFile(root, first, message, rest);
+  return commitFile(root, first, message, rest, lockOpts);
 }
