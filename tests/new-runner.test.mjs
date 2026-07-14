@@ -39,3 +39,20 @@ test("blaze new --components a,b writes components at create", () => {
   assert.match(txt, /components: \[auth, gateway\]/);
   rmSync(root, { recursive: true, force: true });
 });
+
+test("blaze new prints a soft-require warning but still exits 0", () => {
+  const root = dataRepo({ project: { components: ["auth"], requireComponents: true } });
+  const r = run(root, ["--project", "OBA", "--type", "task", "--estimate", "30", "no-comp"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stderr, /warning:.*component/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("blaze new --reason suppresses the soft-require warning", () => {
+  const root = dataRepo({ project: { components: ["auth"], requireComponents: true } });
+  const r = run(root, ["--project", "OBA", "--type", "task", "--estimate", "30",
+                       "--reason", "cross-cutting epic", "no-comp"]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /warning:.*component/);
+  rmSync(root, { recursive: true, force: true });
+});

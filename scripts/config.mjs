@@ -134,6 +134,8 @@ import { isAbsolute as _isAbsolute, resolve as _resolve } from "node:path";
 const PROJECT_DEFAULTS = {
   components: [],
   labels: [],
+  requireComponents: false,
+  requireLabels: false,
   codeRepos: [],
   requireWorklogBeforeTerminal: false,
   schema: null,

@@ -10,7 +10,7 @@ import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { roundEstimate } from "./model/time.mjs";
 import { loadProject } from "./config.mjs";
-import { validateTaxonomy } from "./model/taxonomy.mjs";
+import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
 
 function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -54,5 +54,6 @@ export function applyNew(projectsDir, opts = {}) {
   const file = join(dir, `${id}-${slugify(title)}.md`);
   if (existsSync(file)) return { ok: false, errors: [`refusing to overwrite ${file}`] };
   writeFileSync(file, serializeTicket({ frontmatter, body }));
-  return { ok: true, id, type, project, status, file };
+  const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
+  return { ok: true, id, type, project, status, file, warnings };
 }

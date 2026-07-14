@@ -17,3 +17,15 @@ export function validateTaxonomy(fm, project) {
   }
   return errors;
 }
+
+export function warnMissingRequired(fm, project, { reason = null } = {}) {
+  const warnings = [];
+  if (reason) return warnings; // an explicit blank-reason clears the soft gate
+  const req = { components: project?.requireComponents, labels: project?.requireLabels };
+  for (const field of ["components", "labels"]) {
+    if (req[field] && (fm?.[field] ?? []).length === 0) {
+      warnings.push(`${SINGULAR[field]}s not set — fill from projects/${project.key ?? "?"}/project.json or pass --reason "<why blank>"`);
+    }
+  }
+  return warnings;
+}

@@ -95,3 +95,15 @@ test("applyNew hard-rejects an off-taxonomy component", () => {
   assert.ok(res.errors.some((e) => /bogus/.test(e)));
   rmSync(r, { recursive: true, force: true });
 });
+
+test("applyNew warns (does not block) on empty required components", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  mkdirSync(join(projects, "OBA"), { recursive: true });
+  writeFileSync(join(projects, "OBA", "project.json"),
+    JSON.stringify({ components: ["auth"], requireComponents: true }));
+  const res = applyNew(projects, { project: "OBA", type: "task", title: "no comp", today: "2026-07-15", extra: { estimate: 30 } });
+  assert.equal(res.ok, true);                       // NOT blocked
+  assert.ok(res.warnings.some((w) => /component/.test(w)));
+  rmSync(r, { recursive: true, force: true });
+});
