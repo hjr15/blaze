@@ -20,7 +20,7 @@ try {
   writeFileSync(out, JSON.stringify(idx.toJSON(), null, 2));
   const c = idx.count();
   console.log(`indexed ${c} ticket${c === 1 ? "" : "s"} → ${out}`);
-  for (const w of idx.warnings ?? []) console.warn(`warning: ${w}`);
+  for (const w of idx.warnings) console.warn(`warning: ${w}`);
 
   const built = buildTransitions({ root: dataRoot });
   const transitionsOut = join(dbDir, "transitions.json");

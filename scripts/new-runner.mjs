@@ -38,7 +38,7 @@ if (!opts.project || !opts.type || !opts.title) {
 
 const r = applyNew(projectsDir, opts);
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
-for (const w of r.warnings ?? []) console.error(`warning: ${w}`);
+for (const w of r.warnings) console.error(`warning: ${w}`);
 
 const cfg = loadConfig({ root: dataRoot });
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file] });
