@@ -68,3 +68,16 @@ test("applyNew: a positive sub-5m estimate is bumped to 5, not dropped", () => {
   assert.match(readFileSync(res.file, "utf8"), /estimate: 5/);
   rmSync(r, { recursive: true, force: true });
 });
+
+test("applyNew sets components from extra.components and round-trips", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  const res = applyNew(projects, {
+    project: "OBA", type: "task", title: "comp task", today: "2026-07-15",
+    extra: { components: ["auth", "gateway"], estimate: 30 },
+  });
+  assert.equal(res.ok, true);
+  const txt = readFileSync(res.file, "utf8");
+  assert.match(txt, /components: \[auth, gateway\]/);
+  rmSync(r, { recursive: true, force: true });
+});
