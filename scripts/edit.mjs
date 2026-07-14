@@ -49,12 +49,10 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   all.set(id, { frontmatter: fm, body: found.body });
   const errors = validateTicket({ frontmatter: fm, body: found.body }, (pid) => all.get(pid) || null);
-  // Mirrors move.mjs's defensive loadProject call: a ticket missing/malformed
-  // project data (e.g. legacy fixtures) skips taxonomy validation rather than throwing.
-  try {
+  if (fm.project) {
     const project_cfg = loadProject(fm.project, { root: dirname(projectsDir), projectsDir });
     errors.push(...validateTaxonomy(fm, project_cfg));
-  } catch { /* no project config to validate against */ }
+  }
   if (errors.length) return { ok: false, errors };
 
   if (today) fm.updated = today;
