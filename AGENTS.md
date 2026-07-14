@@ -40,8 +40,10 @@ automatically yet.
 ## The loop
 
 1. **Create**: `blaze new --project <KEY> --type <type> "<title>" [--estimate m]
-   [--parent ID]`. It lands in the type's initial status (`defined` or
-   `identified`).
+   [--parent ID] [--labels a,b] [--components a,b] [--reason "<why blank>"]`. It
+   lands in the type's initial status (`defined` or `identified`). See
+   "Labels/components taxonomy" below for what `--labels`/`--components` and
+   `--reason` do.
 2. **You** move it forward by hand — `blaze move <id> <status>` — when you commit
    to working it (intent is a human/agent decision, not automatic).
 3. If the project has a `codeRepos` entry, `blaze reconcile` takes over for
@@ -71,14 +73,34 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
   `cannot-reproduce`.
 - `parent` — another ticket's `id`; must satisfy the parent-type rule in the table
   above (validated, including cycle detection).
-- `labels` / `components` — free-form; keep to whatever taxonomy the project sets
-  in `project.json` (`defaultLabels` in `blaze.config.json` is the tracker-wide
-  fallback).
+- `labels` / `components` — set via `blaze new --labels a,b` / `--components a,b`,
+  or `blaze edit <id> labels a,b` / `components a,b`. When the project declares a
+  non-empty `labels`/`components` list in `project.json`, values are validated
+  against it (see below); `defaultLabels` in `blaze.config.json` is the
+  tracker-wide fallback for projects with no taxonomy of their own.
 - `estimate` — minutes, rounded to the nearest 5 (`blaze new --estimate`).
 - `worklog` — list of `{ date, minutes, note? }`, appended by `blaze log`; minutes
   round to the nearest whole minute.
 - `likelihood` / `impact` — risk-only fields.
 - `branch` / `pr` — filled by `reconcile`; don't hand-edit.
+
+## Labels/components taxonomy
+
+`projects/<KEY>/project.json` can declare `labels: [...]` and/or
+`components: [...]` — the project's closed taxonomy for those two fields. Both
+`blaze new` and `blaze edit` run every `labels`/`components` value through
+`validateTaxonomy` (`scripts/model/taxonomy.mjs`): a value not in the declared
+list is a **hard reject** (non-zero exit, nothing written) — add it to
+`project.json` first. A project that declares an empty (or omitted) list for a
+field opts out of validation for that field entirely — existing projects with
+no taxonomy configured see no behavior change.
+
+Separately, `requireComponents` / `requireLabels` in `project.json` (both
+default `false`) are a **soft** gate: when `true` and `blaze new` would create a
+ticket with that field empty, it prints a warning to stderr but still exits 0
+and writes the ticket — pass `--reason "<why blank>"` to suppress the warning
+(the reason is not itself stored). This only fires on `new`; it's a nudge at
+creation time, not an ongoing constraint `blaze edit` re-checks.
 
 ## Data-root ladder
 
@@ -116,6 +138,13 @@ are skipped, never fatal. Read it yourself with `tail -f .blaze/activity.jsonl`.
 history derived from git rename history, powering the Metrics view's cumulative-flow
 diagram) are both derived, regenerable caches — safe to delete any time. `blaze
 reindex` rebuilds both from `projects/` and git history respectively.
+
+While building the index, `blaze reindex` also lints every ticket's `links`
+(`scripts/model/links.mjs` → `lintLinks`) and prints one warning per issue —
+never a hard failure: a link entry using `to:` instead of `target:` (previously
+silently dropped), a `type` outside `Blocks`/`Relates`/`Duplicate`/`Cloners`, or
+a `target` that doesn't resolve to a known ticket id (dangling). Warnings are
+also stored on the index (`idx.warnings`) for any consumer that wants them.
 
 ## Commit modes
 
@@ -229,8 +258,11 @@ directory, never edit code or any file outside the tracker.
 `blaze.config.json` (data-repo root): `key`, `projects` (array of project keys the
 board renders), `commitMode`, `port`, and more.
 
-`projects/<KEY>/project.json` (optional, per project): `labels`, `components`,
-`codeRepos` (repos `reconcile` mirrors for this project),
+`projects/<KEY>/project.json` (optional, per project): `labels`, `components`
+(the project's taxonomy for those fields — see "Labels/components taxonomy"
+above; empty/omitted = no validation), `requireLabels`/`requireComponents`
+(default `false` — soft-warn on `blaze new` when the field is left empty; see
+above), `codeRepos` (repos `reconcile` mirrors for this project),
 `requireWorklogBeforeTerminal` (default `false` — when `true`, a leaf ticket
 (story/task/bug/subtask) needs at least one `worklog` entry before it can enter a
 terminal status; epics/goals/risks are exempt since their time rolls up from

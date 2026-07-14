@@ -41,8 +41,8 @@ flowchart TB
 
     subgraph Model["scripts/model/ — one rules home"]
         direction LR
-        M1["schema · workflows · rules<br/>move-plan · ticket"]
-        M2["index · rollup · time · ids<br/>activity · transitions · search · filters · metrics"]
+        M1["schema · workflows · rules<br/>move-plan · ticket · taxonomy"]
+        M2["index · rollup · time · ids<br/>activity · transitions · search · filters · metrics · links"]
     end
 
     subgraph Data["Data repo (own git history)"]

@@ -107,14 +107,14 @@ small commit per ticket, scoped to the files it actually touched.
 
 | Command | Does |
 |---|---|
-| `blaze new --project <KEY> --type <type> "<title>" [--estimate m] [--parent ID] [--priority p] [--labels a,b]` | Create a ticket in its type's initial status |
+| `blaze new --project <KEY> --type <type> "<title>" [--estimate m] [--parent ID] [--priority p] [--labels a,b] [--components a,b] [--reason "<why blank>"]` | Create a ticket in its type's initial status |
 | `blaze move <id> <status>` | Change status (validates the transition; auto-sets `resolution` on a terminal status) |
 | `blaze resolve <id> <done\|wont-do\|duplicate\|cannot-reproduce>` | Set a non-default resolution without moving the file |
 | `blaze log <id> <minutes>` | Append a worklog entry |
 | `blaze rollup [<id>]` | Print rolled-up estimate/logged time for one node, or a summary of every goal/epic |
 | `blaze reconcile [--apply] [--fetch]` | Mirror a linked code repo's branch/PR state onto delivery-workflow tickets (dry-run by default) |
 | `blaze edit <id> ...` | Edit ticket fields |
-| `blaze reindex` | Rebuild/validate the on-disk index |
+| `blaze reindex` | Rebuild/validate the on-disk index (warns on malformed or dangling `links` entries) |
 | `blaze commit` | Flush queued ops into one commit (`commitMode: batch`) |
 | `blaze migrate [--dry-run\|--live] [--project <KEY>]` | Import tickets from an external tracker via a reviewed disposition ledger (`--project` optional — falls back to `blaze.config.json`'s `projects` list) |
 | `blaze board` | Serve the read-only kanban view |
@@ -144,9 +144,18 @@ key, and how an agent should drive the board.
 ```
 
 `key` is the ticket id prefix (`ENG-1`, `ENG-2`, ...); `projects` lists which
-`projects/<KEY>/` directories the board renders. Per-project settings (labels,
-`codeRepos` to mirror, `requireWorklogBeforeTerminal`) live in
-`projects/<KEY>/project.json` — see [`AGENTS.md`](AGENTS.md#configuration).
+`projects/<KEY>/` directories the board renders. Per-project settings (`labels`,
+`components`, `requireLabels`/`requireComponents`, `codeRepos` to mirror,
+`requireWorklogBeforeTerminal`) live in `projects/<KEY>/project.json` — see
+[`AGENTS.md`](AGENTS.md#configuration).
+
+A project that declares `labels`/`components` in `project.json` turns those
+lists into a taxonomy: `blaze new`/`blaze edit` reject any value not on the
+list (add it to `project.json` first). An empty (or undeclared) list opts out —
+existing projects with no taxonomy see no change. Separately,
+`requireLabels`/`requireComponents` (default `false`) make `blaze new` print a
+warning — never a hard failure — when the corresponding field is left empty;
+pass `--reason "<why blank>"` to suppress it.
 
 A `views` block toggles which of Board / List / Live / Metrics / Map are
 available — every view defaults to `true`, so an existing config sees no
