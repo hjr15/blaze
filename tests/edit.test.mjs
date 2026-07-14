@@ -70,3 +70,12 @@ test("applyEdit accepts a title change", () => {
   const r = applyEdit(projects, "OBA-1", { title: "renamed" }, {});
   assert.equal(r.ok, true);
 });
+
+test("applyEdit hard-rejects an off-taxonomy label", () => {
+  const { root, projects } = fixture();
+  writeFileSync(join(projects, "OBA", "project.json"), JSON.stringify({ components: [], labels: ["area:cms"] }));
+  const r = applyEdit(projects, "OBA-1", { labels: "area:cms, bogus" }, { today: "2026-07-15" });
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /bogus/.test(e)));
+  rmSync(root, { recursive: true, force: true });
+});
