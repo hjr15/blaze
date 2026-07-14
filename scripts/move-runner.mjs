@@ -11,6 +11,7 @@ if (!id || !toStatus) { console.error("usage: blaze move <id> <status>"); proces
 const today = new Date().toISOString().slice(0, 10);
 const r = applyMove(projectsDir, id, toStatus, { today });
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
+for (const w of r.warnings ?? []) console.error(`warning: ${w}`);
 
 const cfg = loadConfig({ root: dataRoot });
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "move", id, message: `${id}: ${r.from} → ${r.to}`, files: [r.fromFile, r.file] });
