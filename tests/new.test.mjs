@@ -1,7 +1,7 @@
 // tests/new.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyNew } from "../scripts/new.mjs";
@@ -66,5 +66,44 @@ test("applyNew: a positive sub-5m estimate is bumped to 5, not dropped", () => {
     today: "2026-06-29", extra: { estimate: 2 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   assert.match(readFileSync(res.file, "utf8"), /estimate: 5/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("applyNew sets components from extra.components and round-trips", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  const res = applyNew(projects, {
+    project: "OBA", type: "task", title: "comp task", today: "2026-07-15",
+    extra: { components: ["auth", "gateway"], estimate: 30 },
+  });
+  assert.equal(res.ok, true);
+  const txt = readFileSync(res.file, "utf8");
+  assert.match(txt, /components: \[auth, gateway\]/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("applyNew hard-rejects an off-taxonomy component", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  mkdirSync(join(projects, "OBA"), { recursive: true });
+  writeFileSync(join(projects, "OBA", "project.json"), JSON.stringify({ components: ["auth"], labels: [] }));
+  const res = applyNew(projects, {
+    project: "OBA", type: "task", title: "bad comp", today: "2026-07-15",
+    extra: { components: ["auth", "bogus"], estimate: 30 },
+  });
+  assert.equal(res.ok, false);
+  assert.ok(res.errors.some((e) => /bogus/.test(e)));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("applyNew warns (does not block) on empty required components", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  mkdirSync(join(projects, "OBA"), { recursive: true });
+  writeFileSync(join(projects, "OBA", "project.json"),
+    JSON.stringify({ components: ["auth"], requireComponents: true }));
+  const res = applyNew(projects, { project: "OBA", type: "task", title: "no comp", today: "2026-07-15", extra: { estimate: 30 } });
+  assert.equal(res.ok, true);                       // NOT blocked
+  assert.ok(res.warnings.some((w) => /component/.test(w)));
   rmSync(r, { recursive: true, force: true });
 });

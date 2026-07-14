@@ -6,6 +6,7 @@
 import { readFileSync, readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { parseTicket } from "./ticket.mjs";
+import { lintLinks } from "./links.mjs";
 
 function safeReaddir(p) { try { return readdirSync(p); } catch { return []; } }
 function isDir(p) { try { return statSync(p).isDirectory(); } catch { return false; } }
@@ -59,11 +60,12 @@ export function* walkTickets(projectsDir) {
   }
 }
 
-function makeIndex(rows, links) {
+function makeIndex(rows, links, warnings) {
   const byId = new Map(rows.map((r) => [r.id, r]));
   return {
     rows,
     links,
+    warnings,
     get: (id) => byId.get(id),
     count: () => rows.length,
     byProject: (project) => rows.filter((r) => r.project === project),
@@ -71,13 +73,14 @@ function makeIndex(rows, links) {
       acc[r.project] = (acc[r.project] || 0) + 1; return acc;
     }, {}),
     linksFrom: (id) => links.filter((l) => l.src === id),
-    toJSON: () => ({ tickets: rows, links }),
+    toJSON: () => ({ tickets: rows, links, warnings }),
   };
 }
 
 export function buildIndex(projectsDir, { tickets } = {}) {
   const rows = [];
   const links = [];
+  const collected = [];
   for (const t of tickets ?? walkTickets(projectsDir)) {
     const fm = t.frontmatter;
     const worklog_minutes = Array.isArray(fm.worklog)
@@ -89,6 +92,9 @@ export function buildIndex(projectsDir, { tickets } = {}) {
       worklog_minutes, file: t.file,
     });
     for (const link of fm.links ?? []) links.push({ src: fm.id, type: link.type, target: link.target });
+    collected.push(fm);
   }
-  return makeIndex(rows, links);
+  const knownIds = new Set(rows.map((r) => r.id));
+  const warnings = collected.flatMap((fm) => lintLinks(fm, knownIds));
+  return makeIndex(rows, links, warnings);
 }

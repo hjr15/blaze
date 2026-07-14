@@ -60,3 +60,17 @@ test("buildIndex populates rows with summed worklog and links", () => {
   assert.deepEqual(idx.byProject("INF").map((r) => r.id), ["INF-1"]);
   rmSync(root, { recursive: true, force: true });
 });
+
+test("buildIndex surfaces a malformed link key as a warning", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-idx-"));
+  const dir = join(root, "projects", "OBA", "defined");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "OBA-1.md"),
+    "---\nid: OBA-1\ntype: task\nproject: OBA\ntitle: t\npriority: medium\n" +
+    "links:\n  - { type: Blocks, to: OBA-2 }\n---\n\nbody\n");
+  writeFileSync(join(dir, "OBA-2.md"),
+    "---\nid: OBA-2\ntype: task\nproject: OBA\ntitle: t2\npriority: medium\n---\n\nbody\n");
+  const idx = buildIndex(join(root, "projects"));
+  assert.ok(idx.warnings.some((w) => /target:/.test(w)));
+  rmSync(root, { recursive: true, force: true });
+});

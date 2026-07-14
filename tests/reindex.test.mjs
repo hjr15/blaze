@@ -23,3 +23,16 @@ test("reindex runner builds .blaze/index.json and prints a count", () => {
   assert.equal(JSON.parse(readFileSync(out, "utf8")).tickets[0].id, "OBA-1");
   rmSync(root, { recursive: true, force: true });
 });
+
+test("reindex prints link warnings for a malformed link key", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reindex-"));
+  const dir = join(root, "projects", "OBA", "defined");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "OBA-1.md"),
+    "---\nid: OBA-1\ntype: task\nproject: OBA\ntitle: t\npriority: medium\n" +
+    "links:\n  - { type: Blocks, to: OBA-2 }\n---\n\nbody\n");
+  const r = spawnSync(process.execPath, [runner, join(root, "projects")],
+    { env: { ...process.env, BLAZE_DB_DIR: join(root, ".blaze") }, encoding: "utf8" });
+  assert.match((r.stdout || "") + (r.stderr || ""), /target:/);
+  rmSync(root, { recursive: true, force: true });
+});

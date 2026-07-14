@@ -16,11 +16,13 @@ for (let i = 0; i < argv.length; i++) {
     case "--type":     opts.type = argv[++i]; break;
     case "--priority": opts.priority = argv[++i]; break;
     case "--labels":   opts.labels = argv[++i].split(",").map((s) => s.trim()).filter(Boolean); break;
+    case "--components": opts.extra.components = argv[++i].split(",").map((s) => s.trim()).filter(Boolean); break;
     case "--estimate": opts.extra.estimate = Number(argv[++i]); break;
     case "--parent":   opts.extra.parent = argv[++i]; break;
     case "--assignee": opts.extra.assignee = argv[++i]; break;
     case "--likelihood": opts.extra.likelihood = argv[++i]; break;
     case "--impact":   opts.extra.impact = argv[++i]; break;
+    case "--reason":   opts.extra.reason = argv[++i]; break;
     default:
       if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
       positional.push(a);
@@ -30,12 +32,13 @@ opts.title = positional.join(" ");
 opts.today = new Date().toISOString().slice(0, 10);
 
 if (!opts.project || !opts.type || !opts.title) {
-  console.error('usage: blaze new --project <KEY> --type <type> "<title>" [--priority p] [--labels a,b] [--estimate m] [--parent ID]');
+  console.error('usage: blaze new --project <KEY> --type <type> "<title>" [--priority p] [--labels a,b] [--components a,b] [--estimate m] [--parent ID] [--reason "<why blank>"]');
   process.exit(1);
 }
 
 const r = applyNew(projectsDir, opts);
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
+for (const w of r.warnings) console.error(`warning: ${w}`);
 
 const cfg = loadConfig({ root: dataRoot });
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file] });

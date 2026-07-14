@@ -47,8 +47,8 @@ flowchart TB
 
     subgraph Model["scripts/model/ — one rules home"]
         direction LR
-        M1["schema · workflows · rules<br/>move-plan · ticket"]
-        M2["index · rollup · time · ids<br/>activity · transitions · search · filters · metrics"]
+        M1["schema · workflows · rules<br/>move-plan · ticket · taxonomy"]
+        M2["index · rollup · time · ids<br/>activity · transitions · search · filters · metrics · links"]
     end
 
     subgraph Data["Data repo (own git history)"]
@@ -82,10 +82,15 @@ flowchart TB
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
 - **Model (`scripts/model/`)** — the single home for all rules: `schema`,
-  `workflows`, `rules`, `move-plan`, `ticket` (validation + transitions); `index`,
-  `rollup`, `time`, `ids`, `activity`, `transitions`, `search`, `filters`,
-  `metrics` (derived views over the files). The CLI, the board, and the loops all
-  call these — no rule is ever duplicated in a consumer.
+  `workflows`, `rules`, `move-plan`, `ticket`, `taxonomy` (validation +
+  transitions); `index`, `rollup`, `time`, `ids`, `activity`, `transitions`,
+  `search`, `filters`, `metrics`, `links` (derived views over the files). The
+  CLI, the board, and the loops all call these — no rule is ever duplicated in a
+  consumer. Two of these are the metadata-gate additions: `taxonomy` runs at
+  `new`/`edit` write time, rejecting a `labels`/`components` value the project
+  hasn't declared (empty/undeclared taxonomy opts out); `links` runs at
+  `reindex`/index-build time, warning (never failing) on a malformed `to:` key,
+  an unknown link type, or a dangling target.
 - **Web board (`scripts/serve.mjs` + `scripts/views/`)** — `views/page.mjs` is the
   switcher shell composing the Board / List / Live / Metrics / Map views and the
   detail panel, each a `{ render, styles, clientScript }` module over the served

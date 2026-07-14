@@ -8,6 +8,8 @@ import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { roundEstimate } from "./model/time.mjs";
 import { EDITABLE_FIELDS } from "./model/fields.mjs";
+import { loadProject } from "./config.mjs";
+import { validateTaxonomy } from "./model/taxonomy.mjs";
 
 // Same id resolution as move.mjs/log.mjs: prefer the project-dir-matching id.
 function locate(projectsDir, id) {
@@ -47,6 +49,10 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   all.set(id, { frontmatter: fm, body: found.body });
   const errors = validateTicket({ frontmatter: fm, body: found.body }, (pid) => all.get(pid) || null);
+  if (fm.project) {
+    const project_cfg = loadProject(fm.project, { root: dirname(projectsDir), projectsDir });
+    errors.push(...validateTaxonomy(fm, project_cfg));
+  }
   if (errors.length) return { ok: false, errors };
 
   if (today) fm.updated = today;

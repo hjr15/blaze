@@ -2,13 +2,15 @@
 // schema-correct ticket, validate it, and write it into the type's initial
 // status dir. Pure-fs (no git); the CLI wrapper adds the commit.
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { nextId } from "./model/ids.mjs";
 import { isType } from "./model/schema.mjs";
 import { initialStatus } from "./model/workflows.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { roundEstimate } from "./model/time.mjs";
+import { loadProject } from "./config.mjs";
+import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
 
 function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -43,6 +45,8 @@ export function applyNew(projectsDir, opts = {}) {
   // Validate everything except parent-existence (parent integrity is a reindex
   // concern; at create time the parent may legitimately be created later).
   const errors = validateTicket({ frontmatter, body }).filter((e) => !/parent not found/.test(e));
+  const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir });
+  errors.push(...validateTaxonomy(frontmatter, project_cfg));
   if (errors.length) return { ok: false, errors };
 
   const dir = join(projectsDir, project, status);
@@ -50,5 +54,6 @@ export function applyNew(projectsDir, opts = {}) {
   const file = join(dir, `${id}-${slugify(title)}.md`);
   if (existsSync(file)) return { ok: false, errors: [`refusing to overwrite ${file}`] };
   writeFileSync(file, serializeTicket({ frontmatter, body }));
-  return { ok: true, id, type, project, status, file };
+  const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
+  return { ok: true, id, type, project, status, file, warnings };
 }
