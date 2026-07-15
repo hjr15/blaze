@@ -138,7 +138,8 @@ SKIP_DIRS = {".git", "node_modules", ".venv", "venv", "site", "dist", "build", "
 def walk_markdown(repo_root: Path):
     """Yield every .md file in the repo, skipping common ignore dirs."""
     for path in repo_root.rglob("*.md"):
-        if any(part in SKIP_DIRS for part in path.parts):
+        rel = path.relative_to(repo_root)
+        if any(part in SKIP_DIRS for part in rel.parts):
             continue
         yield path
 
