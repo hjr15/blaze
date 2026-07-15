@@ -9,6 +9,7 @@ import { serializeTicket } from "./model/ticket.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
 import { isTerminal } from "./model/workflows.mjs";
+import { isType } from "./model/schema.mjs";
 
 function locate(projectsDir, id) {
   let fallback = null;
@@ -47,7 +48,9 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
     for (const t of walkTickets(projectsDir)) {
       if (t.frontmatter.id === id) continue;
       const blocks = (t.frontmatter.links ?? []).some((l) => l.type === "Blocks" && l.target === id);
-      if (blocks && !isTerminal(t.frontmatter.type, t.status)) {
+      // A blocker whose type is unresolvable can't be classified terminal/open —
+      // treat it as non-blocking rather than let isTerminal() throw and abort the move.
+      if (blocks && isType(t.frontmatter.type) && !isTerminal(t.frontmatter.type, t.status)) {
         warnings.push(`advisory: ${id} is blocked by ${t.frontmatter.id} (open) — moving to in-progress anyway`);
       }
     }
