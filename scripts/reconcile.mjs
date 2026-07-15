@@ -127,6 +127,7 @@ export function reconcile({
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
 
   const changes = [];
+  const touched = [];
   for (const t of walkTickets(projectsDir)) {
     const type = t.frontmatter.type;
     const s = sig.get(t.frontmatter.project);
@@ -147,21 +148,25 @@ export function reconcile({
 
     if (!dryRun) {
       writeFileSync(t.file, serializeTicket({ frontmatter: fm, body: t.body }));
+      touched.push(t.file);
       if (d.moved) {
         const projectDir = dirname(dirname(t.file));
         const destDir = join(projectDir, d.target);
         mkdirSync(destDir, { recursive: true });
         const dest = join(destDir, basename(t.file));
-        if (dest !== t.file) renameSync(t.file, dest);
+        if (dest !== t.file) {
+          renameSync(t.file, dest);
+          touched.push(dest);
+        }
       }
     }
   }
 
   let committed = false;
-  if (!dryRun && commit && changes.length) {
-    sh("git", ["-C", root, "add", "-A"]);
+  if (commit && !dryRun && touched.length) {
+    sh("git", ["-C", root, "add", "--", ...touched]);
     committed = sh("git", ["-C", root, "commit", "-m",
-      `chore(board): reconcile ${changes.length} ticket(s) to git state`]) !== null;
+      `chore(board): reconcile ${changes.length} ticket(s) to git state`, "--", ...touched]) !== null;
   }
   // push is never performed — hardcoded false regardless of the push param
   return { ok: true, changes, committed, pushed: false };

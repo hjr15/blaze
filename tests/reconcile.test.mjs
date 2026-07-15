@@ -157,3 +157,61 @@ test("reconcile dry-run detects the move but suppresses the write; apply perform
     rmSync(codeRepo, { recursive: true, force: true });
   }
 });
+
+// --- apply must commit ONLY the touched ticket file(s), never an unrelated --
+// dirty file elsewhere in the shared data tree. The prior implementation ran
+// `git add -A` before committing, which sweeps in whatever else is dirty on
+// the board's git tree — a real risk since dataRoot is a shared working tree
+// (other in-flight board ops, editor swap files, etc.). This fixture mirrors
+// the real-branch apply setup above, but git-inits `root` itself (the prior
+// fixtures never did — they only asserted file moves, never inspected git
+// history on dataRoot) and passes commit:true so reconcile actually commits.
+test("reconcile --apply commits only touched files, not an unrelated dirty file", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-"));
+  const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-code-"));
+
+  gitInit(codeRepo);
+  writeFileSync(join(codeRepo, "README.md"), "x\n");
+  execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "-b", "you/ZZZ-1-fix-thing"]);
+
+  const projectsDir = join(root, "projects");
+  const definedDir = join(projectsDir, "ZZZ", "defined");
+  mkdirSync(definedDir, { recursive: true });
+  const ticketFile = "ZZZ-1-fix-thing.md";
+  writeFileSync(
+    join(definedDir, ticketFile),
+    "---\nid: ZZZ-1\ntype: task\nstatus: defined\nproject: ZZZ\nestimate: 30\n---\n\nbody\n",
+  );
+  writeFileSync(
+    join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], codeRepos: [codeRepo] }),
+  );
+
+  // dataRoot itself must be a git repo with an initial commit so we can later
+  // inspect `git show`/`git log` on it (the other fixtures above never do).
+  gitInit(root);
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+
+  // An unrelated dirty file already sitting in the shared data tree — must
+  // NOT be swept into the reconcile commit.
+  writeFileSync(join(root, "UNRELATED.txt"), "not part of reconcile\n");
+
+  try {
+    const applied = reconcile({ dryRun: false, commit: true, root });
+    assert.equal(applied.ok, true);
+    assert.equal(applied.committed, true);
+
+    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
+    assert.doesNotMatch(files, /UNRELATED\.txt/);
+    assert.match(files, /ZZZ-1-.*\.md/);
+
+    const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
+    assert.match(status, /UNRELATED\.txt/);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(codeRepo, { recursive: true, force: true });
+  }
+});
