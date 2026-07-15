@@ -64,9 +64,17 @@ test("applyMove warns (does not block) when moved to in-progress under an open B
   writeFileSync(join(blockerDir, "OBA-9.md"),
     "---\nid: OBA-9\ntitle: blocker\ntype: task\nproject: OBA\nestimate: 30\n" +
     "links:\n  - { type: Blocks, target: OBA-1 }\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
+  // Unrelated ticket with no links field at all — exercises the `?? []`
+  // fallback in the blocker scan (and its .some() false path) since it's
+  // neither the moved ticket nor a blocker.
+  const unrelatedDir = join(projects, "OBA", "defined");
+  writeFileSync(join(unrelatedDir, "OBA-3.md"),
+    "---\nid: OBA-3\ntitle: unrelated\ntype: task\nproject: OBA\nestimate: 30\n" +
+    "created: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
   const r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
   assert.equal(r.ok, true);
   assert.ok(r.warnings.some((w) => /OBA-9/.test(w) && /block/i.test(w)));
+  assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
   rmSync(root, { recursive: true, force: true });
 });
 
