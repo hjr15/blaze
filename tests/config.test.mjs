@@ -186,3 +186,41 @@ test("ambientSchemaOverride returns null when the data root has no schema block"
   assert.equal(got, null);
   rmSync(data, { recursive: true, force: true });
 });
+
+test("loadConfig throws blaze:-prefixed on a board stamped newer than the engine", () => {
+  const dir = withConfig({ key: "X", schemaVersion: 99 });
+  assert.throws(
+    () => loadConfig({ root: dir, env: {} }),
+    (e) =>
+      e.message.startsWith("blaze: ") &&
+      /board schemaVersion 99/.test(e.message) &&    // names the board's version
+      /1\.\.1/.test(e.message) &&                    // names the engine's supported range
+      /docs\/schema-versioning\.md/.test(e.message), // points at the docs, not a command
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("loadConfig throws on an invalid schemaVersion stamp", () => {
+  const dir = withConfig({ key: "X", schemaVersion: "one" });
+  // Quoted: the rendered value must read as a JSON string, not a bare word
+  // (see the "1"-vs-1 regression test in tests/model/schema-config.test.mjs).
+  assert.throws(() => loadConfig({ root: dir, env: {} }), /^Error: blaze: invalid schemaVersion "one"/);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("loadConfig accepts a board stamped with the current schema version", () => {
+  const dir = withConfig({ key: "X", schemaVersion: 1 });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.key, "X");
+  assert.equal(cfg.schemaVersion, 1); // stamp passes through onto the frozen cfg
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("loadConfig accepts an un-versioned (legacy) config unchanged", () => {
+  // Mirrors the compat-legacy fixture's exact shape — absent stamp = v1.
+  const dir = withConfig({ key: "OBA", projects: ["OBA"], commitMode: "batch" });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.key, "OBA");
+  assert.equal(cfg.schemaVersion, undefined);
+  rmSync(dir, { recursive: true, force: true });
+});

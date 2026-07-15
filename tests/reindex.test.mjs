@@ -36,3 +36,34 @@ test("reindex prints link warnings for a malformed link key", () => {
   assert.match((r.stdout || "") + (r.stderr || ""), /target:/);
   rmSync(root, { recursive: true, force: true });
 });
+
+test("reindex fails loud on a board stamped newer than the engine", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reidx-ver-"));
+  mkdirSync(join(root, "projects", "OBA", "todo"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "todo", "OBA-1.md"),
+    "---\nid: OBA-1\ntitle: t\ntype: task\nproject: OBA\n---\nbody\n");
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "OBA", projects: ["OBA"], schemaVersion: 99 }));
+  // cwd = the stamped board root, so resolveRoots picks it as dataRoot:
+  const r = spawnSync(process.execPath, [runner],
+    { cwd: root, encoding: "utf8", env: { ...process.env, BLAZE_DB_DIR: join(root, ".blaze") } });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /blaze reindex failed: blaze: board schemaVersion 99/);
+  assert.match(r.stderr, /docs\/schema-versioning\.md/);
+  assert.ok(!existsSync(join(root, ".blaze", "index.json")), "no index written for an incompatible board");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("reindex works normally on a board stamped with the current schema version", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reidx-ver-ok-"));
+  mkdirSync(join(root, "projects", "OBA", "todo"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "todo", "OBA-1.md"),
+    "---\nid: OBA-1\ntitle: t\ntype: task\nproject: OBA\n---\nbody\n");
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "OBA", projects: ["OBA"], schemaVersion: 1 }));
+  const r = spawnSync(process.execPath, [runner],
+    { cwd: root, encoding: "utf8", env: { ...process.env, BLAZE_DB_DIR: join(root, ".blaze") } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /indexed 1 ticket/);
+  rmSync(root, { recursive: true, force: true });
+});

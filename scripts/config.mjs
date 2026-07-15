@@ -3,6 +3,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { checkSchemaVersion } from "./model/schema-version.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -36,6 +37,12 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
       throw new Error(`blaze: cannot parse ${fileName}: ${e.message}`);
     }
   }
+
+  // Config-schema version guard (ADR-0002): checked on the RAW parsed file,
+  // before any default-merge or derivation — a board written against a contract
+  // outside this engine's window must fail loud before it is interpreted at all.
+  const version = checkSchemaVersion(file);
+  if (!version.ok) throw new Error(`blaze: ${version.error}`);
 
   const cfg = { ...DEFAULTS, ...file };
   cfg.loops = {

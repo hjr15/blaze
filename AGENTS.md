@@ -286,6 +286,12 @@ directory, never edit code or any file outside the tracker.
 `blaze.config.json` (data-repo root): `key`, `projects` (array of project keys the
 board renders), `commitMode`, `port`, and more.
 
+`schemaVersion` (top-level, optional integer): which schema contract the board
+was written against. Absent = `1` (the pre-versioning baseline). The engine
+refuses to load a board stamped outside its supported window (currently `1..1`)
+instead of silently misreading it — see
+[`docs/schema-versioning.md`](docs/schema-versioning.md).
+
 `projects/<KEY>/project.json` (optional, per project): `labels`, `components`
 (the project's taxonomy for those fields — see "Labels/components taxonomy"
 above; empty/omitted = no validation), `requireLabels`/`requireComponents`
