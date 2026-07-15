@@ -169,6 +169,31 @@ The type registry and workflows are themselves configurable: add a `schema` bloc
 editing engine source — see
 [`docs/schema-customization.md`](docs/schema-customization.md).
 
+## Forkability guarantees / CI gates
+
+This is a public, forkable engine, and CI enforces three guarantees that keep it that
+way:
+
+- **Backward-compatibility contract** — a fixture board written in an older ticket
+  format is loaded, indexed, and dry-run reconciled against the current engine on
+  every PR. If a future change quietly makes a field that used to be optional
+  load-bearing for indexing or reconcile, this gate fails loudly instead of letting
+  every board authored under the old shape break silently.
+- **Package smoke gate** — the package is packed into a tarball, installed into a
+  clean throwaway project (no repo `node_modules` in the loop), and the *installed*
+  CLI is booted against a fresh fixture. This catches packaging mistakes — a missing
+  `files`/`bin` entry, a runtime import of a file that never shipped — that running
+  tests against the repo checkout would never surface.
+- **Upstream hygiene bar** — every PR's own commits and added diff lines are scanned
+  for things that don't belong in a public repo other people are meant to fork: a
+  co-author trailer, an internal hostname, or an absolute user-home filesystem path.
+  The scan is scoped to commits/lines unique to the PR, and exempts Markdown prose
+  from the content scan so docs that describe these rules (like this one) don't trip
+  on themselves.
+
+Together, a change has to clear all three before merge: don't break old boards,
+don't break the published package, and don't leak anything private into the fork.
+
 ## Origin
 
 This is a public continuation of [`sychyoboN/blaze`](https://github.com/sychyoboN/blaze).
