@@ -66,3 +66,29 @@ test("pageHtml shows a breadcrumb when focused and a drill-down link on parents"
   assert.doesNotMatch(unfocused, /class="crumbs"/);
   assert.match(unfocused, /href="\?focus=INF-9"/);  // epic has a child → drill-down link
 });
+
+function mapFixture() {
+  const dir = mkdtempSync(join(tmpdir(), "blaze-mapfocus-"));
+  mkdirSync(join(dir, "M", "defined"), { recursive: true });
+  writeFileSync(join(dir, "M", "defined", "M-1.md"), "---\nid: M-1\ntitle: goal\ntype: goal\nproject: M\n---\nx\n");
+  writeFileSync(join(dir, "M", "defined", "M-2.md"), "---\nid: M-2\ntitle: epic\ntype: epic\nproject: M\nparent: M-1\n---\nx\n");
+  writeFileSync(join(dir, "M", "defined", "M-3.md"), "---\nid: M-3\ntitle: task\ntype: task\nproject: M\nparent: M-2\n---\nx\n");
+  return dir;
+}
+
+test("viewEnvelope: the map respects ?focus= — anchor + direct children only", () => {
+  const env = viewEnvelope({ view: "map", projectsDir: mapFixture(), focus: "M-1" });
+  assert.match(env.html, /data-node-id="M-1"/);        // anchor
+  assert.match(env.html, /data-node-id="M-2"/);        // direct child
+  assert.doesNotMatch(env.html, /data-node-id="M-3"/); // grandchild excluded
+  assert.match(env.html, /data-drill="M-2"/);          // child-with-children gets the drill affordance
+});
+
+test("viewEnvelope: map default scope is top-level; ?flat=1 renders the whole corpus", () => {
+  const dir = mapFixture();
+  const top = viewEnvelope({ view: "map", projectsDir: dir });
+  assert.match(top.html, /data-node-id="M-1"/);
+  assert.doesNotMatch(top.html, /data-node-id="M-2"/);
+  const flat = viewEnvelope({ view: "map", projectsDir: dir, flat: true });
+  assert.match(flat.html, /data-node-id="M-3"/);
+});

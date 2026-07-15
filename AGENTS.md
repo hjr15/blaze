@@ -241,11 +241,13 @@ of truth, full CLI/`grep` parity preserved:
   `risk` board; a single-workflow config shows one board and no switcher pills.
   Switching boards composes into the same `#status=` hash as the chips — it
   never clobbers an active chip filter, and there's no hash write on load.
-- **Focus drill** — `?focus=<id>` on `/` scopes the board/list to that
-  ticket's descendants only (`scripts/model/focus.mjs` → `focusScope`, walked
-  over the derived index). A `.crumbs` breadcrumb bar renders the ancestor
-  chain back to `All` for drilling up. A card/row with children shows a
-  `⤵ N` drill-down link to `?focus=<id>`, preserving the active `?project=`.
+- **Focus drill** — `?focus=<id>` on `/` scopes the board, list, **and map**
+  to that ticket's direct children only, not transitive descendants
+  (`scripts/model/focus.mjs` → `scopedRows`, the one shared drill-scope rule
+  all three views consume so they can't disagree about what a level
+  contains). A `.crumbs` breadcrumb bar renders the ancestor chain back to
+  `All` for drilling up. A card/row with children shows a `⤵ N` drill-down
+  link to `?focus=<id>`, preserving the active `?project=`.
 - **Detail panel** — clicking a card/row id opens a side panel with the rendered
   description, a full frontmatter table, parent breadcrumb + children list, and
   links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content

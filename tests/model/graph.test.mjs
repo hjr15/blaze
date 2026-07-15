@@ -4,12 +4,13 @@ import { buildGraph } from "../../scripts/model/graph.mjs";
 
 function idx(rows, links = []) { return { rows, links }; }
 
-test("buildGraph: nodes carry id/type/title/status/project/level", () => {
+test("buildGraph: nodes carry id/type/title/status/project/level + childCount/stub/anchor", () => {
   const g = buildGraph(idx([
     { id: "A-1", type: "epic", title: "Epic one", status: "defined", project: "A", parent: null },
   ]));
   assert.deepEqual(g.nodes, [
-    { id: "A-1", type: "epic", title: "Epic one", status: "defined", project: "A", level: 1 },
+    { id: "A-1", type: "epic", title: "Epic one", status: "defined", project: "A", level: 1,
+      childCount: 0, stub: false, anchor: false },
   ]);
 });
 
@@ -144,8 +145,8 @@ function fixtureDir() {
   return dir;
 }
 
-test("graphModel: builds a laid-out graph from ticket files", () => {
-  const gm = graphModel({ projectsDir: fixtureDir(), project: "all" });
+test("graphModel: flat builds the whole laid-out graph from ticket files", () => {
+  const gm = graphModel({ projectsDir: fixtureDir(), project: "all", flat: true });
   assert.equal(gm.nodes.length, 3);
   assert.equal(gm.edges.filter((e) => e.kind === "parent").length, 1);
   assert.ok(gm.width > 0 && gm.height > 0);
@@ -155,7 +156,7 @@ test("graphModel: builds a laid-out graph from ticket files", () => {
 });
 
 test("graphModel: project filter restricts the node set (excludes other projects)", () => {
-  const gm = graphModel({ projectsDir: fixtureDir(), project: "A" });
+  const gm = graphModel({ projectsDir: fixtureDir(), project: "A", flat: true });
   assert.equal(gm.nodes.length, 2);
   assert.ok(gm.nodes.every((n) => n.project === "A"));
   assert.equal(gm.nodes.find((n) => n.id === "B-1"), undefined);
@@ -163,16 +164,89 @@ test("graphModel: project filter restricts the node set (excludes other projects
 
 test("graphModel: a passed index is used as-is, disk is never walked", () => {
   // projectsDir points at a directory that doesn't exist — if graphModel fell
-  // back to walking disk it would find zero rows. Passing an index-shaped
-  // object must short-circuit that walk entirely.
-  const fakeIndex = {
-    rows: [
-      { id: "Z-1", type: "epic", title: "fake epic", status: "defined", project: "Z", parent: null },
-      { id: "Z-2", type: "task", title: "fake task", status: "todo", project: "Z", parent: "Z-1" },
-    ],
-    links: [],
-  };
-  const gm = graphModel({ projectsDir: "/nonexistent-dir-should-not-be-read", index: fakeIndex });
+  // back to walking disk it would find zero rows. Passing a full Index-shaped
+  // object ({rows, links, get} — v2 needs get for focus/stub resolution) must
+  // short-circuit that walk entirely.
+  const gm = graphModel({ projectsDir: "/nonexistent-dir-should-not-be-read", index: fullIdx([
+    { id: "Z-1", type: "epic", title: "fake epic", status: "defined", project: "Z", parent: null },
+    { id: "Z-2", type: "task", title: "fake task", status: "todo", project: "Z", parent: "Z-1" },
+  ]), flat: true });
   assert.deepEqual(gm.nodes.map((n) => n.id).sort(), ["Z-1", "Z-2"]);
   assert.equal(gm.nodes.length, 2);
+});
+
+// v2 (BLZ-89): drill scope, anchor, childCount, cross-scope link stubs.
+const T = (id, type, parent = null, project = "A") =>
+  ({ id, type, title: id.toLowerCase(), status: "todo", project, parent });
+
+function fullIdx(rows, links = []) {
+  const byId = new Map(rows.map((r) => [r.id, r]));
+  return { rows, links, get: (id) => byId.get(id) };
+}
+
+test("graphModel: focus scopes to anchor + DIRECT children (grandchildren excluded)", () => {
+  const i = fullIdx([T("A-g", "goal"), T("A-e1", "epic", "A-g"), T("A-e2", "epic", "A-g"), T("A-t", "task", "A-e1")]);
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, focus: "A-g" });
+  assert.deepEqual(gm.nodes.map((n) => n.id).sort(), ["A-e1", "A-e2", "A-g"]);
+  assert.equal(gm.nodes.find((n) => n.id === "A-g").anchor, true);
+  assert.equal(gm.nodes.find((n) => n.id === "A-e1").anchor, false);
+  // parent edges children→anchor survive the scoping
+  assert.equal(gm.edges.filter((e) => e.kind === "parent").length, 2);
+});
+
+test("graphModel: default scope is parentless-only; flat is the whole corpus", () => {
+  const i = fullIdx([T("A-g", "goal"), T("A-e1", "epic", "A-g"), T("A-t", "task", "A-e1")]);
+  assert.deepEqual(graphModel({ projectsDir: "/nonexistent", index: i }).nodes.map((n) => n.id), ["A-g"]);
+  assert.equal(graphModel({ projectsDir: "/nonexistent", index: i, flat: true }).nodes.length, 3);
+});
+
+test("graphModel: nodes carry childCount tallied from the FULL index", () => {
+  const i = fullIdx([T("A-g", "goal"), T("A-e1", "epic", "A-g"), T("A-t", "task", "A-e1")]);
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, focus: "A-g" });
+  assert.equal(gm.nodes.find((n) => n.id === "A-e1").childCount, 1); // A-t counts though out of scope
+  assert.equal(gm.nodes.find((n) => n.id === "A-g").childCount, 1);
+});
+
+test("graphModel: a cross-scope link pulls the outside endpoint in as a stub", () => {
+  // Focus A-e1: child A-t1 Blocks B-x (outside the scope) — B-x must appear as
+  // a stub with the dashed edge intact, not silently drop (operator decision).
+  const i = fullIdx(
+    [T("A-g", "goal"), T("A-e1", "epic", "A-g"), T("A-t1", "task", "A-e1"), T("B-x", "task", null, "B")],
+    [{ src: "A-t1", type: "Blocks", target: "B-x" }],
+  );
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, focus: "A-e1" });
+  const stub = gm.nodes.find((n) => n.id === "B-x");
+  assert.equal(stub.stub, true);
+  assert.equal(gm.nodes.find((n) => n.id === "A-t1").stub, false);
+  assert.deepEqual(gm.edges.filter((e) => e.kind === "link").map((e) => [e.src, e.target]), [["A-t1", "B-x"]]);
+});
+
+test("graphModel: two cross-scope links to one outside id yield a single stub", () => {
+  const i = fullIdx(
+    [T("A-g", "goal"), T("A-t1", "task", "A-g"), T("A-t2", "task", "A-g"), T("B-x", "task", null, "B")],
+    [{ src: "A-t1", type: "Blocks", target: "B-x" }, { src: "A-t2", type: "Relates", target: "B-x" }],
+  );
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, focus: "A-g" });
+  assert.equal(gm.nodes.filter((n) => n.id === "B-x").length, 1);
+  assert.equal(gm.edges.filter((e) => e.kind === "link").length, 2);
+});
+
+test("graphModel: a link dangling to an id absent from the index still drops", () => {
+  const i = fullIdx([T("A-g", "goal"), T("A-t1", "task", "A-g")],
+    [{ src: "A-t1", type: "Blocks", target: "GONE-9" }]);
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, focus: "A-g" });
+  assert.equal(gm.edges.filter((e) => e.kind === "link").length, 0);
+  assert.equal(gm.nodes.find((n) => n.id === "GONE-9"), undefined);
+});
+
+test("graphModel: a project filter still resolves a cross-project stub (deliberate — a link that crosses projects is still a real dependency, BLZ-2 says the board must not lie by hiding it)", () => {
+  const i = fullIdx(
+    [T("A-g", "goal", null, "A"), T("A-t1", "task", "A-g", "A"), T("B-x", "task", null, "B")],
+    [{ src: "A-t1", type: "Blocks", target: "B-x" }],
+  );
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, project: "A", flat: true });
+  assert.deepEqual(gm.nodes.map((n) => n.id).sort(), ["A-g", "A-t1", "B-x"]);
+  const stub = gm.nodes.find((n) => n.id === "B-x");
+  assert.equal(stub.stub, true);
+  assert.equal(stub.project, "B"); // rendered though it's outside the ?project=A filter
 });

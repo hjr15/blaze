@@ -39,3 +39,23 @@ test("render: a link edge is dashed and carries its label", () => {
   assert.match(html, /stroke-dasharray/);
   assert.match(html, />Blocks</);
 });
+
+test("render v2: anchor + stub classes; drill affordance only on in-scope nodes with children", () => {
+  const gm = layoutGraph(buildGraph({
+    rows: [
+      { id: "A-g", type: "goal", title: "goal", status: "defined", project: "A", parent: null, anchor: true, childCount: 2 },
+      { id: "A-e", type: "epic", title: "epic", status: "defined", project: "A", parent: "A-g", childCount: 3 },
+      { id: "B-x", type: "task", title: "ext", status: "todo", project: "B", parent: null, stub: true, childCount: 5 },
+    ],
+    links: [{ src: "A-e", type: "Blocks", target: "B-x" }],
+  }));
+  const html = render(gm);
+  assert.match(html, /class="node anchor"[^>]*data-node-id="A-g"/);
+  assert.match(html, /class="node stub"[^>]*data-node-id="B-x"/);
+  // the in-scope epic gets a drill affordance carrying its child count
+  assert.match(html, /data-drill="A-e"/);
+  assert.match(html, /⤵ 3/);
+  // the anchor (already the focus) and the stub (design §5) never get one
+  assert.doesNotMatch(html, /data-drill="A-g"/);
+  assert.doesNotMatch(html, /data-drill="B-x"/);
+});

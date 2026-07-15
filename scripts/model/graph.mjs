@@ -4,6 +4,7 @@
 // dependency; no Date/random so the golden snapshot stays stable.
 import { hierarchyLevel, isType } from "./schema.mjs";
 import { buildIndex } from "./index.mjs";
+import { scopedRows } from "./focus.mjs";
 
 const FALLBACK_LEVEL = -2; // unknown/null types sink below subtask (-1)
 
@@ -24,6 +25,7 @@ export function buildGraph(index) {
   const nodes = rows.map((r) => ({
     id: r.id, type: r.type ?? null, title: r.title ?? null,
     status: r.status ?? null, project: r.project ?? null, level: safeLevel(r.type),
+    childCount: r.childCount ?? 0, stub: r.stub === true, anchor: r.anchor === true,
   }));
   const ids = new Set(nodes.map((n) => n.id));
   const edges = [];
@@ -108,10 +110,34 @@ export function layoutGraph(graph, opts = {}) {
   return { nodes: placed, edges, width, height };
 }
 
-// FS wrapper: read every ticket, optionally restrict to one project, and return
-// the laid-out graph. Built in page.mjs from the same projectsDir the board uses.
-export function graphModel({ projectsDir, project = "all", index = null } = {}) {
+// FS wrapper: read every ticket, optionally restrict to one project, apply the
+// shared drill scope (BLZ-89: focus → anchor + DIRECT children; no focus →
+// parentless; flat=1 → whole corpus), pull cross-scope link endpoints in as
+// muted stubs, and return the laid-out graph. `index` must be a full Index
+// ({rows, links, get}) — page.mjs passes the board's own m.index.
+export function graphModel({ projectsDir, project = "all", index = null, focus = null, flat = false } = {}) {
   const idx = index ?? buildIndex(projectsDir);
-  const rows = project === "all" ? idx.rows : idx.rows.filter((r) => r.project === project);
-  return layoutGraph(buildGraph({ rows, links: idx.links }));
+  const { focused, rows: inScope } = scopedRows(idx, { focus, flat });
+  let rows = project === "all" ? inScope : inScope.filter((r) => r.project === project);
+  // The focused node renders as the anchor: the board shows it in the crumbs,
+  // but a map of children with no parent node would have no hierarchy edges.
+  if (focused) rows = [{ ...focused, anchor: true }, ...rows.filter((r) => r.id !== focused.id)];
+  // Cross-scope link edges: an in-scope endpoint pulls its outside partner in
+  // as a stub node rather than silently dropping the dependency (operator
+  // decision, 2026-07-15). Ids absent from the index still drop (status quo).
+  const ids = new Set(rows.map((r) => r.id));
+  const stubs = new Map();
+  for (const l of idx.links ?? []) {
+    const srcIn = ids.has(l.src), tgtIn = ids.has(l.target);
+    if (srcIn === tgtIn) continue; // both in scope (normal edge) or both out (irrelevant)
+    const missingId = srcIn ? l.target : l.src;
+    const row = idx.get(missingId);
+    if (row && !stubs.has(missingId)) stubs.set(missingId, { ...row, stub: true });
+  }
+  // Drill-affordance data: children per node tallied from the FULL index
+  // (mirrors boardModel's childTally), so an in-scope epic can show "⤵ N".
+  const childTally = {};
+  for (const r of idx.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;
+  const decorated = [...rows, ...stubs.values()].map((r) => ({ ...r, childCount: childTally[r.id] || 0 }));
+  return layoutGraph(buildGraph({ rows: decorated, links: idx.links }));
 }
