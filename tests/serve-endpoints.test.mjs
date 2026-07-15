@@ -128,6 +128,10 @@ test("POST /api/log appends a worklog entry and commits", async () => {
   const { server, base } = await boot(fx);
   const res = await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" });
   assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
+  const onDisk = execFileSync("git", ["-C", fx.root, "show", "HEAD:projects/OBA/in-review/OBA-1.md"], { encoding: "utf8" });
+  assert.match(onDisk, /minutes: 15/);            // new worklog entry landed on disk
+  const subject = execFileSync("git", ["-C", fx.root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
+  assert.match(subject, /^OBA-1: log 15m$/);      // commit subject
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
