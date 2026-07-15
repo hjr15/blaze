@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -99,6 +99,61 @@ test("reconcile() with no explicit root resolves a custom-named projectsDir via 
     if (prevEnv === undefined) delete process.env.BLAZE_PROJECTS_DIR;
     else process.env.BLAZE_PROJECTS_DIR = prevEnv;
     rmSync(dataRoot, { recursive: true, force: true });
+    rmSync(codeRepo, { recursive: true, force: true });
+  }
+});
+
+// --- dry-run must SUPPRESS the write, not merely find nothing to do ----------
+// The negative fixture above (reconcile-pertype.test.mjs) proves dry-run makes
+// no moves, but its ticket carries no real git signal — decide() short-circuits
+// via `skip: true` before the dryRun guard is ever reached, so it never exercises
+// the write/rename branch (reconcile.mjs:148-157) at all. This positive test
+// gives a genuine branch (mirroring :68-104's real-git-signal fixture) so
+// decide() returns moved:true, then proves the *guard* — not an incidental
+// skip — is what suppresses the file move under dryRun, and that the identical
+// setup performs the move when dryRun is false.
+test("reconcile dry-run detects the move but suppresses the write; apply performs it", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-dryrun-"));
+  const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-dryrun-code-"));
+
+  gitInit(codeRepo);
+  writeFileSync(join(codeRepo, "README.md"), "x\n");
+  execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "-b", "you/ZZZ-1-fix-thing"]);
+
+  const projectsDir = join(root, "projects");
+  const definedDir = join(projectsDir, "ZZZ", "defined");
+  const inProgressDir = join(projectsDir, "ZZZ", "in-progress");
+  mkdirSync(definedDir, { recursive: true });
+  const ticketFile = "ZZZ-1-fix-thing.md";
+  writeFileSync(
+    join(definedDir, ticketFile),
+    "---\nid: ZZZ-1\ntype: task\nstatus: defined\nproject: ZZZ\nestimate: 30\n---\n\nbody\n",
+  );
+  writeFileSync(
+    join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], codeRepos: [codeRepo] }),
+  );
+
+  try {
+    // Dry run: the move IS detected but the write must be suppressed.
+    const dry = reconcile({ dryRun: true, root });
+    assert.equal(dry.ok, true);
+    assert.ok(dry.changes.length >= 1, "the would-be move is detected");
+    assert.equal(dry.changes[0].id, "ZZZ-1");
+    assert.ok(existsSync(join(definedDir, ticketFile)), "dry-run must NOT move the file");
+    assert.ok(!existsSync(join(inProgressDir, ticketFile)), "dry-run must NOT create the destination");
+
+    // Apply: the identical setup — untouched by the dry run above — now moves for real,
+    // proving the guard (not an incidental skip) suppressed the earlier write.
+    const applied = reconcile({ dryRun: false, root });
+    assert.equal(applied.ok, true);
+    assert.ok(applied.changes.length >= 1, "apply also detects the move");
+    assert.ok(!existsSync(join(definedDir, ticketFile)), "apply moved the file out of defined/");
+    assert.ok(existsSync(join(inProgressDir, ticketFile)), "apply moved it into in-progress/");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
     rmSync(codeRepo, { recursive: true, force: true });
   }
 });
