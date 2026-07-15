@@ -83,6 +83,34 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
   round to the nearest whole minute.
 - `likelihood` / `impact` — risk-only fields.
 - `branch` / `pr` — filled by `reconcile`; don't hand-edit.
+- `links` — set via `blaze link`, see "Links" below.
+
+## Links
+
+`blaze link [--rm] <id> <TYPE> <target>` adds (or, with `--rm`, removes) a typed
+link on `<id>`'s `links:` frontmatter. `TYPE` is one of `Blocks` / `Relates` /
+`Duplicate` / `Cloners` (`scripts/model/links.mjs` → `LINK_TYPES`) — any other
+value is rejected. Adding validates that `target` resolves to a real ticket id;
+`<id>` itself must also resolve. Add is idempotent — linking the same
+`{type, target}` pair twice is a no-op, not a duplicate entry. `--rm` removes a
+matching `{type, target}` pair if present (also a no-op if it's already gone).
+
+```bash
+blaze link ENG-12 Blocks ENG-9        # ENG-12 blocks ENG-9
+blaze link --rm ENG-12 Blocks ENG-9   # remove that link
+```
+
+**`Blocks` is advisory, not a hard gate.** Moving a ticket to `in-progress`
+while an open (non-terminal) ticket holds a `Blocks` link targeting it prints
+a warning to stderr — the move still proceeds. `blaze move` never refuses a
+transition because of a `Blocks` link; see
+[ADR-0001](docs/decisions/0001-blocks-link-advisory-not-hard-gate.md) for why.
+
+Link data doesn't need a separate integrity check: `blaze reindex` already
+lints every ticket's `links` for malformed entries and dangling targets (see
+"Derived caches" below), and the board renders link edges in both the graph
+view and each ticket's detail panel — `blaze link` and `--rm` are additive to
+those existing surfaces, not new ones.
 
 ## Labels/components taxonomy
 
