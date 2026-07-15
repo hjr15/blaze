@@ -281,6 +281,14 @@
     border: 1px dashed #21262d; border-radius: 10px;
   }
   .mapwrap.no-data .map-empty { display: block; }
+  .map-hint {
+    color: #7d8590; font-size: 12px; padding: 4px 0 8px;
+  }
+  .node.anchor > rect:first-of-type { stroke-width: 3; }
+  .node.stub { opacity: .45; }
+  .node.stub > rect:first-of-type { stroke-dasharray: 3 3; }
+  .drill { cursor: pointer; }
+  .drill-n { fill: #adbac7; font: 600 9px ui-monospace, monospace; }
 </style>
 </head>
 <body>
@@ -757,6 +765,14 @@
       vb.w *= factor; vb.h *= factor; apply();
     }
     function reset() { vb = { x: 0, y: 0, w: W || 1, h: H || 1 }; apply(); }
+    // Full-page drill nav (BLZ-89) — project/view params ride along; the
+    // saved-view mechanism restores the map at the new level. Shared by the
+    // pointer and keyboard paths so they can't drift.
+    function drillTo(id) {
+      var q = new URLSearchParams(location.search);
+      q.set("focus", id);
+      location.search = q.toString();
+    }
     function toVb(clientX, clientY) {
       var r = svg.getBoundingClientRect();
       return { x: vb.x + ((clientX - r.left) / r.width) * vb.w, y: vb.y + ((clientY - r.top) / r.height) * vb.h };
@@ -772,10 +788,11 @@
       var p = toVb(e.clientX, e.clientY);
       zoomAt(e.deltaY < 0 ? 0.9 : 1.111, p.x, p.y);
     }, { passive: false });
-    var dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0, downNode = null;
+    var dragging = false, moved = false, sx = 0, sy = 0, ox = 0, oy = 0, downNode = null, downDrill = null;
     svg.addEventListener("pointerdown", function (e) {
       dragging = true; moved = false; sx = e.clientX; sy = e.clientY; ox = vb.x; oy = vb.y;
       downNode = e.target.closest("[data-node-id]");
+      downDrill = e.target.closest("[data-drill]");
       svg.classList.add("panning");
       try { svg.setPointerCapture(e.pointerId); } catch (x) {}
     });
@@ -790,12 +807,20 @@
     svg.addEventListener("pointerup", function (e) {
       dragging = false; svg.classList.remove("panning");
       try { svg.releasePointerCapture(e.pointerId); } catch (x) {}
-      if (moved) { downNode = null; return; } // it was a pan, not a click
-      if (downNode && window.blazePanel) window.blazePanel.open(downNode.getAttribute("data-node-id"));
-      downNode = null;
+      if (moved) { downNode = null; downDrill = null; return; } // it was a pan, not a click
+      if (downDrill) {
+        drillTo(downDrill.getAttribute("data-drill"));
+      } else if (downNode && window.blazePanel) {
+        window.blazePanel.open(downNode.getAttribute("data-node-id"));
+      }
+      downNode = null; downDrill = null;
     });
     svg.addEventListener("keydown", function (e) {
       if (e.key !== "Enter" && e.key !== " ") return;
+      // Drill must win over the node, matching the pointer path's downDrill
+      // precedence — the drill <g> nests inside the node <g>.
+      var d = e.target.closest("[data-drill]");
+      if (d) { e.preventDefault(); drillTo(d.getAttribute("data-drill")); return; }
       var g = e.target.closest("[data-node-id]");
       if (g && window.blazePanel) { e.preventDefault(); window.blazePanel.open(g.getAttribute("data-node-id")); }
     });

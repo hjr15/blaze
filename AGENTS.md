@@ -218,7 +218,7 @@ blaze rollup            # every goal/epic's rolled-up estimate + logged time
 blaze rollup KEY-12      # one ticket's own vs. rolled totals, with child breakdown
 ```
 
-## Board UI — search, filter chips, board switcher, focus drill, detail panel
+## Board UI — search, filter chips, board switcher, focus drill, map, detail panel
 
 All of these are pure client-side **views over the served model** — no new source
 of truth, full CLI/`grep` parity preserved:
@@ -241,11 +241,25 @@ of truth, full CLI/`grep` parity preserved:
   `risk` board; a single-workflow config shows one board and no switcher pills.
   Switching boards composes into the same `#status=` hash as the chips — it
   never clobbers an active chip filter, and there's no hash write on load.
-- **Focus drill** — `?focus=<id>` on `/` scopes the board/list to that
-  ticket's descendants only (`scripts/model/focus.mjs` → `focusScope`, walked
-  over the derived index). A `.crumbs` breadcrumb bar renders the ancestor
-  chain back to `All` for drilling up. A card/row with children shows a
-  `⤵ N` drill-down link to `?focus=<id>`, preserving the active `?project=`.
+- **Focus drill** — `?focus=<id>` on `/` scopes the board, list, **and map**
+  to that ticket's direct children only, not transitive descendants
+  (`scripts/model/focus.mjs` → `scopedRows`, the one shared drill-scope rule
+  all three views consume so they can't disagree about what a level
+  contains). A `.crumbs` breadcrumb bar renders the ancestor chain back to
+  `All` for drilling up. A card/row with children shows a `⤵ N` drill-down
+  link to `?focus=<id>`, preserving the active `?project=`.
+- **Map** — a hierarchy+dependency graph (`scripts/views/map.mjs`, on by
+  default) rendering the current drill level only: the focused anchor plus
+  its direct children, not the whole corpus. A node with children shows the
+  same `⤵ N` drill affordance as the board/list, focusing that node on
+  click or Enter/Space. Any link edge that crosses the scope boundary —
+  including into another project — pulls its outside endpoint in as a
+  muted, dashed-border **stub node** rather than hiding the dependency; a
+  stub is a link endpoint only, never a solid hierarchy child. A level
+  wraps into extra sub-columns past 12 nodes so it stays legible without
+  zooming. `?flat=1` is the whole-corpus escape hatch; past ~150 nodes flat
+  mode shows a hint pointing back at the nested view instead of rendering
+  an illegible smear.
 - **Detail panel** — clicking a card/row id opens a side panel with the rendered
   description, a full frontmatter table, parent breadcrumb + children list, and
   links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content

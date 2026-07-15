@@ -27,7 +27,7 @@ export const CSRF = randomUUID();
 // How to render each view's fragment. metrics/map compute their models
 // lazily — only when that view is actually requested — so GET / (which
 // always renders "board") never pays for the metrics/graph walk.
-export function renderView(name, { m, pDir, project, now, transitions }) {
+export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false }) {
   switch (name) {
     case "board": return board.render(m);
     case "list": return list.render(m);
@@ -37,7 +37,7 @@ export function renderView(name, { m, pDir, project, now, transitions }) {
       const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
       return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
-    case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, project, index: m.index }))}</div>`;
+    case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, project, index: m.index, focus, flat }), { flat })}</div>`;
     default: return null;
   }
 }
@@ -91,7 +91,7 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
   const m = boardModel(pDir, { project, focus, flat });
   return {
     view,
-    html: renderView(view, { m, pDir, project, now, transitions }),
+    html: renderView(view, { m, pDir, project, now, transitions, focus, flat }),
     chipbar: chipbarHtml(m),
     crumbs: crumbsHtml(m, project, flat),
     total: m.total,
@@ -262,7 +262,7 @@ export function pageHtml({
   ${chipbar}
   ${crumbs}
   ${afterHeader}
-  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions })}</div>
+  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat })}</div>
   <script>
     // View toggle (Board / List), persisted to localStorage. Synchronous only —
     // flips data-view + pill state + localStorage. Fetching/swapping the actual

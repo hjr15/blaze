@@ -8,7 +8,7 @@ import { TYPES, workflowFor } from "../model/schema.mjs";
 import { deriveBoards, columnForStatus } from "../model/boards.mjs";
 import { parseActivity, groupByTicket } from "../model/activity.mjs";
 import { resolveRoots } from "../config.mjs";
-import { focusScope } from "../model/focus.mjs";
+import { scopedRows } from "../model/focus.mjs";
 
 const PRIORITY_ORDER = { highest: 0, high: 1, medium: 2, low: 3, lowest: 4, none: 5, urgent: 0 };
 
@@ -32,11 +32,11 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
   const rows = project === "all" ? all : all.filter((t) => t.project === project);
 
   const idx = index ?? buildIndex(projectsDir, { tickets: walked });
-  const scope = focus ? focusScope(idx, focus) : null;
-  const focused = scope && idx.get(focus);
-  const scoped = focused
-    ? rows.filter((t) => scope.childrenIds.has(t.meta.id))
-    : (flat ? rows : rows.filter((t) => !t.meta.parent));
+  // The shared drill-scope rule (scopedRows, BLZ-89) — board/list/map must
+  // agree on what a level contains, so the rule lives in one place.
+  const { focused, crumbs, rows: inScope } = scopedRows(idx, { focus, flat });
+  const scopedIds = new Set(inScope.map((r) => r.id));
+  const scoped = rows.filter((t) => scopedIds.has(t.meta.id));
 
   const childTally = {};
   for (const r of idx.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;
@@ -97,7 +97,7 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
 
   return {
     selected: project, projects: projectsCount, columns, total: scoped.length, rollup, boards,
-    focus: focused ? { id: focus, crumbs: scope.crumbs } : null,
+    focus: focused ? { id: focus, crumbs } : null,
     index: idx,
   };
 }
