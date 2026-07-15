@@ -250,3 +250,58 @@ test("graphModel: a project filter still resolves a cross-project stub (delibera
   assert.equal(stub.stub, true);
   assert.equal(stub.project, "B"); // rendered though it's outside the ?project=A filter
 });
+
+// BLZ-36: deterministic lane wrapping.
+const wrapRows = (n, type = "task") => Array.from({ length: n }, (_, i) =>
+  ({ id: `A-${type[0]}${String(i + 1).padStart(2, "0")}`, type, title: "t", status: "todo", project: "A", parent: null }));
+
+test("layoutGraph: a column wraps into a new sub-column after WRAP_ROWS (12) nodes", () => {
+  const L = layoutGraph(buildGraph({ rows: wrapRows(13), links: [] }));
+  const n = (id) => L.nodes.find((x) => x.id === id);
+  assert.equal(n("A-t01").x, n("A-t12").x, "first 12 share a sub-column");
+  assert.ok(n("A-t13").x > n("A-t12").x, "the 13th wraps right");
+  assert.equal(n("A-t13").y, n("A-t01").y, "a wrapped sub-column restarts at the top");
+});
+
+test("layoutGraph: wrapping bounds column height at the corpus worst case (49 nodes)", () => {
+  const L = layoutGraph(buildGraph({ rows: wrapRows(49), links: [] }));
+  // 12 rows max per sub-column: height = PAD(40) + 11*ROW_STRIDE(60) + NODE_H(44) + PAD(40) = 784
+  assert.equal(L.height, 784);
+  // 49 nodes / WRAP_ROWS(12) → 5 sub-columns (indices 0..4; node 49 is the
+  // first row of sub-column 4, since floor(48/12)=4). Rightmost sub-column
+  // x = PAD(40) + 4*SUB_STRIDE(180) = 760; maxRight = 760 + NODE_W(160) = 920;
+  // width = maxRight + PAD(40) = 960.
+  assert.equal(L.width, 960);
+});
+
+test("layoutGraph: wrapping is deterministic (same input, identical output)", () => {
+  const rows = [...wrapRows(15, "epic"), { id: "A-x1", type: "task", title: "t", status: "todo", project: "A", parent: null }];
+  const L1 = layoutGraph(buildGraph({ rows, links: [] }));
+  assert.deepEqual(L1, layoutGraph(buildGraph({ rows, links: [] })));
+});
+
+test("layoutGraph: levelX advances by full sub-column width, clearing the widest (3rd) sub-column of the previous level", () => {
+  // 25 epics in ONE project (no lane gap noise), WRAP_ROWS=12 → wraps at rows
+  // 13 and 25: sub-column 0 = epics 1-12, sub-column 1 = epics 13-24,
+  // sub-column 2 = epic 25 alone. This needs >=3 sub-columns (>=25 nodes)
+  // because with only 2 sub-columns the max x offset (1*SUB_STRIDE=180) is
+  // smaller than COL_STRIDE(240) — a loose "next level's x > previous max x"
+  // check can't fail even if the sub-column term is dropped from levelX
+  // entirely. With 3 sub-columns it can, and does (see the regression check
+  // below run manually in the fix report).
+  const rows = [...wrapRows(25, "epic"), { id: "A-x1", type: "task", title: "t", status: "todo", project: "A", parent: null }];
+  const L = layoutGraph(buildGraph({ rows, links: [] }));
+  const x = (id) => L.nodes.find((n) => n.id === id).x;
+  const PAD = 40, SUB_STRIDE = 180, COL_STRIDE = 240;
+  assert.equal(x("A-e01"), PAD, "sub-column 0 starts at PAD");
+  assert.equal(x("A-e12"), PAD, "row 12 is still sub-column 0");
+  assert.equal(x("A-e13"), PAD + SUB_STRIDE, "row 13 wraps into sub-column 1");
+  assert.equal(x("A-e24"), PAD + SUB_STRIDE, "row 24 is still sub-column 1");
+  assert.equal(x("A-e25"), PAD + 2 * SUB_STRIDE, "row 25 wraps into sub-column 2 (the 3rd sub-column)");
+  // levelX for the next (task) level = PAD + (final subCol=2)*SUB_STRIDE + COL_STRIDE
+  //                                   = 40 + 2*180 + 240 = 640.
+  // The regression (levelX += COL_STRIDE, dropping the subCol term) would give
+  // levelX = 40 + 240 = 280 — LESS than the widest epic sub-column's x (400),
+  // so the task level would overlap sub-column 2 of the epic level.
+  assert.equal(x("A-x1"), PAD + 2 * SUB_STRIDE + COL_STRIDE, "task level clears the widest (3rd) epic sub-column");
+});

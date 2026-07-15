@@ -13,14 +13,24 @@ const TYPE_COLORS = {
 };
 const DEFAULT_COLOR = "#7d8590";
 
+// BLZ-36: flat mode (the whole-corpus escape hatch) has no upper bound on node
+// count, and lane wrapping only bounds height, not width — a real 1,310-node
+// corpus browser-measured at viewBox 0 0 20220 880, an effective 0.069x scale
+// (~11px-wide cards). No layout fix makes that many cards legible on one
+// screen; below this count a flat corpus still renders at a readable scale,
+// so the hint only fires once it's actually warranted.
+const FLAT_HINT_THRESHOLD = 150;
+
 function clip(s, n) {
   s = String(s ?? "");
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-export function render(gm) {
+export function render(gm, opts = {}) {
+  const flat = opts.flat === true;
   const g = gm && Array.isArray(gm.nodes) ? gm : { nodes: [], edges: [], width: 80, height: 80 };
   const hasData = g.nodes.length > 0;
+  const showHint = flat && g.nodes.length > FLAT_HINT_THRESHOLD;
 
   const edgesSvg = g.edges.map((e) => {
     const dash = e.kind === "link" ? ' stroke-dasharray="4 3"' : "";
@@ -53,7 +63,16 @@ export function render(gm) {
       + `</g>`;
   }).join("");
 
+  // Sits beside the crumbs line's existing "nested" link (page.mjs's
+  // crumbsHtml) rather than re-rendering a second one — map.mjs has no
+  // project/focus context to build that href, and the link is already right
+  // above this view.
+  const hintHtml = showHint
+    ? `<div class="map-hint" role="status">${g.nodes.length} nodes — zoom in, or switch to the nested view above.</div>`
+    : "";
+
   return `<div class="mapwrap${hasData ? "" : " no-data"}">
+  ${hintHtml}
   <div class="mapzoom" role="group" aria-label="Zoom">
     <button type="button" class="mzoom" data-zoom="in" aria-label="Zoom in">+</button>
     <button type="button" class="mzoom" data-zoom="out" aria-label="Zoom out">−</button>
@@ -94,6 +113,9 @@ export const styles = `
     border: 1px dashed #21262d; border-radius: 10px;
   }
   .mapwrap.no-data .map-empty { display: block; }
+  .map-hint {
+    color: #7d8590; font-size: 12px; padding: 4px 0 8px;
+  }
   .node.anchor > rect:first-of-type { stroke-width: 3; }
   .node.stub { opacity: .45; }
   .node.stub > rect:first-of-type { stroke-dasharray: 3 3; }
