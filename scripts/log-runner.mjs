@@ -7,6 +7,10 @@ import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
+// Config-schema version guard (ADR-0002), hoisted before the mutation below:
+// a guard meant to stop the engine driving a board it may misread must not
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
+const cfg = loadConfig({ root: dataRoot });
 const argv = process.argv.slice(2);
 
 const opts = {};
@@ -32,7 +36,6 @@ if (!id || minutesRaw === undefined) {
 const r = applyLog(projectsDir, id, Number(minutesRaw), opts);
 if (!r.ok) { console.error(`blaze log failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
-const cfg = loadConfig({ root: dataRoot });
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "log", id: r.id, message: `${r.id}: log ${r.minutes}m`, files: [r.file] });
 if (!c.ok) { console.error(`blaze log: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
 console.log(`logged ${r.minutes}m to ${r.id} (total ${formatMinutes(r.total_worklog_minutes)})${c.queued ? " (queued for blaze commit)" : ""}`);

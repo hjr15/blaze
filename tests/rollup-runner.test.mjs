@@ -1,7 +1,14 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import { rollupLines } from "../scripts/rollup-runner.mjs";
 import { rollUp } from "../scripts/model/rollup.mjs";
+
+const runner = fileURLToPath(new URL("../scripts/rollup-runner.mjs", import.meta.url));
 
 function idx(rows) {
   const byId = new Map(rows.map((r) => [r.id, r]));
@@ -34,4 +41,31 @@ test("rollupLines with no id lists goals and epics with rolled totals", () => {
 test("rollupLines reports a clear message for an unknown id", () => {
   const lines = rollupLines(TREE, rollUp(TREE), "OBA-999").join("\n");
   assert.match(lines, /not found/i);
+});
+
+test("blaze rollup fails loud on a board stamped newer than the engine", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-rollup-ver-"));
+  mkdirSync(join(root, "projects", "OBA", "todo"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "todo", "OBA-1.md"),
+    "---\nid: OBA-1\ntitle: t\ntype: goal\nproject: OBA\n---\nbody\n");
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "OBA", projects: ["OBA"], schemaVersion: 99 }));
+  const r = spawnSync(process.execPath, [runner], { cwd: root, encoding: "utf8" });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /blaze rollup failed: blaze: board schemaVersion 99/);
+  assert.doesNotMatch(r.stdout, /OBA-1/, "must not have computed/printed a roll-up against the wrong type registry");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("blaze rollup works normally on a board stamped with the current schema version", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-rollup-ver-ok-"));
+  mkdirSync(join(root, "projects", "OBA", "todo"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "todo", "OBA-1.md"),
+    "---\nid: OBA-1\ntitle: t\ntype: goal\nproject: OBA\n---\nbody\n");
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "OBA", projects: ["OBA"], schemaVersion: 1 }));
+  const r = spawnSync(process.execPath, [runner], { cwd: root, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /OBA-1/);
+  rmSync(root, { recursive: true, force: true });
 });

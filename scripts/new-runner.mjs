@@ -5,6 +5,10 @@ import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
+// Config-schema version guard (ADR-0002), hoisted before the mutation below:
+// a guard meant to stop the engine driving a board it may misread must not
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
+const cfg = loadConfig({ root: dataRoot });
 const argv = process.argv.slice(2);
 
 const opts = { priority: "medium", labels: [], extra: {} };
@@ -40,7 +44,6 @@ const r = applyNew(projectsDir, opts);
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 
-const cfg = loadConfig({ root: dataRoot });
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file] });
 if (!c.ok) { console.error(`blaze new: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
 console.log(`created ${r.id} → ${r.file}${c.queued ? " (queued for blaze commit)" : ""}`);

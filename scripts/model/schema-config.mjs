@@ -28,3 +28,9 @@ export function validateSchema({ types = {}, workflows = {} } = {}) {
   }
   return errors;
 }
+
+// Config-schema compat window + guard (ADR-0002). Defined in schema-version.mjs —
+// a zero-import module config.mjs can import without creating the cycle
+// config → schema-config → schema → config — and re-exported here so the schema
+// surface stays in one place for consumers and tests.
+export { SCHEMA_VERSION, MIN_SCHEMA_VERSION, checkSchemaVersion } from "./schema-version.mjs";

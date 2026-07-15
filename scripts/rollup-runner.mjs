@@ -6,7 +6,7 @@ import { fileURLToPath } from "node:url";
 import { buildIndex } from "./model/index.mjs";
 import { rollUp } from "./model/rollup.mjs";
 import { formatMinutes } from "./model/time.mjs";
-import { resolveRoots } from "./config.mjs";
+import { resolveRoots, loadConfig } from "./config.mjs";
 
 // Pure formatter (exported for tests). index needs { rows, get(id) }.
 export function rollupLines(index, rollupMap, id) {
@@ -43,11 +43,25 @@ export function rollupLines(index, rollupMap, id) {
 }
 
 function main() {
-  const { projectsDir } = resolveRoots();
+  const { dataRoot, projectsDir } = resolveRoots();
+  // Config-schema version guard (ADR-0002): buildIndex transitively pulls
+  // schema.mjs → TYPES via ambientSchemaOverride(), whose catch-all silently
+  // falls back to built-in defaults on a loadConfig throw — so without this
+  // guard a stamped-incompatible board would compute a roll-up against the
+  // wrong type registry and exit 0. Guard explicitly before consulting the
+  // schema so it fails loud instead.
+  loadConfig({ root: dataRoot });
   const id = process.argv.slice(2).find((a) => !a.startsWith("--")) || null;
   const index = buildIndex(projectsDir);
   const lines = rollupLines(index, rollUp(index), id);
   console.log(lines.join("\n"));
 }
 
-if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) main();
+if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
+  try {
+    main();
+  } catch (e) {
+    console.error(`blaze rollup failed: ${e.message}`);
+    process.exit(1);
+  }
+}

@@ -6,6 +6,10 @@ import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
+// Config-schema version guard (ADR-0002), hoisted before the mutation below:
+// a guard meant to stop the engine driving a board it may misread must not
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
+const cfg = loadConfig({ root: dataRoot });
 const [id, field, ...valueParts] = process.argv.slice(2);
 if (!id || !field || valueParts.length === 0) {
   console.error("usage: blaze edit <id> <field> <value>"); process.exit(1);
@@ -15,7 +19,6 @@ const today = new Date().toISOString().slice(0, 10);
 const r = applyEdit(projectsDir, id, { [field]: value }, { today });
 if (!r.ok) { console.error(`blaze edit failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
-const cfg = loadConfig({ root: dataRoot });
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "edit", id, message: `${id}: edit ${field}`, files: [r.file] });
 if (!c.ok) { console.error(`blaze edit: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
 console.log(`${id}: ${field} = ${value}${c.queued ? " (queued for blaze commit)" : ""}`);

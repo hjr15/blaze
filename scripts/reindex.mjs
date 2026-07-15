@@ -7,13 +7,17 @@ import { mkdirSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { buildIndex } from "./model/index.mjs";
 import { buildTransitions } from "./model/transitions.mjs";
-import { resolveRoots } from "./config.mjs";
+import { resolveRoots, loadConfig } from "./config.mjs";
 
 const { dataRoot, projectsDir: defaultProjectsDir } = resolveRoots();
 const projectsDir = process.argv[2] || defaultProjectsDir;
 const dbDir = process.env.BLAZE_DB_DIR || join(dataRoot, ".blaze");
 
 try {
+  // Config-schema version guard (ADR-0002): reindex re-validates every ticket
+  // against the schema, so it must not run against a board contract it may
+  // misread. loadConfig throws `blaze: …` on an incompatible schemaVersion.
+  loadConfig({ root: dataRoot });
   mkdirSync(dbDir, { recursive: true });
   const idx = buildIndex(projectsDir);
   const out = join(dbDir, "index.json");
