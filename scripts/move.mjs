@@ -8,6 +8,8 @@ import { walkTickets } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
+import { isTerminal } from "./model/workflows.mjs";
+import { isType } from "./model/schema.mjs";
 
 function locate(projectsDir, id) {
   let fallback = null;
@@ -39,6 +41,21 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
     { hasWorklog, requireWorklog });
   if (!plan.ok) return { ok: false, errors: plan.errors };
 
+  // Advisory-only: an open (non-terminal) Blocks link targeting this ticket never
+  // stops the move, it just surfaces a warning for the caller to print.
+  const warnings = [];
+  if (toStatus === "in-progress") {
+    for (const t of walkTickets(projectsDir)) {
+      if (t.frontmatter.id === id) continue;
+      const blocks = (t.frontmatter.links ?? []).some((l) => l.type === "Blocks" && l.target === id);
+      // A blocker whose type is unresolvable can't be classified terminal/open —
+      // treat it as non-blocking rather than let isTerminal() throw and abort the move.
+      if (blocks && isType(t.frontmatter.type) && !isTerminal(t.frontmatter.type, t.status)) {
+        warnings.push(`advisory: ${id} is blocked by ${t.frontmatter.id} (open) — moving to in-progress anyway`);
+      }
+    }
+  }
+
   const fm = { ...plan.frontmatter };
   if (today) fm.updated = today;
   const text = serializeTicket({ frontmatter: fm, body: plan.body });
@@ -52,5 +69,5 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
   writeFileSync(found.file, text);
   if (destFile !== found.file) renameSync(found.file, destFile);
 
-  return { ok: true, id, from: found.status, to: toStatus, fromFile: found.file, file: destFile, resolution: plan.resolution };
+  return { ok: true, id, from: found.status, to: toStatus, fromFile: found.file, file: destFile, resolution: plan.resolution, warnings };
 }

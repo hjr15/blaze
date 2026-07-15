@@ -21,3 +21,13 @@ export function lintLinks(fm, knownIds) {
   }
   return warnings;
 }
+
+export function addLink(links, type, target) {
+  const list = links ?? [];
+  if (list.some((l) => l.type === type && l.target === target)) return list.slice();
+  return [...list, { type, target }];
+}
+
+export function removeLink(links, type, target) {
+  return (links ?? []).filter((l) => !(l.type === type && l.target === target));
+}

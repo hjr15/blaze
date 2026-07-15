@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { LINK_TYPES, lintLinks } from "../../scripts/model/links.mjs";
+import { LINK_TYPES, lintLinks, addLink, removeLink } from "../../scripts/model/links.mjs";
 
 const known = new Set(["OBA-1", "OBA-2"]);
 
@@ -41,4 +41,22 @@ test("flags a malformed (non-object) link entry", () => {
   const w = lintLinks({ id: "OBA-1", links: [null] }, known);
   assert.equal(w.length, 1);
   assert.match(w[0], /malformed/);
+});
+
+test("addLink appends a typed link", () => {
+  assert.deepEqual(addLink([], "Blocks", "OBA-2"), [{ type: "Blocks", target: "OBA-2" }]);
+});
+test("addLink is idempotent (no duplicate)", () => {
+  const once = addLink([], "Blocks", "OBA-2");
+  assert.deepEqual(addLink(once, "Blocks", "OBA-2"), [{ type: "Blocks", target: "OBA-2" }]);
+});
+test("addLink treats undefined links as empty", () => {
+  assert.deepEqual(addLink(undefined, "Relates", "OBA-3"), [{ type: "Relates", target: "OBA-3" }]);
+});
+test("removeLink drops the matching entry only", () => {
+  const links = [{ type: "Blocks", target: "OBA-2" }, { type: "Relates", target: "OBA-3" }];
+  assert.deepEqual(removeLink(links, "Blocks", "OBA-2"), [{ type: "Relates", target: "OBA-3" }]);
+});
+test("removeLink on undefined links returns []", () => {
+  assert.deepEqual(removeLink(undefined, "Blocks", "OBA-2"), []);
 });

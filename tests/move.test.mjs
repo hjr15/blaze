@@ -53,5 +53,59 @@ test("applyMove relocates to a non-terminal status with no resolution", () => {
   assert.equal(r.to, "in-progress");
   assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
   assert.equal(r.resolution, null);
+  assert.deepEqual(r.warnings, []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("applyMove warns (does not block) when moved to in-progress under an open Blocks", () => {
+  const { root, projects } = fixture("defined");
+  const blockerDir = join(projects, "OBA", "in-progress");
+  mkdirSync(blockerDir, { recursive: true });
+  writeFileSync(join(blockerDir, "OBA-9.md"),
+    "---\nid: OBA-9\ntitle: blocker\ntype: task\nproject: OBA\nestimate: 30\n" +
+    "links:\n  - { type: Blocks, target: OBA-1 }\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
+  // Unrelated ticket with no links field at all — exercises the `?? []`
+  // fallback in the blocker scan (and its .some() false path) since it's
+  // neither the moved ticket nor a blocker.
+  const unrelatedDir = join(projects, "OBA", "defined");
+  writeFileSync(join(unrelatedDir, "OBA-3.md"),
+    "---\nid: OBA-3\ntitle: unrelated\ntype: task\nproject: OBA\nestimate: 30\n" +
+    "created: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
+  const r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
+  assert.equal(r.ok, true);
+  assert.ok(r.warnings.some((w) => /OBA-9/.test(w) && /block/i.test(w)));
+  assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("applyMove does not throw when a Blocks-linked blocker has an unresolvable type", () => {
+  const { root, projects } = fixture("defined");
+  const blockerDir = join(projects, "OBA", "in-progress");
+  mkdirSync(blockerDir, { recursive: true });
+  // Malformed blocker: has a Blocks link targeting the moved ticket, sits in a
+  // non-terminal status dir, but its `type` is missing — isTerminal() would
+  // throw via workflowFor()/must(type) if called on it directly. The guard
+  // must skip this ticket (not warn, not throw) rather than abort the move.
+  writeFileSync(join(blockerDir, "OBA-9.md"),
+    "---\nid: OBA-9\ntitle: malformed blocker\nproject: OBA\nestimate: 30\n" +
+    "links:\n  - { type: Blocks, target: OBA-1 }\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
+  let r;
+  assert.doesNotThrow(() => { r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" }); });
+  assert.equal(r.ok, true);
+  assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
+  assert.ok(!r.warnings.some((w) => /OBA-9/.test(w)));
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("applyMove has no block-warning when the blocker is already done", () => {
+  const { root, projects } = fixture("defined");
+  const blockerDir = join(projects, "OBA", "done");
+  mkdirSync(blockerDir, { recursive: true });
+  writeFileSync(join(blockerDir, "OBA-9.md"),
+    "---\nid: OBA-9\ntitle: blocker\ntype: task\nproject: OBA\nestimate: 30\n" +
+    "links:\n  - { type: Blocks, target: OBA-1 }\ncreated: 2026-06-01\nupdated: 2026-06-01\nresolution: done\n---\nbody\n");
+  const r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
+  assert.equal(r.ok, true);
+  assert.deepEqual(r.warnings, []);
   rmSync(root, { recursive: true, force: true });
 });
