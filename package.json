@@ -8,6 +8,7 @@
   },
   "files": [
     "scripts/",
+    "!scripts/ci",
     "AGENTS.md",
     "LICENSE",
     "README.md"
