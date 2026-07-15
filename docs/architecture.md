@@ -3,8 +3,9 @@
 The current as-built shape of the Blaze **engine**. For the original design
 rationale (why file-based, why the loops, the brand) see [`design.md`](design.md);
 for customising the type/workflow registry see
-[`schema-customization.md`](schema-customization.md). Diagrams are authored once in
-[`diagrams/`](diagrams/) and embedded below.
+[`schema-customization.md`](schema-customization.md); for the config-schema
+compat guard see [`schema-versioning.md`](schema-versioning.md). Diagrams are
+authored once in [`diagrams/`](diagrams/) and embedded below.
 
 ## The one rule
 

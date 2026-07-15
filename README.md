@@ -164,6 +164,12 @@ change. Set one to `false` (e.g. `"views": { "map": false }`) to hide its
 pill and 404 its fragment endpoint until it's ready; `board` can't be
 disabled since the shell always needs a default view.
 
+An optional integer `schemaVersion` stamps which schema contract the board was
+written against; absent means `1`, the pre-versioning baseline, so existing
+boards need no change. The engine refuses to load a board stamped outside the
+window it supports (currently `1..1`) instead of silently misreading it — see
+[`docs/schema-versioning.md`](docs/schema-versioning.md).
+
 The type registry and workflows are themselves configurable: add a `schema` block
 (top-level or per-project) to override or extend the built-in defaults without
 editing engine source — see
