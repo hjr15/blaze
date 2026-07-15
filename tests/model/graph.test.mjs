@@ -251,6 +251,24 @@ test("graphModel: a project filter still resolves a cross-project stub (delibera
   assert.equal(stub.project, "B"); // rendered though it's outside the ?project=A filter
 });
 
+test("graphModel: a stub never produces a solid parent edge, even when its parent is in scope", () => {
+  // Focus A-e1: direct children A-t1, A-t2 are in scope. A-t1 Blocks A-s1 (a
+  // subtask of in-scope A-t2, but out of scope itself — grandchildren are
+  // excluded) pulls A-s1 in as a stub. A stub is a link endpoint, not a
+  // child: it must not sprout a solid hierarchy edge to A-t2 just because
+  // its `parent` field happens to still resolve in-scope.
+  const i = fullIdx(
+    [T("A-g", "goal"), T("A-e1", "epic", "A-g"), T("A-t1", "task", "A-e1"), T("A-t2", "task", "A-e1"),
+     T("A-s1", "subtask", "A-t2")],
+    [{ src: "A-t1", type: "Blocks", target: "A-s1" }],
+  );
+  const gm = graphModel({ projectsDir: "/nonexistent", index: i, focus: "A-e1" });
+  const stub = gm.nodes.find((n) => n.id === "A-s1");
+  assert.equal(stub.stub, true);
+  assert.equal(gm.edges.filter((e) => e.kind === "parent" && (e.src === "A-s1" || e.target === "A-s1")).length, 0);
+  assert.deepEqual(gm.edges.filter((e) => e.kind === "link").map((e) => [e.src, e.target]), [["A-t1", "A-s1"]]);
+});
+
 // BLZ-36: deterministic lane wrapping.
 const wrapRows = (n, type = "task") => Array.from({ length: n }, (_, i) =>
   ({ id: `A-${type[0]}${String(i + 1).padStart(2, "0")}`, type, title: "t", status: "todo", project: "A", parent: null }));

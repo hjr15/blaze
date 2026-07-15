@@ -11,11 +11,6 @@ import { clientScript } from "../../scripts/views/map.mjs";
 // LIMITATION: this asserts the seam's logic, not real browser semantics; a DOM
 // API the shim doesn't model is not covered. jsdom would not model pointer
 // capture either. Final verification stays a real-browser check on the board.
-//
-// mount()/makeEl() and the drill-nav test below were added by Task 4 (BLZ-89,
-// TDD proof for downDrill, committed ahead of this task); this task upgrades
-// mount() to the full shape (adds node/zoom elements, nests drill inside its
-// own node) and appends the click/drag/zoom/keyboard tests.
 
 function makeEl(tag, { attrs = {}, dataset = {}, parent = null } = {}) {
   const el = {
@@ -121,4 +116,18 @@ test("Enter on a focused node opens the panel (keyboard path)", () => {
   const { svg, node, opened } = mount();
   svg.dispatch("keydown", { key: "Enter", target: node });
   assert.deepEqual(opened, ["T-1"]);
+});
+
+test("Enter on a focused drill navigates to ?focus=<id> (drill wins over the node, keyboard path)", () => {
+  const { svg, drill, opened, location } = mount();
+  svg.dispatch("keydown", { key: "Enter", target: drill });
+  assert.equal(location.search, "focus=T-2");
+  assert.deepEqual(opened, []);
+});
+
+test("Space on a focused drill also navigates to ?focus=<id>", () => {
+  const { svg, drill, opened, location } = mount();
+  svg.dispatch("keydown", { key: " ", target: drill });
+  assert.equal(location.search, "focus=T-2");
+  assert.deepEqual(opened, []);
 });

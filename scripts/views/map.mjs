@@ -49,7 +49,7 @@ export function render(gm, opts = {}) {
     // (it IS the current focus) nor on stubs (design §5 — stub click opens the
     // panel, which is the drill-onward path).
     const drill = n.childCount > 0 && !n.stub && !n.anchor
-      ? `<g class="drill" data-drill="${esc(n.id)}" role="button" aria-label="Show ${n.childCount} children of ${esc(n.id)}">`
+      ? `<g class="drill" data-drill="${esc(n.id)}" tabindex="0" role="button" aria-label="Show ${n.childCount} children of ${esc(n.id)}">`
         + `<rect x="${n.w - 38}" y="${n.h - 18}" width="32" height="14" rx="7" fill="#21262d" />`
         + `<text class="drill-n" x="${n.w - 22}" y="${n.h - 7}" text-anchor="middle">⤵ ${n.childCount}</text>`
         + `</g>`
@@ -140,6 +140,14 @@ export const clientScript = `
       vb.w *= factor; vb.h *= factor; apply();
     }
     function reset() { vb = { x: 0, y: 0, w: W || 1, h: H || 1 }; apply(); }
+    // Full-page drill nav (BLZ-89) — project/view params ride along; the
+    // saved-view mechanism restores the map at the new level. Shared by the
+    // pointer and keyboard paths so they can't drift.
+    function drillTo(id) {
+      var q = new URLSearchParams(location.search);
+      q.set("focus", id);
+      location.search = q.toString();
+    }
     function toVb(clientX, clientY) {
       var r = svg.getBoundingClientRect();
       return { x: vb.x + ((clientX - r.left) / r.width) * vb.w, y: vb.y + ((clientY - r.top) / r.height) * vb.h };
@@ -176,11 +184,7 @@ export const clientScript = `
       try { svg.releasePointerCapture(e.pointerId); } catch (x) {}
       if (moved) { downNode = null; downDrill = null; return; } // it was a pan, not a click
       if (downDrill) {
-        // Full-page drill nav — project/view params ride along; the saved-view
-        // mechanism restores the map at the new level.
-        var q = new URLSearchParams(location.search);
-        q.set("focus", downDrill.getAttribute("data-drill"));
-        location.search = q.toString();
+        drillTo(downDrill.getAttribute("data-drill"));
       } else if (downNode && window.blazePanel) {
         window.blazePanel.open(downNode.getAttribute("data-node-id"));
       }
@@ -188,6 +192,10 @@ export const clientScript = `
     });
     svg.addEventListener("keydown", function (e) {
       if (e.key !== "Enter" && e.key !== " ") return;
+      // Drill must win over the node, matching the pointer path's downDrill
+      // precedence — the drill <g> nests inside the node <g>.
+      var d = e.target.closest("[data-drill]");
+      if (d) { e.preventDefault(); drillTo(d.getAttribute("data-drill")); return; }
       var g = e.target.closest("[data-node-id]");
       if (g && window.blazePanel) { e.preventDefault(); window.blazePanel.open(g.getAttribute("data-node-id")); }
     });

@@ -141,7 +141,9 @@ export function graphModel({ projectsDir, project = "all", index = null, focus =
     if (srcIn === tgtIn) continue; // both in scope (normal edge) or both out (irrelevant)
     const missingId = srcIn ? l.target : l.src;
     const row = idx.get(missingId);
-    if (row && !stubs.has(missingId)) stubs.set(missingId, { ...row, stub: true });
+    // A stub is a link endpoint, not a child — drop `parent` so an in-scope
+    // parent can't sprout a solid hierarchy edge to it (BLZ-31 fix review).
+    if (row && !stubs.has(missingId)) stubs.set(missingId, { ...row, parent: null, stub: true });
   }
   // Drill-affordance data: children per node tallied from the FULL index
   // (mirrors boardModel's childTally), so an in-scope epic can show "⤵ N".
