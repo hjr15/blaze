@@ -6,7 +6,8 @@
   "exclude": [
     "tests/**",
     "scripts/cli.mjs",
-    "scripts/*-runner.mjs"
+    "scripts/*-runner.mjs",
+    "scripts/ci/**"
   ],
   "reporter": ["text-summary", "lcov"],
   "check-coverage": true,
