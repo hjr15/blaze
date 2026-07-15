@@ -239,7 +239,9 @@ test("graphModel: a link dangling to an id absent from the index still drops", (
   assert.equal(gm.nodes.find((n) => n.id === "GONE-9"), undefined);
 });
 
-test("graphModel: a project filter still resolves a cross-project stub (deliberate — a link that crosses projects is still a real dependency, BLZ-2 says the board must not lie by hiding it)", () => {
+// Deliberate — a link that crosses projects is still a real dependency;
+// BLZ-2 says the board must not lie by hiding it.
+test("graphModel: a project filter still resolves a cross-project stub", () => {
   const i = fullIdx(
     [T("A-g", "goal", null, "A"), T("A-t1", "task", "A-g", "A"), T("B-x", "task", null, "B")],
     [{ src: "A-t1", type: "Blocks", target: "B-x" }],
@@ -305,8 +307,7 @@ test("layoutGraph: levelX advances by full sub-column width, clearing the widest
   // because with only 2 sub-columns the max x offset (1*SUB_STRIDE=180) is
   // smaller than COL_STRIDE(240) — a loose "next level's x > previous max x"
   // check can't fail even if the sub-column term is dropped from levelX
-  // entirely. With 3 sub-columns it can, and does (see the regression check
-  // below run manually in the fix report).
+  // entirely. With 3 sub-columns it can, and does.
   const rows = [...wrapRows(25, "epic"), { id: "A-x1", type: "task", title: "t", status: "todo", project: "A", parent: null }];
   const L = layoutGraph(buildGraph({ rows, links: [] }));
   const x = (id) => L.nodes.find((n) => n.id === id).x;

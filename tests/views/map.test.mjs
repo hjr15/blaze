@@ -56,7 +56,10 @@ test("render: flat mode over the node-count threshold shows the real count in a 
   const gm = layoutGraph(buildGraph({ rows: manyTaskRows(200), links: [] }));
   const html = render(gm, { flat: true });
   assert.match(html, /class="map-hint"/);
-  assert.match(html, /200/);
+  // Discriminating: with 200 rows the id "A-200" appears in the markup many
+  // times regardless of the hint, so a bare /200/ match doesn't prove the
+  // hint shows the real count — anchor it to the hint element's own text.
+  assert.match(html, /class="map-hint"[^>]*>200 nodes/);
   assert.match(html, /nested/i);
 });
 
