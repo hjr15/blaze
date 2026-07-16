@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { decide, reconcile } from "../scripts/reconcile.mjs";
+import { decide, reconcile, idFromSubject } from "../scripts/reconcile.mjs";
 
 test("merged PR → done and sets resolution via the post-function", () => {
   const d = decide({ pr: { state: "MERGED", number: 5, url: "u", headRefName: "you/OBA-5-x" } }, "in-review", "task");
@@ -83,6 +83,21 @@ test("shipped on a non-delivery type is skipped", () => {
 
 test("no signal at all (no pr/branch/shipped) is still skipped", () => {
   assert.equal(decide({}, "defined", "task").skip, true);
+});
+
+// --- Task 2: idFromSubject — anchored leading-id parse of a commit subject -----
+test("idFromSubject extracts the leading id, greedy digits", () => {
+  assert.equal(idFromSubject("BLZ-43: reconcile completeness", "BLZ"), "BLZ-43");
+  assert.equal(idFromSubject("BLZ-4: other", "BLZ"), "BLZ-4");
+});
+test("idFromSubject does not confuse BLZ-4 with BLZ-43", () => {
+  assert.equal(idFromSubject("BLZ-43: fixes BLZ-4 mention", "BLZ"), "BLZ-43");
+});
+test("idFromSubject ignores a non-leading id (no mis-attribution)", () => {
+  assert.equal(idFromSubject("chore: bump BLZ-36 dep", "BLZ"), null);
+});
+test("idFromSubject returns null on a non-conforming subject", () => {
+  assert.equal(idFromSubject("just a message", "BLZ"), null);
 });
 
 // --- reconcile() must honour a custom-named projectsDir, not just dataRoot ----
