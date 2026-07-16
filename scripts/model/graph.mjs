@@ -37,6 +37,7 @@ export function neighbourhood(index, focusId) {
 
   for (const l of links) {
     if (l.src !== focusId && l.target !== focusId) continue;
+    if (l.src === l.target) continue; // a self-link is meaningless and would duplicate the anchor
     const otherId = l.src === focusId ? l.target : l.src;
     const otherRow = otherId != null ? index.get(otherId) : undefined;
     if (!otherRow) { unresolved.push({ type: l.type ?? null, target: otherId ?? null }); continue; }

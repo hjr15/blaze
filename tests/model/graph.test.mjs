@@ -61,6 +61,16 @@ test("neighbourhood: a node that is both blocker and blocked de-dupes to ONE rol
   assert.equal(nb.nodes.find((n) => n.id === "A-2").role, "upstream");
 });
 
+test("neighbourhood: a self-link (src === target === focus) is skipped, no duplicate anchor node", () => {
+  const i = fullIdx([T("A-1"), T("A-2")], [
+    { src: "A-1", type: "Blocks", target: "A-1" }, // pathological self-link
+    { src: "A-2", type: "Blocks", target: "A-1" }, // one real neighbour
+  ]);
+  const nb = neighbourhood(i, "A-1");
+  assert.equal(nb.nodes.filter((n) => n.id === "A-1").length, 1);
+  assert.equal(nb.edges.filter((e) => e.src === e.target).length, 0);
+});
+
 test("neighbourhood: the anchor node is present, marked anchor, and first", () => {
   const i = fullIdx([T("A-1"), T("A-2")], [{ src: "A-1", type: "Blocks", target: "A-2" }]);
   const nb = neighbourhood(i, "A-1");
