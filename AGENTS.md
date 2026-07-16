@@ -52,6 +52,15 @@ automatically yet.
    `in-review`; merging moves it to `done`. Goals and risks are always manual.
    Never hand-move a delivery ticket through the reconcile-owned statuses once a
    branch/PR exists for it — let reconcile own it.
+   Reconcile also moves a **bundled epic-child** — a delivery ticket with no
+   branch/PR of its own, only a `<KEY>-<n>:` commit inside its epic's PR — to
+   `done` once that commit is reachable from the code repo's default branch, so
+   children bundled into an epic PR move themselves when that PR merges; no
+   manual `blaze move` needed. This is terminal-sticky and idempotent like the
+   branch/PR paths, and it does not fire while the epic PR is still open (the
+   child's commit then lives only on the epic branch, not the default branch).
+   Reconcile mirrors **delivery** state, not deploy state — see
+   [ADR-0003](docs/decisions/0003-engine-scope-delivery-truth-not-deploy-truth.md).
 
 ## The join key
 
