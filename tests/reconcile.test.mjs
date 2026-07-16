@@ -4,7 +4,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { decide, reconcile } from "../scripts/reconcile.mjs";
+import { decide, reconcile, idFromSubject } from "../scripts/reconcile.mjs";
 
 test("merged PR → done and sets resolution via the post-function", () => {
   const d = decide({ pr: { state: "MERGED", number: 5, url: "u", headRefName: "you/OBA-5-x" } }, "in-review", "task");
@@ -50,6 +50,70 @@ test("terminal status is sticky — a merged PR on a done ticket does not move i
 test("non-delivery types (goal/risk) are never auto-transitioned", () => {
   assert.equal(decide({ pr: { state: "MERGED", number: 1, url: "u", headRefName: "b" } }, "defined", "goal").skip, true);
   assert.equal(decide({ branch: "b" }, "identified", "risk").skip, true);
+});
+
+// --- Task 1: the shipped fallback (bundled epic-children with no branch/PR) ----
+test("shipped (no pr/branch) → done for a delivery child", () => {
+  const d = decide({ shipped: true }, "defined", "task");
+  assert.equal(d.target, "done");
+  assert.equal(d.moved, true);
+  assert.equal(d.resolution, "done");
+  assert.equal(d.skip, false);
+});
+
+test("shipped is ignored when a branch signal is present", () => {
+  const d = decide({ branch: "you/BLZ-8-y", shipped: true }, "defined", "task");
+  assert.equal(d.target, "in-progress"); // branch path wins, shipped not consulted
+});
+
+test("shipped is ignored when a pr signal is present", () => {
+  const d = decide({ pr: { state: "OPEN", number: 6, url: "u", headRefName: "b" }, shipped: true }, "defined", "task");
+  assert.equal(d.target, "in-review");
+});
+
+test("shipped + already done → terminal-sticky, no move", () => {
+  const d = decide({ shipped: true }, "done", "task");
+  assert.equal(d.target, "done");
+  assert.equal(d.moved, false);
+});
+
+// --- Finding 3: shipped must NOT widen behaviour for an already-terminal ticket.
+// A same-id commit on the default branch must not re-enter the shipped path when
+// the ticket is already terminal — otherwise terminal-sticky blocks the move but
+// `resolution` gets recomputed (widening an existing resolution). Gating on
+// isTerminal(type, currentStatus) makes it take the skip path: no move, and
+// resolution left undefined so reconcile() never overwrites it. Delivery's sole
+// terminal status is "done" (scripts/model/workflows.mjs), so that is the only
+// real terminal status a delivery-type decide() can be called with.
+test("shipped on an already-terminal ticket takes the skip path (no resolution recompute)", () => {
+  const d = decide({ shipped: true }, "done", "task");
+  assert.equal(d.skip, true);
+  assert.equal(d.moved, false);
+  assert.equal(d.target, "done");
+  assert.equal(d.resolution, undefined); // NOT recomputed to "done"
+});
+
+test("shipped on a non-delivery type is skipped", () => {
+  assert.equal(decide({ shipped: true }, "defined", "goal").skip, true);
+});
+
+test("no signal at all (no pr/branch/shipped) is still skipped", () => {
+  assert.equal(decide({}, "defined", "task").skip, true);
+});
+
+// --- Task 2: idFromSubject — anchored leading-id parse of a commit subject -----
+test("idFromSubject extracts the leading id, greedy digits", () => {
+  assert.equal(idFromSubject("BLZ-43: reconcile completeness", "BLZ"), "BLZ-43");
+  assert.equal(idFromSubject("BLZ-4: other", "BLZ"), "BLZ-4");
+});
+test("idFromSubject does not confuse BLZ-4 with BLZ-43", () => {
+  assert.equal(idFromSubject("BLZ-43: fixes BLZ-4 mention", "BLZ"), "BLZ-43");
+});
+test("idFromSubject ignores a non-leading id (no mis-attribution)", () => {
+  assert.equal(idFromSubject("chore: bump BLZ-36 dep", "BLZ"), null);
+});
+test("idFromSubject returns null on a non-conforming subject", () => {
+  assert.equal(idFromSubject("just a message", "BLZ"), null);
 });
 
 // --- reconcile() must honour a custom-named projectsDir, not just dataRoot ----
@@ -212,6 +276,119 @@ test("reconcile --apply commits only touched files, not an unrelated dirty file"
     assert.match(status, /UNRELATED\.txt/);
   } finally {
     rmSync(root, { recursive: true, force: true });
+    rmSync(codeRepo, { recursive: true, force: true });
+  }
+});
+
+// --- Task 3: end-to-end proof — bundled epic-children move on a default-branch --
+// commit, an open-epic-PR child (commit only on a feature branch) does NOT move,
+// and a second run is a no-op. This committed test IS the permanent regression
+// guard for the merged-vs-open discrimination.
+test("bundled children: commit on default branch → done; open-epic-PR child NOT moved; idempotent", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-bundled-"));
+  const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-bundled-code-"));
+  // Explicit default branch — do NOT rely on the env's git init default.
+  execFileSync("git", ["-C", codeRepo, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.name", "t"]);
+  writeFileSync(join(codeRepo, "README.md"), "x\n");
+  execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+  // ZZZ-2 shipped: its commit is on the default branch (merged epic PR).
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", "ZZZ-2: bundled child work"]);
+  // ZZZ-3 unmerged: commit lives on a feature branch, NOT on main (epic PR still open).
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "-b", "epic/ZZZ-9-bundle"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", "ZZZ-3: unmerged child work"]);
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "main"]);
+
+  const projectsDir = join(root, "projects");
+  const definedDir = join(projectsDir, "ZZZ", "defined");
+  const doneDir = join(projectsDir, "ZZZ", "done");
+  mkdirSync(definedDir, { recursive: true });
+  for (const n of [2, 3]) {
+    writeFileSync(
+      join(definedDir, `ZZZ-${n}-child.md`),
+      `---\nid: ZZZ-${n}\ntype: task\nstatus: defined\nproject: ZZZ\nestimate: 30\n---\n\nbody\n`,
+    );
+  }
+  writeFileSync(
+    join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], codeRepos: [codeRepo] }),
+  );
+
+  try {
+    const applied = reconcile({ dryRun: false, root });
+    assert.equal(applied.ok, true);
+    // ZZZ-2 shipped → done
+    assert.ok(existsSync(join(doneDir, "ZZZ-2-child.md")), "shipped child moved to done/");
+    assert.ok(!existsSync(join(definedDir, "ZZZ-2-child.md")), "shipped child left defined/");
+    // ZZZ-3 open-epic-PR → NOT moved (commit not on default branch)
+    assert.ok(existsSync(join(definedDir, "ZZZ-3-child.md")), "unmerged child stays in defined/");
+    assert.ok(!existsSync(join(doneDir, "ZZZ-3-child.md")), "unmerged child NOT in done/");
+    // Idempotent: a second run makes no ZZZ-2 change.
+    const again = reconcile({ dryRun: false, root });
+    assert.ok(!again.changes.some((c) => c.id === "ZZZ-2"), "second run is a no-op for the shipped child");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(codeRepo, { recursive: true, force: true });
+  }
+});
+
+// --- Finding 1+2: the shipped signal must read the REMOTE-TRACKING default -----
+// branch (origin/main), not local main. prMap comes from live `gh pr list` and
+// branchMap reads refs/remotes/origin, so a bundled child merged on origin/main
+// must be seen even when local main is behind (blaze reconcile --fetch updates
+// remote-tracking refs, NOT local main). This fixture gives a real `origin`
+// remote whose main carries the child commit while LOCAL main is deliberately
+// one commit behind — reconcile must still move the child to done/, which both
+// proves Finding 1 AND exercises the production `origin/HEAD` detection arm
+// (untested before — every other fixture here is remote-less). See Finding 2.
+test("shipped reads origin/main (remote-tracking), not a stale local main", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-"));
+  const originRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-origin-"));
+  const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-code-"));
+
+  // Bare origin + a code checkout that pushes the child commit to origin/main,
+  // then rewinds LOCAL main one commit behind origin/main.
+  execFileSync("git", ["-C", originRepo, "init", "-q", "--bare", "-b", "main"]);
+  execFileSync("git", ["-C", codeRepo, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.name", "t"]);
+  writeFileSync(join(codeRepo, "README.md"), "x\n");
+  execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", codeRepo, "remote", "add", "origin", originRepo]);
+  // ZZZ-2's shipped commit lands on origin/main…
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", "ZZZ-2: bundled child work"]);
+  execFileSync("git", ["-C", codeRepo, "push", "-q", "origin", "main"]);
+  // …but LOCAL main is rewound behind it (still points at seed only).
+  execFileSync("git", ["-C", codeRepo, "reset", "--hard", "-q", "HEAD~1"]);
+  execFileSync("git", ["-C", codeRepo, "fetch", "-q", "origin"]);
+  execFileSync("git", ["-C", codeRepo, "remote", "set-head", "origin", "main"]); // origin/HEAD → origin/main
+
+  const projectsDir = join(root, "projects");
+  const definedDir = join(projectsDir, "ZZZ", "defined");
+  const doneDir = join(projectsDir, "ZZZ", "done");
+  mkdirSync(definedDir, { recursive: true });
+  writeFileSync(
+    join(definedDir, "ZZZ-2-child.md"),
+    "---\nid: ZZZ-2\ntype: task\nstatus: defined\nproject: ZZZ\nestimate: 30\n---\n\nbody\n",
+  );
+  writeFileSync(
+    join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], codeRepos: [codeRepo] }),
+  );
+
+  try {
+    const applied = reconcile({ dryRun: false, root });
+    assert.equal(applied.ok, true);
+    // The child ships only on origin/main; local main lacks the commit. Moving
+    // it proves the resolver logs the remote-tracking ref via origin/HEAD.
+    assert.ok(existsSync(join(doneDir, "ZZZ-2-child.md")), "child on origin/main moved to done/");
+    assert.ok(!existsSync(join(definedDir, "ZZZ-2-child.md")), "child left defined/");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(originRepo, { recursive: true, force: true });
     rmSync(codeRepo, { recursive: true, force: true });
   }
 });

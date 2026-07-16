@@ -37,7 +37,7 @@ function sh(cmd, args, opts = {}) {
 }
 
 // --- pure decision: git signal + current status + type → target status --------
-export function decide({ pr, branch }, currentStatus, type) {
+export function decide({ pr, branch, shipped }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
@@ -52,6 +52,13 @@ export function decide({ pr, branch }, currentStatus, type) {
   } else if (branch) {
     target = "in-progress";
     branchVal = branch;
+  } else if (shipped && !isTerminal(type, currentStatus)) {
+    // A bundled epic-child has no branch/PR of its own; a <KEY>-<n>: commit
+    // reachable from the default branch is the signal that it shipped. Gate on
+    // NOT-already-terminal: a shipped signal on a terminal ticket must take the
+    // skip path below (not widen behaviour), so terminal-sticky doesn't recompute
+    // an existing `resolution` on a ticket that's already in a terminal status.
+    target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
   }
@@ -62,9 +69,34 @@ export function decide({ pr, branch }, currentStatus, type) {
   return { target, branchVal, prVal, moved, skip: false, resolution };
 }
 
+// --- anchored leading-id parse of a commit subject ("<KEY>-<n>: desc") --------
+// Only the LEADING id counts — a subject that merely mentions a second ticket
+// downstream ("fixes BLZ-4") is attributed to its leading id, never the mention.
+export function idFromSubject(subject, key) {
+  const m = new RegExp("^" + key + "-(\\d+):", "i").exec((subject || "").trim());
+  return m ? `${key}-${m[1]}` : null;
+}
+
+// --- resolve a repo's default-branch LOG REF, preferring the remote-tracking ---
+// branch. prMap comes from live `gh pr list` and branchMap reads
+// refs/remotes/origin, so the shipped signal must read the SAME freshness — the
+// remote-tracking default branch — not local `main` (which `blaze reconcile
+// --fetch` does not update). A bundled child merged on origin/main would
+// otherwise be missed while a solo merged-PR ticket flips to done: asymmetric
+// under-reporting. Order: origin/HEAD → origin/main|master → local main|master
+// (remote-less repos: fixtures + blaze-pm itself) → "main" fallback.
+function defaultBranchRef(repoPath) {
+  const head = sh("git", ["-C", repoPath, "rev-parse", "--abbrev-ref", "origin/HEAD"]);
+  if (head && head !== "origin/HEAD") return head; // e.g. "origin/main" — keep the remote-tracking ref verbatim
+  for (const b of ["origin/main", "origin/master", "main", "master"]) {
+    if (sh("git", ["-C", repoPath, "rev-parse", "--verify", "--quiet", b]) !== null) return b;
+  }
+  return "main";
+}
+
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
-function gatherRepo(repoPath, idFromRef, { fetch }) {
-  const empty = { prMap: new Map(), branchMap: new Map() };
+function gatherRepo(repoPath, idFromRef, key, { fetch }) {
+  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set() };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
   if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
 
@@ -89,21 +121,33 @@ function gatherRepo(repoPath, idFromRef, { fetch }) {
     const id = idFromRef(ref);
     if (id && !branchMap.has(id)) branchMap.set(id, ref);
   }
-  return { prMap, branchMap };
+
+  // Default-branch commit signal: a <KEY>-<n>: commit reachable from the code
+  // repo's default-branch HEAD means that ticket shipped (used for bundled
+  // epic-children that have no branch/PR of their own).
+  const shippedSet = new Set();
+  const ref = defaultBranchRef(repoPath);
+  const subs = sh("git", ["-C", repoPath, "log", ref, "--format=%s"]) || "";
+  for (const line of subs.split("\n")) {
+    const id = idFromSubject(line, key);
+    if (id) shippedSet.add(id);
+  }
+  return { prMap, branchMap, shippedSet };
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
 function gatherProject(project, { fetch }) {
-  const prMap = new Map(), branchMap = new Map();
+  const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
   for (const repo of project.codeRepoPaths) {
-    const r = gatherRepo(repo, project.idFromRef, { fetch });
+    const r = gatherRepo(repo, project.idFromRef, project.key, { fetch });
     for (const [id, pr] of r.prMap) {
       const cur = prMap.get(id);
       if (!cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0)) prMap.set(id, pr);
     }
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
+    for (const id of r.shippedSet) shippedSet.add(id);
   }
-  return { prMap, branchMap };
+  return { prMap, branchMap, shippedSet };
 }
 
 // --- the reconcile pass -------------------------------------------------------
@@ -132,7 +176,7 @@ export function reconcile({
     const type = t.frontmatter.type;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;
-    const d = decide({ pr: s.prMap.get(t.frontmatter.id), branch: s.branchMap.get(t.frontmatter.id) }, t.status, type);
+    const d = decide({ pr: s.prMap.get(t.frontmatter.id), branch: s.branchMap.get(t.frontmatter.id), shipped: s.shippedSet.has(t.frontmatter.id) }, t.status, type);
     if (d.skip) continue;
 
     const fm = { ...t.frontmatter };
