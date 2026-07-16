@@ -263,3 +263,57 @@ test("reconcile --apply commits only touched files, not an unrelated dirty file"
     rmSync(codeRepo, { recursive: true, force: true });
   }
 });
+
+// --- Task 3: end-to-end proof — bundled epic-children move on a default-branch --
+// commit, an open-epic-PR child (commit only on a feature branch) does NOT move,
+// and a second run is a no-op. This committed test IS the permanent regression
+// guard for the merged-vs-open discrimination.
+test("bundled children: commit on default branch → done; open-epic-PR child NOT moved; idempotent", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-bundled-"));
+  const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-bundled-code-"));
+  // Explicit default branch — do NOT rely on the env's git init default.
+  execFileSync("git", ["-C", codeRepo, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.name", "t"]);
+  writeFileSync(join(codeRepo, "README.md"), "x\n");
+  execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+  // ZZZ-2 shipped: its commit is on the default branch (merged epic PR).
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", "ZZZ-2: bundled child work"]);
+  // ZZZ-3 unmerged: commit lives on a feature branch, NOT on main (epic PR still open).
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "-b", "epic/ZZZ-9-bundle"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", "ZZZ-3: unmerged child work"]);
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "main"]);
+
+  const projectsDir = join(root, "projects");
+  const definedDir = join(projectsDir, "ZZZ", "defined");
+  const doneDir = join(projectsDir, "ZZZ", "done");
+  mkdirSync(definedDir, { recursive: true });
+  for (const n of [2, 3]) {
+    writeFileSync(
+      join(definedDir, `ZZZ-${n}-child.md`),
+      `---\nid: ZZZ-${n}\ntype: task\nstatus: defined\nproject: ZZZ\nestimate: 30\n---\n\nbody\n`,
+    );
+  }
+  writeFileSync(
+    join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], codeRepos: [codeRepo] }),
+  );
+
+  try {
+    const applied = reconcile({ dryRun: false, root });
+    assert.equal(applied.ok, true);
+    // ZZZ-2 shipped → done
+    assert.ok(existsSync(join(doneDir, "ZZZ-2-child.md")), "shipped child moved to done/");
+    assert.ok(!existsSync(join(definedDir, "ZZZ-2-child.md")), "shipped child left defined/");
+    // ZZZ-3 open-epic-PR → NOT moved (commit not on default branch)
+    assert.ok(existsSync(join(definedDir, "ZZZ-3-child.md")), "unmerged child stays in defined/");
+    assert.ok(!existsSync(join(doneDir, "ZZZ-3-child.md")), "unmerged child NOT in done/");
+    // Idempotent: a second run makes no ZZZ-2 change.
+    const again = reconcile({ dryRun: false, root });
+    assert.ok(!again.changes.some((c) => c.id === "ZZZ-2"), "second run is a no-op for the shipped child");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(codeRepo, { recursive: true, force: true });
+  }
+});
