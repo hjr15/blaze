@@ -94,8 +94,8 @@ export function parseTicket(text) {
 
 const FIELD_ORDER = [
   "id", "title", "type", "project", "priority", "resolution", "parent",
-  "assignee", "labels", "components", "estimate", "worklog", "links",
-  "likelihood", "impact", "branch", "pr", "created", "updated",
+  "assignee", "labels", "components", "estimate", "sprint", "start", "due",
+  "worklog", "links", "likelihood", "impact", "branch", "pr", "created", "updated",
 ];
 
 function dumpScalar(v) {

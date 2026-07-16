@@ -107,3 +107,45 @@ test("applyNew warns (does not block) on empty required components", () => {
   assert.ok(res.warnings.some((w) => /component/.test(w)));
   rmSync(r, { recursive: true, force: true });
 });
+
+test("applyNew accepts sprint/start/due when the sprint id is in the registry", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  writeFileSync(join(r, "sprints.json"), JSON.stringify({
+    active: "S1", sprints: [{ id: "S1", name: "Mid-July", start: "2026-07-13", end: "2026-07-26" }],
+  }));
+  const res = applyNew(projects, {
+    project: "OBA", type: "task", title: "sprint task", today: "2026-07-15",
+    extra: { estimate: 30, sprint: "S1", start: "2026-07-20", due: "2026-07-24" },
+  });
+  assert.equal(res.ok, true, JSON.stringify(res.errors));
+  const txt = readFileSync(res.file, "utf8");
+  assert.match(txt, /sprint: S1/);
+  assert.match(txt, /start: 2026-07-20/);
+  assert.match(txt, /due: 2026-07-24/);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("applyNew rejects a sprint id not in the registry", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  const res = applyNew(projects, {
+    project: "OBA", type: "task", title: "bad sprint", today: "2026-07-15",
+    extra: { estimate: 30, sprint: "S9" },
+  });
+  assert.equal(res.ok, false);
+  assert.ok(res.errors.some((e) => /sprint 'S9'/.test(e)));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("applyNew WITHOUT sprint fields writes no sprint:/start:/due: lines (M2 delete-guard)", () => {
+  const r = root();
+  const projects = join(r, "projects");
+  const res = applyNew(projects, { project: "OBA", type: "task", title: "plain task", today: "2026-07-15", extra: { estimate: 30 } });
+  assert.equal(res.ok, true, JSON.stringify(res.errors));
+  const txt = readFileSync(res.file, "utf8");
+  assert.doesNotMatch(txt, /^sprint:/m);
+  assert.doesNotMatch(txt, /^start:/m);
+  assert.doesNotMatch(txt, /^due:/m);
+  rmSync(r, { recursive: true, force: true });
+});

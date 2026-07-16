@@ -6,7 +6,7 @@ import { PRIORITIES } from "./schema.mjs";
 // status/resolution stay move/resolve-only; id/type/project/dates are read-only.
 export const EDITABLE_FIELDS = new Set([
   "title", "assignee", "priority", "labels", "components", "estimate", "parent",
-  "likelihood", "impact", "due",
+  "likelihood", "impact", "due", "sprint", "start",
 ]);
 
 const SURFACED = new Set(["title", "pr", "links"]);

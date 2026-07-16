@@ -4,9 +4,10 @@
 // The Index interface is storage-agnostic — a future node:sqlite implementation
 // must satisfy the same shape (spec §13, revised), so the swap stays contained.
 import { readFileSync, readdirSync, statSync } from "node:fs";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { parseTicket } from "./ticket.mjs";
 import { lintLinks } from "./links.mjs";
+import { loadSprints } from "./sprints.mjs";
 
 function safeReaddir(p) { try { return readdirSync(p); } catch { return []; } }
 function isDir(p) { try { return statSync(p).isDirectory(); } catch { return false; } }
@@ -89,6 +90,7 @@ export function buildIndex(projectsDir, { tickets } = {}) {
       id: fm.id, project: fm.project ?? null, type: fm.type ?? null, title: fm.title ?? null,
       status: t.status, priority: fm.priority ?? null, resolution: fm.resolution ?? null,
       parent: fm.parent ?? null, assignee: fm.assignee ?? null, estimate: fm.estimate ?? null,
+      sprint: fm.sprint ?? null, start: fm.start ?? null, due: fm.due ?? null,
       worklog_minutes, file: t.file,
     });
     for (const link of fm.links ?? []) links.push({ src: fm.id, type: link.type, target: link.target });
@@ -96,5 +98,18 @@ export function buildIndex(projectsDir, { tickets } = {}) {
   }
   const knownIds = new Set(rows.map((r) => r.id));
   const warnings = collected.flatMap((fm) => lintLinks(fm, knownIds));
+  // Dangling-sprint-ref lint (mirrors lintLinks above): a warning, never an error.
+  // Skip entirely for a board that never opted in (no sprints.json AND no ticket
+  // carries a `sprint`), so a plain board never sees a sprint warning.
+  const taggedRows = rows.filter((r) => r.sprint != null && r.sprint !== "");
+  const { sprints } = loadSprints({ root: dirname(projectsDir) });
+  if (sprints.length > 0 || taggedRows.length > 0) {
+    const knownSprintIds = new Set(sprints.map((s) => s.id));
+    for (const r of taggedRows) {
+      if (!knownSprintIds.has(r.sprint)) {
+        warnings.push(`${r.id}: sprint '${r.sprint}' not in registry`);
+      }
+    }
+  }
   return makeIndex(rows, links, warnings);
 }

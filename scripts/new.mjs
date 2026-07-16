@@ -11,6 +11,7 @@ import { validateTicket } from "./model/rules.mjs";
 import { roundEstimate } from "./model/time.mjs";
 import { loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
+import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
 
 function slugify(s) {
   return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
@@ -35,11 +36,18 @@ export function applyNew(projectsDir, opts = {}) {
     estimate: roundEstimate(extra.estimate),
     likelihood: extra.likelihood ?? undefined,
     impact: extra.impact ?? undefined,
+    sprint: extra.sprint ?? undefined,
+    start: extra.start ?? undefined,
+    due: extra.due ?? undefined,
     created: today, updated: today,
   };
   // Drop undefined risk-only keys so they don't serialize for non-risk types.
   if (frontmatter.likelihood === undefined) delete frontmatter.likelihood;
   if (frontmatter.impact === undefined) delete frontmatter.impact;
+  // Drop undefined sprint fields so they don't serialize on every ticket (M2).
+  if (frontmatter.sprint === undefined) delete frontmatter.sprint;
+  if (frontmatter.start === undefined) delete frontmatter.start;
+  if (frontmatter.due === undefined) delete frontmatter.due;
 
   const body = "## Context\n\n## Acceptance Criteria\n\n- [ ] \n\n## Notes\n";
   // Validate everything except parent-existence (parent integrity is a reindex
@@ -47,6 +55,8 @@ export function applyNew(projectsDir, opts = {}) {
   const errors = validateTicket({ frontmatter, body }).filter((e) => !/parent not found/.test(e));
   const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir });
   errors.push(...validateTaxonomy(frontmatter, project_cfg));
+  const { sprints } = loadSprints({ root: dirname(projectsDir) });
+  errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
   if (errors.length) return { ok: false, errors };
 
   const dir = join(projectsDir, project, status);

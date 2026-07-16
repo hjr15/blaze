@@ -10,6 +10,7 @@ import { roundEstimate } from "./model/time.mjs";
 import { EDITABLE_FIELDS } from "./model/fields.mjs";
 import { loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
+import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
 
 // Same id resolution as move.mjs/log.mjs: prefer the project-dir-matching id.
 function locate(projectsDir, id) {
@@ -53,6 +54,8 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
     const project_cfg = loadProject(fm.project, { root: dirname(projectsDir), projectsDir });
     errors.push(...validateTaxonomy(fm, project_cfg));
   }
+  const { sprints } = loadSprints({ root: dirname(projectsDir) });
+  errors.push(...validateSprintFields(fm, { sprintIds: new Set(sprints.map((s) => s.id)) }));
   if (errors.length) return { ok: false, errors };
 
   if (today) fm.updated = today;
