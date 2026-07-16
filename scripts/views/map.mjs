@@ -1,9 +1,11 @@
-// scripts/views/map.mjs — the Map view: a hierarchy+dependency graph of every
-// ticket as a hand-rolled, server-positioned SVG. Nodes are laid out by
-// graphModel (../model/graph.mjs) in type-level columns with project lanes;
-// this module only paints them and wires zoom/pan + node-click. Node-click
-// calls Lane A's window.blazePanel.open(id) — panel.mjs is not touched.
-// Contract: render(gm) → section HTML; styles → CSS; clientScript → browser JS.
+// scripts/views/map.mjs — the Map view: a ticket's 1-hop DEPENDENCY neighbourhood
+// as a hand-rolled, server-positioned SVG (BLZ-108). graphModel
+// (../model/graph.mjs) lays nodes out in role columns — upstream blockers left,
+// anchor centre, downstream blocked right, related below; this module paints them
+// and wires zoom/pan + node-click via the unchanged clientScript. Node-click calls
+// Lane A's window.blazePanel.open(id); the per-neighbour "→" re-focuses the map on
+// that ticket (data-drill seam, shared with the board). Contract: render(gm) →
+// section HTML; styles → CSS; clientScript → browser JS.
 import { esc } from "./render-lib.mjs";
 
 // Node stroke colour by type (falls back for unknown types).
@@ -13,45 +15,46 @@ const TYPE_COLORS = {
 };
 const DEFAULT_COLOR = "#7d8590";
 
-// BLZ-36: flat mode (the whole-corpus escape hatch) has no upper bound on node
-// count, and lane wrapping only bounds height, not width — a real 1,310-node
-// corpus browser-measured at viewBox 0 0 20220 880, an effective 0.069x scale
-// (~11px-wide cards). No layout fix makes that many cards legible on one
-// screen; below this count a flat corpus still renders at a readable scale,
-// so the hint only fires once it's actually warranted.
-const FLAT_HINT_THRESHOLD = 150;
-
 function clip(s, n) {
   s = String(s ?? "");
   return s.length > n ? s.slice(0, n - 1) + "…" : s;
 }
 
-export function render(gm, opts = {}) {
-  const flat = opts.flat === true;
-  const g = gm && Array.isArray(gm.nodes) ? gm : { nodes: [], edges: [], width: 80, height: 80 };
-  const hasData = g.nodes.length > 0;
-  const showHint = flat && g.nodes.length > FLAT_HINT_THRESHOLD;
+export function render(gm) {
+  const g = gm && Array.isArray(gm.nodes)
+    ? gm : { nodes: [], edges: [], width: 80, height: 80, unresolved: [], anchor: null };
+  const unresolved = g.unresolved ?? [];
+
+  // No focus / unresolved focus: nothing to map — prompt instead of an empty frame.
+  if (!g.anchor) {
+    return `<div class="mapwrap no-data">
+    <div class="map-empty empty">Select a ticket to see its dependencies.</div>
+  </div>`;
+  }
+
+  const noLinks = g.nodes.filter((n) => !n.anchor).length === 0;
 
   const edgesSvg = g.edges.map((e) => {
-    const dash = e.kind === "link" ? ' stroke-dasharray="4 3"' : "";
-    const color = e.kind === "link" ? "#8b949e" : "#495366";
-    const line = `<line x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}" stroke="${color}" stroke-width="1.5"${dash} />`;
-    const label = e.kind === "link" && e.label
-      ? `<text class="edge-label" x="${(e.x1 + e.x2) / 2}" y="${(e.y1 + e.y2) / 2 - 2}" text-anchor="middle">${esc(e.label)}</text>`
+    const color = e.directed ? "#8b949e" : "#495366";
+    const dash = e.directed ? "" : ' stroke-dasharray="4 3"';
+    const marker = e.directed ? ' marker-end="url(#arrow)"' : "";
+    const line = `<line x1="${e.x1}" y1="${e.y1}" x2="${e.x2}" y2="${e.y2}" stroke="${color}" stroke-width="1.5"${dash}${marker} />`;
+    const label = e.type
+      ? `<text class="edge-label" x="${(e.x1 + e.x2) / 2}" y="${(e.y1 + e.y2) / 2 - 2}" text-anchor="middle">${esc(e.type)}</text>`
       : "";
     return line + label;
   }).join("");
 
   const nodesSvg = g.nodes.map((n) => {
     const color = TYPE_COLORS[n.type] || DEFAULT_COLOR;
-    const cls = "node" + (n.anchor ? " anchor" : "") + (n.stub ? " stub" : "");
-    // Drill affordance (BLZ-89): navigate one level down. Never on the anchor
-    // (it IS the current focus) nor on stubs (design §5 — stub click opens the
-    // panel, which is the drill-onward path).
-    const drill = n.childCount > 0 && !n.stub && !n.anchor
-      ? `<g class="drill" data-drill="${esc(n.id)}" tabindex="0" role="button" aria-label="Show ${n.childCount} children of ${esc(n.id)}">`
-        + `<rect x="${n.w - 38}" y="${n.h - 18}" width="32" height="14" rx="7" fill="#21262d" />`
-        + `<text class="drill-n" x="${n.w - 22}" y="${n.h - 7}" text-anchor="middle">⤵ ${n.childCount}</text>`
+    const cls = "node" + (n.anchor ? " anchor" : "");
+    // Non-anchor neighbours carry a re-focus affordance: it re-centres the map on
+    // THAT ticket's neighbourhood (drillTo → ?focus=). Reuses the BLZ-35 data-drill
+    // seam (clientScript unchanged), so the pointer/keyboard regression tests hold.
+    const focusAff = !n.anchor
+      ? `<g class="drill" data-drill="${esc(n.id)}" tabindex="0" role="button" aria-label="Focus dependencies of ${esc(n.id)}">`
+        + `<rect x="${n.w - 30}" y="${n.h - 18}" width="24" height="14" rx="7" fill="#21262d" />`
+        + `<text class="drill-n" x="${n.w - 18}" y="${n.h - 7}" text-anchor="middle">→</text>`
         + `</g>`
       : "";
     return `<g class="${cls}" data-node-id="${esc(n.id)}" tabindex="0" role="button" aria-label="${esc(n.id)}: ${esc(n.title)}" transform="translate(${n.x},${n.y})">`
@@ -59,29 +62,28 @@ export function render(gm, opts = {}) {
       + `<rect width="4" height="${n.h}" rx="2" fill="${color}" />`
       + `<text class="node-id" x="12" y="18">${esc(n.id)}</text>`
       + `<text class="node-title" x="12" y="34">${esc(clip(n.title, 22))}</text>`
-      + drill
+      + focusAff
       + `</g>`;
   }).join("");
 
-  // Sits beside the crumbs line's existing "nested" link (page.mjs's
-  // crumbsHtml) rather than re-rendering a second one — map.mjs has no
-  // project/focus context to build that href, and the link is already right
-  // above this view.
-  const hintHtml = showHint
-    ? `<div class="map-hint" role="status">${g.nodes.length} nodes — zoom in, or switch to the nested view above.</div>`
+  const noLinksHtml = noLinks
+    ? `<div class="map-note" role="status">No links on this ticket — nothing blocks it and it blocks nothing.</div>`
+    : "";
+  const unresolvedHtml = unresolved.length
+    ? `<div class="map-note map-warn" role="status">${unresolved.length} link${unresolved.length === 1 ? "" : "s"} on this ticket couldn’t be resolved.</div>`
     : "";
 
-  return `<div class="mapwrap${hasData ? "" : " no-data"}">
-  ${hintHtml}
+  return `<div class="mapwrap">
+  ${noLinksHtml}${unresolvedHtml}
   <div class="mapzoom" role="group" aria-label="Zoom">
     <button type="button" class="mzoom" data-zoom="in" aria-label="Zoom in">+</button>
     <button type="button" class="mzoom" data-zoom="out" aria-label="Zoom out">−</button>
     <button type="button" class="mzoom" data-zoom="reset">Reset</button>
   </div>
-  <svg class="graph" viewBox="0 0 ${g.width} ${g.height}" data-w="${g.width}" data-h="${g.height}" role="img" aria-label="Ticket map">
+  <svg class="graph" viewBox="0 0 ${g.width} ${g.height}" data-w="${g.width}" data-h="${g.height}" role="img" aria-label="Dependency map">
+    <defs><marker id="arrow" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="7" markerHeight="7" orient="auto-start-reverse"><path d="M0,0 L10,5 L0,10 z" fill="#8b949e" /></marker></defs>
     <g class="graph-pan">${edgesSvg}${nodesSvg}</g>
   </svg>
-  <div class="map-empty empty">No tickets to map.</div>
 </div>`;
 }
 
@@ -113,14 +115,11 @@ export const styles = `
     border: 1px dashed #21262d; border-radius: 10px;
   }
   .mapwrap.no-data .map-empty { display: block; }
-  .map-hint {
-    color: #7d8590; font-size: 12px; padding: 4px 0 8px;
-  }
+  .map-note { color: #7d8590; font-size: 12px; padding: 4px 0 8px; }
+  .map-warn { color: #d29922; }
   .node.anchor > rect:first-of-type { stroke-width: 3; }
-  .node.stub { opacity: .45; }
-  .node.stub > rect:first-of-type { stroke-dasharray: 3 3; }
   .drill { cursor: pointer; }
-  .drill-n { fill: #adbac7; font: 600 9px ui-monospace, monospace; }`;
+  .drill-n { fill: #adbac7; font: 600 11px ui-monospace, monospace; }`;
 
 // Client: viewBox zoom (buttons + wheel) and drag-pan; a click distinguished
 // from a drag (movement threshold) opens Lane A's shared panel. All work is
