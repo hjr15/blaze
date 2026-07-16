@@ -66,7 +66,7 @@ export function render(gm) {
       + `</g>`;
   }).join("");
 
-  const noLinksHtml = noLinks
+  const noLinksHtml = noLinks && !unresolved.length
     ? `<div class="map-note" role="status">No links on this ticket — nothing blocks it and it blocks nothing.</div>`
     : "";
   const unresolvedHtml = unresolved.length

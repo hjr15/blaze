@@ -59,6 +59,12 @@ test("render: unresolved anchor links surface a count note", () => {
   assert.match(html, /1 link[^s]/); // singular
 });
 
+test("render: an anchor whose sole link is a dangling target shows only the warn note, not the No-links caption", () => {
+  const html = render(gm([T("A-1")], [{ src: "A-1", type: "Blocks", target: "GONE-9" }], "A-1"));
+  assert.match(html, /map-note map-warn/);
+  assert.doesNotMatch(html, /No links on this ticket/);
+});
+
 test("render: title is escaped (no raw markup leaks)", () => {
   const html = render(gm([{ id: "A-1", type: "task", title: "t <x>", status: "todo", project: "A", parent: null }], [], "A-1"));
   assert.doesNotMatch(html, /t <x>/);
