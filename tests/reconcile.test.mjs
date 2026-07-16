@@ -52,6 +52,39 @@ test("non-delivery types (goal/risk) are never auto-transitioned", () => {
   assert.equal(decide({ branch: "b" }, "identified", "risk").skip, true);
 });
 
+// --- Task 1: the shipped fallback (bundled epic-children with no branch/PR) ----
+test("shipped (no pr/branch) → done for a delivery child", () => {
+  const d = decide({ shipped: true }, "defined", "task");
+  assert.equal(d.target, "done");
+  assert.equal(d.moved, true);
+  assert.equal(d.resolution, "done");
+  assert.equal(d.skip, false);
+});
+
+test("shipped is ignored when a branch signal is present", () => {
+  const d = decide({ branch: "you/BLZ-8-y", shipped: true }, "defined", "task");
+  assert.equal(d.target, "in-progress"); // branch path wins, shipped not consulted
+});
+
+test("shipped is ignored when a pr signal is present", () => {
+  const d = decide({ pr: { state: "OPEN", number: 6, url: "u", headRefName: "b" }, shipped: true }, "defined", "task");
+  assert.equal(d.target, "in-review");
+});
+
+test("shipped + already done → terminal-sticky, no move", () => {
+  const d = decide({ shipped: true }, "done", "task");
+  assert.equal(d.target, "done");
+  assert.equal(d.moved, false);
+});
+
+test("shipped on a non-delivery type is skipped", () => {
+  assert.equal(decide({ shipped: true }, "defined", "goal").skip, true);
+});
+
+test("no signal at all (no pr/branch/shipped) is still skipped", () => {
+  assert.equal(decide({}, "defined", "task").skip, true);
+});
+
 // --- reconcile() must honour a custom-named projectsDir, not just dataRoot ----
 // (Review fix.) BLAZE_PROJECTS_DIR is documented (tests/roots.test.mjs)
 // to allow a projects dir that isn't literally named "projects". reconcile()'s

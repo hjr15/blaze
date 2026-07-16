@@ -37,7 +37,7 @@ function sh(cmd, args, opts = {}) {
 }
 
 // --- pure decision: git signal + current status + type → target status --------
-export function decide({ pr, branch }, currentStatus, type) {
+export function decide({ pr, branch, shipped }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
@@ -52,6 +52,10 @@ export function decide({ pr, branch }, currentStatus, type) {
   } else if (branch) {
     target = "in-progress";
     branchVal = branch;
+  } else if (shipped) {
+    // A bundled epic-child has no branch/PR of its own; a <KEY>-<n>: commit
+    // reachable from the default branch is the signal that it shipped.
+    target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
   }
