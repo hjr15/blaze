@@ -70,25 +70,30 @@ test("pageHtml shows a breadcrumb when focused and a drill-down link on parents"
 function mapFixture() {
   const dir = mkdtempSync(join(tmpdir(), "blaze-mapfocus-"));
   mkdirSync(join(dir, "M", "defined"), { recursive: true });
-  writeFileSync(join(dir, "M", "defined", "M-1.md"), "---\nid: M-1\ntitle: goal\ntype: goal\nproject: M\n---\nx\n");
-  writeFileSync(join(dir, "M", "defined", "M-2.md"), "---\nid: M-2\ntitle: epic\ntype: epic\nproject: M\nparent: M-1\n---\nx\n");
-  writeFileSync(join(dir, "M", "defined", "M-3.md"), "---\nid: M-3\ntitle: task\ntype: task\nproject: M\nparent: M-2\n---\nx\n");
+  // M-1 Blocks M-2 (M-2 downstream of M-1); M-3 Relates M-1 (related). A real
+  // dependency neighbourhood, not a hierarchy — the map now renders links.
+  writeFileSync(join(dir, "M", "defined", "M-1.md"), "---\nid: M-1\ntitle: goal\ntype: goal\nproject: M\nlinks:\n  - { type: Blocks, target: M-2 }\n---\nx\n");
+  writeFileSync(join(dir, "M", "defined", "M-2.md"), "---\nid: M-2\ntitle: epic\ntype: epic\nproject: M\n---\nx\n");
+  writeFileSync(join(dir, "M", "defined", "M-3.md"), "---\nid: M-3\ntitle: task\ntype: task\nproject: M\nlinks:\n  - { type: Relates, target: M-1 }\n---\nx\n");
   return dir;
 }
 
-test("viewEnvelope: the map respects ?focus= — anchor + direct children only", () => {
+test("viewEnvelope: the map renders the focused ticket's dependency neighbourhood", () => {
   const env = viewEnvelope({ view: "map", projectsDir: mapFixture(), focus: "M-1" });
-  assert.match(env.html, /data-node-id="M-1"/);        // anchor
-  assert.match(env.html, /data-node-id="M-2"/);        // direct child
-  assert.doesNotMatch(env.html, /data-node-id="M-3"/); // grandchild excluded
-  assert.match(env.html, /data-drill="M-2"/);          // child-with-children gets the drill affordance
+  assert.match(env.html, /class="node anchor"[^>]*data-node-id="M-1"/); // anchor
+  assert.match(env.html, /data-node-id="M-2"/);        // downstream (M-1 Blocks M-2)
+  assert.match(env.html, /data-node-id="M-3"/);        // related (M-3 Relates M-1)
+  assert.match(env.html, /data-drill="M-2"/);          // neighbour carries the re-focus affordance
+  assert.doesNotMatch(env.html, /Select a ticket/);    // not the empty prompt
 });
 
-test("viewEnvelope: map default scope is top-level; ?flat=1 renders the whole corpus", () => {
+test("viewEnvelope: the map with no focus shows the pick-a-ticket prompt and ignores ?flat=1", () => {
   const dir = mapFixture();
   const top = viewEnvelope({ view: "map", projectsDir: dir });
-  assert.match(top.html, /data-node-id="M-1"/);
-  assert.doesNotMatch(top.html, /data-node-id="M-2"/);
+  assert.match(top.html, /Select a ticket to see its dependencies/);
+  assert.doesNotMatch(top.html, /data-node-id="M-1"/);
+  // ?flat=1 no longer renders the corpus in the map — it was removed (metrics keeps flat, not the map)
   const flat = viewEnvelope({ view: "map", projectsDir: dir, flat: true });
-  assert.match(flat.html, /data-node-id="M-3"/);
+  assert.match(flat.html, /Select a ticket to see its dependencies/);
+  assert.doesNotMatch(flat.html, /data-node-id="M-3"/);
 });

@@ -248,18 +248,23 @@ of truth, full CLI/`grep` parity preserved:
   contains). A `.crumbs` breadcrumb bar renders the ancestor chain back to
   `All` for drilling up. A card/row with children shows a `⤵ N` drill-down
   link to `?focus=<id>`, preserving the active `?project=`.
-- **Map** — a hierarchy+dependency graph (`scripts/views/map.mjs`, on by
-  default) rendering the current drill level only: the focused anchor plus
-  its direct children, not the whole corpus. A node with children shows the
-  same `⤵ N` drill affordance as the board/list, focusing that node on
-  click or Enter/Space. Any link edge that crosses the scope boundary —
-  including into another project — pulls its outside endpoint in as a
-  muted, dashed-border **stub node** rather than hiding the dependency; a
-  stub is a link endpoint only, never a solid hierarchy child. A level
-  wraps into extra sub-columns past 12 nodes so it stays legible without
-  zooming. `?flat=1` is the whole-corpus escape hatch; past ~150 nodes flat
-  mode shows a hint pointing back at the nested view instead of rendering
-  an illegible smear.
+- **Map** — a **dependency neighbourhood** graph (`scripts/views/map.mjs`, on by
+  default). Drilling a ticket (`?focus=<id>`) renders its 1-hop link
+  neighbourhood in role columns: tickets that **Block it** on the left
+  (upstream), the anchor in the centre, tickets **it Blocks** on the right
+  (downstream), and `Relates`/`Duplicate`/`Cloners` in a neutral band below.
+  Direction reads by column position **and** an arrowhead on each (directed)
+  `Blocks` edge; `Relates` edges are dashed and undirected. `Blocks` is
+  advisory (ADR-0001), not a hard gate. Clicking a node opens the shared detail
+  panel; a per-neighbour **→** re-centres the map on that ticket's own
+  neighbourhood (`data-drill` → `?focus=`, the seam BLZ-35's client tests lock).
+  With no focus the map shows a "Select a ticket to see its dependencies"
+  prompt; a link-less ticket shows a plain "No links" caption; the anchor's own
+  unresolvable links (dangling target, or a malformed entry) surface a count
+  note rather than being silently dropped. Deterministic, zero-dep, no force
+  simulation. `?flat=1` and whole-corpus rendering were removed with BLZ-108 (a
+  neighbourhood is inherently small); the `flat` escape hatch remains only for
+  board/list/metrics.
 - **Detail panel** — clicking a card/row id opens a side panel with the rendered
   description, a full frontmatter table, parent breadcrumb + children list, and
   links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content
