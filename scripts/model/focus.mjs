@@ -34,8 +34,9 @@ export function focusScope(index, id) {
 // The ONE shared drill-scope rule (BLZ-89): a valid focus scopes to that row's
 // DIRECT children (BLZ-87 — not transitive descendants); no focus scopes to
 // parentless rows; flat=1 is the whole-corpus escape hatch. Focus wins over
-// flat. boardModel and graphModel both consume this, so board/list/map can
-// never disagree about what a level contains.
+// flat. boardModel consumes this for board/list/metrics; graphModel does NOT
+// (BLZ-108 moved the map to a dependency neighbourhood over links, not this
+// hierarchy scope).
 export function scopedRows(index, { focus = null, flat = false } = {}) {
   const focused = focus ? (index.get(focus) ?? null) : null;
   if (focused) {

@@ -37,7 +37,7 @@ export function renderView(name, { m, pDir, project, now, transitions, focus = n
       const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
       return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
-    case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, project, index: m.index, focus, flat }), { flat })}</div>`;
+    case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, index: m.index, focus }))}</div>`;
     default: return null;
   }
 }

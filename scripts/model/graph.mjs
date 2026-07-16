@@ -1,154 +1,141 @@
-// scripts/model/graph.mjs — pure graph model for the Map view. Derives a
-// node/edge graph from the derived index (buildGraph), assigns deterministic
-// layered coordinates (layoutGraph), and wraps the FS read (graphModel). Zero
-// dependency; no Date/random so the golden snapshot stays stable.
-import { hierarchyLevel, isType } from "./schema.mjs";
+// scripts/model/graph.mjs — the Map view's model. BLZ-108 narrowed the map from
+// a hierarchy graph to a DEPENDENCY neighbourhood: given a focused ticket, select
+// its 1-hop link neighbours (what Blocks it → upstream, what it Blocks →
+// downstream, what Relates → related), lay them out in role columns, and return
+// positioned nodes + directed edges. Pure, zero-dep, no Date/random so the golden
+// order stays stable. A link's blocker is its `src`, the blocked ticket its
+// `target` (see model/index.mjs).
 import { buildIndex } from "./index.mjs";
-import { scopedRows } from "./focus.mjs";
 
-const FALLBACK_LEVEL = -2; // unknown/null types sink below subtask (-1)
-
-// Locale-independent string compare — the byte-level golden depends on a stable
-// order, so avoid String.prototype.localeCompare (host-locale dependent).
+const BLOCKS = "Blocks";
+const ROLE_RANK = { upstream: 0, downstream: 1, related: 2 };
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-function safeLevel(type) {
-  return type && isType(type) ? hierarchyLevel(type) : FALLBACK_LEVEL;
+function nodeFrom(row, role) {
+  return {
+    id: row.id, type: row.type ?? null, title: row.title ?? null,
+    status: row.status ?? null, project: row.project ?? null,
+    role, anchor: role === "anchor",
+  };
 }
 
-// Derive { nodes, edges } from an index-shaped object { rows, links }.
-// Parent edges (child→parent, solid) and link edges (dashed, labelled) whose
-// endpoints are not both present in the node set are dropped.
-export function buildGraph(index) {
-  const rows = index.rows ?? [];
+// Pure selection: the 1-hop dependency neighbourhood of focusId over an
+// index-shaped object ({ links, get }). Roles by precedence upstream >
+// downstream > related, so a node appears once even in a Blocks cycle.
+export function neighbourhood(index, focusId) {
+  const anchorRow = focusId ? (index.get(focusId) ?? null) : null;
+  if (!anchorRow) return { anchor: null, nodes: [], edges: [], unresolved: [] };
+
   const links = index.links ?? [];
-  const nodes = rows.map((r) => ({
-    id: r.id, type: r.type ?? null, title: r.title ?? null,
-    status: r.status ?? null, project: r.project ?? null, level: safeLevel(r.type),
-    childCount: r.childCount ?? 0, stub: r.stub === true, anchor: r.anchor === true,
-  }));
-  const ids = new Set(nodes.map((n) => n.id));
+  const roleById = new Map();  // id -> role (best/first wins)
+  const rows = new Map();      // id -> resolved row
   const edges = [];
-  for (const r of rows) {
-    if (r.parent && ids.has(r.parent) && ids.has(r.id)) {
-      edges.push({ src: r.id, target: r.parent, kind: "parent" });
-    }
-  }
+  const unresolved = [];
+  const assign = (id, role) => {
+    if (!roleById.has(id) || ROLE_RANK[role] < ROLE_RANK[roleById.get(id)]) roleById.set(id, role);
+  };
+
   for (const l of links) {
-    if (ids.has(l.src) && ids.has(l.target)) {
-      edges.push({ src: l.src, target: l.target, kind: "link", label: l.type });
+    if (l.src !== focusId && l.target !== focusId) continue;
+    if (l.src === l.target) continue; // a self-link is meaningless and would duplicate the anchor
+    const otherId = l.src === focusId ? l.target : l.src;
+    const otherRow = otherId != null ? index.get(otherId) : undefined;
+    if (!otherRow) { unresolved.push({ type: l.type ?? null, target: otherId ?? null }); continue; }
+    rows.set(otherId, otherRow);
+    if (l.type === BLOCKS) {
+      const downstream = l.src === focusId; // focus blocks other
+      assign(otherId, downstream ? "downstream" : "upstream");
+      edges.push(downstream
+        ? { src: focusId, target: otherId, type: BLOCKS, directed: true }
+        : { src: otherId, target: focusId, type: BLOCKS, directed: true });
+    } else {
+      assign(otherId, "related");
+      edges.push({ src: focusId, target: otherId, type: l.type ?? null, directed: false });
     }
   }
-  nodes.sort((a, b) =>
-    b.level - a.level ||
-    cmp(String(a.project), String(b.project)) ||
-    cmp(String(a.id), String(b.id)));
-  edges.sort((a, b) =>
-    cmp(a.kind, b.kind) ||
-    cmp(String(a.src), String(b.src)) ||
-    cmp(String(a.target), String(b.target)));
-  return { nodes, edges };
+
+  const nodes = [nodeFrom(anchorRow, "anchor")];
+  for (const [id, role] of [...roleById.entries()].sort((a, b) => cmp(a[0], b[0]))) {
+    nodes.push(nodeFrom(rows.get(id), role));
+  }
+  return { anchor: nodeFrom(anchorRow, "anchor"), nodes, edges, unresolved };
 }
 
-// Deterministic layered layout: one column-block per distinct type level
-// (highest level leftmost), nodes stacked within it and grouped into project
-// swimlanes (an extra gap on each project change). BLZ-36: a block wraps into
-// sub-columns every WRAP_ROWS nodes so a level stays legible without zooming —
-// pure arithmetic, no measurement, no Date, no random.
-export function layoutGraph(graph, opts = {}) {
+// The point on box's border along the ray from (fromX,fromY) toward box centre —
+// so an edge stops at the node boundary and its arrowhead is visible, not buried
+// under the target box.
+function clipToBox(fromX, fromY, box) {
+  const cx = box.x + box.w / 2, cy = box.y + box.h / 2;
+  const dx = cx - fromX, dy = cy - fromY;
+  if (dx === 0 && dy === 0) return { x: cx, y: cy };
+  const sx = dx !== 0 ? (box.w / 2) / Math.abs(dx) : Infinity;
+  const sy = dy !== 0 ? (box.h / 2) / Math.abs(dy) : Infinity;
+  const s = Math.min(sx, sy);
+  return { x: cx - dx * s, y: cy - dy * s };
+}
+
+// Deterministic role-column layout: upstream (what blocks the anchor) left,
+// anchor centre, downstream (what the anchor blocks) right; related in a neutral
+// band below the anchor. Columns are vertically centred on a common midline.
+export function layoutNeighbourhood(nb, opts = {}) {
   const NODE_W = opts.nodeW ?? 160;
   const NODE_H = opts.nodeH ?? 44;
-  const COL_STRIDE = opts.colStride ?? 240; // x from a level's LAST sub-column to the next level
-  const ROW_STRIDE = opts.rowStride ?? 60; // y distance between stacked nodes
-  const LANE_GAP = opts.laneGap ?? 24; // extra y on a project change
+  const COL_STRIDE = opts.colStride ?? 240; // x between adjacent columns
+  const ROW_STRIDE = opts.rowStride ?? 64;  // y between stacked nodes
+  const BAND_GAP = opts.bandGap ?? 48;      // y gap before the related band
   const PAD = opts.pad ?? 40;
-  const WRAP_ROWS = opts.wrapRows ?? 12; // BLZ-36: rows per sub-column before wrapping
-  const SUB_STRIDE = opts.subStride ?? 180; // x between sub-columns inside one level
 
-  const nodes = graph.nodes ?? [];
-  const levels = [...new Set(nodes.map((n) => n.level))].sort((a, b) => b - a);
+  const nodes = nb.nodes ?? [];
+  const anchor = nb.anchor ?? null;
+  const unresolved = nb.unresolved ?? [];
+  if (!nodes.length) return { nodes: [], edges: [], width: 2 * PAD, height: 2 * PAD, unresolved, anchor };
+
+  const byRole = { upstream: [], anchor: [], downstream: [], related: [] };
+  for (const n of nodes) byRole[n.role].push(n);
+
+  const colX = { upstream: PAD, anchor: PAD + COL_STRIDE, downstream: PAD + 2 * COL_STRIDE };
+  const colLen = Math.max(byRole.upstream.length, byRole.downstream.length, 1);
+  const centerY = PAD + ((colLen - 1) * ROW_STRIDE) / 2;
 
   const placed = [];
   const posById = new Map();
-  let maxBottom = 0;
-  let maxRight = PAD;
-  let levelX = PAD; // x of the current level's first sub-column
-  for (const lv of levels) {
-    const colNodes = nodes.filter((nn) => nn.level === lv);
-    // Group nodes into project swimlanes explicitly (do not rely on the caller's
-    // ordering): deterministic lane order via cmp, each lane keeps its node order.
-    const byProject = new Map();
-    for (const n of colNodes) {
-      if (!byProject.has(n.project)) byProject.set(n.project, []);
-      byProject.get(n.project).push(n);
-    }
-    let y = PAD;
-    let rowsInSub = 0;
-    let subCol = 0;
-    let firstLane = true;
-    for (const proj of [...byProject.keys()].sort(cmp)) {
-      if (!firstLane && rowsInSub > 0) y += LANE_GAP;
-      firstLane = false;
-      for (const n of byProject.get(proj)) {
-        if (rowsInSub >= WRAP_ROWS) { subCol += 1; y = PAD; rowsInSub = 0; } // wrap
-        const x = levelX + subCol * SUB_STRIDE;
-        const node = { ...n, x, y, w: NODE_W, h: NODE_H };
-        placed.push(node);
-        posById.set(n.id, node);
-        maxBottom = Math.max(maxBottom, y + NODE_H);
-        maxRight = Math.max(maxRight, x + NODE_W);
-        y += ROW_STRIDE;
-        rowsInSub += 1;
-      }
-    }
-    levelX += subCol * SUB_STRIDE + COL_STRIDE;
-  }
+  const placeColumn = (list, x) => {
+    const top = centerY - ((list.length - 1) * ROW_STRIDE) / 2;
+    list.forEach((n, i) => {
+      const node = { ...n, x, y: top + i * ROW_STRIDE, w: NODE_W, h: NODE_H };
+      placed.push(node); posById.set(n.id, node);
+    });
+  };
+  placeColumn(byRole.upstream, colX.upstream);
+  placeColumn(byRole.anchor, colX.anchor);
+  placeColumn(byRole.downstream, colX.downstream);
 
-  const edges = (graph.edges ?? []).map((e) => {
+  const colBottom = PAD + (colLen - 1) * ROW_STRIDE + NODE_H;
+  byRole.related.forEach((n, i) => {
+    const node = { ...n, x: colX.anchor, y: colBottom + BAND_GAP + i * ROW_STRIDE, w: NODE_W, h: NODE_H };
+    placed.push(node); posById.set(n.id, node);
+  });
+
+  const edges = (nb.edges ?? []).map((e) => {
     const s = posById.get(e.src), t = posById.get(e.target);
     if (!s || !t) return null;
-    return {
-      ...e,
-      x1: s.x + s.w / 2, y1: s.y + s.h / 2,
-      x2: t.x + t.w / 2, y2: t.y + t.h / 2,
-    };
+    const cs = { x: s.x + s.w / 2, y: s.y + s.h / 2 };
+    const ct = { x: t.x + t.w / 2, y: t.y + t.h / 2 };
+    const p1 = clipToBox(ct.x, ct.y, s);
+    const p2 = clipToBox(cs.x, cs.y, t);
+    return { ...e, x1: p1.x, y1: p1.y, x2: p2.x, y2: p2.y };
   }).filter(Boolean);
 
-  const width = nodes.length ? maxRight + PAD : 2 * PAD;
-  const height = nodes.length ? maxBottom + PAD : 2 * PAD;
-  return { nodes: placed, edges, width, height };
+  let maxRight = 0, maxBottom = 0;
+  for (const n of placed) { maxRight = Math.max(maxRight, n.x + n.w); maxBottom = Math.max(maxBottom, n.y + n.h); }
+  return { nodes: placed, edges, width: maxRight + PAD, height: maxBottom + PAD, unresolved, anchor };
 }
 
-// FS wrapper: read every ticket, optionally restrict to one project, apply the
-// shared drill scope (BLZ-89: focus → anchor + DIRECT children; no focus →
-// parentless; flat=1 → whole corpus), pull cross-scope link endpoints in as
-// muted stubs, and return the laid-out graph. `index` must be a full Index
-// ({rows, links, get}) — page.mjs passes the board's own m.index.
-export function graphModel({ projectsDir, project = "all", index = null, focus = null, flat = false } = {}) {
+// FS wrapper: read the index (or use the passed one) and lay out the focused
+// ticket's dependency neighbourhood. `index` must be a full Index ({ links, get })
+// — page.mjs passes the board's own m.index. No focus → empty-shaped result;
+// the view renders a "pick a ticket" prompt.
+export function graphModel({ projectsDir, index = null, focus = null } = {}) {
   const idx = index ?? buildIndex(projectsDir);
-  const { focused, rows: inScope } = scopedRows(idx, { focus, flat });
-  let rows = project === "all" ? inScope : inScope.filter((r) => r.project === project);
-  // The focused node renders as the anchor: the board shows it in the crumbs,
-  // but a map of children with no parent node would have no hierarchy edges.
-  if (focused) rows = [{ ...focused, anchor: true }, ...rows.filter((r) => r.id !== focused.id)];
-  // Cross-scope link edges: an in-scope endpoint pulls its outside partner in
-  // as a stub node rather than silently dropping the dependency (operator
-  // decision, 2026-07-15). Ids absent from the index still drop (status quo).
-  const ids = new Set(rows.map((r) => r.id));
-  const stubs = new Map();
-  for (const l of idx.links ?? []) {
-    const srcIn = ids.has(l.src), tgtIn = ids.has(l.target);
-    if (srcIn === tgtIn) continue; // both in scope (normal edge) or both out (irrelevant)
-    const missingId = srcIn ? l.target : l.src;
-    const row = idx.get(missingId);
-    // A stub is a link endpoint, not a child — drop `parent` so an in-scope
-    // parent can't sprout a solid hierarchy edge to it (BLZ-31 fix review).
-    if (row && !stubs.has(missingId)) stubs.set(missingId, { ...row, parent: null, stub: true });
-  }
-  // Drill-affordance data: children per node tallied from the FULL index
-  // (mirrors boardModel's childTally), so an in-scope epic can show "⤵ N".
-  const childTally = {};
-  for (const r of idx.rows) if (r.parent) childTally[r.parent] = (childTally[r.parent] || 0) + 1;
-  const decorated = [...rows, ...stubs.values()].map((r) => ({ ...r, childCount: childTally[r.id] || 0 }));
-  return layoutGraph(buildGraph({ rows: decorated, links: idx.links }));
+  return layoutNeighbourhood(neighbourhood(idx, focus));
 }
