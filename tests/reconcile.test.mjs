@@ -77,6 +77,22 @@ test("shipped + already done → terminal-sticky, no move", () => {
   assert.equal(d.moved, false);
 });
 
+// --- Finding 3: shipped must NOT widen behaviour for an already-terminal ticket.
+// A same-id commit on the default branch must not re-enter the shipped path when
+// the ticket is already terminal — otherwise terminal-sticky blocks the move but
+// `resolution` gets recomputed (widening an existing resolution). Gating on
+// isTerminal(type, currentStatus) makes it take the skip path: no move, and
+// resolution left undefined so reconcile() never overwrites it. Delivery's sole
+// terminal status is "done" (scripts/model/workflows.mjs), so that is the only
+// real terminal status a delivery-type decide() can be called with.
+test("shipped on an already-terminal ticket takes the skip path (no resolution recompute)", () => {
+  const d = decide({ shipped: true }, "done", "task");
+  assert.equal(d.skip, true);
+  assert.equal(d.moved, false);
+  assert.equal(d.target, "done");
+  assert.equal(d.resolution, undefined); // NOT recomputed to "done"
+});
+
 test("shipped on a non-delivery type is skipped", () => {
   assert.equal(decide({ shipped: true }, "defined", "goal").skip, true);
 });

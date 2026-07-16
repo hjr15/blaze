@@ -52,9 +52,12 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   } else if (branch) {
     target = "in-progress";
     branchVal = branch;
-  } else if (shipped) {
+  } else if (shipped && !isTerminal(type, currentStatus)) {
     // A bundled epic-child has no branch/PR of its own; a <KEY>-<n>: commit
-    // reachable from the default branch is the signal that it shipped.
+    // reachable from the default branch is the signal that it shipped. Gate on
+    // NOT-already-terminal: a shipped signal on a terminal ticket must take the
+    // skip path below (not widen behaviour), so terminal-sticky doesn't recompute
+    // an existing `resolution` on a ticket that's already in a terminal status.
     target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
