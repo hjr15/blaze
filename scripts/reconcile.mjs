@@ -74,11 +74,18 @@ export function idFromSubject(subject, key) {
   return m ? `${key}-${m[1]}` : null;
 }
 
-// --- resolve a repo's default branch name (origin/HEAD → main → master) --------
-function defaultBranchName(repoPath) {
+// --- resolve a repo's default-branch LOG REF, preferring the remote-tracking ---
+// branch. prMap comes from live `gh pr list` and branchMap reads
+// refs/remotes/origin, so the shipped signal must read the SAME freshness — the
+// remote-tracking default branch — not local `main` (which `blaze reconcile
+// --fetch` does not update). A bundled child merged on origin/main would
+// otherwise be missed while a solo merged-PR ticket flips to done: asymmetric
+// under-reporting. Order: origin/HEAD → origin/main|master → local main|master
+// (remote-less repos: fixtures + blaze-pm itself) → "main" fallback.
+function defaultBranchRef(repoPath) {
   const head = sh("git", ["-C", repoPath, "rev-parse", "--abbrev-ref", "origin/HEAD"]);
-  if (head && head !== "origin/HEAD") return head.replace(/^origin\//, "");
-  for (const b of ["main", "master"]) {
+  if (head && head !== "origin/HEAD") return head; // e.g. "origin/main" — keep the remote-tracking ref verbatim
+  for (const b of ["origin/main", "origin/master", "main", "master"]) {
     if (sh("git", ["-C", repoPath, "rev-parse", "--verify", "--quiet", b]) !== null) return b;
   }
   return "main";
@@ -116,8 +123,8 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // repo's default-branch HEAD means that ticket shipped (used for bundled
   // epic-children that have no branch/PR of their own).
   const shippedSet = new Set();
-  const branch = defaultBranchName(repoPath);
-  const subs = sh("git", ["-C", repoPath, "log", branch, "--format=%s"]) || "";
+  const ref = defaultBranchRef(repoPath);
+  const subs = sh("git", ["-C", repoPath, "log", ref, "--format=%s"]) || "";
   for (const line of subs.split("\n")) {
     const id = idFromSubject(line, key);
     if (id) shippedSet.add(id);

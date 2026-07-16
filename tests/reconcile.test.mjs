@@ -317,3 +317,62 @@ test("bundled children: commit on default branch → done; open-epic-PR child NO
     rmSync(codeRepo, { recursive: true, force: true });
   }
 });
+
+// --- Finding 1+2: the shipped signal must read the REMOTE-TRACKING default -----
+// branch (origin/main), not local main. prMap comes from live `gh pr list` and
+// branchMap reads refs/remotes/origin, so a bundled child merged on origin/main
+// must be seen even when local main is behind (blaze reconcile --fetch updates
+// remote-tracking refs, NOT local main). This fixture gives a real `origin`
+// remote whose main carries the child commit while LOCAL main is deliberately
+// one commit behind — reconcile must still move the child to done/, which both
+// proves Finding 1 AND exercises the production `origin/HEAD` detection arm
+// (untested before — every other fixture here is remote-less). See Finding 2.
+test("shipped reads origin/main (remote-tracking), not a stale local main", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-"));
+  const originRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-origin-"));
+  const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-code-"));
+
+  // Bare origin + a code checkout that pushes the child commit to origin/main,
+  // then rewinds LOCAL main one commit behind origin/main.
+  execFileSync("git", ["-C", originRepo, "init", "-q", "--bare", "-b", "main"]);
+  execFileSync("git", ["-C", codeRepo, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", codeRepo, "config", "user.name", "t"]);
+  writeFileSync(join(codeRepo, "README.md"), "x\n");
+  execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", codeRepo, "remote", "add", "origin", originRepo]);
+  // ZZZ-2's shipped commit lands on origin/main…
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", "ZZZ-2: bundled child work"]);
+  execFileSync("git", ["-C", codeRepo, "push", "-q", "origin", "main"]);
+  // …but LOCAL main is rewound behind it (still points at seed only).
+  execFileSync("git", ["-C", codeRepo, "reset", "--hard", "-q", "HEAD~1"]);
+  execFileSync("git", ["-C", codeRepo, "fetch", "-q", "origin"]);
+  execFileSync("git", ["-C", codeRepo, "remote", "set-head", "origin", "main"]); // origin/HEAD → origin/main
+
+  const projectsDir = join(root, "projects");
+  const definedDir = join(projectsDir, "ZZZ", "defined");
+  const doneDir = join(projectsDir, "ZZZ", "done");
+  mkdirSync(definedDir, { recursive: true });
+  writeFileSync(
+    join(definedDir, "ZZZ-2-child.md"),
+    "---\nid: ZZZ-2\ntype: task\nstatus: defined\nproject: ZZZ\nestimate: 30\n---\n\nbody\n",
+  );
+  writeFileSync(
+    join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], codeRepos: [codeRepo] }),
+  );
+
+  try {
+    const applied = reconcile({ dryRun: false, root });
+    assert.equal(applied.ok, true);
+    // The child ships only on origin/main; local main lacks the commit. Moving
+    // it proves the resolver logs the remote-tracking ref via origin/HEAD.
+    assert.ok(existsSync(join(doneDir, "ZZZ-2-child.md")), "child on origin/main moved to done/");
+    assert.ok(!existsSync(join(definedDir, "ZZZ-2-child.md")), "child left defined/");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+    rmSync(originRepo, { recursive: true, force: true });
+    rmSync(codeRepo, { recursive: true, force: true });
+  }
+});
