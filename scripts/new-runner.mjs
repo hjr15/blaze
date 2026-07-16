@@ -27,6 +27,9 @@ for (let i = 0; i < argv.length; i++) {
     case "--likelihood": opts.extra.likelihood = argv[++i]; break;
     case "--impact":   opts.extra.impact = argv[++i]; break;
     case "--reason":   opts.extra.reason = argv[++i]; break;
+    case "--sprint":   opts.extra.sprint = argv[++i]; break;
+    case "--start":    opts.extra.start = argv[++i]; break;
+    case "--due":      opts.extra.due = argv[++i]; break;
     default:
       if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
       positional.push(a);

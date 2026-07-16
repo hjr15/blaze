@@ -3,7 +3,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSprints, saveSprints, nextSprintId, validateSprintFields, isIsoDate } from "../../scripts/model/sprints.mjs";
+import { loadSprints, saveSprints, nextSprintId, validateSprintFields, isIsoDate, addSprint, setActive, formatSprintList } from "../../scripts/model/sprints.mjs";
 import { parseTicket, serializeTicket } from "../../scripts/model/ticket.mjs";
 import { EDITABLE_FIELDS } from "../../scripts/model/fields.mjs";
 import { buildIndex } from "../../scripts/model/index.mjs";
@@ -144,4 +144,82 @@ test("buildIndex emits no sprint warning on a board that never opted in (no spri
   const idx = buildIndex(projects);
   assert.equal(idx.warnings.length, 0);
   rmSync(root, { recursive: true, force: true });
+});
+
+// --- addSprint / setActive / formatSprintList (BLZ-111 pure helpers) -------
+
+test("addSprint allocates the next id, appends, and returns {registry, id} without mutating the input", () => {
+  const reg = { active: null, sprints: [] };
+  const out = addSprint(reg, { name: "Mid-July", start: "2026-07-13", end: "2026-07-26" });
+  assert.equal(out.id, "S1");
+  assert.deepEqual(out.registry.sprints, [{ id: "S1", name: "Mid-July", start: "2026-07-13", end: "2026-07-26" }]);
+  assert.equal(reg.sprints.length, 0, "input registry must not be mutated");
+});
+
+test("addSprint allocates max+1 when sprints already exist", () => {
+  const reg = { active: "S1", sprints: [{ id: "S1", name: "a", start: "2026-07-01", end: "2026-07-10" }] };
+  const out = addSprint(reg, { name: "b", start: "2026-07-13", end: "2026-07-26" });
+  assert.equal(out.id, "S2");
+  assert.equal(out.registry.sprints.length, 2);
+  assert.equal(out.registry.active, "S1", "active is untouched by addSprint when one is already set");
+});
+
+test("addSprint auto-activates the first sprint when none was active yet", () => {
+  const out = addSprint({ active: null, sprints: [] }, { name: "Mid-July", start: "2026-07-13", end: "2026-07-26" });
+  assert.equal(out.registry.active, "S1");
+});
+
+test("addSprint throws blaze: ... on a malformed start/end date", () => {
+  assert.throws(
+    () => addSprint({ active: null, sprints: [] }, { name: "x", start: "not-a-date", end: "2026-07-26" }),
+    /blaze: /,
+  );
+  assert.throws(
+    () => addSprint({ active: null, sprints: [] }, { name: "x", start: "2026-07-13", end: "soon" }),
+    /blaze: /,
+  );
+});
+
+test("addSprint throws blaze: ... when start is after end", () => {
+  assert.throws(
+    () => addSprint({ active: null, sprints: [] }, { name: "x", start: "2026-07-26", end: "2026-07-13" }),
+    /blaze: .*start.*end/i,
+  );
+});
+
+test("addSprint allows start equal to end (single-day sprint)", () => {
+  const out = addSprint({ active: null, sprints: [] }, { name: "x", start: "2026-07-13", end: "2026-07-13" });
+  assert.equal(out.registry.sprints[0].end, "2026-07-13");
+});
+
+test("setActive flips active on a known id and does not mutate the input", () => {
+  const reg = { active: "S1", sprints: [{ id: "S1" }, { id: "S2" }] };
+  const out = setActive(reg, "S2");
+  assert.equal(out.active, "S2");
+  assert.equal(reg.active, "S1", "input registry must not be mutated");
+});
+
+test("setActive throws blaze: ... on an unknown id", () => {
+  assert.throws(
+    () => setActive({ active: null, sprints: [{ id: "S1" }] }, "S9"),
+    /blaze: .*S9/,
+  );
+});
+
+test("formatSprintList renders 'id · name · start..end' with an active marker on the active row", () => {
+  const reg = {
+    active: "S1",
+    sprints: [
+      { id: "S1", name: "Mid-July", start: "2026-07-13", end: "2026-07-26" },
+      { id: "S2", name: "Late-July", start: "2026-07-27", end: "2026-08-09" },
+    ],
+  };
+  const out = formatSprintList(reg);
+  const lines = out.split("\n");
+  assert.equal(lines[0], "S1 · Mid-July · 2026-07-13..2026-07-26 (active)");
+  assert.equal(lines[1], "S2 · Late-July · 2026-07-27..2026-08-09");
+});
+
+test("formatSprintList on an empty registry", () => {
+  assert.equal(formatSprintList({ active: null, sprints: [] }), "(no sprints)");
 });

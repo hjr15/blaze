@@ -49,3 +49,37 @@ export function validateSprintFields(fm, { sprintIds }) {
   }
   return errors;
 }
+
+// --- BLZ-111: pure helpers for `blaze sprint new|list|active` --------------
+// Kept here (not in sprint-runner.mjs) so they're covered — *-runner.mjs is
+// coverage-excluded. Never mutate the registry passed in; always return a
+// fresh object so callers can trust the input is untouched.
+
+export function addSprint(registry, { name, start, end }) {
+  if (!isIsoDate(start)) throw new Error(`blaze: start '${start}' must be a YYYY-MM-DD date`);
+  if (!isIsoDate(end)) throw new Error(`blaze: end '${end}' must be a YYYY-MM-DD date`);
+  if (start > end) throw new Error(`blaze: start (${start}) is after end (${end})`);
+  const id = nextSprintId(registry);
+  const sprint = { id, name, start, end };
+  return {
+    // Auto-activate the very first sprint (no active yet) so a fresh board's
+    // gantt view has something to scope by without a separate `active` call.
+    registry: { ...registry, active: registry.active ?? id, sprints: [...(registry.sprints ?? []), sprint] },
+    id,
+  };
+}
+
+export function setActive(registry, id) {
+  if (!(registry.sprints ?? []).some((s) => s.id === id)) {
+    throw new Error(`blaze: sprint '${id}' is not in the registry (sprints.json)`);
+  }
+  return { ...registry, active: id };
+}
+
+export function formatSprintList(registry) {
+  const sprints = registry.sprints ?? [];
+  if (sprints.length === 0) return "(no sprints)";
+  return sprints
+    .map((s) => `${s.id} · ${s.name} · ${s.start}..${s.end}${s.id === registry.active ? " (active)" : ""}`)
+    .join("\n");
+}
