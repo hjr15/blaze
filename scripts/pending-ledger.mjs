@@ -5,10 +5,17 @@
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
 
-// Sanitized BLAZE_SESSION, or null when unset/empty-after-sanitize.
-export function sessionId(env = process.env) {
+// Sanitized BLAZE_SESSION, falling back to an id auto-derived from ppid when
+// unset/empty-after-sanitize. Sessions isolate by default: BLAZE_SESSION is
+// only an override for a stable/readable queue name, never the thing that
+// enables isolation — this never returns null, so nothing new is ever
+// written to the legacy shared fallback (still read by `--all`). ppid (not
+// pid/sid) is used because it's stable across separate invocations within
+// one harness/terminal session and IS that session's process — the `ppid`
+// param exists purely so tests can inject a value instead of forking.
+export function sessionId(env = process.env, ppid = process.ppid) {
   const clean = (env.BLAZE_SESSION || "").replace(/[^A-Za-z0-9._-]/g, "");
-  return clean === "" ? null : clean;
+  return clean !== "" ? clean : `auto-${ppid}`;
 }
 
 export function ledgerPath(root, session = null) {

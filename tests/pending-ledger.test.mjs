@@ -105,11 +105,27 @@ test("readEntries tolerates a trailing partial/corrupt line", () => {
 
 import { sessionId, listQueues } from "../scripts/pending-ledger.mjs";
 
-test("sessionId: set, dirty, empty, unset", () => {
+// BLZ-120: unset/empty-after-sanitize no longer returns null (which routed
+// both write and read to the shared fallback for EVERY such caller) — it
+// auto-derives from ppid instead, so sessions isolate by default. The
+// optional second param exists purely so tests can inject a ppid instead of
+// forking a real process.
+test("sessionId: set and sanitized BLAZE_SESSION values pass through unchanged", () => {
   assert.equal(sessionId({ BLAZE_SESSION: "alpha-1" }), "alpha-1");
   assert.equal(sessionId({ BLAZE_SESSION: "a b/c$!" }), "abc");
-  assert.equal(sessionId({ BLAZE_SESSION: "$$/ " }), null);
-  assert.equal(sessionId({}), null);
+});
+
+test("sessionId: empty-after-sanitize and fully-unset both auto-derive from ppid", () => {
+  assert.equal(sessionId({ BLAZE_SESSION: "$$/ " }, 4242), "auto-4242");
+  assert.equal(sessionId({}, 4242), "auto-4242");
+});
+
+test("sessionId: an explicit BLAZE_SESSION always wins over the ppid-derived fallback", () => {
+  assert.equal(sessionId({ BLAZE_SESSION: "explicit" }, 99999), "explicit");
+});
+
+test("sessionId: defaults to the real process.ppid when no override is given", () => {
+  assert.equal(sessionId({}), `auto-${process.ppid}`);
 });
 
 test("ledgerPath: session-keyed vs legacy fallback", () => {

@@ -84,8 +84,11 @@ test("batch mode queues into the DATA repo's .blaze ledger", () => {
   execFileSync(process.execPath, [join(eng, "scripts", "move-runner.mjs"), "ZZZ-1", "in-review"],
     { cwd: eng, env: { ...process.env, BLAZE_PROJECTS_DIR: join(data, "projects") } });
   assert.equal(head(data), before, "batch mode must not commit");
-  const ledger = readdirSync(join(data, ".blaze"));
-  assert.ok(ledger.includes("pending-commit.jsonl"), ".blaze ledger must live in the data repo");
+  // Unset BLAZE_SESSION auto-derives a queue from ppid — execFileSync has no
+  // intermediate shell, so the child's ppid IS this test process's pid — and
+  // the queue still lives under the DATA repo's .blaze/, not the engine's.
+  const ledger = readdirSync(join(data, ".blaze", "pending"));
+  assert.ok(ledger.includes(`auto-${process.pid}.jsonl`), ".blaze ledger must live in the data repo");
   rmSync(data, { recursive: true, force: true });
   rmSync(eng, { recursive: true, force: true });
 });

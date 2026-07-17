@@ -36,7 +36,9 @@ test("batch mode: blaze edit queues, no commit", () => {
   delete env.BLAZE_SESSION;
   execFileSync(process.execPath, [join(root, "scripts", "edit-runner.mjs"), "OBA-1", "priority", "high"], { cwd: root, env });
   assert.equal(head(root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(root);
+  // Unset BLAZE_SESSION auto-derives a queue from ppid — execFileSync has no
+  // intermediate shell, so the child's ppid IS this test process's pid.
+  const entries = readEntries(root, `auto-${process.pid}`);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "edit");
   assert.match(entries[0].message, /^OBA-1: edit priority$/);

@@ -77,8 +77,9 @@ flowchart TB
   `log`, `commit`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
   `*-runner.mjs` that wraps a pure `apply*`/model core and then commits via
   `commit-or-queue.mjs` (per-op commit, or a queued entry in `batch` mode —
-  session-keyed to `.blaze/pending/<BLAZE_SESSION>.jsonl` since v0.4.0, so
-  `blaze commit` flushes only the caller's queue and `--all` sweeps them all).
+  session-keyed to `.blaze/pending/<session>.jsonl` since v0.4.0, where
+  `<session>` is `BLAZE_SESSION` if set, else auto-derived, so `blaze commit`
+  flushes only the caller's queue and `--all` sweeps them all).
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".

@@ -35,7 +35,9 @@ test("batch mode: blaze log queues, no commit", () => {
   delete env.BLAZE_SESSION;
   execFileSync(process.execPath, [join(root, "scripts", "log-runner.mjs"), "OBA-1", "30"], { cwd: root, env });
   assert.equal(head(root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(root);
+  // Unset BLAZE_SESSION auto-derives a queue from ppid — execFileSync has no
+  // intermediate shell, so the child's ppid IS this test process's pid.
+  const entries = readEntries(root, `auto-${process.pid}`);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "log");
   assert.match(entries[0].message, /^OBA-1: log 30m$/);
@@ -59,7 +61,9 @@ test("batch mode: blaze move queues a two-file entry, no commit", () => {
   delete env.BLAZE_SESSION;
   execFileSync(process.execPath, [join(root, "scripts", "move-runner.mjs"), "OBA-1", "in-review"], { cwd: root, env });
   assert.equal(head(root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(root);
+  // Unset BLAZE_SESSION auto-derives a queue from ppid — execFileSync has no
+  // intermediate shell, so the child's ppid IS this test process's pid.
+  const entries = readEntries(root, `auto-${process.pid}`);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "move");
   assert.equal(entries[0].files.length, 2);

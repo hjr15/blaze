@@ -5,7 +5,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { commitOrQueue } from "../scripts/commit-or-queue.mjs";
-import { readEntries } from "../scripts/pending-ledger.mjs";
+import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 
 function gitRepo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
@@ -37,7 +37,8 @@ test("batch mode appends to the ledger and makes no commit", () => {
   assert.deepEqual(r, { ok: true, queued: true });
   const after = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   assert.equal(before, after, "HEAD must not move in batch mode");
-  const entries = readEntries(root);
+  // Unset BLAZE_SESSION now auto-derives a queue from ppid — not the legacy fallback.
+  const entries = readEntries(root, sessionId({}));
   assert.equal(entries.length, 1);
   assert.equal(entries[0].message, "OBA-1: create task");
   assert.deepEqual(entries[0].files, ["projects/OBA/backlog/OBA-1.md"]); // root-relative
@@ -77,7 +78,10 @@ test("batch mode routes to the session queue and stamps session", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("batch mode without BLAZE_SESSION keeps the legacy queue with no session field", () => {
+// BLZ-120: unset BLAZE_SESSION must NOT land in the shared legacy fallback —
+// it gets its own auto-derived queue (and a matching `session` field), same
+// as an explicit session would.
+test("batch mode without BLAZE_SESSION queues to an auto-derived session, not the legacy fallback", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
   const prev = process.env.BLAZE_SESSION;
   delete process.env.BLAZE_SESSION;
@@ -86,8 +90,10 @@ test("batch mode without BLAZE_SESSION keeps the legacy queue with no session fi
   } finally {
     if (prev !== undefined) process.env.BLAZE_SESSION = prev;
   }
-  const entries = readEntries(root);
+  assert.deepEqual(readEntries(root), []); // legacy fallback untouched
+  const auto = sessionId({});
+  const entries = readEntries(root, auto);
   assert.equal(entries.length, 1);
-  assert.equal("session" in entries[0], false);
+  assert.equal(entries[0].session, auto);
   rmSync(root, { recursive: true, force: true });
 });

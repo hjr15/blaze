@@ -16,8 +16,13 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { readEntries } from "../scripts/pending-ledger.mjs";
+import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
+
+// BLZ-120: with BLAZE_SESSION unset (as in this whole test file), queued ops
+// auto-derive their own session from ppid rather than landing in the shared
+// legacy fallback — read from that queue, not the bare `readEntries(root)`.
+const ownQueue = (root) => readEntries(root, sessionId({}));
 
 function repo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-sb-"));
@@ -59,7 +64,7 @@ test("batch mode: POST /api/edit queues, no commit", async () => {
   const body = await res.json();
   assert.equal(res.status, 200, JSON.stringify(body));
   assert.equal(head(fx.root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(fx.root);
+  const entries = ownQueue(fx.root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "edit");
   assert.match(entries[0].message, /^OBA-1: edit assignee$/);
@@ -74,7 +79,7 @@ test("batch mode: POST /api/move queues a two-file entry, no commit", async () =
   const body = await res.json();
   assert.equal(res.status, 200, JSON.stringify(body));
   assert.equal(head(fx.root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(fx.root);
+  const entries = ownQueue(fx.root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "move");
   assert.ok(entries[0].files.some((f) => f.includes("in-review")), "ledger must include the source path");
@@ -90,7 +95,7 @@ test("batch mode: POST /api/resolve queues, no commit", async () => {
   const body = await res.json();
   assert.equal(res.status, 200, JSON.stringify(body));
   assert.equal(head(fx.root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(fx.root);
+  const entries = ownQueue(fx.root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "resolve");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
@@ -104,7 +109,7 @@ test("batch mode: POST /api/log queues, no commit", async () => {
   const body = await res.json();
   assert.equal(res.status, 200, JSON.stringify(body));
   assert.equal(head(fx.root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(fx.root);
+  const entries = ownQueue(fx.root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "log");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
@@ -118,7 +123,7 @@ test("batch mode: POST /api/ac queues, no commit", async () => {
   const body = await res.json();
   assert.equal(res.status, 200, JSON.stringify(body));
   assert.equal(head(fx.root), before, "HEAD must not move in batch mode");
-  const entries = readEntries(fx.root);
+  const entries = ownQueue(fx.root);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "ac");
   server.close(); rmSync(fx.root, { recursive: true, force: true });

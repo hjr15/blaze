@@ -38,9 +38,48 @@ const headOf = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], 
 test("empty ledger is a friendly no-op", () => {
   const root = gitRepo();
   const before = headOf(root);
-  const out = runCommit(root).stdout;
-  assert.match(out, /nothing to flush/);
+  const r = runCommit(root);
+  assert.match(r.stdout, /nothing to flush/);
+  assert.doesNotMatch(r.stderr, /queued in other sessions/); // no orphan hint when there's nothing anywhere
   assert.equal(headOf(root), before);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-120: a harness restart auto-derives a NEW ppid, orphaning the previous
+// run's queue under its old id. Without this hint, "nothing to flush" reads
+// as "nothing was ever queued" — signpost what's actually still sitting there.
+test("orphan hint: own queue empty but other sessions hold ops — named on stderr", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-40.md"), "orphaned");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-41.md"), "legacy leftover");
+  appendEntry(root, { id: "OBA-40", op: "new", message: "OBA-40: orphaned", files: ["projects/OBA/backlog/OBA-40.md"], ts: "t", session: "auto-1200" }, "auto-1200");
+  appendEntry(root, { id: "OBA-41", op: "new", message: "OBA-41: legacy", files: ["projects/OBA/backlog/OBA-41.md"], ts: "t" });
+
+  const before = headOf(root);
+  const r = runCommit(root); // BLAZE_SESSION unset — own auto-<ppid> queue is empty
+
+  assert.match(r.stdout, /nothing to flush/);
+  assert.match(r.stderr, /nothing to flush for session auto-\d+ — 2 op\(s\) queued in other sessions \(legacy, auto-1200\); use --all to sweep them/);
+  assert.equal(headOf(root), before); // still a no-op — hint is informational only
+  assert.equal(readEntries(root, "auto-1200").length, 1); // untouched
+  assert.equal(readEntries(root).length, 1);              // untouched
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("no orphan hint when the caller's own queue has ops (the normal flush path)", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-42.md"), "mine");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-43.md"), "someone else");
+  const mySession = `auto-${process.pid}`;
+  appendEntry(root, { id: "OBA-42", op: "new", message: "OBA-42: mine", files: ["projects/OBA/backlog/OBA-42.md"], ts: "t", session: mySession }, mySession);
+  appendEntry(root, { id: "OBA-43", op: "new", message: "OBA-43: other", files: ["projects/OBA/backlog/OBA-43.md"], ts: "t", session: "s1" }, "s1");
+
+  const r = runCommit(root); // BLAZE_SESSION unset — own queue is non-empty, flushes normally
+
+  assert.match(r.stdout, /flushed 1 op/);
+  assert.doesNotMatch(r.stderr, /queued in other sessions/); // no hint fires once the flush actually happens
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -50,11 +89,11 @@ test("drains the ledger into one commit and truncates it — even when invoked f
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "one");
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-2.md"), "two");
   writeFileSync(join(root, "untracked-other"), "should NOT be committed");
-  appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: create task", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t" });
-  appendEntry(root, { id: "OBA-2", op: "new", message: "OBA-2: create task", files: ["projects/OBA/backlog/OBA-2.md"], ts: "t" });
+  appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: create task", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t", session: "t1" }, "t1");
+  appendEntry(root, { id: "OBA-2", op: "new", message: "OBA-2: create task", files: ["projects/OBA/backlog/OBA-2.md"], ts: "t", session: "t1" }, "t1");
 
   // Invoke from a subdirectory to prove ROOT is script-relative, not cwd-based.
-  runCommit(root, "projects/OBA");
+  runCommit(root, "projects/OBA", { session: "t1" });
 
   const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
   const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
@@ -63,7 +102,7 @@ test("drains the ledger into one commit and truncates it — even when invoked f
   assert.match(body, /- OBA-2: create task/);
   const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
   assert.match(status, /\?\? untracked-other/);
-  assert.deepEqual(readEntries(root), []);
+  assert.deepEqual(readEntries(root, "t1"), []);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -89,7 +128,8 @@ test("drops a stale intermediate path from a ticket moved twice in one batch", (
     message: "INF-1: defined → in-progress",
     files: ["projects/INF/defined/X.md", "projects/INF/in-progress/X.md"],
     ts: "t",
-  });
+    session: "t1",
+  }, "t1");
 
   // Move 2: in-progress -> in-review, within the SAME batch. in-progress/X.md
   // (created by move 1, relocated again by move 2) is now neither on disk nor in HEAD.
@@ -102,11 +142,12 @@ test("drops a stale intermediate path from a ticket moved twice in one batch", (
     message: "INF-1: in-progress → in-review",
     files: ["projects/INF/in-progress/X.md", "projects/INF/in-review/X.md"],
     ts: "t",
-  });
+    session: "t1",
+  }, "t1");
 
   writeFileSync(join(root, "untracked-other"), "should NOT be committed");
 
-  const out = runCommit(root).stdout;
+  const out = runCommit(root, null, { session: "t1" }).stdout;
   assert.match(out, /blaze commit: flushed 2 op/);
 
   const afterCount = Number(
@@ -123,7 +164,7 @@ test("drops a stale intermediate path from a ticket moved twice in one batch", (
 
   const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
   assert.match(status, /\?\? untracked-other/);
-  assert.deepEqual(readEntries(root), []);
+  assert.deepEqual(readEntries(root, "t1"), []);
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -131,12 +172,12 @@ test("runner exits 1 and keeps the queue when the lock is held", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-8.md"), "x");
-  appendEntry(root, { id: "OBA-8", op: "new", message: "OBA-8: x", files: ["projects/OBA/backlog/OBA-8.md"], ts: "t" });
+  appendEntry(root, { id: "OBA-8", op: "new", message: "OBA-8: x", files: ["projects/OBA/backlog/OBA-8.md"], ts: "t", session: "t1" }, "t1");
   assert.equal(acquireLock(root, { session: "other" }).ok, true);
-  const r = runCommit(root); // waits out the bounded retry (~2 s), then fails
+  const r = runCommit(root, null, { session: "t1" }); // waits out the bounded retry (~2 s), then fails
   assert.equal(r.status, 1);
   assert.match(r.stderr, /commit\.lock held/);
-  assert.equal(readEntries(root).length, 1); // queue kept
+  assert.equal(readEntries(root, "t1").length, 1); // queue kept
   releaseLock(root);
   rmSync(root, { recursive: true, force: true });
 });
@@ -185,21 +226,69 @@ test("REPRO OBA-484: default flush does NOT bundle a foreign session's queued op
   rmSync(root, { recursive: true, force: true });
 });
 
-test("unset session drains only the shared fallback queue", () => {
+// BLZ-120: an unset-session flush must isolate to the caller's own queue.
+// Before this fix, EVERY unset-session caller shared ONE queue (session id
+// null routed both write and read to the fallback file) — so an op parked
+// there from a different origin rode along on whoever flushed first.
+test("REPRO BLZ-120: an unset-session flush must not pull ops parked in the shared fallback from a different origin", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
-  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-3.md"), "legacy");
-  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-4.md"), "sessioned");
-  appendEntry(root, { id: "OBA-3", op: "new", message: "OBA-3: legacy", files: ["projects/OBA/backlog/OBA-3.md"], ts: "t" });
-  appendEntry(root, { id: "OBA-4", op: "new", message: "OBA-4: sessioned", files: ["projects/OBA/backlog/OBA-4.md"], ts: "t", session: "s1" }, "s1");
-  runCommit(root);
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-30.md"), "mine");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-31.md"), "a different origin's op");
+
+  // My own op, unset BLAZE_SESSION: seeded at the path an auto-derived session
+  // queues to. spawnSync below has no intermediate shell, so the child's
+  // ppid IS this test process's pid — the exact queue it will read from.
+  const mySession = `auto-${process.pid}`;
+  appendEntry(
+    root,
+    { id: "OBA-30", op: "new", message: "OBA-30: mine", files: ["projects/OBA/backlog/OBA-30.md"], ts: "t", session: mySession },
+    mySession,
+  );
+
+  // A different origin's op, parked in the shared legacy fallback — exactly
+  // where every unset-session write used to land.
+  appendEntry(root, { id: "OBA-31", op: "new", message: "OBA-31: other origin", files: ["projects/OBA/backlog/OBA-31.md"], ts: "t" });
+  const otherBefore = readFileSync(ledgerPath(root));
+
+  runCommit(root); // BLAZE_SESSION unset
+
   const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
-  assert.match(body, /OBA-3: legacy/);
-  assert.doesNotMatch(body, /OBA-4/);
-  assert.equal(readEntries(root, "s1").length, 1);
+  assert.match(body, /OBA-30: mine/);  // POSITIVE: my own queued op was committed
+  assert.doesNotMatch(body, /OBA-31/); // NEGATIVE: the other origin's op was not
+  const shown = execFileSync("git", ["-C", root, "show", "--stat", "--format=", "HEAD"], { encoding: "utf8" });
+  assert.doesNotMatch(shown, /OBA-31\.md/);
+  assert.deepEqual(readFileSync(ledgerPath(root)), otherBefore); // still queued, byte-identical
+  assert.equal(readEntries(root).length, 1);                    // still readable as pending
   rmSync(root, { recursive: true, force: true });
 });
 
+// BLZ-120: an unset-session flush drains its OWN auto-derived queue only —
+// the shared legacy fallback is read-only history now, swept solely by
+// `--all` (see that test below).
+test("unset session drains its own auto-derived queue, leaving the legacy fallback untouched", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-3.md"), "legacy leftover");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-5.md"), "mine");
+  appendEntry(root, { id: "OBA-3", op: "new", message: "OBA-3: legacy", files: ["projects/OBA/backlog/OBA-3.md"], ts: "t" });
+  const mySession = `auto-${process.pid}`; // execFileSync/spawnSync child's ppid IS this process's pid
+  appendEntry(root, { id: "OBA-5", op: "new", message: "OBA-5: mine", files: ["projects/OBA/backlog/OBA-5.md"], ts: "t", session: mySession }, mySession);
+
+  runCommit(root); // BLAZE_SESSION unset
+
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-5: mine/);
+  assert.doesNotMatch(body, /OBA-3/);
+  assert.equal(readEntries(root).length, 1); // legacy fallback untouched — needs --all
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-120: `--all` semantics MUST NOT CHANGE by this fix. An automated
+// end-of-day flush relies on `--all` to drain every session queue PLUS the
+// legacy shared fallback (still populated by stale/pre-fix entries, or
+// anything an operator queues by hand) — a scheduled sole-committer job runs
+// this as its entire job, so this must keep sweeping the fallback forever.
 test("--all sweeps every queue + fallback into one commit with session-tagged body", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
@@ -228,8 +317,8 @@ test("warns (stderr) when origin/main is ahead, and still commits", () => {
   execFileSync("git", ["-C", root, "reset", "-q", "--hard", "HEAD~1"]);
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-9.md"), "x");
-  appendEntry(root, { id: "OBA-9", op: "new", message: "OBA-9: x", files: ["projects/OBA/backlog/OBA-9.md"], ts: "t" });
-  const r = runCommit(root);
+  appendEntry(root, { id: "OBA-9", op: "new", message: "OBA-9: x", files: ["projects/OBA/backlog/OBA-9.md"], ts: "t", session: "t1" }, "t1");
+  const r = runCommit(root, null, { session: "t1" });
   assert.equal(r.status, 0);
   assert.match(r.stderr, /1 commit\(s\) behind origin\/main/);
   assert.match(r.stdout, /flushed 1 op/);
@@ -240,8 +329,8 @@ test("no warning when origin/main is absent", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-10.md"), "x");
-  appendEntry(root, { id: "OBA-10", op: "new", message: "OBA-10: x", files: ["projects/OBA/backlog/OBA-10.md"], ts: "t" });
-  const r = runCommit(root);
+  appendEntry(root, { id: "OBA-10", op: "new", message: "OBA-10: x", files: ["projects/OBA/backlog/OBA-10.md"], ts: "t", session: "t1" }, "t1");
+  const r = runCommit(root, null, { session: "t1" });
   assert.equal(r.status, 0);
   assert.doesNotMatch(r.stderr, /behind origin\/main/);
   rmSync(root, { recursive: true, force: true });

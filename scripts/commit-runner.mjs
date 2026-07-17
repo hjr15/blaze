@@ -1,7 +1,8 @@
 // scripts/commit-runner.mjs — `blaze commit`: drain the caller's OWN pending
-// queue (session-keyed via BLAZE_SESSION, else the shared fallback) into ONE
-// commit, staging only recorded files. `--all` sweeps every queue + fallback
-// (the bundler / end-of-day path). A failed flush keeps the queue files.
+// queue (session-keyed via BLAZE_SESSION, or auto-derived from ppid when
+// unset) into ONE commit, staging only recorded files. `--all` sweeps every
+// queue plus the legacy shared fallback (the bundler / end-of-day path). A
+// failed flush keeps the queue files.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -32,6 +33,22 @@ const drained = targets
 const entries = drained.flatMap((q) => q.entries.map((e) => ({ ...e, session: q.session })));
 
 if (entries.length === 0) {
+  // Signpost the orphan case: a harness restart auto-derives a NEW ppid, so
+  // the previous run's queue is silently abandoned under its old id. Without
+  // this hint "nothing to flush" reads as "nothing was ever queued" — name
+  // what's actually sitting there so it isn't mystifying.
+  if (!all) {
+    const own = targets[0].session;
+    const others = listQueues(dataRoot)
+      .filter((q) => q.session !== own)
+      .map((q) => ({ session: q.session, count: readForDrain(dataRoot, q.session).entries.length }))
+      .filter((q) => q.count > 0);
+    if (others.length > 0) {
+      const total = others.reduce((n, q) => n + q.count, 0);
+      const names = others.map((q) => (q.session === null ? "legacy" : q.session)).join(", ");
+      console.error(`blaze commit: nothing to flush for session ${own} — ${total} op(s) queued in other sessions (${names}); use --all to sweep them`);
+    }
+  }
   console.log("blaze commit: nothing to flush");
   process.exit(0);
 }
