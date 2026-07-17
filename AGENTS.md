@@ -62,6 +62,30 @@ automatically yet.
    Reconcile mirrors **delivery** state, not deploy state — see
    [ADR-0003](docs/decisions/0003-engine-scope-delivery-truth-not-deploy-truth.md).
 
+## Sprints
+
+A sprint is plain-text **data**, not engine config. The `sprints.json` registry
+at the data root (a new top-level artifact, read per-render like
+`.blaze/transitions.json`, so a mid-session edit is never stale) holds
+`{ active, sprints: [{ id, name, start, end }] }`. Manage it with the `blaze
+sprint` verb:
+
+```bash
+blaze sprint new "Mid-July" --start 2026-07-13 --end 2026-07-26   # -> created S1
+blaze sprint list                                                 # S1 · Mid-July · 2026-07-13..2026-07-26 (active)
+blaze sprint active S1                                            # flip the active sprint
+```
+
+A ticket joins a sprint by carrying the `sprint` field (plus optional
+`start`/`due` dates) — set it at creation with `blaze new … --sprint S1 --start
+2026-07-20 --due 2026-07-22`, or later with `blaze edit <id> sprint S1`. The
+`sprint` value is validated against the registry; `start`/`due` must be real
+`YYYY-MM-DD` dates with `start` not after `due`. `blaze reindex` warns (never
+errors) on a ticket referencing a sprint id absent from the registry, mirroring
+the dangling-link lint. Sprints are additive and do **not** bump
+`SCHEMA_VERSION` — see
+[ADR-0004](docs/decisions/0004-sprints-are-additive-not-a-schema-bump.md).
+
 ## The join key
 
 The only coupling between the tracker and code is the branch name: it must embed
@@ -73,8 +97,8 @@ branch/PR head ref in the project's `codeRepos` and matches it to
 
 Field order as written by the engine: `id`, `title`, `type`, `project`,
 `priority`, `resolution`, `parent`, `assignee`, `labels`, `components`,
-`estimate`, `worklog`, `links`, `likelihood`, `impact`, `branch`, `pr`, `created`,
-`updated`.
+`estimate`, `sprint`, `start`, `due`, `worklog`, `links`, `likelihood`, `impact`,
+`branch`, `pr`, `created`, `updated`.
 
 - `id` — `<KEY>-<n>`, matches the filename, sequential, never reused.
 - `priority` — one of `highest`/`high`/`medium`/`low`/`lowest`/`none`/`urgent`.
@@ -88,6 +112,13 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
   against it (see below); `defaultLabels` in `blaze.config.json` is the
   tracker-wide fallback for projects with no taxonomy of their own.
 - `estimate` — minutes, rounded to the nearest 5 (`blaze new --estimate`).
+- `sprint` — a sprint id from the `sprints.json` registry (e.g. `S1`); the ticket
+  opts into that sprint. Validated against the registry on `new`/`edit`; an unknown
+  id is a hard reject, an empty value clears membership. All three of these fields
+  are optional and absent (no line written) when unset. See "Sprints" below.
+- `start` / `due` — optional `YYYY-MM-DD` dates bounding when the ticket is
+  planned to run; drive the Gantt bars. Validated as real ISO dates, and `start`
+  must not be after `due`.
 - `worklog` — list of `{ date, minutes, note? }`, appended by `blaze log`; minutes
   round to the nearest whole minute.
 - `likelihood` / `impact` — risk-only fields.
@@ -274,6 +305,19 @@ of truth, full CLI/`grep` parity preserved:
   simulation. `?flat=1` and whole-corpus rendering were removed with BLZ-108 (a
   neighbourhood is inherently small); the `flat` escape hatch remains only for
   board/list/metrics.
+- **Gantt** — a deterministic, hand-rolled **SVG timeline** scoped to a sprint
+  (`scripts/views/gantt.mjs` over `scripts/model/gantt.mjs`, on by default). A
+  sprint-picker strip selects the sprint (`?sprint=<id>`, defaulting to the
+  registry's `active`); each in-scope delivery ticket renders one bar positioned
+  from its `start`/`due` against the sprint window, with a today-marker line at
+  the injected `now` (absent when `now` falls outside the window). The model is
+  pure and zero-dep — `now` is injected, dates parse as UTC — so the golden SVG
+  snapshot stays stable. **Scope divergence — read this:** board, list, and map
+  all share the `focus`/`flat` `scopedRows` rule (`scripts/model/focus.mjs`);
+  **gantt and metrics deliberately ignore it and scope by sprint instead.** This
+  is intentional, not an oversight — with no `?focus`, `scopedRows` would hide
+  every level-0 row, leaving the Gantt empty, so gantt (like metrics) draws its
+  own scope from the sprint membership rather than the focus drill.
 - **Detail panel** — clicking a card/row id opens a side panel with the rendered
   description, a full frontmatter table, parent breadcrumb + children list, and
   links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content
@@ -331,8 +375,8 @@ terminal status; epics/goals/risks are exempt since their time rolls up from
 children), and `schema` (a per-project type/workflow override — see
 [`docs/schema-customization.md`](docs/schema-customization.md)).
 
-`views` (top-level, `blaze.config.json`): `{ board, list, live, metrics, map }`,
-each defaulting to `true` — set any to `false` to hide that view's pill and
+`views` (top-level, `blaze.config.json`): `{ board, list, live, metrics, map,
+gantt }`, each defaulting to `true` — set any to `false` to hide that view's pill and
 404 its `/view/<name>` fragment endpoint (zero model computation for a disabled
 view). `board` cannot be disabled — it is forced back to `true` after the merge,
 since the shell always needs a default view to render. A board with a view
