@@ -34,9 +34,9 @@ stateDiagram-v2
 
     state "risk" as risk {
         [*] --> identified
-        identified --> mitigated: mitigated → resolution done
-        identified --> accepted: accepted → resolution done
-        identified --> obsolete: obsolete → resolution wont-do
+        identified --> mitigated: done
+        identified --> accepted: done
+        identified --> obsolete: wont-do
         mitigated --> identified: reopen
         accepted --> identified: reopen
         obsolete --> identified: reopen

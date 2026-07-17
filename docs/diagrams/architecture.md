@@ -61,7 +61,7 @@ flowchart TB
     Model --> Files
     Model --> Caches
     Rec -. reads branches/PRs .-> Ext["mirrored code repos (git + gh)"]
-    Groom -. edits ticket .md .-> Files
+    Groom -. edits ticket files .-> Files
 ```
 
 ## Worked example

@@ -69,7 +69,7 @@ flowchart TB
     Model --> Files
     Model --> Caches
     Rec -. reads branches/PRs .-> Ext["mirrored code repos (git + gh)"]
-    Groom -. edits ticket .md .-> Files
+    Groom -. edits ticket files .-> Files
 ```
 <!-- DIAGRAM:END -->
 
@@ -208,9 +208,9 @@ stateDiagram-v2
 
     state "risk" as risk {
         [*] --> identified
-        identified --> mitigated: mitigated → resolution done
-        identified --> accepted: accepted → resolution done
-        identified --> obsolete: obsolete → resolution wont-do
+        identified --> mitigated: done
+        identified --> accepted: done
+        identified --> obsolete: wont-do
         mitigated --> identified: reopen
         accepted --> identified: reopen
         obsolete --> identified: reopen
