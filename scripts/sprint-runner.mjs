@@ -39,10 +39,18 @@ try {
     if (!c.ok) { console.error(`blaze sprint: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
     console.log(`created ${id}${c.queued ? " (queued for blaze commit)" : ""}`);
   } else if (sub === "list") {
+    for (const a of rest) {
+      if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+    }
     const registry = loadSprints({ root: dataRoot });
     console.log(formatSprintList(registry));
   } else if (sub === "active") {
-    const [id] = rest;
+    const positional = [];
+    for (const a of rest) {
+      if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+      positional.push(a);
+    }
+    const [id] = positional;
     if (!id) { console.error("usage: blaze sprint active <id>"); process.exit(1); }
     const before = loadSprints({ root: dataRoot });
     const registry = setActive(before, id);

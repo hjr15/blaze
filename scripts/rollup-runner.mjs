@@ -51,7 +51,12 @@ function main() {
   // wrong type registry and exit 0. Guard explicitly before consulting the
   // schema so it fails loud instead.
   loadConfig({ root: dataRoot });
-  const id = process.argv.slice(2).find((a) => !a.startsWith("--")) || null;
+  const positional = [];
+  for (const a of process.argv.slice(2)) {
+    if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+    positional.push(a);
+  }
+  const id = positional[0] || null;
   const index = buildIndex(projectsDir);
   const lines = rollupLines(index, rollUp(index), id);
   console.log(lines.join("\n"));

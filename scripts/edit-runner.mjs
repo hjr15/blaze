@@ -11,6 +11,11 @@ const { dataRoot, projectsDir } = resolveRoots();
 // half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
 const cfg = loadConfig({ root: dataRoot });
 const [id, field, ...valueParts] = process.argv.slice(2);
+// Only the id/field SELECTOR positions are flag-guarded — valueParts is a
+// genuinely freeform value (e.g. a title or note) and must stay unguarded so
+// a value that happens to start with "--" still works.
+if (id && id.startsWith("--")) { console.error(`unknown flag: ${id}`); process.exit(1); }
+if (field && field.startsWith("--")) { console.error(`unknown flag: ${field}`); process.exit(1); }
 if (!id || !field || valueParts.length === 0) {
   console.error("usage: blaze edit <id> <field> <value>"); process.exit(1);
 }

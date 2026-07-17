@@ -1,11 +1,11 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, cpSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync, spawnSync, execFile } from "node:child_process";
-import { appendEntry, readEntries } from "../scripts/pending-ledger.mjs";
+import { appendEntry, readEntries, ledgerPath } from "../scripts/pending-ledger.mjs";
 import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -244,5 +244,46 @@ test("no warning when origin/main is absent", () => {
   const r = runCommit(root);
   assert.equal(r.status, 0);
   assert.doesNotMatch(r.stderr, /behind origin\/main/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-119: an unrecognised flag was previously silently ignored, falling
+// through to the real drain-and-commit path. `--help` on a non-empty queue
+// must print usage and exit clean WITHOUT touching the queue or HEAD.
+test("--help exits 0, prints usage, and leaves the queue + HEAD untouched", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-20.md"), "x");
+  appendEntry(root, { id: "OBA-20", op: "new", message: "OBA-20: x", files: ["projects/OBA/backlog/OBA-20.md"], ts: "t" });
+  const queue = ledgerPath(root);
+  const beforeBytes = readFileSync(queue);
+  const beforeHead = headOf(root);
+
+  const r = runCommit(root, null, { args: ["--help"] });
+
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /usage/i);
+  assert.deepEqual(readFileSync(queue), beforeBytes, "queue file must be byte-identical");
+  assert.equal(headOf(root), beforeHead, "HEAD must not move");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-119: an unrecognised flag must be rejected outright, not silently
+// dropped into the positional/queue-drain path.
+test("--bogus exits non-zero, leaves the queue + HEAD untouched", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-21.md"), "x");
+  appendEntry(root, { id: "OBA-21", op: "new", message: "OBA-21: x", files: ["projects/OBA/backlog/OBA-21.md"], ts: "t" });
+  const queue = ledgerPath(root);
+  const beforeBytes = readFileSync(queue);
+  const beforeHead = headOf(root);
+
+  const r = runCommit(root, null, { args: ["--bogus"] });
+
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /unknown flag: --bogus/);
+  assert.deepEqual(readFileSync(queue), beforeBytes, "queue file must be byte-identical");
+  assert.equal(headOf(root), beforeHead, "HEAD must not move");
   rmSync(root, { recursive: true, force: true });
 });

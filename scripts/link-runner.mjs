@@ -11,6 +11,9 @@ const cfg = loadConfig({ root: dataRoot });
 const argv = process.argv.slice(2);
 const remove = argv[0] === "--rm";
 const [id, type, target] = remove ? argv.slice(1) : argv;
+for (const a of [id, type, target]) {
+  if (a && a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+}
 if (!id || !type || !target) {
   console.error("usage: blaze link [--rm] <id> <TYPE> <target>   (TYPE: Blocks|Relates|Duplicate|Cloners)");
   process.exit(1);

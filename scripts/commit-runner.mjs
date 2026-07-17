@@ -10,7 +10,19 @@ import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 
 const { dataRoot } = resolveRoots();
-const all = process.argv.slice(2).includes("--all");
+const argv = process.argv.slice(2);
+let all = false;
+for (const a of argv) {
+  switch (a) {
+    case "--all": all = true; break;
+    case "--help": case "-h":
+      console.log("usage: blaze commit [--all]");
+      process.exit(0);
+    default:
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+  }
+}
 
 // Which queues to drain: every existing queue with --all, else only the caller's own.
 const targets = all ? listQueues(dataRoot) : [{ session: sessionId() }];

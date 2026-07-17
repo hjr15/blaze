@@ -10,7 +10,12 @@ import { buildTransitions } from "./model/transitions.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 
 const { dataRoot, projectsDir: defaultProjectsDir } = resolveRoots();
-const projectsDir = process.argv[2] || defaultProjectsDir;
+const positional = [];
+for (const a of process.argv.slice(2)) {
+  if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+  positional.push(a);
+}
+const projectsDir = positional[0] || defaultProjectsDir;
 const dbDir = process.env.BLAZE_DB_DIR || join(dataRoot, ".blaze");
 
 try {

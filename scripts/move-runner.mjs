@@ -9,7 +9,12 @@ const { dataRoot, projectsDir } = resolveRoots();
 // a guard meant to stop the engine driving a board it may misread must not
 // half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
 const cfg = loadConfig({ root: dataRoot });
-const [id, toStatus] = process.argv.slice(2);
+const positional = [];
+for (const a of process.argv.slice(2)) {
+  if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+  positional.push(a);
+}
+const [id, toStatus] = positional;
 if (!id || !toStatus) { console.error("usage: blaze move <id> <status>"); process.exit(1); }
 
 const today = new Date().toISOString().slice(0, 10);
