@@ -13,6 +13,7 @@ import { join } from "node:path";
 import { readForDrain, clearLedger, listQueues, sessionId } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot } = resolveRoots();
 const argv = process.argv.slice(2);
@@ -23,13 +24,23 @@ for (const a of argv) {
     case "--all": all = true; break;
     case "--shared": shared = true; break;
     case "--help": case "-h":
-      console.log("usage: blaze commit [--all] [--shared]");
+      console.log("usage: blaze commit [--all] [--shared]  (--shared drains ONLY the shared fallback queue, never the caller's own)");
       process.exit(0);
     default:
       console.error(`unknown flag: ${a}`);
       process.exit(1);
   }
 }
+
+// BLZ-121 defence-in-depth, hoisted here for the same reason as
+// move-runner.mjs: this runner talks to git directly and never goes through
+// commitOrQueue/appendEntry, so it carries none of their guards — without its
+// own check here, `BLAZE_READONLY=1 node scripts/commit-runner.mjs` would
+// reach the git add/commit calls below and actually commit. cli.mjs is the
+// primary gate for the normal `blaze commit` path; this only matters for a
+// direct invocation. Hoisted AFTER flag parsing so `--help`/`-h` (a read)
+// still works under BLAZE_READONLY.
+assertWritable("flush the pending queue");
 
 const mySession = sessionId();
 
@@ -49,8 +60,12 @@ if (!all && !shared && mySession === null) {
   }
 }
 
-// Which queues to drain: every existing queue with --all, else only the caller's own.
-const targets = all ? listQueues(dataRoot) : [{ session: mySession }];
+// Which queues to drain: every existing queue with --all; else, with --shared,
+// ONLY the shared fallback (session: null) — the flag names the fallback
+// itself, not "my own queue, whichever one that resolves to", so it drains
+// the fallback regardless of whether the caller also has a session identity
+// of its own (that queue is left untouched); else the caller's own queue.
+const targets = all ? listQueues(dataRoot) : [{ session: shared ? null : mySession }];
 const drained = targets
   .map((q) => ({ session: q.session, ...readForDrain(dataRoot, q.session) }))
   .filter((q) => q.entries.length > 0);

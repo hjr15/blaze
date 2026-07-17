@@ -502,3 +502,29 @@ test("--all drains the fallback even with no session identity at all (no refusal
   assert.match(r.stdout, /flushed 1 op/, `commit-runner said: ${JSON.stringify(r)}`);
   rmSync(root, { recursive: true, force: true });
 });
+
+// Finding 1 (BLZ code-review): --shared must route to the shared fallback
+// (session: null) EVEN WHEN the caller has a real session identity — before
+// this fix `shared` only gated the no-identity refusal above but never
+// routed `targets`, so under a harness (mySession set, the ALWAYS case in
+// this harness) `--shared` silently drained the caller's OWN queue and left
+// the fallback untouched, exiting 0 as if it had done what was asked.
+test("--shared drains the shared fallback even when the caller HAS a session identity (not its own queue)", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-60.md"), "mine, own queue");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-61.md"), "fallback, must be drained by --shared");
+  const mySession = "auto-test-harness-uuid"; // matches runCommit()'s default pinned harness id
+  appendEntry(root, { id: "OBA-60", op: "new", message: "OBA-60: mine", files: ["projects/OBA/backlog/OBA-60.md"], ts: "t", session: mySession }, mySession);
+  appendEntry(root, { id: "OBA-61", op: "new", message: "OBA-61: fallback", files: ["projects/OBA/backlog/OBA-61.md"], ts: "t" });
+
+  const r = runCommit(root, null, { args: ["--shared"] }); // harnessId defaults to HARNESS_ID (session identity present)
+
+  assert.match(r.stdout, /flushed 1 op/, `commit-runner said: ${JSON.stringify(r)}`);
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-61: fallback/);       // fallback entry was committed
+  assert.doesNotMatch(body, /OBA-60/);          // caller's own queue was NOT touched
+  assert.deepEqual(readEntries(root), []);      // fallback emptied
+  assert.equal(readEntries(root, mySession).length, 1); // own queue untouched
+  rmSync(root, { recursive: true, force: true });
+});

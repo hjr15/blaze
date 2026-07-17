@@ -173,3 +173,138 @@ test("BLAZE_READONLY=1 node scripts/move-runner.mjs <id> <status> (bypassing cli
   assert.equal(headOf(root), beforeHead, "HEAD must not move");
   rmSync(root, { recursive: true, force: true });
 });
+
+// Additional finding (adversarial verifier, HIGH): commit-runner.mjs never
+// imports commitOrQueue/appendEntry — it talks to git directly and only pulls
+// the READ helpers from pending-ledger.mjs (readForDrain/clearLedger/
+// listQueues/sessionId) — so the defence-in-depth other runners get for free
+// via commitOrQueue never applied here. `commit` is the one verb this whole
+// epic exists to make safe by default, so a direct bypass that still commits
+// under BLAZE_READONLY is the worst possible hole to leave open.
+test("BLAZE_READONLY=1 node scripts/commit-runner.mjs (bypassing cli.mjs) also refuses and commits nothing", () => {
+  const root = board();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-2.md"), "x");
+  const session = "t1";
+  appendEntry(root, { id: "OBA-2", op: "new", message: "OBA-2: x", files: ["projects/OBA/backlog/OBA-2.md"], ts: "t", session }, session);
+  const queue = ledgerPath(root, session);
+  const beforeQueue = readFileSync(queue);
+  const beforeTree = snapshotTree(root);
+  const beforeHead = headOf(root);
+  const beforeStatus = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
+
+  const runner = join(REPO, "scripts", "commit-runner.mjs");
+  const r = spawnSync(process.execPath, [runner],
+    { cwd: root, env: { ...process.env, BLAZE_SESSION: session, BLAZE_READONLY: "1" }, encoding: "utf8" });
+
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /read-only mode \(BLAZE_READONLY=1\)/);
+  assert.doesNotMatch(r.stdout || "", /flushed/);
+  assert.deepEqual(snapshotTree(root), beforeTree, "ticket tree must be byte-identical");
+  assert.deepEqual(readFileSync(queue), beforeQueue, "queue file must be byte-identical");
+  assert.equal(headOf(root), beforeHead, "HEAD must not move");
+  assert.equal(
+    execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }),
+    beforeStatus,
+    "working tree status must be unchanged",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+// --help is a read: it must still work under BLAZE_READONLY even for the
+// runner invoked directly (bypassing cli.mjs's own --help interception).
+test("BLAZE_READONLY=1 node scripts/commit-runner.mjs --help still works (exit 0, prints usage)", () => {
+  const root = board();
+  const runner = join(REPO, "scripts", "commit-runner.mjs");
+  const r = spawnSync(process.execPath, [runner, "--help"],
+    { cwd: root, env: { ...process.env, BLAZE_READONLY: "1" }, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /usage/i);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// Code-review finding: only move-runner.mjs (and serve.mjs's POST handler)
+// hoisted assertWritable() ABOVE the apply*() write. edit/log/new/resolve/
+// link/sprint all call apply*() (which writes the file via node:fs) BEFORE
+// commitOrQueue's guard ever fires — so under BLAZE_READONLY the write lands
+// on disk and only the commit/queue step throws, leaving a dirty working
+// tree plus an uncaught stack trace. Each test below proves the runner:
+//  1. exits non-zero with a CLEAN `blaze: ...` message (no raw stack trace),
+//  2. leaves the ticket tree byte-identical (nothing written),
+//  3. leaves `git status --porcelain` empty (no dirty file left behind),
+//  4. leaves HEAD unmoved.
+function assertDirectInvocationRefusedAndUntouched(root, runnerFile, args) {
+  const beforeTree = snapshotTree(root);
+  const beforeHead = headOf(root);
+  const beforeStatus = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
+
+  const runner = join(REPO, "scripts", runnerFile);
+  const r = spawnSync(process.execPath, [runner, ...args],
+    { cwd: root, env: { ...process.env, BLAZE_READONLY: "1" }, encoding: "utf8" });
+
+  assert.notEqual(r.status, 0, `expected non-zero exit; stdout=${r.stdout} stderr=${r.stderr}`);
+  assert.match(r.stderr, /blaze: read-only mode \(BLAZE_READONLY=1\)/, `expected a clean blaze: message, got: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /at commitOrQueue|at Object\.<anonymous>|node:internal/, `expected no raw stack trace, got: ${r.stderr}`);
+  assert.deepEqual(snapshotTree(root), beforeTree, "ticket tree must be byte-identical — nothing written");
+  assert.equal(
+    execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }),
+    beforeStatus,
+    "working tree status must be unchanged — no dirty file left behind",
+  );
+  assert.equal(headOf(root), beforeHead, "HEAD must not move");
+}
+
+test("BLAZE_READONLY=1 node scripts/edit-runner.mjs (bypassing cli.mjs) refuses BEFORE writing the ticket file", () => {
+  const root = board();
+  assertDirectInvocationRefusedAndUntouched(root, "edit-runner.mjs", ["OBA-1", "priority", "high"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_READONLY=1 node scripts/log-runner.mjs (bypassing cli.mjs) refuses BEFORE writing the ticket file", () => {
+  const root = board();
+  assertDirectInvocationRefusedAndUntouched(root, "log-runner.mjs", ["OBA-1", "30"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_READONLY=1 node scripts/new-runner.mjs (bypassing cli.mjs) refuses BEFORE creating a ticket file", () => {
+  const root = board();
+  assertDirectInvocationRefusedAndUntouched(root, "new-runner.mjs", ["--project", "OBA", "--type", "task", "--estimate", "30", "a new ticket"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_READONLY=1 node scripts/resolve-runner.mjs (bypassing cli.mjs) refuses BEFORE writing the ticket file", () => {
+  const root = board();
+  assertDirectInvocationRefusedAndUntouched(root, "resolve-runner.mjs", ["OBA-1", "wont-do"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_READONLY=1 node scripts/link-runner.mjs (bypassing cli.mjs) refuses BEFORE writing the ticket file", () => {
+  const root = board();
+  mkdirSync(join(root, "projects", "OBA", "in-progress"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "in-progress", "OBA-2.md"),
+    "---\nid: OBA-2\ntype: task\nproject: OBA\ntitle: OBA-2\npriority: medium\nestimate: 30\n---\n\nbody\n");
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed OBA-2"]);
+  assertDirectInvocationRefusedAndUntouched(root, "link-runner.mjs", ["OBA-1", "Relates", "OBA-2"]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLAZE_READONLY=1 node scripts/sprint-runner.mjs new (bypassing cli.mjs) refuses BEFORE writing sprints.json", () => {
+  const root = board();
+  assertDirectInvocationRefusedAndUntouched(root, "sprint-runner.mjs", ["new", "Sprint 1", "--start", "2026-01-01", "--end", "2026-01-14"]);
+  assert.ok(!existsSync(join(root, "sprints.json")), "sprints.json must not have been written");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// LOW/related: reindex.mjs has no readonly guard at all — it only writes
+// derived, gitignored caches (doesn't dirty the tracked tree), but it's the
+// one mutates:true verb with zero defence-in-depth for a direct invocation.
+test("BLAZE_READONLY=1 node scripts/reindex.mjs (bypassing cli.mjs) refuses and writes no cache", () => {
+  const root = board();
+  const r = spawnSync(process.execPath, [join(REPO, "scripts", "reindex.mjs")],
+    { cwd: root, env: { ...process.env, BLAZE_READONLY: "1" }, encoding: "utf8" });
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /blaze: read-only mode \(BLAZE_READONLY=1\)/);
+  assert.ok(!existsSync(join(root, ".blaze", "index.json")), "no derived index must have been written");
+  rmSync(root, { recursive: true, force: true });
+});

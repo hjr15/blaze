@@ -256,6 +256,13 @@ reliable identity to derive a queue name from: the op queues to the shared
   may hold another session's work. Pass `--shared` to drain it deliberately,
   or set `BLAZE_SESSION` for a queue of your own. If the fallback is empty,
   it's just the ordinary "nothing to flush" — not an error.
+- `--shared` names the **fallback**, not "my own queue, wherever that
+  resolves to": `blaze commit --shared` drains ONLY
+  `.blaze/pending-commit.jsonl`, unconditionally — even when the caller also
+  has a real session identity (`BLAZE_SESSION` or a harness id), in which
+  case the caller's own per-session queue is left untouched. It is the
+  deliberate-drain escape hatch for the fallback specifically, not a synonym
+  for "flush whatever is mine."
 - A session id that no longer resolves to the same queue (e.g. `BLAZE_SESSION`
   changed between runs) orphans whatever was still queued under the old name —
   `blaze commit` then reports "nothing to flush" but hints at the orphaned
@@ -278,6 +285,13 @@ flushes. Use a git worktree per session when you need hard isolation.
 command and the env var, and never spawns the runner, so nothing is written.
 `board` and `rollup` are unaffected, and any `--help` still works — the point
 is to keep the CLI usable for the inspection itself, not to lock it out.
+
+Every mutating runner also carries its own `BLAZE_READONLY` guard, hoisted
+before it writes anything — so a direct `node scripts/<x>-runner.mjs ...`
+(bypassing the `blaze` CLI entirely) refuses just as cleanly, with no ticket
+file written and no dirty working tree left behind. This is defence-in-depth
+for that bypass path, not a second primary gate — `cli.mjs`'s dispatch check
+above is what a normal `blaze <cmd>` invocation actually hits.
 
 This is the **default for any board-inspection run**: a ticket inventory,
 backlog audit, orphan check, or status report is a read, and should never

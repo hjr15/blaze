@@ -56,7 +56,11 @@ if (cmd === "--help" || cmd === "-h") { printUsage(); process.exit(0); }
 // runner: this fires before the runner ever spawns, so discovering the CLI
 // (`blaze commit --help`) can never fall through to a real mutation.
 if (cmd !== undefined && (rest.includes("--help") || rest.includes("-h"))) {
-  const sub = SUBCOMMANDS[cmd];
+  // Object.hasOwn, not a plain lookup: SUBCOMMANDS[cmd] would otherwise
+  // resolve an inherited Object.prototype key ("constructor", "toString",
+  // "__proto__", ...) to a truthy value, skipping the usage-fallback below
+  // for a command name that collides with a prototype property.
+  const sub = Object.hasOwn(SUBCOMMANDS, cmd) ? SUBCOMMANDS[cmd] : undefined;
   if (!sub) { printUsage(); process.exit(1); }
   console.log(`usage: blaze ${cmd} — ${sub.desc}`);
   process.exit(0);
@@ -65,7 +69,8 @@ if (cmd !== undefined && (rest.includes("--help") || rest.includes("-h"))) {
 // No args behaves exactly like `start` (unchanged): same table entry, same
 // no-args forwarding — there's just no literal "undefined" key to look up.
 const key = cmd === undefined ? "start" : cmd;
-const sub = SUBCOMMANDS[key];
+// Same Object.hasOwn guard as the --help lookup above.
+const sub = Object.hasOwn(SUBCOMMANDS, key) ? SUBCOMMANDS[key] : undefined;
 if (!sub) { printUsage(); process.exit(1); }
 
 // BLZ-121: refuse to even spawn a mutating runner under BLAZE_READONLY — the
