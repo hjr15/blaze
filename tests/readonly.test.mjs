@@ -199,6 +199,10 @@ test("BLAZE_READONLY=1 node scripts/commit-runner.mjs (bypassing cli.mjs) also r
 
   assert.notEqual(r.status, 0);
   assert.match(r.stderr, /read-only mode \(BLAZE_READONLY=1\)/);
+  // The refusal must read as a deliberate decision, not a crash: an agent that
+  // sees a raw stack trace may retry or "work around" it. Same bar as the other
+  // runners' direct-invocation tests.
+  assert.doesNotMatch(r.stderr, /at assertWritable|at Object\.<anonymous>|node:internal/, `expected no raw stack trace, got: ${r.stderr}`);
   assert.doesNotMatch(r.stdout || "", /flushed/);
   assert.deepEqual(snapshotTree(root), beforeTree, "ticket tree must be byte-identical");
   assert.deepEqual(readFileSync(queue), beforeQueue, "queue file must be byte-identical");
@@ -253,6 +257,12 @@ function assertDirectInvocationRefusedAndUntouched(root, runnerFile, args) {
   );
   assert.equal(headOf(root), beforeHead, "HEAD must not move");
 }
+
+test("BLAZE_READONLY=1 node scripts/move-runner.mjs (bypassing cli.mjs) refuses BEFORE writing the ticket file", () => {
+  const root = board();
+  assertDirectInvocationRefusedAndUntouched(root, "move-runner.mjs", ["OBA-1", "in-review"]);
+  rmSync(root, { recursive: true, force: true });
+});
 
 test("BLAZE_READONLY=1 node scripts/edit-runner.mjs (bypassing cli.mjs) refuses BEFORE writing the ticket file", () => {
   const root = board();

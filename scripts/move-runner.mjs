@@ -17,7 +17,14 @@ const cfg = loadConfig({ root: dataRoot });
 // file and merely decline the commit (the exact dirty-tree failure mode this
 // ticket exists to avoid). cli.mjs is still the primary gate for the normal
 // `blaze move` path; this only matters for a direct `node move-runner.mjs`.
-assertWritable("move a ticket");
+// Caught locally so the refusal reads as a deliberate `blaze: …` line, not a
+// raw stack trace an agent may misread as a crash.
+try {
+  assertWritable("move a ticket");
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
 const positional = [];
 for (const a of process.argv.slice(2)) {
   if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }

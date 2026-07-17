@@ -236,8 +236,9 @@ fresh pid, not a stable per-session identity). With neither set, there is no
 reliable identity to derive a queue name from: the op queues to the shared
 `.blaze/pending-commit.jsonl` fallback instead (see below).
 
-- `blaze commit` flushes **only your queue** — a parallel session's queued WIP
+- `blaze commit` flushes **only your queue** — a parallel *session*'s queued WIP
   never rides your commit, whether or not either of you set `BLAZE_SESSION`.
+  (Your own subagents are a different matter — see the queue-unit note below.)
 - `blaze commit --all` sweeps every session queue plus the shared legacy
   fallback (end-of-day / bundler path, e.g. the deployed CronJob's
   sole-committer run); body lines are tagged `[<session>]`. It's the
@@ -249,6 +250,18 @@ reliable identity to derive a queue name from: the op queues to the shared
   stable/readable queue name instead of the harness-derived
   `auto-<harness session id>`; it's never required for isolation when a
   harness id is present.
+- **The queue's unit is the session, not the individual agent — deliberately.**
+  A harness session id is inherited by every subagent that session spawns, so a
+  session *and all its subagents* share one queue. That is the intended
+  contract: the batch unit is the session (one commit per session's batch), and
+  a parent must be able to flush ops its subagents queued — per-agent queues
+  would strand that work under an id nobody ever flushes. The trade-off to know:
+  **a subagent running `blaze commit` also flushes its siblings' in-flight ops.**
+  So treat flushing as the parent session's job (or the bundler's), never a
+  subagent's — and prefer `BLAZE_READONLY=1` for any inspection-only subagent,
+  which removes the question entirely. Give a subagent its own `BLAZE_SESSION`
+  only if you genuinely want its ops kept separate; then remember to flush that
+  queue, or `--all` will.
 - With no identity at all (neither `BLAZE_SESSION` nor a harness id), the
   caller's "own queue" IS the shared fallback — the same file every other
   no-identity caller reads and writes. A plain `blaze commit` then **refuses**

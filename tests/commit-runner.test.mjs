@@ -261,6 +261,59 @@ test("two concurrent session flushes serialize: two clean commits, nothing lost"
   rmSync(root, { recursive: true, force: true });
 });
 
+// BLZ-120 CONTRACT (deliberate, not a bug): the queue's unit is the SESSION,
+// not the individual agent. A harness session id is inherited by every subagent
+// a session spawns, so a session and its subagents share one queue — which is
+// exactly what lets a parent flush ops its subagents queued. Per-agent queues
+// would strand that work under an id nobody flushes (the failure mode that sank
+// the earlier ppid attempt). The cost, pinned here so it stays a decision rather
+// than an accident: one subagent's flush DOES take its siblings' in-flight ops.
+// Flushing is the parent session's job; inspection-only subagents get
+// BLAZE_READONLY=1. If this test ever fails because ops stopped being shared,
+// that is a deliberate contract change — update AGENTS.md's queue-unit note too.
+test("two actors sharing one harness session id share one queue (the session, not the agent, is the batch unit)", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-70.md"), "subagent A's op");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-71.md"), "subagent B's op");
+  // Two distinct actors, same inherited harness id, neither setting BLAZE_SESSION.
+  const shared = `auto-${HARNESS_ID}`;
+  appendEntry(root, { id: "OBA-70", op: "new", message: "OBA-70: from subagent A", files: ["projects/OBA/backlog/OBA-70.md"], ts: "t", session: shared }, shared);
+  appendEntry(root, { id: "OBA-71", op: "new", message: "OBA-71: from subagent B", files: ["projects/OBA/backlog/OBA-71.md"], ts: "t", session: shared }, shared);
+
+  const r = runCommit(root); // a third actor of the same session (the parent) flushes
+
+  assert.equal(r.status, 0);
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-70: from subagent A/);
+  assert.match(body, /OBA-71: from subagent B/); // BOTH — that is the contract
+  assert.deepEqual(readEntries(root, shared), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// The other half of that contract: a DIFFERENT harness session id stays fully
+// isolated. This is the boundary the incident crossed, asserted end-to-end.
+test("a different harness session id is still isolated — cross-session ops never ride the flush", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-72.md"), "mine");
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-73.md"), "other session's wip");
+  const mine = `auto-${HARNESS_ID}`;
+  const theirs = "auto-a-different-session-uuid";
+  appendEntry(root, { id: "OBA-72", op: "new", message: "OBA-72: mine", files: ["projects/OBA/backlog/OBA-72.md"], ts: "t", session: mine }, mine);
+  appendEntry(root, { id: "OBA-73", op: "new", message: "OBA-73: theirs", files: ["projects/OBA/backlog/OBA-73.md"], ts: "t", session: theirs }, theirs);
+
+  runCommit(root); // no BLAZE_SESSION; harness id inherited
+
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-72: mine/);
+  assert.doesNotMatch(body, /OBA-73/); // NEGATIVE: the other session's op untouched
+  assert.equal(readEntries(root, theirs).length, 1); // still queued for its owner
+  const tree = execFileSync("git", ["-C", root, "ls-tree", "-r", "--name-only", "HEAD"], { encoding: "utf8" });
+  assert.doesNotMatch(tree, /OBA-73/);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("REPRO OBA-484: default flush does NOT bundle a foreign session's queued ops", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });

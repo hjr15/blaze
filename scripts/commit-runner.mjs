@@ -39,8 +39,14 @@ for (const a of argv) {
 // reach the git add/commit calls below and actually commit. cli.mjs is the
 // primary gate for the normal `blaze commit` path; this only matters for a
 // direct invocation. Hoisted AFTER flag parsing so `--help`/`-h` (a read)
-// still works under BLAZE_READONLY.
-assertWritable("flush the pending queue");
+// still works under BLAZE_READONLY. Caught locally so the refusal reads as a
+// deliberate `blaze: …` line, not a raw stack trace an agent may misread as a crash.
+try {
+  assertWritable("flush the pending queue");
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
 
 const mySession = sessionId();
 
