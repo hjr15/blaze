@@ -105,6 +105,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         project: u.searchParams.get("project") || "all",
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
+        sprint: u.searchParams.get("sprint") || null,
         projectsDir,
         views,
       });
@@ -115,8 +116,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       const project = u.searchParams.get("project") || "all";
       const focus = u.searchParams.get("focus") || null;
       const flat = u.searchParams.get("flat") === "1";
+      const sprint = u.searchParams.get("sprint") || null;
       const view = u.searchParams.get("view") || "board";
-      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, view, views }));
+      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, sprint, view, views }));
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });

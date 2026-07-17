@@ -24,7 +24,7 @@ const DEFAULTS = {
     reconcile: { enabled: true, intervalSec: 60 },
     groomer: { enabled: true, intervalSec: 300, columns: ["backlog"] },
   },
-  views: { board: true, list: true, live: true, metrics: true, map: true },
+  views: { board: true, list: true, live: true, metrics: true, map: true, gantt: true },
 };
 
 export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.config.json" } = {}) {
