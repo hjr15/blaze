@@ -67,6 +67,9 @@ original board's stamp, not that other board's. Passing an explicit
 - `SCHEMA_VERSION` bumps only for a **breaking** schema-contract change
   (renamed status, changed required-field rule, reshaped hierarchy).
   Additive, backwards-compatible schema features never bump it.
+- BLZ-109's `sprint`/`start`/`due` fields are the first additive change
+  post-ADR-0002 and deliberately do not bump `SCHEMA_VERSION` — see
+  [ADR-0004](decisions/0004-sprints-are-additive-not-a-schema-bump.md).
 - There is deliberately **no migrator today**: at version 1 there is nothing
   to migrate. The PR that first ships a breaking schema change ships its
   migration path. (`blaze migrate` is unrelated — it is the external-tracker

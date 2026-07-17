@@ -3,6 +3,7 @@
 // serve.mjs can shrink to routing + /api/* handlers.
 
 import { randomUUID } from "node:crypto";
+import { dirname } from "node:path";
 import { loadConfig, resolveRoots } from "../config.mjs";
 import { PRIORITIES } from "../model/schema.mjs";
 import { esc } from "./render-lib.mjs";
@@ -10,6 +11,8 @@ import { activeStatuses } from "../model/filters.mjs";
 import { boardModel } from "./data.mjs";
 import { metricsModel } from "../model/metrics.mjs";
 import { graphModel } from "../model/graph.mjs";
+import { ganttModel } from "../model/gantt.mjs";
+import { loadSprints } from "../model/sprints.mjs";
 import { loadTransitions } from "../model/transitions.mjs";
 import * as live from "./live.mjs";
 import * as board from "./board.mjs";
@@ -17,6 +20,7 @@ import * as list from "./list.mjs";
 import * as panel from "./panel.mjs";
 import * as metrics from "./metrics.mjs";
 import * as map from "./map.mjs";
+import * as gantt from "./gantt.mjs";
 
 const cfg = loadConfig({ root: resolveRoots().dataRoot });
 
@@ -27,7 +31,7 @@ export const CSRF = randomUUID();
 // How to render each view's fragment. metrics/map compute their models
 // lazily — only when that view is actually requested — so GET / (which
 // always renders "board") never pays for the metrics/graph walk.
-export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false }) {
+export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false, sprint = null }) {
   switch (name) {
     case "board": return board.render(m);
     case "list": return list.render(m);
@@ -38,10 +42,17 @@ export function renderView(name, { m, pDir, project, now, transitions, focus = n
       return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
     case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, index: m.index, focus }))}</div>`;
+    case "gantt": {
+      // Sprints share the index's data root (dirname of projectsDir), so the
+      // sprint ids on rows and in the registry always agree — never resolveRoots()
+      // (which points at the ENGINE's root, not the served board).
+      const sprints = loadSprints({ root: dirname(pDir) });
+      return `<div class="ganttview">${gantt.render(ganttModel({ index: m.index, sprints, sprint, project, now }))}</div>`;
+    }
     default: return null;
   }
 }
-export const VIEW_NAMES = ["board", "list", "live", "metrics", "map"];
+export const VIEW_NAMES = ["board", "list", "live", "metrics", "map", "gantt"];
 
 // ---- shared fragments (chipbar / crumbs / subline) -------------------------
 // Extracted so pageHtml (full document) and viewEnvelope (JSON fragment for a
@@ -81,7 +92,7 @@ export function sublineHtml(m) {
 
 // ---- JSON fragment envelope (client swap target) ---------------------------
 
-export function viewEnvelope({ project = "all", focus = null, flat = false, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views = cfg.views } = {}) {
+export function viewEnvelope({ project = "all", focus = null, flat = false, sprint = null, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views = cfg.views } = {}) {
   // Clamp: board must always be enabled regardless of what the caller passes
   // (config.mjs already forces this for cfg.views, but a direct caller — e.g.
   // a future supervisor — could pass { board: false } and strand every view).
@@ -91,7 +102,7 @@ export function viewEnvelope({ project = "all", focus = null, flat = false, view
   const m = boardModel(pDir, { project, focus, flat });
   return {
     view,
-    html: renderView(view, { m, pDir, project, now, transitions, focus, flat }),
+    html: renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint }),
     chipbar: chipbarHtml(m),
     crumbs: crumbsHtml(m, project, flat),
     total: m.total,
@@ -105,6 +116,7 @@ export function pageHtml({
   project = "all",
   focus = null,
   flat = false,
+  sprint = null,
   view = "board",
   afterHeader = "",
   beforeBodyEnd = "",
@@ -194,6 +206,8 @@ export function pageHtml({
   html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
   html:not([data-view="map"]) .mapview { display: none; }
   html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
+  html:not([data-view="gantt"]) .ganttview { display: none; }
+  html[data-view="gantt"] .board, html[data-view="gantt"] .list, html[data-view="gantt"] .live { display: none; }
 
   /* ---- board switching (per-workflow) ---- */
   .boardtoggle { display: flex; gap: 2px; padding: 2px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
@@ -237,7 +251,7 @@ export function pageHtml({
   .chip.on .chip-n { color: var(--charcoal); }
   .crumbs { padding: 8px 20px; font-size: 12px; color: #7d8590; background: #0F172Acc; border-bottom: 1px solid #21262d; }
   .crumbs a { color: #58a6ff; text-decoration: none; font-weight: 600; }
-  .crumbs a:hover { text-decoration: underline; }${panel.styles}${metrics.styles}${map.styles}
+  .crumbs a:hover { text-decoration: underline; }${panel.styles}${metrics.styles}${map.styles}${gantt.styles}
 </style>
 </head>
 <body>
@@ -262,7 +276,7 @@ export function pageHtml({
   ${chipbar}
   ${crumbs}
   ${afterHeader}
-  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat })}</div>
+  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint })}</div>
   <script>
     // View toggle (Board / List), persisted to localStorage. Synchronous only —
     // flips data-view + pill state + localStorage. Fetching/swapping the actual
@@ -497,6 +511,7 @@ export function pageHtml({
       live:  { init: function () { ${live.clientScript} } },
       metrics: { init: function () { ${metrics.clientScript} } },
       map:   { init: function () { ${map.clientScript} } },
+      gantt: { init: function () { ${gantt.clientScript} } },
     };
     ${panel.clientScript}
   </script>

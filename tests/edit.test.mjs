@@ -90,6 +90,39 @@ test("applyEdit throws on malformed project.json instead of silently skipping ta
   rmSync(root, { recursive: true, force: true });
 });
 
+test("applyEdit accepts a registered sprint id", () => {
+  const { root, projects } = fixture();
+  writeFileSync(join(root, "sprints.json"), JSON.stringify({
+    active: "S1", sprints: [{ id: "S1", name: "Mid-July", start: "2026-07-13", end: "2026-07-26" }],
+  }));
+  const r = applyEdit(projects, "OBA-1", { sprint: "S1" }, {});
+  assert.equal(r.ok, true, JSON.stringify(r.errors));
+  assert.match(readFileSync(r.file, "utf8"), /sprint: S1/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("applyEdit rejects an unregistered sprint id, no write", () => {
+  const { root, projects } = fixture();
+  const before = readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8");
+  const r = applyEdit(projects, "OBA-1", { sprint: "S9" }, {});
+  assert.equal(r.ok, false);
+  assert.ok(r.errors.some((e) => /sprint 'S9'/.test(e)));
+  assert.equal(readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8"), before);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("applyEdit rejects start after due, no write on the failing patch", () => {
+  const { root, projects } = fixture();
+  const r1 = applyEdit(projects, "OBA-1", { start: "2026-07-25" }, {});
+  assert.equal(r1.ok, true, JSON.stringify(r1.errors));
+  const before = readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8");
+  const r2 = applyEdit(projects, "OBA-1", { due: "2026-07-20" }, {});
+  assert.equal(r2.ok, false);
+  assert.ok(r2.errors.some((e) => /start.*after.*due/i.test(e)));
+  assert.equal(readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8"), before);
+  rmSync(root, { recursive: true, force: true });
+});
+
 test("applyEdit skips taxonomy (no crash) for a ticket with no project field", () => {
   // fixture() always stamps `project: OBA`, so build a project-less ticket directly
   // (mirrors edit-runner-batch.test.mjs's project-less OBA-1 fixture).

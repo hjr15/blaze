@@ -97,3 +97,49 @@ test("viewEnvelope: the map with no focus shows the pick-a-ticket prompt and ign
   assert.match(flat.html, /Select a ticket to see its dependencies/);
   assert.doesNotMatch(flat.html, /data-node-id="M-3"/);
 });
+
+// Gantt reads the sprint registry from dirname(projectsDir), so the fixture is a
+// real data root (root/sprints.json + root/projects/<PROJ>/<status>/).
+function ganttFixture() {
+  const root = mkdtempSync(join(tmpdir(), "blaze-gantt-"));
+  const pDir = join(root, "projects");
+  writeFileSync(join(root, "sprints.json"), JSON.stringify({
+    active: "S1",
+    sprints: [
+      { id: "S1", name: "Mid-July", start: "2026-07-13", end: "2026-07-26" },
+      { id: "S2", name: "Late-July", start: "2026-07-27", end: "2026-08-09" },
+    ],
+  }));
+  mkdirSync(join(pDir, "G", "defined"), { recursive: true });
+  writeFileSync(join(pDir, "G", "defined", "G-1.md"),
+    "---\nid: G-1\ntitle: one\ntype: task\nproject: G\nsprint: S1\nstart: 2026-07-20\ndue: 2026-07-22\n---\nx\n");
+  writeFileSync(join(pDir, "G", "defined", "G-2.md"),
+    "---\nid: G-2\ntitle: two\ntype: task\nproject: G\nsprint: S2\nstart: 2026-07-28\ndue: 2026-07-30\n---\nx\n");
+  return pDir;
+}
+const GANTT_NOW = Date.parse("2026-07-20T00:00:00Z");
+
+test("viewEnvelope: the gantt renders the active sprint's bars by default", () => {
+  const env = viewEnvelope({ view: "gantt", projectsDir: ganttFixture(), now: GANTT_NOW });
+  assert.match(env.html, /class="ganttview"/);
+  assert.match(env.html, /data-sprint="S1"/);
+  assert.match(env.html, /data-id="G-1"/);          // S1 ticket present
+  assert.doesNotMatch(env.html, /data-id="G-2"/);   // S2 ticket out of scope
+});
+
+test("viewEnvelope: an explicit ?sprint= selects a NON-active sprint (S2)", () => {
+  const env = viewEnvelope({ view: "gantt", projectsDir: ganttFixture(), sprint: "S2", now: GANTT_NOW });
+  assert.match(env.html, /class="gpill on"[^>]*data-sprint="S2"/); // S2 marked active
+  assert.match(env.html, /data-id="G-2"/);          // S2 ticket now in scope
+  assert.doesNotMatch(env.html, /data-id="G-1"/);   // S1 ticket out of scope
+});
+
+test("pageHtml({view:'gantt'}) falls back to board when views.gantt is disabled", () => {
+  const html = pageHtml({
+    project: "all",
+    view: "gantt",
+    views: { board: true, list: true, live: true, metrics: true, map: true, gantt: false },
+  });
+  assert.doesNotMatch(html, /class="ganttview"/);
+  assert.match(html, /data-rendered="board"/);
+});

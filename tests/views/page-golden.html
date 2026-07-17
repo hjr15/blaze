@@ -108,6 +108,8 @@
   html[data-view="metrics"] .board, html[data-view="metrics"] .list, html[data-view="metrics"] .live { display: none; }
   html:not([data-view="map"]) .mapview { display: none; }
   html[data-view="map"] .board, html[data-view="map"] .list, html[data-view="map"] .live { display: none; }
+  html:not([data-view="gantt"]) .ganttview { display: none; }
+  html[data-view="gantt"] .board, html[data-view="gantt"] .list, html[data-view="gantt"] .live { display: none; }
 
   /* ---- board switching (per-workflow) ---- */
   .boardtoggle { display: flex; gap: 2px; padding: 2px; background: #161b22; border: 1px solid #21262d; border-radius: 8px; }
@@ -286,6 +288,35 @@
   .node.anchor > rect:first-of-type { stroke-width: 3; }
   .drill { cursor: pointer; }
   .drill-n { fill: #adbac7; font: 600 11px ui-monospace, monospace; }
+  .ganttwrap { padding: 0 20px 20px; }
+  .gantt-picker { display: flex; flex-wrap: wrap; gap: 4px; margin-bottom: 10px; }
+  .gpill {
+    appearance: none; border: 1px solid #21262d; background: #161b22; color: #7d8590;
+    font: inherit; font-size: 12px; font-weight: 600; padding: 4px 10px; border-radius: 6px; cursor: pointer;
+  }
+  .gpill:hover { color: #adbac7; }
+  .gpill.on { color: var(--charcoal); background: var(--blaze-orange); border-color: var(--blaze-orange); }
+  svg.gantt {
+    display: block; width: 100%; height: auto; max-width: 100%;
+    background: #0d1117; border: 1px solid #21262d; border-radius: 10px;
+  }
+  .ganttwrap.no-data svg.gantt { display: none; }
+  .gantt-empty {
+    display: none; color: #444c56; text-align: center; padding: 40px 0;
+    border: 1px dashed #21262d; border-radius: 10px;
+  }
+  .ganttwrap.no-data .gantt-empty { display: block; }
+  .gantt-note { color: #7d8590; font-size: 12px; padding: 4px 0 8px; }
+  .gantt-warn { color: #d29922; }
+  .gantt .grow { cursor: pointer; }
+  .gantt .grow:focus { outline: none; }
+  .gantt .grow:focus .bar { stroke-width: 2.5; }
+  .gantt .gid { fill: #c9d1d9; font: 12px ui-sans-serif, system-ui, sans-serif; }
+  .gantt .ghead-label { fill: #adbac7; font: 600 11px ui-sans-serif, system-ui, sans-serif; }
+  .gantt .gaxis { fill: #7d8590; font: 10px ui-monospace, monospace; text-anchor: middle; }
+  .gantt .gday { stroke: #1b2129; stroke-width: 1; }
+  .gantt .gweek { stroke: #2d333b; }
+  .gantt .today { stroke: var(--blaze-orange); stroke-width: 1.5; stroke-dasharray: 4 3; }
 </style>
 </head>
 <body>
@@ -302,6 +333,7 @@
       <button type="button" class="pill" data-view="live">Live</button>
       <button type="button" class="pill" data-view="metrics">Metrics</button>
       <button type="button" class="pill" data-view="map">Map</button>
+      <button type="button" class="pill" data-view="gantt">Gantt</button>
     </div>
     <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
@@ -821,6 +853,31 @@
       var g = e.target.closest("[data-node-id]");
       if (g && window.blazePanel) { e.preventDefault(); window.blazePanel.open(g.getAttribute("data-node-id")); }
     });
+  })();
+ } },
+      gantt: { init: function () { 
+  (function () {
+    var root = document.querySelector(".ganttwrap");
+    if (!root) return;
+    root.querySelectorAll(".gpill").forEach(function (b) {
+      b.addEventListener("click", function () {
+        var q = new URLSearchParams(location.search);
+        q.set("sprint", b.getAttribute("data-sprint"));
+        location.search = q.toString();
+      });
+    });
+    var svg = root.querySelector("svg.gantt");
+    if (svg) {
+      svg.addEventListener("click", function (e) {
+        var g = e.target.closest("[data-id]");
+        if (g && window.blazePanel) window.blazePanel.open(g.getAttribute("data-id"));
+      });
+      svg.addEventListener("keydown", function (e) {
+        if (e.key !== "Enter" && e.key !== " ") return;
+        var g = e.target.closest("[data-id]");
+        if (g && window.blazePanel) { e.preventDefault(); window.blazePanel.open(g.getAttribute("data-id")); }
+      });
+    }
   })();
  } },
     };

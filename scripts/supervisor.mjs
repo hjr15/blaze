@@ -169,6 +169,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
         project: u.searchParams.get("project") || "all",
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
+        sprint: u.searchParams.get("sprint") || null,
       });
       if (!envelope) {
         res.writeHead(404, { "content-type": "application/json" });
@@ -189,6 +190,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
         project: u.searchParams.get("project") || "all",
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
+        sprint: u.searchParams.get("sprint") || null,
         view: u.searchParams.get("view") || "board",
         afterHeader: CONTROLS_HTML,
         beforeBodyEnd: ACTIVITY_SCRIPT,

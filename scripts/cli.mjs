@@ -16,6 +16,7 @@ switch (cmd) {
   case "reconcile": r = node("reconcile.mjs", rest); break;
   case "groom": r = node("loops/groomer.mjs", rest); break;
   case "new": r = node("new-runner.mjs", rest); break;
+  case "sprint": r = node("sprint-runner.mjs", rest); break;
   case "reindex": r = node("reindex.mjs", rest); break;
   case "move": r = node("move-runner.mjs", rest); break;
   case "edit": r = node("edit-runner.mjs", rest); break;
@@ -26,7 +27,7 @@ switch (cmd) {
   case "rollup": r = node("rollup-runner.mjs", rest); break;
   case "migrate": r = node("migrate-runner.mjs", rest); break;
   default:
-    console.log("usage: blaze [start|board|reconcile|groom|new|reindex|move|edit|link|resolve|log|commit|rollup|migrate]");
+    console.log("usage: blaze [start|board|reconcile|groom|new|sprint|reindex|move|edit|link|resolve|log|commit|rollup|migrate]");
     process.exit(1);
 }
 process.exit(r.status ?? 0);
