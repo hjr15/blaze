@@ -13,56 +13,20 @@ with frontmatter declaring its `title`, `type`, and `format`.
 ## Embedding elsewhere
 
 To render a diagram inline in `README.md`, `AGENTS.md`, or another doc, wrap a
-synced copy in marker comments:
+synced copy in marker comments — point `DIAGRAM:BEGIN` at the canonical file and
+leave the body to the sync tool:
+
+> **Illustration only — not a live embed.** The block below shows the *markup
+> shape*. `scripts/embed_diagrams.py` deliberately skips this file, so this snippet
+> is frozen and its mermaid body is a stand-in, **not** a synced copy of any real
+> diagram. Real embeds live in `README.md` / `AGENTS.md` etc. and are kept in sync
+> from `docs/diagrams/`.
 
 ````markdown
-<!-- DIAGRAM:BEGIN docs/diagrams/architecture.md -->
+<!-- DIAGRAM:BEGIN docs/diagrams/<slug>.md -->
 ```mermaid
 flowchart TB
-    CLI["blaze CLI (scripts/cli.mjs)"]
-
-    subgraph Runners["CLI verbs → *-runner.mjs"]
-        direction LR
-        R1["new · move · edit<br/>resolve · log"]
-        R2["commit · rollup<br/>reindex · migrate"]
-    end
-
-    subgraph Sup["blaze start → supervisor.mjs"]
-        direction TB
-        Rec["reconcile loop<br/>(deterministic: git/PR → status)"]
-        Groom["groomer loop<br/>(agentic: spawns agentCommand)"]
-    end
-
-    subgraph Board["blaze board → serve.mjs (web board)"]
-        direction TB
-        Views["views/: page (switcher)<br/>board · list · live · metrics · map · panel"]
-        API["GET /api/{hash,sync,live,panel,reconcile-preview}<br/>POST /api/{move,edit,resolve,log,ac}"]
-    end
-
-    subgraph Model["scripts/model/ — one rules home"]
-        direction LR
-        M1["schema · workflows · rules<br/>move-plan · ticket · taxonomy"]
-        M2["index · rollup · time · ids<br/>activity · transitions · search · filters · metrics · links"]
-    end
-
-    subgraph Data["Data repo (own git history)"]
-        direction TB
-        Files["projects/&lt;KEY&gt;/&lt;status&gt;/&lt;id&gt;-slug.md<br/>(source of truth)"]
-        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)<br/>pending/&lt;session&gt;.jsonl + fallback queue<br/>commit.lock/ (write coordination)"]
-    end
-
-    CLI --> Runners
-    CLI --> Sup
-    CLI --> Board
-    Sup --> Board
-
-    Runners --> Model
-    Rec --> Model
-    Board --> Model
-    Model --> Files
-    Model --> Caches
-    Rec -. reads branches/PRs .-> Ext["mirrored code repos (git + gh)"]
-    Groom -. edits ticket .md .-> Files
+    A["canonical diagram in docs/diagrams/<slug>.md"] --> B["rendered inline here by GitHub"]
 ```
 <!-- DIAGRAM:END -->
 ````
