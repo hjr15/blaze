@@ -19,10 +19,12 @@ import { execFileSync } from "node:child_process";
 import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
-// BLZ-120: with BLAZE_SESSION unset (as in this whole test file), queued ops
-// auto-derive their own session from ppid rather than landing in the shared
-// legacy fallback — read from that queue, not the bare `readEntries(root)`.
-const ownQueue = (root) => readEntries(root, sessionId({}));
+// BLZ-120: with BLAZE_SESSION unset (as in this whole test file), the
+// serve.mjs handlers call commitOrQueue in-process, so sessionId() resolves
+// against this same process's real env — compute it the same way here rather
+// than hard-coding a shape, so this stays correct whether or not
+// CLAUDE_CODE_SESSION_ID happens to be set in the ambient test environment.
+const ownQueue = (root) => readEntries(root, sessionId(process.env));
 
 function repo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-sb-"));

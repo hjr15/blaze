@@ -34,11 +34,14 @@ test("batch mode: blaze edit queues, no commit", () => {
   const before = head(root);
   const env = { ...process.env };
   delete env.BLAZE_SESSION;
+  // Pin a harness id so the queue name is deterministic regardless of
+  // whatever ambient CLAUDE_CODE_SESSION_ID the outer test process happens to
+  // have — unset BLAZE_SESSION + a present harness id auto-derives a queue
+  // keyed to that id (not process.ppid, which changes per invocation).
+  env.CLAUDE_CODE_SESSION_ID = "test-harness-uuid";
   execFileSync(process.execPath, [join(root, "scripts", "edit-runner.mjs"), "OBA-1", "priority", "high"], { cwd: root, env });
   assert.equal(head(root), before, "HEAD must not move in batch mode");
-  // Unset BLAZE_SESSION auto-derives a queue from ppid — execFileSync has no
-  // intermediate shell, so the child's ppid IS this test process's pid.
-  const entries = readEntries(root, `auto-${process.pid}`);
+  const entries = readEntries(root, "auto-test-harness-uuid");
   assert.equal(entries.length, 1);
   assert.equal(entries[0].op, "edit");
   assert.match(entries[0].message, /^OBA-1: edit priority$/);

@@ -37,8 +37,10 @@ test("batch mode appends to the ledger and makes no commit", () => {
   assert.deepEqual(r, { ok: true, queued: true });
   const after = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   assert.equal(before, after, "HEAD must not move in batch mode");
-  // Unset BLAZE_SESSION now auto-derives a queue from ppid — not the legacy fallback.
-  const entries = readEntries(root, sessionId({}));
+  // Whatever commitOrQueue's own sessionId() resolved to for this process's
+  // real env (harness-derived if CLAUDE_CODE_SESSION_ID is set, else null ->
+  // the fallback) — compute it the same way, rather than hard-coding a shape.
+  const entries = readEntries(root, sessionId(process.env));
   assert.equal(entries.length, 1);
   assert.equal(entries[0].message, "OBA-1: create task");
   assert.deepEqual(entries[0].files, ["projects/OBA/backlog/OBA-1.md"]); // root-relative
@@ -78,22 +80,49 @@ test("batch mode routes to the session queue and stamps session", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-// BLZ-120: unset BLAZE_SESSION must NOT land in the shared legacy fallback —
-// it gets its own auto-derived queue (and a matching `session` field), same
-// as an explicit session would.
-test("batch mode without BLAZE_SESSION queues to an auto-derived session, not the legacy fallback", () => {
+// BLZ-120: unset BLAZE_SESSION but a harness id present must NOT land in the
+// shared legacy fallback — it gets its own auto-derived queue (and a matching
+// `session` field), same as an explicit session would. CLAUDE_CODE_SESSION_ID
+// is pinned to a known value so this is deterministic regardless of whatever
+// ambient env the test happens to run under.
+test("batch mode without BLAZE_SESSION but with a harness id queues to an auto-derived session, not the legacy fallback", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
-  const prev = process.env.BLAZE_SESSION;
+  const prevSession = process.env.BLAZE_SESSION;
+  const prevHarness = process.env.CLAUDE_CODE_SESSION_ID;
   delete process.env.BLAZE_SESSION;
+  process.env.CLAUDE_CODE_SESSION_ID = "test-harness-uuid";
   try {
     commitOrQueue({ root, mode: "batch", op: "new", id: "X-2", message: "X-2: create", files: [join(root, "projects/X/backlog/X-2.md")] });
   } finally {
-    if (prev !== undefined) process.env.BLAZE_SESSION = prev;
+    if (prevSession !== undefined) process.env.BLAZE_SESSION = prevSession; else delete process.env.BLAZE_SESSION;
+    if (prevHarness !== undefined) process.env.CLAUDE_CODE_SESSION_ID = prevHarness; else delete process.env.CLAUDE_CODE_SESSION_ID;
   }
   assert.deepEqual(readEntries(root), []); // legacy fallback untouched
-  const auto = sessionId({});
+  const auto = "auto-test-harness-uuid";
   const entries = readEntries(root, auto);
   assert.equal(entries.length, 1);
   assert.equal(entries[0].session, auto);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-120: neither BLAZE_SESSION nor a harness id present — sessionId() is
+// null, so batch mode restores the pre-BLZ-120 behaviour for non-harness
+// callers: queue to the shared legacy fallback (no `session` field stamped).
+test("batch mode with neither BLAZE_SESSION nor a harness id queues to the shared legacy fallback", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-coq-"));
+  const prevSession = process.env.BLAZE_SESSION;
+  const prevHarness = process.env.CLAUDE_CODE_SESSION_ID;
+  delete process.env.BLAZE_SESSION;
+  delete process.env.CLAUDE_CODE_SESSION_ID;
+  try {
+    commitOrQueue({ root, mode: "batch", op: "new", id: "X-3", message: "X-3: create", files: [join(root, "projects/X/backlog/X-3.md")] });
+  } finally {
+    if (prevSession !== undefined) process.env.BLAZE_SESSION = prevSession;
+    if (prevHarness !== undefined) process.env.CLAUDE_CODE_SESSION_ID = prevHarness;
+  }
+  const entries = readEntries(root); // the shared fallback, no session arg
+  assert.equal(entries.length, 1);
+  assert.equal(entries[0].id, "X-3");
+  assert.ok(!("session" in entries[0]), "no session field stamped when there is no identity");
   rmSync(root, { recursive: true, force: true });
 });

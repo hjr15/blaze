@@ -6,17 +6,18 @@ import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, rea
 import { join, dirname } from "node:path";
 import { assertWritable } from "./readonly.mjs";
 
-// Sanitized BLAZE_SESSION, falling back to an id auto-derived from ppid when
-// unset/empty-after-sanitize. Sessions isolate by default: BLAZE_SESSION is
-// only an override for a stable/readable queue name, never the thing that
-// enables isolation — this never returns null, so nothing new is ever
-// written to the legacy shared fallback (still read by `--all`). ppid (not
-// pid/sid) is used because it's stable across separate invocations within
-// one harness/terminal session and IS that session's process — the `ppid`
-// param exists purely so tests can inject a value instead of forking.
-export function sessionId(env = process.env, ppid = process.ppid) {
-  const clean = (env.BLAZE_SESSION || "").replace(/[^A-Za-z0-9._-]/g, "");
-  return clean !== "" ? clean : `auto-${ppid}`;
+// Sanitized BLAZE_SESSION, else an id derived from the agent harness's own
+// session id — stable across invocations and inherited by every descendant,
+// unlike process.ppid (a fresh shell per command => a fresh pid). null when
+// neither exists: no reliable identity, so `blaze commit` refuses to drain the
+// shared fallback without --shared rather than risk taking a foreign session's ops.
+export function sessionId(env = process.env) {
+  const clean = (v) => (v || "").replace(/[^A-Za-z0-9._-]/g, "");
+  const explicit = clean(env.BLAZE_SESSION);
+  if (explicit !== "") return explicit;
+  const harness = clean(env.CLAUDE_CODE_SESSION_ID);
+  if (harness !== "") return `auto-${harness}`;
+  return null;
 }
 
 export function ledgerPath(root, session = null) {

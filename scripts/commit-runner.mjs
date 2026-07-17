@@ -1,8 +1,12 @@
 // scripts/commit-runner.mjs — `blaze commit`: drain the caller's OWN pending
-// queue (session-keyed via BLAZE_SESSION, or auto-derived from ppid when
-// unset) into ONE commit, staging only recorded files. `--all` sweeps every
-// queue plus the legacy shared fallback (the bundler / end-of-day path). A
-// failed flush keeps the queue files.
+// queue (session-keyed via BLAZE_SESSION, or auto-derived from the harness's
+// own session id when unset) into ONE commit, staging only recorded files.
+// `--all` sweeps every queue plus the legacy shared fallback (the bundler /
+// end-of-day CronJob path). With no session identity at all (neither
+// BLAZE_SESSION nor a harness id), the caller's "own queue" IS the shared
+// fallback — refuse to drain it silently unless `--all` or `--shared` says
+// so, since it may hold another session's work. A failed flush keeps the
+// queue files.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
@@ -13,11 +17,13 @@ import { acquireLock, releaseLock } from "./commit-lock.mjs";
 const { dataRoot } = resolveRoots();
 const argv = process.argv.slice(2);
 let all = false;
+let shared = false;
 for (const a of argv) {
   switch (a) {
     case "--all": all = true; break;
+    case "--shared": shared = true; break;
     case "--help": case "-h":
-      console.log("usage: blaze commit [--all]");
+      console.log("usage: blaze commit [--all] [--shared]");
       process.exit(0);
     default:
       console.error(`unknown flag: ${a}`);
@@ -25,18 +31,37 @@ for (const a of argv) {
   }
 }
 
+const mySession = sessionId();
+
+// No BLAZE_SESSION and no harness id: mySession is null, so the caller's own
+// queue is the shared fallback file — the same one every other no-identity
+// caller reads and writes. Draining it here without --shared risks taking a
+// foreign session's queued work as if it were this caller's own. --all (the
+// CronJob's sole-committer path, which sweeps the fallback by design) and
+// --shared (an explicit, deliberate drain) both bypass this.
+if (!all && !shared && mySession === null) {
+  const fallback = readForDrain(dataRoot, null);
+  if (fallback.entries.length > 0) {
+    console.error(
+      `blaze commit: no session identity (BLAZE_SESSION unset) — refusing to drain the shared fallback queue (${fallback.entries.length} op(s)); it may hold another session's work. Set BLAZE_SESSION, or pass --shared to drain it deliberately.`,
+    );
+    process.exit(1);
+  }
+}
+
 // Which queues to drain: every existing queue with --all, else only the caller's own.
-const targets = all ? listQueues(dataRoot) : [{ session: sessionId() }];
+const targets = all ? listQueues(dataRoot) : [{ session: mySession }];
 const drained = targets
   .map((q) => ({ session: q.session, ...readForDrain(dataRoot, q.session) }))
   .filter((q) => q.entries.length > 0);
 const entries = drained.flatMap((q) => q.entries.map((e) => ({ ...e, session: q.session })));
 
 if (entries.length === 0) {
-  // Signpost the orphan case: a harness restart auto-derives a NEW ppid, so
-  // the previous run's queue is silently abandoned under its old id. Without
-  // this hint "nothing to flush" reads as "nothing was ever queued" — name
-  // what's actually sitting there so it isn't mystifying.
+  // Signpost the orphan case: a session id that no longer resolves to the
+  // same queue (e.g. BLAZE_SESSION changed between runs) silently abandons
+  // whatever was queued under the old name. Without this hint "nothing to
+  // flush" reads as "nothing was ever queued" — name what's actually sitting
+  // there so it isn't mystifying.
   if (!all) {
     const own = targets[0].session;
     const others = listQueues(dataRoot)
@@ -46,7 +71,8 @@ if (entries.length === 0) {
     if (others.length > 0) {
       const total = others.reduce((n, q) => n + q.count, 0);
       const names = others.map((q) => (q.session === null ? "legacy" : q.session)).join(", ");
-      console.error(`blaze commit: nothing to flush for session ${own} — ${total} op(s) queued in other sessions (${names}); use --all to sweep them`);
+      const ownLabel = own === null ? "the shared queue (no session identity)" : `session ${own}`;
+      console.error(`blaze commit: nothing to flush for ${ownLabel} — ${total} op(s) queued in other sessions (${names}); use --all to sweep them`);
     }
   }
   console.log("blaze commit: nothing to flush");
@@ -85,7 +111,7 @@ const files = [...new Set(entries.flatMap((e) => e.files))].filter(
   (f) => existsSync(join(dataRoot, f)) || isTracked(f),
 );
 
-const lock = acquireLock(dataRoot, { session: sessionId() });
+const lock = acquireLock(dataRoot, { session: mySession });
 if (!lock.ok) {
   console.error(`blaze commit: commit.lock held by pid ${lock.owner?.pid ?? "?"} (session ${lock.owner?.session ?? "?"}) — try again shortly; ledger kept`);
   process.exit(1);

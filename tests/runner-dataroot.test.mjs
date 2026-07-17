@@ -81,14 +81,18 @@ test("batch mode queues into the DATA repo's .blaze ledger", () => {
   writeFileSync(join(data, "blaze.config.json"),
     JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], commitMode: "batch" }));
   const before = head(data);
-  execFileSync(process.execPath, [join(eng, "scripts", "move-runner.mjs"), "ZZZ-1", "in-review"],
-    { cwd: eng, env: { ...process.env, BLAZE_PROJECTS_DIR: join(data, "projects") } });
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: join(data, "projects") };
+  delete env.BLAZE_SESSION;
+  // Pin a harness id so the queue name is deterministic regardless of
+  // whatever ambient CLAUDE_CODE_SESSION_ID the outer test process happens to
+  // have — unset BLAZE_SESSION + a present harness id auto-derives a queue
+  // keyed to that id (not process.ppid, which changes per invocation).
+  env.CLAUDE_CODE_SESSION_ID = "test-harness-uuid";
+  execFileSync(process.execPath, [join(eng, "scripts", "move-runner.mjs"), "ZZZ-1", "in-review"], { cwd: eng, env });
   assert.equal(head(data), before, "batch mode must not commit");
-  // Unset BLAZE_SESSION auto-derives a queue from ppid — execFileSync has no
-  // intermediate shell, so the child's ppid IS this test process's pid — and
-  // the queue still lives under the DATA repo's .blaze/, not the engine's.
+  // The queue still lives under the DATA repo's .blaze/, not the engine's.
   const ledger = readdirSync(join(data, ".blaze", "pending"));
-  assert.ok(ledger.includes(`auto-${process.pid}.jsonl`), ".blaze ledger must live in the data repo");
+  assert.ok(ledger.includes("auto-test-harness-uuid.jsonl"), ".blaze ledger must live in the data repo");
   rmSync(data, { recursive: true, force: true });
   rmSync(eng, { recursive: true, force: true });
 });

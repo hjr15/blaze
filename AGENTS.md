@@ -226,29 +226,40 @@ also stored on the index (`idx.warnings`) for any consumer that wants them.
 
 ### Sessions (parallel agents on one board)
 
-Sessions isolate **by default** — you don't need to set anything for two
-agents on the same board to stay out of each other's way. Batch ops queue to
-`.blaze/pending/<session>.jsonl`, where `<session>` is `BLAZE_SESSION` if set,
-else `auto-<ppid>` (stable for the life of one harness/terminal session, since
-it's derived from that session's own process, not from the always-changing
-per-invocation pid).
+Sessions isolate **by default** when the caller has a session identity — you
+don't need to set anything for two agents on the same board to stay out of
+each other's way. Batch ops queue to `.blaze/pending/<session>.jsonl`, where
+`<session>` is `BLAZE_SESSION` if set, else `auto-<harness session id>` when
+the agent harness exposes one (stable across invocations and inherited by
+every descendant, unlike `process.ppid` — a fresh shell per command means a
+fresh pid, not a stable per-session identity). With neither set, there is no
+reliable identity to derive a queue name from: the op queues to the shared
+`.blaze/pending-commit.jsonl` fallback instead (see below).
 
 - `blaze commit` flushes **only your queue** — a parallel session's queued WIP
   never rides your commit, whether or not either of you set `BLAZE_SESSION`.
 - `blaze commit --all` sweeps every session queue plus the shared legacy
-  fallback (end-of-day / bundler path); body lines are tagged `[<session>]`.
-  It's the quiescent/end-of-day sweep: ops a session appends mid-sweep survive
-  (each queue clears exactly the bytes it read, so a late append isn't lost),
-  but prefer running it when sessions are idle.
-- `BLAZE_SESSION` is now purely an optional override — set it for a
-  stable/readable queue name (e.g. your harness session UUID) instead of the
-  auto-derived `auto-<ppid>`; it's never required for isolation.
-- The shared `.blaze/pending-commit.jsonl` fallback is legacy-only: nothing
-  new is ever queued there, but existing entries stay readable and are still
-  drained by `--all`.
-- A harness restart gets a new ppid, orphaning whatever was still queued under
-  the old `auto-<ppid>` — `blaze commit` then reports "nothing to flush" but
-  hints at the orphaned queue by name and count on stderr; `--all` recovers it.
+  fallback (end-of-day / bundler path, e.g. the deployed CronJob's
+  sole-committer run); body lines are tagged `[<session>]`. It's the
+  quiescent/end-of-day sweep: ops a session appends mid-sweep survive (each
+  queue clears exactly the bytes it read, so a late append isn't lost), but
+  prefer running it when sessions are idle. `--all` is unchanged by any of
+  this — it always drains the fallback, no `--shared` needed.
+- `BLAZE_SESSION` is purely an optional override — set it for a
+  stable/readable queue name instead of the harness-derived
+  `auto-<harness session id>`; it's never required for isolation when a
+  harness id is present.
+- With no identity at all (neither `BLAZE_SESSION` nor a harness id), the
+  caller's "own queue" IS the shared fallback — the same file every other
+  no-identity caller reads and writes. A plain `blaze commit` then **refuses**
+  to drain it if it holds anything, naming the op count on stderr, since it
+  may hold another session's work. Pass `--shared` to drain it deliberately,
+  or set `BLAZE_SESSION` for a queue of your own. If the fallback is empty,
+  it's just the ordinary "nothing to flush" — not an error.
+- A session id that no longer resolves to the same queue (e.g. `BLAZE_SESSION`
+  changed between runs) orphans whatever was still queued under the old name —
+  `blaze commit` then reports "nothing to flush" but hints at the orphaned
+  queue by name and count on stderr; `--all` recovers it.
 
 Concurrent commits serialize on an advisory `.blaze/commit.lock/` (stale locks
 from dead processes are stolen automatically). If your flush is behind an

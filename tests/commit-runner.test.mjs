@@ -23,17 +23,70 @@ function gitRepo() {
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
   return root;
 }
+// A harness id pinned by default so "own queue" tests are deterministic
+// regardless of whatever ambient CLAUDE_CODE_SESSION_ID the outer test
+// process happens to run under. Pass harnessId: null to simulate genuinely
+// no session identity (neither BLAZE_SESSION nor a harness id).
+const HARNESS_ID = "test-harness-uuid";
+
 // Invoke the temp repo's OWN copy of the runner. cwdSub (a relative subdir)
 // proves ROOT is script-relative, not cwd-based.
-function runCommit(root, cwdSub, { session, args = [] } = {}) {
+function runCommit(root, cwdSub, { session, args = [], harnessId = HARNESS_ID } = {}) {
   const runner = join(root, "scripts", "commit-runner.mjs");
   const cwd = cwdSub ? join(root, cwdSub) : root;
   const env = { ...process.env, ...(session ? { BLAZE_SESSION: session } : {}) };
   if (!session) delete env.BLAZE_SESSION;
+  if (harnessId === null) delete env.CLAUDE_CODE_SESSION_ID;
+  else env.CLAUDE_CODE_SESSION_ID = harnessId;
   const r = spawnSync(process.execPath, [runner, ...args], { cwd, env, encoding: "utf8" });
   return { stdout: r.stdout, stderr: r.stderr, status: r.status };
 }
 const headOf = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+// THE REGRESSION TEST: an agent harness spawns a FRESH SHELL per command, so
+// node's process.ppid (the invoking shell's pid) is a different value on
+// every call — it is NOT a stable per-session identity. Queue an op from one
+// shell, then flush from a genuinely different shell (proven by capturing
+// each shell's own $$, not just asserting on behaviour), and require the op
+// to be found. A `sessionId()` keyed off ppid can't pass this: the two shells
+// have different pids by construction, so it looks for a queue that was
+// never written under that name.
+test("REGRESSION: an op queued from one shell is found and flushed by `blaze commit` run from a different shell", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-99.md"), "queued from another shell");
+  // A harness session id, stable across shells — but BLAZE_SESSION explicitly
+  // unset (empty-after-sanitize) so sessionId() must fall through to it.
+  const env = { ...process.env, CLAUDE_CODE_SESSION_ID: "test-harness-uuid", BLAZE_SESSION: "" };
+
+  writeFileSync(join(root, "queue-op.mjs"), `
+    import { appendEntry, sessionId } from "./scripts/pending-ledger.mjs";
+    const session = sessionId();
+    appendEntry(process.cwd(), {
+      id: "OBA-99", op: "new", message: "OBA-99: create task",
+      files: ["projects/OBA/backlog/OBA-99.md"], ts: "t",
+      ...(session ? { session } : {}),
+    }, session);
+  `);
+
+  const before = headOf(root);
+
+  // Shell 1: queue the op. $$ captured from INSIDE the shell script is that
+  // shell's own pid — the exact value node's process.ppid takes on below.
+  execFileSync("/bin/sh", ["-c", "echo $$ > shell1.pid && node queue-op.mjs"], { cwd: root, env });
+  // Shell 2: a genuinely different shell process flushes.
+  const shell2Out = execFileSync("/bin/sh", ["-c", "echo $$ > shell2.pid && node scripts/commit-runner.mjs"], { cwd: root, env, encoding: "utf8" });
+
+  const shell1Pid = readFileSync(join(root, "shell1.pid"), "utf8").trim();
+  const shell2Pid = readFileSync(join(root, "shell2.pid"), "utf8").trim();
+  assert.notEqual(shell1Pid, shell2Pid, "test is vacuous unless the two shells really had different pids");
+
+  assert.match(shell2Out, /flushed 1 op/, `commit-runner said: ${JSON.stringify(shell2Out)}`);
+  assert.notEqual(headOf(root), before, "HEAD must advance — the queued op was found and committed");
+  const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
+  assert.match(body, /OBA-99: create task/);
+  rmSync(root, { recursive: true, force: true });
+});
 
 test("empty ledger is a friendly no-op", () => {
   const root = gitRepo();
@@ -45,9 +98,11 @@ test("empty ledger is a friendly no-op", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-// BLZ-120: a harness restart auto-derives a NEW ppid, orphaning the previous
-// run's queue under its old id. Without this hint, "nothing to flush" reads
-// as "nothing was ever queued" — signpost what's actually still sitting there.
+// BLZ-120: a session id that changes between runs (e.g. BLAZE_SESSION set
+// differently, or a harness id that isn't the one that queued the op)
+// orphans the previous run's queue under its old name. Without this hint,
+// "nothing to flush" reads as "nothing was ever queued" — signpost what's
+// actually still sitting there.
 test("orphan hint: own queue empty but other sessions hold ops — named on stderr", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
@@ -57,10 +112,10 @@ test("orphan hint: own queue empty but other sessions hold ops — named on stde
   appendEntry(root, { id: "OBA-41", op: "new", message: "OBA-41: legacy", files: ["projects/OBA/backlog/OBA-41.md"], ts: "t" });
 
   const before = headOf(root);
-  const r = runCommit(root); // BLAZE_SESSION unset — own auto-<ppid> queue is empty
+  const r = runCommit(root); // BLAZE_SESSION unset — own auto-<harness-id> queue is empty
 
   assert.match(r.stdout, /nothing to flush/);
-  assert.match(r.stderr, /nothing to flush for session auto-\d+ — 2 op\(s\) queued in other sessions \(legacy, auto-1200\); use --all to sweep them/);
+  assert.match(r.stderr, /nothing to flush for session auto-test-harness-uuid — 2 op\(s\) queued in other sessions \(legacy, auto-1200\); use --all to sweep them/);
   assert.equal(headOf(root), before); // still a no-op — hint is informational only
   assert.equal(readEntries(root, "auto-1200").length, 1); // untouched
   assert.equal(readEntries(root).length, 1);              // untouched
@@ -72,7 +127,7 @@ test("no orphan hint when the caller's own queue has ops (the normal flush path)
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-42.md"), "mine");
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-43.md"), "someone else");
-  const mySession = `auto-${process.pid}`;
+  const mySession = "auto-test-harness-uuid"; // matches runCommit()'s default pinned harness id
   appendEntry(root, { id: "OBA-42", op: "new", message: "OBA-42: mine", files: ["projects/OBA/backlog/OBA-42.md"], ts: "t", session: mySession }, mySession);
   appendEntry(root, { id: "OBA-43", op: "new", message: "OBA-43: other", files: ["projects/OBA/backlog/OBA-43.md"], ts: "t", session: "s1" }, "s1");
 
@@ -226,20 +281,20 @@ test("REPRO OBA-484: default flush does NOT bundle a foreign session's queued op
   rmSync(root, { recursive: true, force: true });
 });
 
-// BLZ-120: an unset-session flush must isolate to the caller's own queue.
-// Before this fix, EVERY unset-session caller shared ONE queue (session id
-// null routed both write and read to the fallback file) — so an op parked
-// there from a different origin rode along on whoever flushed first.
+// BLZ-120: an unset-session flush (but with a harness id present) must
+// isolate to the caller's own queue. Before this fix, EVERY unset-session
+// caller shared ONE queue (session id null routed both write and read to the
+// fallback file) — so an op parked there from a different origin rode along
+// on whoever flushed first.
 test("REPRO BLZ-120: an unset-session flush must not pull ops parked in the shared fallback from a different origin", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-30.md"), "mine");
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-31.md"), "a different origin's op");
 
-  // My own op, unset BLAZE_SESSION: seeded at the path an auto-derived session
-  // queues to. spawnSync below has no intermediate shell, so the child's
-  // ppid IS this test process's pid — the exact queue it will read from.
-  const mySession = `auto-${process.pid}`;
+  // My own op, unset BLAZE_SESSION: seeded at the path the harness-derived
+  // session (matching runCommit()'s default pinned harness id) queues to.
+  const mySession = "auto-test-harness-uuid";
   appendEntry(
     root,
     { id: "OBA-30", op: "new", message: "OBA-30: mine", files: ["projects/OBA/backlog/OBA-30.md"], ts: "t", session: mySession },
@@ -272,10 +327,10 @@ test("unset session drains its own auto-derived queue, leaving the legacy fallba
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-3.md"), "legacy leftover");
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-5.md"), "mine");
   appendEntry(root, { id: "OBA-3", op: "new", message: "OBA-3: legacy", files: ["projects/OBA/backlog/OBA-3.md"], ts: "t" });
-  const mySession = `auto-${process.pid}`; // execFileSync/spawnSync child's ppid IS this process's pid
+  const mySession = "auto-test-harness-uuid"; // matches runCommit()'s default pinned harness id
   appendEntry(root, { id: "OBA-5", op: "new", message: "OBA-5: mine", files: ["projects/OBA/backlog/OBA-5.md"], ts: "t", session: mySession }, mySession);
 
-  runCommit(root); // BLAZE_SESSION unset
+  runCommit(root); // BLAZE_SESSION unset (harness id still present)
 
   const body = execFileSync("git", ["-C", root, "log", "-1", "--format=%b"], { encoding: "utf8" });
   assert.match(body, /OBA-5: mine/);
@@ -352,6 +407,7 @@ test("--help exits 0, prints usage, and leaves the queue + HEAD untouched", () =
 
   assert.equal(r.status, 0);
   assert.match(r.stdout, /usage/i);
+  assert.match(r.stdout, /--shared/); // BLZ-120: --shared must stay listed in commit-runner's own usage line
   assert.deepEqual(readFileSync(queue), beforeBytes, "queue file must be byte-identical");
   assert.equal(headOf(root), beforeHead, "HEAD must not move");
   rmSync(root, { recursive: true, force: true });
@@ -374,5 +430,75 @@ test("--bogus exits non-zero, leaves the queue + HEAD untouched", () => {
   assert.match(r.stderr, /unknown flag: --bogus/);
   assert.deepEqual(readFileSync(queue), beforeBytes, "queue file must be byte-identical");
   assert.equal(headOf(root), beforeHead, "HEAD must not move");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-120: with neither BLAZE_SESSION nor a harness id, sessionId() is null —
+// the caller's "own queue" IS the shared fallback, the same file any other
+// no-identity caller reads and writes. Refuse to drain it silently: it may
+// hold another session's work.
+test("no session identity: refuses to drain a non-empty shared fallback without --shared", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  for (const n of ["OBA-50", "OBA-51", "OBA-52"]) writeFileSync(join(root, "projects", "OBA", "backlog", `${n}.md`), n);
+  appendEntry(root, { id: "OBA-50", op: "new", message: "OBA-50: x", files: ["projects/OBA/backlog/OBA-50.md"], ts: "t" });
+  appendEntry(root, { id: "OBA-51", op: "new", message: "OBA-51: y", files: ["projects/OBA/backlog/OBA-51.md"], ts: "t" });
+  appendEntry(root, { id: "OBA-52", op: "new", message: "OBA-52: z", files: ["projects/OBA/backlog/OBA-52.md"], ts: "t" });
+  const queue = ledgerPath(root);
+  const beforeBytes = readFileSync(queue);
+  const beforeHead = headOf(root);
+
+  const r = runCommit(root, null, { harnessId: null }); // neither BLAZE_SESSION nor a harness id
+
+  assert.equal(r.status, 1);
+  assert.match(
+    r.stderr,
+    /blaze commit: no session identity \(BLAZE_SESSION unset\) — refusing to drain the shared fallback queue \(3 op\(s\)\); it may hold another session's work\. Set BLAZE_SESSION, or pass --shared to drain it deliberately\./,
+  );
+  assert.deepEqual(readFileSync(queue), beforeBytes, "queue file must be byte-identical — nothing drained");
+  assert.equal(headOf(root), beforeHead, "HEAD must not move");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("--shared drains the shared fallback deliberately when there's no session identity", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-53.md"), "x");
+  appendEntry(root, { id: "OBA-53", op: "new", message: "OBA-53: x", files: ["projects/OBA/backlog/OBA-53.md"], ts: "t" });
+
+  const r = runCommit(root, null, { harnessId: null, args: ["--shared"] });
+
+  assert.match(r.stdout, /flushed 1 op/, `commit-runner said: ${JSON.stringify(r)}`);
+  assert.deepEqual(readEntries(root), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// The refusal only fires when there's actually something to lose — an empty
+// fallback with no identity is just the ordinary no-op, not an error.
+test("no session identity but an empty fallback: plain nothing-to-flush, not a refusal", () => {
+  const root = gitRepo();
+  const before = headOf(root);
+
+  const r = runCommit(root, null, { harnessId: null });
+
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /nothing to flush/);
+  assert.doesNotMatch(r.stderr, /refusing to drain/);
+  assert.equal(headOf(root), before);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-120: `--all` (the CronJob's sole-committer path) must bypass the
+// refusal too — it sweeps the fallback by design, with no --shared needed,
+// even when the caller itself has no session identity at all.
+test("--all drains the fallback even with no session identity at all (no refusal)", () => {
+  const root = gitRepo();
+  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-54.md"), "x");
+  appendEntry(root, { id: "OBA-54", op: "new", message: "OBA-54: x", files: ["projects/OBA/backlog/OBA-54.md"], ts: "t" });
+
+  const r = runCommit(root, null, { harnessId: null, args: ["--all"] });
+
+  assert.match(r.stdout, /flushed 1 op/, `commit-runner said: ${JSON.stringify(r)}`);
   rmSync(root, { recursive: true, force: true });
 });
