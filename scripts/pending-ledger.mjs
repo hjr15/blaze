@@ -4,6 +4,7 @@
 // for callers with no session set. All gitignored; drained by `blaze commit`.
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { assertWritable } from "./readonly.mjs";
 
 // Sanitized BLAZE_SESSION, falling back to an id auto-derived from ppid when
 // unset/empty-after-sanitize. Sessions isolate by default: BLAZE_SESSION is
@@ -25,6 +26,10 @@ export function ledgerPath(root, session = null) {
 }
 
 export function appendEntry(root, entry, session = null) {
+  // BLZ-121 defence-in-depth (see commit-or-queue.mjs's guard for the
+  // rationale) — this is currently commitOrQueue's only caller, but guarding
+  // here too covers any future direct caller without relying on that.
+  assertWritable("append to the pending ledger");
   const path = ledgerPath(root, session);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(entry) + "\n"); // append-mode: atomic for the small single-line writes this ledger produces

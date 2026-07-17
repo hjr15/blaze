@@ -83,6 +83,15 @@ flowchart TB
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
+  `cli.mjs`'s `SUBCOMMANDS` table is the single dispatch point (no separate
+  switch) and the only place a verb's `mutates` classification lives:
+  `BLAZE_READONLY=1` (AGENTS.md "Read-only mode") makes it refuse to spawn any
+  mutating runner, gated here rather than inside `commit-or-queue.mjs` — every
+  mutating verb writes/renames the ticket file before it ever reaches a commit
+  decision, so declining only the commit would leave a relocated-but-uncommitted
+  file in a shared tree. `commit-or-queue.mjs`, `pending-ledger.mjs`, and
+  `serve.mjs`'s `/api/*` handlers carry the same check as defence-in-depth for
+  callers that reach them by some path other than `cli.mjs` dispatch.
 - **Model (`scripts/model/`)** — the single home for all rules: `schema`,
   `workflows`, `rules`, `move-plan`, `ticket`, `taxonomy` (validation +
   transitions); `index`, `rollup`, `time`, `ids`, `activity`, `transitions`,

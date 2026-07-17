@@ -259,6 +259,25 @@ Working-tree cross-talk is tolerated by design: sessions sharing one checkout
 see each other's on-disk ticket moves in `git status` until the owning session
 flushes. Use a git worktree per session when you need hard isolation.
 
+### Read-only mode
+
+`BLAZE_READONLY=1` makes `blaze` refuse every mutating subcommand
+(`new`/`move`/`edit`/`link`/`resolve`/`log`/`commit`/`reindex`/`sprint`/
+`reconcile`/`groom`/`start`) at dispatch — it exits non-zero naming the
+command and the env var, and never spawns the runner, so nothing is written.
+`board` and `rollup` are unaffected, and any `--help` still works — the point
+is to keep the CLI usable for the inspection itself, not to lock it out.
+
+This is the **default for any board-inspection run**: a ticket inventory,
+backlog audit, orphan check, or status report is a read, and should never
+carry the ambient authority to relocate or rewrite a shared ledger that other
+sessions may have uncommitted work in. Set it before running one of these,
+not just when you remember to.
+
+It's an env guard against an agent *reaching* for a mutating verb through the
+normal CLI/API surfaces (including a running `blaze board`'s write API) — not
+a sandbox. Code that calls `node:fs` directly still bypasses it.
+
 ## Querying the board
 
 ```bash

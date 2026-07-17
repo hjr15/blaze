@@ -20,6 +20,7 @@ import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
 import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
+import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
@@ -122,6 +123,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
+      // BLZ-121 defence-in-depth, checked here (before any apply* call below,
+      // not just inside commitOrQueue) and as a plain 403 rather than a thrown
+      // assertWritable(): this handler has no wrapping try/catch, and an
+      // uncaught throw inside an async request handler would crash the whole
+      // board server for every connected session, not just refuse one write.
+      if (isReadonly()) return json(403, { errors: ["blaze: read-only mode (BLAZE_READONLY=1) — refusing to write"] });
 
       let payload;
       try { payload = await readJson(req); } catch { return json(400, { errors: ["bad json body"] }); }

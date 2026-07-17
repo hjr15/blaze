@@ -96,5 +96,19 @@ test("blaze <unknown> still prints usage and exits non-zero (unchanged behaviour
 // server/loop and must never be spawned from a test.
 test("blaze with no args still dispatches to supervisor.mjs (source-level guard)", () => {
   const src = readFileSync(cli, "utf8");
-  assert.match(src, /case undefined:\s*\n\s*case "start": r = node\(SUBCOMMANDS\.start\.file\)/);
+  assert.match(src, /cmd === undefined \? "start" : cmd/);
+});
+
+// BLZ-121: SUBCOMMANDS is the single dispatch table (the switch was collapsed
+// into it) — every entry must declare mutates:boolean so BLAZE_READONLY has a
+// complete, source-verifiable classification to gate on. Evaluated as a plain
+// object literal (strings/booleans only, no imports) — never executes cli.mjs.
+test("every SUBCOMMANDS entry declares mutates: boolean", () => {
+  const src = readFileSync(cli, "utf8");
+  const m = src.match(/const SUBCOMMANDS = (\{[\s\S]*?\n\});/);
+  assert.ok(m, "SUBCOMMANDS table not found in cli.mjs");
+  const SUBCOMMANDS = new Function(`return ${m[1]}`)();
+  for (const [name, entry] of Object.entries(SUBCOMMANDS)) {
+    assert.equal(typeof entry.mutates, "boolean", `${name}: mutates must be a boolean`);
+  }
 });

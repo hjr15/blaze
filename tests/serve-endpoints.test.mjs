@@ -1,7 +1,7 @@
 // tests/serve-endpoints.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -100,6 +100,28 @@ test("POST /api/move rejects an illegal skip 422 and writes nothing", async () =
   // defined <- in-review is a backward skip that is not a legal forward transition target
   const res = await post(base, "/api/move", { id: "OBA-1", to: "in-progress" });
   assert.equal(res.status, 422);
+  assert.equal(execFileSync("git", ["-C", fx.root, "status", "--porcelain"], { encoding: "utf8" }).trim(), "");
+  server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+// BLZ-121: the board's own write API is a bypass of cli.mjs's primary gate
+// (a long-running `blaze board` process reads BLAZE_READONLY once at request
+// time, not at cli.mjs dispatch), so it needs its own check — placed before
+// applyMove runs (not just inside commitOrQueue), otherwise the ticket file
+// would relocate before the write was refused. See serve.mjs's POST handler.
+test("POST /api/move under BLAZE_READONLY is refused 403 and writes nothing", async () => {
+  const fx = repo();
+  const { server, base } = await boot(fx);
+  const before = readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"));
+  process.env.BLAZE_READONLY = "1";
+  try {
+    const res = await post(base, "/api/move", { id: "OBA-1", to: "done" });
+    assert.equal(res.status, 403);
+    assert.match((await res.json()).errors[0], /read-only mode \(BLAZE_READONLY=1\)/);
+  } finally {
+    delete process.env.BLAZE_READONLY;
+  }
+  assert.deepEqual(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md")), before, "ticket must not have moved or been rewritten");
   assert.equal(execFileSync("git", ["-C", fx.root, "status", "--porcelain"], { encoding: "utf8" }).trim(), "");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
