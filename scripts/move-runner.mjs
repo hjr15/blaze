@@ -3,13 +3,34 @@
 import { applyMove } from "./move.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below:
 // a guard meant to stop the engine driving a board it may misread must not
 // half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
 const cfg = loadConfig({ root: dataRoot });
-const [id, toStatus] = process.argv.slice(2);
+// BLZ-121 defence-in-depth, hoisted for the same reason as the guard above:
+// commitOrQueue's own BLAZE_READONLY guard fires too late here — applyMove
+// below writes/renames the ticket file via direct node:fs calls before
+// commitOrQueue is ever reached, so a guard only there would relocate the
+// file and merely decline the commit (the exact dirty-tree failure mode this
+// ticket exists to avoid). cli.mjs is still the primary gate for the normal
+// `blaze move` path; this only matters for a direct `node move-runner.mjs`.
+// Caught locally so the refusal reads as a deliberate `blaze: …` line, not a
+// raw stack trace an agent may misread as a crash.
+try {
+  assertWritable("move a ticket");
+} catch (e) {
+  console.error(e.message);
+  process.exit(1);
+}
+const positional = [];
+for (const a of process.argv.slice(2)) {
+  if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+  positional.push(a);
+}
+const [id, toStatus] = positional;
 if (!id || !toStatus) { console.error("usage: blaze move <id> <status>"); process.exit(1); }
 
 const today = new Date().toISOString().slice(0, 10);

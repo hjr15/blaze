@@ -13,21 +13,31 @@ const CACHE = join(dataRoot, ".migration-cache");
 const MIGRATION = join(dataRoot, "migration");
 
 const argv = process.argv.slice(2);
-const mode = argv.includes("--live") ? "live" : "dry-run";
-const projIdx = argv.indexOf("--project");
-if (projIdx !== -1 && argv[projIdx + 1] === undefined) {
+let mode = "dry-run", enableMerges = false, projectSeen = false, project;
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  switch (a) {
+    case "--live": mode = "live"; break;
+    case "--dry-run": mode = "dry-run"; break;
+    case "--merge": enableMerges = true; break;
+    case "--project": projectSeen = true; project = argv[++i]; break;
+    default:
+      console.error(`unknown flag: ${a}`);
+      process.exit(1);
+  }
+}
+if (projectSeen && project === undefined) {
   console.error("usage: blaze migrate [--dry-run|--live] [--project KEY] [--merge]");
   process.exit(1);
 }
 // No explicit --project: fall back to blaze.config.json's configured projects
 // list rather than a hardcoded guess.
 const configuredKeys = loadConfig({ root: dataRoot }).projects;
-const keys = projIdx !== -1 ? [argv[projIdx + 1]] : configuredKeys;
+const keys = projectSeen ? [project] : configuredKeys;
 if (keys.length === 0) {
   console.error("usage: blaze migrate [--dry-run|--live] --project KEY [--merge] (no projects configured in blaze.config.json)");
   process.exit(1);
 }
-const enableMerges = argv.includes("--merge");
 
 if (mode === "dry-run") {
   const { auditMd, ledger, stats } = runDryRun({ cacheDir: CACHE, keys, detectMerges: enableMerges });

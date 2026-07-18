@@ -219,9 +219,16 @@ export function reconcile({
 // --- CLI ----------------------------------------------------------------------
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const args = process.argv.slice(2);
-  const apply = args.includes("--apply");
-  const quiet = args.includes("--quiet");
-  const r = reconcile({ fetch: args.includes("--fetch"), commit: apply, push: false, dryRun: !apply });
+  let apply = false, fetchFlag = false, quiet = false;
+  for (const a of args) {
+    switch (a) {
+      case "--apply": apply = true; break;
+      case "--fetch": fetchFlag = true; break;
+      case "--quiet": quiet = true; break;
+      default: console.error(`unknown flag: ${a}`); process.exit(1);
+    }
+  }
+  const r = reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply });
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   if (r.standalone) { if (!quiet) console.log("reconcile: no projects configured — nothing to reconcile."); process.exit(0); }
   if (!r.changes.length) { if (!quiet) console.log("reconcile: already in sync — nothing to do."); process.exit(0); }

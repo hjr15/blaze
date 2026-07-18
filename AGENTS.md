@@ -226,19 +226,60 @@ also stored on the index (`idx.warnings`) for any consumer that wants them.
 
 ### Sessions (parallel agents on one board)
 
-Export a unique `BLAZE_SESSION` (letters, digits, `._-`) at session start — e.g.
-your harness session UUID. Batch ops then queue to your own
-`.blaze/pending/<session>.jsonl`, and:
+Sessions isolate **by default** when the caller has a session identity — you
+don't need to set anything for two agents on the same board to stay out of
+each other's way. Batch ops queue to `.blaze/pending/<session>.jsonl`, where
+`<session>` is `BLAZE_SESSION` if set, else `auto-<harness session id>` when
+the agent harness exposes one (stable across invocations and inherited by
+every descendant, unlike `process.ppid` — a fresh shell per command means a
+fresh pid, not a stable per-session identity). With neither set, there is no
+reliable identity to derive a queue name from: the op queues to the shared
+`.blaze/pending-commit.jsonl` fallback instead (see below).
 
-- `blaze commit` flushes **only your queue** — a parallel session's queued WIP
-  never rides your commit.
-- `blaze commit --all` sweeps every session queue plus the shared fallback
-  (end-of-day / bundler path); body lines are tagged `[<session>]`. It's the
+- `blaze commit` flushes **only your queue** — a parallel *session*'s queued WIP
+  never rides your commit, whether or not either of you set `BLAZE_SESSION`.
+  (Your own subagents are a different matter — see the queue-unit note below.)
+- `blaze commit --all` sweeps every session queue plus the shared legacy
+  fallback (end-of-day / bundler path, e.g. the deployed CronJob's
+  sole-committer run); body lines are tagged `[<session>]`. It's the
   quiescent/end-of-day sweep: ops a session appends mid-sweep survive (each
   queue clears exactly the bytes it read, so a late append isn't lost), but
-  prefer running it when sessions are idle.
-- No `BLAZE_SESSION` → the shared `.blaze/pending-commit.jsonl` fallback, exactly
-  the pre-0.4 behavior.
+  prefer running it when sessions are idle. `--all` is unchanged by any of
+  this — it always drains the fallback, no `--shared` needed.
+- `BLAZE_SESSION` is purely an optional override — set it for a
+  stable/readable queue name instead of the harness-derived
+  `auto-<harness session id>`; it's never required for isolation when a
+  harness id is present.
+- **The queue's unit is the session, not the individual agent — deliberately.**
+  A harness session id is inherited by every subagent that session spawns, so a
+  session *and all its subagents* share one queue. That is the intended
+  contract: the batch unit is the session (one commit per session's batch), and
+  a parent must be able to flush ops its subagents queued — per-agent queues
+  would strand that work under an id nobody ever flushes. The trade-off to know:
+  **a subagent running `blaze commit` also flushes its siblings' in-flight ops.**
+  So treat flushing as the parent session's job (or the bundler's), never a
+  subagent's — and prefer `BLAZE_READONLY=1` for any inspection-only subagent,
+  which removes the question entirely. Give a subagent its own `BLAZE_SESSION`
+  only if you genuinely want its ops kept separate; then remember to flush that
+  queue, or `--all` will.
+- With no identity at all (neither `BLAZE_SESSION` nor a harness id), the
+  caller's "own queue" IS the shared fallback — the same file every other
+  no-identity caller reads and writes. A plain `blaze commit` then **refuses**
+  to drain it if it holds anything, naming the op count on stderr, since it
+  may hold another session's work. Pass `--shared` to drain it deliberately,
+  or set `BLAZE_SESSION` for a queue of your own. If the fallback is empty,
+  it's just the ordinary "nothing to flush" — not an error.
+- `--shared` names the **fallback**, not "my own queue, wherever that
+  resolves to": `blaze commit --shared` drains ONLY
+  `.blaze/pending-commit.jsonl`, unconditionally — even when the caller also
+  has a real session identity (`BLAZE_SESSION` or a harness id), in which
+  case the caller's own per-session queue is left untouched. It is the
+  deliberate-drain escape hatch for the fallback specifically, not a synonym
+  for "flush whatever is mine."
+- A session id that no longer resolves to the same queue (e.g. `BLAZE_SESSION`
+  changed between runs) orphans whatever was still queued under the old name —
+  `blaze commit` then reports "nothing to flush" but hints at the orphaned
+  queue by name and count on stderr; `--all` recovers it.
 
 Concurrent commits serialize on an advisory `.blaze/commit.lock/` (stale locks
 from dead processes are stolen automatically). If your flush is behind an
@@ -248,6 +289,32 @@ the engine itself never pushes.
 Working-tree cross-talk is tolerated by design: sessions sharing one checkout
 see each other's on-disk ticket moves in `git status` until the owning session
 flushes. Use a git worktree per session when you need hard isolation.
+
+### Read-only mode
+
+`BLAZE_READONLY=1` makes `blaze` refuse every mutating subcommand
+(`new`/`move`/`edit`/`link`/`resolve`/`log`/`commit`/`reindex`/`sprint`/
+`reconcile`/`groom`/`start`) at dispatch — it exits non-zero naming the
+command and the env var, and never spawns the runner, so nothing is written.
+`board` and `rollup` are unaffected, and any `--help` still works — the point
+is to keep the CLI usable for the inspection itself, not to lock it out.
+
+Every mutating runner also carries its own `BLAZE_READONLY` guard, hoisted
+before it writes anything — so a direct `node scripts/<x>-runner.mjs ...`
+(bypassing the `blaze` CLI entirely) refuses just as cleanly, with no ticket
+file written and no dirty working tree left behind. This is defence-in-depth
+for that bypass path, not a second primary gate — `cli.mjs`'s dispatch check
+above is what a normal `blaze <cmd>` invocation actually hits.
+
+This is the **default for any board-inspection run**: a ticket inventory,
+backlog audit, orphan check, or status report is a read, and should never
+carry the ambient authority to relocate or rewrite a shared ledger that other
+sessions may have uncommitted work in. Set it before running one of these,
+not just when you remember to.
+
+It's an env guard against an agent *reaching* for a mutating verb through the
+normal CLI/API surfaces (including a running `blaze board`'s write API) — not
+a sandbox. Code that calls `node:fs` directly still bypasses it.
 
 ## Querying the board
 

@@ -77,11 +77,23 @@ flowchart TB
   `log`, `commit`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
   `*-runner.mjs` that wraps a pure `apply*`/model core and then commits via
   `commit-or-queue.mjs` (per-op commit, or a queued entry in `batch` mode —
-  session-keyed to `.blaze/pending/<BLAZE_SESSION>.jsonl` since v0.4.0, so
-  `blaze commit` flushes only the caller's queue and `--all` sweeps them all).
+  session-keyed to `.blaze/pending/<session>.jsonl` since v0.4.0, where
+  `<session>` is `BLAZE_SESSION` if set, else auto-derived from the agent
+  harness's own session id, else the shared legacy fallback when neither is
+  present — so `blaze commit` flushes only the caller's queue, refusing the
+  fallback without `--shared`, and `--all` sweeps them all unconditionally).
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
+  `cli.mjs`'s `SUBCOMMANDS` table is the single dispatch point (no separate
+  switch) and the only place a verb's `mutates` classification lives:
+  `BLAZE_READONLY=1` (AGENTS.md "Read-only mode") makes it refuse to spawn any
+  mutating runner, gated here rather than inside `commit-or-queue.mjs` — every
+  mutating verb writes/renames the ticket file before it ever reaches a commit
+  decision, so declining only the commit would leave a relocated-but-uncommitted
+  file in a shared tree. `commit-or-queue.mjs`, `pending-ledger.mjs`, and
+  `serve.mjs`'s `/api/*` handlers carry the same check as defence-in-depth for
+  callers that reach them by some path other than `cli.mjs` dispatch.
 - **Model (`scripts/model/`)** — the single home for all rules: `schema`,
   `workflows`, `rules`, `move-plan`, `ticket`, `taxonomy` (validation +
   transitions); `index`, `rollup`, `time`, `ids`, `activity`, `transitions`,

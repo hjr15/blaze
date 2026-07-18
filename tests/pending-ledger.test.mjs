@@ -105,10 +105,33 @@ test("readEntries tolerates a trailing partial/corrupt line", () => {
 
 import { sessionId, listQueues } from "../scripts/pending-ledger.mjs";
 
-test("sessionId: set, dirty, empty, unset", () => {
+// BLZ-120 (corrected): process.ppid is NOT a stable per-session identity — an
+// agent harness spawns a fresh shell per command, so node's ppid (the
+// invoking shell's pid) differs on every call. sessionId() now derives from
+// the harness's own CLAUDE_CODE_SESSION_ID instead (stable across shells,
+// inherited by every descendant), and returns null when neither BLAZE_SESSION
+// nor a harness id is present — there is no reliable identity to auto-derive
+// from, so the caller falls through to the shared legacy fallback (guarded by
+// commit-runner.mjs's --shared refusal, see tests/commit-runner.test.mjs).
+test("sessionId: set and sanitized BLAZE_SESSION values pass through unchanged", () => {
   assert.equal(sessionId({ BLAZE_SESSION: "alpha-1" }), "alpha-1");
   assert.equal(sessionId({ BLAZE_SESSION: "a b/c$!" }), "abc");
-  assert.equal(sessionId({ BLAZE_SESSION: "$$/ " }), null);
+});
+
+test("sessionId: empty-after-sanitize BLAZE_SESSION falls through to the harness id", () => {
+  assert.equal(sessionId({ BLAZE_SESSION: "$$/ ", CLAUDE_CODE_SESSION_ID: "harness-1" }), "auto-harness-1");
+  assert.equal(sessionId({ CLAUDE_CODE_SESSION_ID: "harness-1" }), "auto-harness-1");
+});
+
+test("sessionId: the harness id is sanitized the same way as BLAZE_SESSION", () => {
+  assert.equal(sessionId({ CLAUDE_CODE_SESSION_ID: "a b/c$!" }), "auto-abc");
+});
+
+test("sessionId: an explicit BLAZE_SESSION always wins over the harness-derived fallback", () => {
+  assert.equal(sessionId({ BLAZE_SESSION: "explicit", CLAUDE_CODE_SESSION_ID: "harness-1" }), "explicit");
+});
+
+test("sessionId: neither BLAZE_SESSION nor a harness id present — null (no reliable identity)", () => {
   assert.equal(sessionId({}), null);
 });
 

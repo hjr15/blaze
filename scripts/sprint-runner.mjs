@@ -5,6 +5,7 @@
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { loadSprints, saveSprints, addSprint, setActive, formatSprintList } from "./model/sprints.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below —
@@ -14,6 +15,12 @@ const cfg = loadConfig({ root: dataRoot });
 const [sub, ...rest] = process.argv.slice(2);
 
 try {
+  // BLZ-121 defence-in-depth, hoisted above the saveSprints() writes below —
+  // see move-runner.mjs for the rationale (commitOrQueue's own guard fires
+  // too late, after sprints.json is already written). The whole try/catch
+  // here already turns a thrown `blaze: …` Error into a clean message, so
+  // this doesn't need its own catch.
+  assertWritable("create/activate a sprint");
   if (sub === "new") {
     const opts = { name: undefined, start: undefined, end: undefined };
     const positional = [];
@@ -39,10 +46,18 @@ try {
     if (!c.ok) { console.error(`blaze sprint: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
     console.log(`created ${id}${c.queued ? " (queued for blaze commit)" : ""}`);
   } else if (sub === "list") {
+    for (const a of rest) {
+      if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+    }
     const registry = loadSprints({ root: dataRoot });
     console.log(formatSprintList(registry));
   } else if (sub === "active") {
-    const [id] = rest;
+    const positional = [];
+    for (const a of rest) {
+      if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
+      positional.push(a);
+    }
+    const [id] = positional;
     if (!id) { console.error("usage: blaze sprint active <id>"); process.exit(1); }
     const before = loadSprints({ root: dataRoot });
     const registry = setActive(before, id);

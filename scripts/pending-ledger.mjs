@@ -4,11 +4,20 @@
 // for callers with no session set. All gitignored; drained by `blaze commit`.
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
 import { join, dirname } from "node:path";
+import { assertWritable } from "./readonly.mjs";
 
-// Sanitized BLAZE_SESSION, or null when unset/empty-after-sanitize.
+// Sanitized BLAZE_SESSION, else an id derived from the agent harness's own
+// session id — stable across invocations and inherited by every descendant,
+// unlike process.ppid (a fresh shell per command => a fresh pid). null when
+// neither exists: no reliable identity, so `blaze commit` refuses to drain the
+// shared fallback without --shared rather than risk taking a foreign session's ops.
 export function sessionId(env = process.env) {
-  const clean = (env.BLAZE_SESSION || "").replace(/[^A-Za-z0-9._-]/g, "");
-  return clean === "" ? null : clean;
+  const clean = (v) => (v || "").replace(/[^A-Za-z0-9._-]/g, "");
+  const explicit = clean(env.BLAZE_SESSION);
+  if (explicit !== "") return explicit;
+  const harness = clean(env.CLAUDE_CODE_SESSION_ID);
+  if (harness !== "") return `auto-${harness}`;
+  return null;
 }
 
 export function ledgerPath(root, session = null) {
@@ -18,6 +27,10 @@ export function ledgerPath(root, session = null) {
 }
 
 export function appendEntry(root, entry, session = null) {
+  // BLZ-121 defence-in-depth (see commit-or-queue.mjs's guard for the
+  // rationale) — this is currently commitOrQueue's only caller, but guarding
+  // here too covers any future direct caller without relying on that.
+  assertWritable("append to the pending ledger");
   const path = ledgerPath(root, session);
   mkdirSync(dirname(path), { recursive: true });
   appendFileSync(path, JSON.stringify(entry) + "\n"); // append-mode: atomic for the small single-line writes this ledger produces
