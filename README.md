@@ -20,6 +20,16 @@ Blaze is plain files, all the way down:
 It's built AI-first: an agent drives the tracker with the file tools it already has,
 or with the `blaze` CLI. No API client, no auth, no SDK required either way.
 
+## Documentation
+
+New here? The **[user guide](docs/guide/)** covers Blaze end to end:
+[Why Blaze](docs/guide/why-blaze.md) ·
+[How it works](docs/guide/how-it-works.md) ·
+[Getting started](docs/guide/getting-started.md) ·
+[Command reference](docs/guide/commands.md) ·
+[The schema](docs/guide/schema.md) ·
+[Driving Blaze with an AI agent](docs/guide/driving-with-an-ai-agent.md).
+
 ## Install
 
 ```bash
@@ -118,7 +128,7 @@ small commit per ticket, scoped to the files it actually touched.
 | `blaze reindex` | Rebuild/validate the on-disk index (warns on malformed or dangling `links` entries) |
 | `blaze commit` | Flush queued ops into one commit (`commitMode: batch`) |
 | `blaze migrate [--dry-run\|--live] [--project <KEY>]` | Import tickets from an external tracker via a reviewed disposition ledger (`--project` optional — falls back to `blaze.config.json`'s `projects` list) |
-| `blaze board` | Serve the read-only kanban view |
+| `blaze board` | Serve the read/write dashboard (kanban + `/api/*` write endpoints) |
 
 See [`AGENTS.md`](AGENTS.md) for the full contract — types, workflows, the git join
 key, and how an agent should drive the board.
@@ -158,7 +168,7 @@ existing projects with no taxonomy see no change. Separately,
 warning — never a hard failure — when the corresponding field is left empty;
 pass `--reason "<why blank>"` to suppress it.
 
-A `views` block toggles which of Board / List / Live / Metrics / Map are
+A `views` block toggles which of Board / List / Live / Metrics / Map / Gantt are
 available — every view defaults to `true`, so an existing config sees no
 change. Set one to `false` (e.g. `"views": { "map": false }`) to hide its
 pill and 404 its fragment endpoint until it's ready; `board` can't be

@@ -60,7 +60,7 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
   }));
   const rollup = rollUp(idx);
 
-  // --- additive: per-workflow boards (INF-475). columns above stays the single
+  // --- additive: per-workflow boards. columns above stays the single
   // source metrics/chips/header read; boards is a second view over the same rows.
   const boardsDef = deriveBoards({ types: TYPES, workflows: WORKFLOWS });
   const boardOf = (t) => {

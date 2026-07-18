@@ -14,8 +14,8 @@ agentic **groomer** loop that drives a coding agent (`claude -p` by default) to
 triage, label, dedupe, and flesh out tickets — committing every change as a small,
 revertable git commit. No database, no login, no API keys inside Blaze.
 
-It is a clean, generalized extraction of the private `carelia-tracker` tool, with an
-app shell and the groomer loop added. `carelia-tracker` stays exactly as it is and
+It is a clean, generalized extraction of a private predecessor tool, with an
+app shell and the groomer loop added. That predecessor stays exactly as it is and
 is not touched by this work.
 
 ## Why it exists / the agent angle
@@ -31,8 +31,8 @@ the reconcile engine shells out to `git` and `gh`.
 
 - A generic, publishable OSS app (MIT) anyone can clone and run as either a
   standalone markdown kanban or a live mirror of their own code repo.
-- Everything Carelia-specific (the `DEV` key, the `carelia-web` sibling path, the
-  NDIS/shifts label taxonomy) becomes configuration.
+- Everything specific to the predecessor (its hardcoded project key, its sibling
+  code-repo path, its domain-specific label taxonomy) becomes configuration.
 - Preserve the original's character: **zero runtime dependencies**, Node built-ins
   only, "the directory is the status" as the single rule. The groomer adds no
   dependency — it spawns an external agent CLI the same way reconcile spawns git/gh.
@@ -48,21 +48,21 @@ the reconcile engine shells out to `git` and `gh`.
   auth. (A provider seam is possible later; not built now.)
 - No MCP server; no second git provider (GitHub via `gh` only, with a clean
   `provider` seam); no database; no login.
-- No migration of `carelia-tracker` onto Blaze, and no changes to `carelia-web`.
-  carelia-web appears only as the README's worked example.
+- No migration of the predecessor tool onto Blaze, and no changes to the code repo
+  it mirrors. That mirror appears only as the README's worked example.
 
-## Relationship to carelia-tracker (decided: clean extraction)
+## Relationship to its private predecessor (decided: clean extraction)
 
 ```
-blaze/ (public, generic, app + loops)     carelia-tracker/ (private, unchanged)
-   key configurable                            DEV hardcoded
-   codeRepo configurable          │            mirrors carelia-web as today
+blaze/ (public, generic, app + loops)     predecessor/ (private, unchanged)
+   key configurable                            key hardcoded
+   codeRepo configurable          │            mirrors its code repo as today
    supervisor + groomer + web app │            scripts only, no groomer
    published to GitHub            │            you keep using it as-is
         └────── no link, they diverge ──────────┘
 ```
 
-Blaze is built fresh from the *shape* of carelia-tracker (its scripts and docs are
+Blaze is built fresh from the *shape* of that predecessor (its scripts and docs are
 the reference), not by mutating it in place. No private ticket history enters the
 public repo.
 
@@ -108,7 +108,7 @@ public repo.
    groomer still runs (it grooms the board regardless of any code repo).
 2. **Mirror mode** (`codeRepo` set) — reconcile reads the code repo's branches + PRs
    and drives `in-progress → in-review → done` automatically, joining on the
-   `<key>-<n>` in branch names. The carelia-web walkthrough is the README's example.
+   `<key>-<n>` in branch names. The mirror walkthrough is the README's example.
 
 ## The groomer loop (the new agentic part)
 
@@ -184,7 +184,7 @@ single-board design; see `AGENTS.md` / `README.md` for the current
 ```
 blaze/
 ├── README.md            # generic rewrite; "why this shape" + agent pitch +
-│                        #   the carelia-web mirror walkthrough as the example
+│                        #   the mirror walkthrough as the example
 ├── AGENTS.md            # the universal agent loop AND the groomer's grooming rules
 ├── CONVENTIONS.md       # ticket shape + generic label taxonomy
 ├── TEMPLATE.md          # generic ticket template
@@ -332,7 +332,7 @@ to the product. Full token reference in `brand/BRAND.md`.
 ## Docs, license, publishing
 
 - README rewritten generic: keep the "why this shape" rationale, add the agent pitch,
-  the app/loops overview, and the carelia-web mirror walkthrough as the worked example.
+  the app/loops overview, and the mirror walkthrough as the worked example.
 - CONVENTIONS.md label taxonomy genericized to `defaultLabels`.
 - **MIT** license.
 - Ready to `gh repo create blaze --public --source . --push`. npm publish is optional
