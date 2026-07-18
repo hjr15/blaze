@@ -12,7 +12,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`reconcile`](#reconcile) | Mirror git/PR state onto delivery tickets | with `--apply` |
 | [`groom`](#groom) | One agentic board-keeper pass | yes |
 | [`new`](#new) | Create a ticket | yes |
-| [`sprint`](#sprint) | Sprint registry (post-0.4.4) | yes (`new`); no (`list`/`active`) |
+| [`sprint`](#sprint) | Sprint registry | yes (`new`); no (`list`/`active`) |
 | [`reindex`](#reindex) | Rebuild derived caches | no (cache-only) |
 | [`move`](#move) | Change a ticket's status | yes |
 | [`edit`](#edit) | Edit one field on a ticket | yes |
@@ -96,13 +96,9 @@ rejected.
 | `--likelihood <v>` | Risk-type only. | none |
 | `--impact <v>` | Risk-type only. | none |
 | `--reason "<why blank>"` | Suppresses a required-labels/components warning. | none |
-| `--sprint <id>` | Post-0.4.4. | none |
-| `--start <date>` | Post-0.4.4. | none |
-| `--due <date>` | Post-0.4.4. | none |
-
-> **Version note.** `--sprint`, `--start`, and `--due` ship in the release
-> after 0.4.4. `npm i -g @hjr15/blaze-board` today installs 0.4.4, which does
-> not include them.
+| `--sprint <id>` | Assign the ticket to a sprint by id. | none |
+| `--start <date>` | Planned start date. | none |
+| `--due <date>` | Due date. | none |
 
 ## sprint
 
@@ -111,10 +107,6 @@ blaze sprint new "<name>" --start <YYYY-MM-DD> --end <YYYY-MM-DD>
 blaze sprint list
 blaze sprint active <id>
 ```
-
-> **Version note.** `sprint` ships in the release after 0.4.4. It is not in
-> the currently-published npm package (0.4.4) — this section describes
-> `main`.
 
 The sprint registry. `sprint new` creates a sprint with a start and end
 date. `sprint list` lists all sprints. `sprint active <id>` marks a sprint
@@ -160,9 +152,6 @@ In-place edit of one whitelisted field. Any other field name errors.
 | `<id>` | Ticket id. |
 | `<field>` | One of: `title`, `assignee`, `priority`, `labels`, `components`, `estimate`, `parent`, `likelihood`, `impact`, `due`, `sprint`, `start`. |
 | `<value>` | New value for the field. |
-
-> **Version note.** The `sprint`, `start`, and `due` fields ship in the release
-> after 0.4.4 — editing them isn't available in the currently-published package.
 
 ## link
 
@@ -232,8 +221,6 @@ queue rather than risk taking another session's work.
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
 
-> **Version note.** `--shared` ships in the release after 0.4.4.
-
 ## rollup
 
 ```
@@ -280,10 +267,6 @@ so asking for help can never trigger a mutation — `blaze commit --help` descri
 exits non-zero. For anything past the one-liners — flags, defaults, behaviour —
 this page is the reference.
 
-> **Version note.** `--help` / `-h` ship in the release after 0.4.4; the
-> currently-published package instead prints only a usage line on an unknown
-> command, and has no per-command help.
-
 ## Environment variables
 
 | Variable | Controls | Default |
@@ -297,7 +280,7 @@ this page is the reference.
 | `BLAZE_COMMIT_MODE` | `per-op` or `batch`. | `per-op` |
 | `BLAZE_CODE_REPO` | Code repo `reconcile` mirrors against, when not set per-project. | none |
 | `BLAZE_SESSION` | Key for the batch-mode op queue, so parallel sessions isolate. | unset → an id auto-derived from the agent harness session (`auto-<id>`), so a session and its subagents share one queue; only with no harness id either does it fall back to the shared queue |
-| `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. *(Ships after 0.4.4.)* | unset (writes allowed) |
+| `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
 
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
