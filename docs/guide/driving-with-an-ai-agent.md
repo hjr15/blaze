@@ -90,10 +90,16 @@ Multiple agents can share one board without corrupting it:
 - **Batch mode.** Set `"commitMode": "batch"` (or `BLAZE_COMMIT_MODE=batch`). Each
   mutating verb queues its op instead of committing; `blaze commit` folds your
   queued ops into one commit.
-- **Session isolation.** Export a unique `BLAZE_SESSION` (e.g. your run id). Your
-  ops queue to your own ledger, and `blaze commit` flushes **only your** queue —
-  a parallel agent's in-flight work never rides your commit. `blaze commit --all`
-  sweeps every session's queue (an end-of-run / bundler step).
+- **Session isolation.** Each session's ops queue to its own ledger, and
+  `blaze commit` flushes **only that** queue — a parallel agent's in-flight work
+  never rides your commit. The queue key is `BLAZE_SESSION`; leave it unset and the
+  id is derived from the agent harness session, so a session and the subagents it
+  spawns share one queue (the parent flushes for them). `blaze commit --all` sweeps
+  every session's queue (an end-of-run / bundler step).
+- **Read-only subagents.** Set `BLAZE_READONLY=1` for a subagent that should only
+  inspect the board — `blaze` then refuses every mutating verb, so a reader can't
+  accidentally move or commit a ticket (`board` and `rollup` still work). An env
+  guard, not a sandbox — direct file writes bypass it. *(Ships after 0.4.4.)*
 - Concurrent commits serialise on an advisory lock; the engine never pushes on its
   own. Reads (grep the files, `blaze rollup`, `blaze board`) need no coordination
   at all.
@@ -113,6 +119,8 @@ blaze commit                                               # one commit, your op
 - The loops that run under `blaze start` only ever touch **ticket** files, never
   your code. Autonomy is bounded by construction.
 - Nothing is hidden behind a service you can't inspect: the board is the files.
+- Inspection-only agents can run under `BLAZE_READONLY=1`, which refuses every
+  mutating verb — a reader can't change the board even by mistake.
 
 ---
 

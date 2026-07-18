@@ -216,16 +216,23 @@ Appends a worklog entry to a ticket.
 ## commit
 
 ```
-blaze commit [--all]
+blaze commit [--all] [--shared]
 ```
 
 Flushes queued ops into one git commit. Only meaningful when
 `commitMode: batch` — see [Commit modes](#commit-modes). Stages only the
-files recorded against the flushed ops, never `git add -A`.
+files recorded against the flushed ops, never `git add -A`. By default it drains
+**only the caller's own queue** — keyed by `BLAZE_SESSION`, or an id auto-derived
+from the agent harness session when that's unset. If there is no session identity
+at all and you pass neither flag, `commit` refuses to drain the shared fallback
+queue rather than risk taking another session's work.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--all` | Sweep every session's queue plus the shared fallback queue. | off (drains only the caller's own session queue, keyed by `BLAZE_SESSION`) |
+| `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
+| `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
+
+> **Version note.** `--shared` ships in the release after 0.4.4.
 
 ## rollup
 
@@ -263,13 +270,19 @@ the reviewed ledger.
 
 ---
 
-## No `--help`
+## Help
 
-> There is no `--help` command and no per-subcommand `--help`, on 0.4.4 or
-> on `main`. Running `blaze` with an unknown command prints a one-line
-> usage listing the subcommands and exits 1. Some verbs print a usage line
-> to stderr when a required argument is missing. Neither is a help system —
-> this page is the reference.
+`blaze --help` (or `-h`) prints a usage line plus the full command list with
+one-line descriptions; `blaze <command> --help` prints that command's one-line
+usage. `--help`/`-h` is intercepted at dispatch **before** any runner executes,
+so asking for help can never trigger a mutation — `blaze commit --help` describes
+`commit`, it does not flush. An unknown command prints the same usage list and
+exits non-zero. For anything past the one-liners — flags, defaults, behaviour —
+this page is the reference.
+
+> **Version note.** `--help` / `-h` ship in the release after 0.4.4; the
+> currently-published package instead prints only a usage line on an unknown
+> command, and has no per-command help.
 
 ## Environment variables
 
@@ -283,7 +296,8 @@ the reviewed ledger.
 | `BLAZE_AGENT_COMMAND` | The command `groom` spawns to act on a ticket. | `agentCommand` in `blaze.config.json` |
 | `BLAZE_COMMIT_MODE` | `per-op` or `batch`. | `per-op` |
 | `BLAZE_CODE_REPO` | Code repo `reconcile` mirrors against, when not set per-project. | none |
-| `BLAZE_SESSION` | Key for the batch-mode op queue, so parallel sessions isolate. | unset → a single shared fallback queue (`.blaze/pending-commit.jsonl`) |
+| `BLAZE_SESSION` | Key for the batch-mode op queue, so parallel sessions isolate. | unset → an id auto-derived from the agent harness session (`auto-<id>`), so a session and its subagents share one queue; only with no harness id either does it fall back to the shared queue |
+| `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. *(Ships after 0.4.4.)* | unset (writes allowed) |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
 
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
@@ -296,8 +310,9 @@ scoped to the files it touched. Set `commitMode: batch` in
 `blaze.config.json` (or `BLAZE_COMMIT_MODE=batch`) to instead queue each op
 into a per-session ledger and flush it later with `blaze commit`.
 `BLAZE_SESSION` keys that ledger, so parallel sessions queue independently
-without stepping on each other. See
-[Driving Blaze with an AI agent](driving-with-an-ai-agent.md) for when to
+without stepping on each other; when it's unset the id is auto-derived from the
+agent harness session, so a session and the subagents it spawns share one queue.
+See [Driving Blaze with an AI agent](driving-with-an-ai-agent.md) for when to
 choose which mode.
 
 ## Types, workflows, priorities, resolutions
