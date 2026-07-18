@@ -99,7 +99,7 @@ Multiple agents can share one board without corrupting it:
 - **Read-only subagents.** Set `BLAZE_READONLY=1` for a subagent that should only
   inspect the board — `blaze` then refuses every mutating verb, so a reader can't
   accidentally move or commit a ticket (`board` and `rollup` still work). An env
-  guard, not a sandbox — direct file writes bypass it. *(Ships after 0.4.4.)*
+  guard, not a sandbox — direct file writes bypass it.
 - Concurrent commits serialise on an advisory lock; the engine never pushes on its
   own. Reads (grep the files, `blaze rollup`, `blaze board`) need no coordination
   at all.
