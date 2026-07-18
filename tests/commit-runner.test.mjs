@@ -314,7 +314,7 @@ test("a different harness session id is still isolated — cross-session ops nev
   rmSync(root, { recursive: true, force: true });
 });
 
-test("REPRO OBA-484: default flush does NOT bundle a foreign session's queued ops", () => {
+test("default flush does NOT bundle a foreign session's queued ops", () => {
   const root = gitRepo();
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "mine");
