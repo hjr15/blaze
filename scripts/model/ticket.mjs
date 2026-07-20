@@ -76,10 +76,27 @@ export function parseTicket(text) {
     if (rest === "") {
       const items = [];
       let j = i + 1;
-      while (j < lines.length && /^\s+-\s+/.test(lines[j])) {
-        const itemRaw = lines[j].replace(/^\s+-\s+/, "").trim();
-        items.push(itemRaw.startsWith("{") ? parseInlineObject(itemRaw) : coerceScalar(itemRaw));
+      while (j < lines.length) {
+        const item = /^(\s+)-\s+(.*)$/.exec(lines[j]);
+        if (!item) break;
+        const markerIndent = item[1].length;
+        const itemRaw = item[2].trim();
         j++;
+        if (itemRaw.startsWith("{")) { items.push(parseInlineObject(itemRaw)); continue; }
+        // Block-mapping item: `- key: value`, optionally followed by further
+        // `key: value` lines indented past the `-` marker. YAML requires
+        // whitespace after the colon for a mapping, so `- compliance:privacy`
+        // stays the scalar it looks like.
+        const head = /^([A-Za-z0-9_]+):[ \t]+(\S.*)$/.exec(itemRaw);
+        if (!head) { items.push(coerceScalar(itemRaw)); continue; }
+        const obj = { [head[1]]: coerceScalar(head[2]) };
+        while (j < lines.length) {
+          const cont = /^(\s+)([A-Za-z0-9_]+):[ \t]+(\S.*)$/.exec(lines[j]);
+          if (!cont || cont[1].length <= markerIndent) break;
+          obj[cont[2]] = coerceScalar(cont[3]);
+          j++;
+        }
+        items.push(obj);
       }
       if (items.length > 0) { fm[key] = items; i = j - 1; } else fm[key] = null;
     } else if (rest.startsWith("[")) {
