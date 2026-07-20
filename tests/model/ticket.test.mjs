@@ -64,3 +64,73 @@ test("round-trips a value containing a comma (forces quoting)", () => {
   const back = parseTicket(serializeTicket(once));
   assert.equal(back.frontmatter.worklog[0].note, "review, fixes");
 });
+
+// ── block-style (multi-line) mapping items ───────────────────────────────────
+// The serializer emits inline `- { k: v }` items, but hand-authored and
+// migrated tickets commonly use YAML's block form. Both must round-trip.
+
+const BLOCK_LINKS = `---
+id: PROJ-596
+title: Block-style links
+type: task
+project: PROJ
+links:
+  - type: Blocks
+    target: PROJ-432
+  - type: Relates
+    target: PROJ-592
+created: 2026-07-20
+---
+
+## Context
+
+Body.
+`;
+
+test("parses block-style mapping items into objects", () => {
+  const { frontmatter } = parseTicket(BLOCK_LINKS);
+  assert.deepEqual(frontmatter.links, [
+    { type: "Blocks", target: "PROJ-432" },
+    { type: "Relates", target: "PROJ-592" },
+  ]);
+});
+
+test("block-style links survive a parse → serialize → parse round-trip", () => {
+  const once = parseTicket(BLOCK_LINKS);
+  const twice = parseTicket(serializeTicket(once));
+  assert.deepEqual(twice.frontmatter.links, once.frontmatter.links);
+  assert.equal(twice.frontmatter.links.length, 2);
+  assert.equal(twice.frontmatter.links[0].target, "PROJ-432");
+});
+
+test("a scalar list item keeps its colon — `- a:b` is not a mapping", () => {
+  // YAML requires whitespace after the colon for a mapping. Without it this is
+  // a plain scalar, and namespaced labels rely on that.
+  const { frontmatter } = parseTicket(`---
+id: PROJ-1
+labels:
+  - compliance:privacy
+  - risk:data
+---
+
+Body.
+`);
+  assert.deepEqual(frontmatter.labels, ["compliance:privacy", "risk:data"]);
+});
+
+test("block and inline items can be mixed in one list", () => {
+  const { frontmatter } = parseTicket(`---
+id: PROJ-2
+links:
+  - { type: Blocks, target: PROJ-3 }
+  - type: Relates
+    target: PROJ-4
+---
+
+Body.
+`);
+  assert.deepEqual(frontmatter.links, [
+    { type: "Blocks", target: "PROJ-3" },
+    { type: "Relates", target: "PROJ-4" },
+  ]);
+});
