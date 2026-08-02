@@ -261,3 +261,49 @@ test("BLZ-136 AC4: claims survive squash-merge + branch delete, so no id is re-i
   rmSync(clone, { recursive: true, force: true });
   rmSync(repo, { recursive: true, force: true });
 });
+
+import { remoteMaxClaim } from "../scripts/model/claims.mjs";
+
+// AC ⑤ online half: a published id must be visible BEFORE the next allocation,
+// so a cross-machine collision is avoided rather than merely detected at merge.
+test("BLZ-136 AC5: remoteMaxClaim reads claims published on the remote", () => {
+  const origin = initRepo(mkdtempSync(join(tmpdir(), "blaze-origin-")));
+  writeClaim(join(origin, "projects"), "PROJ", 4242, "published");
+  execFileSync("git", ["-C", origin, "add", "-A"]);
+  execFileSync("git", ["-C", origin, "commit", "-qm", "publish claim"]);
+
+  const clone = mkdtempSync(join(tmpdir(), "blaze-cl-"));
+  rmSync(clone, { recursive: true, force: true });
+  execFileSync("git", ["clone", "-q", origin, clone]);
+  assert.equal(remoteMaxClaim(clone, "PROJ"), 4242);
+  rmSync(clone, { recursive: true, force: true });
+  rmSync(origin, { recursive: true, force: true });
+});
+
+// AC ⑤ offline half: specified as degraded, not undefined. A fetch failure must
+// never crash ticket creation — refusing to create tickets without a network is
+// a worse regression than a collision caught loudly at merge.
+test("BLZ-136 AC5: offline (no reachable remote) degrades to 0 rather than throwing", () => {
+  const repo = initRepo(mkdtempSync(join(tmpdir(), "blaze-off-")));
+  assert.equal(remoteMaxClaim(repo, "PROJ"), 0, "a fetch failure must degrade, not crash");
+  rmSync(repo, { recursive: true, force: true });
+});
+
+// A published id must not be re-issued even by a clone that has never seen it
+// on disk — this is the end-to-end version of the layer.
+test("BLZ-136 AC5: a clone allocates above the remote's published claims", () => {
+  const origin = initRepo(mkdtempSync(join(tmpdir(), "blaze-origin2-")));
+  mkdirSync(join(origin, "projects", "PROJ", "defined"), { recursive: true });
+  writeClaim(join(origin, "projects"), "PROJ", 88, "published");
+  execFileSync("git", ["-C", origin, "add", "-A"]);
+  execFileSync("git", ["-C", origin, "commit", "-qm", "publish"]);
+
+  const clone = mkdtempSync(join(tmpdir(), "blaze-cl2-"));
+  rmSync(clone, { recursive: true, force: true });
+  execFileSync("git", ["clone", "-q", origin, clone]);
+  const pd = join(clone, "projects");
+  const { n } = allocateId(pd, "PROJ", { dataRoot: clone, remoteMax: remoteMaxClaim(clone, "PROJ") });
+  assert.equal(n, 89, "must allocate above the remote's highest published claim");
+  rmSync(clone, { recursive: true, force: true });
+  rmSync(origin, { recursive: true, force: true });
+});
