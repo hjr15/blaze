@@ -60,3 +60,25 @@ test("loadProject honours an explicit projectsDir not named projects", () => {
   assert.equal(zzz.name, "Zeta");
   rmSync(root, { recursive: true, force: true });
 });
+
+// BLZ-140. A missing project directory used to yield PROJECT_DEFAULTS, so a typo'd
+// --project key read as "this project exists and declares no taxonomy" and the
+// caller proceeded to write a ticket into a project that was never scaffolded.
+test("BLZ-140: loadProject throws when the project directory does not exist", () => {
+  const root = fixture();
+  assert.throws(
+    () => loadProject("NOPE", { root, projectsDir: join(root, "projects") }),
+    /blaze: unknown project 'NOPE'/
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-140: a real project dir with no project.json is still valid (defaults, no throw)", () => {
+  const root = fixture();
+  mkdirSync(join(root, "projects", "BARE"), { recursive: true });
+  const p = loadProject("BARE", { root, projectsDir: join(root, "projects") });
+  assert.equal(p.key, "BARE");
+  assert.deepEqual(p.components, []);
+  assert.equal(p.requireWorklogBeforeTerminal, false);
+  rmSync(root, { recursive: true, force: true });
+});
