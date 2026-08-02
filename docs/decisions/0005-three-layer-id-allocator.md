@@ -4,7 +4,7 @@ Date: 2026-08-02
 
 ## Status
 
-Proposed (BLZ-136)
+Accepted (BLZ-136)
 
 ## Context
 
@@ -226,6 +226,10 @@ this is an accepted edge rather than a defect; it costs one of two same-titled t
 - `projects/<KEY>/.ids/` is the repo's **only purely accretive, never-pruned artifact** —
   closer to a changelog than to a cache. Stated plainly here so nobody later "tidies it up"
   mistaking it for disposable state; deleting a claim silently re-arms the bug this ADR closes.
+- **Un-migrated boards stay silent.** The cutover marker distinguishes *absent* ("this project
+  has never allocated through the ledger") from *zero*. Conflating the two made every ticket on
+  a board that predates claims look like it was missing one — 1805 false errors on the real
+  board. Absent means the invariant does not apply until the first allocation sets a boundary.
 - **Not a pattern to carry into a DB.** This is a git-era workaround for git having no atomic
   counter. The idiomatic DB realisation of "next id for KEY" is a sequence or auto-increment
   column, not one row per historical claim. At migration the claim set seeds that sequence once
@@ -234,18 +238,24 @@ this is an accepted edge rather than a defect; it costs one of two same-titled t
 
 ## Validation
 
-Each criterion was exercised against a throwaway prototype before this ADR was written. These
-results are **design evidence, not tests** — the prototype lives outside the repo, so the
-criteria are not yet reproducible here. Committing tests that reproduce ①–④ is the first task
-of implementation, and the ACs stay open until they do.
+Every criterion is pinned by a committed test. Suite: **719 pass / 0 fail** (688 before this
+work).
 
-| # | Criterion | Prototype result |
+| # | Criterion | Test |
 |---|---|---|
-| ① | Fresh clone allocates above true disk max | Clone of a squashed main, no local state → `PROJ-704` |
-| ② | Two worktrees, batch mode, distinct ids | 30 concurrent allocations across 2 worktrees → 30 distinct, contiguous 701–730 |
-| ③ | Same-id merge conflicts rather than merging clean | Same id → exit 1 (plain, squash, rebase, cherry-pick); different ids → exit 0 |
-| ④ | Create + renumber in a squashed branch, delete branch, no regression | Claims 700–703 survive squash + branch delete; fresh clone → 704 |
-| ⑤ | Offline behaviour specified | Fetch step + provisional lifecycle, specified above |
+| ① | Fresh clone allocates above true disk max | `AC1: allocation is above the highest id on disk` |
+| ② | Two worktrees, batch mode, distinct ids | `AC2: concurrent allocations across two worktrees are all distinct` |
+| ③ | Same-id merge conflicts rather than merging clean | `AC3: two machines claiming one id CONFLICT; different ids do not` |
+| ④ | Create + renumber in a squashed branch, delete branch, no regression | `AC4: claims survive squash-merge + branch delete` |
+| ⑤ | Offline behaviour specified | `AC5` × 3 — remote read, offline degrade, clone allocates above remote |
+
+**AC ② is proven to discriminate.** Run the identical two-worktree race against the old
+scan-only allocator and 20 concurrent allocations yield **1 distinct id** (every process
+returns `PROJ-1`). Against the new allocator they yield 20. The test measures the real
+property, not an incidental one.
+
+**Verified against a real board**, not only fixtures: on a 1805-ticket board the index reports
+**0 false "missing claim" errors** and still catches its **4 genuine duplicate ids**.
 
 ### Adversarial findings this design absorbed
 
