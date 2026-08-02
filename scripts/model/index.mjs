@@ -26,6 +26,10 @@ export function* walkTickets(projectsDir) {
     const projPath = join(projectsDir, project);
     if (!isDir(projPath)) continue;
     for (const status of safeReaddir(projPath)) {
+      // BLZ-136: `.ids/` holds the allocation ledger, not tickets. Dot-dirs were
+      // previously skipped only because claim files carry no .md extension — an
+      // accident, not a guard, and one a single renamed file would have undone.
+      if (status.startsWith(".")) continue;
       const statusPath = join(projPath, status);
       if (!isDir(statusPath)) continue;
       for (const f of safeReaddir(statusPath)) {

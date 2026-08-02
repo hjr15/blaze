@@ -11,8 +11,12 @@ function* walkFiles(dir) {
     const p = join(dir, e);
     let s;
     try { s = statSync(p); } catch { continue; }
-    if (s.isDirectory()) yield* walkFiles(p);
-    else yield p;
+    // BLZ-136: never descend into `.ids/` (or any dot-dir) — it holds the
+    // allocation ledger, whose filenames would otherwise be read as ticket ids.
+    if (s.isDirectory()) {
+      if (e.startsWith(".")) continue;
+      yield* walkFiles(p);
+    } else yield p;
   }
 }
 
