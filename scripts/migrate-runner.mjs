@@ -55,7 +55,13 @@ if (mode === "dry-run") {
   }
   const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
   const res = runLive({ cacheDir: CACHE, projectsDir, keys, ledger });
-  spawnSync("git", ["-C", dataRoot, "add", "-A"], { stdio: "ignore" });
-  spawnSync("git", ["-C", dataRoot, "commit", "-m", `migrate: import ${keys.join("+")} from Jira (${res.written.length} tickets)`], { stdio: "inherit" });
+  // BLZ-139: stage the projects tree ONLY, never the whole data root. A bare
+  // `add -A` sweeps every unrelated change in the working tree into the migration
+  // commit — including a sister session's in-flight edits, which on a shared board
+  // checkout is how another agent's half-finished work gets committed under this
+  // commit's message. `-A` is kept (scoped) because runLive's removeExisting()
+  // deletes superseded ticket files, and those deletions must be staged too.
+  spawnSync("git", ["-C", dataRoot, "add", "-A", "--", projectsDir], { stdio: "ignore" });
+  spawnSync("git", ["-C", dataRoot, "commit", "-m", `migrate: import ${keys.join("+")} from Jira (${res.written.length} tickets)`, "--", projectsDir], { stdio: "inherit" });
   console.log(`live: wrote ${res.written.length} tickets · dropped ${res.dropped} · merged ${res.merged}`);
 }
