@@ -79,7 +79,7 @@ test("rung 3 throws instead of falling back when the engine tree lives under nod
 // BLZ-133. The node_modules substring test was the ONLY thing standing between an
 // unscaffolded cwd and the engine checkout — and a symlinked install defeats it:
 // `fileURLToPath(import.meta.url)` yields the REAL path, so a global install
-// symlinked to a dev checkout reports an engineRoot like /home/me/Code/blaze,
+// symlinked to a dev checkout reports an engineRoot under the user's own tree,
 // which contains no "/node_modules/" and sailed straight through to the fallback.
 // That is how two tickets got committed onto the live engine repo's main on
 // 2026-08-02. The guard is now positive — fall back only to a tree that really is
