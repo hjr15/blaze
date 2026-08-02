@@ -6,6 +6,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { startServer, CSRF } from "../scripts/serve.mjs";
+
+// BLZ-133: pageHtml takes its board from projectsDir; the ambient fallback to
+// the engine tree is gone. Chrome-only assertions render against a real, empty board.
+const EMPTY_BOARD = (() => {
+  const d = mkdtempSync(join(tmpdir(), "blaze-ep-empty-"));
+  mkdirSync(join(d, "projects"), { recursive: true });
+  return join(d, "projects");
+})();
 import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
 function repo() {
@@ -229,12 +237,12 @@ test("pageHtml renders live AC checkboxes and a sync badge", () => {
 });
 
 test("pageHtml includes reconcileBtn", () => {
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   assert.match(html, /id="reconcileBtn"/);
 });
 
 test("pageHtml renders a client-side search box wired to a filter pass", () => {
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   assert.match(html, /id="board-search"/);
   assert.match(html, /applyFilters/);
   // filtered-out cards/rows are hidden purely client-side (no round-trip)
@@ -256,7 +264,7 @@ test("pageHtml renders a status chip bar with counts, All/Active presets, hash w
 test("pageHtml priority select includes none and urgent (Fix 2 — unified enum)", () => {
   // The client-side PRIORITIES array must be injected from the canonical server constant,
   // covering all enum values including none and urgent (previously absent from the narrow list).
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   // The injected array literal must contain both values.
   assert.match(html, /"none"/, "none missing from injected PRIORITIES");
   assert.match(html, /"urgent"/, "urgent missing from injected PRIORITIES");
@@ -265,7 +273,7 @@ test("pageHtml priority select includes none and urgent (Fix 2 — unified enum)
 test("pageHtml client script contains self-drop guard (Fix 3)", () => {
   // The drop handler must compare dragSourceStatus to zone.dataset.status
   // before POSTing, so a same-column drop is a no-op without a network request.
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   assert.match(html, /dragSourceStatus !== zone\.dataset\.status/, "self-drop guard missing");
 });
 
@@ -361,12 +369,12 @@ test("GET /api/live groups fresh events and degrades to [] with no file", async 
 });
 
 test("pageHtml wires a card/row click to open the detail panel", () => {
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   assert.match(html, /blazePanel\.open/);   // clicking a ticket id opens the panel
 });
 
 test("pageHtml client shows-all for an unknown #status (mirrors model statusFilter, no blank board)", () => {
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   // The client must guard the hash status against the known status list before
   // constraining — an unknown/stale/shared value falls through to show-all
   // instead of hiding every card (which diverges from model/filters.mjs).
@@ -375,7 +383,7 @@ test("pageHtml client shows-all for an unknown #status (mirrors model statusFilt
 });
 
 test("pageHtml scopes drag-drop drop zones to columns/groups so chips are not move targets", () => {
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   // Status chips also carry data-status (for filtering); the drop-zone query
   // must not treat them as move targets, or dropping a card on a chip moves it.
   assert.match(html, /querySelectorAll\("\.col\[data-status\], \.group\[data-status\]"\)/);
@@ -383,7 +391,7 @@ test("pageHtml scopes drag-drop drop zones to columns/groups so chips are not mo
 });
 
 test("pageHtml wires the Live view pill, region and poll", () => {
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   assert.match(html, /data-view="live"/);
   assert.match(html, /\/api\/live/);
 });

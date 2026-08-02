@@ -79,6 +79,11 @@ const ACTIVITY_SCRIPT = `
 
 export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
   const bus = createBus();
+  // BLZ-133: the app serves THIS root's board. pageHtml/contentHash used to fall
+  // back to the ambient engine tree when passed no projectsDir — wrong board for
+  // an app started against an explicit root, and now a throw rather than silently
+  // wrong data.
+  const projectsDir = join(root, "projects");
 
   const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
 
@@ -97,7 +102,10 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
     try {
-      const r = reconcile({ fetch: true, commit: true, push: true });
+      // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
+      // ambient tree — the wrong board whenever the app was started against an
+      // explicit root, and now a throw rather than silently reconciling nothing.
+      const r = reconcile({ fetch: true, commit: true, push: true, root, projectsDir });
       if (r && r.ok && r.changes) {
         for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
       } else if (r && !r.ok) {
@@ -141,7 +149,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
   const server = createServer((req, res) => {
     if (req.url === "/api/hash") {
       res.writeHead(200, { "content-type": "text/plain" });
-      res.end(contentHash());
+      res.end(contentHash({ projectsDir }));
       return;
     }
     if (req.method === "GET" && req.url === "/api/sync") {
@@ -170,6 +178,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
         sprint: u.searchParams.get("sprint") || null,
+        projectsDir,
       });
       if (!envelope) {
         res.writeHead(404, { "content-type": "application/json" });
@@ -194,6 +203,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
         view: u.searchParams.get("view") || "board",
         afterHeader: CONTROLS_HTML,
         beforeBodyEnd: ACTIVITY_SCRIPT,
+        projectsDir,
       }));
       return;
     }

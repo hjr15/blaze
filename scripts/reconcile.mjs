@@ -157,8 +157,12 @@ export function reconcile({
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
   // callers/tests) keeps the pre-existing join(root, "projects") behaviour.
+  // BLZ-133: only resolve ambient roots when the caller didn't supply one.
+  // resolveRoots() now throws outside a board, so resolving unconditionally
+  // would make an explicitly-rooted reconcile (every programmatic caller and
+  // test) fail on the ambient cwd it was never going to use.
   const explicitRoot = root !== undefined;
-  const resolved = resolveRoots();
+  const resolved = explicitRoot ? null : resolveRoots();
   root ??= resolved.dataRoot;
   projectsDir ??= explicitRoot ? join(root, "projects") : resolved.projectsDir;
 

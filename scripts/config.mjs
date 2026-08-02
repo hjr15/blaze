@@ -86,8 +86,18 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
 //   1. BLAZE_PROJECTS_DIR env — explicit projects dir; dataRoot is its parent
 //   2. ./projects under CWD — running from a data repo checkout
 //   3. the engine tree itself — single-tree back-compat (pre-split behaviour),
-//      but only when engineRoot isn't under node_modules; a packaged install
-//      with no data dir found throws instead of silently falling back
+//      but ONLY when that tree really is a board (it has projects/ of its own);
+//      otherwise throw rather than resolve somewhere merely writable
+//
+// BLZ-133: rung 3 used to gate on `engineRoot.includes("/node_modules/")` — an
+// inference about how the engine was INSTALLED, standing in for the question that
+// actually matters (is this tree a board?). A symlinked install breaks the
+// inference: `fileURLToPath(import.meta.url)` resolves symlinks, so a global
+// `blaze` linked to a dev checkout reports an engineRoot with no "/node_modules/"
+// in it, sailed past the guard, and made the live engine repo the data root — a
+// `blaze new` from an unscaffolded directory committed two tickets onto the
+// engine's own main on 2026-08-02. Testing for projects/ asks the real question
+// directly, so the install shape stops mattering.
 export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoot = ROOT } = {}) {
   if (env.BLAZE_PROJECTS_DIR) {
     const projectsDir = resolve(cwd, env.BLAZE_PROJECTS_DIR);
@@ -96,10 +106,10 @@ export function resolveRoots({ env = process.env, cwd = process.cwd(), engineRoo
   if (existsSync(join(cwd, "projects"))) {
     return Object.freeze({ engineRoot, dataRoot: cwd, projectsDir: join(cwd, "projects") });
   }
-  if (engineRoot.includes("/node_modules/")) {
-    throw new Error("blaze: no data dir found — set BLAZE_PROJECTS_DIR or run from a directory containing projects/");
+  if (existsSync(join(engineRoot, "projects"))) {
+    return Object.freeze({ engineRoot, dataRoot: engineRoot, projectsDir: join(engineRoot, "projects") });
   }
-  return Object.freeze({ engineRoot, dataRoot: engineRoot, projectsDir: join(engineRoot, "projects") });
+  throw new Error("blaze: no data dir found — set BLAZE_PROJECTS_DIR or run from a directory containing projects/");
 }
 
 // Read the ambient data root's top-level schema override, guarded: any failure
@@ -153,9 +163,24 @@ export function listProjects(cfg, { root = ROOT } = {}) {
   return Array.isArray(c.projects) ? c.projects.slice() : [];
 }
 
-export function loadProject(key, { root = ROOT, projectsDir = join(root, "projects") } = {}) {
+// `allowMissing` is for the ONE legitimate caller that may name a project which
+// doesn't exist yet: `blaze new`, which bootstraps a project by creating its
+// first ticket. Every other caller (move/edit/log/resolve/reconcile) is acting
+// on a ticket that already exists, so a missing project dir there is a real
+// misconfiguration and must throw.
+export function loadProject(key, { root = ROOT, projectsDir = join(root, "projects"), allowMissing = false } = {}) {
   const cfg = loadConfig({ root });
-  const path = join(projectsDir, key, "project.json");
+  // BLZ-140: a missing project DIRECTORY is a misconfiguration (typo'd --project,
+  // an unscaffolded key), not an empty taxonomy. Returning PROJECT_DEFAULTS for it
+  // is a false-empty fail-open: the caller reads "exists, declares nothing" and
+  // proceeds to write into a project that was never created. A directory that
+  // exists WITHOUT project.json is a different, legitimate state — no taxonomy
+  // declared — and still resolves to defaults below.
+  const dir = join(projectsDir, key);
+  if (!allowMissing && !existsSync(dir)) {
+    throw new Error(`blaze: unknown project '${key}' — no such directory ${dir}`);
+  }
+  const path = join(dir, "project.json");
   let file = {};
   if (existsSync(path)) {
     try { file = JSON.parse(readFileSync(path, "utf8")); }

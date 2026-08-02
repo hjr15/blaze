@@ -15,6 +15,10 @@ const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 function gitRepo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-commitrun-"));
   cpSync(join(REPO, "scripts"), join(root, "scripts"), { recursive: true });
+  // BLZ-133: a board is a tree with projects/. resolveRoots() now refuses to
+  // treat a projects-less tree as a data root, so the fixture has to be a real
+  // board rather than relying on the old silent fallback to the engine tree.
+  mkdirSync(join(root, "projects"), { recursive: true });
   execFileSync("git", ["-C", root, "init", "-q"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);

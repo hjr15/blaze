@@ -53,7 +53,9 @@ export function applyNew(projectsDir, opts = {}) {
   // Validate everything except parent-existence (parent integrity is a reindex
   // concern; at create time the parent may legitimately be created later).
   const errors = validateTicket({ frontmatter, body }).filter((e) => !/parent not found/.test(e));
-  const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir });
+  // allowMissing: creating a project's FIRST ticket is how a project comes into
+  // existence, so its directory legitimately may not exist yet (BLZ-140).
+  const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir, allowMissing: true });
   errors.push(...validateTaxonomy(frontmatter, project_cfg));
   const { sprints } = loadSprints({ root: dirname(projectsDir) });
   errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
