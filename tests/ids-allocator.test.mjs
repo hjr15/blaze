@@ -175,3 +175,89 @@ test("BLZ-136: allocation records a cutover on first use, and never moves it", (
   assert.equal(readCutover(projects, "PROJ"), 42, "cutover must never be raised afterwards");
   rmSync(root, { recursive: true, force: true });
 });
+
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+// AC ②, the real one: two worktrees, separate PROCESSES, batch mode (nothing
+// committed). This is the shape that produced the production collisions — a
+// same-process loop cannot prove it, because the race is between processes.
+test("BLZ-136 AC2: concurrent allocations across two worktrees are all distinct", () => {
+  const { root, projects } = boardRepo();
+  writeFileSync(join(root, "board"), "b");
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "-qm", "board"]);
+  const wt = mkdtempSync(join(tmpdir(), "blaze-alloc-wt-"));
+  rmSync(wt, { recursive: true, force: true });
+  execFileSync("git", ["-C", root, "worktree", "add", "-q", wt, "-b", "alloc-b"]);
+
+  const src = (dr, pd) =>
+    `import{allocateId}from ${JSON.stringify(join(REPO, "scripts/model/ids.mjs"))};` +
+    `console.log(allocateId(${JSON.stringify(pd)},"PROJ",{dataRoot:${JSON.stringify(dr)}}).n)`;
+
+  const targets = [];
+  for (let i = 0; i < 10; i++) {
+    targets.push([root, projects], [wt, join(wt, "projects")]);
+  }
+  const got = targets.map(([dr, pd]) =>
+    spawnSync(process.execPath, ["--input-type=module", "-e", src(dr, pd)], { encoding: "utf8" }).stdout.trim());
+
+  const nums = got.filter(Boolean).map(Number);
+  assert.equal(nums.length, targets.length, `every process must allocate; got ${JSON.stringify(got)}`);
+  assert.equal(new Set(nums).size, nums.length,
+    `ids must be distinct across worktrees, got ${nums.slice().sort((a, b) => a - b)}`);
+
+  rmSync(wt, { recursive: true, force: true });
+  rmSync(root, { recursive: true, force: true });
+});
+
+// AC ③: the entire reason the claim path is slug-free.
+test("BLZ-136 AC3: two machines claiming one id CONFLICT; different ids do not", () => {
+  const repo = initRepo(mkdtempSync(join(tmpdir(), "blaze-merge-")));
+  const pd = join(repo, "projects");
+  const branchWithClaim = (branch, n, slug) => {
+    execFileSync("git", ["-C", repo, "checkout", "-q", "main"]);
+    execFileSync("git", ["-C", repo, "checkout", "-q", "-b", branch]);
+    writeClaim(pd, "PROJ", n, slug);
+    execFileSync("git", ["-C", repo, "add", "-A"]);
+    execFileSync("git", ["-C", repo, "commit", "-qm", `${branch}:${n}`]);
+  };
+  branchWithClaim("m1", 700, "alpha");
+  branchWithClaim("m2", 700, "beta");
+
+  execFileSync("git", ["-C", repo, "checkout", "-q", "m1"]);
+  const same = spawnSync("git", ["-C", repo, "merge", "--no-edit", "m2"], { encoding: "utf8" });
+  assert.notEqual(same.status, 0, "the same id from two branches MUST conflict");
+  spawnSync("git", ["-C", repo, "merge", "--abort"], { encoding: "utf8" });
+
+  branchWithClaim("m3", 701, "gamma");
+  execFileSync("git", ["-C", repo, "checkout", "-q", "m1"]);
+  const diff = spawnSync("git", ["-C", repo, "merge", "--no-edit", "m3"], { encoding: "utf8" });
+  assert.equal(diff.status, 0, "different ids must NOT conflict — the surface is per-id, not global");
+  rmSync(repo, { recursive: true, force: true });
+});
+
+// AC ④: the case that killed the git-history high-water-mark mechanism.
+test("BLZ-136 AC4: claims survive squash-merge + branch delete, so no id is re-issued", () => {
+  const repo = initRepo(mkdtempSync(join(tmpdir(), "blaze-squash-")));
+  const pd = join(repo, "projects");
+  execFileSync("git", ["-C", repo, "checkout", "-q", "-b", "work"]);
+  for (const n of [700, 701, 702]) writeClaim(pd, "PROJ", n, `s${n}`);
+  execFileSync("git", ["-C", repo, "add", "-A"]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", "work"]);
+  execFileSync("git", ["-C", repo, "checkout", "-q", "main"]);
+  execFileSync("git", ["-C", repo, "merge", "-q", "--squash", "work"]);
+  execFileSync("git", ["-C", repo, "commit", "-qm", "squashed"]);
+  execFileSync("git", ["-C", repo, "branch", "-qD", "work"]);
+
+  const clone = mkdtempSync(join(tmpdir(), "blaze-clone-"));
+  rmSync(clone, { recursive: true, force: true });
+  execFileSync("git", ["clone", "-q", repo, clone]);
+  assert.equal(allocateId(join(clone, "projects"), "PROJ", { dataRoot: clone }).n, 703,
+    "a fresh clone with no reservations must not re-issue a squashed-away id");
+  rmSync(clone, { recursive: true, force: true });
+  rmSync(repo, { recursive: true, force: true });
+});
