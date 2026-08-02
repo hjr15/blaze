@@ -5,9 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pageHtml, viewEnvelope, CSRF } from "../../scripts/views/page.mjs";
 
+// BLZ-133: pageHtml/viewEnvelope now take their board (and its config) from
+// projectsDir — the old silent fallback to the ambient engine tree is gone. Even
+// the chrome-only assertions therefore need a real, if empty, board to render.
+const EMPTY_BOARD = (() => {
+  const d = mkdtempSync(join(tmpdir(), "blaze-page-empty-"));
+  mkdirSync(join(d, "projects"), { recursive: true });
+  return join(d, "projects");
+})();
+
+
 test("page.mjs exports CSRF and a composing pageHtml", () => {
   assert.equal(typeof CSRF, "string");
-  const html = pageHtml({ project: "all" });
+  const html = pageHtml({ project: "all", projectsDir: EMPTY_BOARD });
   // shared chrome present
   assert.match(html, /window\.__csrf/);
   assert.match(html, /blazePost/);
@@ -21,21 +31,22 @@ test("page.mjs exports CSRF and a composing pageHtml", () => {
 });
 
 test("viewEnvelope renders each view's markup on demand (moved out of pageHtml since it no longer inlines every view)", () => {
-  const list = viewEnvelope({ project: "all", view: "list" });
+  const list = viewEnvelope({ project: "all", view: "list", projectsDir: EMPTY_BOARD });
   assert.match(list.html, /class="list"/);
   assert.doesNotMatch(list.html, /class="board"/);
 
-  const map = viewEnvelope({ project: "all", view: "map" });
+  const map = viewEnvelope({ project: "all", view: "map", projectsDir: EMPTY_BOARD });
   assert.match(map.html, /class="mapwrap/);
   assert.doesNotMatch(map.html, /class="board"/);
 
-  const live = viewEnvelope({ project: "all", view: "live" });
+  const live = viewEnvelope({ project: "all", view: "live", projectsDir: EMPTY_BOARD });
   assert.match(live.html, /class="live"/);
 });
 
 test("pageHtml({view:'map'}) falls back to board when views.map is disabled (review fix: ?view= bypass)", () => {
   const html = pageHtml({
     project: "all",
+    projectsDir: EMPTY_BOARD,
     view: "map",
     views: { board: true, list: true, live: true, metrics: true, map: false },
   });
@@ -137,6 +148,7 @@ test("viewEnvelope: an explicit ?sprint= selects a NON-active sprint (S2)", () =
 test("pageHtml({view:'gantt'}) falls back to board when views.gantt is disabled", () => {
   const html = pageHtml({
     project: "all",
+    projectsDir: EMPTY_BOARD,
     view: "gantt",
     views: { board: true, list: true, live: true, metrics: true, map: true, gantt: false },
   });

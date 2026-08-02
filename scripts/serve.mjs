@@ -26,9 +26,17 @@ import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
-const cfg = loadConfig({ root: resolveRoots().dataRoot });
-
-const PORT = Number(process.env.PORT) || cfg.port;
+// BLZ-133: config is read lazily, and from the board being SERVED rather than
+// the ambient engine tree. Import-time resolution broke merely importing this
+// module (several tests import it only for the boardModel/pageHtml re-exports)
+// now that resolveRoots() throws outside a board — and reading commitMode from
+// the engine root was already wrong for a server started against an explicit
+// --root. Memoised per data root.
+const _cfgCache = new Map();
+const cfgFor = (root) => {
+  if (!_cfgCache.has(root)) _cfgCache.set(root, loadConfig({ root }));
+  return _cfgCache.get(root);
+};
 
 function readJson(req) {
   return new Promise((resolve, reject) => {
@@ -69,7 +77,7 @@ function send(req, res, code, type, body) {
 
 // ---- server factory ---------------------------------------------------------
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = PORT, host = process.env.HOST || "127.0.0.1", views } = {}) {
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = Number(process.env.PORT) || cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views } = {}) {
   return createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
@@ -119,7 +127,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       const flat = u.searchParams.get("flat") === "1";
       const sprint = u.searchParams.get("sprint") || null;
       const view = u.searchParams.get("view") || "board";
-      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, sprint, view, views }));
+      // projectsDir is explicit: without it pageHtml would fall back to the
+      // AMBIENT board rather than the one this server was started against
+      // (/view/<name> above already passes it) — a latent mismatch that
+      // BLZ-133's stricter resolveRoots turns from wrong-data into a throw.
+      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, sprint, view, views, projectsDir }));
     }
     if (req.method === "POST") {
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
@@ -148,7 +160,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       };
       const done = (r, msg, op, extra = {}) => {
         if (!r.ok) return json(422, { errors: r.errors });
-        const c = commitOrQueue({ root, mode: cfg.commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
+        const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
         return json(200, { ok: true, ...extra });
       };
@@ -157,7 +169,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         const r = applyMove(projectsDir, payload.id, payload.to, { today });
         if (!r.ok) return json(422, { errors: r.errors });
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
-        const c = commitOrQueue({ root, mode: cfg.commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
+        const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
         return json(200, { ok: true, resolution: r.resolution });
       }
@@ -187,5 +199,5 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const server = startServer();
-  server.on("listening", () => console.log(`${cfg.boardTitle} board → http://localhost:${server.address().port}`));
+  server.on("listening", () => console.log(`${cfgFor(root).boardTitle} board → http://localhost:${server.address().port}`));
 }
