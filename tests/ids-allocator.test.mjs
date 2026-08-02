@@ -94,7 +94,7 @@ test("BLZ-136: a non-board dataRoot under an unrelated repo FAILS LOUD, not sile
 });
 
 import { readFileSync } from "node:fs";
-import { claimPath, writeClaim, maxClaim, claimedNumbers } from "../scripts/model/claims.mjs";
+import { claimPath, writeClaim, maxClaim, claimedNumbers, readCutover } from "../scripts/model/claims.mjs";
 
 test("BLZ-136: writeClaim records id + slug so a same-id collision differs in CONTENT", () => {
   const { root, projects } = board();
@@ -121,5 +121,57 @@ test("BLZ-136: maxClaim and claimedNumbers read the claim set", () => {
   writeClaim(projects, "PROJ", 11, "b");
   assert.equal(maxClaim(projects, "PROJ"), 11);
   assert.deepEqual([...claimedNumbers(projects, "PROJ")].sort((x, y) => x - y), [3, 11]);
+  rmSync(root, { recursive: true, force: true });
+});
+
+import { allocateId } from "../scripts/model/ids.mjs";
+
+function boardRepo() {
+  const root = initRepo(mkdtempSync(join(tmpdir(), "blaze-alloc-repo-")));
+  const projects = join(root, "projects");
+  mkdirSync(join(projects, "PROJ", "defined"), { recursive: true });
+  return { root, projects };
+}
+
+// AC ①: allocation must sit above the true disk max.
+test("BLZ-136 AC1: allocation is above the highest id on disk", () => {
+  const { root, projects } = boardRepo();
+  ticket(projects, "defined", "PROJ-700-existing.md", "PROJ-700");
+  const { id, n } = allocateId(projects, "PROJ", { dataRoot: root });
+  assert.equal(n, 701);
+  assert.equal(id, "PROJ-701");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// Reservation, not merely a scan: nothing here is committed, and the disk max
+// never moves, so a scan-only allocator would return the same id 25 times.
+test("BLZ-136 AC2: repeated allocation never repeats an id with nothing committed", () => {
+  const { root, projects } = boardRepo();
+  const seen = new Set();
+  for (let i = 0; i < 25; i++) seen.add(allocateId(projects, "PROJ", { dataRoot: root }).n);
+  assert.equal(seen.size, 25, "every allocation must be distinct");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-136: a claim raises the floor even when its ticket is gone (tombstone)", () => {
+  const { root, projects } = boardRepo();
+  writeClaim(projects, "PROJ", 900, "retired-and-deleted");
+  assert.equal(allocateId(projects, "PROJ", { dataRoot: root }).n, 901);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-136: remoteMax participates so a published id is never re-issued", () => {
+  const { root, projects } = boardRepo();
+  assert.equal(allocateId(projects, "PROJ", { dataRoot: root, remoteMax: 5000 }).n, 5001);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-136: allocation records a cutover on first use, and never moves it", () => {
+  const { root, projects } = boardRepo();
+  ticket(projects, "defined", "PROJ-42-existing.md", "PROJ-42");
+  allocateId(projects, "PROJ", { dataRoot: root });
+  assert.equal(readCutover(projects, "PROJ"), 42, "cutover = disk max at first allocation");
+  allocateId(projects, "PROJ", { dataRoot: root });
+  assert.equal(readCutover(projects, "PROJ"), 42, "cutover must never be raised afterwards");
   rmSync(root, { recursive: true, force: true });
 });
