@@ -31,8 +31,11 @@ export function applyNew(projectsDir, opts = {}) {
   // merely detected later. dataRoot is the parent of projectsDir, matching
   // BLAZE_PROJECTS_DIR's semantics elsewhere.
   const dataRoot = dirname(projectsDir);
+  // null = the remote could not be read, so this allocation is against a
+  // possibly stale view. A numeric 0 means the remote WAS read and simply has no
+  // claims yet — a known-empty set, not a stale one.
   const remoteMax = remoteMaxClaim(dataRoot, project);
-  const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax });
+  const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax: remoteMax ?? 0 });
   const status = initialStatus(type);
   const frontmatter = {
     id, title, type, project, priority,
@@ -77,7 +80,7 @@ export function applyNew(projectsDir, opts = {}) {
   // that reaches upstream without its claim merges as silently as it did before
   // this existed. remoteMax === 0 means the remote could not be read, so the
   // allocation was made against a possibly stale view: mark it provisional.
-  const claimFile = writeClaim(projectsDir, project, n, slugify(title), { provisional: remoteMax === 0 });
+  const claimFile = writeClaim(projectsDir, project, n, slugify(title), { provisional: remoteMax === null });
   const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
   return { ok: true, id, type, project, status, file, claimFile, warnings };
 }

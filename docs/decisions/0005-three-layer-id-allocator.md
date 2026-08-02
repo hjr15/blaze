@@ -172,6 +172,13 @@ gains a `provisional` marker line. Concretely:
 | Claim content | `<KEY>-<N> <slug>` | `<KEY>-<N> <slug> provisional` |
 | Collision risk | avoided at allocation time | possible; caught at merge / index build |
 
+"Offline" means the remote could not be **read**, which is not the same as the
+remote having no claims. `remoteMaxClaim` therefore returns `null` for a failed
+read and a number — possibly `0` — for a successful one. Conflating the two marks
+every allocation provisional on a board whose ledger was just introduced, since
+its remote legitimately has no claims yet. Observed on the first real allocation
+against a live board, which came out provisional while fully online.
+
 **Provisional lifecycle** — the marker is not decorative, it has exactly one consumer and one
 transition: the next successful online operation (`blaze new`, or an explicit
 `blaze reindex`) rewrites any provisional claim it can prove is uncontested upstream to a plain
