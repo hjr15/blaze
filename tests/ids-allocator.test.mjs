@@ -92,3 +92,34 @@ test("BLZ-136: a non-board dataRoot under an unrelated repo FAILS LOUD, not sile
   assert.throws(() => commonDirFor(nested), /blaze:/);
   rmSync(outer, { recursive: true, force: true });
 });
+
+import { readFileSync } from "node:fs";
+import { claimPath, writeClaim, maxClaim, claimedNumbers } from "../scripts/model/claims.mjs";
+
+test("BLZ-136: writeClaim records id + slug so a same-id collision differs in CONTENT", () => {
+  const { root, projects } = board();
+  const p = writeClaim(projects, "PROJ", 7, "wire-the-gateway");
+  assert.equal(p, claimPath(projects, "PROJ", 7));
+  const body = readFileSync(p, "utf8");
+  assert.match(body, /PROJ-7/);
+  assert.match(body, /wire-the-gateway/);
+  assert.doesNotMatch(body, /provisional/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-136: a provisional claim is marked, so a stale-view allocation is identifiable", () => {
+  const { root, projects } = board();
+  const p = writeClaim(projects, "PROJ", 8, "slug", { provisional: true });
+  assert.match(readFileSync(p, "utf8"), /provisional/);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-136: maxClaim and claimedNumbers read the claim set", () => {
+  const { root, projects } = board();
+  assert.equal(maxClaim(projects, "PROJ"), 0, "empty claim set is 0");
+  writeClaim(projects, "PROJ", 3, "a");
+  writeClaim(projects, "PROJ", 11, "b");
+  assert.equal(maxClaim(projects, "PROJ"), 11);
+  assert.deepEqual([...claimedNumbers(projects, "PROJ")].sort((x, y) => x - y), [3, 11]);
+  rmSync(root, { recursive: true, force: true });
+});
