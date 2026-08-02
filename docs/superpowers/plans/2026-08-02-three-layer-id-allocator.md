@@ -847,7 +847,74 @@ with `import { claimedNumbers, claimPath as claimPathFor } from "./claims.mjs";`
 Run: `node --test tests/ids-rollback.test.mjs` then `node --test`
 Expected: PASS.
 
-**Important:** the existing board has ~1800 tickets and zero claims, so this check would flag every one of them. Before this ships, either backfill claims for all existing tickets, or gate the check behind a config flag defaulting off until backfill runs. **Decide this with the operator** — it is a behaviour change to a live board, not a code detail. Record the decision in ADR-0005 before merging.
+**The cutover rule.** A board that predates claims has thousands of tickets and zero claim
+files, so a naive check flags every one — and ADR-0005 explicitly promises "no backfill
+required". Those two only reconcile one way: **the invariant applies only to ids issued after
+claims existed.**
+
+Implement it as a per-project cutover marker rather than a config flag or a mass backfill:
+
+- On first allocation for a key, if `projects/<KEY>/.ids/` has no `.cutover` file, write one
+  containing the current `maxId(projectsDir, key)`.
+- `missingClaimErrors` skips any ticket whose numeric id is `<=` that cutover value.
+
+This needs no backfill, no flag to forget to flip, and is self-describing on disk. Pre-existing
+tickets are grandfathered exactly once; everything issued afterwards is held to the invariant.
+
+Add to `scripts/model/claims.mjs`:
+
+```javascript
+import { readFileSync, existsSync } from "node:fs";
+
+// BLZ-136. Tickets that predate the claim ledger cannot have claims and must not
+// be reported as errors — but every id issued AFTER cutover must. Written once,
+// on the first allocation for a key, and never updated: raising it later would
+// silently forgive real missing claims.
+export function cutoverPath(projectsDir, key) {
+  return join(claimDir(projectsDir, key), ".cutover");
+}
+
+export function readCutover(projectsDir, key) {
+  try { return Number(readFileSync(cutoverPath(projectsDir, key), "utf8").trim()) || 0; }
+  catch { return 0; }
+}
+
+export function ensureCutover(projectsDir, key, currentMax) {
+  const p = cutoverPath(projectsDir, key);
+  if (existsSync(p)) return readCutover(projectsDir, key);
+  mkdirSync(claimDir(projectsDir, key), { recursive: true });
+  writeFileSync(p, `${currentMax}\n`);
+  return currentMax;
+}
+```
+
+Call `ensureCutover(projectsDir, key, maxId(projectsDir, key))` in `allocateId` (Task 4) before
+reserving, and have `missingClaimErrors` skip ids `<= readCutover(...)`.
+
+Add this test to `tests/ids-rollback.test.mjs`:
+
+```javascript
+import { ensureCutover } from "../scripts/model/claims.mjs";
+
+test("BLZ-136: tickets predating the claim ledger are grandfathered by the cutover", () => {
+  const { root, projects } = boardWith([["defined", "PROJ-5-x.md", "PROJ-5"]], []);
+  ensureCutover(projects, "PROJ", 5);           // claims introduced when max was 5
+  assert.deepEqual(buildIndex(projects).errors, [], "pre-cutover tickets must not error");
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-136: a ticket issued AFTER cutover still errors without a claim", () => {
+  const { root, projects } = boardWith([["defined", "PROJ-6-x.md", "PROJ-6"]], []);
+  ensureCutover(projects, "PROJ", 5);
+  const errs = buildIndex(projects).errors;
+  assert.equal(errs.length, 1, `expected one error, got ${JSON.stringify(errs)}`);
+  assert.match(errs[0], /PROJ-6/);
+  rmSync(root, { recursive: true, force: true });
+});
+```
+
+The `.cutover` file starts with a dot, so Task 1's dot-dir exclusion and `claimedNumbers`'s
+`^\d+$` filter both already ignore it.
 
 - [ ] **Step 5: Commit**
 
@@ -995,6 +1062,13 @@ git commit -m "BLZ-136: mark ADR-0005 accepted and record the shipped validation
 
 ---
 
-## Open decision for the operator (blocks Task 7 shipping)
+## Notes for the reviewer
 
-The ticket-without-claim check flags **every existing ticket** on a board that predates claims (~1800 on the production board). Options: backfill a claim for every existing ticket in one commit, or default the check off until backfill runs. This must be decided before Task 7 merges — it changes behaviour on a live board.
+- **No operator decision is outstanding.** The one that looked like it — how the
+  ticket-without-claim invariant treats a board that predates claims — is resolved by the
+  cutover rule in Task 7, which needs neither a backfill nor a flag.
+- **Live-board impact.** Once merged and installed, `blaze new` requires `dataRoot` to be a
+  real git worktree (Task 2 fails loud otherwise). This is intended and matches BLZ-133's
+  direction, but it means the engine can no longer allocate from a non-repo scratch directory.
+- **Ordering.** Task 1 must land first: it is what stops `.ids/` being walked as a status dir,
+  and `removeExisting` would otherwise be one filename convention away from deleting claims.
