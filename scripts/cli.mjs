@@ -40,6 +40,7 @@ const SUBCOMMANDS = {
   commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true },
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
   migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
+  publish: { file: "publish-runner.mjs", desc: "sweep local queues and trigger the flush", mutates: true },
 };
 
 function printUsage() {
