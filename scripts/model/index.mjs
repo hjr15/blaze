@@ -61,12 +61,41 @@ export function* walkTickets(projectsDir) {
   }
 }
 
-function makeIndex(rows, links, warnings) {
-  const byId = new Map(rows.map((r) => [r.id, r]));
+// BLZ-134: `new Map(rows.map(...))` silently keeps the LAST row for a duplicated
+// id, so two tickets sharing an id collapsed into one and the other vanished
+// from every consumer (board, reconcile, rollup) with no signal at all. Observed
+// in production on a real board: four contiguous ids had each been issued twice
+// by concurrent sessions, and in two of those pairs the shadowed copy was the
+// non-terminal one — so the index was hiding OPEN work behind a closed ticket.
+// Collisions are now collected as ERRORS — a separate channel from `warnings`,
+// which callers are entitled to tolerate — naming every colliding path so the
+// operator can act without hunting for the other copy.
+function duplicateIdErrors(rows) {
+  const filesById = new Map();
+  for (const r of rows) {
+    if (!filesById.has(r.id)) filesById.set(r.id, []);
+    filesById.get(r.id).push(r.file);
+  }
+  const errors = [];
+  for (const [id, files] of filesById) {
+    if (files.length > 1) {
+      errors.push(`duplicate id ${id}: ${files.length} files claim it — ${files.join(" , ")}`);
+    }
+  }
+  return errors;
+}
+
+function makeIndex(rows, links, warnings, errors = []) {
+  // First-wins rather than last-wins: with a duplicate present the choice is
+  // arbitrary either way, but `errors` above makes the collision loud, so this
+  // only decides which row the (already-failing) board happens to show.
+  const byId = new Map();
+  for (const r of rows) if (!byId.has(r.id)) byId.set(r.id, r);
   return {
     rows,
     links,
     warnings,
+    errors,
     get: (id) => byId.get(id),
     count: () => rows.length,
     byProject: (project) => rows.filter((r) => r.project === project),
@@ -74,7 +103,7 @@ function makeIndex(rows, links, warnings) {
       acc[r.project] = (acc[r.project] || 0) + 1; return acc;
     }, {}),
     linksFrom: (id) => links.filter((l) => l.src === id),
-    toJSON: () => ({ tickets: rows, links, warnings }),
+    toJSON: () => ({ tickets: rows, links, warnings, errors }),
   };
 }
 
@@ -111,5 +140,5 @@ export function buildIndex(projectsDir, { tickets } = {}) {
       }
     }
   }
-  return makeIndex(rows, links, warnings);
+  return makeIndex(rows, links, warnings, duplicateIdErrors(rows));
 }
