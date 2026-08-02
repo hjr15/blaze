@@ -283,9 +283,10 @@ test("BLZ-136 AC5: remoteMaxClaim reads claims published on the remote", () => {
 // AC ⑤ offline half: specified as degraded, not undefined. A fetch failure must
 // never crash ticket creation — refusing to create tickets without a network is
 // a worse regression than a collision caught loudly at merge.
-test("BLZ-136 AC5: offline (no reachable remote) degrades to 0 rather than throwing", () => {
+test("BLZ-136 AC5: offline (no reachable remote) degrades rather than throwing", () => {
   const repo = initRepo(mkdtempSync(join(tmpdir(), "blaze-off-")));
-  assert.equal(remoteMaxClaim(repo, "PROJ"), 0, "a fetch failure must degrade, not crash");
+  assert.equal(remoteMaxClaim(repo, "PROJ"), null,
+    "a fetch failure must degrade to null (caller marks the claim provisional), not crash");
   rmSync(repo, { recursive: true, force: true });
 });
 
@@ -304,6 +305,32 @@ test("BLZ-136 AC5: a clone allocates above the remote's published claims", () =>
   const pd = join(clone, "projects");
   const { n } = allocateId(pd, "PROJ", { dataRoot: clone, remoteMax: remoteMaxClaim(clone, "PROJ") });
   assert.equal(n, 89, "must allocate above the remote's highest published claim");
+  rmSync(clone, { recursive: true, force: true });
+  rmSync(origin, { recursive: true, force: true });
+});
+
+// The provisional marker means "allocated against a possibly stale view". An
+// EMPTY remote claim set is not a stale view — it is a fully-known one that
+// happens to be empty, which is the normal state of a board whose ledger was
+// just introduced. Conflating "fetch failed" with "fetched, nothing there" marks
+// every early allocation provisional; observed on the first real allocation
+// against a live board.
+test("BLZ-136: remoteMaxClaim distinguishes fetch FAILURE from an empty remote claim set", () => {
+  const origin = initRepo(mkdtempSync(join(tmpdir(), "blaze-empty-origin-")));
+  const clone = mkdtempSync(join(tmpdir(), "blaze-empty-cl-"));
+  rmSync(clone, { recursive: true, force: true });
+  execFileSync("git", ["clone", "-q", origin, clone]);
+
+  // Reachable remote, no claims published yet → 0, NOT null.
+  assert.equal(remoteMaxClaim(clone, "PROJ"), 0,
+    "a reachable remote with no claims is a known-empty set, not a failure");
+
+  // No remote at all → null, meaning "could not be determined".
+  const solo = initRepo(mkdtempSync(join(tmpdir(), "blaze-solo-")));
+  assert.equal(remoteMaxClaim(solo, "PROJ"), null,
+    "an unreachable remote must be null so the caller can mark the claim provisional");
+
+  rmSync(solo, { recursive: true, force: true });
   rmSync(clone, { recursive: true, force: true });
   rmSync(origin, { recursive: true, force: true });
 });

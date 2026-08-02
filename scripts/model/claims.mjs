@@ -85,19 +85,23 @@ export function ensureCutover(projectsDir, key, currentMax) {
 // has already published is visible before the next one is issued. Tree read
 // only — no working tree touched, no merge.
 //
-// Returns 0 on ANY failure (offline, no remote, no such branch). The caller
-// marks the resulting claim provisional. It must never crash ticket creation:
-// refusing to create tickets without a network is a worse regression than a
-// collision caught loudly at merge.
+// Returns null when the remote could not be READ (offline, no remote, no such
+// branch), and a number — possibly 0 — when it was read successfully. The
+// distinction matters: 0 from a reachable remote is a known-empty claim set,
+// which is the normal state of a board whose ledger was just introduced, and
+// marking those allocations provisional would mislabel every early ticket.
+//
+// Never throws. Refusing to create tickets without a network is a worse
+// regression than a collision caught loudly at merge.
 export function remoteMaxClaim(dataRoot, key, { remote = "origin", branch = "main" } = {}) {
   const fetched = spawnSync("git", ["-C", dataRoot, "fetch", "--quiet", remote, branch], { encoding: "utf8" });
-  if (fetched.status !== 0) return 0;
+  if (fetched.status !== 0) return null;
   const ls = spawnSync(
     "git",
     ["-C", dataRoot, "ls-tree", "--name-only", "FETCH_HEAD", "--", `projects/${key}/.ids/`],
     { encoding: "utf8" },
   );
-  if (ls.status !== 0) return 0;
+  if (ls.status !== 0) return null;
   let max = 0;
   for (const line of ls.stdout.split("\n")) {
     const m = /\/(\d+)$/.exec(line.trim());
