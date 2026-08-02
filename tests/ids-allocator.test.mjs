@@ -47,3 +47,48 @@ test("BLZ-136: maxId ignores dot-directories", () => {
   assert.equal(maxId(projects, "PROJ"), 3, "a dot-dir decoy must not raise the max");
   rmSync(root, { recursive: true, force: true });
 });
+
+import { execFileSync } from "node:child_process";
+import { commonDirFor } from "../scripts/model/git-common.mjs";
+
+function initRepo(dir) {
+  mkdirSync(dir, { recursive: true });
+  execFileSync("git", ["-C", dir, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", dir, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
+  writeFileSync(join(dir, "seed"), "s");
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-qm", "seed"]);
+  return dir;
+}
+
+test("BLZ-136: commonDirFor returns an absolute shared .git for a repo", () => {
+  const repo = initRepo(mkdtempSync(join(tmpdir(), "blaze-gc-")));
+  const cd = commonDirFor(repo);
+  assert.ok(cd.startsWith("/"), `expected absolute path, got ${cd}`);
+  assert.equal(existsSync(cd), true);
+  rmSync(repo, { recursive: true, force: true });
+});
+
+test("BLZ-136: a linked worktree resolves to the SAME common dir as its main checkout", () => {
+  const repo = initRepo(mkdtempSync(join(tmpdir(), "blaze-gc-")));
+  const wt = mkdtempSync(join(tmpdir(), "blaze-gc-wt-"));
+  rmSync(wt, { recursive: true, force: true });
+  execFileSync("git", ["-C", repo, "worktree", "add", "-q", wt, "-b", "feat"]);
+  assert.equal(commonDirFor(wt), commonDirFor(repo),
+    "worktree and main checkout must share one reservation namespace");
+  rmSync(wt, { recursive: true, force: true });
+  rmSync(repo, { recursive: true, force: true });
+});
+
+// The silent-misresolution hole: `git -C <dir> rev-parse` succeeds for ANY
+// ancestor repo, so a non-repo dataRoot nested under an unrelated repo resolves
+// that repo's .git with exit 0. Two sessions would then reserve in different
+// namespaces, never contend, and collide on one machine.
+test("BLZ-136: a non-board dataRoot under an unrelated repo FAILS LOUD, not silently", () => {
+  const outer = initRepo(mkdtempSync(join(tmpdir(), "blaze-gc-outer-")));
+  const nested = join(outer, "unrelated", "board");
+  mkdirSync(nested, { recursive: true });
+  assert.throws(() => commonDirFor(nested), /blaze:/);
+  rmSync(outer, { recursive: true, force: true });
+});
