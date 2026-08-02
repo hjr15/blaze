@@ -63,14 +63,17 @@ export function cutoverPath(projectsDir, key) {
   return join(claimDir(projectsDir, key), ".cutover");
 }
 
+// null means "this project has never allocated through the ledger", which is a
+// different state from "cutover is 0". Conflating them made every ticket on an
+// un-migrated board look like it was missing a claim.
 export function readCutover(projectsDir, key) {
   try { return Number(readFileSync(cutoverPath(projectsDir, key), "utf8").trim()) || 0; }
-  catch { return 0; }
+  catch { return null; }
 }
 
 export function ensureCutover(projectsDir, key, currentMax) {
   const p = cutoverPath(projectsDir, key);
-  if (existsSync(p)) return readCutover(projectsDir, key);
+  if (existsSync(p)) return readCutover(projectsDir, key) ?? 0;
   mkdirSync(claimDir(projectsDir, key), { recursive: true });
   writeFileSync(p, `${currentMax}\n`);
   return currentMax;
