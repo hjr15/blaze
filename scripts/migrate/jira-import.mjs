@@ -56,6 +56,10 @@ function removeExisting(projectsDir, project, id) {
   let statuses = [];
   try { statuses = readdirSync(projDir); } catch { return; }
   for (const st of statuses) {
+    // BLZ-136: this is the one walker that DELETES. Claims are append-only
+    // tombstones, and they survive here today only because a claim named `700`
+    // happens not to match `PROJ-700-` — luck, not a guard.
+    if (st.startsWith(".")) continue;
     const dir = join(projDir, st);
     let files = [];
     try { files = readdirSync(dir); } catch { continue; }

@@ -3,7 +3,8 @@
 // status dir. Pure-fs (no git); the CLI wrapper adds the commit.
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
-import { nextId } from "./model/ids.mjs";
+import { allocateId } from "./model/ids.mjs";
+import { writeClaim, remoteMaxClaim } from "./model/claims.mjs";
 import { isType } from "./model/schema.mjs";
 import { initialStatus } from "./model/workflows.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
@@ -25,7 +26,13 @@ export function applyNew(projectsDir, opts = {}) {
   if (!title) pre.push("missing title");
   if (pre.length) return { ok: false, errors: pre };
 
-  const id = nextId(projectsDir, project);
+  // BLZ-136 / ADR-0005: allocate + atomically reserve, seeded by the remote's
+  // published claims so a cross-machine collision is usually AVOIDED rather than
+  // merely detected later. dataRoot is the parent of projectsDir, matching
+  // BLAZE_PROJECTS_DIR's semantics elsewhere.
+  const dataRoot = dirname(projectsDir);
+  const remoteMax = remoteMaxClaim(dataRoot, project);
+  const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax });
   const status = initialStatus(type);
   const frontmatter = {
     id, title, type, project, priority,
@@ -66,6 +73,11 @@ export function applyNew(projectsDir, opts = {}) {
   const file = join(dir, `${id}-${slugify(title)}.md`);
   if (existsSync(file)) return { ok: false, errors: [`refusing to overwrite ${file}`] };
   writeFileSync(file, serializeTicket({ frontmatter, body }));
+  // The claim has to land WITH the ticket — new-runner stages both. A ticket
+  // that reaches upstream without its claim merges as silently as it did before
+  // this existed. remoteMax === 0 means the remote could not be read, so the
+  // allocation was made against a possibly stale view: mark it provisional.
+  const claimFile = writeClaim(projectsDir, project, n, slugify(title), { provisional: remoteMax === 0 });
   const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
-  return { ok: true, id, type, project, status, file, warnings };
+  return { ok: true, id, type, project, status, file, claimFile, warnings };
 }

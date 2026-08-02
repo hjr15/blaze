@@ -4,9 +4,18 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { applyNew } from "../scripts/new.mjs";
 
-function root() { return mkdtempSync(join(tmpdir(), "blaze-new-")); }
+// BLZ-136: allocation reserves ids in the shared git common dir, so a board root
+// must be a real git worktree. commonDirFor fails loud rather than degrading to
+// an unshared reservation, so the fixture is a repo — the guard is not weakened
+// for tests.
+function root() {
+  const d = mkdtempSync(join(tmpdir(), "blaze-new-"));
+  execFileSync("git", ["-C", d, "init", "-q", "-b", "main"]);
+  return d;
+}
 
 test("applyNew creates a validated task in the initial status dir with a namespaced id", () => {
   const r = root(); const projects = join(r, "projects");
@@ -148,4 +157,24 @@ test("applyNew WITHOUT sprint fields writes no sprint:/start:/due: lines (M2 del
   assert.doesNotMatch(txt, /^start:/m);
   assert.doesNotMatch(txt, /^due:/m);
   rmSync(r, { recursive: true, force: true });
+});
+
+// BLZ-136: the claim must be created with the ticket and returned, so the batch
+// ledger can stage both atomically. A ticket that reaches upstream without its
+// claim merges exactly as silently as before the allocator existed.
+test("BLZ-136: applyNew writes a claim beside the ticket and returns its path", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { readFileSync } = await import("node:fs");
+  const r0 = root();
+  execFileSync("git", ["-C", r0, "init", "-q", "-b", "main"]);
+  const projects = join(r0, "projects");
+  const res = applyNew(projects, { project: "PROJ", type: "task", title: "Wire the gateway",
+    today: "2026-06-29", extra: { estimate: 30 } });
+  assert.equal(res.ok, true, JSON.stringify(res.errors));
+  assert.ok(res.claimFile, "applyNew must return the claim path so the ledger can stage it");
+  assert.equal(existsSync(res.claimFile), true);
+  const n = res.id.split("-")[1];
+  assert.equal(res.claimFile, join(projects, "PROJ", ".ids", n));
+  assert.match(readFileSync(res.claimFile, "utf8"), new RegExp(res.id));
+  rmSync(r0, { recursive: true, force: true });
 });

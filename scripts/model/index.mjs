@@ -8,6 +8,7 @@ import { join, dirname } from "node:path";
 import { parseTicket } from "./ticket.mjs";
 import { lintLinks } from "./links.mjs";
 import { loadSprints } from "./sprints.mjs";
+import { claimedNumbers, readCutover, claimPath } from "./claims.mjs";
 
 function safeReaddir(p) { try { return readdirSync(p); } catch { return []; } }
 function isDir(p) { try { return statSync(p).isDirectory(); } catch { return false; } }
@@ -26,6 +27,10 @@ export function* walkTickets(projectsDir) {
     const projPath = join(projectsDir, project);
     if (!isDir(projPath)) continue;
     for (const status of safeReaddir(projPath)) {
+      // BLZ-136: `.ids/` holds the allocation ledger, not tickets. Dot-dirs were
+      // previously skipped only because claim files carry no .md extension — an
+      // accident, not a guard, and one a single renamed file would have undone.
+      if (status.startsWith(".")) continue;
       const statusPath = join(projPath, status);
       if (!isDir(statusPath)) continue;
       for (const f of safeReaddir(statusPath)) {
@@ -85,6 +90,41 @@ function duplicateIdErrors(rows) {
   return errors;
 }
 
+// BLZ-136 / ADR-0005. A ticket whose id has no claim reached the board without
+// its allocation record — committed by hand, or through a merge strategy that
+// auto-resolved the claim conflict away (`-X ours/theirs` merges a colliding
+// claim cleanly, which the claim layer alone cannot prevent). Either way the id
+// is no longer provably unique, so it is an error, not a warning.
+//
+// Ids at or below the per-project cutover predate the ledger and are exempt —
+// that is what lets ADR-0005 promise no backfill.
+function missingClaimErrors(projectsDir, rows) {
+  const claimsByKey = new Map();
+  const cutoverByKey = new Map();
+  const errors = [];
+  for (const r of rows) {
+    if (!r.project || !r.id) continue;
+    if (!claimsByKey.has(r.project)) {
+      claimsByKey.set(r.project, claimedNumbers(projectsDir, r.project));
+      cutoverByKey.set(r.project, readCutover(projectsDir, r.project));
+    }
+    const cutover = cutoverByKey.get(r.project);
+    // No cutover marker at all: this project has never allocated through the
+    // ledger, so none of its tickets could have a claim. Stay silent until its
+    // first allocation establishes the boundary.
+    if (cutover === null) continue;
+    const n = Number(String(r.id).split("-").pop());
+    if (!Number.isFinite(n)) continue;
+    if (n <= cutover) continue;
+    if (claimsByKey.get(r.project).has(n)) continue;
+    errors.push(
+      `ticket ${r.id} has no claim (${claimPath(projectsDir, r.project, n)}) — its id is not ` +
+      `provably unique; restore or re-create the claim, then re-run \`blaze reindex\``,
+    );
+  }
+  return errors;
+}
+
 function makeIndex(rows, links, warnings, errors = []) {
   // First-wins rather than last-wins: with a duplicate present the choice is
   // arbitrary either way, but `errors` above makes the collision loud, so this
@@ -140,5 +180,8 @@ export function buildIndex(projectsDir, { tickets } = {}) {
       }
     }
   }
-  return makeIndex(rows, links, warnings, duplicateIdErrors(rows));
+  return makeIndex(rows, links, warnings, [
+    ...duplicateIdErrors(rows),
+    ...missingClaimErrors(projectsDir, rows),
+  ]);
 }
