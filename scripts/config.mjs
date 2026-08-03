@@ -3,6 +3,7 @@
 import { readFileSync, existsSync } from "node:fs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
+import { spawnSync } from "node:child_process";
 import { checkSchemaVersion } from "./model/schema-version.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -158,6 +159,41 @@ const PROJECT_DEFAULTS = {
   schema: null,
 };
 
+// --- INF-763: resolve relative codeRepos against the MAIN working tree --------
+// `codeRepos` are stored relative (`../service-platform`). Resolved against the
+// invoking root they break in a linked worktree: every path becomes a sibling of
+// the WORKTREE, which does not exist, so reconcile silently scans nothing and
+// still reports "already in sync". The board-main worktree is the documented
+// INF-673 workaround, so this is the normal path, not an exotic one.
+//
+// `git rev-parse --git-common-dir` names the shared .git for any worktree —
+// relative (`.git`) from the main tree, absolute from a linked one — so resolving
+// it against `root` handles both. Its parent is the main working tree.
+//
+// Redirect ONLY when that parent actually looks like a board (`projects/` there).
+// A non-git root, a packaged install, or an unusual layout falls through to the
+// previous behaviour rather than guessing.
+//
+// Memoised: loadProject is on the hot path for every board command, and a repo's
+// worktree layout does not change within a process.
+const _mainWorktreeCache = new Map();
+function mainWorktreeFor(root) {
+  if (_mainWorktreeCache.has(root)) return _mainWorktreeCache.get(root);
+  let out = root;
+  const r = spawnSync("git", ["-C", root, "rev-parse", "--git-common-dir"],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] });
+  if (r.status === 0) {
+    const raw = (r.stdout || "").trim();
+    if (raw) {
+      const commonDir = isAbsolute(raw) ? raw : resolve(root, raw);
+      const parent = dirname(commonDir);
+      if (parent !== root && existsSync(join(parent, "projects"))) out = parent;
+    }
+  }
+  _mainWorktreeCache.set(root, out);
+  return out;
+}
+
 export function listProjects(cfg, { root = ROOT } = {}) {
   const c = cfg || loadConfig({ root });
   return Array.isArray(c.projects) ? c.projects.slice() : [];
@@ -188,7 +224,7 @@ export function loadProject(key, { root = ROOT, projectsDir = join(root, "projec
   }
   const merged = { ...PROJECT_DEFAULTS, ...file, key };
   const repos = merged.codeRepos.length ? merged.codeRepos : (cfg.codeRepos || []);
-  merged.codeRepoPaths = repos.map((r) => (_isAbsolute(r) ? r : _resolve(root, r)));
+  merged.codeRepoPaths = repos.map((r) => (_isAbsolute(r) ? r : _resolve(mainWorktreeFor(root), r)));
   merged.idRegex = new RegExp("\\b" + key + "-(\\d+)", "i");
   merged.idFromRef = (ref) => { const m = merged.idRegex.exec(ref || ""); return m ? `${key}-${m[1]}` : null; };
   merged.fileRegex = new RegExp("^" + key + "-\\d+.*\\.md$");
