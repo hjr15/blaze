@@ -136,27 +136,32 @@ export function buildPrMap(prs, idFromRef, shippedSet) {
 // to it (`KEY-n: desc`, the house convention `idFromSubject` already parses) — or
 // the shipped signal.
 //
-// The rule turns on whether the branch has content yet:
-//   - NO commits of its own → claimed on the name. `git checkout -b KEY-1-fix` and
-//     nothing else is the ordinary "branched, about to work" signal this path
-//     exists to catch; there is no content to contradict the name. Gating it would
-//     delete the feature instead of fixing the defect.
-//   - HAS commits → at least one must name the ticket. Once a branch has content,
-//     that content is the evidence, and a name-only claim is exactly the defect.
-//     (A squash-merged PR leaves its originals unreachable from the default
-//     branch, so they still count as the branch's own commits.)
+// When a branch has NO commits of its own, two very different situations look
+// identical to `git log <ref> ^<default>` (both empty):
+//
+//   FRESH  — `git checkout -b KEY-1-fix` and nothing yet. Tip == default tip.
+//            Nothing contradicts the name, and this is the ordinary "branched,
+//            about to work" signal the branch path exists to catch.
+//   STALE  — a fully-merged branch left behind after its PR landed. Tip is BEHIND
+//            the default tip. It has nothing outstanding and is never evidence of
+//            work in progress.
+//
+// The tip is the discriminator. Conflating them re-claimed a ticket whose bogus
+// PR claim had just been dropped, moving it back to `in-progress` and undoing a
+// hand repair — observed live on 2026-08-03.
 //
 // Uncorroborated refs are skipped WITHOUT reserving the id, so a bogus ref cannot
 // squat an id and shadow the ticket's real branch.
-export function buildBranchMap(refs, idFromRef, { key, shippedSet, subjectsFor }) {
+export function buildBranchMap(refs, idFromRef, { key, shippedSet, inspect }) {
   const branchMap = new Map();
   for (const ref of refs || []) {
     const id = idFromRef(ref);
     if (!id || branchMap.has(id)) continue;
-    const own = subjectsFor(ref) || [];
+    const { own = [], sameTipAsDefault = false } = inspect(ref) || {};
     const corroborated = (shippedSet && shippedSet.has(id)) ||
-      own.length === 0 ||
-      own.some((s) => idFromSubject(s, key) === id);
+      (own.length > 0
+        ? own.some((sub) => idFromSubject(sub, key) === id)
+        : sameTipAsDefault);
     if (!corroborated) continue;
     branchMap.set(id, ref);
   }
@@ -191,12 +196,17 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
     .map((r) => r.replace(/^origin\//, "").trim())
     .filter((r) => r && r !== "HEAD");
 
-  // Subjects unique to the branch (not already on the default branch) — that is
-  // what says the branch is FOR this ticket rather than merely named after it.
-  const subjectsFor = (branchRef) =>
-    (sh("git", ["-C", repoPath, "log", `${branchRef}`, `^${ref}`, "--format=%s"]) || "")
-      .split("\n").filter(Boolean);
-  const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, subjectsFor });
+  // What the branch itself says: the subjects unique to it (not already on the
+  // default branch), plus whether its tip IS the default tip — the fresh-vs-stale
+  // discriminator, since both have zero unique subjects.
+  const defaultTip = sh("git", ["-C", repoPath, "rev-parse", ref]);
+  const inspect = (branchRef) => ({
+    own: (sh("git", ["-C", repoPath, "log", `${branchRef}`, `^${ref}`, "--format=%s"]) || "")
+      .split("\n").filter(Boolean),
+    sameTipAsDefault: Boolean(defaultTip) &&
+      sh("git", ["-C", repoPath, "rev-parse", branchRef]) === defaultTip,
+  });
+  const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
   return { prMap, branchMap, shippedSet };
 }
