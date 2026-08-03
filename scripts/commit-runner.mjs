@@ -14,17 +14,20 @@ import { readForDrain, clearLedger, listQueues, sessionId } from "./pending-ledg
 import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 import { assertWritable } from "./readonly.mjs";
+import { checkBranch } from "./branch-guard.mjs";
 
 const { dataRoot } = resolveRoots();
 const argv = process.argv.slice(2);
 let all = false;
 let shared = false;
+let branchOk = false;
 for (const a of argv) {
   switch (a) {
     case "--all": all = true; break;
     case "--shared": shared = true; break;
+    case "--branch-ok": branchOk = true; break;
     case "--help": case "-h":
-      console.log("usage: blaze commit [--all] [--shared]  (--shared drains ONLY the shared fallback queue, never the caller's own)");
+      console.log("usage: blaze commit [--all] [--shared] [--branch-ok]  (--shared drains ONLY the shared fallback queue, never the caller's own; --branch-ok overrides the INF-673 foreign-branch refusal)");
       process.exit(0);
     default:
       console.error(`unknown flag: ${a}`);
@@ -98,6 +101,17 @@ if (entries.length === 0) {
   }
   console.log("blaze commit: nothing to flush");
   process.exit(0);
+}
+
+// INF-673: refuse before anything is staged or committed, so a refusal leaves
+// no half-made commit to clean off the foreign branch. Placed after the queues
+// are read (the message names the stranded tickets) but before the lock, the
+// `git add` and the `git commit` — the queue is left fully intact, so the
+// caller just re-runs from a checkout on the default branch.
+const guard = checkBranch(dataRoot, entries, { override: branchOk });
+if (!guard.ok) {
+  console.error(guard.message);
+  process.exit(1);
 }
 
 // Cheap divergence signal against already-fetched refs — no network, so the
