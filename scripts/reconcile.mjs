@@ -77,6 +77,25 @@ export function idFromSubject(subject, key) {
   return m ? `${key}-${m[1]}` : null;
 }
 
+// --- INF-735: a ref-derived claim needs a SECOND signal to count --------------
+// `idFromRef` is an unanchored `\bKEY-(\d+)` run over every branch/PR head ref in
+// every one of a project's codeRepos. When a repo that carries board or docs work
+// is itself a codeRepo for a project, its own branches claim that project's
+// tickets they never touched — and a MERGED PR outranks the ticket's real repo,
+// driving an unworked ticket to `done`. Terminal status is sticky and a MERGED
+// signal never changes, so it re-asserts on every `reconcile --apply`.
+//
+// A ref name is a naming convention, not evidence. Corroborate it with something
+// that describes the WORK: the id in the PR title (the house `KEY-n: desc` title
+// convention), or a `KEY-n:` commit reachable from the default branch (the
+// shippedSet we already compute). Fail closed — an uncorroborated claim is dropped
+// rather than trusted, so a misnamed branch costs a missed signal, not a corrupted
+// ticket.
+export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
+  if (shippedSet && shippedSet.has(id)) return true;
+  return new RegExp("\\b" + id + "\\b", "i").test(title || "");
+}
+
 // --- resolve a repo's default-branch LOG REF, preferring the remote-tracking ---
 // branch. prMap comes from live `gh pr list` and branchMap reads
 // refs/remotes/origin, so the shipped signal must read the SAME freshness — the
@@ -94,37 +113,66 @@ function defaultBranchRef(repoPath) {
   return "main";
 }
 
+// --- rank a repo's PRs into id → best-PR, gated on corroboration (INF-735) -----
+// Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
+// an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
+// no longer beat a corroborated OPEN PR from the ticket's real repo.
+export function buildPrMap(prs, idFromRef, shippedSet) {
+  const prMap = new Map();
+  for (const pr of prs || []) {
+    const id = idFromRef(pr.headRefName);
+    if (!id) continue;
+    if (!claimCorroborated(id, { title: pr.title, shippedSet })) continue;
+    const cur = prMap.get(id);
+    const better = !cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0) ||
+      ((PR_RANK[pr.state] || 0) === (PR_RANK[cur.state] || 0) && pr.number > cur.number);
+    if (better) prMap.set(id, pr);
+  }
+  return prMap;
+}
+
+// --- rank a repo's branches into id → first-corroborated-branch (INF-735) -----
+// A branch has no title, so its evidence is its own commits — the subjects unique
+// to it (`KEY-n: desc`, the house convention `idFromSubject` already parses) — or
+// the shipped signal.
+//
+// The rule turns on whether the branch has content yet:
+//   - NO commits of its own → claimed on the name. `git checkout -b KEY-1-fix` and
+//     nothing else is the ordinary "branched, about to work" signal this path
+//     exists to catch; there is no content to contradict the name. Gating it would
+//     delete the feature instead of fixing the defect.
+//   - HAS commits → at least one must name the ticket. Once a branch has content,
+//     that content is the evidence, and a name-only claim is exactly the defect.
+//     (A squash-merged PR leaves its originals unreachable from the default
+//     branch, so they still count as the branch's own commits.)
+//
+// Uncorroborated refs are skipped WITHOUT reserving the id, so a bogus ref cannot
+// squat an id and shadow the ticket's real branch.
+export function buildBranchMap(refs, idFromRef, { key, shippedSet, subjectsFor }) {
+  const branchMap = new Map();
+  for (const ref of refs || []) {
+    const id = idFromRef(ref);
+    if (!id || branchMap.has(id)) continue;
+    const own = subjectsFor(ref) || [];
+    const corroborated = (shippedSet && shippedSet.has(id)) ||
+      own.length === 0 ||
+      own.some((s) => idFromSubject(s, key) === id);
+    if (!corroborated) continue;
+    branchMap.set(id, ref);
+  }
+  return branchMap;
+}
+
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
 function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set() };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
   if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
 
-  const prMap = new Map();
-  const prJson = sh("gh", ["pr", "list", "--state", "all", "--limit", "1000",
-    "--json", "number,url,headRefName,state"], { cwd: repoPath });
-  for (const pr of JSON.parse(prJson || "[]")) {
-    const id = idFromRef(pr.headRefName);
-    if (!id) continue;
-    const cur = prMap.get(id);
-    const better = !cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0) ||
-      ((PR_RANK[pr.state] || 0) === (PR_RANK[cur.state] || 0) && pr.number > cur.number);
-    if (better) prMap.set(id, pr);
-  }
-
-  const branchMap = new Map();
-  const refs = sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
-    "refs/heads", "refs/remotes/origin"]) || "";
-  for (let ref of refs.split("\n")) {
-    ref = ref.replace(/^origin\//, "").trim();
-    if (!ref || ref === "HEAD") continue;
-    const id = idFromRef(ref);
-    if (id && !branchMap.has(id)) branchMap.set(id, ref);
-  }
-
   // Default-branch commit signal: a <KEY>-<n>: commit reachable from the code
   // repo's default-branch HEAD means that ticket shipped (used for bundled
-  // epic-children that have no branch/PR of their own).
+  // epic-children that have no branch/PR of their own). Computed FIRST because
+  // buildPrMap corroborates against it (INF-735).
   const shippedSet = new Set();
   const ref = defaultBranchRef(repoPath);
   const subs = sh("git", ["-C", repoPath, "log", ref, "--format=%s"]) || "";
@@ -132,6 +180,24 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
     const id = idFromSubject(line, key);
     if (id) shippedSet.add(id);
   }
+
+  const prJson = sh("gh", ["pr", "list", "--state", "all", "--limit", "1000",
+    "--json", "number,url,headRefName,state,title"], { cwd: repoPath });
+  const prMap = buildPrMap(JSON.parse(prJson || "[]"), idFromRef, shippedSet);
+
+  const refs = (sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
+    "refs/heads", "refs/remotes/origin"]) || "")
+    .split("\n")
+    .map((r) => r.replace(/^origin\//, "").trim())
+    .filter((r) => r && r !== "HEAD");
+
+  // Subjects unique to the branch (not already on the default branch) — that is
+  // what says the branch is FOR this ticket rather than merely named after it.
+  const subjectsFor = (branchRef) =>
+    (sh("git", ["-C", repoPath, "log", `${branchRef}`, `^${ref}`, "--format=%s"]) || "")
+      .split("\n").filter(Boolean);
+  const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, subjectsFor });
+
   return { prMap, branchMap, shippedSet };
 }
 
