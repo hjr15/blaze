@@ -93,19 +93,48 @@ export function ensureCutover(projectsDir, key, currentMax) {
 //
 // Never throws. Refusing to create tickets without a network is a worse
 // regression than a collision caught loudly at merge.
-export function remoteMaxClaim(dataRoot, key, { remote = "origin", branch = "main" } = {}) {
-  const fetched = spawnSync("git", ["-C", dataRoot, "fetch", "--quiet", remote, branch], { encoding: "utf8" });
-  if (fetched.status !== 0) return null;
-  const ls = spawnSync(
+//
+// INF-682: scans ALL remote heads, not just the default branch. Reading one
+// branch left an id reserved on an UNMERGED branch invisible at allocation time —
+// the exact collision this layer exists to avoid, and one that BLZ-136 made loud
+// but did not prevent. Still a single fetch (one network round trip, just a wider
+// refspec) followed by local tree reads.
+//
+// The `branch` option is gone deliberately rather than silently ignored: scanning
+// every head supersedes it, and keeping a parameter that no longer narrows
+// anything would misrepresent what the function does.
+export function remoteMaxClaim(dataRoot, key, { remote = "origin" } = {}) {
+  const fetched = spawnSync(
     "git",
-    ["-C", dataRoot, "ls-tree", "--name-only", "FETCH_HEAD", "--", `projects/${key}/.ids/`],
+    ["-C", dataRoot, "fetch", "--quiet", remote, `+refs/heads/*:refs/remotes/${remote}/*`],
     { encoding: "utf8" },
   );
-  if (ls.status !== 0) return null;
+  if (fetched.status !== 0) return null;
+
+  // Enumerating the refs is part of READING the remote: if this fails we do not
+  // know the claim set, which is null (provisional), not 0 (known-empty).
+  const refs = spawnSync(
+    "git",
+    ["-C", dataRoot, "for-each-ref", "--format=%(refname)", `refs/remotes/${remote}`],
+    { encoding: "utf8" },
+  );
+  if (refs.status !== 0) return null;
+
   let max = 0;
-  for (const line of ls.stdout.split("\n")) {
-    const m = /\/(\d+)$/.exec(line.trim());
-    if (m) max = Math.max(max, Number(m[1]));
+  for (const ref of refs.stdout.split("\n").map((s) => s.trim()).filter(Boolean)) {
+    const ls = spawnSync(
+      "git",
+      ["-C", dataRoot, "ls-tree", "--name-only", ref, "--", `projects/${key}/.ids/`],
+      { encoding: "utf8" },
+    );
+    // A single unreadable ref (a symbolic HEAD mid-update, a ref pruned between
+    // the enumeration and the read) must not sink the whole scan — the other refs
+    // still carry real claims, and the fetch above already proved reachability.
+    if (ls.status !== 0) continue;
+    for (const line of ls.stdout.split("\n")) {
+      const m = /\/(\d+)$/.exec(line.trim());
+      if (m) max = Math.max(max, Number(m[1]));
+    }
   }
   return max;
 }
