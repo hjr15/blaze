@@ -202,9 +202,16 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
+// Tracks which configured repos were actually READABLE (INF-763). A path that
+// isn't a git repo used to be skipped in silence, so a board whose repos all
+// failed to resolve reported "already in sync" having scanned nothing at all.
 function gatherProject(project, { fetch }) {
   const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
+  const missingRepos = [];
+  let scannedRepos = 0;
   for (const repo of project.codeRepoPaths) {
+    if (!existsSync(repo) || !existsSync(join(repo, ".git"))) { missingRepos.push(repo); continue; }
+    scannedRepos += 1;
     const r = gatherRepo(repo, project.idFromRef, project.key, { fetch });
     for (const [id, pr] of r.prMap) {
       const cur = prMap.get(id);
@@ -213,7 +220,10 @@ function gatherProject(project, { fetch }) {
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
   }
-  return { prMap, branchMap, shippedSet };
+  return {
+    prMap, branchMap, shippedSet, missingRepos, scannedRepos,
+    configuredRepos: project.codeRepoPaths.length,
+  };
 }
 
 // --- the reconcile pass -------------------------------------------------------
@@ -235,7 +245,8 @@ export function reconcile({
   const today = new Date().toISOString().slice(0, 10);
   const cfg = loadConfig({ root });
   const keys = listProjects(cfg);
-  if (!keys.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false };
+  if (!keys.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false,
+    missingRepos: [], scannedRepos: 0, configuredRepos: 0 };
 
   const sig = new Map();
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
@@ -283,7 +294,12 @@ export function reconcile({
       `chore(board): reconcile ${changes.length} ticket(s) to git state`, "--", ...touched]) !== null;
   }
   // push is never performed — hardcoded false regardless of the push param
-  return { ok: true, changes, committed, pushed: false };
+  // INF-763: surface repo reachability so a caller can tell "scanned everything,
+  // nothing to change" from "scanned nothing, so of course nothing changed".
+  const missingRepos = [...new Set([...sig.values()].flatMap((g) => g.missingRepos))];
+  const scannedRepos = [...sig.values()].reduce((n, g) => n + g.scannedRepos, 0);
+  const configuredRepos = [...sig.values()].reduce((n, g) => n + g.configuredRepos, 0);
+  return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -301,6 +317,17 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const r = reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply });
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   if (r.standalone) { if (!quiet) console.log("reconcile: no projects configured — nothing to reconcile."); process.exit(0); }
+  // INF-763: a repo that could not be read is a misconfiguration, not a quiet
+  // skip. Warnings go to stderr regardless of --quiet: --quiet means "print only
+  // on change", and this is not a change, it is a reason not to trust the run.
+  for (const p of r.missingRepos || []) {
+    console.error(`reconcile: WARNING — codeRepo not found, skipped: ${p}`);
+  }
+  if (r.configuredRepos > 0 && r.scannedRepos === 0) {
+    console.error(`reconcile: FAILED — none of the ${r.configuredRepos} configured codeRepo(s) could be read, so NOTHING was scanned.`);
+    console.error("reconcile: this is a misconfiguration, not an in-sync board. If you are in a git worktree, relative codeRepos may be resolving against the wrong parent.");
+    process.exit(1);
+  }
   if (!r.changes.length) { if (!quiet) console.log("reconcile: already in sync — nothing to do."); process.exit(0); }
   for (const c of r.changes) console.log(`${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`);
   if (!apply) console.log(`(dry-run: ${r.changes.length} change(s); rerun with --apply to write locally — reconcile never pushes)`);
