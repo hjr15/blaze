@@ -27,3 +27,9 @@ coverage/
 
 # git worktrees created by parallel Claude sessions (never track; blaze log git-add-all sweeps these)
 .claude/worktrees/
+
+# ruflo / claude-flow plugin runtime state — machine-local, regenerable (INF-772)
+.claude-flow/
+.claude/proven-config.json
+.claude/.proven-config-version
+.claude/worktrees/
