@@ -67,12 +67,33 @@ if (sweep.status !== 0) {
 // --- step 2: trigger the flush -----------------------------------------------
 const NS = process.env.BLAZE_FLUSH_NAMESPACE || "blaze";
 const CRONJOB = process.env.BLAZE_FLUSH_CRONJOB || "blaze-flush";
+// INF-800: the flush lives on ONE cluster, but this command used to inherit
+// whatever context happened to be current. Observed: the ambient context was
+// k3d-online-broker-agent while the blaze namespace lives on
+// k3d-service-platform, so the trigger failed with `namespaces "blaze" not
+// found` — a message that names the namespace and never the context, so it
+// reads as "the flush is misconfigured" rather than "you are pointed at the
+// wrong cluster". Naming the target explicitly makes publishing independent of
+// whatever the last kubectl command in the shell was doing.
+const CONTEXT = process.env.BLAZE_FLUSH_CONTEXT || "";
 // Seconds since epoch: unique per invocation, and readable in `kubectl get job`.
 const jobName = `${CRONJOB}-manual-${Math.floor(Date.now() / 1000)}`;
-const trigger = ["kubectl", "create", "job", "-n", NS, "--from", `cronjob/${CRONJOB}`, jobName];
+const trigger = [
+  "kubectl",
+  ...(CONTEXT ? ["--context", CONTEXT] : []),
+  "create", "job", "-n", NS, "--from", `cronjob/${CRONJOB}`, jobName,
+];
+
+// Whatever happens next, the operator needs to know which cluster was targeted.
+// Unset is legitimate (single-cluster machines, CI), so it is described rather
+// than refused — but described loudly enough that a wrong-cluster failure is
+// self-diagnosing instead of pointing at the namespace.
+const contextNote = CONTEXT
+  ? `context ${CONTEXT}`
+  : "the ambient kubectl context (BLAZE_FLUSH_CONTEXT unset — set it to the flush cluster to make this deterministic)";
 
 if (dryRun) {
-  console.log(`dry-run: would trigger the flush with:\n  ${trigger.join(" ")}`);
+  console.log(`dry-run: would trigger the flush against ${contextNote} with:\n  ${trigger.join(" ")}`);
   process.exit(0);
 }
 
@@ -86,9 +107,14 @@ if (r.error && r.error.code === "ENOENT") {
 }
 if (r.status !== 0) {
   console.error(
-    `blaze publish: flush trigger failed (status ${r.status}). The local sweep committed; ` +
-    "origin/main is unchanged until a flush runs.",
+    `blaze publish: flush trigger failed (status ${r.status}) against ${contextNote}. ` +
+    `The local sweep committed; origin/main is unchanged until a flush runs.\n` +
+    `  If kubectl reported \`namespaces "${NS}" not found\`, the cluster is almost certainly the ` +
+    `problem and not the namespace — check \`kubectl config get-contexts\` and set ` +
+    `BLAZE_FLUSH_CONTEXT to the cluster that hosts the ${NS} namespace.`,
   );
   process.exit(1);
 }
-console.log(`blaze publish: swept local queues and triggered ${jobName} in namespace ${NS}`);
+console.log(
+  `blaze publish: swept local queues and triggered ${jobName} in namespace ${NS} against ${contextNote}`,
+);
