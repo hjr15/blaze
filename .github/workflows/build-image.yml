@@ -1,12 +1,28 @@
 name: Build blaze image
-# Build + push the container image for the board engine. The engine is a
-# zero-dependency Node app; data (projects/ + .git) is bind-mounted at runtime,
-# never baked (see Dockerfile). Consumers pin the pushed image by digest.
+# Build + push the container image for the board engine, then bump the pin the
+# deploy chart in hjr15/service-platform actually reads (INF-798). The engine is
+# a zero-dependency Node app; data (projects/ + .git) is bind-mounted at
+# runtime, never baked (see Dockerfile). Consumers pin the pushed image by
+# digest.
+#
+# Before INF-798 the `build` job below was the whole workflow: it pushed a new
+# image on every qualifying push to main, but nothing moved the digest pin in
+# service-platform's deploy/apps/blaze/values-dev.yaml, which documented that
+# gap in its own header as accepted behaviour. See
+# docs/operations/deploy-bump.md and hjr15/service-platform's ADR-0023 for why
+# this is a cross-repo bump job (mirroring hjr15/howman-cloud-site's
+# build-and-deploy.yml) rather than a Renovate-tracked tag.
 on:
   push:
     branches: [main]
     paths: ["scripts/**", "package.json", "Dockerfile", ".github/workflows/build-image.yml"]
   workflow_dispatch: {}
+
+# One deploy target, one Deployment. Two concurrent bumps would race the digest
+# pin in service-platform and the loser would silently pin a stale image.
+concurrency:
+  group: bump-service-platform
+  cancel-in-progress: false
 
 permissions:
   contents: read
@@ -16,6 +32,8 @@ jobs:
   build:
     # Public repo → free GitHub-hosted runner.
     runs-on: ubuntu-latest
+    outputs:
+      digest: ${{ steps.push.outputs.digest }}
     steps:
       - uses: actions/checkout@v4
       - name: Login to GHCR
@@ -35,3 +53,77 @@ jobs:
             ghcr.io/hjr15/blaze:${{ github.sha }}
       - name: Report digest
         run: echo "digest=${{ steps.push.outputs.digest }}" >> "$GITHUB_STEP_SUMMARY"
+
+  bump:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      # The default GITHUB_TOKEN is scoped to THIS repo and cannot write to
+      # service-platform at all, so there is no silent-fallback path — fail
+      # loudly and actionably instead of pushing nothing and reporting green.
+      - name: Require BUMP_TOKEN
+        env:
+          BUMP_TOKEN: ${{ secrets.BUMP_TOKEN }}
+        run: |
+          if [ -z "${BUMP_TOKEN}" ]; then
+            echo "::error::BUMP_TOKEN is not set. Create a fine-grained PAT with Contents: Read and write on hjr15/service-platform and add it as a repo secret named BUMP_TOKEN here. Without it the image is built and pushed but blaze.howman.link keeps serving the previous digest — see docs/operations/deploy-bump.md."
+            exit 1
+          fi
+
+      - uses: actions/checkout@v4
+        with:
+          repository: hjr15/service-platform
+          token: ${{ secrets.BUMP_TOKEN }}
+          # The push-race retry below rebases onto origin/main, which needs a
+          # common ancestor — a shallow clone would make `git rebase` fail.
+          fetch-depth: 0
+
+      - name: Install yq
+        run: |
+          sudo wget -qO /usr/local/bin/yq https://github.com/mikefarah/yq/releases/download/v4.44.3/yq_linux_amd64
+          sudo chmod +x /usr/local/bin/yq
+
+      - name: Pin the new digest
+        env:
+          DIGEST: ${{ needs.build.outputs.digest }}
+        run: |
+          set -euo pipefail
+          file=deploy/apps/blaze/values-dev.yaml
+          # The chart renders `repository@digest` and `required`s the digest, so an
+          # empty value fails the render rather than deploying something unpinned.
+          if [ -z "${DIGEST}" ]; then
+            echo "::error::build job produced no image digest — refusing to write an empty pin."
+            exit 1
+          fi
+          yq -i "(.image.digest) = \"${DIGEST}\"" "$file"
+          yq -i "(.image.sourceCommit) = \"${{ github.sha }}\"" "$file"
+          cat "$file"
+
+      - name: Commit and push
+        run: |
+          set -euo pipefail
+          file=deploy/apps/blaze/values-dev.yaml
+          if git diff --quiet "$file"; then
+            echo "Digest unchanged — nothing to bump."
+            exit 0
+          fi
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add "$file"
+          git commit -m "chore(deploy): pin blaze to ${{ github.sha }} [skip ci]"
+          # A concurrent push to service-platform (e.g. howman-cloud's own bump
+          # job racing this one) makes a bare push lose, and the bump would be
+          # silently dropped while ghcr holds the new image — the cluster then
+          # serves a stale digest with everything reporting green.
+          for attempt in 1 2 3 4 5; do
+            if git push origin HEAD:main; then
+              echo "Pinned blaze to ${{ github.sha }} on attempt ${attempt}."
+              exit 0
+            fi
+            echo "Push rejected (attempt ${attempt}) — rebasing onto origin/main and retrying."
+            git fetch origin main
+            git rebase origin/main
+          done
+          echo "::error::Failed to push the digest pin after 5 attempts. The image is in ghcr but blaze.howman.link still serves the old one; re-run this job."
+          exit 1
