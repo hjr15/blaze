@@ -198,6 +198,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
 // ---- standalone entry -------------------------------------------------------
 
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const server = startServer();
+  // Resolve the data root HERE and pass it in. `root` is a destructured
+  // parameter of startServer(), not a module-level binding, so referencing it
+  // in this block threw `ReferenceError: root is not defined` from the
+  // "listening" handler — after the port was already bound, so the process
+  // crash-looped instead of failing to start (BLZ-133 regression).
+  const root = resolveRoots().dataRoot;
+  const server = startServer({ root });
   server.on("listening", () => console.log(`${cfgFor(root).boardTitle} board → http://localhost:${server.address().port}`));
 }
