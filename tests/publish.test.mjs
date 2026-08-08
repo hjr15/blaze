@@ -81,3 +81,37 @@ test("BLZ-135: --dry-run reports the trigger it would run without running it", (
   assert.match(r.stdout, /dry-run/i);
   rmSync(root, { recursive: true, force: true });
 });
+
+// INF-800: `blaze publish` built its kubectl invocation with no --context, so it
+// targeted whatever context happened to be current. Observed live: the ambient
+// context was k3d-online-broker-agent while the blaze namespace lives on
+// k3d-service-platform, so the trigger died with `namespaces "blaze" not found`
+// — a message that names the namespace and never the context, pointing the
+// reader at the wrong thing entirely.
+test("INF-800: the trigger targets BLAZE_FLUSH_CONTEXT explicitly when set", () => {
+  const root = boardRepo();
+  const r = runPublish(root, root, { BLAZE_FLUSH_CONTEXT: "k3d-service-platform" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(
+    r.stdout,
+    /--context k3d-service-platform/,
+    "the flush cluster must be named explicitly, not inherited from the ambient kubectl context",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("INF-800: with no context configured, publish says which context it will use", () => {
+  const root = boardRepo();
+  const env = { ...process.env, BLAZE_SESSION: "pubtest" };
+  delete env.BLAZE_FLUSH_CONTEXT;
+  const r = spawnSync(process.execPath, [join(root, "scripts", "publish-runner.mjs"), "--dry-run"], {
+    cwd: root, encoding: "utf8", env,
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(
+    r.stdout,
+    /ambient kubectl context/i,
+    "an unconfigured publish must SAY it is falling back to the ambient context, so a wrong-cluster failure is self-diagnosing",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
