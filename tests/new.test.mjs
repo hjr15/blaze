@@ -178,3 +178,110 @@ test("BLZ-136: applyNew writes a claim beside the ticket and returns its path", 
   assert.match(readFileSync(res.claimFile, "utf8"), new RegExp(res.id));
   rmSync(r0, { recursive: true, force: true });
 });
+
+// --- INF-791: `blaze new` must validate --parent, and must not burn an id -----
+
+// The reservation ledger is the ground truth for "was an id consumed": allocateId
+// creates <common>/blaze/ids/<KEY>/<N> with O_EXCL, and that reservation survives
+// even when no ticket file is written. Reading it directly is how we prove a
+// rejected create left the counter untouched, rather than inferring it.
+function reservedIds(r, key) {
+  const d = join(r, ".git", "blaze", "ids", key);
+  try { return readdirSync(d).filter((e) => /^\d+$/.test(e)).map(Number).sort((a, b) => a - b); }
+  catch { return []; }
+}
+
+function seedParent(projects, { type, title }) {
+  const res = applyNew(projects, { project: "OBA", type, title, today: "2026-08-07",
+    extra: { estimate: type === "goal" || type === "epic" ? undefined : 30 } });
+  assert.equal(res.ok, true, JSON.stringify(res.errors));
+  return res.id;
+}
+
+test("INF-791: applyNew REJECTS an epic parented to an epic", () => {
+  const r = root(); const projects = join(r, "projects");
+  const goal = seedParent(projects, { type: "goal", title: "the goal" });
+  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "the epic",
+    today: "2026-08-07", extra: { parent: goal } });
+  assert.equal(epic.ok, true, JSON.stringify(epic.errors));
+
+  const bad = applyNew(projects, { project: "OBA", type: "epic", title: "child epic",
+    today: "2026-08-07", extra: { parent: epic.id } });
+  assert.equal(bad.ok, false, "epic -> epic must be refused at create time");
+  assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("INF-791: applyNew REJECTS a task parented to a goal", () => {
+  const r = root(); const projects = join(r, "projects");
+  const goal = seedParent(projects, { type: "goal", title: "the goal" });
+  const bad = applyNew(projects, { project: "OBA", type: "task", title: "orphan task",
+    today: "2026-08-07", extra: { parent: goal, estimate: 30 } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("INF-791: applyNew REJECTS a parent that does not exist", () => {
+  const r = root(); const projects = join(r, "projects");
+  seedParent(projects, { type: "goal", title: "the goal" });
+  const bad = applyNew(projects, { project: "OBA", type: "task", title: "dangling",
+    today: "2026-08-07", extra: { parent: "OBA-9999", estimate: 30 } });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => /parent not found/.test(e)), JSON.stringify(bad.errors));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("INF-791: applyNew ACCEPTS every legal pair (the check discriminates both ways)", () => {
+  const r = root(); const projects = join(r, "projects");
+  const goal = seedParent(projects, { type: "goal", title: "the goal" });
+  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "the epic",
+    today: "2026-08-07", extra: { parent: goal } });
+  assert.equal(epic.ok, true, JSON.stringify(epic.errors));
+  for (const t of ["story", "task", "bug"]) {
+    const res = applyNew(projects, { project: "OBA", type: t, title: `a ${t}`,
+      today: "2026-08-07", extra: { parent: epic.id, estimate: 30 } });
+    assert.equal(res.ok, true, `${t} -> epic must be allowed: ${JSON.stringify(res.errors)}`);
+  }
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("INF-791: a rejected create does NOT burn an id", () => {
+  const r = root(); const projects = join(r, "projects");
+  const goal = seedParent(projects, { type: "goal", title: "the goal" });
+  const before = reservedIds(r, "OBA");
+  assert.deepEqual(before, [1], `expected only the goal's id reserved, got ${before}`);
+
+  const bad = applyNew(projects, { project: "OBA", type: "task", title: "rejected",
+    today: "2026-08-07", extra: { parent: goal, estimate: 30 } });
+  assert.equal(bad.ok, false);
+
+  const after = reservedIds(r, "OBA");
+  assert.deepEqual(after, before, `a rejected create burned an id: ${before} -> ${after}`);
+
+  // And the next SUCCESSFUL create takes the id the rejection would have eaten.
+  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "next",
+    today: "2026-08-07", extra: { parent: goal } });
+  assert.equal(epic.ok, true, JSON.stringify(epic.errors));
+  assert.equal(epic.id, "OBA-2", "the id after a rejected create must not skip");
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("INF-791: a create rejected for a NON-parent reason also keeps its id", () => {
+  const r = root(); const projects = join(r, "projects");
+  seedParent(projects, { type: "goal", title: "the goal" });
+  const before = reservedIds(r, "OBA");
+  const bad = applyNew(projects, { project: "OBA", type: "task", title: "no estimate",
+    today: "2026-08-07" });
+  assert.equal(bad.ok, false);
+  assert.deepEqual(reservedIds(r, "OBA"), before);
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("INF-791: a parentless non-goal is still allowed (missing parent is soft)", () => {
+  const r = root(); const projects = join(r, "projects");
+  const res = applyNew(projects, { project: "OBA", type: "task", title: "no parent",
+    today: "2026-08-07", extra: { estimate: 30 } });
+  assert.equal(res.ok, true, JSON.stringify(res.errors));
+  rmSync(r, { recursive: true, force: true });
+});

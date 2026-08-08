@@ -4,6 +4,7 @@
 import { writeFileSync, mkdirSync, existsSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { allocateId } from "./model/ids.mjs";
+import { walkTickets } from "./model/index.mjs";
 import { writeClaim, remoteMaxClaim } from "./model/claims.mjs";
 import { isType } from "./model/schema.mjs";
 import { initialStatus } from "./model/workflows.mjs";
@@ -26,19 +27,14 @@ export function applyNew(projectsDir, opts = {}) {
   if (!title) pre.push("missing title");
   if (pre.length) return { ok: false, errors: pre };
 
-  // BLZ-136 / ADR-0005: allocate + atomically reserve, seeded by the remote's
-  // published claims so a cross-machine collision is usually AVOIDED rather than
-  // merely detected later. dataRoot is the parent of projectsDir, matching
-  // BLAZE_PROJECTS_DIR's semantics elsewhere.
   const dataRoot = dirname(projectsDir);
-  // null = the remote could not be read, so this allocation is against a
-  // possibly stale view. A numeric 0 means the remote WAS read and simply has no
-  // claims yet — a known-empty set, not a stale one.
-  const remoteMax = remoteMaxClaim(dataRoot, project);
-  const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax: remoteMax ?? 0 });
   const status = initialStatus(type);
+  // INF-791: `id` is a placeholder until validation passes. Allocation is an
+  // irreversible side effect (an O_EXCL reservation that survives a failed
+  // create), so it happens AFTER the ticket is known to be valid — see below.
+  // Declared first so the key order of the serialized frontmatter is unchanged.
   const frontmatter = {
-    id, title, type, project, priority,
+    id: null, title, type, project, priority,
     resolution: null,
     parent: extra.parent ?? null,
     assignee: extra.assignee ?? "unassigned",
@@ -60,16 +56,40 @@ export function applyNew(projectsDir, opts = {}) {
   if (frontmatter.due === undefined) delete frontmatter.due;
 
   const body = "## Context\n\n## Acceptance Criteria\n\n- [ ] \n\n## Notes\n";
-  // Validate everything except parent-existence (parent integrity is a reindex
-  // concern; at create time the parent may legitimately be created later).
-  const errors = validateTicket({ frontmatter, body }).filter((e) => !/parent not found/.test(e));
+  // INF-791: validate the parent for real. This previously passed NO lookup and
+  // then filtered out `parent not found`, on the reasoning that a parent might be
+  // created later — which meant canParent() was never reached and `blaze new`
+  // accepted epic -> epic without complaint. That is how the board accumulated
+  // structurally invalid rows that the engine rejected everywhere else, and it
+  // made `blaze edit` fail confusingly later on an unrelated field. The lookup
+  // spans every ticket, matching edit.mjs, so parent-pair and cycle checks both
+  // apply. Ids are allocated in order, so a parent that does not exist yet cannot
+  // be named correctly anyway.
+  const all = new Map();
+  for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  const errors = validateTicket({ frontmatter, body }, (pid) => all.get(pid) || null);
   // allowMissing: creating a project's FIRST ticket is how a project comes into
   // existence, so its directory legitimately may not exist yet (BLZ-140).
   const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir, allowMissing: true });
   errors.push(...validateTaxonomy(frontmatter, project_cfg));
   const { sprints } = loadSprints({ root: dirname(projectsDir) });
   errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
+  // Return BEFORE allocating: a rejected create must not consume an id. It used
+  // to, which is how CRP-111 was lost, and it meant a gap in the id sequence was
+  // not evidence that a ticket had been deleted.
   if (errors.length) return { ok: false, errors };
+
+  // BLZ-136 / ADR-0005: allocate + atomically reserve, seeded by the remote's
+  // published claims so a cross-machine collision is usually AVOIDED rather than
+  // merely detected later. dataRoot is the parent of projectsDir, matching
+  // BLAZE_PROJECTS_DIR's semantics elsewhere.
+  //
+  // null = the remote could not be read, so this allocation is against a
+  // possibly stale view. A numeric 0 means the remote WAS read and simply has no
+  // claims yet — a known-empty set, not a stale one.
+  const remoteMax = remoteMaxClaim(dataRoot, project);
+  const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax: remoteMax ?? 0 });
+  frontmatter.id = id;
 
   const dir = join(projectsDir, project, status);
   mkdirSync(dir, { recursive: true });
