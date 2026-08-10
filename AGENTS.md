@@ -37,6 +37,25 @@ check — every type's `workflow` must name a declared workflow — returning a 
 of human-readable errors (`[]` when valid); nothing in the engine calls it
 automatically yet.
 
+A board may instead run the opt-in **`engineering` preset** — `goal →
+requirement → architecture → feature → task/bug`, installed the same way, via
+a `schema` block. It is not a built-in mode and does not ship enabled. See
+[`docs/method/work-item-types.md`](docs/method/work-item-types.md) for the
+full type table; its `approved`/`verified`/`superseded` gates are designed
+but not shipped.
+
+### Citing a REQ or ADR
+
+Under the `engineering` preset, only `requirement` and `architecture`
+tickets carry a `ref` (`REQ-nnn` / `ADR-nnnn`) — the citation form. The
+ticket id is still the identity.
+
+1. Write the `ref` in prose ("implements REQ-014", "per ADR-0011"); write the
+   ticket id only when you mean the ticket itself.
+2. A `ref` is project-scoped — qualify it across projects (`BLZ REQ-001`).
+3. Never cite either by path — a ticket's status is its directory, so its
+   path changes on every transition; the `ref` doesn't.
+
 ## The loop
 
 1. **Create**: `blaze new --project <KEY> --type <type> "<title>" [--estimate m]
