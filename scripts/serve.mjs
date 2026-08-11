@@ -77,7 +77,19 @@ function send(req, res, code, type, body) {
 
 // ---- server factory ---------------------------------------------------------
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = Number(process.env.PORT) || cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views } = {}) {
+// PORT=0 is a REQUEST, not an absence: it means "bind any free port", which is how tests get
+// an isolated server. `Number(env.PORT) || fallback` treated it as unset — 0 is falsy — so the
+// server quietly took the configured 4321 instead, and the standalone-entry test failed with
+// EADDRINUSE whenever a real board happened to be running locally. Only an unset, blank, or
+// non-numeric value falls through to the config.
+function envPort() {
+  const raw = process.env.PORT;
+  if (raw === undefined || raw.trim() === "") return null;
+  const n = Number(raw);
+  return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null;
+}
+
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views } = {}) {
   return createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
