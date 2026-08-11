@@ -6,6 +6,7 @@ import { basename, dirname } from "node:path";
 import { walkTickets } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
+import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
 import { EDITABLE_FIELDS } from "./model/fields.mjs";
 import { loadProject } from "./config.mjs";
@@ -49,7 +50,9 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   const all = new Map();
   for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   all.set(id, { frontmatter: fm, body: found.body });
-  const errors = validateTicket({ frontmatter: fm, body: found.body }, (pid) => all.get(pid) || null);
+  // The edited ticket is validated against ITS OWN project's registry (BLZ-238).
+  const { types } = loadProjectSchema(projectsDir, fm.project ?? id.split("-")[0]);
+  const errors = validateTicket({ frontmatter: fm, body: found.body }, (pid) => all.get(pid) || null, { types });
 
   // A retype is the only edit that can invalidate OTHER tickets: every child's parent-pair
   // is now checked against the new type. Without this the engine would accept a retype that
@@ -58,7 +61,9 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   if (patch.type && patch.type !== found.frontmatter.type) {
     for (const [cid, child] of all) {
       if (cid === id || child.frontmatter?.parent !== id) continue;
-      for (const e of validateTicket(child, (pid) => all.get(pid) || null)) {
+      // A child may live in another project, so it is judged by its own registry.
+      const childTypes = loadProjectSchema(projectsDir, child.frontmatter.project ?? cid.split("-")[0]).types;
+      for (const e of validateTicket(child, (pid) => all.get(pid) || null, { types: childTypes })) {
         if (/invalid parent/i.test(e)) errors.push(`${cid}: ${e} (after retyping ${id} to ${patch.type})`);
       }
     }

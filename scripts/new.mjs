@@ -10,6 +10,7 @@ import { isType } from "./model/schema.mjs";
 import { initialStatus } from "./model/workflows.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
+import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
 import { loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
@@ -67,7 +68,9 @@ export function applyNew(projectsDir, opts = {}) {
   // be named correctly anyway.
   const all = new Map();
   for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
-  const errors = validateTicket({ frontmatter, body }, (pid) => all.get(pid) || null);
+  // Validate against the TARGET PROJECT's registry, not the ambient one (BLZ-238).
+  const { types } = loadProjectSchema(projectsDir, project);
+  const errors = validateTicket({ frontmatter, body }, (pid) => all.get(pid) || null, { types });
   // allowMissing: creating a project's FIRST ticket is how a project comes into
   // existence, so its directory legitimately may not exist yet (BLZ-140).
   const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir, allowMissing: true });

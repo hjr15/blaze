@@ -118,8 +118,23 @@ against.
 
 ## What reads the resolved schema
 
-The top-level resolved registry is what `blaze` validation (required fields,
-parent rules, transition legality) and the board columns read. For per-project
-resolution, any future feature would call `resolveSchema({ config, project })`
-from `scripts/model/schema-config.mjs` after loading `config`/`project` via
-`scripts/config.mjs` — as of today nothing does.
+| Scope | Read by |
+|---|---|
+| **Default → top-level** | Board columns, transition legality, and every read that goes through the ambient registry. |
+| **Default → top-level → per-project** | **Ticket validation on the write path** — `blaze new` and `blaze edit` (BLZ-238). |
+
+`blaze new` validates a create against the **target project's** registry, and `blaze edit`
+validates against the **edited ticket's** project. A retype's child sweep judges each child by
+**its own** project's registry, since a child may live elsewhere.
+
+Call `loadProjectSchema(projectsDir, key)` from `scripts/model/schema-config.mjs` to resolve one
+project's registry, or `resolveSchema({ config, project })` if you already hold both objects.
+
+**A project with no `schema` block resolves to the ambient registry, not to nothing** — so
+per-project customisation is opt-in rather than a cliff, and adding a block to one project cannot
+affect another.
+
+> Two things still read the ambient registry only: **board columns** and **transition legality**.
+> A project that overrides a type's `workflow` will therefore see its tickets validated by its own
+> rules but rendered in the ambient board's columns. That is a real gap, not a design choice —
+> narrowing it means threading the project through the view layer.
