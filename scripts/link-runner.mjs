@@ -1,5 +1,6 @@
 // scripts/link-runner.mjs — CLI for `blaze link [--rm] <id> <TYPE> <target>`.
 import { applyLink } from "./link.mjs";
+import { LINK_TYPES } from "./model/links.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -31,7 +32,11 @@ for (const a of [id, type, target]) {
   if (a && a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
 }
 if (!id || !type || !target) {
-  console.error("usage: blaze link [--rm] <id> <TYPE> <target>   (TYPE: Blocks|Relates|Duplicate|Cloners)");
+  // Derived from the model so the usage line cannot drift from the vocabulary (BLZ-237).
+  console.error(`usage: blaze link [--rm] <id> <TYPE> <target>   (TYPE: ${[...LINK_TYPES].join("|")})`);
+  console.error("  Implements / Addresses are directional traceability:");
+  console.error("    blaze link <feature> Implements <requirement>");
+  console.error("    blaze link <architecture> Addresses <requirement>");
   process.exit(1);
 }
 const today = new Date().toISOString().slice(0, 10);
