@@ -31,6 +31,7 @@ const SUBCOMMANDS = {
   groom: { file: "loops/groomer.mjs", desc: "run one groomer pass", mutates: true },
   new: { file: "new-runner.mjs", desc: "create a ticket", mutates: true },
   sprint: { file: "sprint-runner.mjs", desc: "create/list/activate sprints", mutates: true },
+  audit: { file: "audit-runner.mjs", desc: "report corpus hygiene (read-only; non-zero on a hard finding)", mutates: false },
   reindex: { file: "reindex.mjs", desc: "rebuild the derived index + transitions cache", mutates: true },
   move: { file: "move-runner.mjs", desc: "move a ticket to a new status", mutates: true },
   edit: { file: "edit-runner.mjs", desc: "edit a ticket field", mutates: true },
