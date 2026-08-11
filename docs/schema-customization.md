@@ -6,8 +6,8 @@ plus `risk` and `subtask`). A data repo customizes it
 **without editing engine source** by adding a `schema` block to its config. The
 engine applies the **top-level** override at load, so validation, the board
 columns, and the CLI all read it. A `resolveSchema` helper additionally layers
-`default → top-level → per-project`, available to any future feature that
-calls it — as of today nothing in the engine does. See
+`default → top-level → per-project`, which the write path and the hygiene gate
+resolve so a single project can carry its own type rules. See
 [What reads the resolved schema](#what-reads-the-resolved-schema) below for which
 scope actually takes effect where.
 
@@ -109,19 +109,23 @@ An agent customizes the schema with ordinary file tools — no engine change:
    next load; no engine source is touched and no version bump is needed.
 
 **Scoping to one project:** you can put the same `schema` block in
-`projects/<KEY>/project.json` instead. That block is resolved by
-`resolveSchema`, available to any future feature that calls it — as of today
-nothing in the engine does, so a per-project block has no effect on the
-built-in `blaze new`/`move`/board commands. Verifying a per-project override
-with step 3 above won't show anything; there is no feature yet to verify it
-against.
+`projects/<KEY>/project.json` instead. It is resolved by `resolveSchema` and
+**takes effect on the write path** — `blaze new`, `blaze edit`, and `blaze
+audit` each judge a ticket against its own project's registry, so one project
+can widen or narrow its type rules without touching another's. Step 3 above
+verifies it: create a ticket that only the overriding project should accept,
+and confirm a second project still refuses it.
+
+Board columns and transition legality remain **board-wide** — they come from the
+ambient registry, not the per-project one. See the table below for exactly which
+reads resolve which scope.
 
 ## What reads the resolved schema
 
 | Scope | Read by |
 |---|---|
 | **Default → top-level** | Board columns, transition legality, and every read that goes through the ambient registry. |
-| **Default → top-level → per-project** | **Ticket validation on the write path** — `blaze new` and `blaze edit` (BLZ-238). |
+| **Default → top-level → per-project** | **Ticket validation on the write path** — `blaze new` and `blaze edit` (BLZ-238) — and **corpus hygiene**, `blaze audit` (BLZ-137). |
 
 `blaze new` validates a create against the **target project's** registry, and `blaze edit`
 validates against the **edited ticket's** project. A retype's child sweep judges each child by
