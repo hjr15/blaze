@@ -1,10 +1,18 @@
 // scripts/model/rules.mjs — the single home for Blaze business rules.
 // Phase 1: required-field + parent-integrity validation. (Transitions: Phase 2.)
-import { isType, requiredFields, canParent, PRIORITIES } from "./schema.mjs";
+import { isType, requiredFields, canParent, PRIORITIES, TYPES } from "./schema.mjs";
 import { statusesFor, canTransition, RESOLUTIONS } from "./workflows.mjs";
 
 // ticket = { frontmatter, body }; lookup(id) => ticket | null (for parent checks).
-export function validateTicket(ticket, lookup = () => null) {
+/** @param opts.types  a resolved registry (BLZ-238). Omit for the ambient one — every
+ *  existing caller keeps working, and a project-scoped caller passes its own. */
+export function validateTicket(ticket, lookup = () => null, opts = {}) {
+  const types = opts.types ?? TYPES;
+  const isType = (t) => Object.prototype.hasOwnProperty.call(types, t);
+  const requiredFields = (t) => types[t].required;
+  const canParent = (child, parent) =>
+    Boolean(types[child]) && Boolean(types[parent]) && types[child].parentTypes.includes(parent);
+
   const errors = [];
   const fm = ticket.frontmatter || {};
   const type = fm.type;

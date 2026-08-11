@@ -31,3 +31,26 @@ test("npm pack ships engine only — no tests, no data dirs, no dotfiles beyond 
     assert.ok(f !== "CONVENTIONS.md", "CONVENTIONS.md must not ship");
   }
 });
+
+test("attribution: the LICENSE retains the upstream notice and adds the maintainer's", () => {
+  // INF-767: hjr15/blaze is a FORK of sychyoboN/blaze, and its LICENSE originally carried only
+  // the upstream author's copyright — which `files` then shipped under this npm scope. MIT
+  // requires RETAINING the original notice, so the fix adds a line rather than replacing one.
+  // Both lines must survive; a future tidy-up that drops the upstream line is a licence breach.
+  const license = readFileSync(join(REPO, "LICENSE"), "utf8");
+  assert.match(license, /^MIT License/);
+  assert.match(license, /Copyright \(c\) \d{4} Jordan Lyons/, "upstream notice must be retained");
+  assert.match(license, /Copyright \(c\) \d{4} Ryan Howman/, "maintainer notice must be present");
+  assert.ok(pkg.files.includes("LICENSE"), "the corrected LICENSE must actually ship");
+});
+
+test("discovery metadata is set — a published package with blank fields is unfindable", () => {
+  // INF-824. `npm view` rendered author/homepage/bugs/keywords as undefined on 0.5.1: the
+  // package resolved and installed, so nothing failed, but it carried no maintainer, no route
+  // to report a bug, and nothing to match a search on.
+  assert.ok(pkg.author, "author must name the maintainer of this scope");
+  assert.ok(pkg.homepage, "homepage must point somewhere a reader can learn what this is");
+  assert.ok(pkg.bugs?.url, "bugs.url must give a route to report a defect");
+  assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.length >= 3, "keywords must support search");
+  assert.match(pkg.repository.url, /github\.com\/hjr15\/blaze/, "repository must resolve to the source");
+});

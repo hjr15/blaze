@@ -77,7 +77,7 @@ test("panelContentHtml: editable spans for allowlisted fields, read-only for gov
   const html = panelContentHtml(model);
   assert.match(html, /class="editable"[^>]*data-edit="assignee"/);
   assert.match(html, /data-edit="priority"/);
-  assert.doesNotMatch(html, /data-edit="type"/);       // governed → read-only
+  assert.match(html, /data-edit="type"/);              // BLZ-230: retype is a first-class edit
   assert.doesNotMatch(html, /data-edit="project"/);    // not allowlisted → read-only
   assert.match(html, /class="panel-fm"[^>]*data-ticket="INF-1"/);
   assert.match(html, /data-edit="title"/);             // title editable via heading

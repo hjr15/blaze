@@ -2,6 +2,8 @@
 // Merges the built-in defaults with a top-level (blaze.config.json) override and a
 // per-project (project.json) override, per registry entry: default → top → project,
 // later wins. Callers load `config`/`project` via config.mjs and pass them in.
+import { readFileSync } from "node:fs";
+import { join } from "node:path";
 import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows } from "./workflows.mjs";
 
@@ -34,3 +36,13 @@ export function validateSchema({ types = {}, workflows = {} } = {}) {
 // config → schema-config → schema → config — and re-exported here so the schema
 // surface stays in one place for consumers and tests.
 export { SCHEMA_VERSION, MIN_SCHEMA_VERSION, checkSchemaVersion } from "./schema-version.mjs";
+
+/** Resolve the registry for ONE project: defaults → top-level → that project's own block.
+ *  A project with no `schema` block resolves to the ambient registry, not to nothing —
+ *  which is what makes per-project customisation opt-in rather than a cliff (BLZ-238). */
+export function loadProjectSchema(projectsDir, key, { config = null } = {}) {
+  let project = null;
+  try { project = JSON.parse(readFileSync(join(projectsDir, key, "project.json"), "utf8")); }
+  catch { project = null; }
+  return resolveSchema({ config, project });
+}

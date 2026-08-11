@@ -55,6 +55,7 @@ test("with no override the resolved registry is unchanged from the built-in defa
   mkdirSync(join(dir, "projects"), { recursive: true });
   writeFileSync(join(dir, "blaze.config.json"), JSON.stringify({ key: "X", projects: [] }));
   const out = runWithDataRoot(dir, `import { allTypes } from "${schemaMod}"; console.log(JSON.stringify(allTypes().sort()));`);
-  assert.deepEqual(JSON.parse(out), ["bug", "epic", "goal", "risk", "story", "subtask", "task"]);
+  assert.deepEqual(JSON.parse(out),
+    ["architecture", "bug", "epic", "feature", "goal", "requirement", "risk", "story", "subtask", "task"]);
   rmSync(dir, { recursive: true, force: true });
 });

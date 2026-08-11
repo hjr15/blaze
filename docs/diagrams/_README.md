@@ -9,6 +9,8 @@ with frontmatter declaring its `title`, `type`, and `format`.
 | [engine-data-split.md](engine-data-split.md) | architecture | Published engine ⟂ data repo, and the `resolveRoots` attachment ladder |
 | [type-hierarchy.md](type-hierarchy.md) | data-model | The built-in ticket type registry and its parent rules |
 | [workflow-state-machines.md](workflow-state-machines.md) | state-machine | The three workflows (delivery / goal / risk) as state machines |
+| [engineering-model.md](engineering-model.md) | data-model | The `engineering` preset — requirement / architecture / feature, and the `ref` designators |
+| [engineering-workflows.md](engineering-workflows.md) | state-machine | The requirement and architecture workflows, with the deferred gates marked |
 
 ## Embedding elsewhere
 

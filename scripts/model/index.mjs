@@ -66,6 +66,42 @@ export function* walkTickets(projectsDir) {
   }
 }
 
+// BLZ-122: resolve an id to the ONE file that is it, or refuse.
+//
+// Every mutating verb (move/edit/log/link/resolve) used to carry its own copy of a locate()
+// that returned the first match and moved on. Ids are unique by construction — the per-project
+// `.ids/` ledger issues each number once — so a second file bearing the same id is always
+// corruption, never a legitimate alias. Picking one of them silently is how `blaze move
+// INF-583 in-progress` came to rewrite a stale `defined/` duplicate of an already-`done`
+// ticket and write a transition that never happened into board history.
+//
+// Which copy is canonical needs judgement (on the seven 2026-08-11 duplicates the `done/` copy
+// was right; that is not a general rule) and a wrong auto-pick destroys the real ticket. So
+// this refuses and hands back every path. `blaze audit`'s duplicate-status finding is the
+// detector; this is the guard that stops a write landing on a guess.
+//
+// This scans the WHOLE walk rather than returning at the first hit: the ambiguity is only
+// visible once every candidate is known, so an early return is precisely the bug.
+//
+// @returns { found } | { found: null } | { found: null, duplicates: [path, ...] }
+export function locateTicket(projectsDir, id) {
+  const matches = [];
+  for (const t of walkTickets(projectsDir)) {
+    if (t.frontmatter?.id === id) matches.push(t);
+  }
+  if (matches.length > 1) {
+    return { found: null, duplicates: matches.map((t) => t.file).sort() };
+  }
+  return { found: matches[0] ?? null };
+}
+
+/** The refusal message, shared so every verb names the paths the same way. */
+export function ambiguousIdError(id, duplicates) {
+  return `${id} resolves to ${duplicates.length} files — refusing to guess which is the ticket:\n` +
+    duplicates.map((f) => `  ${f}`).join("\n") +
+    `\nStatus is the directory: delete the wrong-directory duplicate (never the ticket, never its id claim), then retry.`;
+}
+
 // BLZ-134: `new Map(rows.map(...))` silently keeps the LAST row for a duplicated
 // id, so two tickets sharing an id collapsed into one and the other vanished
 // from every consumer (board, reconcile, rollup) with no signal at all. Observed

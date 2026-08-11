@@ -167,3 +167,49 @@ detail: [`docs/schema-versioning.md`](../schema-versioning.md).
 Fixed: priorities, resolutions, the type/workflow shapes the engine ships by
 default. Customisable: which types and workflows are active, per project or
 board-wide, via the top-level `schema` block.
+
+---
+
+## An opinionated alternative: the engineering preset
+
+Everything above is the engine's built-in default, and it's what a new board
+runs unless you change it. A different, opt-in type hierarchy —
+`engineering` — is documented separately. It doesn't ship enabled; you
+install it yourself as a `schema` block in `blaze.config.json`, the same
+mechanism described in Part 2 above.
+
+The relationship it's built on, in one line:
+
+**A project builds workable items. `REQ` and `ADR` are the references
+inside that project that those items trace to.** Only `requirement` and
+`architecture` carry a `ref` — the ticket id (`BLZ-150`) is identity, the
+`ref` (`REQ-014`) is the citation. Write the `ref` in prose, never the
+ticket's path — a ticket's status is its directory, so its path changes on
+every transition; the `ref` doesn't.
+
+| Type | Level | Legal parents | Workflow |
+|---|---|---|---|
+| `goal` | 4 | (top-level) | `goal` |
+| `requirement` | 3 | `goal` | `requirement` |
+| `architecture` | 2 | `requirement`, `goal` | `architecture` |
+| `feature` | 1 | `architecture`, `requirement`, `goal` | `delivery` |
+| `story` | 1 | `requirement` | `delivery` |
+| `risk` | 1 | `goal`, `requirement`, `architecture`, `feature` | `risk` |
+| `task` | 0 | `feature`, `story` | `delivery` |
+| `bug` | 0 | `feature`, `story` | `delivery` |
+
+`feature` occupies the altitude other tools call `epic` — the PR unit, one
+integration branch, typically 4–8 child tasks. Installing this registry
+doesn't remove `epic`/`subtask` (the engine can add or replace a type but
+never delete one), so keep `epic` in `task`/`bug`/`story`'s `parentTypes`
+until existing tickets are migrated.
+
+The `approved`/`verified` (on `requirement`) and `superseded` (on
+`architecture`) gates are designed but not shipped in the documented
+configuration — each needs a return visit after the triggering event has
+passed, and return-visit obligations measure far below fields captured at
+creation time on the board this model was developed against.
+
+Full type reference, field requirements, link vocabulary, and what the
+engine can't yet express: [`../method/work-item-types.md`](../method/work-item-types.md).
+The reasoning behind the model: [`../method/engineering-method.md`](../method/engineering-method.md).

@@ -54,7 +54,13 @@ opts.title = positional.join(" ");
 opts.today = new Date().toISOString().slice(0, 10);
 
 if (!opts.project || !opts.type || !opts.title) {
-  console.error('usage: blaze new --project <KEY> --type <type> "<title>" [--priority p] [--labels a,b] [--components a,b] [--estimate m] [--parent ID] [--reason "<why blank>"]');
+  // BLZ-232: --likelihood/--impact were parsed and undocumented, so the one type that
+  // REQUIRES them could not be created from the documented invocation.
+  console.error('usage: blaze new --project <KEY> --type <type> "<title>"');
+  console.error('  [--parent ID] [--priority p] [--assignee who] [--labels a,b] [--components a,b]');
+  console.error('  [--estimate m] [--likelihood l] [--impact i] [--sprint s] [--start YYYY-MM-DD]');
+  console.error('  [--due YYYY-MM-DD] [--reason "<why a required field is blank>"]');
+  console.error('  --likelihood and --impact are REQUIRED for --type risk; --estimate for story/task/bug.');
   process.exit(1);
 }
 

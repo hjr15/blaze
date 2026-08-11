@@ -18,23 +18,57 @@ installed with a `schema` block, the mechanism documented in
 > describe the model as designed; the limits section describes what actually
 > ships today. They do not yet agree.
 
+## The relationship in one line
+
+**A project builds workable items. `REQ` and `ADR` are the references inside that
+project that those items trace to.**
+
+Everything else in this document is detail on that sentence. Concretely:
+
+| | Identity | Reference | Cited as | Lives at |
+|---|---|---|---|---|
+| Requirement | `BLZ-150` | `ref: REQ-001` | "REQ-001" | `projects/BLZ/implemented/BLZ-150-….md` |
+| Architecture decision | `BLZ-202` | `ref: ADR-0001` | "ADR-0001" | `projects/BLZ/accepted/BLZ-202-….md` |
+| Feature / task / bug | `BLZ-51` | — | its id | `projects/BLZ/done/BLZ-51-….md` |
+
+Three rules follow, and they are the whole convention:
+
+1. **The `ref` is the citation; the id is the identity.** Write "this implements
+   REQ-014" and "per ADR-0011" — in ticket bodies, code comments, commit messages,
+   docs, anywhere. Write the ticket id only when you mean the ticket itself.
+2. **A `ref` is project-scoped.** `REQ-001` means one thing inside `BLZ` and something
+   else inside `OBA`. Qualify it across projects: "BLZ REQ-001".
+3. **Never reference either by path.** A ticket's status is its directory, so its path
+   changes on every transition. `ADR-0011` survives that; `docs/decisions/0011-….md`
+   does not.
+
+Only `requirement` and `architecture` carry a `ref`, because only those two are
+things you cite rather than things you do. Features and tasks are referenced by id,
+because you point at the work itself, not at a statement about it.
+
 ## Type hierarchy
 
 | Type | Level | Legal parents | Workflow |
 |---|---|---|---|
 | `goal` | 4 | (top-level) | `defined → in-progress → achieved` |
 | `requirement` | 3 | `goal` | `proposed → approved → implemented → verified` (+ `rejected`, `obsolete`) |
-| `architecture` | 2 | `requirement` | `proposed → accepted → superseded` (+ `rejected`, `deprecated`) |
+| `architecture` | 2 | `requirement`, `goal` | `proposed → accepted → superseded` (+ `rejected`, `deprecated`) |
 | `feature` | 1 | `architecture`, `requirement`, `goal` | delivery |
 | `story` | 1 | `requirement` | delivery (verification axis — design deferred) |
 | `risk` | 1 | `goal`, `requirement`, `architecture`, `feature` | risk |
 | `task` | 0 | `feature`, `story` | delivery |
 | `bug` | 0 | `feature`, `story` | delivery |
 
-`feature` legally parenting straight to `goal` is deliberate, not an
-oversight — see "Untraced work" in the method doc. `story`'s design (fields,
-required content) is out of scope here; it keeps the `delivery` workflow and
-a `requirement` parent for now.
+`feature` **and** `architecture` legally parenting straight to `goal` is deliberate,
+not an oversight — see "Untraced work" in the method doc. Some delivery work traces to
+no stated need (discovery, toil, tech debt), and some decisions predate any written
+requirement — foundational choices made before anyone wrote down what the product must
+do. Both are legal, and both are **counted**: the matrix publishes the untraced figure
+rather than hiding it. Manufacturing a requirement to close the gap is what makes a
+traceability matrix a lie.
+
+`story`'s design (its fields and required content) is out of scope here; it keeps the
+`delivery` workflow and a `requirement` parent for now.
 
 ### New workflows
 

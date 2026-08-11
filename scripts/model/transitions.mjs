@@ -12,7 +12,14 @@ import { join } from "node:path";
 
 const NUL = "\0";
 // projects/<KEY>/<status>/<KEY>-<n>-*.md (slug is optional: <KEY>-<n>.md also matches)
-const PATH_RE = /^projects\/([^/]+)\/([^/]+)\/([^/]+-\d+)(?:-[^/]*)?\.md$/;
+//
+// The id group is `[A-Za-z][A-Za-z0-9]*-\d+` and NOT `[^/]+-\d+` (BLZ-233). The permissive
+// form was greedy and could not stop at the id, so any slug ending in a digit was swallowed
+// whole — `INF-783-…-tier-0.md` parsed to the id `INF-783-…-tier-0`, which is not a ticket,
+// and the transition attached to nothing. It fails silently: the cache stays well-formed and
+// only the metrics that join on id go quietly short. A key cannot contain `-`, so forbidding
+// it in the group is what makes the match stop in the right place.
+const PATH_RE = /^projects\/([^/]+)\/([^/]+)\/([A-Za-z][A-Za-z0-9]*-\d+)(?:-[^/]*)?\.md$/;
 
 function statusAndId(path) {
   const m = PATH_RE.exec(path);

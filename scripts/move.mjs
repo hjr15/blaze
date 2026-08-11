@@ -4,27 +4,17 @@
 // the CLI wrapper adds git add/commit.
 import { writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
-import { walkTickets } from "./model/index.mjs";
+import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
 import { isTerminal } from "./model/workflows.mjs";
 import { isType } from "./model/schema.mjs";
 
-function locate(projectsDir, id) {
-  let fallback = null;
-  for (const t of walkTickets(projectsDir)) {
-    if (t.frontmatter.id !== id) continue;
-    const projectKey = basename(dirname(dirname(t.file))); // projects/<KEY>/<status>/<file>
-    if (id.startsWith(`${projectKey}-`)) return t; // canonical: id prefix matches project dir
-    fallback ??= t;
-  }
-  return fallback;
-}
-
 export function applyMove(projectsDir, id, toStatus, opts = {}) {
   const { today = null } = opts;
-  const found = locate(projectsDir, id);
+  const { found, duplicates } = locateTicket(projectsDir, id);
+  if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 
   // requireWorklog: explicit opt wins; otherwise read the ticket's project config.

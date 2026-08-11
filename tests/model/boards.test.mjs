@@ -5,8 +5,11 @@ import { resolveSchema } from "../../scripts/model/schema-config.mjs";
 
 const { types, workflows } = resolveSchema({});
 
-test("default schema yields a delivery board + a standalone risk board", () => {
-  assert.deepEqual(deriveBoards({ types, workflows }).map((b) => b.name), ["delivery", "risk"]);
+test("default schema yields a board per workflow, in hierarchy order", () => {
+  // BLZ-231: `requirement` and `architecture` ship with their own workflows, so each gets
+  // its own board — which is the point of a type following its own workflow.
+  assert.deepEqual(deriveBoards({ types, workflows }).map((b) => b.name),
+    ["delivery", "requirement", "architecture", "risk"]);
 });
 
 test("delivery board columns: defined/in-progress/in-review + Done folding achieved", () => {

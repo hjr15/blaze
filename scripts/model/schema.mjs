@@ -12,13 +12,20 @@ import { ambientSchemaOverride } from "../config.mjs";
 export const PRIORITIES = ["highest", "high", "medium", "low", "lowest", "none", "urgent"];
 
 export const DEFAULT_TYPES = {
-  goal:    { level: 2,  workflow: "goal",     parentTypes: [],                       required: ["title", "description"] },
-  epic:    { level: 1,  workflow: "delivery", parentTypes: ["goal"],                 required: ["title", "description"] },
-  risk:    { level: 1,  workflow: "risk",     parentTypes: ["goal", "epic"],         required: ["title", "description", "likelihood", "impact"] },
-  story:   { level: 0,  workflow: "delivery", parentTypes: ["epic"],                 required: ["title", "description", "estimate"] },
-  task:    { level: 0,  workflow: "delivery", parentTypes: ["epic"],                 required: ["title", "description", "estimate"] },
-  bug:     { level: 0,  workflow: "delivery", parentTypes: ["epic"],                 required: ["title", "description", "estimate"] },
-  subtask: { level: -1, workflow: "delivery", parentTypes: ["story", "task", "bug"], required: ["title", "description"] },
+  goal:         { level: 4,  workflow: "goal",         parentTypes: [],                                             required: ["title", "description"] },
+  requirement:  { level: 3,  workflow: "requirement",  parentTypes: ["goal"],                                       required: ["title", "description"] },
+  architecture: { level: 2,  workflow: "architecture", parentTypes: ["requirement", "goal"],                        required: ["title", "description"] },
+  feature:      { level: 1,  workflow: "delivery",     parentTypes: ["architecture", "requirement", "goal"],        required: ["title", "description"] },
+  risk:         { level: 1,  workflow: "risk",         parentTypes: ["goal", "requirement", "architecture", "feature"], required: ["title", "description", "likelihood", "impact"] },
+  story:        { level: 0,  workflow: "delivery",     parentTypes: ["requirement", "feature"],                     required: ["title", "description", "estimate"] },
+  task:         { level: 0,  workflow: "delivery",     parentTypes: ["feature", "story"],                           required: ["title", "description", "estimate"] },
+  bug:          { level: 0,  workflow: "delivery",     parentTypes: ["feature", "story"],                           required: ["title", "description", "estimate"] },
+  subtask:      { level: -1, workflow: "delivery",     parentTypes: ["story", "task", "bug"],                       required: ["title", "description"] },
+  // `epic` is RETAINED and unparentable (BLZ-231). It cannot be removed: `mergeTypes` is a
+  // spread, so an override can replace or add an entry but never delete one — a board that
+  // still holds epics must keep loading. Giving it no legal parent retires it without
+  // deleting it: existing epics stay readable, and no new one can be created anywhere.
+  epic:         { level: 1,  workflow: "delivery",     parentTypes: [],                                             required: ["title", "description"] },
 };
 
 /** Per-entry replace/add merge: each override entry replaces or adds a whole type. */

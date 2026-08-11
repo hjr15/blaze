@@ -124,6 +124,41 @@ makes no commit. Optional positional `projectsDir` overrides which
 `projects/` tree to index; the cache directory itself is overridable via
 `BLAZE_DB_DIR`.
 
+## audit
+
+```
+blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]
+```
+
+Read-only corpus hygiene over the whole board. Findings split two ways, and the
+split is the point (ADR-0011): a **hard** finding means the corpus is *wrong* and
+fails the run; a **soft** finding is a *fill queue* and never fails one. A gate
+that fails on the fill queue is a gate people learn to skip, which costs the hard
+findings too.
+
+| Severity | Kinds |
+|---|---|
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error` |
+| soft | `empty-components`, `empty-labels`, `missing-parent` |
+
+| Arg | Meaning |
+|---|---|
+| `--projects A,B` | Audit only these project keys. Default: every project in the config. |
+| `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
+| `--json` | Emit the full report as JSON. |
+| `projectsDir` | Audit a `projects/` tree outside the current board. |
+
+Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
+the corpus is empty — a run that measured nothing is never reported as a pass.
+
+**`duplicate-status`** is the one finding that comes from the *walk* rather than
+from frontmatter. Status is the directory, so an id resolving to files under two
+status directories has two contradictory statuses at once and every derived view
+silently picks one. The finding names every path; the mutating verbs
+(`move`/`edit`/`link`/`log`/`resolve`) refuse to act on such an id at all rather
+than guess which copy is the ticket. Repair it by deleting the wrong-directory
+*duplicate file* — never the ticket, and never its id claim.
+
 ## move
 
 ```
