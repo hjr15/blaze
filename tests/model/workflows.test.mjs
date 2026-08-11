@@ -47,7 +47,9 @@ test("workflowDef throws on unknown type", () => {
   assert.ok(WORKFLOWS.delivery && WORKFLOWS.goal && WORKFLOWS.risk);
 });
 
-test("DEFAULT_WORKFLOWS holds today's exact three definitions (regression anchor)", () => {
+test("DEFAULT_WORKFLOWS holds today's exact definitions (regression anchor)", () => {
+  // BLZ-231: `requirement` and `architecture` were added so the shipped types map to
+  // shipped workflows. Adding a type without its workflow makes validateSchema fail at load.
   assert.deepEqual(DEFAULT_WORKFLOWS, {
     delivery: {
       statuses: ["defined", "in-progress", "in-review", "done"],
@@ -69,6 +71,21 @@ test("DEFAULT_WORKFLOWS holds today's exact three definitions (regression anchor
       transitions: [["identified", "mitigated"], ["identified", "accepted"], ["identified", "obsolete"]],
       reopenTo: "identified",
       resolutionOnTerminal: { mitigated: "done", accepted: "done", obsolete: "wont-do" },
+    },
+    requirement: {
+      statuses: ["proposed", "implemented", "rejected", "obsolete"],
+      terminal: ["implemented", "rejected", "obsolete"],
+      transitions: [["proposed", "implemented"], ["proposed", "rejected"], ["proposed", "obsolete"],
+                    ["implemented", "obsolete"]],
+      reopenTo: "proposed",
+      resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" },
+    },
+    architecture: {
+      statuses: ["proposed", "accepted", "rejected"],
+      terminal: ["accepted", "rejected"],
+      transitions: [["proposed", "accepted"], ["proposed", "rejected"]],
+      reopenTo: "proposed",
+      resolutionOnTerminal: { accepted: "done", rejected: "wont-do" },
     },
   });
 });

@@ -27,6 +27,23 @@ export const DEFAULT_WORKFLOWS = {
     reopenTo: "defined",
     resolutionOnTerminal: { achieved: "done" },
   },
+  // The requirements-driven model's two workflows (blaze-pm ADR-0014). Shipped as defaults
+  // so a board gets the documented model without an override — BLZ-231.
+  requirement: {
+    statuses: ["proposed", "implemented", "rejected", "obsolete"],
+    terminal: ["implemented", "rejected", "obsolete"],
+    transitions: [["proposed", "implemented"], ["proposed", "rejected"], ["proposed", "obsolete"],
+                  ["implemented", "obsolete"]],
+    reopenTo: "proposed",
+    resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" },
+  },
+  architecture: {
+    statuses: ["proposed", "accepted", "rejected"],
+    terminal: ["accepted", "rejected"],
+    transitions: [["proposed", "accepted"], ["proposed", "rejected"]],
+    reopenTo: "proposed",
+    resolutionOnTerminal: { accepted: "done", rejected: "wont-do" },
+  },
   risk: {
     statuses: ["identified", "mitigated", "accepted", "obsolete"],
     terminal: ["mitigated", "accepted", "obsolete"],

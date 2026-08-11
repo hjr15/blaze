@@ -50,6 +50,19 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   all.set(id, { frontmatter: fm, body: found.body });
   const errors = validateTicket({ frontmatter: fm, body: found.body }, (pid) => all.get(pid) || null);
+
+  // A retype is the only edit that can invalidate OTHER tickets: every child's parent-pair
+  // is now checked against the new type. Without this the engine would accept a retype that
+  // silently orphans its children — the exact failure BLZ-230 records, because
+  // `validateTicket` never runs on `reindex` and nothing downstream would report it.
+  if (patch.type && patch.type !== found.frontmatter.type) {
+    for (const [cid, child] of all) {
+      if (cid === id || child.frontmatter?.parent !== id) continue;
+      for (const e of validateTicket(child, (pid) => all.get(pid) || null)) {
+        if (/invalid parent/i.test(e)) errors.push(`${cid}: ${e} (after retyping ${id} to ${patch.type})`);
+      }
+    }
+  }
   if (fm.project) {
     const project_cfg = loadProject(fm.project, { root: dirname(projectsDir), projectsDir });
     errors.push(...validateTaxonomy(fm, project_cfg));

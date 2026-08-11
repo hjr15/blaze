@@ -8,7 +8,11 @@ import { isType } from "../model/schema.mjs";
 import { initialStatus, statusesFor, isTerminal } from "../model/workflows.mjs";
 import { validateTicket } from "../model/rules.mjs";
 
-const TYPE_MAP = { goal: "goal", epic: "epic", risk: "risk", story: "story", task: "task", bug: "bug", "sub-task": "subtask", subtask: "subtask" };
+// Jira's Epic maps to the model's delivery bundle, `feature` — not to the retained `epic`
+// type (BLZ-231). `epic` is kept in the registry only so a board written before the
+// requirements-driven model still loads; it has no legal parent, so importing into it
+// would produce an illegal board on the first run.
+const TYPE_MAP = { goal: "goal", epic: "feature", risk: "risk", story: "story", task: "task", bug: "bug", "sub-task": "subtask", subtask: "subtask" };
 const PRIORITY_SET = new Set(["highest", "high", "medium", "low", "lowest"]);
 const RESOLUTION_MAP = { "done": "done", "won't do": "wont-do", "wont do": "wont-do", "duplicate": "duplicate", "cannot reproduce": "cannot-reproduce" };
 // Jira status NAME → blaze status, per workflow. Lowercased lookup.

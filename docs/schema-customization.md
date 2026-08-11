@@ -1,7 +1,8 @@
 # Customizing the schema (types, hierarchy, required fields, workflows)
 
-Blaze ships a built-in **default** schema — the seven types and three workflows
-described in [`AGENTS.md`](../AGENTS.md#types--workflow). A data repo customizes it
+Blaze ships a built-in **default** schema — the ten types and five workflows of the
+requirements-driven model (`goal → requirement → architecture → feature → story/task/bug`,
+plus `risk` and `subtask`). A data repo customizes it
 **without editing engine source** by adding a `schema` block to its config. The
 engine applies the **top-level** override at load, so validation, the board
 columns, and the CLI all read it. A `resolveSchema` helper additionally layers
@@ -9,6 +10,22 @@ columns, and the CLI all read it. A `resolveSchema` helper additionally layers
 calls it — as of today nothing in the engine does. See
 [What reads the resolved schema](#what-reads-the-resolved-schema) below for which
 scope actually takes effect where.
+
+> **Breaking change (BLZ-231).** The shipped defaults were the Jira-inherited seven types
+> (`goal/epic/risk/story/task/bug/subtask`) and are now the requirements-driven model. Two
+> consequences for a board that has not migrated:
+>
+> - **`epic` is retained but unparentable.** It cannot be removed — `mergeTypes` is a spread
+>   merge, so an override can replace or add an entry but never delete one, and a board that
+>   still holds epics must keep loading. It now has no legal parent, so existing epics stay
+>   readable and **no new one can be created**.
+> - **`story`/`task`/`bug` hang off `feature`, not `epic`.** A board with `task → epic` edges
+>   will report them as illegal.
+>
+> A board that wants the old behaviour restores it with a top-level `schema.types` override —
+> the same mechanism this page documents. A board that wants the new model now gets it with no
+> override at all, which is the point. **Migrate first, then tighten**: `validateTicket` does
+> not run on `reindex`, so a registry change that outruns the corpus is silent.
 
 ## Where overrides live
 

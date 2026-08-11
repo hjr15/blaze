@@ -5,10 +5,20 @@ import { validateTicket } from "../../scripts/model/rules.mjs";
 
 const t = (fm, body = "body") => ({ frontmatter: fm, body });
 
-test("valid task with an epic parent passes", () => {
+test("valid task with a feature parent passes", () => {
+  // BLZ-231: delivery hangs off a feature now, not an epic.
+  const feature = t({ id: "OBA-1", type: "feature" });
+  const task = t({ id: "OBA-2", type: "task", title: "x", estimate: 30, parent: "OBA-1" });
+  assert.deepEqual(validateTicket(task, (id) => (id === "OBA-1" ? feature : null)), []);
+});
+
+test("a task parented to a retained epic is now rejected", () => {
+  // The edge that the additive-then-tighten ordering exists to protect: once `epic` is
+  // unparentable, every task under one is illegal. It must be REPORTED, not tolerated.
   const epic = t({ id: "OBA-1", type: "epic" });
   const task = t({ id: "OBA-2", type: "task", title: "x", estimate: 30, parent: "OBA-1" });
-  assert.deepEqual(validateTicket(task, (id) => (id === "OBA-1" ? epic : null)), []);
+  const errs = validateTicket(task, (id) => (id === "OBA-1" ? epic : null));
+  assert.ok(errs.length > 0, "a task under an epic must not validate");
 });
 
 test("missing required field is reported", () => {

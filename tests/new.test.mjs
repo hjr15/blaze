@@ -198,16 +198,26 @@ function seedParent(projects, { type, title }) {
   return res.id;
 }
 
-test("INF-791: applyNew REJECTS an epic parented to an epic", () => {
+test("INF-791: applyNew REJECTS a feature parented to a feature", () => {
   const r = root(); const projects = join(r, "projects");
   const goal = seedParent(projects, { type: "goal", title: "the goal" });
-  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "the epic",
+  const feat = applyNew(projects, { project: "OBA", type: "feature", title: "the feature",
     today: "2026-08-07", extra: { parent: goal } });
-  assert.equal(epic.ok, true, JSON.stringify(epic.errors));
+  assert.equal(feat.ok, true, JSON.stringify(feat.errors));
 
-  const bad = applyNew(projects, { project: "OBA", type: "epic", title: "child epic",
-    today: "2026-08-07", extra: { parent: epic.id } });
-  assert.equal(bad.ok, false, "epic -> epic must be refused at create time");
+  const bad = applyNew(projects, { project: "OBA", type: "feature", title: "child feature",
+    today: "2026-08-07", extra: { parent: feat.id } });
+  assert.equal(bad.ok, false, "feature -> feature must be refused at create time");
+  assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
+  rmSync(r, { recursive: true, force: true });
+});
+
+test("BLZ-231: applyNew REJECTS a new epic anywhere — the type is retired, not deleted", () => {
+  const r = root(); const projects = join(r, "projects");
+  const goal = seedParent(projects, { type: "goal", title: "the goal" });
+  const bad = applyNew(projects, { project: "OBA", type: "epic", title: "a new epic",
+    today: "2026-08-07", extra: { parent: goal } });
+  assert.equal(bad.ok, false, "an epic has no legal parent, so none can be created");
   assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
   rmSync(r, { recursive: true, force: true });
 });
@@ -235,13 +245,22 @@ test("INF-791: applyNew REJECTS a parent that does not exist", () => {
 test("INF-791: applyNew ACCEPTS every legal pair (the check discriminates both ways)", () => {
   const r = root(); const projects = join(r, "projects");
   const goal = seedParent(projects, { type: "goal", title: "the goal" });
-  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "the epic",
+  const req = applyNew(projects, { project: "OBA", type: "requirement", title: "a requirement",
     today: "2026-08-07", extra: { parent: goal } });
-  assert.equal(epic.ok, true, JSON.stringify(epic.errors));
+  assert.equal(req.ok, true, JSON.stringify(req.errors));
+  const feat = applyNew(projects, { project: "OBA", type: "feature", title: "the feature",
+    today: "2026-08-07", extra: { parent: req.id } });
+  assert.equal(feat.ok, true, JSON.stringify(feat.errors));
   for (const t of ["story", "task", "bug"]) {
     const res = applyNew(projects, { project: "OBA", type: t, title: `a ${t}`,
-      today: "2026-08-07", extra: { parent: epic.id, estimate: 30 } });
-    assert.equal(res.ok, true, `${t} -> epic must be allowed: ${JSON.stringify(res.errors)}`);
+      today: "2026-08-07", extra: { parent: feat.id, estimate: 30 } });
+    assert.equal(res.ok, true, `${t} -> feature must be allowed: ${JSON.stringify(res.errors)}`);
+  }
+  // A risk reaches every altitude it can threaten (BLZ-231).
+  for (const [parent, label] of [[goal, "goal"], [req.id, "requirement"], [feat.id, "feature"]]) {
+    const res = applyNew(projects, { project: "OBA", type: "risk", title: `a risk on ${label}`,
+      today: "2026-08-07", extra: { parent, likelihood: "medium", impact: "high" } });
+    assert.equal(res.ok, true, `risk -> ${label} must be allowed: ${JSON.stringify(res.errors)}`);
   }
   rmSync(r, { recursive: true, force: true });
 });
@@ -260,10 +279,10 @@ test("INF-791: a rejected create does NOT burn an id", () => {
   assert.deepEqual(after, before, `a rejected create burned an id: ${before} -> ${after}`);
 
   // And the next SUCCESSFUL create takes the id the rejection would have eaten.
-  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "next",
+  const req = applyNew(projects, { project: "OBA", type: "requirement", title: "next",
     today: "2026-08-07", extra: { parent: goal } });
-  assert.equal(epic.ok, true, JSON.stringify(epic.errors));
-  assert.equal(epic.id, "OBA-2", "the id after a rejected create must not skip");
+  assert.equal(req.ok, true, JSON.stringify(req.errors));
+  assert.equal(req.id, "OBA-2", "the id after a rejected create must not skip");
   rmSync(r, { recursive: true, force: true });
 });
 
