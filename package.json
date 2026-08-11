@@ -2,6 +2,21 @@
   "name": "@hjr15/blaze-board",
   "version": "0.5.1",
   "description": "A file-based, git-native issue board that AI coding agents can drive. Tickets are markdown; status is the directory.",
+  "keywords": [
+    "issue-tracker",
+    "project-management",
+    "kanban",
+    "markdown",
+    "git",
+    "cli",
+    "ai-agents",
+    "agentic"
+  ],
+  "homepage": "https://github.com/hjr15/blaze#readme",
+  "bugs": {
+    "url": "https://github.com/hjr15/blaze/issues"
+  },
+  "author": "Ryan Howman",
   "type": "module",
   "bin": {
     "blaze": "scripts/cli.mjs"
