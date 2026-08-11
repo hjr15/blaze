@@ -18,6 +18,12 @@ import { LINK_TYPES } from "./links.mjs";
 export const HARD_KINDS = new Set([
   "off-taxonomy-component", "off-taxonomy-label", "bad-link-key", "unknown-link-type",
   "dangling-target", "dangling-parent", "invalid-parent-type", "parse-error",
+  // duplicate-status (BLZ-122/REQ-035) is raised by the RUNNER, not by auditCorpus — ticket
+  // identity is a property of the walk, and this pure function is a function of frontmatter
+  // alone. Its severity still belongs here: HARD_KINDS is the published contract that
+  // `summarise` and every caller reads, so a kind raised elsewhere must still be classified
+  // in one place.
+  "duplicate-status",
 ]);
 
 // Types whose classification lives in typed fields rather than labels (BLZ-234).

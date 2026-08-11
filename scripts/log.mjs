@@ -3,26 +3,14 @@
 // Worklog minutes round to 1m and must be positive (model/time.roundWorklog).
 import { writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { walkTickets } from "./model/index.mjs";
+import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { roundWorklog } from "./model/time.mjs";
 
-// Same id resolution as move.mjs: prefer the ticket whose project dir matches
-// the id prefix; fall back to the first id match.
-function locate(projectsDir, id) {
-  let fallback = null;
-  for (const t of walkTickets(projectsDir)) {
-    if (t.frontmatter.id !== id) continue;
-    const projectKey = basename(dirname(dirname(t.file)));
-    if (id.startsWith(`${projectKey}-`)) return t;
-    fallback ??= t;
-  }
-  return fallback;
-}
-
 export function applyLog(projectsDir, id, minutes, opts = {}) {
   const { date = null, note = null, today = null } = opts;
-  const found = locate(projectsDir, id);
+  const { found, duplicates } = locateTicket(projectsDir, id);
+  if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 
   let rounded;

@@ -61,12 +61,33 @@ for (const k of keys) {
 
 const wanted = new Set(keys);
 const tickets = [];
+// Status IS the directory (blaze-pm ADR-0001), so an id resolving to files under two status
+// directories carries two contradictory statuses and every derived view silently picks one.
+// This has to be caught HERE rather than in `auditCorpus`: ticket identity is a property of
+// the WALK — which paths exist — and the pure function is a function of frontmatter, which
+// carries no path. BLZ-122 / REQ-035.
+const filesById = new Map();
 for (const t of walkTickets(projectsDir)) {
   const id = t.frontmatter?.id;
-  if (id && wanted.has(String(id).split("-")[0])) tickets.push(t);
+  if (!id || !wanted.has(String(id).split("-")[0])) continue;
+  tickets.push(t);
+  if (!filesById.has(id)) filesById.set(id, []);
+  filesById.get(id).push(t.file);
 }
 
 const report = auditCorpus({ tickets, projects, config });
+
+// One finding per id naming EVERY path, not one per surplus copy: an operator told about a
+// single path goes hunting for the other, which is the failure mode itself.
+for (const [id, files] of filesById) {
+  if (files.length > 1) {
+    report.findings.push({ ticket: id, kind: "duplicate-status", detail: files.sort().join(", ") });
+  }
+}
+// auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
+// that reports a hard finding and still exits 0 is not a gate.
+report.ok = !report.findings.some((f) => HARD_KINDS.has(f.kind));
+
 const findings = opts.kind ? report.findings.filter((f) => f.kind === opts.kind) : report.findings;
 
 if (opts.json) {

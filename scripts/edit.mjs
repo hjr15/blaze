@@ -3,7 +3,7 @@
 // model/ — this file only marshals a patch through validateTicket before writing.
 import { writeFileSync } from "node:fs";
 import { basename, dirname } from "node:path";
-import { walkTickets } from "./model/index.mjs";
+import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
@@ -12,18 +12,6 @@ import { EDITABLE_FIELDS } from "./model/fields.mjs";
 import { loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
 import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
-
-// Same id resolution as move.mjs/log.mjs: prefer the project-dir-matching id.
-function locate(projectsDir, id) {
-  let fallback = null;
-  for (const t of walkTickets(projectsDir)) {
-    if (t.frontmatter.id !== id) continue;
-    const projectKey = basename(dirname(dirname(t.file)));
-    if (id.startsWith(`${projectKey}-`)) return t;
-    fallback ??= t;
-  }
-  return fallback;
-}
 
 function asArray(v) {
   if (Array.isArray(v)) return v;
@@ -36,7 +24,8 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   const bad = Object.keys(patch).filter((k) => !EDITABLE_FIELDS.has(k));
   if (bad.length) return { ok: false, errors: [`field(s) not editable: ${bad.join(", ")}`] };
 
-  const found = locate(projectsDir, id);
+  const { found, duplicates } = locateTicket(projectsDir, id);
+  if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 
   const fm = { ...found.frontmatter };
@@ -85,7 +74,8 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
 // Only lines within that section count; a `- [ ]` elsewhere in the body is ignored.
 export function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
   const { today = null } = opts;
-  const found = locate(projectsDir, id);
+  const { found, duplicates } = locateTicket(projectsDir, id);
+  if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 
   const lines = found.body.split("\n");
