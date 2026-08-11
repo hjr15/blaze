@@ -31,10 +31,11 @@ scope actually takes effect where.
 
 - **Top-level** — `blaze.config.json` at the data repo root. Applies to every
   project.
-- **Per-project** — `projects/<KEY>/project.json`. Resolved by `resolveSchema`
-  to win over the top-level block for the same entry, available to any future
-  feature that calls it. The built-in `blaze new`/`move`/board commands don't
-  call it — see
+- **Per-project** — `projects/<KEY>/project.json`. `resolveSchema` resolves it
+  to win over the top-level block for the same entry, and the **write path**
+  (`blaze new`, `blaze edit`) and the **hygiene gate** (`blaze audit`) each
+  judge a ticket against its own project's registry (BLZ-238). Board columns
+  and transition legality still read the top-level registry board-wide. See
   [What reads the resolved schema](#what-reads-the-resolved-schema).
 
 Both use the same shape:
@@ -119,6 +120,93 @@ and confirm a second project still refuses it.
 Board columns and transition legality remain **board-wide** — they come from the
 ambient registry, not the per-project one. See the table below for exactly which
 reads resolve which scope.
+
+## Worked example 3 — a substantial override: the `engineering` preset
+
+Most overrides touch one or two entries. A larger one — new types **and** new
+workflows together — works the same way, just with more entries in the same
+two objects. This is the mechanical piece behind the `engineering` preset's
+type hierarchy, documented in full (reasoning, field requirements, link
+vocabulary, engine limits) in
+[`method/work-item-types.md`](method/work-item-types.md); shown here
+abbreviated to `requirement`, `architecture`, and one delivery type, since the
+rest of `feature`/`story`/`risk`/`bug` follow the same shape:
+
+```json
+{
+  "schema": {
+    "types": {
+      "goal":         { "level": 4, "workflow": "goal", "parentTypes": [], "required": ["title", "description"] },
+      "requirement":  { "level": 3, "workflow": "requirement", "parentTypes": ["goal"], "required": ["title", "description", "ref", "verification", "derived"] },
+      "architecture": { "level": 2, "workflow": "architecture", "parentTypes": ["requirement"], "required": ["title", "description", "ref"] },
+      "feature":      { "level": 1, "workflow": "delivery", "parentTypes": ["architecture", "requirement", "goal"], "required": ["title", "description", "estimate"] },
+      "task":         { "level": 0, "workflow": "delivery", "parentTypes": ["feature", "story", "epic"], "required": ["title", "description", "estimate"] }
+    },
+    "workflows": {
+      "requirement": {
+        "statuses": ["proposed", "implemented", "rejected", "obsolete"],
+        "terminal": ["implemented", "rejected", "obsolete"],
+        "transitions": [["proposed", "implemented"], ["proposed", "rejected"], ["proposed", "obsolete"], ["implemented", "obsolete"]],
+        "reopenTo": "proposed",
+        "resolutionOnTerminal": { "implemented": "done", "rejected": "wont-do", "obsolete": "wont-do" }
+      },
+      "architecture": {
+        "statuses": ["proposed", "accepted", "rejected"],
+        "terminal": ["accepted", "rejected"],
+        "transitions": [["proposed", "accepted"], ["proposed", "rejected"]],
+        "reopenTo": "proposed",
+        "resolutionOnTerminal": { "accepted": "done", "rejected": "wont-do" }
+      }
+    }
+  }
+}
+```
+
+Three things worth flagging, each covered in full in `work-item-types.md`'s
+own "Engine limits" section:
+
+- **`task` keeps `epic` in `parentTypes`** even though this registry defines
+  no `epic` type. `mergeTypes` merges by spread, so an override can add or
+  replace a type but never remove one — `epic` survives regardless. Drop it
+  from `parentTypes` only after every existing `task`/`bug`/`story` parented
+  under an `epic` has been migrated (see the Gotchas section below).
+- **`approved`, `verified` (on `requirement`) and `superseded`/`deprecated`
+  (on `architecture`) are deliberately absent** from the `statuses` lists
+  above — they're designed, not shipped. Each needs a return visit after the
+  triggering event, and return-visit obligations measure far below fields
+  captured at creation, on the board this model was developed against.
+- **The five `engineering`-specific link types** (`Implements`, `Addresses`,
+  `Verifies`, `Supersedes`, `Derives`) can't be installed this way at all —
+  the `schema` block exposes `types` and `workflows` only, there is no
+  `links` path. `blaze link` hard-rejects an unknown type outright;
+  `work-item-types.md` documents these five as vocabulary/convention, not an
+  installable schema.
+
+## Gotchas
+
+Three failure modes worth knowing before hand-writing a `schema` block —
+each one has actually broken a board running this mechanism.
+
+- **`transitions` is an array of `[from, to]` pairs, not an object map.**
+  `{"proposed": "accepted"}` reads like a reasonable shorthand and is wrong.
+  `validateSchema` only checks that a type's `workflow` names a declared
+  workflow — it does not check the shape of `transitions` — so the wrong
+  shape passes validation cleanly and then throws a raw `TypeError` at the
+  first `blaze move` that hits it.
+- **`mergeTypes` can add or replace a type, never remove one.** It merges by
+  spread (`{ ...defaults, ...override }`), so `"epic": null` or `"epic":
+  undefined` in an override leaves the `epic` key present in the merged
+  registry — `isType("epic")` still returns `true`, and
+  `hierarchyLevel("epic")` throws instead of giving the clean `unknown type`
+  error you'd expect from actually deleting it.
+- **A type left out of an existing type's `parentTypes` makes existing
+  tickets parented that way silently parent-illegal.** "Silently" because
+  `validateTicket` runs on `new`, `edit`, and `migrate` — never on
+  `reindex` — so the board indexes and renders fine, and the first symptom
+  is an unrelated `blaze edit <id> --priority high` failing with `invalid
+  parent: task cannot be a child of epic`, an error about a field nobody
+  touched. On the board this model was developed against, that pattern
+  affected 1,599 parent edges.
 
 ## What reads the resolved schema
 

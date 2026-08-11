@@ -9,16 +9,28 @@ touched.
 
 ## Types & workflow
 
-Every ticket has a `type`. Each type follows one of three workflows — its own
-sequence of statuses:
+Every ticket has a `type`. Each type follows one of five workflows — its own
+sequence of statuses. These are the **shipped defaults** as of BLZ-231: the
+requirements-driven model, `goal → requirement → architecture → feature →
+story/task/bug`. A board gets them with no override at all.
 
 | Type | Parent | Required fields | Workflow | Statuses (initial → terminal) |
 |---|---|---|---|---|
 | `goal` | — | title, description | `goal` | `defined → in-progress → achieved` |
-| `epic` | goal | title, description | `delivery` | `defined → in-progress → in-review → done` |
-| `story` / `task` / `bug` | epic | title, description, **estimate** | `delivery` | `defined → in-progress → in-review → done` |
+| `requirement` | goal | title, description | `requirement` | `proposed → implemented` / `rejected` / `obsolete` |
+| `architecture` | requirement or goal | title, description | `architecture` | `proposed → accepted` / `rejected` |
+| `feature` | architecture, requirement or goal | title, description | `delivery` | `defined → in-progress → in-review → done` |
+| `story` | requirement or feature | title, description, **estimate** | `delivery` | `defined → in-progress → in-review → done` |
+| `task` / `bug` | feature or story | title, description, **estimate** | `delivery` | `defined → in-progress → in-review → done` |
 | `subtask` | story/task/bug | title, description | `delivery` | `defined → in-progress → in-review → done` |
-| `risk` | goal or epic | title, description, likelihood, impact | `risk` | `identified → mitigated` / `accepted` / `obsolete` |
+| `risk` | goal, requirement, architecture or feature | title, description, likelihood, impact | `risk` | `identified → mitigated` / `accepted` / `obsolete` |
+| `epic` | — (unparentable) | title, description | `delivery` | `defined → in-progress → in-review → done` |
+
+`epic` is **retained but unparentable**: `mergeTypes` merges by spread, so an
+override can add or replace a type but never delete one, and a board that still
+holds epics has to keep loading. Existing epics stay readable; no new one can be
+created, and nothing may hang off one. A board that wants the old
+`goal → epic → task` hierarchy back restores it with a `schema.types` override.
 
 A terminal move auto-sets `resolution` (`done` for `achieved`/`done`/`mitigated`/
 `accepted`; `wont-do` for `obsolete`). Use `blaze resolve <id> <resolution>` for a
@@ -29,13 +41,35 @@ repo can override or extend them — add or modify types and workflows — via a
 `schema` block in `blaze.config.json` (all projects); the engine applies this
 **top-level** override at load, so `blaze new`/`move`, validation, and the board
 all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
-`resolveSchema` helper, available to any future feature that calls it — as of
-today nothing in the engine does, including the built-in commands. With no
-override the table above applies unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
+`resolveSchema` helper and **takes effect on the write path** (BLZ-238): `blaze
+new` and `blaze edit` validate against the ticket's own project's registry, and
+`blaze audit` judges each project's corpus by its own. Board columns and
+transition legality remain board-wide. With no override the table above applies
+unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 `validateSchema` (also in `scripts/model/schema-config.mjs`) is a pure structural
 check — every type's `workflow` must name a declared workflow — returning a list
 of human-readable errors (`[]` when valid); nothing in the engine calls it
 automatically yet.
+
+The model above is what earlier docs called the **`engineering` preset**. Since
+BLZ-231 it is no longer a preset a board opts into — it is what the engine
+ships, and a board opts *out* with a `schema` block. See
+[`docs/method/work-item-types.md`](docs/method/work-item-types.md) for the full
+type table and the reasoning; its `approved`/`verified` (on `requirement`) and
+`superseded`/`deprecated` (on `architecture`) gates are designed but not
+shipped, so they are absent from the statuses above.
+
+### Citing a REQ or ADR
+
+Under the `engineering` preset, only `requirement` and `architecture`
+tickets carry a `ref` (`REQ-nnn` / `ADR-nnnn`) — the citation form. The
+ticket id is still the identity.
+
+1. Write the `ref` in prose ("implements REQ-014", "per ADR-0011"); write the
+   ticket id only when you mean the ticket itself.
+2. A `ref` is project-scoped — qualify it across projects (`BLZ REQ-001`).
+3. Never cite either by path — a ticket's status is its directory, so its
+   path changes on every transition; the `ref` doesn't.
 
 ## The loop
 
