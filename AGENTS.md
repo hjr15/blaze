@@ -24,13 +24,17 @@ story/task/bug`. A board gets them with no override at all.
 | `task` / `bug` | feature or story | title, description, **estimate** | `delivery` | `defined → in-progress → in-review → done` |
 | `subtask` | story/task/bug | title, description | `delivery` | `defined → in-progress → in-review → done` |
 | `risk` | goal, requirement, architecture or feature | title, description, likelihood, impact | `risk` | `identified → mitigated` / `accepted` / `obsolete` |
-| `epic` | — (unparentable) | title, description | `delivery` | `defined → in-progress → in-review → done` |
+| `epic` | — (unparentable) | title, description | `delivery` | `defined → in-progress → in-review → done` — **retired, legacy only** |
 
-`epic` is **retained but unparentable**: `mergeTypes` merges by spread, so an
-override can add or replace a type but never delete one, and a board that still
-holds epics has to keep loading. Existing epics stay readable; no new one can be
-created, and nothing may hang off one. A board that wants the old
+`epic` is **retired in favour of `feature`** (BLZ-231), and retained only because
+it cannot be removed: `mergeTypes` merges by spread, so an override can add or
+replace a type but never delete one, and a board that still holds epics has to
+keep loading. Existing epics stay readable; nothing may hang off one. `feature`
+is the delivery bundle and the PR unit — use it. A board that wants the old
 `goal → epic → task` hierarchy back restores it with a `schema.types` override.
+
+Caveat: emptying `parentTypes` blocks a *parented* create, but `parent` is not a
+required field, so an **unparented** epic still validates. Tracked as BLZ-248.
 
 A terminal move auto-sets `resolution` (`done` for `achieved`/`done`/`mitigated`/
 `accepted`; `wont-do` for `obsolete`). Use `blaze resolve <id> <resolution>` for a
@@ -81,18 +85,18 @@ ticket id is still the identity.
 2. **You** move it forward by hand — `blaze move <id> <status>` — when you commit
    to working it (intent is a human/agent decision, not automatic).
 3. If the project has a `codeRepos` entry, `blaze reconcile` takes over for
-   **delivery-workflow tickets only** (epic/story/task/bug/subtask): a branch
+   **delivery-workflow tickets only** (feature/story/task/bug/subtask): a branch
    embedding the ticket's key moves it to `in-progress`; opening its PR moves it to
    `in-review`; merging moves it to `done`. Goals and risks are always manual.
    Never hand-move a delivery ticket through the reconcile-owned statuses once a
    branch/PR exists for it — let reconcile own it.
-   Reconcile also moves a **bundled epic-child** — a delivery ticket with no
-   branch/PR of its own, only a `<KEY>-<n>:` commit inside its epic's PR — to
+   Reconcile also moves a **bundled feature-child** — a delivery ticket with no
+   branch/PR of its own, only a `<KEY>-<n>:` commit inside its feature's PR — to
    `done` once that commit is reachable from the code repo's default branch, so
-   children bundled into an epic PR move themselves when that PR merges; no
+   children bundled into a feature PR move themselves when that PR merges; no
    manual `blaze move` needed. This is terminal-sticky and idempotent like the
-   branch/PR paths, and it does not fire while the epic PR is still open (the
-   child's commit then lives only on the epic branch, not the default branch).
+   branch/PR paths, and it does not fire while the feature PR is still open (the
+   child's commit then lives only on the feature branch, not the default branch).
    Reconcile mirrors **delivery** state, not deploy state — see
    [ADR-0003](docs/decisions/0003-engine-scope-delivery-truth-not-deploy-truth.md).
 
@@ -356,6 +360,8 @@ a sandbox. Code that calls `node:fs` directly still bypasses it.
 for s in defined in-progress in-review; do echo "## $s"; ls projects/*/$s/*.md 2>/dev/null; done
 grep -rl '^priority: urgent' --include='*.md' projects/
 blaze rollup            # every goal/epic's rolled-up estimate + logged time
+                        # NOTE: filters on goal|epic only, so on a migrated
+                        # board (zero epics) features are missing — BLZ-248
 blaze rollup KEY-12      # one ticket's own vs. rolled totals, with child breakdown
 ```
 
@@ -378,7 +384,7 @@ of truth, full CLI/`grep` parity preserved:
   `types`/`workflows` so a data-repo schema override flows through): the
   primary board folds any workflow whose non-terminal statuses are a subset of
   its own, and every other workflow gets its own standalone board. The default
-  schema shows one `delivery` board (epic/story/task/bug/subtask) and one
+  schema shows one `delivery` board (feature/story/task/bug/subtask) and one
   `risk` board; a single-workflow config shows one board and no switcher pills.
   Switching boards composes into the same `#status=` hash as the chips — it
   never clobbers an active chip filter, and there's no hash write on load.
@@ -472,7 +478,7 @@ above; empty/omitted = no validation), `requireLabels`/`requireComponents`
 above), `codeRepos` (repos `reconcile` mirrors for this project),
 `requireWorklogBeforeTerminal` (default `false` — when `true`, a leaf ticket
 (story/task/bug/subtask) needs at least one `worklog` entry before it can enter a
-terminal status; epics/goals/risks are exempt since their time rolls up from
+terminal status; features/goals/risks are exempt since their time rolls up from
 children), and `schema` (a per-project type/workflow override — see
 [`docs/schema-customization.md`](docs/schema-customization.md)).
 

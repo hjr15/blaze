@@ -16,20 +16,32 @@ diagram shows the defaults.
 
 ```mermaid
 flowchart TD
-    goal["goal · level 2<br/>workflow: goal<br/>requires: title, description"]
-    epic["epic · level 1<br/>workflow: delivery<br/>requires: title, description"]
+    goal["goal · level 4<br/>workflow: goal<br/>requires: title, description"]
+    requirement["requirement · level 3<br/>workflow: requirement<br/>requires: title, description"]
+    architecture["architecture · level 2<br/>workflow: architecture<br/>requires: title, description"]
+    feature["feature · level 1<br/>workflow: delivery<br/>requires: title, description"]
     risk["risk · level 1<br/>workflow: risk<br/>requires: title, description,<br/>likelihood, impact"]
     story["story · level 0<br/>workflow: delivery<br/>requires: title, description, estimate"]
     task["task · level 0<br/>workflow: delivery<br/>requires: title, description, estimate"]
     bug["bug · level 0<br/>workflow: delivery<br/>requires: title, description, estimate"]
     subtask["subtask · level -1<br/>workflow: delivery<br/>requires: title, description"]
 
-    goal --> epic
+    goal --> requirement
+    goal --> architecture
+    goal --> feature
     goal --> risk
-    epic --> risk
-    epic --> story
-    epic --> task
-    epic --> bug
+    requirement --> architecture
+    requirement --> feature
+    requirement --> story
+    requirement --> risk
+    architecture --> feature
+    architecture --> risk
+    feature --> story
+    feature --> task
+    feature --> bug
+    feature --> risk
+    story --> task
+    story --> bug
     story --> subtask
     task --> subtask
     bug --> subtask
@@ -40,13 +52,20 @@ flowchart TD
 An arrow points from a **parent** type to a **child** type it may contain:
 
 - A `goal` is top-level (no parent type) and sits above everything.
-- An `epic` must hang off a `goal`; `story`/`task`/`bug` must hang off an `epic`;
-  a `subtask` hangs off a `story`, `task`, or `bug`.
-- A `risk` is the one type with two legal parents — a `goal` **or** an `epic` — and
-  is the only leaf-level type carrying `likelihood` and `impact` instead of an
-  `estimate`.
+- `requirement` and `architecture` are the reference spine: a `requirement` hangs
+  off a `goal`, an `architecture` off a `requirement` or `goal`.
+- A `feature` is the delivery bundle and the PR unit — it hangs off an
+  `architecture`, `requirement` or `goal`, and **features do not nest**.
+- `story` hangs off a `requirement` or `feature`; `task`/`bug` off a `feature` or
+  `story`; a `subtask` off a `story`, `task`, or `bug`.
+- A `risk` has the widest choice of parents — `goal`, `requirement`,
+  `architecture` or `feature` — and carries `likelihood` and `impact` instead of
+  an `estimate`.
+- `epic` is **retired** in favour of `feature` (BLZ-231). It is absent from this
+  diagram deliberately: it survives in the registry only because the engine
+  cannot delete a type, it is unparentable, and no new one should be created.
 
 Only the delivery-workflow leaf types (`story`/`task`/`bug`/`subtask`) require an
 `estimate`; a project can additionally require a worklog before those enter a
 terminal status via `requireWorklogBeforeTerminal`. Time rolls up from leaves to
-`epic` and `goal` parents, so parents carry no estimate of their own.
+`feature`, `requirement` and `goal` parents, so parents carry no estimate of their own.

@@ -17,7 +17,7 @@ validation, which is why `blaze resolve` can override it (`wont-do`, `duplicate`
 
 ```mermaid
 stateDiagram-v2
-    state "delivery — epic / story / task / bug / subtask" as delivery {
+    state "delivery — feature / story / task / bug / subtask" as delivery {
         [*] --> defined
         defined --> in_progress: in-progress
         in_progress --> in_review: in-review

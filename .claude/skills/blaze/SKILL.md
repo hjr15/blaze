@@ -7,7 +7,7 @@ description: Use when working in a Blaze board repo — creating, moving, or gro
 
 Blaze is a file-based issue tracker: a ticket's status is the directory it sits in,
 `projects/<KEY>/<status>/<KEY>-<n>-slug.md`. The default (delivery) workflow for
-epic/story/task/bug/subtask is `defined → in-progress → in-review → done`; goals and
+feature/story/task/bug/subtask is `defined → in-progress → in-review → done`; goals and
 risks follow their own workflow. The full contract, including all workflows and the
 frontmatter schema, is in the repo's `AGENTS.md` — read it before acting.
 

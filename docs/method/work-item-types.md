@@ -6,10 +6,11 @@ An alternative type hierarchy for requirements-driven delivery: it separates
 instead of collapsing all three into one. For the reasoning, see
 [`engineering-method.md`](engineering-method.md).
 
-This is **not** the engine's built-in default (`goal`/`epic`/`risk`/`story`/
-`task`/`bug`/`subtask` — see [`guide/schema.md`](../guide/schema.md)). It is
-installed with a `schema` block, the mechanism documented in
-[`schema-customization.md`](../schema-customization.md).
+This **is** the engine's built-in default as of BLZ-231 — see
+[`guide/schema.md`](../guide/schema.md). It began as an opt-in `schema` block
+(the mechanism documented in
+[`schema-customization.md`](../schema-customization.md)) and was subsequently
+adopted as the default registry, so a new board runs it with no override.
 
 > **Read this before adopting the model.** Three parts of it **cannot** be
 > expressed through the schema block on the current engine. They are listed
@@ -190,9 +191,12 @@ survive alongside `feature` and `task`.
 exists, so `isType("epic")` returns `true` and `hierarchyLevel("epic")` throws
 a `TypeError` rather than the clean `unknown type` error.
 
-Consequences: `blaze new --type epic` keeps working after you adopt the model,
-`allTypes()` reports both `epic` and `feature` with no way to tell which is
-current, and nothing enforces the migration beyond convention.
+Consequences: `blaze new --type epic` keeps working, `allTypes()` reports both
+`epic` and `feature` with no way to tell which is current, and nothing enforces
+the migration beyond convention. Emptying `epic`'s `parentTypes` retires it for
+*parented* creates, but `parent` is not a required field, so an **unparented**
+epic still validates clean. Tracked as **BLZ-248**, which asks for a declarative
+`deprecated`/`replacedBy` marker instead of retirement-by-absence.
 
 ### 2. Existing `task`/`bug`/`story` parents become illegal unless you keep `epic`
 
@@ -206,8 +210,17 @@ only — never on `reindex` — so the board indexes fine and the first symptom 
 `blaze edit <id> --priority high` failing with `invalid parent: task cannot be
 a child of epic`, an error about a field you did not touch.
 
-**Until limit 1 is fixed, keep `epic` in the `parentTypes` of `task`, `bug`
-and `story`,** and migrate the tickets before tightening the rule.
+**This is now historical — do not act on it.** The advice used to be "keep
+`epic` in the `parentTypes` of `task`, `bug` and `story` until the tickets are
+migrated". That migration is **complete**: 275 tickets were retyped (the last
+four in blaze-pm#99) and `blaze-pm` `origin/main` holds **zero** epics, so the
+parent rules were tightened and `epic` is out of every `parentTypes` list.
+
+Re-adding it now **un-retires the type** and reintroduces exactly the
+`invalid-parent-type` findings the retype cleared. If you are migrating a board
+that still holds epics, retype them to `feature` rather than widening the parent
+rules — see **BLZ-249** for a branch that followed the old advice and would have
+undone the migration on merge.
 
 ### 3. The link registry is not schema-driven
 

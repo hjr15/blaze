@@ -13,13 +13,19 @@ by default, and how to change it.
 
 | Type | Level | Legal parent(s) | Required fields | Workflow |
 |---|---|---|---|---|
-| `goal` | 2 | top-level | title, description | goal |
-| `epic` | 1 | goal | title, description | delivery |
-| `risk` | 1 | goal or epic | title, description, likelihood, impact | risk |
-| `story` | 0 | epic | title, description, estimate | delivery |
-| `task` | 0 | epic | title, description, estimate | delivery |
-| `bug` | 0 | epic | title, description, estimate | delivery |
+| `goal` | 4 | top-level | title, description | goal |
+| `requirement` | 3 | goal | title, description | requirement |
+| `architecture` | 2 | requirement or goal | title, description | architecture |
+| `feature` | 1 | architecture, requirement or goal | title, description | delivery |
+| `risk` | 1 | goal, requirement, architecture or feature | title, description, likelihood, impact | risk |
+| `story` | 0 | requirement or feature | title, description, estimate | delivery |
+| `task` | 0 | feature or story | title, description, estimate | delivery |
+| `bug` | 0 | feature or story | title, description, estimate | delivery |
 | `subtask` | -1 | story, task, or bug | title, description | delivery |
+| `epic` | 1 | — (unparentable) | title, description | delivery — **retired, legacy only** |
+
+`epic` is retired in favour of `feature` (BLZ-231) and retained only because the
+engine cannot delete a type — see "The engineering model" below. Never create one.
 
 Parent legality and cycle detection are enforced on every write — you cannot
 park a `story` under a `goal`, or create a parent/child loop.
@@ -30,9 +36,11 @@ A workflow's columns are exactly its status directories.
 
 | Workflow | Types | Status sequence | Terminal | Reopen target |
 |---|---|---|---|---|
-| delivery | epic, story, task, bug, subtask | `defined → in-progress → in-review → done` | `done` | `defined` |
+| delivery | feature, story, task, bug, subtask | `defined → in-progress → in-review → done` | `done` | `defined` |
 | goal | goal | `defined → in-progress → achieved` | `achieved` | `defined` |
 | risk | risk | `identified → { mitigated \| accepted \| obsolete }` | `mitigated`, `accepted`, `obsolete` | `identified` |
+| requirement | requirement | `proposed → { implemented \| rejected \| obsolete }` | `implemented`, `rejected`, `obsolete` | `proposed` |
+| architecture | architecture | `proposed → { accepted \| rejected }` | `accepted`, `rejected` | `proposed` |
 
 A move is legal only along an adjacent forward edge in that sequence, or a
 jump back to the reopen target — nothing else. Entering a terminal status
@@ -136,7 +144,7 @@ Shape:
 ```json
 {
   "schema": {
-    "types":     { "<name>": { "level": 0, "workflow": "<wf>", "parentTypes": ["epic"], "required": ["title", "description"] } },
+    "types":     { "<name>": { "level": 0, "workflow": "<wf>", "parentTypes": ["feature"], "required": ["title", "description"] } },
     "workflows": { "<wf>":  { "statuses": ["a", "b"], "terminal": ["b"], "transitions": [["a", "b"]], "reopenTo": "a", "resolutionOnTerminal": { "b": "done" } } }
   }
 }
@@ -170,13 +178,13 @@ board-wide, via the top-level `schema` block.
 
 ---
 
-## An opinionated alternative: the engineering preset
+## The engineering model (now the built-in default)
 
-Everything above is the engine's built-in default, and it's what a new board
-runs unless you change it. A different, opt-in type hierarchy —
-`engineering` — is documented separately. It doesn't ship enabled; you
-install it yourself as a `schema` block in `blaze.config.json`, the same
-mechanism described in Part 2 above.
+This started as an opt-in `engineering` preset installed via a `schema` block.
+**It has since been adopted as the engine's built-in default** — the registry in
+Part 1 above is this model, so a new board runs it with no `schema` block at
+all. The section is kept because it explains the *reasoning* behind the
+hierarchy, which the Part 1 table only states.
 
 The relationship it's built on, in one line:
 
@@ -199,10 +207,16 @@ every transition; the `ref` doesn't.
 | `bug` | 0 | `feature`, `story` | `delivery` |
 
 `feature` occupies the altitude other tools call `epic` — the PR unit, one
-integration branch, typically 4–8 child tasks. Installing this registry
-doesn't remove `epic`/`subtask` (the engine can add or replace a type but
-never delete one), so keep `epic` in `task`/`bug`/`story`'s `parentTypes`
-until existing tickets are migrated.
+integration branch, typically 4–8 child tasks. Adopting this registry doesn't
+remove `epic`/`subtask`, because the engine can add or replace a type but never
+delete one.
+
+**Do not re-add `epic` to `task`/`bug`/`story`'s `parentTypes`.** Earlier
+guidance here suggested keeping it there until existing tickets were migrated;
+that migration is done (275 tickets, `blaze-pm` `origin/main` holds zero epics),
+and re-adding it un-retires the type. If you are migrating a board that still
+holds epics, retype them to `feature` rather than widening the parent rules —
+see BLZ-249 for a branch that got this wrong.
 
 The `approved`/`verified` (on `requirement`) and `superseded` (on
 `architecture`) gates are designed but not shipped in the documented
