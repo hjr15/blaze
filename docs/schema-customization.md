@@ -43,7 +43,7 @@ Both use the same shape:
 ```json
 {
   "schema": {
-    "types":     { "<name>": { "level": 0, "workflow": "<wf>", "parentTypes": ["epic"], "required": ["title", "description"] } },
+    "types":     { "<name>": { "level": 0, "workflow": "<wf>", "parentTypes": ["feature"], "required": ["title", "description"] } },
     "workflows": { "<wf>":  { "statuses": ["a", "b"], "terminal": ["b"], "transitions": [["a", "b"]], "reopenTo": "a", "resolutionOnTerminal": { "b": "done" } } }
   }
 }
@@ -78,7 +78,7 @@ project can use it. Edit `blaze.config.json`:
   "projects": ["ENG"],
   "schema": {
     "types": {
-      "spike": { "level": 0, "workflow": "research", "parentTypes": ["epic"], "required": ["title", "description"] }
+      "spike": { "level": 0, "workflow": "research", "parentTypes": ["feature"], "required": ["title", "description"] }
     },
     "workflows": {
       "research": {
@@ -140,7 +140,7 @@ rest of `feature`/`story`/`risk`/`bug` follow the same shape:
       "requirement":  { "level": 3, "workflow": "requirement", "parentTypes": ["goal"], "required": ["title", "description", "ref", "verification", "derived"] },
       "architecture": { "level": 2, "workflow": "architecture", "parentTypes": ["requirement"], "required": ["title", "description", "ref"] },
       "feature":      { "level": 1, "workflow": "delivery", "parentTypes": ["architecture", "requirement", "goal"], "required": ["title", "description", "estimate"] },
-      "task":         { "level": 0, "workflow": "delivery", "parentTypes": ["feature", "story", "epic"], "required": ["title", "description", "estimate"] }
+      "task":         { "level": 0, "workflow": "delivery", "parentTypes": ["feature", "story"], "required": ["title", "description", "estimate"] }
     },
     "workflows": {
       "requirement": {
@@ -165,11 +165,14 @@ rest of `feature`/`story`/`risk`/`bug` follow the same shape:
 Three things worth flagging, each covered in full in `work-item-types.md`'s
 own "Engine limits" section:
 
-- **`task` keeps `epic` in `parentTypes`** even though this registry defines
-  no `epic` type. `mergeTypes` merges by spread, so an override can add or
-  replace a type but never remove one — `epic` survives regardless. Drop it
-  from `parentTypes` only after every existing `task`/`bug`/`story` parented
-  under an `epic` has been migrated (see the Gotchas section below).
+- **`task` no longer keeps `epic` in `parentTypes`.** Earlier revisions of this
+  example did, on the reasoning that `epic` survives the merge regardless
+  (`mergeTypes` is a spread, so an override can add or replace a type but never
+  remove one) and existing `task → epic` edges would otherwise become illegal.
+  That migration is **done** — 275 tickets retyped, `blaze-pm` `origin/main`
+  holds zero epics — so the rule was tightened. **Do not re-add it**: doing so
+  un-retires the type. Migrate a legacy board by retyping its epics to
+  `feature`, not by widening the parent rules (see BLZ-249).
 - **`approved`, `verified` (on `requirement`) and `superseded`/`deprecated`
   (on `architecture`) are deliberately absent** from the `statuses` lists
   above — they're designed, not shipped. Each needs a return visit after the

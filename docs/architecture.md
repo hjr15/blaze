@@ -174,20 +174,32 @@ Types, their hierarchy, parent rules, and required fields are defined once in
 <!-- DIAGRAM:BEGIN docs/diagrams/type-hierarchy.md -->
 ```mermaid
 flowchart TD
-    goal["goal · level 2<br/>workflow: goal<br/>requires: title, description"]
-    epic["epic · level 1<br/>workflow: delivery<br/>requires: title, description"]
+    goal["goal · level 4<br/>workflow: goal<br/>requires: title, description"]
+    requirement["requirement · level 3<br/>workflow: requirement<br/>requires: title, description"]
+    architecture["architecture · level 2<br/>workflow: architecture<br/>requires: title, description"]
+    feature["feature · level 1<br/>workflow: delivery<br/>requires: title, description"]
     risk["risk · level 1<br/>workflow: risk<br/>requires: title, description,<br/>likelihood, impact"]
     story["story · level 0<br/>workflow: delivery<br/>requires: title, description, estimate"]
     task["task · level 0<br/>workflow: delivery<br/>requires: title, description, estimate"]
     bug["bug · level 0<br/>workflow: delivery<br/>requires: title, description, estimate"]
     subtask["subtask · level -1<br/>workflow: delivery<br/>requires: title, description"]
 
-    goal --> epic
+    goal --> requirement
+    goal --> architecture
+    goal --> feature
     goal --> risk
-    epic --> risk
-    epic --> story
-    epic --> task
-    epic --> bug
+    requirement --> architecture
+    requirement --> feature
+    requirement --> story
+    requirement --> risk
+    architecture --> feature
+    architecture --> risk
+    feature --> story
+    feature --> task
+    feature --> bug
+    feature --> risk
+    story --> task
+    story --> bug
     story --> subtask
     task --> subtask
     bug --> subtask
@@ -203,7 +215,7 @@ separate axis.
 <!-- DIAGRAM:BEGIN docs/diagrams/workflow-state-machines.md -->
 ```mermaid
 stateDiagram-v2
-    state "delivery — epic / story / task / bug / subtask" as delivery {
+    state "delivery — feature / story / task / bug / subtask" as delivery {
         [*] --> defined
         defined --> in_progress: in-progress
         in_progress --> in_review: in-review

@@ -335,7 +335,7 @@ choose which mode.
 
 ## Types, workflows, priorities, resolutions
 
-The type registry (goal/epic/risk/story/task/bug/subtask), their
+The type registry (goal/requirement/architecture/feature/risk/story/task/bug/subtask), their
 workflows, and how to customise them live in [`schema.md`](schema.md) —
 not repeated here. Two enums you pass as literal command arguments above:
 

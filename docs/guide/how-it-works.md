@@ -32,7 +32,8 @@ full as-built picture.
 
 ## Types and workflows, at a glance
 
-Work items come in a handful of types — `goal`, `epic`, `story`, `task`,
+Work items come in a handful of types — `goal`, `requirement`, `architecture`,
+`feature`, `story`, `task`,
 `bug`, `subtask`, `risk` — each with a legal parent type and a set of required
 fields. Every type runs through one of three workflows (`delivery`, `goal`,
 `risk`); a workflow's columns are exactly its status directories, and a ticket
