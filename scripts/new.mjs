@@ -12,7 +12,7 @@ import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
-import { loadProject } from "./config.mjs";
+import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
 import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
 
@@ -69,7 +69,14 @@ export function applyNew(projectsDir, opts = {}) {
   const all = new Map();
   for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   // Validate against the TARGET PROJECT's registry, not the ambient one (BLZ-238).
-  const { types } = loadProjectSchema(projectsDir, project);
+  // BLZ-246: the registry is `default → top-level → project`, so the data root's config has
+  // to be passed in. Without it `loadProjectSchema` defaults `config` to null, the top-level
+  // `schema.types` block is skipped, and a board's declared override is honoured on the READ
+  // path (schema.mjs resolves TYPES via ambientSchemaOverride) but silently ignored here —
+  // which made `blaze new --parent <epic> --type task` fail on a board that declares that
+  // edge. loadProject below already loads the same config, so this adds no new failure mode.
+  const config = loadConfig({ root: dataRoot });
+  const { types } = loadProjectSchema(projectsDir, project, { config });
   const errors = validateTicket({ frontmatter, body }, (pid) => all.get(pid) || null, { types });
   // allowMissing: creating a project's FIRST ticket is how a project comes into
   // existence, so its directory legitimately may not exist yet (BLZ-140).

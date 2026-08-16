@@ -219,8 +219,14 @@ each one has actually broken a board running this mechanism.
 validates against the **edited ticket's** project. A retype's child sweep judges each child by
 **its own** project's registry, since a child may live elsewhere.
 
-Call `loadProjectSchema(projectsDir, key)` from `scripts/model/schema-config.mjs` to resolve one
-project's registry, or `resolveSchema({ config, project })` if you already hold both objects.
+Call `loadProjectSchema(projectsDir, key, { config })` from `scripts/model/schema-config.mjs` to
+resolve one project's registry, or `resolveSchema({ config, project })` if you already hold both
+objects. **`config` is not optional in practice**: it carries the top-level layer, and omitting it
+resolves `default → per-project` only — the board's `blaze.config.json` override is skipped without
+a word. Load it the way every other call site does, `loadConfig({ root: dirname(projectsDir) })`.
+BLZ-246 is what that footgun cost: `blaze new` and `blaze edit` both omitted it, so a board that
+declared `task.parentTypes: ["epic", …]` still had its creates refused with `invalid parent: task
+cannot be a child of epic`, while the read path honoured the very same block.
 
 **A project with no `schema` block resolves to the ambient registry, not to nothing** — so
 per-project customisation is opt-in rather than a cliff, and adding a block to one project cannot
