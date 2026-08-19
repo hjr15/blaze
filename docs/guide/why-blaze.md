@@ -60,7 +60,8 @@ lock-in — if you ever walk away, what you keep is a git repo full of markdown.
   repo.
 - **Zero lock-in.** The engine is a separate npm package
   (`@hjr15/blaze-board`); your data is your own git repo. Delete the engine and
-  your board is still a complete, portable set of files.
+  your board is still a complete, portable set of files. (This is the property
+  v3 trades away — see [Where Blaze is going](#where-blaze-is-going) below.)
 - **The board can't lie.** Because status is the directory and the board is a
   render over the files, there is no cache or field that can silently disagree
   with reality.
@@ -87,13 +88,76 @@ Look elsewhere when:
   — they triage, label, dedupe, and reconcile status from your code repo's
   branch/PR state. They never cut branches or edit code in the mirrored repo.
   That boundary is deliberate.
-- you need integrations Blaze deliberately omits — a hosted API, an MCP server,
-  a second git provider (GitHub via `gh` is the one implemented), or a database
-  backend. These are non-goals by design, not gaps waiting to be filled.
+- you need a second git provider — GitHub via `gh` is the one implemented, and
+  that remains a non-goal.
+
+**A hosted API, an MCP server and a database backend used to be on that list.**
+They were described here as "non-goals by design, not gaps waiting to be filled".
+That position has been deliberately reversed — see below.
 
 Blaze is intentionally small. Its bet is that for an agent-driven workflow, plain
 files and git beat a database and an API — and that keeping the surface tiny is
 what makes it safe for an agent to drive.
+
+That bet held for one writer. It did not survive many.
+
+## Where Blaze is going
+
+Everything above describes `@hjr15/blaze-board`, the file-based line, and stays
+true of it. **`@hjr15/blaze-board` is frozen at 0.6.0.**
+
+Blaze v3 is a different product with the same purpose: the database becomes the
+sole source of truth, behind an API, and it ships under a new name,
+**`@hjr15/blaze`**. It is a rename rather than a major version bump precisely
+because a major bump would silently convert an existing zero-dependency file
+writer into a client that needs a server. The reasoning is recorded in
+[ADR-0008](../decisions/0008-v3-ships-as-hjr15-blaze.md).
+
+### Why the reversal
+
+The ceiling was concurrency, and it was structural rather than a matter of
+polish. Multiple agent sessions across multiple machines could not write to one
+board without branch-and-worktree ceremony, merge conflicts, a daily
+squash-flush job acting as sole committer, and a
+[three-layer id allocator](../decisions/0005-three-layer-id-allocator.md) built
+solely to stop two machines minting the same id.
+
+Two failures make it concrete, and neither is hypothetical:
+
+- A ticket was observed **in two status directories at once**. Status *is* the
+  directory, so it had two statuses — and because the two paths differ, git had
+  nothing to conflict on and merged them cleanly.
+- Two *different* tickets held **the same id** in two divergent trees. The
+  allocator cannot see across an unmerged branch, so it never fired.
+
+Both are one problem: the filesystem cannot express an invariant that spans two
+trees. A database expresses each in a line of DDL. The full argument is
+[ADR-0006](../decisions/0006-database-is-the-sole-source-of-truth.md).
+
+### What v3 gives up
+
+Stated plainly, because these were real strengths and not marketing:
+
+- **Zero runtime dependencies, on the Postgres path.** Node has no built-in
+  Postgres client. The `npx` + SQLite path stays genuinely install-free; the
+  cluster path does not.
+- **`git log --follow` as the audit trail.** It is replaced by a ticket-events
+  log and event-sourced revert — built before files freeze, not after.
+- **"Delete the engine and your board is still a complete set of files."** After
+  v3, that is no longer true, and this page will not go on implying it.
+
+A git markdown mirror was considered as a way to keep that last property, and
+**declined**: it reintroduces exactly the two-writers problem v3 exists to
+remove.
+
+### What stays true
+
+- `npx @hjr15/blaze serve` still works on a clean machine — no Docker, no
+  Postgres, no config.
+- The board is still a rendering, never a second source of truth.
+- These ADRs stay in this repo and stay readable without the board.
+- `@hjr15/blaze-board@0.6.0` keeps working exactly as this page describes, for as
+  long as you keep using it.
 
 ---
 

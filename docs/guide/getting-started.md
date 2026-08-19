@@ -6,7 +6,7 @@ run them in order and you'll have a working board in a couple of minutes.
 
 ## Prerequisites
 
-- Node 20+
+- Node 24+
 - `git` on `PATH`
 
 ## Install

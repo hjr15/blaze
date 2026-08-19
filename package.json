@@ -38,7 +38,7 @@
     "test:coverage": "c8 node --test --test-concurrency=1"
   },
   "engines": {
-    "node": ">=20"
+    "node": ">=24"
   },
   "repository": {
     "type": "git",
