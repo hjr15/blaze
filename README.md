@@ -38,7 +38,7 @@ npm i -g @hjr15/blaze-board
 npx @hjr15/blaze-board <command>
 ```
 
-Requires Node 20+ and `git` on `PATH`.
+Requires Node 24+ and `git` on `PATH`.
 
 ## The engine ⟂ data split
 

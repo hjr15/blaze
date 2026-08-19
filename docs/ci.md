@@ -8,7 +8,7 @@ One workflow, [`tests`](../.github/workflows/test.yml), runs on GitHub-hosted
 | `pull_request` | Run the suite under c8 + enforce the coverage floor. The merge gate. |
 | `push` to `main` | Same gate, run again after merge. |
 
-Steps: `actions/checkout@v4` → `actions/setup-node@v4` (Node 20) → `npm ci` →
+Steps: `actions/checkout@v4` → `actions/setup-node@v4` (Node 24) → `npm ci` →
 `npm run test:coverage`. This package ships as an npm package (`@hjr15/blaze-board`)
 — there is no deploy/build-image workflow to gate here.
 

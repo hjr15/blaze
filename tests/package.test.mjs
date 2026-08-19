@@ -15,7 +15,7 @@ test("package identity", () => {
   assert.ok(pkg.files.includes("scripts/"), "files whitelist must ship scripts/");
   assert.ok(pkg.files.includes("AGENTS.md"), "files whitelist must ship AGENTS.md (agent-facing contract)");
   assert.ok(!pkg.files.includes("CONVENTIONS.md"), "CONVENTIONS.md is stale/removed and must not ship");
-  assert.equal(pkg.engines?.node, ">=20", "engine floor matches the tested Node line");
+  assert.equal(pkg.engines?.node, ">=24", "engine floor matches the tested Node line — node:sqlite needs 24 (BLZ-264)");
 });
 
 test("npm pack ships engine only — no tests, no data dirs, no dotfiles beyond defaults", () => {

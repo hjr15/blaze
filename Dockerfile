@@ -1,6 +1,6 @@
 # blaze board — zero-dependency Node app. Data (projects/ + .git) is bind-mounted
 # at runtime, NOT baked. git is required: commit-on-edit shells out to it.
-FROM node:22-alpine@sha256:16e22a550f3863206a3f701448c45f7912c6896a62de43add43bb9c86130c3e2
+FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 RUN apk add --no-cache git
 WORKDIR /app
 COPY package.json ./
