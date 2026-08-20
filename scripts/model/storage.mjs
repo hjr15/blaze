@@ -14,8 +14,21 @@
 //      thing it abstracts has exactly one.
 //
 //   2. The driver contract — write/read/exists/move. Deliberately tiny: these are
-//      the only operations the verbs actually perform. A SQLite driver satisfying
-//      this shape is a drop-in, which is the whole point.
+//      the only operations the verbs actually perform against the file store.
+//
+//      This is a TRANSITIONAL funnel, not the v3 storage port, and the difference
+//      matters. An earlier version of this comment claimed "a SQLite driver
+//      satisfying this shape is a drop-in, which is the whole point". That is
+//      false, and a review panel caught it: the v3 port (service-architecture
+//      §B.4) is `tx`/`create`/`getForUpdate`/`allocateSeq`/`ancestors`/`update`
+//      — path-keyed blob I/O and a transactional ticket repository share ZERO
+//      methods and zero arguments. Nothing here is reused by the database driver.
+//
+//      What this seam actually buys is narrower and still worth having: one
+//      authority for where a ticket lives, no `node:fs` call inside a verb, and
+//      an injectable driver so a verb's writes can be observed in a test without
+//      touching disk. It is expected to be DELETED at Phase 2 cutover (BLZ-254)
+//      rather than reimplemented over SQL.
 //
 // Drivers are passed in, never set globally. ~56 of the engine's test files build a
 // real temp dir and a real git repo, so a module-level singleton would make them
