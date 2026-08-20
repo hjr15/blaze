@@ -49,6 +49,7 @@ CREATE TABLE IF NOT EXISTS ticket (
   updated_on TEXT NOT NULL,
   version    INTEGER NOT NULL DEFAULT 1 CHECK (version > 0),
   deleted_at TEXT,
+  ac_heading TEXT,   -- verbatim, so the section round-trips and the spelling survives
 
   -- EVERY table-level constraint sits after EVERY column. SQLite requires this;
   -- Postgres does not care. The v3 design's section 4.3 interleaves them, so that
@@ -136,6 +137,43 @@ CREATE TRIGGER IF NOT EXISTS ticket_event_no_delete
 BEGIN
   SELECT RAISE(ABORT, 'ticket_event is append-only: DELETE is refused');
 END;
+
+-- Acceptance criteria as ORDERED BLOCKS (design D6), not checkbox-only. 518 of 1972
+-- AC sections hold prose, plain bullets or wrapped continuations; refusing them would
+-- reject a quarter of the corpus. 'kind' is the discriminator and a note can never be
+-- checked. See model/ac-blocks.mjs for the parser and the two measured findings that
+-- shape it.
+CREATE TABLE IF NOT EXISTS acceptance_criterion (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id TEXT NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
+  ord       INTEGER NOT NULL CHECK (ord >= 0),
+  kind      TEXT NOT NULL,
+  text      TEXT NOT NULL,
+  checked   INTEGER NOT NULL DEFAULT 0 CHECK (checked IN (0,1)),
+
+  CONSTRAINT ac_kind_known CHECK (kind IN ('criterion','note')),
+  CONSTRAINT ac_ord_unique UNIQUE (ticket_id, ord),
+  -- a note is not checkable; the design makes this a constraint rather than a
+  -- convention because the toggle path is where the old ordinal bug lived
+  CONSTRAINT ac_note_not_checked CHECK (kind = 'criterion' OR checked = 0)
+);
+CREATE INDEX IF NOT EXISTS ac_ticket_idx ON acceptance_criterion (ticket_id, ord);
+
+-- Worklog entries. Kept as rows rather than a JSON blob on the ticket (design D4:
+-- no JSONB, multi-valued fields are join tables) so time roll-up is a SUM.
+CREATE TABLE IF NOT EXISTS worklog_entry (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,
+  ticket_id TEXT NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
+  on_date   TEXT NOT NULL,
+  minutes   INTEGER NOT NULL CHECK (minutes > 0),
+  note      TEXT
+);
+CREATE INDEX IF NOT EXISTS worklog_ticket_idx ON worklog_entry (ticket_id);
+
+-- The heading is preserved verbatim so the section round-trips byte-exactly. 245
+-- tickets use a heading a case-sensitive matcher never finds, so this column also
+-- records WHICH spelling a ticket used rather than normalising it away.
+-- (SQLite has no ADD COLUMN IF NOT EXISTS; the column is declared on ticket.)
 
 -- What metrics.mjs consumes today, unchanged in shape: { id, from, to, ts }.
 CREATE VIEW IF NOT EXISTS ticket_transition AS
