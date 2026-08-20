@@ -1,14 +1,14 @@
 // scripts/new.mjs — `blaze new`: allocate the next per-project id, build a
 // schema-correct ticket, validate it, and write it into the type's initial
 // status dir. Pure-fs (no git); the CLI wrapper adds the commit.
-import { writeFileSync, mkdirSync, existsSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { dirname } from "node:path";
 import { allocateId } from "./model/ids.mjs";
 import { walkTickets } from "./model/index.mjs";
 import { writeClaim, remoteMaxClaim } from "./model/claims.mjs";
 import { isType } from "./model/schema.mjs";
 import { initialStatus } from "./model/workflows.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
+import { fsStorage, ticketPath, slugify } from "./model/storage.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
@@ -16,12 +16,9 @@ import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
 import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
 
-function slugify(s) {
-  return String(s).toLowerCase().replace(/[^a-z0-9]+/g, "-").replace(/^-+|-+$/g, "");
-}
-
 export function applyNew(projectsDir, opts = {}) {
-  const { project, type, title, priority = "medium", labels = [], today = null, extra = {} } = opts;
+  const { project, type, title, priority = "medium", labels = [], today = null, extra = {},
+          storage = fsStorage } = opts;
   const pre = [];
   if (!project) pre.push("missing project (use --project <KEY>)");
   if (!isType(type)) pre.push(`unknown or missing type: ${type}`);
@@ -101,11 +98,9 @@ export function applyNew(projectsDir, opts = {}) {
   const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax: remoteMax ?? 0 });
   frontmatter.id = id;
 
-  const dir = join(projectsDir, project, status);
-  mkdirSync(dir, { recursive: true });
-  const file = join(dir, `${id}-${slugify(title)}.md`);
-  if (existsSync(file)) return { ok: false, errors: [`refusing to overwrite ${file}`] };
-  writeFileSync(file, serializeTicket({ frontmatter, body }));
+  const { file } = ticketPath.parts(projectsDir, project, status, id, title);
+  if (storage.exists(file)) return { ok: false, errors: [`refusing to overwrite ${file}`] };
+  storage.write(file, serializeTicket({ frontmatter, body }));
   // The claim has to land WITH the ticket — new-runner stages both. A ticket
   // that reaches upstream without its claim merges as silently as it did before
   // this existed. remoteMax === 0 means the remote could not be read, so the

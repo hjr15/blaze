@@ -1,7 +1,7 @@
 // scripts/edit.mjs — validated in-place field edits and AC-checkbox toggling.
 // fs-only (no git); the board/CLI wrappers commit. All business rules come from
 // model/ — this file only marshals a patch through validateTicket before writing.
-import { writeFileSync } from "node:fs";
+import { fsStorage } from "./model/storage.mjs";
 import { basename, dirname } from "node:path";
 import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
@@ -20,7 +20,7 @@ function asArray(v) {
 }
 
 export function applyEdit(projectsDir, id, patch, opts = {}) {
-  const { today = null } = opts;
+  const { today = null, storage = fsStorage } = opts;
   const bad = Object.keys(patch).filter((k) => !EDITABLE_FIELDS.has(k));
   if (bad.length) return { ok: false, errors: [`field(s) not editable: ${bad.join(", ")}`] };
 
@@ -70,14 +70,14 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   if (errors.length) return { ok: false, errors };
 
   if (today) fm.updated = today;
-  writeFileSync(found.file, serializeTicket({ frontmatter: fm, body: found.body }));
+  storage.write(found.file, serializeTicket({ frontmatter: fm, body: found.body }));
   return { ok: true, id, file: found.file };
 }
 
 // Flip one checkbox under the `## Acceptance Criteria` heading, by ordinal.
 // Only lines within that section count; a `- [ ]` elsewhere in the body is ignored.
 export function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
-  const { today = null } = opts;
+  const { today = null, storage = fsStorage } = opts;
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
@@ -100,6 +100,6 @@ export function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
 
   const fm = { ...found.frontmatter };
   if (today) fm.updated = today;
-  writeFileSync(found.file, serializeTicket({ frontmatter: fm, body: lines.join("\n") }));
+  storage.write(found.file, serializeTicket({ frontmatter: fm, body: lines.join("\n") }));
   return { ok: true, id, file: found.file };
 }
