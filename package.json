@@ -49,9 +49,15 @@
   },
   "license": "MIT",
   "devDependencies": {
-    "c8": "11.0.0"
-  },
-  "optionalDependencies": {
+    "c8": "11.0.0",
     "pg": "^8.16.0"
+  },
+  "peerDependencies": {
+    "pg": "^8.16.0"
+  },
+  "peerDependenciesMeta": {
+    "pg": {
+      "optional": true
+    }
   }
 }

@@ -38,8 +38,27 @@ const COLS = `id, project_key, num, type, status, title, priority, resolution,
               start_date, due_date, body, created_on, updated_on, version`;
 const ALIVE = "deleted_at IS NULL";
 
+// `pg` is an OPTIONAL peer dependency: it is deliberately not installed for the
+// majority of users, who run Blaze on files or SQLite and would otherwise carry a
+// database client they never load. That makes "pg is absent" an ordinary, expected
+// state rather than a broken install — so it has to read as a setup instruction, not
+// as an ERR_MODULE_NOT_FOUND stack trace from inside a dynamic import.
+async function loadPg() {
+  try {
+    return (await import("pg")).default;
+  } catch (cause) {
+    if (cause?.code !== "ERR_MODULE_NOT_FOUND") throw cause;
+    throw new Error(
+      "The Postgres driver needs the 'pg' package, which Blaze does not install by "
+      + "default. Install it alongside Blaze to use a Postgres board:\n\n"
+      + "    npm install pg\n\n"
+      + "No other driver requires it — the filesystem and SQLite drivers work without.",
+      { cause });
+  }
+}
+
 export async function openPostgresRead(connection) {
-  const pg = (await import("pg")).default;   // optionalDependency, C2
+  const pg = await loadPg();
   const client = new pg.Client(connection);
   await client.connect();
   await client.query(PG_DDL);

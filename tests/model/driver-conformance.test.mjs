@@ -9,9 +9,12 @@
 // That is what makes ADR-0010's split workable: the transitional fs seam stays sync,
 // the v3 port is async, and one suite still holds both to the same semantics.
 //
-// Postgres is skipped rather than failed when unreachable — CI has no server, and a
-// suite that goes red on infrastructure absence teaches people to ignore it. When it
-// IS reachable the assertions are identical, not merely similar.
+// Postgres is skipped rather than failed when unreachable LOCALLY — a suite that goes
+// red because a developer has no server teaches people to ignore it. In CI it is the
+// opposite: the workflow provisions a real Postgres service, so an absent
+// BLAZE_TEST_PG_URL there means the fourth driver silently stopped being tested. That
+// case is a hard failure, not a skip — see the CI guard at the bottom of this file.
+// When Postgres IS reachable the assertions are identical, not merely similar.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
@@ -148,6 +151,16 @@ describe("driver conformance — one suite, every driver", async () => {
 
   if (PG) {
     await conformance(seedPg, "postgres");
+  } else if (process.env.CI) {
+    // Deleting the service container or its env var would otherwise drop CI to three
+    // drivers and stay green — the suite would still SAY "one suite, every driver"
+    // while quietly proving it for three. Make that loud.
+    test("postgres: BLAZE_TEST_PG_URL must be set in CI", () => {
+      assert.fail(
+        "BLAZE_TEST_PG_URL is unset under CI. The tests workflow provisions a Postgres "
+        + "service so this suite covers all four drivers; if that service or its env var "
+        + "was removed, restore it rather than letting the Postgres driver go untested.");
+    });
   } else {
     test("postgres: SKIPPED — set BLAZE_TEST_PG_URL to run it", { skip: true }, () => {});
   }
