@@ -329,7 +329,8 @@ export async function seedConfigInTransaction(run, name, seed = configSeed()) {
     for (const { sql, params } of configSeedSql(name, seed)) await run(sql, params);
     return await run("COMMIT", []);
   } catch (e) {
-    await run("ROLLBACK", []).catch(() => {});
+    // Sync drivers return undefined; `.catch()` on that throws and masks the real error.
+    try { await run("ROLLBACK", []); } catch { /* the original error is what matters */ }
     throw e;
   }
 }
