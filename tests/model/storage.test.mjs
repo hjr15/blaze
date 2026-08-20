@@ -178,3 +178,45 @@ test("applyLog with an injected driver leaves the on-disk ticket unchanged", () 
   assert.equal(readFileSync(created.file, "utf8"), before, "on-disk ticket must be byte-identical");
   assert.match(s.read(created.file), /minutes: 45/, "the worklog landed in the injected driver");
 });
+
+// --- ticketPath.relocate: the fs assumption, made loud ---------------------------
+// move.mjs and reconcile.mjs used to compute a destination as
+// join(dirname(dirname(file)), toStatus) + basename(file). Handed anything that is
+// not a path under projectsDir — which is exactly what a database driver yields —
+// that produces "done/BLZ-9" and the caller reports ok:true. A ticket silently
+// relocated to a bogus path is the BLZ-122 class, reintroduced by the seam itself.
+//
+// relocate() is the single authority for "where does this ticket go when its status
+// changes". It REFUSES an unrecognised handle rather than guessing, so the day a
+// non-fs driver appears the failure is loud.
+test("relocate keeps the existing filename and only changes the status directory", () => {
+  const { dir, file } = ticketPath.relocate("/data/projects", "BLZ", "done",
+    "/data/projects/BLZ/defined/BLZ-9-original-slug.md");
+  assert.equal(dir, join("/data/projects", "BLZ", "done"));
+  assert.equal(file, join("/data/projects", "BLZ", "done", "BLZ-9-original-slug.md"));
+});
+
+test("relocate does NOT recompute the slug — 60 live tickets have a filename that no longer matches their title", () => {
+  // `blaze edit` never renames on a title change, so filename slugs legitimately
+  // drift. Recomputing would rename those files on their next move.
+  const { file } = ticketPath.relocate("/p", "BLZ", "done", "/p/BLZ/defined/BLZ-1-stale-slug.md");
+  assert.match(file, /BLZ-1-stale-slug\.md$/);
+});
+
+test("relocate REFUSES an opaque handle instead of producing a bogus path", () => {
+  for (const handle of ["BLZ-9", "", "not/a/real/ticket/path.md"]) {
+    assert.throws(
+      () => ticketPath.relocate("/data/projects", "BLZ", "done", handle),
+      /not a ticket path under/,
+      `relocate must refuse ${JSON.stringify(handle)} rather than guess`,
+    );
+  }
+});
+
+test("relocate refuses a path whose project directory disagrees with the ticket's project", () => {
+  assert.throws(
+    () => ticketPath.relocate("/data/projects", "OBA", "done", "/data/projects/BLZ/defined/BLZ-9-x.md"),
+    /disagrees/,
+    "a mismatch means the caller derived one of them wrongly — refuse, do not pick",
+  );
+});

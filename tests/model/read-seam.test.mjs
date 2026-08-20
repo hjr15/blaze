@@ -12,7 +12,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
 
@@ -35,7 +35,7 @@ function seedFs() {
 function seedMem() {
   const rec = (id, status, parent) => ({
     frontmatter: { id, title: `${id} title`, type: "task", project: "BLZ", parent },
-    body: `body of ${id}`, status, file: id,
+    body: `body of ${id}`, project: "BLZ", status, file: id,
   });
   return memReadStorage([
     rec("BLZ-1", "defined", ""),
@@ -56,6 +56,16 @@ for (const [name, make] of DRIVERS) {
     assert.equal(r.found?.frontmatter.id, "BLZ-2");
     assert.equal(r.found.status, "defined");
     assert.equal(r.duplicates, undefined);
+  });
+
+  test(`${name}: records carry project and status FIRST-CLASS, not recoverable from file`, () => {
+    // BLZ-271: move/reconcile used to recover both by path arithmetic on `file`,
+    // which silently produced a bogus destination for any non-path handle. Both
+    // drivers must supply them directly or the contract diverges.
+    const { s, root } = make();
+    const r = s.getTicket(root, "BLZ-3").found;
+    assert.equal(r.project, "BLZ", "project must be on the record itself");
+    assert.equal(r.status, "done", "status must be on the record itself");
   });
 
   test(`${name}: getTicket finds a ticket in any status directory`, () => {
@@ -164,3 +174,37 @@ for (const [verb, run] of [
     assert.match(msg, /BLZ-1-a\.md/, "the refusal names the conflicting paths");
   });
 }
+
+// --- BLZ-271: an opaque handle must fail loudly, not relocate silently ----------
+import { ticketPath } from "../../scripts/model/storage.mjs";
+
+test("BLZ-271: a non-fs handle now throws instead of producing a bogus destination", () => {
+  // Before this fix, move.mjs computed join(dirname(dirname("BLZ-9")), "done") +
+  // basename("BLZ-9") = "done/BLZ-9", wrote there, and returned ok:true.
+  assert.throws(() => ticketPath.relocate("/p", "BLZ", "done", "BLZ-9"),
+    /not a ticket path under/);
+  // and the old arithmetic, shown for contrast, produced exactly that bogus path:
+  const bogus = join(dirname(dirname("BLZ-9")), "done", "BLZ-9");
+  assert.equal(bogus, join("done", "BLZ-9"), "the silent-corruption path this replaces");
+});
+
+test("BLZ-271: a real move still lands in the right directory with its filename intact", () => {
+  const { projectsDir } = (() => {
+    const root = mkdtempSync(join(tmpdir(), "blaze-reloc-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ projects: [{ key: "BLZ", name: "Blaze" }] }));
+    const projects = join(root, "projects");
+    mkdirSync(join(projects, "BLZ", "defined"), { recursive: true });
+    // a filename whose slug deliberately does NOT match the title, as 60 live ones do
+    writeFileSync(join(projects, "BLZ", "defined", "BLZ-1-stale-slug.md"),
+      `---\nid: BLZ-1\ntitle: A Completely Different Title Now\ntype: task\nproject: BLZ\n` +
+      `parent: \nassignee: unassigned\nestimate: 30\nworklog: []\nlinks: []\n` +
+      `created: 2026-08-20\nupdated: 2026-08-20\n---\n\nbody\n`);
+    return { projectsDir: projects };
+  })();
+  const r = applyMove(projectsDir, "BLZ-1", "in-progress", { today: "2026-08-20" });
+  assert.equal(r.ok, true, r.errors?.join("; "));
+  assert.match(r.file, /BLZ[/\\]in-progress[/\\]BLZ-1-stale-slug\.md$/,
+    "the stale filename is preserved — recomputing it would rename 60 live tickets");
+});

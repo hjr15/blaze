@@ -21,7 +21,15 @@ function isDir(p) { try { return statSync(p).isDirectory(); } catch { return fal
 // immutable. Entries for deleted/moved paths are pruned lazily.
 const parseCache = new Map();
 
-// Yields every ticket under projectsDir/<KEY>/<status>/<id>.md
+// Yields every ticket under projectsDir/<KEY>/<status>/<id>.md.
+//
+// `project` and `status` are yielded FIRST-CLASS rather than left for the caller to
+// recover from `file`. For the filesystem store the directory IS the location, so
+// the walk already holds both; a database driver supplies them from columns. This is
+// what stops move/reconcile doing dirname(dirname(file)) arithmetic that silently
+// produced a bogus destination for any non-path handle (BLZ-271). Note frontmatter
+// .project is NOT a substitute: it is absent on some boards, while the directory is
+// always present.
 export function* walkTickets(projectsDir) {
   const seen = new Set();
   for (const project of safeReaddir(projectsDir)) {
@@ -41,12 +49,12 @@ export function* walkTickets(projectsDir) {
         seen.add(file);
         const hit = parseCache.get(file);
         if (hit && hit.mtimeMs === s.mtimeMs && hit.size === s.size) {
-          yield { frontmatter: hit.frontmatter, body: hit.body, status, file };
+          yield { frontmatter: hit.frontmatter, body: hit.body, project, status, file };
           continue;
         }
         const { frontmatter, body } = parseTicket(readFileSync(file, "utf8"));
         parseCache.set(file, { mtimeMs: s.mtimeMs, size: s.size, frontmatter, body });
-        yield { frontmatter, body, status, file };
+        yield { frontmatter, body, project, status, file };
       }
     }
   }

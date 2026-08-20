@@ -2,10 +2,10 @@
 // resolution on terminal entry, rewrite frontmatter, and relocate the ticket file
 // between status directories. applyMove() is pure-ish (fs only, no git) for tests;
 // the CLI wrapper adds git add/commit.
-import { join, dirname, basename } from "node:path";
+import { dirname } from "node:path";
 import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
-import { fsStorage } from "./model/storage.mjs";
+import { fsStorage, ticketPath } from "./model/storage.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
 import { isTerminal } from "./model/workflows.mjs";
@@ -50,11 +50,12 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
   if (today) fm.updated = today;
   const text = serializeTicket({ frontmatter: fm, body: plan.body });
 
-  // project key = the directory two levels up from the file (projects/<KEY>/<status>/file)
-  const statusDir = dirname(found.file);
-  const projectDir = dirname(statusDir);
-  const destDir = join(projectDir, toStatus);
-  const destFile = join(destDir, basename(found.file));
+  // The destination comes from the ticket's OWN project plus the target status, via
+  // the path authority — never from arithmetic on found.file. Deriving the project
+  // as dirname(dirname(file)) silently produced "done/BLZ-9" for any non-path
+  // handle, and this function still returned ok:true. See ticketPath.relocate.
+  const { file: destFile } = ticketPath.relocate(
+    projectsDir, found.project, toStatus, found.file);
   storage.move(found.file, destFile, text);
 
   return { ok: true, id, from: found.status, to: toStatus, fromFile: found.file, file: destFile, resolution: plan.resolution, warnings };

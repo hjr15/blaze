@@ -17,11 +17,12 @@
 
 import { execFileSync } from "node:child_process";
 import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
-import { join, dirname, basename } from "node:path";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
 import { walkTickets } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
+import { ticketPath } from "./model/storage.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 
@@ -285,10 +286,11 @@ export function reconcile({
       writeFileSync(t.file, serializeTicket({ frontmatter: fm, body: t.body }));
       touched.push(t.file);
       if (d.moved) {
-        const projectDir = dirname(dirname(t.file));
-        const destDir = join(projectDir, d.target);
+        // Same rule as move.mjs: the destination comes from the ticket's own
+        // project via the path authority, not from arithmetic on t.file.
+        const { dir: destDir, file: dest } = ticketPath.relocate(
+          projectsDir, t.project, d.target, t.file);
         mkdirSync(destDir, { recursive: true });
-        const dest = join(destDir, basename(t.file));
         if (dest !== t.file) {
           renameSync(t.file, dest);
           touched.push(dest);
