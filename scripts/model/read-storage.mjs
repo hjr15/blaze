@@ -15,11 +15,14 @@
 //   getTicket(root, id)          resolve one id, or refuse   — 7 call sites, 6 verbs
 //   listChildren(root, parentId) the board drill
 //   blockersOf(root, id)         inbound Blocks links — move's advisory check
+//   changeToken(root, {project})  opaque "has anything changed?", for the poll
 //   listTickets(root)            everything, for the index and audit
 //
 // `listTickets` survives deliberately: `buildIndex` and `auditCorpus` genuinely do
 // need every ticket, and pretending otherwise would push a fake filter into them.
 // What ADR-0009 rejects is `listTickets` being the ONLY affordance.
+import { readdirSync, statSync } from "node:fs";
+import { join } from "node:path";
 import { walkTickets } from "./index.mjs";
 
 /**
@@ -81,6 +84,44 @@ export const fsReadStorage = {
     return out;
   },
 
+
+/**
+ * An opaque "has anything changed?" token, for the board's auto-reload poll.
+ *
+ * This is the fourth read entry point, and the only one that never went through
+ * walkTickets: `contentHash` hashed path:size:mtimeMs over every directory, at a
+ * measured 35.4 ms per poll per open tab, every 3 seconds. A database has no mtime.
+ *
+ * It is also the one place the read-seam panel's REJECTED "opaque staleness token"
+ * idea is right. The poll does not want the tickets — it wants to know whether to ask
+ * for them. A SQLite driver answers with `PRAGMA data_version` (measured 0.009 ms);
+ * Postgres with a per-table change counter.
+ *
+ * KNOWN BLIND SPOT, preserved deliberately: an edit that keeps both the file size and
+ * the mtime is invisible to this token. That is the pre-existing behaviour of
+ * contentHash — changing the hash would change what the poll fires on, which is a
+ * different decision from moving it behind the seam. Pinned by a test so it is a
+ * recorded limitation rather than a latent surprise. A database driver has no such
+ * blind spot.
+ */
+  changeToken(root, { project = null } = {}) {
+    let h = 0;
+    const stack = [project ? join(root, project) : root];
+    while (stack.length) {
+      const dir = stack.pop();
+      let entries = [];
+      try { entries = readdirSync(dir); } catch { continue; }
+      for (const e of entries) {
+        const p = join(dir, e);
+        let st; try { st = statSync(p); } catch { continue; }
+        if (st.isDirectory()) { stack.push(p); continue; }
+        const sig = `${p}:${st.size}:${st.mtimeMs}`;
+        for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) | 0;
+      }
+    }
+    return String(h);
+  },
+
   listTickets(root) {
     return walkTickets(root);
   },
@@ -107,6 +148,11 @@ export function memReadStorage(records = []) {
     blockersOf(_root, id) {
       return rows.filter((r) => r.frontmatter?.id !== id &&
         (r.frontmatter?.links ?? []).some((l) => l.type === "Blocks" && l.target === id));
+    },
+    // Ids are unique and rows are immutable here, so the corpus itself is the token.
+    changeToken(_root, { project = null } = {}) {
+      const scoped = project ? rows.filter((r) => r.project === project) : rows;
+      return String(scoped.length) + ":" + scoped.map((r) => r.frontmatter?.id).sort().join(",");
     },
     listTickets(_root) {
       return rows[Symbol.iterator]();
