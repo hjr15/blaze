@@ -132,6 +132,17 @@ function duplicateIdErrors(rows) {
   return errors;
 }
 
+// BLZ-274 / ADR-0009: this is a PATH-DEPENDENT check and no longer runs inside
+// buildIndex. It reads the id-claims ledger off disk, so leaving it in the pure index
+// meant a filesystem-fed and a database-fed buildIndex would return different `errors`
+// arrays — the driver leaking through the function that claims to be storage-agnostic.
+// It is exported and called by reindex.mjs instead, following the precedent already
+// set at audit-runner.mjs:64-72: identity is a property of the WALK, and the pure
+// function is a function of frontmatter, which carries no path.
+//
+// It is also condemned code: Phase 2 (BLZ-254) deletes the allocator, and the READ
+// path depending on the claims ledger is exactly the hazard recorded there.
+//
 // BLZ-136 / ADR-0005. A ticket whose id has no claim reached the board without
 // its allocation record — committed by hand, or through a merge strategy that
 // auto-resolved the claim conflict away (`-X ours/theirs` merges a colliding
@@ -140,7 +151,7 @@ function duplicateIdErrors(rows) {
 //
 // Ids at or below the per-project cutover predate the ledger and are exempt —
 // that is what lets ADR-0005 promise no backfill.
-function missingClaimErrors(projectsDir, rows) {
+export function missingClaimErrors(projectsDir, rows) {
   const claimsByKey = new Map();
   const cutoverByKey = new Map();
   const errors = [];
@@ -189,7 +200,7 @@ function makeIndex(rows, links, warnings, errors = []) {
   };
 }
 
-export function buildIndex(projectsDir, { tickets } = {}) {
+export function buildIndex(projectsDir, { tickets, sprints } = {}) {
   const rows = [];
   const links = [];
   const collected = [];
@@ -213,9 +224,12 @@ export function buildIndex(projectsDir, { tickets } = {}) {
   // Skip entirely for a board that never opted in (no sprints.json AND no ticket
   // carries a `sprint`), so a plain board never sees a sprint warning.
   const taggedRows = rows.filter((r) => r.sprint != null && r.sprint !== "");
-  const { sprints } = loadSprints({ root: dirname(projectsDir) });
-  if (sprints.length > 0 || taggedRows.length > 0) {
-    const knownSprintIds = new Set(sprints.map((s) => s.id));
+  // ADR-0009: sprints arrive through the seam. They still default to the filesystem
+  // registry so every existing caller is unchanged, but a database-fed index passes
+  // its own — this was buildIndex's second node:fs escape hatch (BLZ-274).
+  const sprintList = sprints ?? loadSprints({ root: dirname(projectsDir) }).sprints;
+  if (sprintList.length > 0 || taggedRows.length > 0) {
+    const knownSprintIds = new Set(sprintList.map((s) => s.id));
     for (const r of taggedRows) {
       if (!knownSprintIds.has(r.sprint)) {
         warnings.push(`${r.id}: sprint '${r.sprint}' not in registry`);
@@ -224,6 +238,5 @@ export function buildIndex(projectsDir, { tickets } = {}) {
   }
   return makeIndex(rows, links, warnings, [
     ...duplicateIdErrors(rows),
-    ...missingClaimErrors(projectsDir, rows),
   ]);
 }
