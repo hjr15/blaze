@@ -16,13 +16,13 @@
 // Zero dependencies — Node built-ins + shelling to `git`/`gh`.
 
 import { execFileSync } from "node:child_process";
-import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
-import { ticketPath } from "./model/storage.mjs";
+import { ticketPath, fsStorage } from "./model/storage.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 
@@ -240,7 +240,7 @@ function gatherProject(project, { fetch }) {
 // --- the reconcile pass -------------------------------------------------------
 export function reconcile({
   fetch = false, commit = false, push = false, dryRun = true, root, projectsDir,
-  readStorage = fsReadStorage,
+  readStorage = fsReadStorage, storage = fsStorage,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
@@ -284,18 +284,25 @@ export function reconcile({
     changes.push({ id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved });
 
     if (!dryRun) {
-      writeFileSync(t.file, serializeTicket({ frontmatter: fm, body: t.body }));
-      touched.push(t.file);
+      // BLZ-276: the last direct node:fs ticket write in the engine, and the only one
+      // BLZ-267 deliberately left behind — it is interleaved inside this per-ticket
+      // loop rather than sitting at the tail of a pure function, so lifting it out
+      // would have changed the semantics. It stays in the loop and goes through the
+      // driver, which is what the write-seam map called for.
+      const text = serializeTicket({ frontmatter: fm, body: t.body });
       if (d.moved) {
-        // Same rule as move.mjs: the destination comes from the ticket's own
-        // project via the path authority, not from arithmetic on t.file.
-        const { dir: destDir, file: dest } = ticketPath.relocate(
-          projectsDir, t.project, d.target, t.file);
-        mkdirSync(destDir, { recursive: true });
-        if (dest !== t.file) {
-          renameSync(t.file, dest);
-          touched.push(dest);
-        }
+        // Same rule as move.mjs: the destination comes from the ticket's own project
+        // via the path authority, never from arithmetic on t.file.
+        const { file: dest } = ticketPath.relocate(projectsDir, t.project, d.target, t.file);
+        // One driver call, not write-then-rename: move() owns that ordering, and it
+        // writes the text at the DESTINATION so a crash cannot leave the old body at
+        // the new path.
+        storage.move(t.file, dest, text);
+        touched.push(t.file);
+        if (dest !== t.file) touched.push(dest);
+      } else {
+        storage.write(t.file, text);
+        touched.push(t.file);
       }
     }
   }

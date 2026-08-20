@@ -60,3 +60,27 @@ test("no module outside the seam stats or lists the projects tree directly", () 
   assert.deepEqual(offenders, [],
     "a bespoke directory walk outside the seam is how contentHash hid for four slices");
 });
+
+test("no module outside the write seam writes or renames a ticket file", () => {
+  // BLZ-267 wired six verbs and deliberately left reconcile, whose write is
+  // interleaved inside a per-ticket loop. BLZ-276 finished it. This is the guard that
+  // keeps the seventh writer from reappearing.
+  const ALLOWED = new Set([
+    "model/storage.mjs",                    // the write seam itself
+    "model/ids.mjs", "model/claims.mjs",    // the allocator, deleted at Phase 2
+    "model/transitions.mjs", "model/sprints.mjs",  // caches and registries
+    "reindex.mjs",                          // derived, gitignored caches
+    "pending-ledger.mjs", "commit-lock.mjs", "serve-commit.mjs",
+    "migrate/jira-import.mjs", "migrate-runner.mjs", "migrate/jira-client.mjs",
+    "loops/groomer.mjs", "config.mjs",
+  ]);
+  const offenders = [];
+  for (const file of mjsFiles(SCRIPTS)) {
+    const rel = relative(SCRIPTS, file).split("\\").join("/");
+    if (ALLOWED.has(rel) || rel.startsWith("ci/")) continue;
+    const src = readFileSync(file, "utf8").replace(/\/\/.*$/gm, "");
+    if (/\bwriteFileSync\s*\(|\brenameSync\s*\(/.test(src)) offenders.push(rel);
+  }
+  assert.deepEqual(offenders, [],
+    "ADR-0006: ticket writes go through the storage driver, not node:fs");
+});
