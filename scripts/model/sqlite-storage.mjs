@@ -60,6 +60,15 @@ export function openSqliteRead(path = ":memory:") {
        FROM ticket_link l JOIN ticket t ON t.id = l.src_id
       WHERE l.target_id = ? AND l.link_type = 'Blocks' AND t.id <> ? AND t.${ALIVE}
       ORDER BY t.id`);
+  const eventsFor = db.prepare(
+    `SELECT id, ticket_id, kind, at, actor, source, request_id,
+            from_status, to_status, field, old_value, new_value, detail
+       FROM ticket_event WHERE ticket_id = ? ORDER BY at, id`);
+  const appendEv = db.prepare(
+    `INSERT INTO ticket_event
+       (ticket_id, kind, at, actor, source, request_id, from_status, to_status,
+        field, old_value, new_value, detail)
+     VALUES (?,?,?,?,?,?,?,?,?,?,?,?)`);
   const dataVersion = db.prepare("PRAGMA data_version");
   const rowStamp = db.prepare(
     `SELECT COUNT(*) n, COALESCE(SUM(version),0) v, COALESCE(MAX(updated_on),'') u
@@ -96,6 +105,22 @@ export function openSqliteRead(path = ":memory:") {
     // cannot see this connection's own writes. Combining it with a cheap aggregate
     // over the rows covers both, and the aggregate is what makes the token
     // project-scopable — which the poll requires.
+    // The audit trail. Ordered by (at, id) rather than id alone: a migration can
+    // import events whose real timestamps predate rows already inserted, and the
+    // history a reader wants is chronological, not insertion order.
+    listEvents(_root, id) {
+      return eventsFor.all(id);
+    },
+
+    appendEvent(_root, e) {
+      appendEv.run(
+        e.ticket_id, e.kind, e.at ?? new Date().toISOString(),
+        e.actor ?? "unknown", e.source ?? "cli", e.request_id ?? null,
+        e.from_status ?? null, e.to_status ?? null,
+        e.field ?? null, e.old_value ?? null, e.new_value ?? null,
+        e.detail ?? null);
+    },
+
     changeToken(_root, { project = null } = {}) {
       const dv = dataVersion.get();
       const s = rowStamp.get(project, project);

@@ -76,6 +76,71 @@ CREATE TABLE IF NOT EXISTS ticket_link (
 -- blockersOf() is "inbound links by type", so the index is on the TARGET. The design
 -- calls this out: the reverse direction would otherwise seq-scan.
 CREATE INDEX IF NOT EXISTS link_target_idx ON ticket_link (target_id, link_type);
+
+-- The audit trail (design D7 / section 4.6). This is the designated replacement for
+-- \`git log --follow\`, and the brief is explicit that it has to exist BEFORE files
+-- freeze or it dies silently: once the filesystem stops being the store, any history
+-- not captured here is simply gone.
+--
+-- It is worth being honest about what it replaces. The existing trail is
+-- .blaze/transitions.json, rebuilt by \`blaze reindex\` from git rename history, and it
+-- covers 383 of 2,534 tickets — about 15%, because history is squash-merged. So this
+-- is not a like-for-like migration of a complete log; it replaces a mostly-empty one
+-- with a complete one going forward, and the coverage figure belongs on the metrics
+-- view rather than buried.
+--
+-- One table, not two. A separate transitions table would duplicate every status move;
+-- a partial index gives metrics the narrow path it needs while leaving one place to
+-- ask "what happened to this ticket".
+CREATE TABLE IF NOT EXISTS ticket_event (
+  id        INTEGER PRIMARY KEY AUTOINCREMENT,   -- V8: the SQLite identity clause
+  ticket_id TEXT NOT NULL REFERENCES ticket (id) ON DELETE RESTRICT,
+  kind      TEXT NOT NULL,
+  at        TEXT NOT NULL,                       -- ISO-8601 UTC; sorts chronologically
+  actor     TEXT NOT NULL DEFAULT 'unknown',
+  source    TEXT NOT NULL,
+  request_id  TEXT,
+  from_status TEXT,
+  to_status   TEXT,
+  field     TEXT,
+  old_value TEXT,
+  new_value TEXT,
+  detail    TEXT,
+
+  CONSTRAINT event_kind_known CHECK (kind IN (
+    'create','transition','edit','resolve','link-add','link-remove',
+    'worklog','ac-toggle','ac-edit','sprint-assign','delete','restore','import')),
+  CONSTRAINT event_source_known CHECK (source IN ('cli','api','loop','migration','git-backfill')),
+  -- a transition event without both statuses is not a transition
+  CONSTRAINT event_transition_shape CHECK (
+    (kind = 'transition') = (from_status IS NOT NULL AND to_status IS NOT NULL))
+);
+
+CREATE INDEX IF NOT EXISTS event_ticket_at_idx  ON ticket_event (ticket_id, at);
+CREATE INDEX IF NOT EXISTS event_at_idx         ON ticket_event (at);
+CREATE INDEX IF NOT EXISTS event_transition_idx ON ticket_event (at, ticket_id)
+  WHERE kind = 'transition';
+
+-- Append-only, enforced by the database rather than by convention. The design calls
+-- this the single most important property of the v3 trail: no write path can skip it.
+-- SQLite trigger bodies are SQL-only and use RAISE(ABORT, …) — the Postgres form is a
+-- PL/pgSQL function plus trigger, which is V13's genuine per-dialect cost.
+CREATE TRIGGER IF NOT EXISTS ticket_event_no_update
+  BEFORE UPDATE ON ticket_event
+BEGIN
+  SELECT RAISE(ABORT, 'ticket_event is append-only: UPDATE is refused');
+END;
+
+CREATE TRIGGER IF NOT EXISTS ticket_event_no_delete
+  BEFORE DELETE ON ticket_event
+BEGIN
+  SELECT RAISE(ABORT, 'ticket_event is append-only: DELETE is refused');
+END;
+
+-- What metrics.mjs consumes today, unchanged in shape: { id, from, to, ts }.
+CREATE VIEW IF NOT EXISTS ticket_transition AS
+  SELECT ticket_id AS id, from_status AS "from", to_status AS "to", at AS ts, actor, source
+    FROM ticket_event WHERE kind = 'transition';
 `;
 
 /** Applied per connection: SQLite does not enforce foreign keys without it (V3). */
