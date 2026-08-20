@@ -8,6 +8,7 @@ import { join, dirname } from "node:path";
 import { parseTicket } from "./ticket.mjs";
 import { lintLinks } from "./links.mjs";
 import { loadSprints } from "./sprints.mjs";
+import { fsReadStorage } from "./read-storage.mjs";
 import { claimedNumbers, readCutover, claimPath } from "./claims.mjs";
 
 function safeReaddir(p) { try { return readdirSync(p); } catch { return []; } }
@@ -84,15 +85,12 @@ export function* walkTickets(projectsDir) {
 // visible once every candidate is known, so an early return is precisely the bug.
 //
 // @returns { found } | { found: null } | { found: null, duplicates: [path, ...] }
-export function locateTicket(projectsDir, id) {
-  const matches = [];
-  for (const t of walkTickets(projectsDir)) {
-    if (t.frontmatter?.id === id) matches.push(t);
-  }
-  if (matches.length > 1) {
-    return { found: null, duplicates: matches.map((t) => t.file).sort() };
-  }
-  return { found: matches[0] ?? null };
+export function locateTicket(projectsDir, id, { storage = fsReadStorage } = {}) {
+  // ADR-0009: this is now a NAMED read the driver answers, not a walk the caller
+  // filters. On the filesystem the driver still walks — that is the fs
+  // implementation of the name, not the contract. On a database it is a primary-key
+  // lookup, which is the 578x this seam exists to make reachable.
+  return storage.getTicket(projectsDir, id);
 }
 
 /** The refusal message, shared so every verb names the paths the same way. */
