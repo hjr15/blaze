@@ -40,6 +40,10 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
     // substituted, and substituting is inventing. Counted so the tally never claims a
     // clean load when 40 titles were manufactured.
     titleFallbacks: 0,
+    // A field the source simply did not carry, given the schema's documented default.
+    // Applying a default is correct — the read path does it too — but it is still a
+    // value the source did not state, so it is counted rather than assumed away.
+    defaultsApplied: { priority: 0, assignee: 0 },
   };
 
   const rows = [...source.listTickets(projectsDir)];
@@ -72,12 +76,16 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
     const ac = parseAcBlocks(t.body);
     const title = String(fm.title ?? "").trim() || id;
     if (title === id && String(fm.title ?? "").trim() === "") report.titleFallbacks++;
+    const priority = String(fm.priority ?? "").trim() || "medium";
+    if (!String(fm.priority ?? "").trim()) report.defaultsApplied.priority++;
+    const assignee = String(fm.assignee ?? "").trim() || "unassigned";
+    if (!String(fm.assignee ?? "").trim()) report.defaultsApplied.assignee++;
     try {
       insTicket.run(
         id, t.project ?? key, num, String(fm.type ?? "task"), t.status,
-        title, String(fm.priority ?? "medium") || "medium",
+        title, priority,
         String(fm.resolution ?? "") || null,
-        String(fm.assignee ?? "unassigned") || "unassigned",
+        assignee,
         estimate(fm.estimate), String(fm.sprint ?? "") || null,
         isoDate(fm.start, null), isoDate(fm.due, null),
         t.body ?? "", ac.heading,
