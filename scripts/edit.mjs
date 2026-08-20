@@ -2,8 +2,9 @@
 // fs-only (no git); the board/CLI wrappers commit. All business rules come from
 // model/ — this file only marshals a patch through validateTicket before writing.
 import { fsStorage } from "./model/storage.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { basename, dirname } from "node:path";
-import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
+import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
@@ -20,7 +21,7 @@ function asArray(v) {
 }
 
 export function applyEdit(projectsDir, id, patch, opts = {}) {
-  const { today = null, storage = fsStorage } = opts;
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage } = opts;
   const bad = Object.keys(patch).filter((k) => !EDITABLE_FIELDS.has(k));
   if (bad.length) return { ok: false, errors: [`field(s) not editable: ${bad.join(", ")}`] };
 
@@ -37,7 +38,7 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
 
   // Validate the merged ticket. lookup spans every ticket for parent-pair + cycle checks.
   const all = new Map();
-  for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  for (const t of readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   all.set(id, { frontmatter: fm, body: found.body });
   // The edited ticket is validated against ITS OWN project's registry (BLZ-238).
   // BLZ-246: `config` carries the data root's top-level `schema.types` layer — omitting it
@@ -77,7 +78,7 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
 // Flip one checkbox under the `## Acceptance Criteria` heading, by ordinal.
 // Only lines within that section count; a `- [ ]` elsewhere in the body is ignored.
 export function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
-  const { today = null, storage = fsStorage } = opts;
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage } = opts;
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };

@@ -3,12 +3,12 @@
 // status dir. Pure-fs (no git); the CLI wrapper adds the commit.
 import { dirname } from "node:path";
 import { allocateId } from "./model/ids.mjs";
-import { walkTickets } from "./model/index.mjs";
 import { writeClaim, remoteMaxClaim } from "./model/claims.mjs";
 import { isType } from "./model/schema.mjs";
 import { initialStatus } from "./model/workflows.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { fsStorage, ticketPath, slugify } from "./model/storage.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
@@ -18,7 +18,7 @@ import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
 
 export function applyNew(projectsDir, opts = {}) {
   const { project, type, title, priority = "medium", labels = [], today = null, extra = {},
-          storage = fsStorage } = opts;
+          storage = fsStorage, readStorage = fsReadStorage } = opts;
   const pre = [];
   if (!project) pre.push("missing project (use --project <KEY>)");
   if (!isType(type)) pre.push(`unknown or missing type: ${type}`);
@@ -64,7 +64,7 @@ export function applyNew(projectsDir, opts = {}) {
   // apply. Ids are allocated in order, so a parent that does not exist yet cannot
   // be named correctly anyway.
   const all = new Map();
-  for (const t of walkTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  for (const t of readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   // Validate against the TARGET PROJECT's registry, not the ambient one (BLZ-238).
   // BLZ-246: the registry is `default → top-level → project`, so the data root's config has
   // to be passed in. Without it `loadProjectSchema` defaults `config` to null, the top-level

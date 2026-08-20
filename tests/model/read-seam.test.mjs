@@ -323,3 +323,23 @@ test("fsReadStorage: changeToken has a known blind spot — same size, same mtim
   assert.equal(readFileSync(f, "utf8"), edited, "the file really did change on disk");
   assert.equal(after, before, "same size + same mtime => the token cannot see the edit");
 });
+
+// --- listProjects: a different question from "which tickets" --------------------
+for (const [name, make] of DRIVERS) {
+  test(`${name}: listProjects returns the project keys that exist`, () => {
+    const { s, root } = make();
+    assert.deepEqual(s.listProjects(root), ["BLZ"]);
+  });
+}
+
+test("fsReadStorage: listProjects skips dot-directories", () => {
+  const dir = seedFs();
+  mkdirSync(join(dir, ".git"), { recursive: true });
+  mkdirSync(join(dir, "OBA", "defined"), { recursive: true });
+  assert.deepEqual(fsReadStorage.listProjects(dir).sort(), ["BLZ", "OBA"],
+    ".git is not a project");
+});
+
+test("fsReadStorage: listProjects on a missing root is empty, not a throw", () => {
+  assert.deepEqual(fsReadStorage.listProjects("/nope/does/not/exist"), []);
+});
