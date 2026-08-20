@@ -14,6 +14,7 @@
 //
 //   getTicket(root, id)          resolve one id, or refuse   — 7 call sites, 6 verbs
 //   listChildren(root, parentId) the board drill
+//   blockersOf(root, id)         inbound Blocks links — move's advisory check
 //   listTickets(root)            everything, for the index and audit
 //
 // `listTickets` survives deliberately: `buildIndex` and `auditCorpus` genuinely do
@@ -54,6 +55,32 @@ export const fsReadStorage = {
     return out;
   },
 
+
+/**
+ * Every ticket carrying a `Blocks` link that targets `id`.
+ *
+ * `move` needs this on any transition to in-progress, and today it is the single
+ * worst read in the engine: a full corpus walk to answer a two-row question. On the
+ * live 2,534-ticket corpus that is ~22 ms and ~5.6 MiB materialised per invocation,
+ * against 0.06 ms from an index — which is exactly the 578x ADR-0009 exists to make
+ * reachable. A database driver answers it with
+ * `WHERE target_id = ? AND link_type = 'Blocks'`.
+ *
+ * It returns the LINK SOURCES and nothing more. Deciding whether a blocker is still
+ * open is a schema question (`isType`/`isTerminal`) and stays with the caller — a
+ * storage driver that knew about terminal statuses would be reaching past its job.
+ */
+  blockersOf(root, id) {
+    const out = [];
+    for (const t of walkTickets(root)) {
+      if (t.frontmatter?.id === id) continue;
+      const blocks = (t.frontmatter?.links ?? [])
+        .some((l) => l.type === "Blocks" && l.target === id);
+      if (blocks) out.push(t);
+    }
+    return out;
+  },
+
   listTickets(root) {
     return walkTickets(root);
   },
@@ -76,6 +103,10 @@ export function memReadStorage(records = []) {
     },
     listChildren(_root, parentId) {
       return rows.filter((r) => r.frontmatter?.parent === parentId);
+    },
+    blockersOf(_root, id) {
+      return rows.filter((r) => r.frontmatter?.id !== id &&
+        (r.frontmatter?.links ?? []).some((l) => l.type === "Blocks" && l.target === id));
     },
     listTickets(_root) {
       return rows[Symbol.iterator]();
