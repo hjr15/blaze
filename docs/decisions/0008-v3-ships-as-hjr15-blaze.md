@@ -1,4 +1,4 @@
-# 8. Blaze v3 ships as `@hjr15/blaze`; `@hjr15/blaze-board` freezes at 0.6.0
+# 8. Blaze v3 ships as `@hjr15/blaze`; `@hjr15/blaze-board` freezes at 0.7.0
 
 Date: 2026-08-20
 
@@ -22,9 +22,24 @@ not the same promise, and one package name cannot carry both.
 
 Blaze v3 ships as **`@hjr15/blaze`** — confirmed unclaimed on npm, 2026-08-20.
 
-`@hjr15/blaze-board` **freezes at 0.6.0** as the file-based line. It is not
-republished. Its README gains a deprecation note pointing at `@hjr15/blaze` and
-stating plainly that v3 needs a server.
+`@hjr15/blaze-board` **freezes at 0.7.0** as the file-based line. Its README gains
+a deprecation note pointing at `@hjr15/blaze` and stating plainly that v3 needs a
+server.
+
+> **Amended 2026-08-20.** This ADR first said "freezes at 0.6.0 … it is not
+> republished". That was written before it was noticed that **no published version
+> carried BLZ-251's fix** — 0.6.0 was cut at `f3ed8f7`, the fix landed at
+> `2f19a03`, after it. Freezing at 0.6.0 would have frozen a known write-path bug
+> into the only version anyone can install, for a board whose own config depends on
+> exactly the override it breaks.
+>
+> So the line freezes **after one more release, 0.7.0**, and the freeze holds from
+> there. The bump is a **minor, not a patch**, because `main` also carries BLZ-264
+> raising `engines.node` from `>=20` to `>=24` — breaking for consumers, which in
+> 0.x is signalled by the minor, exactly as the 0.6.0 release commit argued.
+> Consumers who cannot move off Node 20 stay on 0.6.0 and do not get the fix; that
+> is the honest cost of the runtime floor and it is not hidden behind a patch
+> number.
 
 The bare name already matches everything else in the estate — the repo
 (`hjr15/blaze`), the CLI binary (`blaze`), the image (`ghcr.io/hjr15/blaze`) and
@@ -46,8 +61,8 @@ inconsistency rather than adding one. It also leaves `@hjr15/blaze-core`,
 ## Consequences
 
 - Existing `@hjr15/blaze-board` users are **not** upgraded by accident. They stay
-  on 0.6.0 until they choose to move, and what they move to is visibly a
-  different thing.
+  on 0.7.0 (or 0.6.0, on Node 20) until they choose to move, and what they move to
+  is visibly a different thing.
 - Every consumer reference moves in one effort: `blaze-pm`'s `package.json` and
   `package-lock.json`, the service-platform chart, and the docs that name the
   package. Note BLZ-247 — the lockfile currently pins 0.4.1, so an `npm ci` there
