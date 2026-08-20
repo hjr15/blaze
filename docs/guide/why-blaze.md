@@ -104,7 +104,7 @@ That bet held for one writer. It did not survive many.
 ## Where Blaze is going
 
 Everything above describes `@hjr15/blaze-board`, the file-based line, and stays
-true of it. **`@hjr15/blaze-board` is frozen at 0.6.0.**
+true of it. **`@hjr15/blaze-board` is frozen at 0.7.0.**
 
 Blaze v3 is a different product with the same purpose: the database becomes the
 sole source of truth, behind an API, and it ships under a new name,
@@ -156,7 +156,7 @@ remove.
   Postgres, no config.
 - The board is still a rendering, never a second source of truth.
 - These ADRs stay in this repo and stay readable without the board.
-- `@hjr15/blaze-board@0.6.0` keeps working exactly as this page describes, for as
+- `@hjr15/blaze-board@0.7.0` keeps working exactly as this page describes, for as
   long as you keep using it.
 
 ---
