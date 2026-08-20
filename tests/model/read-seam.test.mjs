@@ -10,7 +10,7 @@
 // turn that into a first-hit lookup.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
@@ -236,4 +236,90 @@ test("BLZ-271: a real move still lands in the right directory with its filename 
   assert.equal(r.ok, true, r.errors?.join("; "));
   assert.match(r.file, /BLZ[/\\]in-progress[/\\]BLZ-1-stale-slug\.md$/,
     "the stale filename is preserved — recomputing it would rename 60 live tickets");
+});
+
+// --- changeToken: the fourth read entry point ----------------------------------
+// contentHash (views/data.mjs) hashed path:size:mtimeMs across every directory to
+// drive the board's 3-second auto-reload poll. It was the only read path that never
+// went through walkTickets, and a database has no mtime to hash. Measured at 35.4 ms
+// per poll per open tab.
+//
+// This is the one place the review panel's REJECTED "opaque staleness token" idea is
+// correct: the poll genuinely wants "has anything changed?", not the tickets.
+import { rmSync, utimesSync } from "node:fs";
+
+for (const [name, make] of DRIVERS) {
+  test(`${name}: changeToken is stable when nothing changes`, () => {
+    const { s, root } = make();
+    assert.equal(s.changeToken(root), s.changeToken(root));
+  });
+
+  test(`${name}: changeToken is opaque — a string the caller must not parse`, () => {
+    const { s, root } = make();
+    assert.equal(typeof s.changeToken(root), "string");
+  });
+}
+
+test("fsReadStorage: changeToken changes when a ticket's content changes", () => {
+  const dir = seedFs();
+  const before = fsReadStorage.changeToken(dir);
+  const f = join(dir, "BLZ", "defined", "BLZ-1-a.md");
+  writeFileSync(f, readFileSync(f, "utf8") + "\nappended\n");
+  assert.notEqual(fsReadStorage.changeToken(dir), before);
+});
+
+test("fsReadStorage: changeToken changes when a ticket is added", () => {
+  const dir = seedFs();
+  const before = fsReadStorage.changeToken(dir);
+  writeFileSync(join(dir, "BLZ", "defined", "BLZ-9-new.md"),
+    `---\nid: BLZ-9\ntitle: new\ntype: task\nproject: BLZ\nparent: \n---\n\nb\n`);
+  assert.notEqual(fsReadStorage.changeToken(dir), before);
+});
+
+test("fsReadStorage: changeToken changes when a ticket is removed", () => {
+  const dir = seedFs();
+  const before = fsReadStorage.changeToken(dir);
+  rmSync(join(dir, "BLZ", "defined", "BLZ-2-b.md"));
+  assert.notEqual(fsReadStorage.changeToken(dir), before);
+});
+
+test("fsReadStorage: changeToken is project-scoped — another project's edit must not invalidate it", () => {
+  const dir = seedFs();
+  mkdirSync(join(dir, "OBA", "defined"), { recursive: true });
+  writeFileSync(join(dir, "OBA", "defined", "OBA-1-x.md"),
+    `---\nid: OBA-1\ntitle: x\ntype: task\nproject: OBA\nparent: \n---\n\nb\n`);
+  const blzBefore = fsReadStorage.changeToken(dir, { project: "BLZ" });
+  const allBefore = fsReadStorage.changeToken(dir);
+
+  writeFileSync(join(dir, "OBA", "defined", "OBA-1-x.md"),
+    `---\nid: OBA-1\ntitle: CHANGED\ntype: task\nproject: OBA\nparent: \n---\n\nb\n`);
+
+  assert.equal(fsReadStorage.changeToken(dir, { project: "BLZ" }), blzBefore,
+    "a BLZ-scoped poll must not fire on an OBA edit — that is why the scope exists");
+  assert.notEqual(fsReadStorage.changeToken(dir), allBefore,
+    "the unscoped token must still see it");
+});
+
+test("fsReadStorage: changeToken has a known blind spot — same size, same mtime", () => {
+  // Documented rather than fixed: the fs token hashes path:size:mtimeMs, so an edit
+  // that preserves BOTH is invisible. This is the PRE-EXISTING behaviour of
+  // contentHash and is preserved deliberately — changing the hash would change what
+  // the poll fires on, which is a different decision from moving it behind the seam.
+  // A database driver has no such blind spot.
+  const dir = seedFs();
+  const f = join(dir, "BLZ", "defined", "BLZ-1-a.md");
+  const original = readFileSync(f, "utf8");
+  const edited = original.replace("body of BLZ-1", "body of BLZ-X"); // identical length
+  assert.equal(edited.length, original.length, "the fixture must be a same-length edit");
+  const pinned = new Date(1000000);
+
+  utimesSync(f, pinned, pinned);
+  const before = fsReadStorage.changeToken(dir);
+
+  writeFileSync(f, edited);
+  utimesSync(f, pinned, pinned);            // restore the mtime the write just bumped
+  const after = fsReadStorage.changeToken(dir);
+
+  assert.equal(readFileSync(f, "utf8"), edited, "the file really did change on disk");
+  assert.equal(after, before, "same size + same mtime => the token cannot see the edit");
 });

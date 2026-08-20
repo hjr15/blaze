@@ -1,5 +1,6 @@
 // scripts/views/data.mjs — pure, read-only board/live models.
-import { readdirSync, statSync, readFileSync } from "node:fs";
+import { readFileSync } from "node:fs";
+import { fsReadStorage } from "../model/read-storage.mjs";
 import { join, basename } from "node:path";
 import { walkTickets, buildIndex } from "../model/index.mjs";
 import { rollUp } from "../model/rollup.mjs";
@@ -102,26 +103,16 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
   };
 }
 
-// A cheap hash of all ticket files' size+mtime, for the auto-reload poll.
-// Scoped to projectsDir/<project> when project is given, so an edit in an
-// unrelated project doesn't invalidate a project-focused view's poll.
-export function contentHash({ projectsDir = resolveRoots().projectsDir, project = null } = {}) {
-  let h = 0;
-  const rootDir = project ? join(projectsDir, project) : projectsDir;
-  const stack = [rootDir];
-  while (stack.length) {
-    const dir = stack.pop();
-    let entries = [];
-    try { entries = readdirSync(dir); } catch { continue; }
-    for (const e of entries) {
-      const p = join(dir, e);
-      let s; try { s = statSync(p); } catch { continue; }
-      if (s.isDirectory()) { stack.push(p); continue; }
-      const sig = `${p}:${s.size}:${s.mtimeMs}`;
-      for (let i = 0; i < sig.length; i++) h = (h * 31 + sig.charCodeAt(i)) | 0;
-    }
-  }
-  return String(h);
+// The board's auto-reload poll asks one question: has anything changed? ADR-0009
+// makes that a NAMED driver operation (`changeToken`) rather than a bespoke stat walk
+// living in the view layer — it was the fourth read entry point and the only one that
+// never went through walkTickets, which is why no earlier slice caught it.
+//
+// Scoped to projectsDir/<project> when project is given, so an edit in an unrelated
+// project doesn't invalidate a project-focused view's poll.
+export function contentHash({ projectsDir = resolveRoots().projectsDir, project = null,
+                              readStorage = fsReadStorage } = {}) {
+  return readStorage.changeToken(projectsDir, { project });
 }
 
 // Live-activity model: tail <dataRoot>/.blaze/activity.jsonl, group by ticket,
