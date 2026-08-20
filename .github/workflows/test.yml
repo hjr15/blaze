@@ -8,6 +8,28 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+
+    # The driver conformance suite asserts ONE contract across four drivers. Without a
+    # real server the Postgres quarter skips, so the suite's headline claim would only
+    # ever be proven on a developer's laptop and a Postgres-only regression would merge
+    # green. This service makes the fourth driver a first-class citizen of CI.
+    services:
+      postgres:
+        image: postgres:17-alpine
+        env:
+          POSTGRES_PASSWORD: postgres
+          POSTGRES_DB: blaze_test
+        options: >-
+          --health-cmd pg_isready
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+        ports:
+          - 5432:5432
+
+    env:
+      BLAZE_TEST_PG_URL: postgres://postgres:postgres@localhost:5432/blaze_test
+
     steps:
       - uses: actions/checkout@v4
 
