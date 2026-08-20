@@ -15,6 +15,7 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
+import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
 
 function seedFs() {
   const dir = mkdtempSync(join(tmpdir(), "blaze-readseam-"));
@@ -26,7 +27,10 @@ function seedFs() {
     `---\nid: ${id}\ntitle: ${id} title\ntype: task\nproject: BLZ\nparent: ${extra}\n` +
     `links:\n${links.map((l) => `  - { type: ${l.type}, target: ${l.target} }`).join("\n") || "  []"}\n` +
     `---\n\nbody of ${id}\n`;
-  put("defined", "BLZ-1-a.md", t("BLZ-1"));
+  // BLZ-1 blocks ITSELF. Nonsense as data, but it is the only way the
+  // "never returns the ticket itself" assertion can actually fail — without it
+  // that test passes vacuously, which an injected regression proved.
+  put("defined", "BLZ-1-a.md", t("BLZ-1", "", [{ type: "Blocks", target: "BLZ-1" }]));
   put("defined", "BLZ-2-b.md", t("BLZ-2", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]));
   put("done", "BLZ-3-c.md", t("BLZ-3", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]));
   // a Relates link to the same target must NOT be mistaken for a blocker
@@ -42,16 +46,44 @@ function seedMem() {
     body: `body of ${id}`, project: "BLZ", status, file: id,
   });
   return memReadStorage([
-    rec("BLZ-1", "defined", ""),
+    rec("BLZ-1", "defined", "", [{ type: "Blocks", target: "BLZ-1" }]),
     rec("BLZ-2", "defined", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]),
     rec("BLZ-3", "done", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]),
     rec("BLZ-4", "defined", "", [{ type: "Relates", target: "BLZ-1" }]),
   ]);
 }
 
+// The same logical corpus in a database. This is the whole point of ADR-0009: a
+// driver that answers the named questions from an index satisfies the identical
+// assertions as the one that walks 2,534 files.
+function seedSqlite() {
+  const s = openSqliteRead();
+  const ins = s.db.prepare(
+    `INSERT INTO ticket (id,project_key,num,type,status,title,parent_id,parent_type,
+                         body,created_on,updated_on)
+     VALUES (?,?,?,?,?,?,?,?,?,'2026-01-01','2026-01-01')`);
+  const link = s.db.prepare("INSERT INTO ticket_link VALUES (?,?,?)");
+  const row = (id, n, status, parent) =>
+    ins.run(id, "BLZ", n, "task", status, `${id} title`, parent || null,
+            parent ? "task" : null, `body of ${id}`);
+  row("BLZ-1", 1, "defined", "");
+  row("BLZ-2", 2, "defined", "BLZ-1");
+  row("BLZ-3", 3, "done", "BLZ-1");
+  row("BLZ-4", 4, "defined", "");
+  link.run("BLZ-1", "Blocks", "BLZ-1");   // self-block: see the fs fixture comment
+  link.run("BLZ-2", "Blocks", "BLZ-1");
+  link.run("BLZ-3", "Blocks", "BLZ-1");
+  link.run("BLZ-4", "Relates", "BLZ-1");
+  return s;
+}
+
+// Every assertion below runs against ALL THREE. A database driver that cannot satisfy
+// the filesystem driver's contract is not a drop-in, and finding that out here is the
+// entire reason the contract was named before the driver existed.
 const DRIVERS = [
   ["fsReadStorage", () => ({ s: fsReadStorage, root: seedFs() })],
   ["memReadStorage", () => ({ s: seedMem(), root: null })],
+  ["sqliteReadStorage", () => ({ s: seedSqlite(), root: null })],
 ];
 
 for (const [name, make] of DRIVERS) {
@@ -108,9 +140,11 @@ for (const [name, make] of DRIVERS) {
     assert.deepEqual(byId, { "BLZ-2": "defined", "BLZ-3": "done" });
   });
 
-  test(`${name}: blockersOf never returns the ticket itself`, () => {
+  test(`${name}: blockersOf never returns the ticket itself, even when it blocks itself`, () => {
     const { s, root } = make();
-    assert.equal(s.blockersOf(root, "BLZ-1").some((t) => t.frontmatter.id === "BLZ-1"), false);
+    const ids = s.blockersOf(root, "BLZ-1").map((t) => t.frontmatter.id);
+    assert.ok(ids.length > 0, "the fixture must actually produce blockers, or this proves nothing");
+    assert.equal(ids.includes("BLZ-1"), false, "self-exclusion must be real, not vacuous");
   });
 
   test(`${name}: blockersOf is empty for an id nothing blocks`, () => {
