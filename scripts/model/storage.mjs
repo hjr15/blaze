@@ -35,7 +35,7 @@
 // order-dependent; an explicit parameter keeps every existing test working against
 // fsStorage unchanged while new tests inject memStorage.
 import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename } from "node:path";
 
 /** Ticket-filename slug: lowercase, non-alphanumerics collapsed to single dashes, trimmed. */
 export function slugify(s) {
@@ -54,6 +54,44 @@ export function ticketPath(projectsDir, project, status, id, title) {
 ticketPath.parts = function parts(projectsDir, project, status, id, title) {
   const dir = join(projectsDir, project, status);
   return { dir, file: join(dir, `${id}-${slugify(title)}.md`) };
+};
+
+/**
+ * Where a ticket goes when its status changes — the ONE authority for that question.
+ *
+ * move.mjs and reconcile.mjs used to compute this inline as
+ * `join(dirname(dirname(file)), toStatus)` plus `basename(file)`. That works only
+ * while `file` is a real path. Handed anything else — which is exactly what a
+ * database driver yields — it produces `"done/BLZ-9"` and the caller returns
+ * `ok: true`. A ticket silently relocated to a bogus path is the BLZ-122 class,
+ * reintroduced by the seam meant to remove it.
+ *
+ * So this REFUSES an unrecognised handle rather than guessing. The fs assumption is
+ * now explicit and loud: the day a non-fs driver reaches here, it throws instead of
+ * corrupting.
+ *
+ * It also deliberately does NOT recompute the filename slug. `blaze edit` never
+ * renames on a title change, so 60 of the live corpus's 2,537 tickets have a
+ * filename that no longer matches `id-slug(title)`. Recomputing would rename them on
+ * their next move — silent churn, and it would widen the zero-diff migration oracle's
+ * existing gap.
+ */
+ticketPath.relocate = function relocate(projectsDir, project, toStatus, currentFile) {
+  const statusDir = dirname(String(currentFile ?? ""));
+  const projectDir = dirname(statusDir);
+  if (!currentFile || projectDir !== join(projectsDir, project)) {
+    // Two distinguishable failures, because they mean different mistakes.
+    if (dirname(projectDir) !== projectsDir) {
+      throw new Error(
+        `relocate: ${JSON.stringify(currentFile)} is not a ticket path under ${projectsDir} — ` +
+        `refusing to guess a destination. A non-filesystem driver must implement its own move.`);
+    }
+    throw new Error(
+      `relocate: ${JSON.stringify(currentFile)} disagrees with project ${project} — ` +
+      `one of them was derived wrongly; refusing to pick.`);
+  }
+  const dir = join(projectsDir, project, toStatus);
+  return { dir, file: join(dir, basename(currentFile)) };
 };
 
 /** The real filesystem. The only driver in use until Phase 1 lands SQLite. */
