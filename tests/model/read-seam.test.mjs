@@ -22,25 +22,30 @@ function seedFs() {
     mkdirSync(join(dir, "BLZ", status), { recursive: true });
     writeFileSync(join(dir, "BLZ", status, name), body);
   };
-  const t = (id, extra = "") =>
-    `---\nid: ${id}\ntitle: ${id} title\ntype: task\nproject: BLZ\nparent: ${extra}\n---\n\nbody of ${id}\n`;
+  const t = (id, extra = "", links = []) =>
+    `---\nid: ${id}\ntitle: ${id} title\ntype: task\nproject: BLZ\nparent: ${extra}\n` +
+    `links:\n${links.map((l) => `  - { type: ${l.type}, target: ${l.target} }`).join("\n") || "  []"}\n` +
+    `---\n\nbody of ${id}\n`;
   put("defined", "BLZ-1-a.md", t("BLZ-1"));
-  put("defined", "BLZ-2-b.md", t("BLZ-2", "BLZ-1"));
-  put("done", "BLZ-3-c.md", t("BLZ-3", "BLZ-1"));
+  put("defined", "BLZ-2-b.md", t("BLZ-2", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]));
+  put("done", "BLZ-3-c.md", t("BLZ-3", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]));
+  // a Relates link to the same target must NOT be mistaken for a blocker
+  put("defined", "BLZ-4-d.md", t("BLZ-4", "", [{ type: "Relates", target: "BLZ-1" }]));
   return dir;
 }
 
 // The in-memory driver is seeded with the same logical corpus, so both drivers are
 // held to the same assertions rather than to two hand-written expectations.
 function seedMem() {
-  const rec = (id, status, parent) => ({
-    frontmatter: { id, title: `${id} title`, type: "task", project: "BLZ", parent },
+  const rec = (id, status, parent, links = []) => ({
+    frontmatter: { id, title: `${id} title`, type: "task", project: "BLZ", parent, links },
     body: `body of ${id}`, project: "BLZ", status, file: id,
   });
   return memReadStorage([
     rec("BLZ-1", "defined", ""),
-    rec("BLZ-2", "defined", "BLZ-1"),
-    rec("BLZ-3", "done", "BLZ-1"),
+    rec("BLZ-2", "defined", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]),
+    rec("BLZ-3", "done", "BLZ-1", [{ type: "Blocks", target: "BLZ-1" }]),
+    rec("BLZ-4", "defined", "", [{ type: "Relates", target: "BLZ-1" }]),
   ]);
 }
 
@@ -87,13 +92,37 @@ for (const [name, make] of DRIVERS) {
     const { s, root } = make();
     const kids = s.listChildren(root, "BLZ-1").map((t) => t.frontmatter.id).sort();
     assert.deepEqual(kids, ["BLZ-2", "BLZ-3"]);
+    assert.deepEqual(s.listChildren(root, "BLZ-4"), []);
     assert.deepEqual(s.listChildren(root, "BLZ-2"), []);
+  });
+
+  test(`${name}: blockersOf returns only inbound Blocks links`, () => {
+    const { s, root } = make();
+    const ids = s.blockersOf(root, "BLZ-1").map((t) => t.frontmatter.id).sort();
+    assert.deepEqual(ids, ["BLZ-2", "BLZ-3"], "BLZ-4 Relates, and must not count as a blocker");
+  });
+
+  test(`${name}: blockersOf carries status, so the caller can judge terminal-ness`, () => {
+    const { s, root } = make();
+    const byId = Object.fromEntries(s.blockersOf(root, "BLZ-1").map((t) => [t.frontmatter.id, t.status]));
+    assert.deepEqual(byId, { "BLZ-2": "defined", "BLZ-3": "done" });
+  });
+
+  test(`${name}: blockersOf never returns the ticket itself`, () => {
+    const { s, root } = make();
+    assert.equal(s.blockersOf(root, "BLZ-1").some((t) => t.frontmatter.id === "BLZ-1"), false);
+  });
+
+  test(`${name}: blockersOf is empty for an id nothing blocks`, () => {
+    const { s, root } = make();
+    assert.deepEqual(s.blockersOf(root, "BLZ-3"), []);
+    assert.deepEqual(s.blockersOf(root, "BLZ-999"), []);
   });
 
   test(`${name}: listTickets still yields everything, for the index and audit`, () => {
     const { s, root } = make();
     const ids = [...s.listTickets(root)].map((t) => t.frontmatter.id).sort();
-    assert.deepEqual(ids, ["BLZ-1", "BLZ-2", "BLZ-3"]);
+    assert.deepEqual(ids, ["BLZ-1", "BLZ-2", "BLZ-3", "BLZ-4"]);
   });
 }
 

@@ -3,16 +3,17 @@
 // between status directories. applyMove() is pure-ish (fs only, no git) for tests;
 // the CLI wrapper adds git add/commit.
 import { dirname } from "node:path";
-import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
+import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { fsStorage, ticketPath } from "./model/storage.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
 import { isTerminal } from "./model/workflows.mjs";
 import { isType } from "./model/schema.mjs";
 
 export function applyMove(projectsDir, id, toStatus, opts = {}) {
-  const { today = null, storage = fsStorage } = opts;
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage } = opts;
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
@@ -35,12 +36,14 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
   // stops the move, it just surfaces a warning for the caller to print.
   const warnings = [];
   if (toStatus === "in-progress") {
-    for (const t of walkTickets(projectsDir)) {
-      if (t.frontmatter.id === id) continue;
-      const blocks = (t.frontmatter.links ?? []).some((l) => l.type === "Blocks" && l.target === id);
+    // ADR-0009: ask the driver for the blockers instead of walking the corpus and
+    // filtering here. This was the engine's worst read — a full 2,534-ticket walk to
+    // answer a two-row question, ~22 ms and ~5.6 MiB per invocation against 0.06 ms
+    // from an index.
+    for (const t of readStorage.blockersOf(projectsDir, id)) {
       // A blocker whose type is unresolvable can't be classified terminal/open —
       // treat it as non-blocking rather than let isTerminal() throw and abort the move.
-      if (blocks && isType(t.frontmatter.type) && !isTerminal(t.frontmatter.type, t.status)) {
+      if (isType(t.frontmatter.type) && !isTerminal(t.frontmatter.type, t.status)) {
         warnings.push(`advisory: ${id} is blocked by ${t.frontmatter.id} (open) — moving to in-progress anyway`);
       }
     }
