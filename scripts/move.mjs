@@ -2,17 +2,17 @@
 // resolution on terminal entry, rewrite frontmatter, and relocate the ticket file
 // between status directories. applyMove() is pure-ish (fs only, no git) for tests;
 // the CLI wrapper adds git add/commit.
-import { writeFileSync, renameSync, mkdirSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 import { walkTickets, locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
+import { fsStorage } from "./model/storage.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
 import { isTerminal } from "./model/workflows.mjs";
 import { isType } from "./model/schema.mjs";
 
 export function applyMove(projectsDir, id, toStatus, opts = {}) {
-  const { today = null } = opts;
+  const { today = null, storage = fsStorage } = opts;
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
@@ -55,9 +55,7 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
   const projectDir = dirname(statusDir);
   const destDir = join(projectDir, toStatus);
   const destFile = join(destDir, basename(found.file));
-  mkdirSync(destDir, { recursive: true });
-  writeFileSync(found.file, text);
-  if (destFile !== found.file) renameSync(found.file, destFile);
+  storage.move(found.file, destFile, text);
 
   return { ok: true, id, from: found.status, to: toStatus, fromFile: found.file, file: destFile, resolution: plan.resolution, warnings };
 }
