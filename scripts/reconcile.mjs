@@ -20,7 +20,7 @@ import { writeFileSync, renameSync, mkdirSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
-import { walkTickets } from "./model/index.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { ticketPath } from "./model/storage.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
@@ -240,6 +240,7 @@ function gatherProject(project, { fetch }) {
 // --- the reconcile pass -------------------------------------------------------
 export function reconcile({
   fetch = false, commit = false, push = false, dryRun = true, root, projectsDir,
+  readStorage = fsReadStorage,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
@@ -264,7 +265,7 @@ export function reconcile({
 
   const changes = [];
   const touched = [];
-  for (const t of walkTickets(projectsDir)) {
+  for (const t of readStorage.listTickets(projectsDir)) {
     const type = t.frontmatter.type;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;

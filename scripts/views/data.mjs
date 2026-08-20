@@ -2,7 +2,7 @@
 import { readFileSync } from "node:fs";
 import { fsReadStorage } from "../model/read-storage.mjs";
 import { join, basename } from "node:path";
-import { walkTickets, buildIndex } from "../model/index.mjs";
+import { buildIndex } from "../model/index.mjs";
 import { rollUp } from "../model/rollup.mjs";
 import { WORKFLOWS } from "../model/workflows.mjs";
 import { TYPES, workflowFor } from "../model/schema.mjs";
@@ -21,8 +21,9 @@ const title = (s) => s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase(
 
 // Pure board model: read every ticket under projectsDir, optionally filter to one
 // project, and group into status columns. Read-only (the editable board is Phase 6).
-export function boardModel(projectsDir, { project = "all", focus = null, flat = false, index = null } = {}) {
-  const walked = [...walkTickets(projectsDir)];
+export function boardModel(projectsDir, { project = "all", focus = null, flat = false, index = null,
+                                          readStorage = fsReadStorage } = {}) {
+  const walked = [...readStorage.listTickets(projectsDir)];
   const all = walked.map((t) => ({
     file: basename(t.file), meta: t.frontmatter, body: t.body,
     status: t.status, project: t.frontmatter.project,

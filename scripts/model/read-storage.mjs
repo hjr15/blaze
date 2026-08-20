@@ -15,6 +15,7 @@
 //   getTicket(root, id)          resolve one id, or refuse   — 7 call sites, 6 verbs
 //   listChildren(root, parentId) the board drill
 //   blockersOf(root, id)         inbound Blocks links — move's advisory check
+//   listProjects(root)            the project keys that exist
 //   changeToken(root, {project})  opaque "has anything changed?", for the poll
 //   listTickets(root)            everything, for the index and audit
 //
@@ -104,6 +105,20 @@ export const fsReadStorage = {
  * recorded limitation rather than a latent surprise. A database driver has no such
  * blind spot.
  */
+  /**
+   * The project keys that exist. A different question from "which tickets" — audit
+   * and reconcile both need the set of projects before they can scope anything, and
+   * audit-runner was answering it with its own readdirSync. On the filesystem a
+   * project is a directory; on a database it is `SELECT key FROM resolved_project`.
+   */
+  listProjects(root) {
+    try {
+      return readdirSync(root, { withFileTypes: true })
+        .filter((d) => d.isDirectory() && !d.name.startsWith("."))
+        .map((d) => d.name);
+    } catch { return []; }
+  },
+
   changeToken(root, { project = null } = {}) {
     let h = 0;
     const stack = [project ? join(root, project) : root];
@@ -150,6 +165,9 @@ export function memReadStorage(records = []) {
         (r.frontmatter?.links ?? []).some((l) => l.type === "Blocks" && l.target === id));
     },
     // Ids are unique and rows are immutable here, so the corpus itself is the token.
+    listProjects(_root) {
+      return [...new Set(rows.map((r) => r.project).filter(Boolean))].sort();
+    },
     changeToken(_root, { project = null } = {}) {
       const scoped = project ? rows.filter((r) => r.project === project) : rows;
       return String(scoped.length) + ":" + scoped.map((r) => r.frontmatter?.id).sort().join(",");

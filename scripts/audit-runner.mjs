@@ -3,9 +3,9 @@
 //
 // Read-only. Exits non-zero only on a HARD finding — a soft finding is a fill queue and
 // must never fail a run (blaze-pm ADR-0011). BLZ-137.
-import { readFileSync, readdirSync } from "node:fs";
+import { readFileSync } from "node:fs";
 import { join, dirname, resolve as resolvePath } from "node:path";
-import { walkTickets } from "./model/index.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { auditCorpus, summarise, HARD_KINDS } from "./model/audit.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 
@@ -48,7 +48,7 @@ try { config = loadConfig({ root: dataRoot }); } catch { config = null; }
 const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 const keys = nonEmpty(opts.projects)
   ?? nonEmpty(config?.projects)
-  ?? readdirSync(projectsDir, { withFileTypes: true }).filter((d) => d.isDirectory()).map((d) => d.name);
+  ?? fsReadStorage.listProjects(projectsDir);
 
 // And having resolved them, refuse to report success over an empty corpus.
 if (!keys.length) { console.error(`no projects found under ${projectsDir}`); process.exit(2); }
@@ -67,7 +67,7 @@ const tickets = [];
 // the WALK — which paths exist — and the pure function is a function of frontmatter, which
 // carries no path. BLZ-122 / REQ-035.
 const filesById = new Map();
-for (const t of walkTickets(projectsDir)) {
+for (const t of fsReadStorage.listTickets(projectsDir)) {
   const id = t.frontmatter?.id;
   if (!id || !wanted.has(String(id).split("-")[0])) continue;
   tickets.push(t);
