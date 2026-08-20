@@ -5,7 +5,7 @@
 // Run: node scripts/reindex.mjs [projectsDir]
 import { mkdirSync, writeFileSync } from "node:fs";
 import { join, dirname, resolve as resolvePath } from "node:path";
-import { buildIndex } from "./model/index.mjs";
+import { buildIndex, missingClaimErrors } from "./model/index.mjs";
 import { buildTransitions } from "./model/transitions.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -48,20 +48,36 @@ try {
   assertWritable("rebuild the index/transitions cache");
   mkdirSync(dbDir, { recursive: true });
   const idx = buildIndex(projectsDir);
+  // BLZ-274 / ADR-0009: the missing-claim check is path-dependent — it reads the
+  // id-claims ledger off disk — so it runs HERE rather than inside the pure index,
+  // following the precedent at audit-runner.mjs:64-72. Keeping it in buildIndex made
+  // a filesystem-fed and a database-fed index return different `errors` arrays.
+  //
+  // Separating them also fixes a real mislabelling: buildIndex.errors previously held
+  // BOTH kinds while this message called all of them duplicate ids. A board with one
+  // unclaimed id and no collisions was told "1 duplicate ticket id — renumber one side
+  // of each collision", naming a collision that did not exist.
+  const claimErrors = missingClaimErrors(projectsDir, idx.rows);
+  for (const e of claimErrors) console.error(`error: ${e}`);
   // BLZ-134: refuse to write an index built over colliding ids. Writing it would
   // bake the collision into every consumer while looking like a clean rebuild —
   // exactly how four duplicate ids sat undetected on the live board. Fail before
   // the write so the on-disk cache keeps its last known-good state.
-  if (idx.errors.length) {
+  const blocking = [...idx.errors, ...claimErrors];
+  if (blocking.length) {
     for (const e of idx.errors) console.error(`error: ${e}`);
     if (!allowDuplicateIds) {
+      const dupes = idx.errors.length;
+      const parts = [];
+      if (dupes) parts.push(`${dupes} duplicate ticket id${dupes === 1 ? "" : "s"}`);
+      if (claimErrors.length) parts.push(`${claimErrors.length} unclaimed id${claimErrors.length === 1 ? "" : "s"}`);
       throw new Error(
-        `${idx.errors.length} duplicate ticket id${idx.errors.length === 1 ? "" : "s"} — ` +
-        `refusing to write a corrupt index. Renumber one side of each collision, then re-run ` +
+        `${parts.join(" and ")} — refusing to write a corrupt index. ` +
+        (dupes ? `Renumber one side of each collision, then re-run ` : `Restore the missing claim(s), then re-run `) +
         `(or --allow-duplicate-ids to rebuild anyway; the shadowed ticket stays invisible).`
       );
     }
-    console.error(`warning: --allow-duplicate-ids — rebuilding anyway; ${idx.errors.length} collision(s) remain unresolved.`);
+    console.error(`warning: --allow-duplicate-ids — rebuilding anyway; ${blocking.length} unresolved finding(s).`);
   }
   const out = join(dbDir, "index.json");
   writeFileSync(out, JSON.stringify(idx.toJSON(), null, 2));

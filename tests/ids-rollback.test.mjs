@@ -8,7 +8,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildIndex } from "../scripts/model/index.mjs";
+import { buildIndex, missingClaimErrors } from "../scripts/model/index.mjs";
 import { writeClaim, ensureCutover } from "../scripts/model/claims.mjs";
 
 function boardWith(tickets, claims) {
@@ -26,10 +26,18 @@ function boardWith(tickets, claims) {
 
 // Hole: a ticket committed without its claim — by hand, or because a merge
 // strategy auto-resolved the claim away — merges as silently as it did before.
-test("BLZ-136 rollback: a ticket issued after cutover with no claim is an index ERROR", () => {
+// BLZ-274 / ADR-0009 moved this check OUT of buildIndex and into the reindex runner:
+// it reads the id-claims ledger off disk, so leaving it in the pure index made a
+// filesystem-fed and a database-fed index return different `errors` arrays. The
+// protection is unchanged — only where it is invoked. This test now asserts it where
+// it lives, which is also closer to the behaviour that matters (reindex refusing).
+test("BLZ-136 rollback: a ticket issued after cutover with no claim is a MISSING-CLAIM error", () => {
   const { root, projects } = boardWith([["defined", "PROJ-6-x.md", "PROJ-6"]], []);
   ensureCutover(projects, "PROJ", 5);
-  const errs = buildIndex(projects).errors;
+  const idx = buildIndex(projects);
+  assert.deepEqual(idx.errors, [],
+    "the pure index no longer carries path-dependent claim errors (BLZ-274)");
+  const errs = missingClaimErrors(projects, idx.rows);
   assert.equal(errs.length, 1, `expected one error, got ${JSON.stringify(errs)}`);
   assert.match(errs[0], /PROJ-6/);
   assert.match(errs[0], /claim/i);
