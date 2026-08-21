@@ -5,6 +5,10 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
+import { dirname } from "node:path";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 import { startServer, CSRF } from "../scripts/serve.mjs";
 
 // BLZ-133: pageHtml takes its board from projectsDir; the ambient fallback to
@@ -510,4 +514,29 @@ test("GET /view/live envelope carries the class=\"live\" markup", async () => {
   assert.equal(j.view, "live");
   assert.match(j.html, /class="live"/);
   server.close(); rmSync(fx.root, { recursive: true, force: true });
+});
+
+// --- BLZ-301: the viewer must not bypass the dual-write soak -----------------
+//
+// The handlers called the verbs without a writePort, so they fell back to each verb's
+// DEFAULT filesystem port. A board edited in the browser wrote files only, the shadow
+// never saw it, and the soak's week of evidence would have been silently partial —
+// with no indication that anything was missing.
+test("BLZ-301: every mutating handler passes a writePort to its verb", () => {
+  // A structural check rather than a live server: this is about which argument the
+  // handler passes, and a handler that quietly stops passing it is exactly the
+  // regression that produced the gap in the first place.
+  const src = readFileSync(join(REPO, "scripts", "serve.mjs"), "utf8");
+  const calls = src.match(/await apply\w+\([^;]*?\);/gs) ?? [];
+  assert.ok(calls.length >= 5, `expected the five mutating verbs, found ${calls.length}`);
+  for (const call of calls) {
+    assert.match(call, /writePort/,
+      `a handler calls a verb without a writePort, so it bypasses the soak:\n${call}`);
+  }
+});
+
+test("BLZ-301: the resolved port is closed, so a long-lived server does not hold it", () => {
+  const src = readFileSync(join(REPO, "scripts", "serve.mjs"), "utf8");
+  assert.match(src, /finally\s*\{\s*closeWritePort\(\);\s*\}/,
+    "the shadow database must be released after each request");
 });
