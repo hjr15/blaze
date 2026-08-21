@@ -73,6 +73,10 @@ test("no module outside the write seam writes or renames a ticket file", () => {
     "pending-ledger.mjs", "commit-lock.mjs", "serve-commit.mjs",
     "migrate/jira-import.mjs", "migrate-runner.mjs", "migrate/jira-client.mjs",
     "loops/groomer.mjs", "config.mjs",
+    // BLZ-285. `blaze init` writes blaze.config.json, project.json and .gitignore —
+    // config, never a ticket — and it runs BEFORE a board exists, so there is no
+    // storage driver to route through. Listed for the same reason config.mjs is.
+    "init-runner.mjs",
   ]);
   const offenders = [];
   for (const file of mjsFiles(SCRIPTS)) {
