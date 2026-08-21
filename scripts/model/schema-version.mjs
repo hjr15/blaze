@@ -14,14 +14,44 @@
 // the oldest contract it still reads. A board loads iff
 // MIN_SCHEMA_VERSION <= schemaVersion <= SCHEMA_VERSION. An absent stamp is the
 // pre-versioning baseline, defined as v1.
-export const SCHEMA_VERSION = 1;
+export const SCHEMA_VERSION = 2;
 export const MIN_SCHEMA_VERSION = 1;
+
+/**
+ * Keys removed from the config contract, and what to do instead (BLZ-298).
+ *
+ * Each was accepted by `loadConfig` and read by NOTHING — verified by grep across
+ * `scripts/`. A config key nothing reads is a promise the software does not keep: the
+ * next person to set `provider: "gitlab"` reasonably expects something to happen.
+ *
+ * Removal is a hard error rather than a silent drop, because silently dropping it is
+ * exactly the behaviour being fixed.
+ */
+export const REMOVED_KEYS = {
+  provider: "nothing read it; reconcile talks to GitHub via `gh` regardless",
+  terminal: "nothing read it; terminal statuses come from the workflow registry "
+          + "(model/workflows.mjs), per type",
+  codeRepo: "nothing read it; set `codeRepos` on the project instead "
+          + "(projects/<KEY>/project.json)",
+};
 
 /** Pure guard over a parsed config object's schemaVersion stamp.
  *  `current`/`min` are injectable so every branch — including ones unreachable
  *  with the real constants (at MIN === CURRENT === 1 the too-old branch cannot
  *  fire) — stays unit-testable. Returns { ok, error } and never throws. */
-export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SCHEMA_VERSION } = {}) {
+export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SCHEMA_VERSION,
+                                          removed = REMOVED_KEYS } = {}) {
+  // Checked before the version, and on the RAW parsed file: a board carrying a key this
+  // engine no longer honours must be told, not quietly obeyed in part.
+  const present = Object.keys(removed).filter((k) => cfg && cfg[k] !== undefined);
+  if (present.length) {
+    const lines = present.map((k) => `  ${k} — ${removed[k]}`).join("\n");
+    return { ok: false, error:
+      `blaze.config.json sets ${present.length === 1 ? "a key" : "keys"} this engine no `
+      + `longer reads:\n${lines}\n`
+      + `Delete ${present.length === 1 ? "it" : "them"} — nothing else changes. `
+      + "See https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md" };
+  }
   const v = cfg ? cfg.schemaVersion : undefined;
   if (v === undefined || v === null) return { ok: true, error: null }; // pre-versioning board = v1
   if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {

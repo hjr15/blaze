@@ -1,4 +1,5 @@
 import { test } from "node:test";
+import { SCHEMA_VERSION, MIN_SCHEMA_VERSION } from "../scripts/model/schema-version.mjs";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -20,9 +21,11 @@ test("applies defaults when no config file exists", () => {
   const cfg = loadConfig({ root: dir, env: {} });
   assert.equal(cfg.key, "TASK");
   assert.equal(cfg.boardTitle, "Blaze");
-  assert.equal(cfg.codeRepo, null);
-  assert.equal(cfg.codeRepoPath, null);
-  assert.deepEqual(cfg.terminal, ["done", "canceled", "duplicate"]);
+  // BLZ-298 removed codeRepo/codeRepoPath/terminal/provider: each was accepted and
+  // read by nothing. They must now be ABSENT, not defaulted.
+  for (const gone of ["codeRepo", "codeRepoPath", "terminal", "provider"]) {
+    assert.equal(cfg[gone], undefined, `${gone} was removed and must not reappear`);
+  }
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -38,11 +41,26 @@ test("file overrides defaults; loops deep-merge", () => {
 
 test("env overrides win over file", () => {
   const dir = withConfig({ key: "PROJ", port: 4321 });
-  const cfg = loadConfig({ root: dir, env: { BLAZE_KEY: "OPS", BLAZE_PORT: "8080", BLAZE_CODE_REPO: "../app" } });
+  const cfg = loadConfig({ root: dir, env: { BLAZE_KEY: "OPS", BLAZE_PORT: "8080" } });
   assert.equal(cfg.key, "OPS");
   assert.equal(cfg.port, 8080);
-  assert.equal(cfg.codeRepo, "../app");
-  assert.ok(cfg.codeRepoPath.endsWith("/app"));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLAZE_CODE_REPO is no longer honoured — it set a value nothing read", () => {
+  const dir = withConfig({ key: "PROJ" });
+  const cfg = loadConfig({ root: dir, env: { BLAZE_CODE_REPO: "../app" } });
+  assert.equal(cfg.codeRepo, undefined);
+  assert.equal(cfg.codeRepoPath, undefined);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("a config still carrying a removed key fails LOUD, naming it and the fix", () => {
+  // Silently ignoring it is the behaviour being fixed: the next person to set
+  // provider: "gitlab" reasonably expects something to happen.
+  const dir = withConfig({ key: "PROJ", provider: "gitlab" });
+  assert.throws(() => loadConfig({ root: dir, env: {} }),
+    /no longer reads:[\s\S]*provider —/);
   rmSync(dir, { recursive: true, force: true });
 });
 
@@ -194,7 +212,7 @@ test("loadConfig throws blaze:-prefixed on a board stamped newer than the engine
     (e) =>
       e.message.startsWith("blaze: ") &&
       /board schemaVersion 99/.test(e.message) &&    // names the board's version
-      /1\.\.1/.test(e.message) &&                    // names the engine's supported range
+      new RegExp(`${MIN_SCHEMA_VERSION}\\.\\.${SCHEMA_VERSION}`).test(e.message) &&                    // names the engine's supported range
       /docs\/schema-versioning\.md/.test(e.message), // points at the docs, not a command
   );
   rmSync(dir, { recursive: true, force: true });

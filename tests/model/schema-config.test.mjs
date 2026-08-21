@@ -55,9 +55,11 @@ test("validateSchema: rejects a type mapped to an undeclared workflow", () => {
 
 // --- config-schema version guard (ADR-0002) ---------------------------------
 
-test("the engine's compat window is currently [1, 1]", () => {
+test("the engine's compat window is currently [1, 2]", () => {
+  // BLZ-298 bumped to 2 when provider/terminal/codeRepo were removed. MIN stays 1:
+  // a v1 board that does not carry a removed key still loads unchanged.
   assert.equal(MIN_SCHEMA_VERSION, 1);
-  assert.equal(SCHEMA_VERSION, 1);
+  assert.equal(SCHEMA_VERSION, 2);
 });
 
 test("checkSchemaVersion: an absent schemaVersion is legacy → treated as v1 → ok", () => {
@@ -78,7 +80,7 @@ test("checkSchemaVersion: a version newer than the engine fails, naming version,
   const r = checkSchemaVersion({ schemaVersion: 99 });
   assert.equal(r.ok, false);
   assert.match(r.error, /board schemaVersion 99/);
-  assert.match(r.error, /1\.\.1/);           // the engine's supported range
+  assert.match(r.error, new RegExp(`${MIN_SCHEMA_VERSION}\\.\\.${SCHEMA_VERSION}`));           // the engine's supported range
   assert.match(r.error, /docs\/schema-versioning\.md/);
 });
 
