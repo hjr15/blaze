@@ -41,6 +41,7 @@ function seedFs() {
     mkdirSync(join(dir, "BLZ", t.status), { recursive: true });
     writeFileSync(join(dir, "BLZ", t.status, `${t.id}-x.md`),
       ["---", `id: ${t.id}`, `title: ${t.id} title`, "type: task", "project: BLZ",
+       "created: 2026-01-01", "updated: 2026-01-01",
        `parent: ${t.parent}`, "links:",
        ...t.links.map((l) => `  - { type: ${l.type}, target: ${l.target} }`),
        "---", "", `body of ${t.id}`, ""].join("\n"));
@@ -51,6 +52,7 @@ function seedFs() {
 function seedMem() {
   return { s: memReadStorage(CORPUS.map((t) => ({
     frontmatter: { id: t.id, title: `${t.id} title`, type: "task", project: "BLZ",
+                   created: "2026-01-01", updated: "2026-01-01",
                    parent: t.parent, links: t.links },
     body: `body of ${t.id}`, project: "BLZ", status: t.status, file: t.id,
   }))), root: null };
@@ -132,6 +134,29 @@ async function conformance(make, name) {
   await test(`${name}: listProjects returns the project keys`, async () => {
     const { s, root } = await make();
     assert.deepEqual(await s.listProjects(root), ["BLZ"]);
+    await s.close?.();
+  });
+
+  await test(`${name}: dates are plain YYYY-MM-DD strings, not instants`, async () => {
+    // Added after dual-write (BLZ-293) found what 32 assertions had missed: `pg`
+    // decodes a Postgres `date` into a JS Date at LOCAL midnight, so 2026-01-01 read
+    // from Sydney came back as "2025-12-31T13:00:00.000Z" — every created/updated date
+    // shifted a day, in a direction that depends on the reader's timezone. Blaze stores
+    // dates with no time and no zone; a driver that hands back an instant is wrong.
+    const { s, root } = await make();
+    const t = await s.getTicket(root, "BLZ-1");
+    const rec = t.found ?? t;
+    // Assert the VALUE, not the shape. An earlier version of this checked only that the
+    // string matched /\d{4}-\d{2}-\d{2}/ and passed against the bug: pg-storage's
+    // `iso()` helper runs toISOString().slice(0,10) on a Date already parked at LOCAL
+    // midnight, which yields a perfectly well-formed "2025-12-31" for a ticket created
+    // on 2026-01-01. A shape check cannot catch an off-by-one-day.
+    for (const field of ["created", "updated"]) {
+      const v = rec.frontmatter[field];
+      assert.equal(typeof v, "string", `${field} must be a string, got ${typeof v}`);
+      assert.equal(v, "2026-01-01",
+        `${field} must be the date the corpus stored, got ${JSON.stringify(v)}`);
+    }
     await s.close?.();
   });
 

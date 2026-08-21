@@ -33,9 +33,17 @@ function toRecord(row, links) {
   };
 }
 
+// DATE COLUMNS ARE CAST TO text, and that is not cosmetic. `pg` decodes a Postgres
+// `date` into a JS Date at LOCAL midnight, so 2026-01-01 read from Sydney serialises as
+// "2025-12-31T13:00:00.000Z" — the ticket's created date moves a day backwards, and the
+// direction depends on the reader's timezone. Blaze stores dates as plain YYYY-MM-DD
+// strings with no time and no zone, so decoding them as instants is simply wrong.
+// Casting in SQL keeps the fix local and explicit; a global pg type parser would reach
+// into every other consumer of the `pg` module in the process.
 const COLS = `id, project_key, num, type, status, title, priority, resolution,
               parent_id, parent_type, assignee, estimate_minutes, sprint_id,
-              start_date, due_date, body, created_on, updated_on, version`;
+              start_date::text AS start_date, due_date::text AS due_date, body,
+              created_on::text AS created_on, updated_on::text AS updated_on, version`;
 const ALIVE = "deleted_at IS NULL";
 
 // `pg` is an OPTIONAL peer dependency: it is deliberately not installed for the
