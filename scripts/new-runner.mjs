@@ -1,6 +1,7 @@
 // scripts/new-runner.mjs — CLI entry for `blaze new`. Parses flags, calls
 // applyNew against the resolved data tree, then commits (or queues) the ticket.
 import { applyNew } from "./new.mjs";
+import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -64,7 +65,12 @@ if (!opts.project || !opts.type || !opts.title) {
   process.exit(1);
 }
 
-const r = await applyNew(projectsDir, opts);
+// BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the
+// real verbs. Unset means the filesystem, exactly as before.
+const { port: writePort, close: closeWritePort } =
+  await resolveWritePort({ dataRoot, projectsDir });
+const r = await applyNew(projectsDir, { ...opts, writePort });
+closeWritePort();
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 

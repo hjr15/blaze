@@ -1,6 +1,7 @@
 // scripts/move-runner.mjs — CLI entry for `blaze move <id> <status>`: applyMove
 // against the resolved data tree, then commit (or queue) the relocation.
 import { applyMove } from "./move.mjs";
+import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -34,7 +35,12 @@ const [id, toStatus] = positional;
 if (!id || !toStatus) { console.error("usage: blaze move <id> <status>"); process.exit(1); }
 
 const today = new Date().toISOString().slice(0, 10);
-const r = await applyMove(projectsDir, id, toStatus, { today });
+// BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the
+// real verbs. Unset means the filesystem, exactly as before.
+const { port: writePort, close: closeWritePort } =
+  await resolveWritePort({ dataRoot, projectsDir });
+const r = await applyMove(projectsDir, id, toStatus, { today, writePort });
+closeWritePort();
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 
