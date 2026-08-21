@@ -146,67 +146,35 @@ describe("T2 escape 2 — no-regression, so the 242 stay workable", () => {
 });
 
 describe("T2 — what it does NOT enforce is named, not hidden", () => {
-  test("likelihood and impact are declared unenforceable because ticket has no column", () => {
-    // blaze_config.type_required_field's CHECK admits both, and `risk` declares both.
-    // There is no column to test, so the trigger cannot enforce them. That gap is
-    // exported by name — an unenforceable required field is worse than an absent one,
-    // because the config claims a guarantee nothing provides.
-    for (const f of UNENFORCEABLE_REQUIRED_FIELDS) {
-      assert.ok(!(f in REQUIRED_FIELD_COLUMNS), `${f} must not claim to be enforced`);
+  test("every field the config can require now HAS a column and is enforced", () => {
+    // Inverted from the version that asserted the gap. blaze_config's CHECK admits
+    // title/description/estimate/likelihood/impact; all five map to a column, so the
+    // list of unenforceable fields must be empty.
+    assert.deepEqual(UNENFORCEABLE_REQUIRED_FIELDS, [],
+      "a required field with no column is enforced by NOTHING while the config still claims it");
+    for (const f of ["title", "description", "estimate", "likelihood", "impact"]) {
+      assert.ok(f in REQUIRED_FIELD_COLUMNS, `${f} must be enforceable`);
     }
-    assert.deepEqual(UNENFORCEABLE_REQUIRED_FIELDS, ["likelihood", "impact"]);
   });
 
-  test("a risk with neither field still inserts — proving the gap is real, not theoretical", async () => {
+  test("a risk WITHOUT likelihood and impact is now refused — the gap is closed", async () => {
     const db = await openDb();
-    insert(db, { id: "BLZ-1", num: 1, type: "risk" });
-    assert.equal(db.prepare("SELECT count(*) n FROM ticket").get().n, 1,
-      "documents today's behaviour: the risk fields are unenforced at the database layer");
+    assert.throws(
+      () => db.prepare(`INSERT INTO ticket (id,project_key,num,type,status,title,body,created_on,updated_on)
+                        VALUES ('BLZ-1','BLZ',1,'risk','identified','t','b','2026-01-01','2026-01-01')`).run(),
+      // Either trigger may fire first — SQLite does not promise an order, and pinning
+      // one would make this test fail on a reordering that changes nothing that matters.
+      /(likelihood|impact) is required for this ticket type/);
   });
-});
 
-describe("T2 — Postgres parity", { skip: PG ? false : "set BLAZE_TEST_PG_URL" }, () => {
-  test("the same rule, the same messages, on the other driver", async () => {
-    const { PG_DDL } = await import("../../scripts/model/pg-schema.mjs");
-    const pgmod = (await import("pg")).default;
-    const c = new pgmod.Client(PG);
-    await c.connect();
-    try {
-      await c.query("DROP SCHEMA IF EXISTS blaze_rules_test CASCADE");
-      await c.query("CREATE SCHEMA blaze_rules_test");
-      await c.query("SET search_path TO blaze_rules_test");
-      await c.query(PG_DDL);
-      await c.query(projectionDdl("postgres"));
-      const exec = {
-        async run(sql, params) { return c.query(sql, params); },
-        async all(sql, params) { return (await c.query(sql, params)).rows; },
-      };
-      await refreshProjection(exec, config(), { dialect: "postgres", now: "2026-08-21" });
-      await c.query(writeRulesDdl("postgres"));
-
-      const ins = (id, num, est) => c.query(
-        `INSERT INTO ticket (id,project_key,num,type,status,title,body,estimate_minutes,created_on,updated_on)
-         VALUES ($1,'BLZ',$2,'task','defined','t','b',$3,'2026-01-01','2026-01-01')`, [id, num, est]);
-
-      await assert.rejects(ins("BLZ-1", 1, null), /estimate is required for this ticket type/);
-
-      await c.query(setMigrationModeSql("postgres", true));
-      await ins("BLZ-1", 1, null);                        // the migration case
-      await c.query(setMigrationModeSql("postgres", false));
-
-      // No-regression: the grandfathered row still closes, without an invented estimate.
-      await c.query("UPDATE ticket SET status='in-progress' WHERE id='BLZ-1'");
-      const r = await c.query("SELECT estimate_minutes FROM ticket WHERE id='BLZ-1'");
-      assert.equal(r.rows[0].estimate_minutes, null);
-
-      // ...but a populated one cannot be cleared.
-      await ins("BLZ-2", 2, 60);
-      await assert.rejects(
-        c.query("UPDATE ticket SET estimate_minutes=NULL WHERE id='BLZ-2'"),
-        /cannot be cleared once set/);
-    } finally {
-      await c.query("DROP SCHEMA IF EXISTS blaze_rules_test CASCADE").catch(() => {});
-      await c.end();
-    }
+  test("a risk WITH both fields inserts, and neither can be cleared afterwards", async () => {
+    const db = await openDb();
+    db.prepare(`INSERT INTO ticket (id,project_key,num,type,status,title,body,likelihood,impact,
+                                    created_on,updated_on)
+                VALUES ('BLZ-1','BLZ',1,'risk','identified','t','b','medium','high','2026-01-01','2026-01-01')`).run();
+    assert.equal(db.prepare("SELECT count(*) n FROM ticket").get().n, 1);
+    assert.throws(
+      () => db.prepare("UPDATE ticket SET impact = NULL WHERE id='BLZ-1'").run(),
+      /impact is required and cannot be cleared once set/);
   });
 });

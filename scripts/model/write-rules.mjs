@@ -33,13 +33,18 @@ export const REQUIRED_FIELD_COLUMNS = {
   title:       { column: "title", empty: (c) => `${c} IS NULL OR length(trim(${c})) = 0` },
   description: { column: "body",  empty: (c) => `${c} IS NULL OR length(trim(${c})) = 0` },
   estimate:    { column: "estimate_minutes", empty: (c) => `${c} IS NULL` },
+  // BLZ-290, unblocked by BLZ-295. These were accepted by the config's CHECK and
+  // declared required for `risk`, but `ticket` had no column for either — so the
+  // config advertised a guarantee nothing provided. Now enforced like any other.
+  likelihood:  { column: "likelihood", empty: (c) => `${c} IS NULL OR length(trim(${c})) = 0` },
+  impact:      { column: "impact",     empty: (c) => `${c} IS NULL OR length(trim(${c})) = 0` },
 };
 
-// `likelihood` and `impact` are accepted by blaze_config.type_required_field's CHECK —
-// `risk` declares both — but `ticket` has no column for either yet, so they cannot be
-// enforced. Named here rather than silently skipped: an unenforceable required field
-// is worse than an absent one, because the config claims a guarantee nothing provides.
-export const UNENFORCEABLE_REQUIRED_FIELDS = ["likelihood", "impact"];
+// Every field the config CHECK admits now HAS a column and is enforced. The list stays
+// — and stays asserted-empty — because the failure it guards against is not a missing
+// column but a SILENT one: a required field with no column is enforced by nothing while
+// the config still claims it, which is worse than not requiring it at all.
+export const UNENFORCEABLE_REQUIRED_FIELDS = [];
 
 const MIGRATION_OFF_SQLITE =
   "COALESCE((SELECT enabled FROM migration_mode WHERE id = 1), 0) = 0";

@@ -9,6 +9,7 @@
 // hands back a tally tells you about all of them, which is what you need before
 // cutover. Nothing is silently dropped — every skip is counted and named.
 import { parseAcBlocks } from "../model/ac-blocks.mjs";
+import { extraFields } from "../model/write-port.mjs";
 import { fsReadStorage } from "../model/read-storage.mjs";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
@@ -30,10 +31,18 @@ function estimate(v) {
  * @param source  a read driver (defaults to the filesystem)
  * @returns a tally: what loaded, what was skipped, and why
  */
+const nzs = (v) => {
+  const t = String(v ?? "").trim();
+  return t === "" ? null : t;
+};
+const asList = (v) => (Array.isArray(v) ? v.map((x) => String(x).trim()).filter(Boolean)
+  : typeof v === "string" ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
+
 export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = null } = {}) {
   const now = today ?? new Date().toISOString().slice(0, 10);
   const report = {
     tickets: 0, links: 0, worklog: 0, criteria: 0, notes: 0, acHeadings: 0,
+    labels: 0, components: 0,
     skipped: { noId: 0, badId: 0, insertFailed: [] },
     danglingLinks: 0, danglingParents: 0,
     // A ticket with no title still loads — losing it would be worse — but the id is
@@ -55,8 +64,17 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   const insTicket = db.prepare(
     `INSERT INTO ticket (id, project_key, num, type, status, title, priority, resolution,
                          parent_id, parent_type, assignee, estimate_minutes, sprint_id,
-                         start_date, due_date, body, ac_heading, created_on, updated_on)
-     VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?)`);
+                         start_date, due_date, body, ac_heading, created_on, updated_on,
+                         branch, pr, ref, category, verification, derived,
+                         likelihood, impact, extra_json)
+     VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+  // BLZ-295. Without these the migration silently dropped every one of them: 926 of
+  // 2,561 tickets (36.2%) carry at least one, and extra_json is what keeps the
+  // round-trip promise for keys nobody has thought of yet.
+  const insLabel = db.prepare(
+    "INSERT OR IGNORE INTO ticket_label (ticket_id, project_key, label, ord) VALUES (?,?,?,?)");
+  const insComponent = db.prepare(
+    "INSERT OR IGNORE INTO ticket_component (ticket_id, project_key, component, ord) VALUES (?,?,?,?)");
   const setParent = db.prepare("UPDATE ticket SET parent_id = ?, parent_type = ? WHERE id = ?");
   const insLink = db.prepare("INSERT OR IGNORE INTO ticket_link VALUES (?,?,?)");
   const insWork = db.prepare("INSERT INTO worklog_entry (ticket_id,on_date,minutes,note) VALUES (?,?,?,?)");
@@ -89,7 +107,16 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
         estimate(fm.estimate), String(fm.sprint ?? "") || null,
         isoDate(fm.start, null), isoDate(fm.due, null),
         t.body ?? "", ac.heading,
-        isoDate(fm.created, now), isoDate(fm.updated, now));
+        isoDate(fm.created, now), isoDate(fm.updated, now),
+        nzs(fm.branch), nzs(fm.pr), nzs(fm.ref), nzs(fm.category),
+        nzs(fm.verification), nzs(fm.derived), nzs(fm.likelihood), nzs(fm.impact),
+        JSON.stringify(extraFields(fm)));
+
+      const project = t.project ?? key;
+      let ord = 0;
+      for (const l of asList(fm.labels)) { insLabel.run(id, project, l, ord++); report.labels++; }
+      ord = 0;
+      for (const c of asList(fm.components)) { insComponent.run(id, project, c, ord++); report.components++; }
     } catch (e) {
       // Named, not swallowed: the tally is only trustworthy if a refusal is visible.
       report.skipped.insertFailed.push({ id, reason: String(e.message).slice(0, 120) });

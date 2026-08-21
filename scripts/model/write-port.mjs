@@ -22,6 +22,15 @@ import { ticketPath, fsStorage } from "./storage.mjs";
 import { serializeTicket } from "./ticket.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 
+/** A corrupt extra_json must not take the whole read down — report empty, never throw. */
+function safeJson(text) {
+  if (!text) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+
 /** Stable stringify: object keys sorted, array order preserved. */
 function canonical(v) {
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
@@ -107,6 +116,32 @@ export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsRe
 const ENC = (v, pg) => (typeof v === "boolean" ? (pg ? v : (v ? 1 : 0)) : v);
 
 /**
+ * Frontmatter keys with a real column, and therefore NOT part of extra_json.
+ *
+ * One list, used by both the write and the read side. Two lists would drift, and the
+ * drift is invisible: a key in neither list is dropped, a key in both is stored twice
+ * and the second write wins.
+ */
+export const COLUMN_FIELDS = new Set([
+  "id", "project", "type", "title", "priority", "resolution", "parent", "assignee",
+  "estimate", "sprint", "start", "due", "created", "updated",
+  "links", "labels", "components", "worklog",
+  "branch", "pr", "ref", "category", "verification", "derived", "likelihood", "impact",
+]);
+
+/** Everything else — preserved verbatim so the round-trip promise survives. */
+export function extraFields(fm) {
+  const out = {};
+  for (const [k, v] of Object.entries(fm ?? {})) {
+    if (COLUMN_FIELDS.has(k)) continue;
+    if (v === "" || v === null || v === undefined) continue;
+    if (Array.isArray(v) && v.length === 0) continue;
+    out[k] = v;
+  }
+  return out;
+}
+
+/**
  * Database adapter. `exec` is the same {run, all} shape the projection uses, so it
  * works against SQLite synchronously and Postgres asynchronously without a second
  * implementation — ADR-0010's async port doing the job it was chosen for.
@@ -149,13 +184,20 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
       if (rows?.length) parentType = rows[0].type;
       else parentId = null;
     }
+    const extra = extraFields(fm);
     const cols = ["id", "project_key", "num", "type", "status", "title", "priority", "resolution",
                   "parent_id", "parent_type", "assignee", "estimate_minutes", "sprint_id",
-                  "start_date", "due_date", "body", "created_on", "updated_on"];
+                  "start_date", "due_date", "body", "created_on", "updated_on",
+                  "branch", "pr", "ref", "category", "verification", "derived",
+                  "likelihood", "impact", "extra_json"];
     const vals = [id, project, num(id), fm.type, status, fm.title, fm.priority || "medium",
                   nz(fm.resolution), parentId, parentType, fm.assignee || "unassigned",
                   est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due), body ?? "",
-                  fm.created, fm.updated];
+                  fm.created, fm.updated,
+                  nz(fm.branch), nz(fm.pr) == null ? null : String(fm.pr), nz(fm.ref),
+                  nz(fm.category), nz(fm.verification), nz(fm.derived),
+                  nz(fm.likelihood), nz(fm.impact),
+                  JSON.stringify(extra)];
     // `excluded.<col>` rather than a second set of placeholders. SQLite's `?` is
     // POSITIONAL, so repeating the columns in the SET clause would silently consume
     // parameters past the end of the list — which is how this first went in, and it
@@ -180,10 +222,12 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
     for (const [table, col, val] of [["ticket_label", "label", fm.labels],
                                      ["ticket_component", "component", fm.components]]) {
       await exec.run(`DELETE FROM ${table} WHERE ticket_id = ${ph(0)}`, [id]);
+      let ord = 0;
       for (const v of asList(val)) {
         await exec.run(
-          `INSERT INTO ${table} (ticket_id, project_key, ${col}) VALUES (${ph(0)}, ${ph(1)}, ${ph(2)})`,
-          [id, project, v]);
+          `INSERT INTO ${table} (ticket_id, project_key, ${col}, ord)
+           VALUES (${ph(0)}, ${ph(1)}, ${ph(2)}, ${ph(3)})`,
+          [id, project, v, ord++]);
       }
     }
 
@@ -222,7 +266,9 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
         `SELECT id, project_key, num, type, status, title, priority, resolution, parent_id,
                 parent_type, assignee, estimate_minutes, sprint_id,
                 ${d("start_date")}, ${d("due_date")}, body,
-                ${d("created_on")}, ${d("updated_on")}
+                ${d("created_on")}, ${d("updated_on")},
+                branch, pr, ref, category, verification, derived, likelihood, impact,
+                extra_json
            FROM ticket WHERE id = ${ph(0)} AND deleted_at IS NULL`, [id]);
       if (!rows?.length) return null;
       const r = rows[0];
@@ -230,9 +276,9 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
         `SELECT link_type, target_id FROM ticket_link WHERE src_id = ${ph(0)}
           ORDER BY link_type, target_id`, [id])) ?? [];
       const labels = (await exec.all(
-        `SELECT label FROM ticket_label WHERE ticket_id = ${ph(0)} ORDER BY label`, [id])) ?? [];
+        `SELECT label FROM ticket_label WHERE ticket_id = ${ph(0)} ORDER BY ord`, [id])) ?? [];
       const comps = (await exec.all(
-        `SELECT component FROM ticket_component WHERE ticket_id = ${ph(0)} ORDER BY component`, [id])) ?? [];
+        `SELECT component FROM ticket_component WHERE ticket_id = ${ph(0)} ORDER BY ord`, [id])) ?? [];
       const work = (await exec.all(
         `SELECT ${pg ? "on_date::text AS on_date" : "on_date"}, minutes, note
            FROM worklog_entry WHERE ticket_id = ${ph(0)} ORDER BY id`, [id])) ?? [];
@@ -244,6 +290,17 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
           estimate: r.estimate_minutes ?? "", sprint: r.sprint_id ?? "",
           start: r.start_date ?? "", due: r.due_date ?? "",
           created: r.created_on, updated: r.updated_on,
+          ...(r.branch       == null ? {} : { branch: r.branch }),
+          ...(r.pr           == null ? {} : { pr: r.pr }),
+          ...(r.ref          == null ? {} : { ref: r.ref }),
+          ...(r.category     == null ? {} : { category: r.category }),
+          ...(r.verification == null ? {} : { verification: r.verification }),
+          ...(r.derived      == null ? {} : { derived: r.derived }),
+          ...(r.likelihood   == null ? {} : { likelihood: r.likelihood }),
+          ...(r.impact       == null ? {} : { impact: r.impact }),
+          // Unknown keys, restored verbatim. Spread BEFORE nothing else can shadow a
+          // real column: extraFields() already guarantees no overlap.
+          ...safeJson(r.extra_json),
           links: links.map((l) => ({ type: l.link_type, target: l.target_id })),
           ...(labels.length ? { labels: labels.map((r) => r.label) } : {}),
           ...(comps.length ? { components: comps.map((r) => r.component) } : {}),
