@@ -13,10 +13,7 @@ const DEFAULTS = {
   projects: [],
   codeRepos: [],
   boardTitle: "Blaze",
-  codeRepo: null,
-  provider: "github",
   columns: ["backlog", "todo", "in-progress", "in-review", "done", "canceled", "duplicate"],
-  terminal: ["done", "canceled", "duplicate"],
   defaultLabels: ["frontend", "backend", "infra", "docs", "bug", "chore"],
   port: 4321,
   agentCommand: "claude -p",
@@ -58,12 +55,8 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   if (env.BLAZE_PORT) cfg.port = Number(env.BLAZE_PORT);
   if (env.BLAZE_AGENT_COMMAND) cfg.agentCommand = env.BLAZE_AGENT_COMMAND;
   if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;
-  if (env.BLAZE_CODE_REPO !== undefined) cfg.codeRepo = env.BLAZE_CODE_REPO || null;
 
   // Derived values.
-  cfg.codeRepoPath = cfg.codeRepo
-    ? (isAbsolute(cfg.codeRepo) ? cfg.codeRepo : resolve(root, cfg.codeRepo))
-    : null;
   cfg.idRegex = new RegExp("\\b" + cfg.key + "-(\\d+)", "i");
   cfg.idFromRef = (ref) => {
     const m = cfg.idRegex.exec(ref || "");

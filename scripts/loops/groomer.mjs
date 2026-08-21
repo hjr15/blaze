@@ -30,22 +30,71 @@ export function saveState(root, state) {
   writeFileSync(join(dir, "state.json"), JSON.stringify(state, null, 2));
 }
 
+/**
+ * Every root-relative directory a ticket in `col` could live in.
+ *
+ * BLZ-298: this used to be just `col`. The board layout is
+ * `projects/<KEY>/<status>/`, so `readdirSync(join(root, "defined"))` threw ENOENT for
+ * every column, the catch swallowed it, and the groomer selected NOTHING — measured
+ * against the live board. It had never worked on a multi-project board; nobody noticed
+ * because the loop is disabled by default.
+ *
+ * The flat layout is still honoured, so a board that predates `projects/` keeps working.
+ */
+export function statusDirs(root, cfg, col) {
+  const out = [];
+  if (existsSync(join(root, "projects"))) {
+    // cfg.projects is the authority on which projects exist; a stray directory is not
+    // a project until it is configured as one.
+    for (const key of cfg.projects ?? []) {
+      const dir = join("projects", key, col);
+      if (existsSync(join(root, dir))) out.push({ dir, key });
+    }
+  }
+  // Legacy flat layout: `<root>/<col>/`, matched by the single-project cfg.key.
+  if (existsSync(join(root, col))) out.push({ dir: col, key: null });
+  return out;
+}
+
+/**
+ * A project's ticket-file and id-line matchers.
+ *
+ * BLZ-298: the groomer used `cfg.fileRegex`, derived from the SINGLE-project `cfg.key`
+ * — which defaults to "TASK". Against a board of BLZ/OBA/INF tickets it matched no
+ * file at all, so even after the directory walk was fixed the groomer still selected
+ * nothing. Reconcile already derives its matchers per project (config.mjs:228-230);
+ * this is the same construction, applied here.
+ */
+export function matchersFor(cfg, key) {
+  if (!key) return { fileRegex: cfg.fileRegex, idLineRegex: cfg.idLineRegex };
+  return {
+    fileRegex: new RegExp("^" + key + "-\\d+.*\\.md$"),
+    idLineRegex: new RegExp("^id:\\s*(" + key + "-\\d+)", "m"),
+  };
+}
+
 export function selectNextTicket(root, cfg, state) {
   for (const col of cfg.loops.groomer.columns) {
-    let files = [];
-    try {
-      files = readdirSync(join(root, col)).filter((f) => cfg.fileRegex.test(f));
-    } catch {
-      continue;
-    }
-    files.sort();
-    for (const file of files) {
-      const rel = `${col}/${file}`;
-      const raw = readFileSync(join(root, rel), "utf8");
-      const m = cfg.idLineRegex.exec(raw);
-      if (!m) continue;
-      const id = m[1];
-      if (state.groomed[id] !== hashContent(raw)) return { id, file, col, rel, raw };
+    for (const { dir, key } of statusDirs(root, cfg, col)) {
+      const { fileRegex, idLineRegex } = matchersFor(cfg, key);
+      let files = [];
+      try {
+        files = readdirSync(join(root, dir)).filter((f) => fileRegex.test(f));
+      } catch {
+        continue;
+      }
+      files.sort();
+      for (const file of files) {
+        const rel = `${dir}/${file}`;
+        const raw = readFileSync(join(root, rel), "utf8");
+        const m = idLineRegex.exec(raw);
+        if (!m) continue;
+        const id = m[1];
+        // `statusDir` is carried so the rename guard compares against the ticket's OWN
+        // directory rather than rel.split("/")[0], which is "projects" for every ticket
+        // under the project layout and therefore compares nothing.
+        if (state.groomed[id] !== hashContent(raw)) return { id, file, col, rel, raw, statusDir: dir };
+      }
     }
   }
   return null;
@@ -167,7 +216,11 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   }
 
   const porcelain = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" });
-  const changed = parsePorcelain(porcelain).filter((f) => cfg.columns.some((c) => f.startsWith(`${c}/`)));
+  // Any status directory of any configured project, not just a top-level `<col>/`.
+  const groomable = (cfg.loops.groomer.columns ?? [])
+    .flatMap((c) => statusDirs(root, cfg, c).map((d) => d.dir));
+  const changed = parsePorcelain(porcelain)
+    .filter((f) => groomable.some((d) => f.startsWith(`${d}/`)));
   const record = () => {
     const raw = readFileSync(join(root, ticket.rel), "utf8");
     state.groomed[ticket.id] = hashContent(raw);
@@ -181,8 +234,11 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
 
   // Guard: detect renames (status-dir change) or structural frontmatter mutations.
   // A rename means any changed path lands in a different column dir than the ticket's.
-  const ticketDir = ticket.rel.split("/")[0];
-  const hasRename = changed.some((f) => f.split("/")[0] !== ticketDir);
+  // The ticket's own status directory. `rel.split("/")[0]` was "projects" for every
+  // ticket under the project layout, so the rename guard compared a constant to itself
+  // and could never fire.
+  const ticketDir = ticket.statusDir ?? ticket.rel.split("/").slice(0, -1).join("/");
+  const hasRename = changed.some((f) => f.split("/").slice(0, -1).join("/") !== ticketDir);
   const afterRaw = existsSync(join(root, ticket.rel)) ? readFileSync(join(root, ticket.rel), "utf8") : "";
   const hasStructuralFmChange = isStructuralChange(ticket.raw, afterRaw);
   if (hasRename || hasStructuralFmChange) {
