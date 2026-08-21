@@ -43,6 +43,7 @@ const BULLET = /^[ \t]*[-*][ \t]+/;
  */
 export function findAcSection(body) {
   const lines = String(body ?? "").split("\n");
+  const found = [];
   for (let i = 0; i < lines.length; i++) {
     const exact = HEADING_EXACT.test(lines[i]);
     if (!exact && !HEADING_NEAR.test(lines[i])) continue;
@@ -51,9 +52,30 @@ export function findAcSection(body) {
       if (ANY_HEADING.test(lines[j])) break;
       out.push(lines[j]);
     }
-    return { heading: lines[i].trim(), lines: out, exact };
+    found.push({ heading: lines[i].trim(), lines: out, exact });
   }
-  return null;
+  if (!found.length) return null;
+
+  // BLZ-296. Returning found[0] unconditionally lost real criteria on 54 tickets.
+  // `blaze new` writes a template stub — `## Acceptance Criteria` followed by a single
+  // empty `- [ ]` — and a hand-written body then repeats the heading with the actual
+  // criteria under it. 65 tickets carry more than one AC heading and 54 of those have
+  // an EMPTY first section, so the importer loaded the placeholder and dropped
+  // everything real. Silently: a ticket with one blank criterion is a valid ticket.
+  //
+  // The rule is therefore "the first section that says anything", falling back to the
+  // first when none does — which leaves the 2,498 single-section tickets untouched.
+  // "Content" means a line that SAYS something, not merely a line that exists. The
+  // template stub is `- [ ] ` — non-empty as a string, empty as a criterion — so a
+  // bare trim() test calls the placeholder content and keeps choosing it.
+  const saysSomething = (l) => {
+    const t = l.trim();
+    if (t === "") return false;
+    const m = t.match(/^[-*+][ \t]+\[[ xX]\][ \t]*(.*)$/);
+    return m ? m[1].trim() !== "" : true;
+  };
+  const hasContent = (sec) => sec.lines.some(saysSomething);
+  return found.find(hasContent) ?? found[0];
 }
 
 /**
