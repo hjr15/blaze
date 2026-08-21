@@ -5,7 +5,9 @@
 // operation, plus the command that reads back what a dual-write soak has found.
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolveRoots, loadConfig } from "./config.mjs";
-import { openShadow, shadowDbPath, divergenceLogPath } from "./model/write-port-resolve.mjs";
+import { openShadow, shadowDbPath, divergenceLogPath,
+         readSoakState } from "./model/write-port-resolve.mjs";
+import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION } from "./model/db-schema-version.mjs";
 
@@ -99,17 +101,32 @@ async function status({ dataRoot, log }) {
     log(`  AC notes     ${byKind.note ?? 0}`);
   } finally { db.close(); }
 
+  // Is the soak actually ON right now? A week of "no divergences" from a board whose
+  // env var was never exported is not evidence of anything, and it looks identical to
+  // a week of perfect agreement.
+  const mode = (process.env[WRITE_PORT_ENV] ?? "fs").trim();
+  log(`\nwrite port   ${mode}${mode === "fs" ? "   (the soak is NOT running — export "
+    + `${WRITE_PORT_ENV}=dual)` : ""}`);
+
+  const soak = readSoakState(dataRoot);
+  if (soak) {
+    log(`operations   ${soak.operations}   (first ${soak.firstAt.slice(0, 10)}, `
+      + `last ${soak.lastAt.slice(0, 10)})`);
+  } else {
+    log("operations   0   — nothing has been written through the dual port yet");
+  }
+
   const logPath = divergenceLogPath(dataRoot);
   if (!existsSync(logPath)) {
     // Deliberately not "no soak has run": the log is written only when the two sides
     // DIFFER, so an absent file is exactly what a clean soak looks like. Claiming
     // otherwise reports a successful soak as one that never happened.
-    log("\ndivergences: none recorded — the log is written only when the filesystem");
+    log("divergences: none recorded — the log is written only when the filesystem");
     log("and the database disagree, so this is also what a clean soak looks like.");
     return 0;
   }
   const lines = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
-  log(`\ndivergences: ${lines.length}  (${logPath})`);
+  log(`divergences: ${lines.length}  (${logPath})`);
   if (!lines.length) return 0;
 
   // Grouped by FIELD, because a hundred divergences on one field is one bug and a

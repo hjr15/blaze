@@ -134,3 +134,65 @@ describe("divergences go to a file, not to whichever terminal happened to run th
       "an intercepted soak must not also write the file");
   });
 });
+
+describe("the soak has a denominator (BLZ-300)", () => {
+  // "Zero divergences" is not evidence on its own. Zero divergences across zero
+  // operations is what an INACTIVE soak looks like, and it is indistinguishable from a
+  // perfect one unless something counts the denominator. A week of a forgotten env var
+  // would otherwise read as a week of perfect agreement.
+  test("counting starts at one and accumulates across separate invocations", async () => {
+    const { recordSoakOp, readSoakState } = await import("../scripts/model/write-port-resolve.mjs");
+    const dataRoot = root();
+    assert.equal(readSoakState(dataRoot), null, "nothing counted before anything runs");
+    assert.equal(recordSoakOp(dataRoot, { now: "2026-08-21T00:00:00.000Z" }).operations, 1);
+    assert.equal(recordSoakOp(dataRoot, { now: "2026-08-22T00:00:00.000Z" }).operations, 2);
+    const s = readSoakState(dataRoot);
+    assert.equal(s.operations, 2);
+    assert.equal(s.firstAt, "2026-08-21T00:00:00.000Z", "the window's start is kept");
+    assert.equal(s.lastAt, "2026-08-22T00:00:00.000Z");
+  });
+
+  test("a corrupt counter restarts rather than taking the verb down", async () => {
+    // The counter is telemetry. Losing the count is a nuisance; failing the write
+    // because telemetry is unreadable would make the instrument the outage.
+    const { recordSoakOp, soakStatePath } = await import("../scripts/model/write-port-resolve.mjs");
+    const dataRoot = root();
+    mkdirSync(join(dataRoot, ".blaze"), { recursive: true });
+    const { writeFileSync } = await import("node:fs");
+    writeFileSync(soakStatePath(dataRoot), "not json" + String.fromCharCode(10));
+    // The corrupt line still counts as an operation — losing the timestamp is a
+    // nuisance, miscounting the denominator is not.
+    const s2 = recordSoakOp(dataRoot);
+    assert.equal(s2.operations, 2);
+    assert.equal(s2.firstAt, "unknown");
+  });
+
+  test("a dual port counts every write and move", async () => {
+    const { readSoakState } = await import("../scripts/model/write-port-resolve.mjs");
+    const dataRoot = await seededBoard();
+    const projectsDir = join(dataRoot, "projects");
+    mkdirSync(join(projectsDir, "ENG", "defined"), { recursive: true });
+    const r = await resolveWritePort({ dataRoot, projectsDir,
+                                       env: { BLAZE_WRITE_PORT: "dual" },
+                                       onDivergence: () => {} });
+    const t = {
+      project: "ENG", status: "defined",
+      frontmatter: { id: "ENG-1", project: "ENG", type: "task", title: "t",
+                     priority: "medium", assignee: "unassigned",
+                     created: "2026-01-01", updated: "2026-01-01", links: [] },
+      body: "b",
+    };
+    const w = await r.port.write(t);
+    await r.port.move({ ...t, status: "in-progress", currentFile: w.file });
+    r.close();
+    assert.equal(readSoakState(dataRoot).operations, 2);
+  });
+
+  test("the fs port counts nothing — there is no soak to measure", async () => {
+    const { readSoakState } = await import("../scripts/model/write-port-resolve.mjs");
+    const dataRoot = root();
+    const r = await resolveWritePort({ dataRoot, projectsDir: join(dataRoot, "projects"), env: {} });
+    r.close();
+    assert.equal(readSoakState(dataRoot), null);
+  });
+});

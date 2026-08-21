@@ -9,7 +9,7 @@
 // THE DEFAULT IS STILL THE FILESYSTEM. `fs` needs no database and opens none. Only
 // `dual` and `db` touch SQLite, and only `db` makes it the source of truth — which
 // remains a Phase 2 decision (BLZ-254), not a configuration accident.
-import { existsSync, mkdirSync, appendFileSync } from "node:fs";
+import { existsSync, mkdirSync, appendFileSync, readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fsStorage } from "./storage.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write-port.mjs";
@@ -18,6 +18,7 @@ import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
 export const shadowDbPath = (dataRoot) => join(dataRoot, ".blaze", "blaze.db");
 export const divergenceLogPath = (dataRoot) => join(dataRoot, ".blaze", "divergences.jsonl");
+export const soakStatePath = (dataRoot) => join(dataRoot, ".blaze", "soak-ops.jsonl");
 
 /** A sync {run, all} over node:sqlite, the shape the db port and the schema guard want. */
 export function sqliteExec(db) {
@@ -71,6 +72,35 @@ export function logDivergence(dataRoot, d, { now = new Date().toISOString() } = 
 }
 
 /**
+ * Count one dual-write operation.
+ *
+ * "Zero divergences" is not evidence on its own — zero divergences across zero
+ * operations is what an INACTIVE soak looks like, and it is indistinguishable from a
+ * perfect one unless something counts the denominator. This is that denominator.
+ */
+export function recordSoakOp(dataRoot, { now = new Date().toISOString() } = {}) {
+  // APPEND, never read-modify-write. This board runs parallel sessions (BLAZE_SESSION),
+  // and a counter that reads a number, adds one and writes it back loses an increment
+  // whenever two sessions overlap — silently, and in the direction that flatters the
+  // soak by undercounting the denominator.
+  const path = soakStatePath(dataRoot);
+  mkdirSync(dirname(path), { recursive: true });
+  appendFileSync(path, JSON.stringify({ at: now }) + "\n");
+  return readSoakState(dataRoot);
+}
+
+export function readSoakState(dataRoot) {
+  const path = soakStatePath(dataRoot);
+  if (!existsSync(path)) return null;
+  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+  if (!lines.length) return null;
+  const at = (line) => { try { return JSON.parse(line).at; } catch { return null; } };
+  return { operations: lines.length,
+           firstAt: at(lines[0]) ?? "unknown",
+           lastAt: at(lines[lines.length - 1]) ?? "unknown" };
+}
+
+/**
  * The port a verb should write through, for this board and this environment.
  *
  * @returns { port, mode, close } — `close` releases the shadow database, and is a no-op
@@ -99,6 +129,13 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
   // fatal — refusing a legitimate write because a shadow disagreed would make the
   // safety net the outage.
   const report = onDivergence ?? ((d) => logDivergence(dataRoot, d));
-  return { port: dualWritePort(fsWritePort(projectsDir, storage), db, { onDivergence: report }),
-           mode, close };
+  const port = dualWritePort(fsWritePort(projectsDir, storage), db, { onDivergence: report });
+  // Count every operation, so a week of "no divergences" can be told apart from a week
+  // of the soak not running at all.
+  const counted = {
+    ...port,
+    write(t, ctx) { recordSoakOp(dataRoot); return port.write(t, ctx); },
+    move(t, ctx) { recordSoakOp(dataRoot); return port.move(t, ctx); },
+  };
+  return { port: counted, mode, close };
 }
