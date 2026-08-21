@@ -25,6 +25,7 @@ const node = (file, args = []) => spawnSync(process.execPath, [join(here, file),
 // read/write web viewer — its own mutating `/api/*` handlers are gated
 // separately, see readonly.mjs) and `rollup` (a report) are the only false.
 const SUBCOMMANDS = {
+  init: { file: "init-runner.mjs", desc: "set up a new board (first-run wizard)", mutates: true },
   start: { file: "supervisor.mjs", desc: "run the reconcile/groomer loops (default)", mutates: true, noArgs: true },
   board: { file: "serve.mjs", desc: "serve the board viewer", mutates: false, noArgs: true },
   reconcile: { file: "reconcile.mjs", desc: "sync board status to git/PR state", mutates: true },
