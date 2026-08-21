@@ -1,5 +1,6 @@
 // scripts/link-runner.mjs — CLI for `blaze link [--rm] <id> <TYPE> <target>`.
 import { applyLink } from "./link.mjs";
+import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { LINK_TYPES } from "./model/links.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
@@ -40,7 +41,12 @@ if (!id || !type || !target) {
   process.exit(1);
 }
 const today = new Date().toISOString().slice(0, 10);
-const r = await applyLink(projectsDir, id, { type, target, remove }, { today });
+// BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the
+// real verbs. Unset means the filesystem, exactly as before.
+const { port: writePort, close: closeWritePort } =
+  await resolveWritePort({ dataRoot, projectsDir });
+const r = await applyLink(projectsDir, id, { type, target, remove }, { today, writePort });
+closeWritePort();
 if (!r.ok) { console.error(`blaze link failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const verb = remove ? "unlink" : "link";

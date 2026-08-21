@@ -1,5 +1,6 @@
 // scripts/resolve-runner.mjs — CLI entry for `blaze resolve <id> <resolution>`.
 import { applyResolve } from "./resolve.mjs";
+import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -33,7 +34,12 @@ const [id, resolution] = positional;
 if (!id || !resolution) { console.error("usage: blaze resolve <id> <resolution>"); process.exit(1); }
 
 const today = new Date().toISOString().slice(0, 10);
-const r = await applyResolve(projectsDir, id, resolution, { today });
+// BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the
+// real verbs. Unset means the filesystem, exactly as before.
+const { port: writePort, close: closeWritePort } =
+  await resolveWritePort({ dataRoot, projectsDir });
+const r = await applyResolve(projectsDir, id, resolution, { today, writePort });
+closeWritePort();
 if (!r.ok) { console.error(`blaze resolve failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "resolve", id, message: `${id}: resolution → ${resolution}`, files: [r.file] });

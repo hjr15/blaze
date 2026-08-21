@@ -2,6 +2,7 @@
 // applyEdit against the resolved data tree, then commit (or queue) the
 // touched file. Mirrors move-runner.mjs's commit pattern.
 import { applyEdit } from "./edit.mjs";
+import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -43,7 +44,12 @@ if (!id || !field || valueParts.length === 0) {
 }
 const value = valueParts.join(" ");
 const today = new Date().toISOString().slice(0, 10);
-const r = await applyEdit(projectsDir, id, { [field]: value }, { today });
+// BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the
+// real verbs. Unset means the filesystem, exactly as before.
+const { port: writePort, close: closeWritePort } =
+  await resolveWritePort({ dataRoot, projectsDir });
+const r = await applyEdit(projectsDir, id, { [field]: value }, { today, writePort });
+closeWritePort();
 if (!r.ok) { console.error(`blaze edit failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "edit", id, message: `${id}: edit ${field}`, files: [r.file] });
