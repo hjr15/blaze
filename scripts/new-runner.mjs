@@ -64,7 +64,7 @@ if (!opts.project || !opts.type || !opts.title) {
   process.exit(1);
 }
 
-const r = applyNew(projectsDir, opts);
+const r = await applyNew(projectsDir, opts);
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 

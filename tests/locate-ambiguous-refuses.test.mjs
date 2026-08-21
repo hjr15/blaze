@@ -53,20 +53,20 @@ function ambiguousBoard() {
 }
 
 const VERBS = [
-  ["blaze move",   (p, id) => applyMove(p, id, "in-progress", { today: "2026-01-02" })],
-  ["blaze edit",   (p, id) => applyEdit(p, id, { priority: "high" }, { today: "2026-01-02" })],
-  ["blaze log",    (p, id) => applyLog(p, id, 30, { today: "2026-01-02" })],
-  ["blaze link",   (p, id) => applyLink(p, id, { type: "Relates", target: "PROJ-42" }, { today: "2026-01-02" })],
-  ["blaze resolve",(p, id) => applyResolve(p, id, "done", { today: "2026-01-02" })],
-  ["toggle-ac",    (p, id) => applyToggleAc(p, id, { index: 0, checked: true }, { today: "2026-01-02" })],
+  ["blaze move",   async (p, id) => await applyMove(p, id, "in-progress", { today: "2026-01-02" })],
+  ["blaze edit",   async (p, id) => await applyEdit(p, id, { priority: "high" }, { today: "2026-01-02" })],
+  ["blaze log",    async (p, id) => await applyLog(p, id, 30, { today: "2026-01-02" })],
+  ["blaze link",   async (p, id) => await applyLink(p, id, { type: "Relates", target: "PROJ-42" }, { today: "2026-01-02" })],
+  ["blaze resolve",async (p, id) => await applyResolve(p, id, "done", { today: "2026-01-02" })],
+  ["toggle-ac",    async (p, id) => await applyToggleAc(p, id, { index: 0, checked: true }, { today: "2026-01-02" })],
 ];
 
 for (const [name, run] of VERBS) {
-  test(`BLZ-122: ${name} REFUSES an ambiguous id, names every path, and mutates nothing`, () => {
+  test(`BLZ-122: ${name} REFUSES an ambiguous id, names every path, and mutates nothing`, async () => {
     const { root, projects, done, defined } = ambiguousBoard();
     const before = [done, defined].map((f) => readFileSync(f, "utf8"));
 
-    const res = run(projects, "PROJ-41");
+    const res = await run(projects, "PROJ-41");
 
     assert.equal(res.ok, false, `${name} must refuse rather than pick a copy`);
     const msg = res.errors.join("\n");
@@ -81,10 +81,10 @@ for (const [name, run] of VERBS) {
   });
 }
 
-test("BLZ-122: an ambiguous LINK TARGET is refused too — the link would point at two tickets", () => {
+test("BLZ-122: an ambiguous LINK TARGET is refused too — the link would point at two tickets", async () => {
   const { root, projects, done, defined } = ambiguousBoard();
   const before = readFileSync(done, "utf8");
-  const res = applyLink(projects, "PROJ-42", { type: "Relates", target: "PROJ-41" }, { today: "2026-01-02" });
+  const res = await applyLink(projects, "PROJ-42", { type: "Relates", target: "PROJ-41" }, { today: "2026-01-02" });
   assert.equal(res.ok, false, "a target resolving to two files is not a resolved target");
   const msg = res.errors.join("\n");
   assert.ok(msg.includes(done) && msg.includes(defined), `must name both target paths:\n${msg}`);
@@ -92,17 +92,17 @@ test("BLZ-122: an ambiguous LINK TARGET is refused too — the link would point 
   rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-122: the refusal is scoped to the ambiguous id — clean ids still work", () => {
+test("BLZ-122: the refusal is scoped to the ambiguous id — clean ids still work", async () => {
   const { root, projects, other } = ambiguousBoard();
-  const res = applyEdit(projects, "PROJ-42", { priority: "high" }, { today: "2026-01-02" });
+  const res = await applyEdit(projects, "PROJ-42", { priority: "high" }, { today: "2026-01-02" });
   assert.equal(res.ok, true, `an unambiguous ticket must still edit: ${JSON.stringify(res.errors)}`);
   assert.match(readFileSync(other, "utf8"), /priority: high/);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-122: a genuinely missing id still reports 'not found', not 'ambiguous'", () => {
+test("BLZ-122: a genuinely missing id still reports 'not found', not 'ambiguous'", async () => {
   const { root, projects } = ambiguousBoard();
-  const res = applyLog(projects, "PROJ-999", 30, { today: "2026-01-02" });
+  const res = await applyLog(projects, "PROJ-999", 30, { today: "2026-01-02" });
   assert.equal(res.ok, false);
   assert.match(res.errors.join("\n"), /not found/);
   rmSync(root, { recursive: true, force: true });

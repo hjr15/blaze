@@ -98,14 +98,17 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
     }
   }
 
-  function runReconcile() {
+  // async: reconcile awaits the write port (BLZ-293/294). The busy flag still guards
+  // correctly — it is set before the await and cleared in the finally, which now runs
+  // after the awaited work rather than before it.
+  async function runReconcile() {
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
     try {
       // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
-      const r = reconcile({ fetch: true, commit: true, push: true, root, projectsDir });
+      const r = await reconcile({ fetch: true, commit: true, push: true, root, projectsDir });
       if (r && r.ok && r.changes) {
         for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
       } else if (r && !r.ok) {

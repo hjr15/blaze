@@ -15,9 +15,9 @@ function fixture() {
   return { root, projects: join(root, "projects") };
 }
 
-test("applyResolve overrides resolution in place without moving the file", () => {
+test("applyResolve overrides resolution in place without moving the file", async () => {
   const { root, projects } = fixture();
-  const r = applyResolve(projects, "OBA-1", "wont-do", { today: "2026-06-29" });
+  const r = await applyResolve(projects, "OBA-1", "wont-do", { today: "2026-06-29" });
   assert.equal(r.ok, true);
   const txt = readFileSync(join(projects, "OBA", "done", "OBA-1.md"), "utf8");
   assert.match(txt, /resolution: wont-do/);
@@ -25,17 +25,17 @@ test("applyResolve overrides resolution in place without moving the file", () =>
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyResolve rejects an invalid resolution value", () => {
+test("applyResolve rejects an invalid resolution value", async () => {
   const { root, projects } = fixture();
-  const r = applyResolve(projects, "OBA-1", "banana", { today: "2026-06-29" });
+  const r = await applyResolve(projects, "OBA-1", "banana", { today: "2026-06-29" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /invalid resolution/.test(e)));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyResolve reports a missing ticket", () => {
+test("applyResolve reports a missing ticket", async () => {
   const { root, projects } = fixture();
-  const r = applyResolve(projects, "OBA-404", "done", { today: "2026-06-29" });
+  const r = await applyResolve(projects, "OBA-404", "done", { today: "2026-06-29" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /not found/.test(e)));
   rmSync(root, { recursive: true, force: true });

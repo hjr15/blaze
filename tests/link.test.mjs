@@ -16,52 +16,52 @@ function fixture() {
   return { root, projects: join(root, "projects") };
 }
 
-test("applyLink adds a validated typed link", () => {
+test("applyLink adds a validated typed link", async () => {
   const { root, projects } = fixture();
-  const r = applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
+  const r = await applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
   assert.equal(r.ok, true);
   assert.match(readFileSync(r.file, "utf8"), /links:\n\s*- \{ type: Blocks, target: OBA-2 \}/);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLink rejects an unknown link type", () => {
+test("applyLink rejects an unknown link type", async () => {
   const { root, projects } = fixture();
-  const r = applyLink(projects, "OBA-1", { type: "Bogus", target: "OBA-2" }, {});
+  const r = await applyLink(projects, "OBA-1", { type: "Bogus", target: "OBA-2" }, {});
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /unknown link type/i.test(e)));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLink rejects a target that does not resolve", () => {
+test("applyLink rejects a target that does not resolve", async () => {
   const { root, projects } = fixture();
-  const r = applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-999" }, {});
+  const r = await applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-999" }, {});
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /OBA-999/.test(e)));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLink is idempotent", () => {
+test("applyLink is idempotent", async () => {
   const { root, projects } = fixture();
-  applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
-  const r = applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
+  await applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
+  const r = await applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
   assert.equal(r.ok, true);
   const links = (readFileSync(r.file, "utf8").match(/type: Blocks, target: OBA-2/g) || []).length;
   assert.equal(links, 1);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLink rejects a source id that does not resolve", () => {
+test("applyLink rejects a source id that does not resolve", async () => {
   const { root, projects } = fixture();
-  const r = applyLink(projects, "OBA-404", { type: "Blocks", target: "OBA-2" }, {});
+  const r = await applyLink(projects, "OBA-404", { type: "Blocks", target: "OBA-2" }, {});
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /not found/.test(e)));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLink --rm removes an entry", () => {
+test("applyLink --rm removes an entry", async () => {
   const { root, projects } = fixture();
-  applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
-  const r = applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2", remove: true }, { today: "2026-07-15" });
+  await applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2" }, { today: "2026-07-15" });
+  const r = await applyLink(projects, "OBA-1", { type: "Blocks", target: "OBA-2", remove: true }, { today: "2026-07-15" });
   assert.equal(r.ok, true);
   assert.doesNotMatch(readFileSync(r.file, "utf8"), /type: Blocks, target: OBA-2/);
   rmSync(root, { recursive: true, force: true });

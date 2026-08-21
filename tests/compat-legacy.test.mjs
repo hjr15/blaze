@@ -17,7 +17,7 @@ import { reconcile } from "../scripts/reconcile.mjs";
 
 const FIXTURE = join(dirname(fileURLToPath(import.meta.url)), "fixtures", "legacy-board");
 
-test("a legacy-format board loads + indexes on the current engine (no regression)", () => {
+test("a legacy-format board loads + indexes on the current engine (no regression)", async () => {
   const idx = buildIndex(join(FIXTURE, "projects"));
   assert.ok(idx.count() >= 2, "all legacy tickets indexed");
   assert.ok(idx.get("OBA-1"), "legacy ticket OBA-1 resolves");
@@ -29,14 +29,14 @@ test("a legacy-format board loads + indexes on the current engine (no regression
   assert.equal(child.parent, "OBA-1");
 });
 
-test("a legacy-format board dry-run reconciles without throwing", () => {
+test("a legacy-format board dry-run reconciles without throwing", async () => {
   // Copy the fixture to a throwaway temp dir — reconcile() must never mutate
   // the committed fixture in place.
   const root = mkdtempSync(join(tmpdir(), "blaze-compat-legacy-"));
   cpSync(FIXTURE, root, { recursive: true });
 
   try {
-    const r = reconcile({ root, dryRun: true });
+    const r = await reconcile({ root, dryRun: true });
     assert.equal(r.ok, true, "reconcile does not throw / reports ok on a legacy board");
     // No codeRepos configured on the fixture → no git signal for any ticket,
     // so every ticket is skipped and there is nothing to change.

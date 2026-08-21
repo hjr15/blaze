@@ -15,9 +15,9 @@ function fixture(status = "in-review", fm = "") {
   return { root, projects: join(root, "projects") };
 }
 
-test("applyMove relocates the file and sets resolution on terminal entry", () => {
+test("applyMove relocates the file and sets resolution on terminal entry", async () => {
   const { root, projects } = fixture("in-review");
-  const r = applyMove(projects, "OBA-1", "done", { today: "2026-06-29" });
+  const r = await applyMove(projects, "OBA-1", "done", { today: "2026-06-29" });
   assert.equal(r.ok, true);
   assert.equal(r.from, "in-review");
   assert.equal(r.to, "done");
@@ -29,26 +29,26 @@ test("applyMove relocates the file and sets resolution on terminal entry", () =>
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyMove rejects an illegal transition and leaves the file in place", () => {
+test("applyMove rejects an illegal transition and leaves the file in place", async () => {
   const { root, projects } = fixture("defined");
-  const r = applyMove(projects, "OBA-1", "done", { today: "2026-06-29" });
+  const r = await applyMove(projects, "OBA-1", "done", { today: "2026-06-29" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /illegal transition/.test(e)));
   assert.ok(existsSync(join(projects, "OBA", "defined", "OBA-1.md")));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyMove reports a missing ticket", () => {
+test("applyMove reports a missing ticket", async () => {
   const { root, projects } = fixture("defined");
-  const r = applyMove(projects, "OBA-404", "in-progress", { today: "2026-06-29" });
+  const r = await applyMove(projects, "OBA-404", "in-progress", { today: "2026-06-29" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /not found/.test(e)));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyMove relocates to a non-terminal status with no resolution", () => {
+test("applyMove relocates to a non-terminal status with no resolution", async () => {
   const { root, projects } = fixture("defined");
-  const r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-06-29" });
+  const r = await applyMove(projects, "OBA-1", "in-progress", { today: "2026-06-29" });
   assert.equal(r.ok, true);
   assert.equal(r.to, "in-progress");
   assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
@@ -57,7 +57,7 @@ test("applyMove relocates to a non-terminal status with no resolution", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyMove warns (does not block) when moved to in-progress under an open Blocks", () => {
+test("applyMove warns (does not block) when moved to in-progress under an open Blocks", async () => {
   const { root, projects } = fixture("defined");
   const blockerDir = join(projects, "OBA", "in-progress");
   mkdirSync(blockerDir, { recursive: true });
@@ -71,14 +71,14 @@ test("applyMove warns (does not block) when moved to in-progress under an open B
   writeFileSync(join(unrelatedDir, "OBA-3.md"),
     "---\nid: OBA-3\ntitle: unrelated\ntype: task\nproject: OBA\nestimate: 30\n" +
     "created: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
-  const r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
+  const r = await applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
   assert.equal(r.ok, true);
   assert.ok(r.warnings.some((w) => /OBA-9/.test(w) && /block/i.test(w)));
   assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyMove does not throw when a Blocks-linked blocker has an unresolvable type", () => {
+test("applyMove does not throw when a Blocks-linked blocker has an unresolvable type", async () => {
   const { root, projects } = fixture("defined");
   const blockerDir = join(projects, "OBA", "in-progress");
   mkdirSync(blockerDir, { recursive: true });
@@ -90,21 +90,21 @@ test("applyMove does not throw when a Blocks-linked blocker has an unresolvable 
     "---\nid: OBA-9\ntitle: malformed blocker\nproject: OBA\nestimate: 30\n" +
     "links:\n  - { type: Blocks, target: OBA-1 }\ncreated: 2026-06-01\nupdated: 2026-06-01\n---\nbody\n");
   let r;
-  assert.doesNotThrow(() => { r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" }); });
+  await assert.doesNotReject(async () => { r = await applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" }); });
   assert.equal(r.ok, true);
   assert.ok(existsSync(join(projects, "OBA", "in-progress", "OBA-1.md")));
   assert.ok(!r.warnings.some((w) => /OBA-9/.test(w)));
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyMove has no block-warning when the blocker is already done", () => {
+test("applyMove has no block-warning when the blocker is already done", async () => {
   const { root, projects } = fixture("defined");
   const blockerDir = join(projects, "OBA", "done");
   mkdirSync(blockerDir, { recursive: true });
   writeFileSync(join(blockerDir, "OBA-9.md"),
     "---\nid: OBA-9\ntitle: blocker\ntype: task\nproject: OBA\nestimate: 30\n" +
     "links:\n  - { type: Blocks, target: OBA-1 }\ncreated: 2026-06-01\nupdated: 2026-06-01\nresolution: done\n---\nbody\n");
-  const r = applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
+  const r = await applyMove(projects, "OBA-1", "in-progress", { today: "2026-07-15" });
   assert.equal(r.ok, true);
   assert.deepEqual(r.warnings, []);
   rmSync(root, { recursive: true, force: true });

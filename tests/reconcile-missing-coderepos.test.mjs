@@ -29,10 +29,10 @@ function board(codeRepos) {
   return tmp;
 }
 
-test("INF-763: reconcile reports codeRepos it could not resolve", () => {
+test("INF-763: reconcile reports codeRepos it could not resolve", async () => {
   const root = board([join(tmpdir(), "inf763-definitely-not-here")]);
   try {
-    const r = reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
+    const r = await reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
     assert.ok(Array.isArray(r.missingRepos), "reconcile must report unresolvable repos");
     assert.equal(r.missingRepos.length, 1, "the one bad path must be named, not silently skipped");
     assert.match(r.missingRepos[0], /inf763-definitely-not-here/);
@@ -41,10 +41,10 @@ test("INF-763: reconcile reports codeRepos it could not resolve", () => {
   }
 });
 
-test("INF-763: reconcile counts how many repos it actually scanned", () => {
+test("INF-763: reconcile counts how many repos it actually scanned", async () => {
   const root = board([join(tmpdir(), "inf763-nope-a"), join(tmpdir(), "inf763-nope-b")]);
   try {
-    const r = reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
+    const r = await reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
     assert.equal(r.scannedRepos, 0, "zero repos were readable — that must be visible to the caller");
     assert.equal(r.configuredRepos, 2, "two were configured");
   } finally {
@@ -52,7 +52,7 @@ test("INF-763: reconcile counts how many repos it actually scanned", () => {
   }
 });
 
-test("INF-763: a readable repo is counted as scanned and not reported missing", () => {
+test("INF-763: a readable repo is counted as scanned and not reported missing", async () => {
   const tmp = mkdtempSync(join(tmpdir(), "inf763-ok-"));
   const repo = join(tmp, "svc");
   mkdirSync(repo, { recursive: true });
@@ -65,7 +65,7 @@ test("INF-763: a readable repo is counted as scanned and not reported missing", 
 
   const root = board([repo]);
   try {
-    const r = reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
+    const r = await reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
     assert.deepEqual(r.missingRepos, [], "a real repo must not be reported missing");
     assert.equal(r.scannedRepos, 1);
   } finally {
@@ -74,11 +74,11 @@ test("INF-763: a readable repo is counted as scanned and not reported missing", 
   }
 });
 
-test("INF-763: a board with no codeRepos configured is not treated as a failure", () => {
+test("INF-763: a board with no codeRepos configured is not treated as a failure", async () => {
   // Legitimately empty — must stay distinguishable from "configured but all broken".
   const root = board([]);
   try {
-    const r = reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
+    const r = await reconcile({ root, projectsDir: join(root, "projects"), dryRun: true });
     assert.equal(r.configuredRepos, 0);
     assert.deepEqual(r.missingRepos, []);
   } finally {

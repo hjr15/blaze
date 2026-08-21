@@ -16,9 +16,9 @@ function fixture(body) {
 
 const BODY = `## Context\nsome text with - [ ] a decoy not under AC\n## Acceptance Criteria\n- [ ] first\n- [x] second\n- [ ] third\n## Notes\ntail\n`;
 
-test("applyToggleAc checks the target AC line and leaves the rest intact", () => {
+test("applyToggleAc checks the target AC line and leaves the rest intact", async () => {
   const { root, projects } = fixture(BODY);
-  const r = applyToggleAc(projects, "OBA-1", { index: 0, checked: true }, {});
+  const r = await applyToggleAc(projects, "OBA-1", { index: 0, checked: true }, {});
   assert.equal(r.ok, true, JSON.stringify(r.errors));
   const text = readFileSync(r.file, "utf8");
   assert.match(text, /- \[x\] first/);
@@ -28,26 +28,26 @@ test("applyToggleAc checks the target AC line and leaves the rest intact", () =>
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyToggleAc unchecks index 1", () => {
+test("applyToggleAc unchecks index 1", async () => {
   const { root, projects } = fixture(BODY);
-  const r = applyToggleAc(projects, "OBA-1", { index: 1, checked: false }, {});
+  const r = await applyToggleAc(projects, "OBA-1", { index: 1, checked: false }, {});
   assert.equal(r.ok, true);
   assert.match(readFileSync(r.file, "utf8"), /- \[ \] second/);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyToggleAc rejects an out-of-range index with no write", () => {
+test("applyToggleAc rejects an out-of-range index with no write", async () => {
   const { root, projects } = fixture(BODY);
   const before = readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8");
-  const r = applyToggleAc(projects, "OBA-1", { index: 9, checked: true }, {});
+  const r = await applyToggleAc(projects, "OBA-1", { index: 9, checked: true }, {});
   assert.equal(r.ok, false);
   assert.equal(readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8"), before);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyToggleAc rejects when there is no AC section", () => {
+test("applyToggleAc rejects when there is no AC section", async () => {
   const { root, projects } = fixture("## Context\nno criteria here\n");
-  const r = applyToggleAc(projects, "OBA-1", { index: 0, checked: true }, {});
+  const r = await applyToggleAc(projects, "OBA-1", { index: 0, checked: true }, {});
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /acceptance criteria/i.test(e)));
   rmSync(root, { recursive: true, force: true });

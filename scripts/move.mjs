@@ -4,16 +4,17 @@
 // the CLI wrapper adds git add/commit.
 import { dirname } from "node:path";
 import { locateTicket, ambiguousIdError } from "./model/index.mjs";
-import { serializeTicket } from "./model/ticket.mjs";
-import { fsStorage, ticketPath } from "./model/storage.mjs";
+import { fsStorage } from "./model/storage.mjs";
+import { fsWritePort } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { planMove } from "./model/move-plan.mjs";
 import { loadProject } from "./config.mjs";
 import { isTerminal } from "./model/workflows.mjs";
 import { isType } from "./model/schema.mjs";
 
-export function applyMove(projectsDir, id, toStatus, opts = {}) {
-  const { today = null, storage = fsStorage, readStorage = fsReadStorage } = opts;
+export async function applyMove(projectsDir, id, toStatus, opts = {}) {
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
@@ -51,15 +52,16 @@ export function applyMove(projectsDir, id, toStatus, opts = {}) {
 
   const fm = { ...plan.frontmatter };
   if (today) fm.updated = today;
-  const text = serializeTicket({ frontmatter: fm, body: plan.body });
 
-  // The destination comes from the ticket's OWN project plus the target status, via
-  // the path authority — never from arithmetic on found.file. Deriving the project
-  // as dirname(dirname(file)) silently produced "done/BLZ-9" for any non-path
-  // handle, and this function still returned ok:true. See ticketPath.relocate.
-  const { file: destFile } = ticketPath.relocate(
-    projectsDir, found.project, toStatus, found.file);
-  storage.move(found.file, destFile, text);
+  // The destination is the port's business, not this verb's. move.mjs used to compute
+  // it as dirname(dirname(file)) + toStatus, which works only while `file` is a real
+  // path — handed a database handle it produced "done/BLZ-9" and still returned
+  // ok:true, the BLZ-122 class reintroduced. The verb now states WHAT it wants
+  // persisted; where that lives is the adapter's answer (BLZ-271, BLZ-293).
+  const { file: destFile, fromFile } = await writePort.move({
+    project: found.project, status: toStatus,
+    frontmatter: fm, body: plan.body, currentFile: found.file,
+  });
 
-  return { ok: true, id, from: found.status, to: toStatus, fromFile: found.file, file: destFile, resolution: plan.resolution, warnings };
+  return { ok: true, id, from: found.status, to: toStatus, fromFile: fromFile ?? found.file, file: destFile, resolution: plan.resolution, warnings };
 }

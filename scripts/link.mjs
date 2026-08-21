@@ -2,13 +2,15 @@
 // link on a ticket's `links:` frontmatter, validating the type vocabulary and (on
 // add) that the target resolves to a real ticket. fs-only; the runner commits.
 import { fsStorage } from "./model/storage.mjs";
+import { fsWritePort } from "./model/write-port.mjs";
 import { basename, dirname } from "node:path";
 import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { LINK_TYPES, addLink, removeLink } from "./model/links.mjs";
 
-export function applyLink(projectsDir, id, { type, target, remove = false }, opts = {}) {
-  const { today = null, storage = fsStorage } = opts;
+export async function applyLink(projectsDir, id, { type, target, remove = false }, opts = {}) {
+  const { today = null, storage = fsStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
   if (!LINK_TYPES.has(type)) {
     return { ok: false, errors: [`unknown link type '${type}' (expected ${[...LINK_TYPES].join("/")})`] };
   }
@@ -25,6 +27,9 @@ export function applyLink(projectsDir, id, { type, target, remove = false }, opt
   const fm = { ...found.frontmatter };
   fm.links = remove ? removeLink(fm.links, type, target) : addLink(fm.links, type, target);
   if (today) fm.updated = today;
-  storage.write(found.file, serializeTicket({ frontmatter: fm, body: found.body }));
-  return { ok: true, id, file: found.file };
+  const { file } = await writePort.write({
+    project: found.project, status: found.status,
+    frontmatter: fm, body: found.body, currentFile: found.file,
+  });
+  return { ok: true, id, file };
 }

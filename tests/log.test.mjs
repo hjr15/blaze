@@ -14,9 +14,9 @@ function fixture(worklogBlock = "") {
   return { root, projects };
 }
 
-test("applyLog appends the first worklog entry and sets updated", () => {
+test("applyLog appends the first worklog entry and sets updated", async () => {
   const { root, projects } = fixture();
-  const r = applyLog(projects, "OBA-1", 30, { today: "2026-06-29" });
+  const r = await applyLog(projects, "OBA-1", 30, { today: "2026-06-29" });
   assert.equal(r.ok, true, JSON.stringify(r.errors));
   assert.equal(r.minutes, 30);
   assert.equal(r.total_worklog_minutes, 30);
@@ -28,25 +28,25 @@ test("applyLog appends the first worklog entry and sets updated", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLog accumulates onto an existing worklog", () => {
+test("applyLog accumulates onto an existing worklog", async () => {
   const { root, projects } = fixture("worklog:\n  - { date: 2026-06-01, minutes: 60 }\n");
-  const r = applyLog(projects, "OBA-1", 15, { today: "2026-06-29" });
+  const r = await applyLog(projects, "OBA-1", 15, { today: "2026-06-29" });
   assert.equal(r.ok, true, JSON.stringify(r.errors));
   assert.equal(r.total_worklog_minutes, 75);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLog rounds minutes to 1m", () => {
+test("applyLog rounds minutes to 1m", async () => {
   const { root, projects } = fixture();
-  const r = applyLog(projects, "OBA-1", 30.4, { today: "2026-06-29" });
+  const r = await applyLog(projects, "OBA-1", 30.4, { today: "2026-06-29" });
   assert.equal(r.minutes, 30);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLog rejects non-positive minutes and does not write", () => {
+test("applyLog rejects non-positive minutes and does not write", async () => {
   const { root, projects } = fixture();
   const before = readFileSync(join(projects, "OBA", "in-progress", "OBA-1-x.md"), "utf8");
-  const r = applyLog(projects, "OBA-1", 0, { today: "2026-06-29" });
+  const r = await applyLog(projects, "OBA-1", 0, { today: "2026-06-29" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /positive/.test(e)));
   const after = readFileSync(join(projects, "OBA", "in-progress", "OBA-1-x.md"), "utf8");
@@ -54,9 +54,9 @@ test("applyLog rejects non-positive minutes and does not write", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLog round-trips a --note and honours an explicit --date", () => {
+test("applyLog round-trips a --note and honours an explicit --date", async () => {
   const { root, projects } = fixture();
-  const r = applyLog(projects, "OBA-1", 20, { date: "2026-06-15", note: "pairing", today: "2026-06-29" });
+  const r = await applyLog(projects, "OBA-1", 20, { date: "2026-06-15", note: "pairing", today: "2026-06-29" });
   assert.equal(r.ok, true, JSON.stringify(r.errors));
   const txt = readFileSync(r.file, "utf8");
   assert.match(txt, /date: 2026-06-15/);
@@ -64,9 +64,9 @@ test("applyLog round-trips a --note and honours an explicit --date", () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyLog reports a clear error for an unknown id", () => {
+test("applyLog reports a clear error for an unknown id", async () => {
   const { root, projects } = fixture();
-  const r = applyLog(projects, "OBA-999", 10, { today: "2026-06-29" });
+  const r = await applyLog(projects, "OBA-999", 10, { today: "2026-06-29" });
   assert.equal(r.ok, false);
   assert.ok(r.errors.some((e) => /not found/.test(e)));
   rmSync(root, { recursive: true, force: true });

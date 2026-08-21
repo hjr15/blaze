@@ -43,7 +43,7 @@ if (!id || !field || valueParts.length === 0) {
 }
 const value = valueParts.join(" ");
 const today = new Date().toISOString().slice(0, 10);
-const r = applyEdit(projectsDir, id, { [field]: value }, { today });
+const r = await applyEdit(projectsDir, id, { [field]: value }, { today });
 if (!r.ok) { console.error(`blaze edit failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "edit", id, message: `${id}: edit ${field}`, files: [r.file] });

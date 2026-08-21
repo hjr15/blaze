@@ -2,10 +2,10 @@
 // fs-only (no git); the board/CLI wrappers commit. All business rules come from
 // model/ — this file only marshals a patch through validateTicket before writing.
 import { fsStorage } from "./model/storage.mjs";
+import { fsWritePort } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { basename, dirname } from "node:path";
 import { locateTicket, ambiguousIdError } from "./model/index.mjs";
-import { serializeTicket } from "./model/ticket.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
@@ -20,8 +20,9 @@ function asArray(v) {
   return v == null ? [] : [v];
 }
 
-export function applyEdit(projectsDir, id, patch, opts = {}) {
-  const { today = null, storage = fsStorage, readStorage = fsReadStorage } = opts;
+export async function applyEdit(projectsDir, id, patch, opts = {}) {
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
   const bad = Object.keys(patch).filter((k) => !EDITABLE_FIELDS.has(k));
   if (bad.length) return { ok: false, errors: [`field(s) not editable: ${bad.join(", ")}`] };
 
@@ -71,14 +72,18 @@ export function applyEdit(projectsDir, id, patch, opts = {}) {
   if (errors.length) return { ok: false, errors };
 
   if (today) fm.updated = today;
-  storage.write(found.file, serializeTicket({ frontmatter: fm, body: found.body }));
-  return { ok: true, id, file: found.file };
+  const { file } = await writePort.write({
+    project: found.project, status: found.status,
+    frontmatter: fm, body: found.body, currentFile: found.file,
+  });
+  return { ok: true, id, file };
 }
 
 // Flip one checkbox under the `## Acceptance Criteria` heading, by ordinal.
 // Only lines within that section count; a `- [ ]` elsewhere in the body is ignored.
-export function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
-  const { today = null, storage = fsStorage, readStorage = fsReadStorage } = opts;
+export async function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
@@ -101,6 +106,9 @@ export function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
 
   const fm = { ...found.frontmatter };
   if (today) fm.updated = today;
-  storage.write(found.file, serializeTicket({ frontmatter: fm, body: lines.join("\n") }));
-  return { ok: true, id, file: found.file };
+  const { file } = await writePort.write({
+    project: found.project, status: found.status,
+    frontmatter: fm, body: lines.join("\n"), currentFile: found.file,
+  });
+  return { ok: true, id, file };
 }

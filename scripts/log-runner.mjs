@@ -48,7 +48,7 @@ if (!id || minutesRaw === undefined) {
   process.exit(1);
 }
 
-const r = applyLog(projectsDir, id, Number(minutesRaw), opts);
+const r = await applyLog(projectsDir, id, Number(minutesRaw), opts);
 if (!r.ok) { console.error(`blaze log failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "log", id: r.id, message: `${r.id}: log ${r.minutes}m`, files: [r.file] });
