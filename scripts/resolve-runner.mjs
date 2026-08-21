@@ -33,7 +33,7 @@ const [id, resolution] = positional;
 if (!id || !resolution) { console.error("usage: blaze resolve <id> <resolution>"); process.exit(1); }
 
 const today = new Date().toISOString().slice(0, 10);
-const r = applyResolve(projectsDir, id, resolution, { today });
+const r = await applyResolve(projectsDir, id, resolution, { today });
 if (!r.ok) { console.error(`blaze resolve failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "resolve", id, message: `${id}: resolution → ${resolution}`, files: [r.file] });

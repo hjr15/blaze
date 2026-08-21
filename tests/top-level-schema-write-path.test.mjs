@@ -66,28 +66,28 @@ const parentOf = (projects, id) =>
 
 // --- new.mjs -----------------------------------------------------------------
 
-test("applyNew honours a top-level schema.types override when validating the parent", () => {
+test("applyNew honours a top-level schema.types override when validating the parent", async () => {
   const { root, projects } = board({ schema: OVERRIDE });
-  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "Engine bundle", today: "2026-08-16" });
+  const epic = await applyNew(projects, { project: "OBA", type: "epic", title: "Engine bundle", today: "2026-08-16" });
   assert.equal(epic.ok, true, JSON.stringify(epic.errors));
 
-  const task = applyNew(projects, { project: "OBA", type: "task", title: "Thread the config",
+  const task = await applyNew(projects, { project: "OBA", type: "task", title: "Thread the config",
     today: "2026-08-16", extra: { estimate: 30, parent: epic.id } });
   assert.equal(task.ok, true,
     `the board's declared task.parentTypes includes epic, so this create must succeed: ${JSON.stringify(task.errors)}`);
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyNew still refuses the same create when the board declares NO override", () => {
+test("applyNew still refuses the same create when the board declares NO override", async () => {
   // Without this control the test above proves nothing: it would also pass if the engine
   // had simply stopped enforcing parent rules.
   assert.deepEqual(DEFAULT_TYPES.task.parentTypes, ["feature", "story"],
     "BLZ-231's default is the baseline this control depends on");
   const { root, projects } = board();
-  const epic = applyNew(projects, { project: "OBA", type: "epic", title: "Engine bundle", today: "2026-08-16" });
+  const epic = await applyNew(projects, { project: "OBA", type: "epic", title: "Engine bundle", today: "2026-08-16" });
   assert.equal(epic.ok, true, JSON.stringify(epic.errors));
 
-  const task = applyNew(projects, { project: "OBA", type: "task", title: "Thread the config",
+  const task = await applyNew(projects, { project: "OBA", type: "task", title: "Thread the config",
     today: "2026-08-16", extra: { estimate: 30, parent: epic.id } });
   assert.equal(task.ok, false, "the shipped default must still retire the epic→task edge");
   assert.ok(task.errors.some((e) => /invalid parent/i.test(e)), JSON.stringify(task.errors));
@@ -96,23 +96,23 @@ test("applyNew still refuses the same create when the board declares NO override
 
 // --- edit.mjs: the edited ticket's own parent edge (schema-config.mjs call at edit.mjs:43) --
 
-test("applyEdit honours a top-level schema.types override when re-parenting", () => {
+test("applyEdit honours a top-level schema.types override when re-parenting", async () => {
   const { root, projects } = board({ schema: OVERRIDE });
   put(projects, "OBA-1", "epic");
   put(projects, "OBA-2", "task", { estimate: 30 });
 
-  const res = applyEdit(projects, "OBA-2", { parent: "OBA-1" }, { today: "2026-08-16" });
+  const res = await applyEdit(projects, "OBA-2", { parent: "OBA-1" }, { today: "2026-08-16" });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   assert.equal(parentOf(projects, "OBA-2"), "OBA-1");
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyEdit still refuses the same re-parent when the board declares NO override", () => {
+test("applyEdit still refuses the same re-parent when the board declares NO override", async () => {
   const { root, projects } = board();
   put(projects, "OBA-1", "epic");
   put(projects, "OBA-2", "task", { estimate: 30 });
 
-  const res = applyEdit(projects, "OBA-2", { parent: "OBA-1" }, { today: "2026-08-16" });
+  const res = await applyEdit(projects, "OBA-2", { parent: "OBA-1" }, { today: "2026-08-16" });
   assert.equal(res.ok, false, "the shipped default must still retire the epic→task edge");
   assert.ok(res.errors.some((e) => /invalid parent/i.test(e)), JSON.stringify(res.errors));
   assert.equal(parentOf(projects, "OBA-2"), "", "a refused edit must not write");
@@ -123,7 +123,7 @@ test("applyEdit still refuses the same re-parent when the board declares NO over
 // This is a separate defect from the one above: fixing only edit.mjs:43 leaves the
 // child-orphan check judging every child against the un-overridden defaults.
 
-test("a retype's CHILD re-check honours the top-level override", () => {
+test("a retype's CHILD re-check honours the top-level override", async () => {
   const { root, projects } = board({ schema: OVERRIDE });
   put(projects, "OBA-1", "requirement");
   put(projects, "OBA-2", "feature", { parent: "OBA-1" });
@@ -132,14 +132,14 @@ test("a retype's CHILD re-check honours the top-level override", () => {
   // feature → epic is legal for OBA-2 itself (the override gives epic parentTypes
   // ["goal","requirement"]), and the board declares task→epic legal, so OBA-3 stays valid.
   // Only the child re-check at edit.mjs:54 can wrongly refuse this.
-  const res = applyEdit(projects, "OBA-2", { type: "epic" }, { today: "2026-08-16" });
+  const res = await applyEdit(projects, "OBA-2", { type: "epic" }, { today: "2026-08-16" });
   assert.equal(res.ok, true,
     `the board declares task→epic legal, so retyping the parent must be accepted: ${JSON.stringify(res.errors)}`);
   assert.equal(typeOf(projects, "OBA-2"), "epic");
   rmSync(root, { recursive: true, force: true });
 });
 
-test("a retype's CHILD re-check still refuses an edge the board does not declare", () => {
+test("a retype's CHILD re-check still refuses an edge the board does not declare", async () => {
   const { root, projects } = board({ schema: OVERRIDE });
   put(projects, "OBA-1", "requirement");
   put(projects, "OBA-2", "feature", { parent: "OBA-1" });
@@ -148,7 +148,7 @@ test("a retype's CHILD re-check still refuses an edge the board does not declare
   // `subtask` is NOT in the override, so it keeps the shipped parentTypes
   // ["story","task","bug"] — retyping its parent to an epic must still be refused, and the
   // error must name the child.
-  const res = applyEdit(projects, "OBA-2", { type: "epic" }, { today: "2026-08-16" });
+  const res = await applyEdit(projects, "OBA-2", { type: "epic" }, { today: "2026-08-16" });
   assert.equal(res.ok, false, "an override must widen only the entries it declares");
   assert.ok(res.errors.some((e) => /OBA-3/.test(e)), JSON.stringify(res.errors));
   assert.equal(typeOf(projects, "OBA-2"), "feature", "a refused retype must not write");
@@ -157,7 +157,7 @@ test("a retype's CHILD re-check still refuses an edge the board does not declare
 
 // --- the resolver contract the three call sites depend on ---------------------
 
-test("loadProjectSchema merges the top-level override only when a config is supplied", () => {
+test("loadProjectSchema merges the top-level override only when a config is supplied", async () => {
   const { root, projects } = board({ schema: OVERRIDE });
   const config = loadConfig({ root });
 

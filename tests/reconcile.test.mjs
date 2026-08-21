@@ -6,7 +6,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { decide, reconcile, idFromSubject } from "../scripts/reconcile.mjs";
 
-test("merged PR → done and sets resolution via the post-function", () => {
+test("merged PR → done and sets resolution via the post-function", async () => {
   const d = decide({ pr: { state: "MERGED", number: 5, url: "u", headRefName: "you/OBA-5-x" } }, "in-review", "task");
   assert.equal(d.target, "done");
   assert.equal(d.moved, true);
@@ -15,45 +15,45 @@ test("merged PR → done and sets resolution via the post-function", () => {
   assert.equal(d.resolution, "done");
 });
 
-test("open PR → in-review (no resolution)", () => {
+test("open PR → in-review (no resolution)", async () => {
   const d = decide({ pr: { state: "OPEN", number: 6, url: "u", headRefName: "b" } }, "defined", "task");
   assert.equal(d.target, "in-review");
   assert.equal(d.moved, true);
   assert.equal(d.resolution, undefined);
 });
 
-test("closed unmerged PR → in-progress", () => {
+test("closed unmerged PR → in-progress", async () => {
   const d = decide({ pr: { state: "CLOSED", number: 7, url: "u", headRefName: "b" } }, "in-review", "task");
   assert.equal(d.target, "in-progress");
 });
 
-test("branch with no PR → in-progress", () => {
+test("branch with no PR → in-progress", async () => {
   const d = decide({ branch: "you/OBA-8-y" }, "defined", "task");
   assert.equal(d.target, "in-progress");
   assert.equal(d.branchVal, "you/OBA-8-y");
   assert.equal(d.prVal, null);
 });
 
-test("no git signal is skipped and left in place", () => {
+test("no git signal is skipped and left in place", async () => {
   const d = decide({}, "defined", "task");
   assert.equal(d.skip, true);
   assert.equal(d.moved, false);
   assert.equal(d.target, "defined");
 });
 
-test("terminal status is sticky — a merged PR on a done ticket does not move it", () => {
+test("terminal status is sticky — a merged PR on a done ticket does not move it", async () => {
   const d = decide({ pr: { state: "MERGED", number: 9, url: "u", headRefName: "b" } }, "done", "task");
   assert.equal(d.target, "done");
   assert.equal(d.moved, false);
 });
 
-test("non-delivery types (goal/risk) are never auto-transitioned", () => {
+test("non-delivery types (goal/risk) are never auto-transitioned", async () => {
   assert.equal(decide({ pr: { state: "MERGED", number: 1, url: "u", headRefName: "b" } }, "defined", "goal").skip, true);
   assert.equal(decide({ branch: "b" }, "identified", "risk").skip, true);
 });
 
 // --- Task 1: the shipped fallback (bundled epic-children with no branch/PR) ----
-test("shipped (no pr/branch) → done for a delivery child", () => {
+test("shipped (no pr/branch) → done for a delivery child", async () => {
   const d = decide({ shipped: true }, "defined", "task");
   assert.equal(d.target, "done");
   assert.equal(d.moved, true);
@@ -61,17 +61,17 @@ test("shipped (no pr/branch) → done for a delivery child", () => {
   assert.equal(d.skip, false);
 });
 
-test("shipped is ignored when a branch signal is present", () => {
+test("shipped is ignored when a branch signal is present", async () => {
   const d = decide({ branch: "you/BLZ-8-y", shipped: true }, "defined", "task");
   assert.equal(d.target, "in-progress"); // branch path wins, shipped not consulted
 });
 
-test("shipped is ignored when a pr signal is present", () => {
+test("shipped is ignored when a pr signal is present", async () => {
   const d = decide({ pr: { state: "OPEN", number: 6, url: "u", headRefName: "b" }, shipped: true }, "defined", "task");
   assert.equal(d.target, "in-review");
 });
 
-test("shipped + already done → terminal-sticky, no move", () => {
+test("shipped + already done → terminal-sticky, no move", async () => {
   const d = decide({ shipped: true }, "done", "task");
   assert.equal(d.target, "done");
   assert.equal(d.moved, false);
@@ -85,7 +85,7 @@ test("shipped + already done → terminal-sticky, no move", () => {
 // resolution left undefined so reconcile() never overwrites it. Delivery's sole
 // terminal status is "done" (scripts/model/workflows.mjs), so that is the only
 // real terminal status a delivery-type decide() can be called with.
-test("shipped on an already-terminal ticket takes the skip path (no resolution recompute)", () => {
+test("shipped on an already-terminal ticket takes the skip path (no resolution recompute)", async () => {
   const d = decide({ shipped: true }, "done", "task");
   assert.equal(d.skip, true);
   assert.equal(d.moved, false);
@@ -93,26 +93,26 @@ test("shipped on an already-terminal ticket takes the skip path (no resolution r
   assert.equal(d.resolution, undefined); // NOT recomputed to "done"
 });
 
-test("shipped on a non-delivery type is skipped", () => {
+test("shipped on a non-delivery type is skipped", async () => {
   assert.equal(decide({ shipped: true }, "defined", "goal").skip, true);
 });
 
-test("no signal at all (no pr/branch/shipped) is still skipped", () => {
+test("no signal at all (no pr/branch/shipped) is still skipped", async () => {
   assert.equal(decide({}, "defined", "task").skip, true);
 });
 
 // --- Task 2: idFromSubject — anchored leading-id parse of a commit subject -----
-test("idFromSubject extracts the leading id, greedy digits", () => {
+test("idFromSubject extracts the leading id, greedy digits", async () => {
   assert.equal(idFromSubject("BLZ-43: reconcile completeness", "BLZ"), "BLZ-43");
   assert.equal(idFromSubject("BLZ-4: other", "BLZ"), "BLZ-4");
 });
-test("idFromSubject does not confuse BLZ-4 with BLZ-43", () => {
+test("idFromSubject does not confuse BLZ-4 with BLZ-43", async () => {
   assert.equal(idFromSubject("BLZ-43: fixes BLZ-4 mention", "BLZ"), "BLZ-43");
 });
-test("idFromSubject ignores a non-leading id (no mis-attribution)", () => {
+test("idFromSubject ignores a non-leading id (no mis-attribution)", async () => {
   assert.equal(idFromSubject("chore: bump BLZ-36 dep", "BLZ"), null);
 });
-test("idFromSubject returns null on a non-conforming subject", () => {
+test("idFromSubject returns null on a non-conforming subject", async () => {
   assert.equal(idFromSubject("just a message", "BLZ"), null);
 });
 
@@ -129,7 +129,7 @@ function gitInit(dir) {
   execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
 }
 
-test("reconcile() with no explicit root resolves a custom-named projectsDir via BLAZE_PROJECTS_DIR", () => {
+test("await reconcile() with no explicit root resolves a custom-named projectsDir via BLAZE_PROJECTS_DIR", async () => {
   const dataRoot = mkdtempSync(join(tmpdir(), "blaze-reconcile-dataroot-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-codereo-"));
   const prevEnv = process.env.BLAZE_PROJECTS_DIR;
@@ -154,7 +154,7 @@ test("reconcile() with no explicit root resolves a custom-named projectsDir via 
 
   try {
     process.env.BLAZE_PROJECTS_DIR = ticketsDir;
-    const r = reconcile();
+    const r = await reconcile();
     assert.equal(r.ok, true);
     assert.equal(r.changes.length, 1, "reconcile must find the ticket under the custom-named projects dir");
     assert.equal(r.changes[0].id, "ZZZ-1");
@@ -176,7 +176,7 @@ test("reconcile() with no explicit root resolves a custom-named projectsDir via 
 // decide() returns moved:true, then proves the *guard* — not an incidental
 // skip — is what suppresses the file move under dryRun, and that the identical
 // setup performs the move when dryRun is false.
-test("reconcile dry-run detects the move but suppresses the write; apply performs it", () => {
+test("reconcile dry-run detects the move but suppresses the write; apply performs it", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-dryrun-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-dryrun-code-"));
 
@@ -202,7 +202,7 @@ test("reconcile dry-run detects the move but suppresses the write; apply perform
 
   try {
     // Dry run: the move IS detected but the write must be suppressed.
-    const dry = reconcile({ dryRun: true, root });
+    const dry = await reconcile({ dryRun: true, root });
     assert.equal(dry.ok, true);
     assert.ok(dry.changes.length >= 1, "the would-be move is detected");
     assert.equal(dry.changes[0].id, "ZZZ-1");
@@ -211,7 +211,7 @@ test("reconcile dry-run detects the move but suppresses the write; apply perform
 
     // Apply: the identical setup — untouched by the dry run above — now moves for real,
     // proving the guard (not an incidental skip) suppressed the earlier write.
-    const applied = reconcile({ dryRun: false, root });
+    const applied = await reconcile({ dryRun: false, root });
     assert.equal(applied.ok, true);
     assert.ok(applied.changes.length >= 1, "apply also detects the move");
     assert.ok(!existsSync(join(definedDir, ticketFile)), "apply moved the file out of defined/");
@@ -230,7 +230,7 @@ test("reconcile dry-run detects the move but suppresses the write; apply perform
 // the real-branch apply setup above, but git-inits `root` itself (the prior
 // fixtures never did — they only asserted file moves, never inspected git
 // history on dataRoot) and passes commit:true so reconcile actually commits.
-test("reconcile --apply commits only touched files, not an unrelated dirty file", () => {
+test("reconcile --apply commits only touched files, not an unrelated dirty file", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-code-"));
 
@@ -264,7 +264,7 @@ test("reconcile --apply commits only touched files, not an unrelated dirty file"
   writeFileSync(join(root, "UNRELATED.txt"), "not part of reconcile\n");
 
   try {
-    const applied = reconcile({ dryRun: false, commit: true, root });
+    const applied = await reconcile({ dryRun: false, commit: true, root });
     assert.equal(applied.ok, true);
     assert.equal(applied.committed, true);
 
@@ -284,7 +284,7 @@ test("reconcile --apply commits only touched files, not an unrelated dirty file"
 // commit, an open-epic-PR child (commit only on a feature branch) does NOT move,
 // and a second run is a no-op. This committed test IS the permanent regression
 // guard for the merged-vs-open discrimination.
-test("bundled children: commit on default branch → done; open-epic-PR child NOT moved; idempotent", () => {
+test("bundled children: commit on default branch → done; open-epic-PR child NOT moved; idempotent", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-bundled-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-bundled-code-"));
   // Explicit default branch — do NOT rely on the env's git init default.
@@ -317,7 +317,7 @@ test("bundled children: commit on default branch → done; open-epic-PR child NO
   );
 
   try {
-    const applied = reconcile({ dryRun: false, root });
+    const applied = await reconcile({ dryRun: false, root });
     assert.equal(applied.ok, true);
     // ZZZ-2 shipped → done
     assert.ok(existsSync(join(doneDir, "ZZZ-2-child.md")), "shipped child moved to done/");
@@ -326,7 +326,7 @@ test("bundled children: commit on default branch → done; open-epic-PR child NO
     assert.ok(existsSync(join(definedDir, "ZZZ-3-child.md")), "unmerged child stays in defined/");
     assert.ok(!existsSync(join(doneDir, "ZZZ-3-child.md")), "unmerged child NOT in done/");
     // Idempotent: a second run makes no ZZZ-2 change.
-    const again = reconcile({ dryRun: false, root });
+    const again = await reconcile({ dryRun: false, root });
     assert.ok(!again.changes.some((c) => c.id === "ZZZ-2"), "second run is a no-op for the shipped child");
   } finally {
     rmSync(root, { recursive: true, force: true });
@@ -343,7 +343,7 @@ test("bundled children: commit on default branch → done; open-epic-PR child NO
 // one commit behind — reconcile must still move the child to done/, which both
 // proves Finding 1 AND exercises the production `origin/HEAD` detection arm
 // (untested before — every other fixture here is remote-less). See Finding 2.
-test("shipped reads origin/main (remote-tracking), not a stale local main", () => {
+test("shipped reads origin/main (remote-tracking), not a stale local main", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-"));
   const originRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-origin-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-remotetrack-code-"));
@@ -380,7 +380,7 @@ test("shipped reads origin/main (remote-tracking), not a stale local main", () =
   );
 
   try {
-    const applied = reconcile({ dryRun: false, root });
+    const applied = await reconcile({ dryRun: false, root });
     assert.equal(applied.ok, true);
     // The child ships only on origin/main; local main lacks the commit. Moving
     // it proves the resolver logs the remote-tracking ref via origin/HEAD.

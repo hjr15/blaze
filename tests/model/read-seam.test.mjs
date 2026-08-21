@@ -87,7 +87,7 @@ const DRIVERS = [
 ];
 
 for (const [name, make] of DRIVERS) {
-  test(`${name}: getTicket resolves a ticket by id`, () => {
+  test(`${name}: getTicket resolves a ticket by id`, async () => {
     const { s, root } = make();
     const r = s.getTicket(root, "BLZ-2");
     assert.equal(r.found?.frontmatter.id, "BLZ-2");
@@ -95,7 +95,7 @@ for (const [name, make] of DRIVERS) {
     assert.equal(r.duplicates, undefined);
   });
 
-  test(`${name}: records carry project and status FIRST-CLASS, not recoverable from file`, () => {
+  test(`${name}: records carry project and status FIRST-CLASS, not recoverable from file`, async () => {
     // BLZ-271: move/reconcile used to recover both by path arithmetic on `file`,
     // which silently produced a bogus destination for any non-path handle. Both
     // drivers must supply them directly or the contract diverges.
@@ -105,22 +105,22 @@ for (const [name, make] of DRIVERS) {
     assert.equal(r.status, "done", "status must be on the record itself");
   });
 
-  test(`${name}: getTicket finds a ticket in any status directory`, () => {
+  test(`${name}: getTicket finds a ticket in any status directory`, async () => {
     const { s, root } = make();
     assert.equal(s.getTicket(root, "BLZ-3").found?.status, "done");
   });
 
-  test(`${name}: getTicket returns found:null for an unknown id, and does not throw`, () => {
+  test(`${name}: getTicket returns found:null for an unknown id, and does not throw`, async () => {
     const { s, root } = make();
     assert.deepEqual(s.getTicket(root, "BLZ-999"), { found: null });
   });
 
-  test(`${name}: getTicket carries the body, so a caller need not re-read`, () => {
+  test(`${name}: getTicket carries the body, so a caller need not re-read`, async () => {
     const { s, root } = make();
     assert.match(s.getTicket(root, "BLZ-1").found.body, /body of BLZ-1/);
   });
 
-  test(`${name}: listChildren answers the drill without materialising the corpus`, () => {
+  test(`${name}: listChildren answers the drill without materialising the corpus`, async () => {
     const { s, root } = make();
     const kids = s.listChildren(root, "BLZ-1").map((t) => t.frontmatter.id).sort();
     assert.deepEqual(kids, ["BLZ-2", "BLZ-3"]);
@@ -128,32 +128,32 @@ for (const [name, make] of DRIVERS) {
     assert.deepEqual(s.listChildren(root, "BLZ-2"), []);
   });
 
-  test(`${name}: blockersOf returns only inbound Blocks links`, () => {
+  test(`${name}: blockersOf returns only inbound Blocks links`, async () => {
     const { s, root } = make();
     const ids = s.blockersOf(root, "BLZ-1").map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-2", "BLZ-3"], "BLZ-4 Relates, and must not count as a blocker");
   });
 
-  test(`${name}: blockersOf carries status, so the caller can judge terminal-ness`, () => {
+  test(`${name}: blockersOf carries status, so the caller can judge terminal-ness`, async () => {
     const { s, root } = make();
     const byId = Object.fromEntries(s.blockersOf(root, "BLZ-1").map((t) => [t.frontmatter.id, t.status]));
     assert.deepEqual(byId, { "BLZ-2": "defined", "BLZ-3": "done" });
   });
 
-  test(`${name}: blockersOf never returns the ticket itself, even when it blocks itself`, () => {
+  test(`${name}: blockersOf never returns the ticket itself, even when it blocks itself`, async () => {
     const { s, root } = make();
     const ids = s.blockersOf(root, "BLZ-1").map((t) => t.frontmatter.id);
     assert.ok(ids.length > 0, "the fixture must actually produce blockers, or this proves nothing");
     assert.equal(ids.includes("BLZ-1"), false, "self-exclusion must be real, not vacuous");
   });
 
-  test(`${name}: blockersOf is empty for an id nothing blocks`, () => {
+  test(`${name}: blockersOf is empty for an id nothing blocks`, async () => {
     const { s, root } = make();
     assert.deepEqual(s.blockersOf(root, "BLZ-3"), []);
     assert.deepEqual(s.blockersOf(root, "BLZ-999"), []);
   });
 
-  test(`${name}: listTickets still yields everything, for the index and audit`, () => {
+  test(`${name}: listTickets still yields everything, for the index and audit`, async () => {
     const { s, root } = make();
     const ids = [...s.listTickets(root)].map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-1", "BLZ-2", "BLZ-3", "BLZ-4"]);
@@ -161,7 +161,7 @@ for (const [name, make] of DRIVERS) {
 }
 
 // --- BLZ-122: the constraint a query shape must not quietly relax ---------------
-test("fsReadStorage: getTicket REFUSES when an id resolves to two files", () => {
+test("fsReadStorage: getTicket REFUSES when an id resolves to two files", async () => {
   const dir = seedFs();
   // the same id in two status directories — the BLZ-122 shape
   mkdirSync(join(dir, "BLZ", "in-progress"), { recursive: true });
@@ -174,7 +174,7 @@ test("fsReadStorage: getTicket REFUSES when an id resolves to two files", () => 
   assert.deepEqual(r.duplicates, [...r.duplicates].sort(), "paths are sorted, so the message is stable");
 });
 
-test("fsReadStorage: getTicket scans the WHOLE corpus — an early return is the bug", () => {
+test("fsReadStorage: getTicket scans the WHOLE corpus — an early return is the bug", async () => {
   const dir = seedFs();
   // Duplicate lands in a directory the walk reaches AFTER the first hit. A
   // first-hit implementation returns BLZ-1 happily and never sees the ambiguity.
@@ -187,7 +187,7 @@ test("fsReadStorage: getTicket scans the WHOLE corpus — an early return is the
   assert.equal(r.duplicates.length, 2);
 });
 
-test("memReadStorage: a driver where ids are unique cannot produce duplicates", () => {
+test("memReadStorage: a driver where ids are unique cannot produce duplicates", async () => {
   // On a database, id is the primary key — the ambiguity is structurally impossible,
   // not merely absent. The contract still has to expose the same shape.
   const s = seedMem();
@@ -224,12 +224,12 @@ function boardWithDuplicate() {
 }
 
 for (const [verb, run] of [
-  ["applyMove", (p) => applyMove(p, "BLZ-1", "in-review", { today: "2026-08-20" })],
-  ["applyLog", (p) => applyLog(p, "BLZ-1", 30, { today: "2026-08-20" })],
-  ["applyResolve", (p) => applyResolve(p, "BLZ-1", "done", { today: "2026-08-20" })],
+  ["applyMove", async (p) => await applyMove(p, "BLZ-1", "in-review", { today: "2026-08-20" })],
+  ["applyLog", async (p) => await applyLog(p, "BLZ-1", 30, { today: "2026-08-20" })],
+  ["applyResolve", async (p) => await applyResolve(p, "BLZ-1", "done", { today: "2026-08-20" })],
 ]) {
-  test(`${verb} REFUSES a duplicated id rather than writing to a guess`, () => {
-    const r = run(boardWithDuplicate());
+  test(`${verb} REFUSES a duplicated id rather than writing to a guess`, async () => {
+    const r = await run(boardWithDuplicate());
     assert.equal(r.ok, false, `${verb} must refuse when an id resolves to two files`);
     const msg = r.errors.join("\n");
     assert.match(msg, /resolves to 2 files/);
@@ -241,7 +241,7 @@ for (const [verb, run] of [
 // --- BLZ-271: an opaque handle must fail loudly, not relocate silently ----------
 import { ticketPath } from "../../scripts/model/storage.mjs";
 
-test("BLZ-271: a non-fs handle now throws instead of producing a bogus destination", () => {
+test("BLZ-271: a non-fs handle now throws instead of producing a bogus destination", async () => {
   // Before this fix, move.mjs computed join(dirname(dirname("BLZ-9")), "done") +
   // basename("BLZ-9") = "done/BLZ-9", wrote there, and returned ok:true.
   assert.throws(() => ticketPath.relocate("/p", "BLZ", "done", "BLZ-9"),
@@ -251,7 +251,7 @@ test("BLZ-271: a non-fs handle now throws instead of producing a bogus destinati
   assert.equal(bogus, join("done", "BLZ-9"), "the silent-corruption path this replaces");
 });
 
-test("BLZ-271: a real move still lands in the right directory with its filename intact", () => {
+test("BLZ-271: a real move still lands in the right directory with its filename intact", async () => {
   const { projectsDir } = (() => {
     const root = mkdtempSync(join(tmpdir(), "blaze-reloc-"));
     execFileSync("git", ["-C", root, "init", "-q"]);
@@ -266,7 +266,7 @@ test("BLZ-271: a real move still lands in the right directory with its filename 
       `created: 2026-08-20\nupdated: 2026-08-20\n---\n\nbody\n`);
     return { projectsDir: projects };
   })();
-  const r = applyMove(projectsDir, "BLZ-1", "in-progress", { today: "2026-08-20" });
+  const r = await applyMove(projectsDir, "BLZ-1", "in-progress", { today: "2026-08-20" });
   assert.equal(r.ok, true, r.errors?.join("; "));
   assert.match(r.file, /BLZ[/\\]in-progress[/\\]BLZ-1-stale-slug\.md$/,
     "the stale filename is preserved — recomputing it would rename 60 live tickets");
@@ -283,18 +283,18 @@ test("BLZ-271: a real move still lands in the right directory with its filename 
 import { rmSync, utimesSync } from "node:fs";
 
 for (const [name, make] of DRIVERS) {
-  test(`${name}: changeToken is stable when nothing changes`, () => {
+  test(`${name}: changeToken is stable when nothing changes`, async () => {
     const { s, root } = make();
     assert.equal(s.changeToken(root), s.changeToken(root));
   });
 
-  test(`${name}: changeToken is opaque — a string the caller must not parse`, () => {
+  test(`${name}: changeToken is opaque — a string the caller must not parse`, async () => {
     const { s, root } = make();
     assert.equal(typeof s.changeToken(root), "string");
   });
 }
 
-test("fsReadStorage: changeToken changes when a ticket's content changes", () => {
+test("fsReadStorage: changeToken changes when a ticket's content changes", async () => {
   const dir = seedFs();
   const before = fsReadStorage.changeToken(dir);
   const f = join(dir, "BLZ", "defined", "BLZ-1-a.md");
@@ -302,7 +302,7 @@ test("fsReadStorage: changeToken changes when a ticket's content changes", () =>
   assert.notEqual(fsReadStorage.changeToken(dir), before);
 });
 
-test("fsReadStorage: changeToken changes when a ticket is added", () => {
+test("fsReadStorage: changeToken changes when a ticket is added", async () => {
   const dir = seedFs();
   const before = fsReadStorage.changeToken(dir);
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-9-new.md"),
@@ -310,14 +310,14 @@ test("fsReadStorage: changeToken changes when a ticket is added", () => {
   assert.notEqual(fsReadStorage.changeToken(dir), before);
 });
 
-test("fsReadStorage: changeToken changes when a ticket is removed", () => {
+test("fsReadStorage: changeToken changes when a ticket is removed", async () => {
   const dir = seedFs();
   const before = fsReadStorage.changeToken(dir);
   rmSync(join(dir, "BLZ", "defined", "BLZ-2-b.md"));
   assert.notEqual(fsReadStorage.changeToken(dir), before);
 });
 
-test("fsReadStorage: changeToken is project-scoped — another project's edit must not invalidate it", () => {
+test("fsReadStorage: changeToken is project-scoped — another project's edit must not invalidate it", async () => {
   const dir = seedFs();
   mkdirSync(join(dir, "OBA", "defined"), { recursive: true });
   writeFileSync(join(dir, "OBA", "defined", "OBA-1-x.md"),
@@ -334,7 +334,7 @@ test("fsReadStorage: changeToken is project-scoped — another project's edit mu
     "the unscoped token must still see it");
 });
 
-test("fsReadStorage: changeToken has a known blind spot — same size, same mtime", () => {
+test("fsReadStorage: changeToken has a known blind spot — same size, same mtime", async () => {
   // Documented rather than fixed: the fs token hashes path:size:mtimeMs, so an edit
   // that preserves BOTH is invisible. This is the PRE-EXISTING behaviour of
   // contentHash and is preserved deliberately — changing the hash would change what
@@ -360,13 +360,13 @@ test("fsReadStorage: changeToken has a known blind spot — same size, same mtim
 
 // --- listProjects: a different question from "which tickets" --------------------
 for (const [name, make] of DRIVERS) {
-  test(`${name}: listProjects returns the project keys that exist`, () => {
+  test(`${name}: listProjects returns the project keys that exist`, async () => {
     const { s, root } = make();
     assert.deepEqual(s.listProjects(root), ["BLZ"]);
   });
 }
 
-test("fsReadStorage: listProjects skips dot-directories", () => {
+test("fsReadStorage: listProjects skips dot-directories", async () => {
   const dir = seedFs();
   mkdirSync(join(dir, ".git"), { recursive: true });
   mkdirSync(join(dir, "OBA", "defined"), { recursive: true });
@@ -374,6 +374,6 @@ test("fsReadStorage: listProjects skips dot-directories", () => {
     ".git is not a project");
 });
 
-test("fsReadStorage: listProjects on a missing root is empty, not a throw", () => {
+test("fsReadStorage: listProjects on a missing root is empty, not a throw", async () => {
   assert.deepEqual(fsReadStorage.listProjects("/nope/does/not/exist"), []);
 });

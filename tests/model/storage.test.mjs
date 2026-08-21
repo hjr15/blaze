@@ -14,7 +14,7 @@ import { slugify, ticketPath, fsStorage, memStorage } from "../../scripts/model/
 
 const root = () => mkdtempSync(join(tmpdir(), "blaze-storage-"));
 
-test("slugify matches the shape the corpus already uses", () => {
+test("slugify matches the shape the corpus already uses", async () => {
   assert.equal(slugify("Top-level schema.types override ignored"), "top-level-schema-types-override-ignored");
   assert.equal(slugify("  Leading and trailing  "), "leading-and-trailing");
   assert.equal(slugify("Ünïcødé & symbols!!"), "n-c-d-symbols");
@@ -22,14 +22,14 @@ test("slugify matches the shape the corpus already uses", () => {
   assert.equal(slugify(123), "123", "non-string input is coerced, not thrown on");
 });
 
-test("ticketPath is the single authority for where a ticket lives", () => {
+test("ticketPath is the single authority for where a ticket lives", async () => {
   assert.equal(
     ticketPath("/data/projects", "BLZ", "defined", "BLZ-9", "A Title"),
     join("/data/projects", "BLZ", "defined", "BLZ-9-a-title.md"),
   );
 });
 
-test("ticketPath separates the directory from the file so a move can reuse it", () => {
+test("ticketPath separates the directory from the file so a move can reuse it", async () => {
   const { dir, file } = ticketPath.parts("/data/projects", "OBA", "done", "OBA-1", "X");
   assert.equal(dir, join("/data/projects", "OBA", "done"));
   assert.equal(file, join(dir, "OBA-1-x.md"));
@@ -40,7 +40,7 @@ for (const [name, make] of [
   ["fsStorage", () => ({ s: fsStorage, base: root() })],
   ["memStorage", () => ({ s: memStorage(), base: "/virtual" })],
 ]) {
-  test(`${name}: write then read round-trips exactly`, () => {
+  test(`${name}: write then read round-trips exactly`, async () => {
     const { s, base } = make();
     const f = join(base, "a", "BLZ-1-x.md");
     s.write(f, "hello\nworld\n");
@@ -48,19 +48,19 @@ for (const [name, make] of [
     assert.equal(s.exists(f), true);
   });
 
-  test(`${name}: exists is false before a write`, () => {
+  test(`${name}: exists is false before a write`, async () => {
     const { s, base } = make();
     assert.equal(s.exists(join(base, "nope.md")), false);
   });
 
-  test(`${name}: write creates missing parent directories`, () => {
+  test(`${name}: write creates missing parent directories`, async () => {
     const { s, base } = make();
     const f = join(base, "deep", "nested", "BLZ-2-y.md");
     s.write(f, "body");
     assert.equal(s.read(f), "body");
   });
 
-  test(`${name}: move relocates content and leaves nothing behind`, () => {
+  test(`${name}: move relocates content and leaves nothing behind`, async () => {
     const { s, base } = make();
     const from = join(base, "defined", "BLZ-3-z.md");
     const to = join(base, "done", "BLZ-3-z.md");
@@ -70,7 +70,7 @@ for (const [name, make] of [
     assert.equal(s.read(to), "v2", "move writes the NEW text, not the old");
   });
 
-  test(`${name}: move to the same path is a plain in-place write`, () => {
+  test(`${name}: move to the same path is a plain in-place write`, async () => {
     const { s, base } = make();
     const f = join(base, "defined", "BLZ-4-w.md");
     s.write(f, "v1");
@@ -79,20 +79,20 @@ for (const [name, make] of [
     assert.equal(s.read(f), "v2");
   });
 
-  test(`${name}: reading a missing file throws rather than returning undefined`, () => {
+  test(`${name}: reading a missing file throws rather than returning undefined`, async () => {
     const { s, base } = make();
     assert.throws(() => s.read(join(base, "absent.md")));
   });
 }
 
-test("memStorage instances are isolated from each other", () => {
+test("memStorage instances are isolated from each other", async () => {
   const a = memStorage(), b = memStorage();
   a.write("/x.md", "a");
   assert.equal(a.exists("/x.md"), true);
   assert.equal(b.exists("/x.md"), false, "a second instance must not see the first's writes");
 });
 
-test("memStorage never touches the real filesystem", () => {
+test("memStorage never touches the real filesystem", async () => {
   const base = root();
   const s = memStorage();
   const f = join(base, "ghost.md");
@@ -101,7 +101,7 @@ test("memStorage never touches the real filesystem", () => {
   assert.equal(existsSync(f), false, "the in-memory driver must leave no trace on disk");
 });
 
-test("fsStorage reads a file written by something else — it is not a private store", () => {
+test("fsStorage reads a file written by something else — it is not a private store", async () => {
   const base = root();
   const dir = join(base, "defined");
   mkdirSync(dir, { recursive: true });
@@ -109,7 +109,7 @@ test("fsStorage reads a file written by something else — it is not a private s
   assert.equal(fsStorage.read(join(dir, "BLZ-5-q.md")), "written by hand");
 });
 
-test("fsStorage.write lands real bytes at the real path", () => {
+test("fsStorage.write lands real bytes at the real path", async () => {
   const base = root();
   const f = join(base, "s", "BLZ-6-r.md");
   fsStorage.write(f, "on disk");
@@ -134,10 +134,10 @@ function board() {
   return { root: d, projectsDir: join(d, "projects") };
 }
 
-test("applyNew with an injected driver writes NOTHING to the real filesystem", () => {
+test("applyNew with an injected driver writes NOTHING to the real filesystem", async () => {
   const { projectsDir } = board();
   const s = memStorage();
-  const r = applyNew(projectsDir, {
+  const r = await applyNew(projectsDir, {
     project: "BLZ", type: "task", title: "Seam proof", today: "2026-08-20",
     extra: { estimate: 30 }, storage: s,
   });
@@ -147,33 +147,33 @@ test("applyNew with an injected driver writes NOTHING to the real filesystem", (
   assert.match(s.read(r.file), /^id: BLZ-1$/m);
 });
 
-test("applyMove with an injected driver relocates in the driver, not on disk", () => {
+test("applyMove with an injected driver relocates in the driver, not on disk", async () => {
   const { projectsDir } = board();
   // Seed through the fs driver so locateTicket (a READ path, still fs-backed) can find it.
-  const created = applyNew(projectsDir, {
+  const created = await applyNew(projectsDir, {
     project: "BLZ", type: "task", title: "Move proof", today: "2026-08-20", extra: { estimate: 30 },
   });
   assert.equal(created.ok, true, `seed failed: ${created.errors?.join("; ")}`);
   assert.equal(existsSync(created.file), true, "seeded via fsStorage, so it IS on disk");
 
   const s = memStorage();
-  const r = applyMove(projectsDir, "BLZ-1", "in-progress", { today: "2026-08-20", storage: s });
+  const r = await applyMove(projectsDir, "BLZ-1", "in-progress", { today: "2026-08-20", storage: s });
   assert.equal(r.ok, true, `applyMove failed: ${r.errors?.join("; ")}`);
   assert.equal(existsSync(r.file), false, "the destination must NOT appear on disk");
   assert.equal(existsSync(created.file), true, "and the source must be untouched on disk");
   assert.equal(s.exists(r.file), true, "the move landed in the injected driver");
 });
 
-test("applyLog with an injected driver leaves the on-disk ticket unchanged", () => {
+test("applyLog with an injected driver leaves the on-disk ticket unchanged", async () => {
   const { projectsDir } = board();
-  const created = applyNew(projectsDir, {
+  const created = await applyNew(projectsDir, {
     project: "BLZ", type: "task", title: "Log proof", today: "2026-08-20", extra: { estimate: 30 },
   });
   assert.equal(created.ok, true);
   const before = readFileSync(created.file, "utf8");
 
   const s = memStorage();
-  const r = applyLog(projectsDir, "BLZ-1", 45, { today: "2026-08-20", note: "seam", storage: s });
+  const r = await applyLog(projectsDir, "BLZ-1", 45, { today: "2026-08-20", note: "seam", storage: s });
   assert.equal(r.ok, true, `applyLog failed: ${r.errors?.join("; ")}`);
   assert.equal(readFileSync(created.file, "utf8"), before, "on-disk ticket must be byte-identical");
   assert.match(s.read(created.file), /minutes: 45/, "the worklog landed in the injected driver");
@@ -189,21 +189,21 @@ test("applyLog with an injected driver leaves the on-disk ticket unchanged", () 
 // relocate() is the single authority for "where does this ticket go when its status
 // changes". It REFUSES an unrecognised handle rather than guessing, so the day a
 // non-fs driver appears the failure is loud.
-test("relocate keeps the existing filename and only changes the status directory", () => {
+test("relocate keeps the existing filename and only changes the status directory", async () => {
   const { dir, file } = ticketPath.relocate("/data/projects", "BLZ", "done",
     "/data/projects/BLZ/defined/BLZ-9-original-slug.md");
   assert.equal(dir, join("/data/projects", "BLZ", "done"));
   assert.equal(file, join("/data/projects", "BLZ", "done", "BLZ-9-original-slug.md"));
 });
 
-test("relocate does NOT recompute the slug — 60 live tickets have a filename that no longer matches their title", () => {
+test("relocate does NOT recompute the slug — 60 live tickets have a filename that no longer matches their title", async () => {
   // `blaze edit` never renames on a title change, so filename slugs legitimately
   // drift. Recomputing would rename those files on their next move.
   const { file } = ticketPath.relocate("/p", "BLZ", "done", "/p/BLZ/defined/BLZ-1-stale-slug.md");
   assert.match(file, /BLZ-1-stale-slug\.md$/);
 });
 
-test("relocate REFUSES an opaque handle instead of producing a bogus path", () => {
+test("relocate REFUSES an opaque handle instead of producing a bogus path", async () => {
   for (const handle of ["BLZ-9", "", "not/a/real/ticket/path.md"]) {
     assert.throws(
       () => ticketPath.relocate("/data/projects", "BLZ", "done", handle),
@@ -213,7 +213,7 @@ test("relocate REFUSES an opaque handle instead of producing a bogus path", () =
   }
 });
 
-test("relocate refuses a path whose project directory disagrees with the ticket's project", () => {
+test("relocate refuses a path whose project directory disagrees with the ticket's project", async () => {
   assert.throws(
     () => ticketPath.relocate("/data/projects", "OBA", "done", "/data/projects/BLZ/defined/BLZ-9-x.md"),
     /disagrees/,

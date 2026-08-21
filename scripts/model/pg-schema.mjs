@@ -71,6 +71,28 @@ CREATE TABLE IF NOT EXISTS acceptance_criterion (
 );
 CREATE INDEX IF NOT EXISTS ac_ticket_idx ON acceptance_criterion (ticket_id, ord);
 
+-- BLZ-294. Found by the dual-write soak against the live board: an edit that set
+-- labels wrote to the file and NOTHING to the database, so every label and component on
+-- 2,500 tickets would have been lost at cutover — silently, because a ticket with no
+-- labels is a valid ticket.
+--
+-- No FK to resolved_label/resolved_component yet: those live in the projection, which
+-- the base data schema must not depend on (the conformance suite builds this DDL
+-- alone). The FK lands with the projection at Phase 2 cutover.
+CREATE TABLE IF NOT EXISTS ticket_label (
+  ticket_id   text NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
+  project_key text NOT NULL,
+  label       text NOT NULL,
+  PRIMARY KEY (ticket_id, label)
+);
+
+CREATE TABLE IF NOT EXISTS ticket_component (
+  ticket_id   text NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
+  project_key text NOT NULL,
+  component   text NOT NULL,
+  PRIMARY KEY (ticket_id, component)
+);
+
 CREATE TABLE IF NOT EXISTS worklog_entry (
   id        bigint GENERATED ALWAYS AS IDENTITY PRIMARY KEY,
   ticket_id text NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,

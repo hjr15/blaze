@@ -116,7 +116,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
       const { reconcile } = await import("./reconcile.mjs");
-      const r = reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
+      const r = await reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
       return json(200, { changes: r.changes || [] });
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
@@ -178,7 +178,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       };
 
       if (u.pathname === "/api/move") {
-        const r = applyMove(projectsDir, payload.id, payload.to, { today });
+        const r = await applyMove(projectsDir, payload.id, payload.to, { today });
         if (!r.ok) return json(422, { errors: r.errors });
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
         const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
@@ -186,19 +186,19 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         return json(200, { ok: true, resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {
-        const r = applyEdit(projectsDir, payload.id, payload.patch || {}, { today });
+        const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today });
         return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`, "edit");
       }
       if (u.pathname === "/api/resolve") {
-        const r = applyResolve(projectsDir, payload.id, payload.resolution, { today });
+        const r = await applyResolve(projectsDir, payload.id, payload.resolution, { today });
         return done(r, `${payload.id}: resolve ${payload.resolution}`, "resolve");
       }
       if (u.pathname === "/api/log") {
-        const r = applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today });
+        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today });
         return done(r, `${payload.id}: log ${payload.minutes}m`, "log");
       }
       if (u.pathname === "/api/ac") {
-        const r = applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today });
+        const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today });
         return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
       }
       return json(404, { errors: ["not found"] });

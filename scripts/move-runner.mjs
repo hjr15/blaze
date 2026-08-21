@@ -34,7 +34,7 @@ const [id, toStatus] = positional;
 if (!id || !toStatus) { console.error("usage: blaze move <id> <status>"); process.exit(1); }
 
 const today = new Date().toISOString().slice(0, 10);
-const r = applyMove(projectsDir, id, toStatus, { today });
+const r = await applyMove(projectsDir, id, toStatus, { today });
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 

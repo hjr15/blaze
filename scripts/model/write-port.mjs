@@ -20,6 +20,16 @@
 // evidence, taken deliberately in Phase 2 (BLZ-254), rather than a leap.
 import { ticketPath, fsStorage } from "./storage.mjs";
 import { serializeTicket } from "./ticket.mjs";
+import { fsReadStorage } from "./read-storage.mjs";
+
+/** Stable stringify: object keys sorted, array order preserved. */
+function canonical(v) {
+  if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v).sort().map((k) => `${k}:${canonical(v[k])}`).join(",")}}`;
+  }
+  return v === null || v === undefined ? "" : String(v);
+}
 
 /** The value-level identity of a ticket. Paths and byte order are deliberately absent. */
 export function ticketValue(rec) {
@@ -35,7 +45,13 @@ export function ticketValue(rec) {
   const norm = {};
   for (const [k, v] of Object.entries(fm)) {
     if (v === "" || v === null || v === undefined) continue;
-    norm[k] = typeof v === "number" ? String(v) : v;
+    if (Array.isArray(v) && v.length === 0) continue;   // [] and absent are one absence
+    // Arrays and objects — worklog, components, labels — are compared by CANONICAL
+    // value, not by reference. `!==` on two arrays is always true, so without this
+    // every array field reported a divergence on every write; and a plain
+    // JSON.stringify would report one whenever the two sides happened to emit an
+    // entry's keys in a different order, which a file and a database routinely do.
+    norm[k] = typeof v === "object" ? canonical(v) : (typeof v === "number" ? String(v) : v);
   }
   return {
     id: rec.frontmatter?.id ?? null,
@@ -48,7 +64,7 @@ export function ticketValue(rec) {
 }
 
 /** Filesystem adapter — today's behaviour, byte for byte. */
-export function fsWritePort(projectsDir, storage = fsStorage) {
+export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsReadStorage) {
   return {
     name: "fs",
     write({ project, status, frontmatter, body, currentFile }) {
@@ -66,11 +82,23 @@ export function fsWritePort(projectsDir, storage = fsStorage) {
       storage.move(currentFile, file, text);
       return { file, fromFile: currentFile };
     },
+    // `blaze new` refuses to overwrite. On a filesystem that question is "is there a
+    // file at this path"; in a database it is "is there a row with this id". Same
+    // guard, different question — which is exactly why it belongs to the adapter and
+    // not to the verb.
+    exists({ project, status, frontmatter }) {
+      return storage.exists(
+        ticketPath(projectsDir, project, status, frontmatter.id, frontmatter.title));
+    },
     // getTicket returns { found, duplicates? } — an envelope, not the record. Reading
     // it as the record made every dual-write comparison see "primary absent" and report
     // a divergence on every field, which looks exactly like a broken database adapter.
-    read(id, { readStorage }) {
-      return readStorage.getTicket(projectsDir, id)?.found ?? null;
+    //
+    // The read driver defaults rather than being required from a context: verbs call
+    // `write(target)` with no second argument, and demanding one here would have made
+    // dual-write unusable from exactly the place it matters most.
+    read(id, ctx) {
+      return (ctx?.readStorage ?? readStorage).getTicket(projectsDir, id)?.found ?? null;
     },
     close() {},
   };
@@ -102,13 +130,30 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
   };
   const nz = (v) => (v === "" || v === undefined ? null : v);
 
+  const asList = (v) => (Array.isArray(v) ? v
+    : typeof v === "string" ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
+
   async function persist({ project, status, frontmatter: fm, body }) {
     const id = fm.id;
+
+    // parent_type is DERIVED, never taken from frontmatter — frontmatter has no such
+    // field. The soak surfaced this on the live board: writing parent_id with a NULL
+    // parent_type failed `ticket_parent_pair_present` on every parented ticket, which
+    // is 2,000-odd of them. Resolved the same way the corpus loader resolves it: look
+    // up the parent's own type. A parent that is not in the database cannot be stored
+    // without violating the CHECK, so the pair is dropped and the dual-write
+    // comparison REPORTS the difference rather than this hiding it.
+    let parentId = nz(fm.parent), parentType = null;
+    if (parentId) {
+      const rows = await exec.all(`SELECT type FROM ticket WHERE id = ${ph(0)}`, [parentId]);
+      if (rows?.length) parentType = rows[0].type;
+      else parentId = null;
+    }
     const cols = ["id", "project_key", "num", "type", "status", "title", "priority", "resolution",
                   "parent_id", "parent_type", "assignee", "estimate_minutes", "sprint_id",
                   "start_date", "due_date", "body", "created_on", "updated_on"];
     const vals = [id, project, num(id), fm.type, status, fm.title, fm.priority || "medium",
-                  nz(fm.resolution), nz(fm.parent), nz(fm.parentType), fm.assignee || "unassigned",
+                  nz(fm.resolution), parentId, parentType, fm.assignee || "unassigned",
                   est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due), body ?? "",
                   fm.created, fm.updated];
     // `excluded.<col>` rather than a second set of placeholders. SQLite's `?` is
@@ -128,11 +173,43 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
         `INSERT INTO ticket_link (src_id, link_type, target_id) VALUES (${ph(0)}, ${ph(1)}, ${ph(2)})`,
         [id, l.type, l.target]);
     }
+
+    // Labels and components. Also found missing by the soak — an edit that set them
+    // wrote to the file and nothing here, so 2,500 tickets' taxonomy would have gone
+    // at cutover. Replace-in-full, so a re-write does not accumulate duplicates.
+    for (const [table, col, val] of [["ticket_label", "label", fm.labels],
+                                     ["ticket_component", "component", fm.components]]) {
+      await exec.run(`DELETE FROM ${table} WHERE ticket_id = ${ph(0)}`, [id]);
+      for (const v of asList(val)) {
+        await exec.run(
+          `INSERT INTO ${table} (ticket_id, project_key, ${col}) VALUES (${ph(0)}, ${ph(1)}, ${ph(2)})`,
+          [id, project, v]);
+      }
+    }
+
+    // Worklog. The dual-write soak found this missing: `blaze log` wrote an entry to
+    // the file and NOTHING to the database, so every logged minute would have been
+    // lost at cutover — silently, because a ticket with no worklog is a perfectly
+    // valid ticket. Replace-in-full rather than append, so a re-write of the same
+    // ticket does not duplicate history.
+    await exec.run(`DELETE FROM worklog_entry WHERE ticket_id = ${ph(0)}`, [id]);
+    for (const w of fm.worklog ?? []) {
+      const mins = Number(w?.minutes);
+      if (!Number.isFinite(mins) || mins <= 0) continue;
+      await exec.run(
+        `INSERT INTO worklog_entry (ticket_id, on_date, minutes, note)
+         VALUES (${ph(0)}, ${ph(1)}, ${ph(2)}, ${ph(3)})`,
+        [id, w.date ?? fm.updated, mins, w.note ?? null]);
+    }
     return { file: id };   // an opaque handle, never a path — BLZ-271
   }
 
   return {
     name: "db",
+    async exists({ frontmatter }) {
+      const rows = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [frontmatter.id]);
+      return Boolean(rows?.length);
+    },
     async write(t) { return persist(t); },
     async move(t) { const r = await persist(t); return { ...r, fromFile: t.currentFile }; },
     async read(id) {
@@ -152,6 +229,13 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
       const links = (await exec.all(
         `SELECT link_type, target_id FROM ticket_link WHERE src_id = ${ph(0)}
           ORDER BY link_type, target_id`, [id])) ?? [];
+      const labels = (await exec.all(
+        `SELECT label FROM ticket_label WHERE ticket_id = ${ph(0)} ORDER BY label`, [id])) ?? [];
+      const comps = (await exec.all(
+        `SELECT component FROM ticket_component WHERE ticket_id = ${ph(0)} ORDER BY component`, [id])) ?? [];
+      const work = (await exec.all(
+        `SELECT ${pg ? "on_date::text AS on_date" : "on_date"}, minutes, note
+           FROM worklog_entry WHERE ticket_id = ${ph(0)} ORDER BY id`, [id])) ?? [];
       return {
         frontmatter: {
           id: r.id, project: r.project_key, type: r.type, title: r.title,
@@ -161,6 +245,11 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
           start: r.start_date ?? "", due: r.due_date ?? "",
           created: r.created_on, updated: r.updated_on,
           links: links.map((l) => ({ type: l.link_type, target: l.target_id })),
+          ...(labels.length ? { labels: labels.map((r) => r.label) } : {}),
+          ...(comps.length ? { components: comps.map((r) => r.component) } : {}),
+          ...(work.length ? { worklog: work.map((w) => ({
+            date: w.on_date, minutes: w.minutes,
+            ...(w.note == null ? {} : { note: w.note }) })) } : {}),
         },
         body: r.body ?? "", project: r.project_key, status: r.status, file: r.id,
       };
@@ -218,6 +307,9 @@ export function dualWritePort(primary, shadow, { onDivergence, strict = false } 
   return {
     name: `dual(${primary.name}->${shadow.name})`,
     divergences,
+    // The primary decides existence, as it decides every outcome. A shadow that
+    // disagreed here would change what the verb DOES, not merely what it reports.
+    exists(t, ctx) { return primary.exists(t, ctx); },
     write(t, ctx) { return both("write", t, ctx); },
     move(t, ctx) { return both("move", t, ctx); },
     read(id, ctx) { return primary.read(id, ctx); },

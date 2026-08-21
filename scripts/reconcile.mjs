@@ -21,8 +21,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { serializeTicket } from "./model/ticket.mjs";
-import { ticketPath, fsStorage } from "./model/storage.mjs";
+import { fsStorage } from "./model/storage.mjs";
+import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 
@@ -238,9 +238,9 @@ function gatherProject(project, { fetch }) {
 }
 
 // --- the reconcile pass -------------------------------------------------------
-export function reconcile({
+export async function reconcile({
   fetch = false, commit = false, push = false, dryRun = true, root, projectsDir,
-  readStorage = fsReadStorage, storage = fsStorage,
+  readStorage = fsReadStorage, storage = fsStorage, writePort = null,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
@@ -253,6 +253,9 @@ export function reconcile({
   const resolved = explicitRoot ? null : resolveRoots();
   root ??= resolved.dataRoot;
   projectsDir ??= explicitRoot ? join(root, "projects") : resolved.projectsDir;
+
+  // Built here, not in the signature: projectsDir is only final at this point.
+  const port = writePort ?? fsWritePort(projectsDir, storage);
 
   const today = new Date().toISOString().slice(0, 10);
   const cfg = loadConfig({ root });
@@ -289,20 +292,18 @@ export function reconcile({
       // loop rather than sitting at the tail of a pure function, so lifting it out
       // would have changed the semantics. It stays in the loop and goes through the
       // driver, which is what the write-seam map called for.
-      const text = serializeTicket({ frontmatter: fm, body: t.body });
+      // The verb states WHAT it wants persisted; the adapter decides where that lives.
+      // move() also owns the write-then-rename ordering, so the text lands at the
+      // DESTINATION and a crash cannot leave the old body at the new path.
+      const target = { project: t.project, status: d.moved ? d.target : t.status,
+                       frontmatter: fm, body: t.body, currentFile: t.file };
       if (d.moved) {
-        // Same rule as move.mjs: the destination comes from the ticket's own project
-        // via the path authority, never from arithmetic on t.file.
-        const { file: dest } = ticketPath.relocate(projectsDir, t.project, d.target, t.file);
-        // One driver call, not write-then-rename: move() owns that ordering, and it
-        // writes the text at the DESTINATION so a crash cannot leave the old body at
-        // the new path.
-        storage.move(t.file, dest, text);
+        const { file: dest } = await port.move(target);
         touched.push(t.file);
         if (dest !== t.file) touched.push(dest);
       } else {
-        storage.write(t.file, text);
-        touched.push(t.file);
+        const { file } = await port.write(target);
+        touched.push(file);
       }
     }
   }
@@ -334,7 +335,7 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
       default: console.error(`unknown flag: ${a}`); process.exit(1);
     }
   }
-  const r = reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply });
+  const r = await reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply });
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   if (r.standalone) { if (!quiet) console.log("reconcile: no projects configured — nothing to reconcile."); process.exit(0); }
   // INF-763: a repo that could not be read is a misconfiguration, not a quiet

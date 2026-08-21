@@ -17,9 +17,9 @@ function root() {
   return d;
 }
 
-test("applyNew creates a validated task in the initial status dir with a namespaced id", () => {
+test("applyNew creates a validated task in the initial status dir with a namespaced id", async () => {
   const r = root(); const projects = join(r, "projects");
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "Wire gateway timeout",
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "Wire gateway timeout",
     priority: "high", labels: ["infra"], today: "2026-06-29", extra: { estimate: 30 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   assert.equal(res.id, "OBA-1");
@@ -33,35 +33,35 @@ test("applyNew creates a validated task in the initial status dir with a namespa
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew increments the id on the second create", () => {
+test("applyNew increments the id on the second create", async () => {
   const r = root(); const projects = join(r, "projects");
-  applyNew(projects, { project: "OBA", type: "task", title: "first", today: "2026-06-29", extra: { estimate: 5 } });
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "second", today: "2026-06-29", extra: { estimate: 5 } });
+  await applyNew(projects, { project: "OBA", type: "task", title: "first", today: "2026-06-29", extra: { estimate: 5 } });
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "second", today: "2026-06-29", extra: { estimate: 5 } });
   assert.equal(res.id, "OBA-2");
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew rejects an unknown type and a leaf with no estimate", () => {
+test("applyNew rejects an unknown type and a leaf with no estimate", async () => {
   const r = root(); const projects = join(r, "projects");
-  assert.equal(applyNew(projects, { project: "OBA", type: "nope", title: "x", today: "2026-06-29" }).ok, false);
-  const noEst = applyNew(projects, { project: "OBA", type: "task", title: "x", today: "2026-06-29" });
+  assert.equal((await applyNew(projects, { project: "OBA", type: "nope", title: "x", today: "2026-06-29" })).ok, false);
+  const noEst = await applyNew(projects, { project: "OBA", type: "task", title: "x", today: "2026-06-29" });
   assert.equal(noEst.ok, false);
   assert.ok(noEst.errors.some((e) => /estimate/.test(e)));
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew places a goal in its own initial status", () => {
+test("applyNew places a goal in its own initial status", async () => {
   const r = root(); const projects = join(r, "projects");
-  const res = applyNew(projects, { project: "OBA", type: "goal", title: "Ship v1", today: "2026-06-29" });
+  const res = await applyNew(projects, { project: "OBA", type: "goal", title: "Ship v1", today: "2026-06-29" });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   assert.equal(res.status, "defined");
   assert.ok(readdirSync(join(projects, "OBA", "defined")).length === 1);
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew rounds the estimate to 5m at create", () => {
+test("applyNew rounds the estimate to 5m at create", async () => {
   const r = root(); const projects = join(r, "projects");
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "round me",
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "round me",
     today: "2026-06-29", extra: { estimate: 33 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   const txt = readFileSync(res.file, "utf8");
@@ -69,19 +69,19 @@ test("applyNew rounds the estimate to 5m at create", () => {
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew: a positive sub-5m estimate is bumped to 5, not dropped", () => {
+test("applyNew: a positive sub-5m estimate is bumped to 5, not dropped", async () => {
   const r = root(); const projects = join(r, "projects");
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "tiny",
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "tiny",
     today: "2026-06-29", extra: { estimate: 2 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   assert.match(readFileSync(res.file, "utf8"), /estimate: 5/);
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew sets components from extra.components and round-trips", () => {
+test("applyNew sets components from extra.components and round-trips", async () => {
   const r = root();
   const projects = join(r, "projects");
-  const res = applyNew(projects, {
+  const res = await applyNew(projects, {
     project: "OBA", type: "task", title: "comp task", today: "2026-07-15",
     extra: { components: ["auth", "gateway"], estimate: 30 },
   });
@@ -91,12 +91,12 @@ test("applyNew sets components from extra.components and round-trips", () => {
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew hard-rejects an off-taxonomy component", () => {
+test("applyNew hard-rejects an off-taxonomy component", async () => {
   const r = root();
   const projects = join(r, "projects");
   mkdirSync(join(projects, "OBA"), { recursive: true });
   writeFileSync(join(projects, "OBA", "project.json"), JSON.stringify({ components: ["auth"], labels: [] }));
-  const res = applyNew(projects, {
+  const res = await applyNew(projects, {
     project: "OBA", type: "task", title: "bad comp", today: "2026-07-15",
     extra: { components: ["auth", "bogus"], estimate: 30 },
   });
@@ -105,25 +105,25 @@ test("applyNew hard-rejects an off-taxonomy component", () => {
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew warns (does not block) on empty required components", () => {
+test("applyNew warns (does not block) on empty required components", async () => {
   const r = root();
   const projects = join(r, "projects");
   mkdirSync(join(projects, "OBA"), { recursive: true });
   writeFileSync(join(projects, "OBA", "project.json"),
     JSON.stringify({ components: ["auth"], requireComponents: true }));
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "no comp", today: "2026-07-15", extra: { estimate: 30 } });
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "no comp", today: "2026-07-15", extra: { estimate: 30 } });
   assert.equal(res.ok, true);                       // NOT blocked
   assert.ok(res.warnings.some((w) => /component/.test(w)));
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew accepts sprint/start/due when the sprint id is in the registry", () => {
+test("applyNew accepts sprint/start/due when the sprint id is in the registry", async () => {
   const r = root();
   const projects = join(r, "projects");
   writeFileSync(join(r, "sprints.json"), JSON.stringify({
     active: "S1", sprints: [{ id: "S1", name: "Mid-July", start: "2026-07-13", end: "2026-07-26" }],
   }));
-  const res = applyNew(projects, {
+  const res = await applyNew(projects, {
     project: "OBA", type: "task", title: "sprint task", today: "2026-07-15",
     extra: { estimate: 30, sprint: "S1", start: "2026-07-20", due: "2026-07-24" },
   });
@@ -135,10 +135,10 @@ test("applyNew accepts sprint/start/due when the sprint id is in the registry", 
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew rejects a sprint id not in the registry", () => {
+test("applyNew rejects a sprint id not in the registry", async () => {
   const r = root();
   const projects = join(r, "projects");
-  const res = applyNew(projects, {
+  const res = await applyNew(projects, {
     project: "OBA", type: "task", title: "bad sprint", today: "2026-07-15",
     extra: { estimate: 30, sprint: "S9" },
   });
@@ -147,10 +147,10 @@ test("applyNew rejects a sprint id not in the registry", () => {
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew WITHOUT sprint fields writes no sprint:/start:/due: lines (M2 delete-guard)", () => {
+test("applyNew WITHOUT sprint fields writes no sprint:/start:/due: lines (M2 delete-guard)", async () => {
   const r = root();
   const projects = join(r, "projects");
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "plain task", today: "2026-07-15", extra: { estimate: 30 } });
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "plain task", today: "2026-07-15", extra: { estimate: 30 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   const txt = readFileSync(res.file, "utf8");
   assert.doesNotMatch(txt, /^sprint:/m);
@@ -168,7 +168,7 @@ test("BLZ-136: applyNew writes a claim beside the ticket and returns its path", 
   const r0 = root();
   execFileSync("git", ["-C", r0, "init", "-q", "-b", "main"]);
   const projects = join(r0, "projects");
-  const res = applyNew(projects, { project: "PROJ", type: "task", title: "Wire the gateway",
+  const res = await applyNew(projects, { project: "PROJ", type: "task", title: "Wire the gateway",
     today: "2026-06-29", extra: { estimate: 30 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   assert.ok(res.claimFile, "applyNew must return the claim path so the ledger can stage it");
@@ -191,87 +191,87 @@ function reservedIds(r, key) {
   catch { return []; }
 }
 
-function seedParent(projects, { type, title }) {
-  const res = applyNew(projects, { project: "OBA", type, title, today: "2026-08-07",
+async function seedParent(projects, { type, title }) {
+  const res = await applyNew(projects, { project: "OBA", type, title, today: "2026-08-07",
     extra: { estimate: type === "goal" || type === "epic" ? undefined : 30 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   return res.id;
 }
 
-test("INF-791: applyNew REJECTS a feature parented to a feature", () => {
+test("INF-791: applyNew REJECTS a feature parented to a feature", async () => {
   const r = root(); const projects = join(r, "projects");
-  const goal = seedParent(projects, { type: "goal", title: "the goal" });
-  const feat = applyNew(projects, { project: "OBA", type: "feature", title: "the feature",
+  const goal = await seedParent(projects, { type: "goal", title: "the goal" });
+  const feat = await applyNew(projects, { project: "OBA", type: "feature", title: "the feature",
     today: "2026-08-07", extra: { parent: goal } });
   assert.equal(feat.ok, true, JSON.stringify(feat.errors));
 
-  const bad = applyNew(projects, { project: "OBA", type: "feature", title: "child feature",
+  const bad = await applyNew(projects, { project: "OBA", type: "feature", title: "child feature",
     today: "2026-08-07", extra: { parent: feat.id } });
   assert.equal(bad.ok, false, "feature -> feature must be refused at create time");
   assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
   rmSync(r, { recursive: true, force: true });
 });
 
-test("BLZ-231: applyNew REJECTS a new epic anywhere — the type is retired, not deleted", () => {
+test("BLZ-231: applyNew REJECTS a new epic anywhere — the type is retired, not deleted", async () => {
   const r = root(); const projects = join(r, "projects");
-  const goal = seedParent(projects, { type: "goal", title: "the goal" });
-  const bad = applyNew(projects, { project: "OBA", type: "epic", title: "a new epic",
+  const goal = await seedParent(projects, { type: "goal", title: "the goal" });
+  const bad = await applyNew(projects, { project: "OBA", type: "epic", title: "a new epic",
     today: "2026-08-07", extra: { parent: goal } });
   assert.equal(bad.ok, false, "an epic has no legal parent, so none can be created");
   assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
   rmSync(r, { recursive: true, force: true });
 });
 
-test("INF-791: applyNew REJECTS a task parented to a goal", () => {
+test("INF-791: applyNew REJECTS a task parented to a goal", async () => {
   const r = root(); const projects = join(r, "projects");
-  const goal = seedParent(projects, { type: "goal", title: "the goal" });
-  const bad = applyNew(projects, { project: "OBA", type: "task", title: "orphan task",
+  const goal = await seedParent(projects, { type: "goal", title: "the goal" });
+  const bad = await applyNew(projects, { project: "OBA", type: "task", title: "orphan task",
     today: "2026-08-07", extra: { parent: goal, estimate: 30 } });
   assert.equal(bad.ok, false);
   assert.ok(bad.errors.some((e) => /invalid parent/.test(e)), JSON.stringify(bad.errors));
   rmSync(r, { recursive: true, force: true });
 });
 
-test("INF-791: applyNew REJECTS a parent that does not exist", () => {
+test("INF-791: applyNew REJECTS a parent that does not exist", async () => {
   const r = root(); const projects = join(r, "projects");
-  seedParent(projects, { type: "goal", title: "the goal" });
-  const bad = applyNew(projects, { project: "OBA", type: "task", title: "dangling",
+  await seedParent(projects, { type: "goal", title: "the goal" });
+  const bad = await applyNew(projects, { project: "OBA", type: "task", title: "dangling",
     today: "2026-08-07", extra: { parent: "OBA-9999", estimate: 30 } });
   assert.equal(bad.ok, false);
   assert.ok(bad.errors.some((e) => /parent not found/.test(e)), JSON.stringify(bad.errors));
   rmSync(r, { recursive: true, force: true });
 });
 
-test("INF-791: applyNew ACCEPTS every legal pair (the check discriminates both ways)", () => {
+test("INF-791: applyNew ACCEPTS every legal pair (the check discriminates both ways)", async () => {
   const r = root(); const projects = join(r, "projects");
-  const goal = seedParent(projects, { type: "goal", title: "the goal" });
-  const req = applyNew(projects, { project: "OBA", type: "requirement", title: "a requirement",
+  const goal = await seedParent(projects, { type: "goal", title: "the goal" });
+  const req = await applyNew(projects, { project: "OBA", type: "requirement", title: "a requirement",
     today: "2026-08-07", extra: { parent: goal } });
   assert.equal(req.ok, true, JSON.stringify(req.errors));
-  const feat = applyNew(projects, { project: "OBA", type: "feature", title: "the feature",
+  const feat = await applyNew(projects, { project: "OBA", type: "feature", title: "the feature",
     today: "2026-08-07", extra: { parent: req.id } });
   assert.equal(feat.ok, true, JSON.stringify(feat.errors));
   for (const t of ["story", "task", "bug"]) {
-    const res = applyNew(projects, { project: "OBA", type: t, title: `a ${t}`,
+    const res = await applyNew(projects, { project: "OBA", type: t, title: `a ${t}`,
       today: "2026-08-07", extra: { parent: feat.id, estimate: 30 } });
     assert.equal(res.ok, true, `${t} -> feature must be allowed: ${JSON.stringify(res.errors)}`);
   }
   // A risk reaches every altitude it can threaten (BLZ-231).
   for (const [parent, label] of [[goal, "goal"], [req.id, "requirement"], [feat.id, "feature"]]) {
-    const res = applyNew(projects, { project: "OBA", type: "risk", title: `a risk on ${label}`,
+    const res = await applyNew(projects, { project: "OBA", type: "risk", title: `a risk on ${label}`,
       today: "2026-08-07", extra: { parent, likelihood: "medium", impact: "high" } });
     assert.equal(res.ok, true, `risk -> ${label} must be allowed: ${JSON.stringify(res.errors)}`);
   }
   rmSync(r, { recursive: true, force: true });
 });
 
-test("INF-791: a rejected create does NOT burn an id", () => {
+test("INF-791: a rejected create does NOT burn an id", async () => {
   const r = root(); const projects = join(r, "projects");
-  const goal = seedParent(projects, { type: "goal", title: "the goal" });
+  const goal = await seedParent(projects, { type: "goal", title: "the goal" });
   const before = reservedIds(r, "OBA");
   assert.deepEqual(before, [1], `expected only the goal's id reserved, got ${before}`);
 
-  const bad = applyNew(projects, { project: "OBA", type: "task", title: "rejected",
+  const bad = await applyNew(projects, { project: "OBA", type: "task", title: "rejected",
     today: "2026-08-07", extra: { parent: goal, estimate: 30 } });
   assert.equal(bad.ok, false);
 
@@ -279,27 +279,27 @@ test("INF-791: a rejected create does NOT burn an id", () => {
   assert.deepEqual(after, before, `a rejected create burned an id: ${before} -> ${after}`);
 
   // And the next SUCCESSFUL create takes the id the rejection would have eaten.
-  const req = applyNew(projects, { project: "OBA", type: "requirement", title: "next",
+  const req = await applyNew(projects, { project: "OBA", type: "requirement", title: "next",
     today: "2026-08-07", extra: { parent: goal } });
   assert.equal(req.ok, true, JSON.stringify(req.errors));
   assert.equal(req.id, "OBA-2", "the id after a rejected create must not skip");
   rmSync(r, { recursive: true, force: true });
 });
 
-test("INF-791: a create rejected for a NON-parent reason also keeps its id", () => {
+test("INF-791: a create rejected for a NON-parent reason also keeps its id", async () => {
   const r = root(); const projects = join(r, "projects");
-  seedParent(projects, { type: "goal", title: "the goal" });
+  await seedParent(projects, { type: "goal", title: "the goal" });
   const before = reservedIds(r, "OBA");
-  const bad = applyNew(projects, { project: "OBA", type: "task", title: "no estimate",
+  const bad = await applyNew(projects, { project: "OBA", type: "task", title: "no estimate",
     today: "2026-08-07" });
   assert.equal(bad.ok, false);
   assert.deepEqual(reservedIds(r, "OBA"), before);
   rmSync(r, { recursive: true, force: true });
 });
 
-test("INF-791: a parentless non-goal is still allowed (missing parent is soft)", () => {
+test("INF-791: a parentless non-goal is still allowed (missing parent is soft)", async () => {
   const r = root(); const projects = join(r, "projects");
-  const res = applyNew(projects, { project: "OBA", type: "task", title: "no parent",
+  const res = await applyNew(projects, { project: "OBA", type: "task", title: "no parent",
     today: "2026-08-07", extra: { estimate: 30 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   rmSync(r, { recursive: true, force: true });

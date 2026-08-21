@@ -40,7 +40,7 @@ if (!id || !type || !target) {
   process.exit(1);
 }
 const today = new Date().toISOString().slice(0, 10);
-const r = applyLink(projectsDir, id, { type, target, remove }, { today });
+const r = await applyLink(projectsDir, id, { type, target, remove }, { today });
 if (!r.ok) { console.error(`blaze link failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 const verb = remove ? "unlink" : "link";
