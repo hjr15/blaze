@@ -88,7 +88,15 @@ async function status({ dataRoot, log }) {
     log(`  schema       v${exec.all("SELECT value FROM blaze_meta WHERE key='schema_version'")[0]?.value}`);
     log(`  tickets      ${n("ticket")}`);
     log(`  links        ${n("ticket_link")}`);
-    log(`  criteria     ${n("acceptance_criterion")}`);
+    // Split by kind. `acceptance_criterion` holds BOTH criteria and notes, so counting
+    // the table and calling it "criteria" overstates it by every note — 2,339 of them
+    // on this board. It reads as the shadow inventing rows, which is exactly the alarm
+    // a soak must not raise falsely.
+    const acByKind = exec.all(
+      "SELECT kind, count(*) AS n FROM acceptance_criterion GROUP BY kind");
+    const byKind = Object.fromEntries(acByKind.map((r) => [r.kind, r.n]));
+    log(`  criteria     ${byKind.criterion ?? 0}`);
+    log(`  AC notes     ${byKind.note ?? 0}`);
   } finally { db.close(); }
 
   const logPath = divergenceLogPath(dataRoot);
