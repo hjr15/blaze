@@ -31,7 +31,7 @@ describe("pg absent — the optional peer dependency is not installed", () => {
   test("explains how to install pg instead of leaking ERR_MODULE_NOT_FOUND", () => {
     const { ok, stderr } = runWithLoader(`
       const { openPostgresRead } = await import("./scripts/model/pg-storage.mjs");
-      await openPostgresRead("postgres://nobody@127.0.0.1:1/none");
+      await openPostgresRead("postgres://nobody@127.0.0.1:1/none", { create: true });
     `);
     assert.equal(ok, false, "opening a Postgres board without pg must fail");
     assert.match(stderr, /needs the 'pg' package/, "must name the missing package");
@@ -53,7 +53,7 @@ describe("pg absent — the optional peer dependency is not installed", () => {
     // run `npm install pg` — which they already did, and which will not fix this.
     const { ok, stderr } = runWithLoader(`
       const { openPostgresRead } = await import("./scripts/model/pg-storage.mjs");
-      await openPostgresRead("postgres://nobody:nobody@127.0.0.1:1/none");
+      await openPostgresRead("postgres://nobody:nobody@127.0.0.1:1/none", { create: true });
     `, brokenLoader);
     assert.equal(ok, false);
     assert.match(stderr, /simulated corrupt install/,

@@ -12,7 +12,7 @@
 //
 // `pg` is an optionalDependency loaded through a dynamic import (design C2), so the
 // npx + SQLite path installs nothing.
-import { PG_DDL } from "./pg-schema.mjs";
+import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
 
 function toRecord(row, links) {
   const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
@@ -65,11 +65,34 @@ async function loadPg() {
   }
 }
 
-export async function openPostgresRead(connection) {
+/**
+ * @param opts.create  create the schema when the database is EMPTY. Default false.
+ *
+ * BLZ-297: this used to run PG_DDL unconditionally. Every statement is
+ * `CREATE TABLE IF NOT EXISTS`, so a database written by an older engine connected
+ * cleanly with its columns silently missing. It now checks and refuses.
+ */
+export async function openPostgresRead(connection, { create = false } = {}) {
   const pg = await loadPg();
   const client = new pg.Client(connection);
   await client.connect();
-  await client.query(PG_DDL);
+
+  const exec = {
+    run: (sql, params = []) => client.query(sql, params.length ? params : undefined),
+    all: async (sql, params = []) => (await client.query(sql, params.length ? params : undefined)).rows,
+  };
+  const state = await checkDbSchema(exec, { dialect: "postgres" });
+  if (!state.ok) { await client.end(); throw new Error(`blaze: ${state.error}`); }
+  if (state.state === "empty") {
+    if (!create) {
+      await client.end();
+      throw new Error(
+        "blaze: this database has no Blaze schema. Create one explicitly rather than "
+        + "having a read open silently write DDL — pass { create: true }, or run "
+        + "'blaze db init'.");
+    }
+    await createDbSchema(exec, { dialect: "postgres" });
+  }
 
   const linksFor = async (id) =>
     (await client.query(

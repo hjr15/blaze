@@ -13,7 +13,8 @@
 // caller that did path arithmetic on it, and ticketPath.relocate() now REFUSES an
 // unrecognised handle rather than guessing, so a bogus destination fails loudly.
 import { DatabaseSync } from "node:sqlite";
-import { SQLITE_DDL, SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
+import { SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
+import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-schema-version.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
 function toRecord(row, links) {
@@ -34,10 +35,39 @@ function toRecord(row, links) {
   };
 }
 
-export function openSqliteRead(path = ":memory:") {
+/**
+ * @param path   database file, or ":memory:"
+ * @param opts.create  create the schema when the database is EMPTY. Default false.
+ *
+ * BLZ-297: this used to exec the DDL unconditionally, and every statement is
+ * `CREATE TABLE IF NOT EXISTS` — so a database written by an older engine opened
+ * cleanly with its columns silently missing. Opening now CHECKS, and refuses anything
+ * this engine cannot read. Creation is opt-in and only ever applies to an empty
+ * database; `createDbSchema` refuses the rest.
+ */
+export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   const db = new DatabaseSync(path);
   db.exec(SQLITE_PRAGMAS);
-  db.exec(SQLITE_DDL);
+
+  const exec = {
+    run(sql, params = []) { return params.length ? db.prepare(sql).run(...params) : db.exec(sql); },
+    all(sql, params = []) { return db.prepare(sql).all(...params); },
+  };
+  // The JUDGEMENT is pure and shared with the Postgres driver; only the fetch differs.
+  // An async guard cannot serve a sync driver at all — `.then` always defers to a
+  // microtask — so the split is structural, not stylistic.
+  const state = judgeDbSchema(readSchemaFactsSync(exec));
+  if (!state.ok) { db.close(); throw new Error(`blaze: ${state.error}`); }
+  if (state.state === "empty") {
+    if (!create) {
+      db.close();
+      throw new Error(
+        "blaze: this database has no Blaze schema. Create one explicitly rather than "
+        + "having a read open silently write DDL — pass { create: true }, or run "
+        + "'blaze db init'.");
+    }
+    createDbSchemaSync(exec);
+  }
 
   const linksFor = db.prepare(
     "SELECT link_type, target_id FROM ticket_link WHERE src_id = ? ORDER BY link_type, target_id");

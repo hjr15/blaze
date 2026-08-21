@@ -73,7 +73,7 @@ test("a log with no create event still replays edits it does have", () => {
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
 
 function seeded() {
-  const s = openSqliteRead();
+  const s = openSqliteRead(":memory:", { create: true });
   s.db.prepare(
     `INSERT INTO ticket (id,project_key,num,type,status,title,body,created_on,updated_on)
      VALUES ('BLZ-1','BLZ',1,'task','defined','First','','2026-01-01','2026-01-01')`).run();

@@ -28,7 +28,7 @@ const ticket = (id, status, extra = {}) => ({ id, status,
 // --- transitions -----------------------------------------------------------------
 test("transitions import verbatim, with the timestamp untouched", () => {
   const dir = board([ticket("BLZ-1", "done")]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   const r = importTransitions(s.db,
     { transitions: [{ id: "BLZ-1", from: "defined", to: "done", ts: "2026-07-16T12:29:58+10:00" }] });
   assert.equal(r.imported, 1);
@@ -40,7 +40,7 @@ test("transitions import verbatim, with the timestamp untouched", () => {
 
 test("a transition for an unknown ticket is COUNTED, never invented", () => {
   const dir = board([ticket("BLZ-1", "done")]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   const r = importTransitions(s.db,
     { transitions: [{ id: "BLZ-999", from: "a", to: "b", ts: "2026-07-16T12:00:00Z" }] });
   assert.equal(r.imported, 0);
@@ -51,7 +51,7 @@ test("a transition missing `from` cannot be an event and is counted, not forced"
   // The event shape CHECK requires both statuses. Inventing a `from` to satisfy it
   // would put fiction in the audit trail.
   const dir = board([ticket("BLZ-1", "done")]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   const r = importTransitions(s.db,
     { transitions: [{ id: "BLZ-1", to: "done", ts: "2026-07-16T12:00:00Z" }] });
   assert.equal(r.imported, 0);
@@ -61,7 +61,7 @@ test("a transition missing `from` cannot be an event and is counted, not forced"
 test("coverage is REPORTED, because the trail is known to be partial", () => {
   const dir = board([ticket("BLZ-1", "done"), ticket("BLZ-2", "defined"),
                      ticket("BLZ-3", "defined"), ticket("BLZ-4", "defined")]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   const r = importTransitions(s.db,
     { transitions: [{ id: "BLZ-1", from: "defined", to: "done", ts: "2026-07-16T12:00:00Z" }] });
   assert.equal(r.ticketsCovered, 1);
@@ -73,7 +73,7 @@ test("coverage is REPORTED, because the trail is known to be partial", () => {
 // --- the oracle ------------------------------------------------------------------
 test("a faithful migration passes the oracle", () => {
   const dir = board([ticket("BLZ-1", "defined"), ticket("BLZ-2", "done")]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   const z = zeroDiff(fsReadStorage, dir, s);
   assert.equal(z.ok, true);
   assert.equal(z.valueDiffs.length, 0);
@@ -82,7 +82,7 @@ test("a faithful migration passes the oracle", () => {
 
 test("the oracle CATCHES a changed value — it is not decorative", () => {
   const dir = board([ticket("BLZ-1", "defined")]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   s.db.exec("UPDATE ticket SET title = 'tampered' WHERE id = 'BLZ-1'");
   const z = zeroDiff(fsReadStorage, dir, s);
   assert.equal(z.ok, false);
@@ -91,7 +91,7 @@ test("the oracle CATCHES a changed value — it is not decorative", () => {
 
 test("the oracle catches a missing ticket and an extra one", () => {
   const dir = board([ticket("BLZ-1", "defined")]);
-  const s = openSqliteRead();
+  const s = openSqliteRead(":memory:", { create: true });
   const z1 = zeroDiff(fsReadStorage, dir, s);
   assert.equal(z1.missing.length, 1, "loaded nothing — the ticket is missing");
   assert.equal(z1.ok, false);
@@ -103,7 +103,7 @@ test("an APPLIED DEFAULT is reported separately from a changed value", () => {
   // it is named rather than either hidden or treated as a failure.
   const dir = board([{ id: "BLZ-1", status: "defined",
     text: doc({ id: "BLZ-1", title: "One", type: "task", project: "BLZ", parent: "" }) }]);
-  const s = openSqliteRead();
+  const s = openSqliteRead(":memory:", { create: true });
   const load = loadCorpus(s.db, dir);
   assert.equal(load.defaultsApplied.priority, 1);
   const z = zeroDiff(fsReadStorage, dir, s);
@@ -115,7 +115,7 @@ test("an APPLIED DEFAULT is reported separately from a changed value", () => {
 test("a DIFFERENT value in a defaulted field is still a failure", () => {
   // The escape hatch must not swallow a real change in the same field.
   const dir = board([ticket("BLZ-1", "defined", { priority: "high" })]);
-  const s = openSqliteRead(); loadCorpus(s.db, dir);
+  const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   s.db.exec("UPDATE ticket SET priority = 'low' WHERE id = 'BLZ-1'");
   const z = zeroDiff(fsReadStorage, dir, s);
   assert.equal(z.ok, false, "high -> low is a change, not a default");
