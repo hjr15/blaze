@@ -22,18 +22,27 @@
 // acceptance criterion that fails for an unrelated reason gets waived — which is how
 // a real regression later slips through a gate everyone has learned to ignore.
 import { parseTicket, serializeTicket } from "../model/ticket.mjs";
+import { acCriteria } from "./ac-oracle-matcher.mjs";
 
 /**
  * @param source  read driver holding the ORIGINAL corpus (filesystem)
  * @param loaded  read driver holding the MIGRATED corpus (database)
+ * @param opts.criteriaFor  (id) => [{ text, checked }] as LOADED, in ord order.
+ *        Optional. When supplied, acceptance criteria are compared too, using a
+ *        matcher written independently of the importer's — see ac-oracle-matcher.mjs.
+ *        Without it the criteria are simply not checked, and `report.criteriaChecked`
+ *        says so rather than the absence looking like a pass.
  */
-export function zeroDiff(source, sourceRoot, loaded) {
+export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null } = {}) {
   const report = {
     compared: 0, missing: [], extra: [],
     valueDiffs: [],      // data loss — the gate
     defaulted: [],       // source carried no value; the schema default applied
     byteDiffs: 0,        // field-order only — informational
     fieldsChecked: 0,
+    criteriaChecked: 0,  // 0 with no criteriaFor — an unchecked oracle must SAY so
+    criteriaDiffs: [],   // data loss in the AC section — part of the gate
+    criteriaShapeDiffs: 0,  // continuation-vs-note allocation only — informational
   };
 
   const src = new Map();
@@ -74,6 +83,43 @@ export function zeroDiff(source, sourceRoot, loaded) {
     if (a.status !== b.status) report.valueDiffs.push({ id, field: "status", source: a.status, loaded: b.status });
     if ((a.body ?? "") !== (b.body ?? "")) report.valueDiffs.push({ id, field: "body" });
 
+    // Acceptance criteria, read by a SECOND matcher that shares no code with the
+    // importer's. Sharing one would make the oracle agree with the importer by
+    // construction, including where the importer is wrong — which is exactly how 153
+    // lower-case headings could migrate as zero criteria and still report clean.
+    if (criteriaFor) {
+      const { criteria: want, hasSection } = acCriteria(a.body ?? "");
+      const got = criteriaFor(id) ?? [];
+      report.criteriaChecked += want.length;
+      if (hasSection && want.length && got.length === 0) {
+        report.criteriaDiffs.push({ id, kind: "section-dropped", expected: want.length });
+      } else if (want.length !== got.length) {
+        report.criteriaDiffs.push({ id, kind: "count", expected: want.length, loaded: got.length });
+      } else {
+        for (let i = 0; i < want.length; i++) {
+          const loadedText = String(got[i].text ?? "").trim();
+          if (want[i].checked !== Boolean(got[i].checked)) {
+            report.criteriaDiffs.push({ id, kind: "checked", ord: i,
+                                        expected: want[i].checked, loaded: Boolean(got[i].checked) });
+          } else if (!loadedText.startsWith(want[i].head)) {
+            // The criterion ITSELF differs: wrong text, wrong order, or truncated at
+            // the source line. This is data loss and it gates.
+            report.criteriaDiffs.push({ id, kind: "text", ord: i,
+                                        expected: want[i].head, loaded: loadedText });
+          } else if (loadedText !== want[i].text) {
+            // Same criterion, different amount of trailing material. The two readers
+            // disagree about whether an indented sub-bullet CONTINUES the criterion or
+            // is a separate note row — and both readings preserve every character; the
+            // importer simply stores the remainder as `kind='note'` instead. Reported,
+            // deliberately NOT gating: an oracle that fails on a representation choice
+            // where nothing was lost is an oracle people learn to wave through, and
+            // then it is not watching when something IS lost.
+            report.criteriaShapeDiffs++;
+          }
+        }
+      }
+    }
+
     // The informational half: would the bytes match if re-emitted?
     const reEmitted = serializeTicket({ frontmatter: a.frontmatter, body: a.body ?? "" });
     const original = serializeTicket({ frontmatter: parseTicket(
@@ -81,6 +127,7 @@ export function zeroDiff(source, sourceRoot, loaded) {
     if (reEmitted !== original) report.byteDiffs++;
   }
 
-  report.ok = report.valueDiffs.length === 0 && report.missing.length === 0 && report.extra.length === 0;
+  report.ok = report.valueDiffs.length === 0 && report.missing.length === 0
+           && report.extra.length === 0 && report.criteriaDiffs.length === 0;
   return report;
 }
