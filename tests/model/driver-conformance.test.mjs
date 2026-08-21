@@ -59,7 +59,7 @@ function seedMem() {
 }
 
 function seedSqlite() {
-  const s = openSqliteRead();
+  const s = openSqliteRead(":memory:", { create: true });
   const ins = s.db.prepare(
     `INSERT INTO ticket (id,project_key,num,type,status,title,parent_id,parent_type,body,created_on,updated_on)
      VALUES (?,'BLZ',?,'task',?,?,?,?,?,'2026-01-01','2026-01-01')`);
@@ -72,7 +72,7 @@ function seedSqlite() {
 
 async function seedPg() {
   const { openPostgresRead } = await import("../../scripts/model/pg-storage.mjs");
-  const s = await openPostgresRead(PG);
+  const s = await openPostgresRead(PG, { create: true });
   await s.client.query("TRUNCATE ticket_event, ticket_link, acceptance_criterion, worklog_entry, ticket CASCADE");
   for (const t of CORPUS)
     await s.client.query(
