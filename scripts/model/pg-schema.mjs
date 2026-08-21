@@ -35,6 +35,31 @@ CREATE TABLE IF NOT EXISTS ticket (
   sprint_id  text,
   start_date date,
   due_date   date,
+
+  -- BLZ-295. Eight fields the live corpus carries that had no column, found by the
+  -- dual-write soak: 926 of 2,561 tickets (36.2%) held at least one, and every one of
+  -- them would have been dropped at cutover.
+  --
+  --   branch/pr           reconcile's link to git       544 / 534 tickets
+  --   ref                 REQ-nnn / ADR-nnnn designator        301
+  --   category/verification/derived   requirement metadata     175 / 175 / 176
+  --   likelihood/impact   risk fields, DECLARED REQUIRED for   80 / 80
+  --                       type=risk and until now enforced by nothing
+  branch       text,
+  pr           text,
+  ref          text,
+  category     text,
+  verification text,
+  derived      text,
+  likelihood   text,
+  impact       text,
+
+  -- The round-trip promise. Blaze has always preserved frontmatter keys it does not
+  -- recognise; a fixed column set cannot, and silently dropping an unrecognised key on
+  -- write is the exact failure the soak exists to prevent. Unknown keys live here so
+  -- adding a field never requires a migration to avoid losing data.
+  extra_json   text NOT NULL DEFAULT '{}',
+
   body       text NOT NULL DEFAULT '',
   created_on date NOT NULL,
   updated_on date NOT NULL,
@@ -83,6 +108,10 @@ CREATE TABLE IF NOT EXISTS ticket_label (
   ticket_id   text NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
   project_key text NOT NULL,
   label       text NOT NULL,
+  -- Authored order, preserved. The file keeps the order someone wrote; a plain
+  -- ORDER BY name would re-emit 2,500 tickets with their taxonomy reshuffled at
+  -- cutover — not data loss, but a diff on every ticket for no reason.
+  ord         integer NOT NULL DEFAULT 0,
   PRIMARY KEY (ticket_id, label)
 );
 
@@ -90,6 +119,10 @@ CREATE TABLE IF NOT EXISTS ticket_component (
   ticket_id   text NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
   project_key text NOT NULL,
   component   text NOT NULL,
+  -- Authored order, preserved. The file keeps the order someone wrote; a plain
+  -- ORDER BY name would re-emit 2,500 tickets with their taxonomy reshuffled at
+  -- cutover — not data loss, but a diff on every ticket for no reason.
+  ord         integer NOT NULL DEFAULT 0,
   PRIMARY KEY (ticket_id, component)
 );
 

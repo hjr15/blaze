@@ -18,7 +18,8 @@ import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mj
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
 import { memStorage } from "../../scripts/model/storage.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, selectWritePort, valueDiff,
-         ticketValue, WRITE_PORT_ENV } from "../../scripts/model/write-port.mjs";
+         ticketValue, WRITE_PORT_ENV, COLUMN_FIELDS,
+         extraFields } from "../../scripts/model/write-port.mjs";
 
 const PG = process.env.BLAZE_TEST_PG_URL ?? null;
 
@@ -252,5 +253,103 @@ describe("dual-write against Postgres", { skip: PG ? false : "set BLAZE_TEST_PG_
       await c.query("DROP SCHEMA IF EXISTS blaze_wp_test CASCADE").catch(() => {});
       await c.end();
     }
+  });
+});
+
+describe("frontmatter that is not a column still round-trips (BLZ-295)", () => {
+  // The soak found 926 of 2,561 tickets (36.2%) carrying at least one field the ticket
+  // table had no column for. Eight got columns; everything else goes to extra_json,
+  // because Blaze has always preserved frontmatter keys it does not recognise and
+  // silently dropping one on write is the failure this whole exercise exists to stop.
+  const RICH = () => ({
+    project: "BLZ", status: "defined",
+    frontmatter: {
+      id: "BLZ-9", project: "BLZ", type: "risk", title: "A risk",
+      priority: "high", assignee: "unassigned",
+      created: "2026-01-01", updated: "2026-01-02", links: [],
+      branch: "BLZ-9-thing", pr: "74", ref: "ADR-0021",
+      category: "portability", verification: "demonstration", derived: "operator",
+      likelihood: "medium", impact: "high",
+      labels: ["zeta", "alpha"], components: ["engine", "blaze"],
+      somethingNobodyPlannedFor: "kept", anotherOne: ["a", "b"],
+    },
+    body: "b",
+  });
+
+  test("all eight new columns survive a write/read cycle", async () => {
+    const port = dbWritePort(sqliteExec());
+    await port.write(RICH());
+    const fm = (await port.read("BLZ-9")).frontmatter;
+    for (const [k, v] of Object.entries({
+      branch: "BLZ-9-thing", pr: "74", ref: "ADR-0021", category: "portability",
+      verification: "demonstration", derived: "operator",
+      likelihood: "medium", impact: "high",
+    })) assert.equal(fm[k], v, `${k} must round-trip`);
+  });
+
+  test("an unrecognised key survives verbatim, including a nested value", async () => {
+    const port = dbWritePort(sqliteExec());
+    await port.write(RICH());
+    const fm = (await port.read("BLZ-9")).frontmatter;
+    assert.equal(fm.somethingNobodyPlannedFor, "kept");
+    assert.deepEqual(fm.anotherOne, ["a", "b"]);
+  });
+
+  test("labels and components keep their AUTHORED order, not alphabetical", async () => {
+    // Sorting them would re-emit 2,500 tickets with their taxonomy reshuffled at
+    // cutover — not data loss, but a diff on every ticket for no reason.
+    const port = dbWritePort(sqliteExec());
+    await port.write(RICH());
+    const fm = (await port.read("BLZ-9")).frontmatter;
+    assert.deepEqual(fm.labels, ["zeta", "alpha"]);
+    assert.deepEqual(fm.components, ["engine", "blaze"]);
+  });
+
+  test("a field WITH a column never also lands in extra_json", () => {
+    // Stored twice, the second write wins — and which one that is depends on read
+    // order, so the bug would be intermittent.
+    const extra = extraFields(RICH().frontmatter);
+    for (const k of Object.keys(extra)) {
+      assert.ok(!COLUMN_FIELDS.has(k), `${k} has a column and must not be in extra_json`);
+    }
+    assert.deepEqual(Object.keys(extra).sort(), ["anotherOne", "somethingNobodyPlannedFor"]);
+  });
+
+  test("empty and absent values are not stored as present", () => {
+    const extra = extraFields({ id: "X", blank: "", nothing: null, missing: undefined, none: [] });
+    assert.deepEqual(extra, {}, "an empty value is an absence, not a value to preserve");
+  });
+
+  test("a corrupt extra_json degrades to empty rather than taking the read down", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec);
+    await port.write(RICH());
+    exec._db.prepare("UPDATE ticket SET extra_json = 'not json at all' WHERE id = 'BLZ-9'").run();
+    const rec = await port.read("BLZ-9");
+    assert.equal(rec.frontmatter.title, "A risk", "the rest of the ticket must still read");
+    assert.equal(rec.frontmatter.somethingNobodyPlannedFor, undefined);
+  });
+
+  test("a schema DEFAULT the file does not state is a real difference, and is reported", async () => {
+    // The ticket table declares `assignee NOT NULL DEFAULT 'unassigned'`, so a ticket
+    // written without one comes back from the database WITH one while the file still
+    // has none. That is not data loss — but it is not agreement either, and the
+    // comparison must say so rather than quietly normalising it away. Every one of the
+    // 2,562 live tickets carries an assignee, which is why the soak sees this zero
+    // times; a hand-built ticket that omits it would surface here.
+    const dir = mkdtempSync(join(tmpdir(), "blaze-default-"));
+    const port = dualWritePort(fsWritePort(dir), dbWritePort(sqliteExec()));
+    const t = RICH();
+    delete t.frontmatter.assignee;
+    await port.write(t, { readStorage: fsReadStorage });
+    assert.deepEqual(port.divergences[0].fields,
+      [{ field: "frontmatter.assignee", primary: undefined, shadow: "unassigned" }]);
+  });
+
+  test("a full-fidelity write diverges on nothing against the filesystem", async () => {
+    const dir = mkdtempSync(join(tmpdir(), "blaze-rich-"));
+    const port = dualWritePort(fsWritePort(dir), dbWritePort(sqliteExec()), { strict: true });
+    await port.write(RICH(), { readStorage: fsReadStorage });
+    assert.deepEqual(port.divergences, []);
   });
 });
