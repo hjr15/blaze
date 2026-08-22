@@ -36,19 +36,18 @@ export const ROUTE_SCOPES = {
   "POST /api/ac": "write",
 
   // v4 (BLZ-323): artifact model, links, gates, baselines, custom fields, matrix and
-  // coverage. NOTE: task-13-brief.md's worked example scores "POST /api/field" as
-  // "admin" — the field-promotion route mutates schema (ALTER TABLE), which is a
-  // meaningfully higher-risk action than an ordinary write. But the pre-existing test
-  // immediately below ("every mutating route costs write, and no GET does") asserts
-  // EXACT equality to "write" for every POST route, and this task's brief cannot touch
-  // that test file. "admin" cannot satisfy that assertion, so this stays "write" —
-  // flagged in task-13-report.md as a brief/test contradiction rather than silently
-  // picked. GET /api/coverage and GET /api/artifact/:id are read; POST /api/artifact,
+  // coverage. POST /api/field is "admin", not "write": defining a filterable field
+  // emits ALTER TABLE, and it spends the install-wide 200-filterable-field budget that
+  // ADR-0018 shares across every project in the installation — one project's member
+  // could exhaust another project's headroom. That is an administrative act. (An
+  // earlier revision of this file scored it "write" to satisfy an exact-equality
+  // invariant in the test below; that invariant was the thing that was wrong, and has
+  // since been loosened — see task-13-report.md fix round 1.) POST /api/artifact,
   // /api/link and /api/baseline are ordinary mutations.
   "POST /api/artifact": "write",
   "POST /api/link": "write",
   "POST /api/baseline": "write",
-  "POST /api/field": "write",
+  "POST /api/field": "admin",
   "GET /api/matrix": "read",
   "GET /api/coverage": "read",
 };

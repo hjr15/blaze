@@ -73,11 +73,27 @@ describe("routes are classified, and an unclassified one is denied", () => {
     }
   });
 
-  test("every mutating route costs write, and no GET does", () => {
+  test("no mutating route is free, and no GET costs more than read", () => {
+    // Was `assert.equal(scope, "write")`, which forbade a POST from being STRICTER
+    // than write. That held only while write was the highest tier any route reached.
+    // POST /api/field emits ALTER TABLE and spends the install-wide column budget, so
+    // it is legitimately admin. The invariant that actually matters is that nothing
+    // mutating is readable-only — a route that costs merely `read` while changing state
+    // is the bug this test exists to catch.
     for (const [route, scope] of Object.entries(ROUTE_SCOPES)) {
-      if (route.startsWith("POST ")) assert.equal(scope, "write", route);
+      if (route.startsWith("POST ")) {
+        assert.ok(scope === "write" || scope === "admin",
+          `${route} costs ${scope} — a mutating route must cost write or admin`);
+      }
       if (route.startsWith("GET ")) assert.equal(scope, "read", route);
     }
+  });
+
+  test("the field-definition route is admin, not write — it ALTERs the schema", () => {
+    // Not merely "a mutating route". Defining a filterable field promotes a real column
+    // and spends the install-wide 200-field budget shared by every project, so a member
+    // who can create tickets must not be able to do it.
+    assert.equal(ROUTE_SCOPES["POST /api/field"], "admin");
   });
 
   test("an unknown route is denied rather than inheriting anything", async () => {
