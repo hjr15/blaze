@@ -69,6 +69,26 @@ describe("coverage evaluation", () => {
     const artifacts = [{ id: "d1", ref: "ADR-0007", kind: "architecture" }];
     assert.equal(evaluateCoverage({ rule: ORPHAN_ADR, artifacts, links: [] }).violations.length, 1);
   });
+
+  const TWO_VERIFICATIONS = { name: "independently-verified-twice", subject_kind: "requirement",
+    definition: { requires_link: "Verifies", direction: "inbound", min: 2 } };
+
+  test("a rule with min 2 is NOT satisfied by a single link", () => {
+    // min was dead in test: every fixture used 1, so hardcoding min = 1 passed everything.
+    const artifacts = [{ id: "a1", ref: "REQ-014", kind: "requirement" }];
+    const links = [{ type_name: "Verifies", source_id: "s1", target_id: "a1" }];
+    const r = evaluateCoverage({ rule: TWO_VERIFICATIONS, artifacts, links });
+    assert.equal(r.violations.length, 1);
+    assert.match(r.violations[0].why, /at least 2/, "the message must state the real threshold");
+    assert.match(r.violations[0].why, /has 1/, "and what was actually found");
+  });
+
+  test("a rule with min 2 IS satisfied by two links", () => {
+    const artifacts = [{ id: "a1", ref: "REQ-014", kind: "requirement" }];
+    const links = [{ type_name: "Verifies", source_id: "s1", target_id: "a1" },
+                   { type_name: "Verifies", source_id: "s2", target_id: "a1" }];
+    assert.deepEqual(evaluateCoverage({ rule: TWO_VERIFICATIONS, artifacts, links }).violations, []);
+  });
 });
 
 // --- schema ------------------------------------------------------------
