@@ -9,9 +9,9 @@
 
 | What | Where |
 |---|---|
-| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 29 commits ahead of `main`, clean tree |
+| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 30 commits ahead of `main`, clean tree |
 | Engine docs (ADRs 0014–0018, spec, plan, ledger, review) | `/home/rnamwoh/Documents/Code/blaze` on **`main`** — 14 commits, **unpushed** |
-| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..326, **unpushed** |
+| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..327, **unpushed** |
 | Competitive register + audits | same board worktree, `docs/competitive/` and `docs/audits/` |
 
 **Nothing has been pushed or merged.** That is deliberate — `blaze-pm` is published only by the
@@ -56,9 +56,9 @@ than fixtures. Do not substitute a weaker check.
 ## Read these three, in this order
 
 1. **`docs/superpowers/specs/2026-08-22-blaze-v4-spine-design.md`** — the spec. Binding authority.
-2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **16 rulings** made
-   during execution, several reversing the plan's own text, plus every parked finding and accepted
-   residual. If you are about to "fix" something that looks wrong, check here first — it may be a
+2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **22 rulings** made
+   during execution (16 in session 1, R17–R22 in session 2), several reversing the plan's own text,
+   plus every parked finding and accepted residual. If you are about to "fix" something that looks wrong, check here first — it may be a
    deliberate decision with a recorded reason.
 3. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-final-review.md`** — the whole-branch review
    that found five Criticals. Three fixed in a review round, two under their own tickets.
@@ -93,12 +93,14 @@ Recorded in the ledger with reasoning:
 
 ## Known spec gaps with no code behind them
 
-Found by the final review; **not yet ticketed**:
+Found by the final review. One is now closed; the remaining three are **still not ticketed**:
 
-- **§4.4 — applying a coverage rule to existing data must report every current violation.** No
-  rule-creation path exists at all. This is the fix for Jama's silent grandfathering (CS-013), which
-  the operator named directly as the drift that must not happen. `coverage()` is a standing read,
-  which is a different obligation — an endpoint nobody opens is exactly the failure.
+- ~~**§4.4 — applying a coverage rule to existing data must report every current violation.**~~
+  **CLOSED (session 2)** by BLZ-327, commit `ebaab09`. `defineCoverageRule` / `setCoverageRuleEnabled`
+  on the API: the report is owed on *enable* as well as on *create* (otherwise §4.4 is routed around
+  by defining every rule disabled), `enabled` is now honoured by `coverage()` and `baselineDocument`
+  instead of being an indexed lie, and `evaluateCoverage` is project-scoped. Rulings R17–R22 in the
+  ledger. `coverage()` remains the standing read — a different obligation, deliberately kept.
 - §4.1 required-field / enum / range validation — entirely absent.
 - §3.4's JSON tail column and the budget reporting the 200-field cap needs to be visible rather than
   sprung.
