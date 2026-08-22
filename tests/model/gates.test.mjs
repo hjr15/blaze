@@ -79,4 +79,29 @@ describe("gates", () => {
       assert.equal(typeof r.ok, "boolean", `${action} has no handler`);
     }
   });
+
+  test("document -> baselined is refused when coverage rules are unmet, and lists every item", () => {
+    // The gate where coverage actually bites. Previously untested: replacing this
+    // handler with () => [] passed the whole suite.
+    const r = checkGate({ action: "document:baselined", subject: { id: "d1" }, context: {
+      coverageViolations: [
+        { ref: "REQ-014", why: "needs at least 1 inbound Addresses link, has 0" },
+        { ref: "REQ-019", why: "needs at least 1 inbound Verifies link, has 0" },
+      ] } });
+    assert.equal(r.ok, false);
+    assert.equal(r.failures.length, 2);
+    assert.match(r.error, /REQ-014/);
+    assert.match(r.error, /REQ-019/);
+    assert.match(r.error, /Addresses/, "the refusal carries the reason, not just the ref");
+  });
+
+  test("document -> baselined passes when coverage is clean", () => {
+    assert.equal(checkGate({ action: "document:baselined", subject: { id: "d1" },
+                             context: { coverageViolations: [] } }).ok, true);
+  });
+
+  test("document -> baselined with no coverage context at all passes rather than throwing", () => {
+    // A caller that computed no coverage must not crash the gate.
+    assert.equal(checkGate({ action: "document:baselined", subject: { id: "d1" }, context: {} }).ok, true);
+  });
 });
