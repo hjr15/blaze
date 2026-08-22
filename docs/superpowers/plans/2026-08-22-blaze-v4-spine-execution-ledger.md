@@ -411,3 +411,75 @@ Finding parked, RETRACTED AND REPLACED (same session, on inspection of reconcile
  house `KEY-n: description` PR title and BLZ-308 corroborates normally. Pre-PR, `in-progress` is a
  hand move — which is exactly what was done here. NOT worth code: the gate is fail-closed on
  purpose, and loosening it is how INF-735's corrupted tickets happened.
+
+=== SESSION 2, PART 2 — THE REMAINING SPEC GAPS AND THE DIALECT EXTRACTION ===
+BLZ-328 (§4.1 validation, 516600a), BLZ-329 (§3.4 budget, b9637d9), BLZ-330 (§5 indicators,
+ 8e82992), BLZ-331 (dialect extraction, f40045c). Every gap the final review named now has code
+ behind it. Full suite 1,633 tests, 1,633 pass, 0 fail, 0 skipped with Postgres 17 (was 1,489 at
+ the end of session 1).
+
+Rulings:
+
+Ruling (R23 — custom field values arrive under an explicit `fields` key): createArtifact's
+ `...rest` conflates them with real artifact columns (body, status), and required-field presence
+ has to know which keys the caller actually supplied. Fishing them out of `rest` would make
+ "supplied `body`" indistinguishable from "supplied a custom field named body".
+
+Ruling (R24 — validation runs BEFORE ref allocation): a refused write must not burn a ref. The
+ ref_claim ledger (BLZ-326) is append-only, so the hole is permanent. Proven against real tables on
+ both engines: zero rows in artifact, artifact_revision AND ref_claim after a refusal, and the next
+ valid write still gets REQ-001.
+
+Ruling (R25 — a bound constrains only when SET, and only number/date have one): `min_value ?? 0`
+ would make every unbounded number field silently reject negatives. And "9" > "10" lexicographically,
+ so a bound on text is ignored rather than compared — text has no ordering the user declared.
+
+Ruling (R26 — `warn` at 80% of the cap, not at it): the benchmark's indexing knee is 200-400, so
+ 160 leaves real headroom to act in, which is the entire point of warning rather than refusing. A
+ threshold AT the cap warns nobody. §3.4's word is "continuously", and CS-008's failure is "sprung".
+
+Ruling (R27 — the budget reports `yours`/`others`, null when no project was named): ADR-0018's
+ "will surprise people" consequence is that project A's promotion spends project B's headroom. A
+ per-project view that hides it IS the silent exhaustion §3.4 warns about. Null rather than 0
+ because a zero reads as "nobody else is using this".
+
+Ruling (R28 — downstream is INBOUND): a link runs source -> target where the source realises the
+ target (architecture Addresses requirement). So an artifact's downstream realisation arrives
+ inbound — the same direction every-requirement-addressed uses and the same thing
+ buildMatrix.untraced measures. BLZ-330's first-draft acceptance criteria had this INVERTED; the
+ ticket was corrected on the board (f1fdcd6b) before any code was written.
+
+Ruling (R29 — orphan and missing-downstream NEST, they do not exclude): an orphan is a strictly
+ worse case of missing-downstream. Reporting only the narrower one hides it. The discriminating
+ fixture is an artifact with only OUTBOUND links: not an orphan, still missing downstream.
+
+Ruling (R30 — link.reviewed_at had to exist): staleness.mjs had always read `l.reviewed_at` and
+ linkDdl defined no such column, so it was permanently NULL and every link whose source had any
+ revision reported stale. An indicator that is on for everything is off. Added nullable on purpose
+ — "never reviewed" is exactly the case §5 wants surfaced, so it must be representable rather than
+ defaulted away.
+
+Ruling (R31 — config-schema.mjs stays out of the shared dialect table, with a reason, not just a
+ carve-out): its dialect carries regex-vs-GLOB checks, a structurally different circular-FK strategy
+ (Postgres needs a deferred ALTER; SQLite declares it inline and has no ALTER TABLE ADD CONSTRAINT
+ at all), a namespace and an FK-qualification function. Those are engine DIFFERENCES, not shared
+ tokens. Folding them in would couple every schema module to config's peculiarities.
+
+Discrimination totals for this part: 44 mutations injected across the four tickets (13 + 13 + 12 +
+ 6). ONE did not break a test and is reported rather than glossed —
+
+  BLZ-328, "a range comparator applied to text fields". The test used numeric-looking bounds
+  ("1"/"10") where any comparison yields NaN and can never fire, so it proved nothing. Rewritten
+  with real string bounds ("m"/"p"), where a lexicographic comparison rejects both fixtures; the
+  mutation then broke it. This is the eighth-plus instance of the pattern the brief named — a test
+  that looks rigorous and proves nothing because no fixture varies the thing under test.
+
+Bug found by a new test, kept because it is the point: the dialect extraction first returned the
+ SHARED token object where the ten private helpers had each built a fresh literal per call. A stray
+ assignment in any one module would have changed every other module's generated DDL — and the
+ shared-state test demonstrated it live, poisoning ` STRICT` for every schema checked after it.
+ Now returns a copy.
+
+Two false alarms from the new STRICT guard, narrowed rather than deleted: `ON DELETE RESTRICT`
+ contains the substring "STRICT", and hierarchy-schema.mjs has a comment mentioning it. The check
+ is for the table-suffix construct `) STRICT;`, not the word.

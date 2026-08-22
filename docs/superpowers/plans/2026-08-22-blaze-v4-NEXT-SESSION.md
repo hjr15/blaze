@@ -9,9 +9,9 @@
 
 | What | Where |
 |---|---|
-| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 30 commits ahead of `main`, clean tree |
+| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 34 commits ahead of `main`, clean tree |
 | Engine docs (ADRs 0014–0018, spec, plan, ledger, review) | `/home/rnamwoh/Documents/Code/blaze` on **`main`** — 14 commits, **unpushed** |
-| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..327, **unpushed** |
+| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..331, **unpushed** |
 | Competitive register + audits | same board worktree, `docs/competitive/` and `docs/audits/` |
 
 **Nothing has been pushed or merged.** That is deliberate — `blaze-pm` is published only by the
@@ -19,9 +19,10 @@
 
 ## State in one line
 
-**Fourteen of fifteen planned tasks are built, plus BLZ-327 (§4.4). 1,517 tests, 1,517 pass, 0 fail,
-0 skipped with Postgres enabled** (baseline before this work: 1,267; end of session 1: 1,489). Task
-14 — the migration — is the only planned task outstanding and is genuinely blocked.
+**Fourteen of fifteen planned tasks are built, plus BLZ-327..331 — every spec gap the final review
+named now has code behind it. 1,633 tests, 1,633 pass, 0 fail, 0 skipped with Postgres enabled**
+(baseline before this work: 1,267; end of session 1: 1,489). Task 14 — the migration — is the only
+planned task outstanding and is genuinely blocked.
 
 Verify before trusting that number:
 
@@ -56,8 +57,8 @@ than fixtures. Do not substitute a weaker check.
 ## Read these three, in this order
 
 1. **`docs/superpowers/specs/2026-08-22-blaze-v4-spine-design.md`** — the spec. Binding authority.
-2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **22 rulings** made
-   during execution (16 in session 1, R17–R22 in session 2), several reversing the plan's own text,
+2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **31 rulings** made
+   during execution (16 in session 1, R17–R31 in session 2), several reversing the plan's own text,
    plus every parked finding and accepted residual. If you are about to "fix" something that looks wrong, check here first — it may be a
    deliberate decision with a recorded reason.
 3. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-final-review.md`** — the whole-branch review
@@ -91,28 +92,37 @@ Recorded in the ledger with reasoning:
 - A goal with no hierarchy members vacuously passes `goal:achieved`. Consistent with the house rule
   that untraced work is legal and counted, and the matrix publishes the count.
 
-## Known spec gaps with no code behind them
+## Known spec gaps — ALL CLOSED (session 2)
 
-Found by the final review. One is now closed; the remaining three are **still not ticketed**:
+Every gap the final review named now has code behind it. Kept here as a record of what shipped,
+not as outstanding work:
 
-- ~~**§4.4 — applying a coverage rule to existing data must report every current violation.**~~
-  **CLOSED (session 2)** by BLZ-327, commit `ebaab09`. `defineCoverageRule` / `setCoverageRuleEnabled`
-  on the API: the report is owed on *enable* as well as on *create* (otherwise §4.4 is routed around
-  by defining every rule disabled), `enabled` is now honoured by `coverage()` and `baselineDocument`
-  instead of being an indexed lie, and `evaluateCoverage` is project-scoped. Rulings R17–R22 in the
-  ledger. `coverage()` remains the standing read — a different obligation, deliberately kept.
-- §4.1 required-field / enum / range validation — entirely absent.
-- §3.4's JSON tail column and the budget reporting the 200-field cap needs to be visible rather than
-  sprung.
-- §5's missing-downstream indicator and API-surfaced staleness.
+- **§4.4** — applying a coverage rule reports every current violation. BLZ-327, `ebaab09`.
+  The report is owed on *enable* as well as *create*; `enabled` is now honoured; coverage is
+  project-scoped. Rulings R17–R22.
+- **§4.1** — required-field / enum / type / range validation. BLZ-328, `516600a`. Runs before ref
+  allocation so a refused write burns nothing. Rulings R23–R25.
+- **§3.4** — the field budget, surfaced install-wide and per project. BLZ-329, `b9637d9`. Reported
+  on every successful promotion, not only inside a refusal, with `warn` at 80%. Rulings R26–R27.
+- **§5** — per-artifact orphan / missing-downstream / stale-since-change. BLZ-330, `8e82992`. Also
+  added the `link.reviewed_at` column staleness.mjs had always read and never had. Rulings R28–R30.
+
+Still genuinely absent, and **never ticketed because the review listed them only in passing** —
+decide whether they are wanted before building:
+
+- §4.3's advisory checks beyond WARN_TIER: singularity, necessity, verification-method
+  appropriateness, architecture-coverage percentage.
+- §3.4's JSON tail column with CHECK constraints (the *storage* half of I6; BLZ-329 was the
+  budget-reporting half). Custom field values are validated today but not persisted.
+- §5's "filterable by custom field on both axes" of the matrix.
 
 ## Recommended follow-up, already reasoned through
 
-**Extract the dialect helper.** Seven modules each define a private `dialect(name)`. This is not
-tidiness: `boolean NOT NULL DEFAULT 0` shipped **three separate times** because Postgres rejects an
-integer default and SQLite tolerates it, and ` STRICT` is retyped seven times where omission fails
-silently. Coupling cost is near zero. **Leave `config-schema.mjs` alone.** Follow-up ticket, not a
-merge blocker.
+~~**Extract the dialect helper.**~~ **DONE** — BLZ-331, `f40045c`. It was ten modules, not seven
+(the count predated BLZ-325/326/330). Verified by a zero-diff oracle: all 42 generated DDL
+statements byte-identical, including the carved-out `config-schema.mjs`. `config-schema.mjs` stays
+out for a recorded reason now, not just a carve-out (R31). The extraction's own new test caught a
+real bug it had introduced — returning the shared token object rather than a copy.
 
 ## Out of scope for the next session
 
