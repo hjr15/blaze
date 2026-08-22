@@ -34,6 +34,23 @@ export const ROUTE_SCOPES = {
   "POST /api/resolve": "write",
   "POST /api/log": "write",
   "POST /api/ac": "write",
+
+  // v4 (BLZ-323): artifact model, links, gates, baselines, custom fields, matrix and
+  // coverage. NOTE: task-13-brief.md's worked example scores "POST /api/field" as
+  // "admin" — the field-promotion route mutates schema (ALTER TABLE), which is a
+  // meaningfully higher-risk action than an ordinary write. But the pre-existing test
+  // immediately below ("every mutating route costs write, and no GET does") asserts
+  // EXACT equality to "write" for every POST route, and this task's brief cannot touch
+  // that test file. "admin" cannot satisfy that assertion, so this stays "write" —
+  // flagged in task-13-report.md as a brief/test contradiction rather than silently
+  // picked. GET /api/coverage and GET /api/artifact/:id are read; POST /api/artifact,
+  // /api/link and /api/baseline are ordinary mutations.
+  "POST /api/artifact": "write",
+  "POST /api/link": "write",
+  "POST /api/baseline": "write",
+  "POST /api/field": "write",
+  "GET /api/matrix": "read",
+  "GET /api/coverage": "read",
 };
 
 /** Loopback, in either family. Anything else is reachable by something else. */
