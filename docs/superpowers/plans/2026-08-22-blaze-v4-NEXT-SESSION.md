@@ -1,40 +1,58 @@
 # Blaze v4 — next session brief
 
 **Written:** 2026-08-22, at the end of the session that designed and built the v4 spine.
+**Updated:** 2026-08-22, after the spine and the deferred-defect round both MERGED.
 **Read this whole file before running anything.** Every command is literal and can be pasted.
 
 ---
 
 ## Where the work is
 
+**It is all merged.** `blaze` `main` carries the whole v4 spine plus the pre-merge fix round and
+the deferred defects. Nothing is sitting on an unmerged branch any more.
+
 | What | Where |
 |---|---|
-| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 38 commits ahead of `main`, clean tree |
-| Engine docs (ADRs 0014–0018, spec, plan, ledger, review) | `/home/rnamwoh/Documents/Code/blaze` on **`main`** — 14 commits, **unpushed** |
-| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..343, **unpushed** |
+| Engine code | `blaze` **`main`**, pushed. Spine merge `59d6a92`, deferred defects `6eacc6a` (PR #88) |
+| Engine docs (ADRs 0014–0018, spec, plan, ledger, review) | same, `docs/` |
+| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..344, **committed locally, deliberately unpushed** |
 | Competitive register + audits | same board worktree, `docs/competitive/` and `docs/audits/` |
 
-**Nothing has been pushed or merged.** That is deliberate — `blaze-pm` is published only by the
-`blaze-flush` CronJob, and the engine branch was left for the operator to review.
+`blaze-pm` is still local-only: the `blaze-flush` CronJob (23:50 Australia/Sydney) is the sole
+merger there, and that has not changed.
+
+**The worktree `blaze-worktrees/BLZ-306-document-model` is now spent** — its branch is merged and
+deleted, and it is sitting detached. Removing it is safe whenever you want the disk back; it was
+left in place rather than removed unprompted.
 
 ## State in one line
 
-**The spine is FULLY IMPLEMENTED and has been through a pre-merge review. Every requirement in the
-spec has code behind it except §6, the migration. 1,727 tests, 1,727 pass, 0 fail, 0 skipped with
-Postgres enabled** (baseline before this
-work: 1,267; end of session 1: 1,489). Task 14 / BLZ-324 — the migration — is the only outstanding
-work and is genuinely blocked on the soak.
+**The v4 spine is built, reviewed, fixed and merged. 1,753 tests, 1,753 pass, 0 fail, 0 skipped**
+with real Postgres 17 under the CI command (baseline before any of this work: 1,267). Coverage
+97.40 / 85.49 / 95.55 / 97.40 against gates of 91 / 77 / 93 / 91. **37 of 40 v4 tickets are done.**
 
 Verify before trusting that number:
 
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH   # Node 20 lacks node:sqlite — this is mandatory
-cd /home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model
+cd /home/rnamwoh/Documents/Code/blaze
 docker run --rm -d -e POSTGRES_PASSWORD=x -p 55443:5432 --name v4chk postgres:17-alpine
 sleep 5
-BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55443/postgres npm test
+BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55443/postgres npm run test:coverage
 docker rm -f v4chk
 ```
+
+## What is left, in full
+
+Three tickets, and only one kind of work:
+
+- **BLZ-324** — the migration. Blocked on the soak (below). The only outstanding spine task.
+- **BLZ-309** — its parent feature, open because BLZ-324 is.
+- **BLZ-305** — the goal, open because BLZ-309 is.
+
+**There is no unblocked engine work left on the spine.** Do not go looking for gaps; there are
+none. The next real work is either the soak, or specs 2–6 — which are now unblocked, since they
+were only ever waiting on the spine to merge.
 
 ## The one blocked task, and what unblocks it
 
