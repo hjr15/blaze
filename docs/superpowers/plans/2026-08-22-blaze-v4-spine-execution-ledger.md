@@ -331,3 +331,65 @@ Residuals accepted, recorded so they are not mistaken for oversights:
  - With no store wired, ref allocation still uses the old live-array nextRef. That preserves ~150
    pre-existing policy tests that never construct a database. The reuse bug therefore still exists
    on the storeless path — acceptable only because production always has a store.
+
+=== SESSION 2 — BLZ-327, THE §4.4 GAP CLOSED ===
+Picked up from the next-session brief's "known spec gaps with no code behind them". §4.4 was the
+ one the operator named directly (Jama's CS-013 silent grandfathering), and the final review's I4
+ confirmed there was no rule-creation path at all. Ticketed as BLZ-327 before any code was written.
+Commit ebaab09 on BLZ-308-v4-fields-baselines-api.
+
+Rulings made during this task:
+
+Ruling (R17 — the report is owed on ENABLE, not only on CREATE): §4.4 says "applying a rule". A rule
+ created disabled and switched on later is the same act of application. Without covering the enable
+ path, §4.4 is routed around in one line: define every rule disabled, switch it on silently, and
+ nobody is ever told what became non-compliant. setCoverageRuleEnabled carries the same report.
+
+Ruling (R18 — disabling returns `null`, not `[]`): withdrawal is not application and owes no report.
+ Returning `[]` would be indistinguishable from "applied, and nothing violates it", which is the
+ same class of lie §4.4 exists to prevent. `null` means "not asked". The mutation collapsing the two
+ broke a test, so the distinction is load-bearing rather than decorative.
+
+Ruling (R19 — `enabled` had been a lie, and this fixes it in the same change): the column existed
+ and coverage_rule_project_kind_idx indexed on it, while coverage() and baselineDocument both
+ evaluated every rule regardless. A disabled rule still refused baselines. Strictly this is beyond
+ BLZ-327's title, but shipping a create path that takes an `enabled` argument the rest of the system
+ ignores would have been building on top of a known-false flag.
+
+Ruling (R20 — defining the FIRST rule must not drop DEFAULT_COVERAGE_RULES): `state.coverageRules ??
+ DEFAULT_COVERAGE_RULES` meant the first define, if it initialised the array to `[]`, would switch
+ three standing rules off as a side effect of adding one. Materialising a copy of the defaults keeps
+ absent = "defaults in force" and `[]` = "deliberately none", which is what the existing tests
+ already assumed.
+
+Ruling (R21 — evaluateCoverage is now project-scoped): coverage_rule has always had a project_key
+ and evaluateCoverage had always ignored it. A rule applied in one project reported another
+ project's artifacts as violations — and §4.4's whole value is that the person reads that report and
+ acts on it. Only an EXPLICIT mismatch skips (`rule.project_key && a.project_key && differ`), so the
+ ~20 project-less pure-decision fixtures predating project scoping are unaffected. artifact.project_key
+ is NOT NULL in the real schema, so production always takes the strict path.
+
+Ruling (R22 — requires_link must name a DECLARED link type): default deny (§4.1, CS-011/CS-012)
+ applies to a rule naming a link type as much as to a link using one. A rule requiring "Verifes"
+ can never be satisfied and reports every requirement in the project as a violation forever, and the
+ reader cannot distinguish that from genuine total non-coverage.
+
+Discrimination: 13 mutations injected, every one broke at least one test — empty report, report
+ truncated to 10, project scoping dropped, enabled ignored, defaults dropped, null-vs-[] collapsed,
+ duplicate check removed, undeclared link type accepted, definition persisted as "{}", the enable
+ write made a no-op, boolVal dropped for `enabled`, min>=1 validation removed, and the rule never
+ persisted to the store. No mutation passed silently; there is nothing to report under the
+ "if a mutation does not break a test, say so plainly" instruction.
+
+FULL SUITE with Postgres 17: 1517 tests, 1517 pass, 0 fail, 0 skipped. Was 1489.
+
+Board: BLZ-305..326 moved defined -> in-progress (the work is built but nothing is merged, so
+ in-progress is the honest status); BLZ-327 created under BLZ-307 and moved to in-progress.
+ Committed locally in blaze-pm-worktrees/v4-spine as 293aa30e. Not pushed — blaze-flush is the sole
+ merger.
+
+Finding parked, NOT fixed: `blaze reconcile` can never move a BLZ engine ticket, because
+ blaze.config.json has `codeRepos: []`. Reconcile derives status from branch + PR state in the
+ registered code repos, and the blaze engine repo is not registered. That is why 22 tickets sat in
+ `defined` while fourteen tasks were built. Left alone deliberately — it is a board-wide config
+ change that affects every project's reconcile behaviour, and it is the operator's call.

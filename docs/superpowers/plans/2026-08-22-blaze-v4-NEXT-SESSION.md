@@ -19,9 +19,9 @@
 
 ## State in one line
 
-**Fourteen of fifteen planned tasks are built. 1,489 tests, 1,489 pass, 0 fail, 0 skipped with
-Postgres enabled** (baseline before this work: 1,267). Task 14 — the migration — is the only one
-outstanding and is genuinely blocked.
+**Fourteen of fifteen planned tasks are built, plus BLZ-327 (§4.4). 1,517 tests, 1,517 pass, 0 fail,
+0 skipped with Postgres enabled** (baseline before this work: 1,267; end of session 1: 1,489). Task
+14 — the migration — is the only planned task outstanding and is genuinely blocked.
 
 Verify before trusting that number:
 
@@ -123,5 +123,10 @@ merge blocker.
 ## If you are continuing rather than starting fresh
 
 Nothing is half-finished. The tree is clean, every commit is complete, and the ledger records every
-decision. You can pick up at any of: BLZ-325/326 close-out, the four spec gaps above, the dialect
+decision. You can pick up at any of: the three remaining spec gaps above, the dialect
 extraction, or waiting on the soak for Task 14.
+
+**Board note (session 2):** BLZ-305..327 are now `in-progress`, not `defined` — nothing is merged, so
+that is the honest status. `blaze reconcile` cannot move them itself: `blaze.config.json` has
+`codeRepos: []`, so reconcile has no repo to read branch/PR state from. That is a board-wide config
+change affecting every project, so it was left for the operator rather than made unilaterally.
