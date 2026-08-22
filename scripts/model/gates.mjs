@@ -13,43 +13,36 @@
 // gates have nothing to do with coverage, and `document:baselined` receives its
 // coverage failures pre-computed on context.coverageViolations -- the composition of
 // evaluateCoverage's output into that context happens in a later API task, not here.
-export const GATED_ACTIONS = new Set([
-  "document:baselined",
-  "requirement:verified",
-  "goal:achieved",
-  "architecture:accepted",
-]);
-
 const REQUIRED_ADR_SECTIONS = ["Context", "Decision", "Consequences"];
 
-export function checkGate({ action, subject = {}, context = {} }) {
-  if (!GATED_ACTIONS.has(action)) return { ok: true, error: null, failures: [] };
-
-  let failures = [];
-  if (action === "requirement:verified") {
+// Each gate is a function from ({subject, context}) to a list of failures.
+// GATED_ACTIONS is DERIVED from these keys — a handler cannot exist without being
+// registered, and a registered action cannot exist without a handler. The previous
+// shape kept the two in separate places, where they could silently disagree.
+const GATES = {
+  "requirement:verified": ({ subject, context }) => {
     const has = (context.links ?? []).some(
       (l) => l.type_name === "Verifies" && l.target_id === subject.id);
-    if (!has) failures = [{ ref: subject.ref, why: "no resolving Verifies link" }];
-  }
-
-  if (action === "goal:achieved") {
-    failures = (context.children ?? [])
+    return has ? [] : [{ ref: subject.ref, why: "no resolving Verifies link" }];
+  },
+  "goal:achieved": ({ context }) =>
+    (context.children ?? [])
       .filter((c) => c.kind === "requirement" && !c.terminal)
-      .map((c) => ({ ref: c.ref, why: `still ${c.status ?? "open"}` }));
-  }
+      .map((c) => ({ ref: c.ref, why: `still ${c.status ?? "open"}` })),
+  "architecture:accepted": ({ subject }) =>
+    REQUIRED_ADR_SECTIONS
+      .filter((s) => !sectionHasContent(String(subject.body ?? ""), s))
+      .map((s) => ({ ref: subject.ref, why: `section "${s}" is missing or empty` })),
+  "document:baselined": ({ context }) =>
+    (context.coverageViolations ?? []).map((v) => ({ ref: v.ref, why: v.why })),
+};
 
-  if (action === "architecture:accepted") {
-    const body = String(subject.body ?? "");
-    failures = REQUIRED_ADR_SECTIONS
-      .filter((s) => !sectionHasContent(body, s))
-      .map((s) => ({ ref: subject.ref, why: `section "${s}" is missing or empty` }));
-  }
+export const GATED_ACTIONS = new Set(Object.keys(GATES));
 
-  if (action === "document:baselined") {
-    failures = (context.coverageViolations ?? [])
-      .map((v) => ({ ref: v.ref, why: v.why }));
-  }
-
+export function checkGate({ action, subject = {}, context = {} }) {
+  const gate = GATES[action];
+  if (!gate) return { ok: true, error: null, failures: [] };
+  const failures = gate({ subject, context });
   if (!failures.length) return { ok: true, error: null, failures: [] };
   return {
     ok: false,

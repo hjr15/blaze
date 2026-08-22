@@ -69,4 +69,14 @@ describe("gates", () => {
                  { ref: "REQ-003", kind: "requirement", terminal: false }] } });
     assert.equal(r.failures.length, 3);
   });
+
+  test("GATED_ACTIONS is derived from the handlers — the two cannot drift apart", () => {
+    // Previously the set was hand-maintained beside the handlers, so a gate could be
+    // implemented without being registered, or registered without being implemented,
+    // and no test could tell. Deriving it makes both impossible by construction.
+    for (const action of GATED_ACTIONS) {
+      const r = checkGate({ action, subject: { ref: "X", body: "" }, context: {} });
+      assert.equal(typeof r.ok, "boolean", `${action} has no handler`);
+    }
+  });
 });
