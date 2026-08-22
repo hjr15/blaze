@@ -130,3 +130,31 @@ export function validateFieldValues({ definitions = [], values = {}, project_key
     violations,
   };
 }
+
+/**
+ * §3.4's two homes for a custom field value, split once (BLZ-332).
+ *
+ * `is_filterable` at definition time promoted the field to a real `cf_<key>` column; every
+ * other value lives in the `custom_fields` JSON tail. A value must never be in both:
+ * promotion is "decided once, at definition", so two copies are two answers that can
+ * disagree, and nothing would say which one a filter should trust.
+ *
+ * Scoped the same way validateFieldValues is, and by the same rule — a call site that has
+ * to remember to scope is a call site that eventually will not.
+ *
+ * @returns { custom_fields, promoted } — `custom_fields` always an object (never null, so
+ *   the NOT NULL column never has to be special-cased), `promoted` keyed by COLUMN name.
+ */
+export function splitCustomFields({ definitions = [], values = {}, project_key, kind }) {
+  const scoped = definitions.filter(
+    (d) => d.project_key === project_key && d.applies_to_kind === kind);
+  const filterable = new Set(scoped.filter((d) => d.is_filterable).map((d) => d.key));
+
+  const custom_fields = {};
+  const promoted = {};
+  for (const [key, value] of Object.entries(values)) {
+    if (filterable.has(key)) promoted[`cf_${key}`] = value;
+    else custom_fields[key] = value;
+  }
+  return { custom_fields, promoted };
+}

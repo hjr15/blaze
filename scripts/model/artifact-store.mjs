@@ -20,6 +20,21 @@ import { claimRef, claimedRefs } from "./ref-claim.mjs";
 
 const ph = (dialect, i) => (dialect === "postgres" ? `$${i + 1}` : "?");
 
+// Promoted custom-field columns are named `cf_<key>` where <key> already passed
+// promotionPlan's SAFE_IDENT. Re-checked at the point of interpolation regardless.
+const SAFE_COLUMN = /^cf_[a-z][a-z0-9_]{0,50}$/;
+
+/**
+ * The tail is an OBJECT in memory and JSON text in the column. An artifact with no custom
+ * values stores a real empty object — never NULL (the column is NOT NULL) and never the
+ * string "undefined", which JSON.stringify(undefined) produces and which would then fail
+ * the column's own json_valid CHECK.
+ */
+function jsonTail(v) {
+  if (typeof v === "string") return v;
+  return JSON.stringify(v ?? {});
+}
+
 /** JS booleans need translating: Postgres takes them natively, SQLite INTEGER wants 0/1. */
 function boolVal(v, dialect) {
   if (typeof v !== "boolean") return v;
@@ -64,13 +79,34 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
       return claimedRefs(exec, p, { project_key, kind });
     },
 
+    /**
+     * BLZ-332, §3.4: custom field values have two homes, decided once at definition time.
+     * A FILTERABLE field was promoted to a real `cf_<key>` column (BLZ-321); everything
+     * else goes to the `custom_fields` JSON tail. Never both — one value, one home.
+     *
+     * `a.promoted` therefore makes the column list dynamic, which is the only place in
+     * this store that builds SQL from data. Every column name is re-validated against
+     * SAFE_COLUMN here even though promotionPlan already checked the key at definition
+     * time: a store that interpolates an unchecked identifier is one bug away from being
+     * an injection point, and "the caller already checked" is exactly the assumption that
+     * stops being true later.
+     */
     async insertArtifact(a) {
+      const cols = ["id", "project_key", "kind", "ref", "title", "statement", "body",
+                    "status", "created_at", "updated_at", "custom_fields"];
+      const vals = [a.id, a.project_key, a.kind, a.ref, a.title, a.statement ?? null,
+                    a.body ?? null, a.status, a.created_at, a.updated_at,
+                    jsonTail(a.custom_fields)];
+      for (const [col, v] of Object.entries(a.promoted ?? {})) {
+        if (!SAFE_COLUMN.test(col)) {
+          throw new Error(`refusing to build SQL with the unsafe column name ${JSON.stringify(col)}`);
+        }
+        cols.push(col);
+        vals.push(boolVal(v, dialect));
+      }
       await exec.run(
-        `INSERT INTO artifact
-           (id, project_key, kind, ref, title, statement, body, status, created_at, updated_at)
-         VALUES (${p(0)},${p(1)},${p(2)},${p(3)},${p(4)},${p(5)},${p(6)},${p(7)},${p(8)},${p(9)})`,
-        [a.id, a.project_key, a.kind, a.ref, a.title, a.statement ?? null, a.body ?? null,
-         a.status, a.created_at, a.updated_at]);
+        `INSERT INTO artifact (${cols.join(", ")})
+         VALUES (${cols.map((_, i) => p(i)).join(",")})`, vals);
     },
 
     async updateArtifactStatus({ id, status, updated_at }) {

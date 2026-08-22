@@ -5,7 +5,7 @@
 // constraint: it reads as protection on the schema diagram. This is the reader.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { validateFieldValues, parseEnumValues } from "../../scripts/model/field-validation.mjs";
+import { validateFieldValues, parseEnumValues, splitCustomFields } from "../../scripts/model/field-validation.mjs";
 
 const defn = (o) => ({
   project_key: "BLZ", applies_to_kind: "requirement", data_type: "text",
@@ -198,5 +198,42 @@ describe("scoping — a definition constrains only what it was declared for", ()
   test("no definitions at all means nothing is constrained, and no value is legal", () => {
     assert.equal(run([], {}).ok, true);
     assert.equal(run([], { anything: 1 }).ok, false);
+  });
+});
+
+// BLZ-332 — the two homes, split once. Found by mutation: nothing exercised the scoping,
+// so dropping it entirely passed the whole suite.
+describe("splitCustomFields routes each value to exactly one home", () => {
+  const d = (o) => ({ project_key: "BLZ", applies_to_kind: "requirement",
+                      is_filterable: false, key: "k", ...o });
+  const split = (definitions, values) =>
+    splitCustomFields({ definitions, values, project_key: "BLZ", kind: "requirement" });
+
+  test("a filterable field goes to its cf_ column, a non-filterable one to the tail", () => {
+    const r = split([d({ key: "risk", is_filterable: true }), d({ key: "owner" })],
+                    { risk: 7, owner: "ryan" });
+    assert.deepEqual(r.promoted, { cf_risk: 7 });
+    assert.deepEqual(r.custom_fields, { owner: "ryan" });
+  });
+
+  test("a same-named FILTERABLE definition in another PROJECT does not promote this value", () => {
+    // Without scoping, project OTHER's promotion decision silently routes BLZ's value to a
+    // cf_ column that BLZ's table may not even have.
+    const r = split([d({ key: "risk", is_filterable: true, project_key: "OTHER" })], { risk: 7 });
+    assert.deepEqual(r.promoted, {});
+    assert.deepEqual(r.custom_fields, { risk: 7 });
+  });
+
+  test("a same-named FILTERABLE definition for another KIND does not promote it either", () => {
+    const r = split([d({ key: "risk", is_filterable: true, applies_to_kind: "architecture" })],
+                    { risk: 7 });
+    assert.deepEqual(r.promoted, {});
+    assert.deepEqual(r.custom_fields, { risk: 7 });
+  });
+
+  test("no values at all yields an empty object, never null", () => {
+    const r = split([], {});
+    assert.deepEqual(r.custom_fields, {});
+    assert.deepEqual(r.promoted, {});
   });
 });

@@ -17,7 +17,7 @@ import { artifactHealth } from "./artifact-health.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
-import { validateFieldValues } from "./field-validation.mjs";
+import { validateFieldValues, splitCustomFields } from "./field-validation.mjs";
 import { ARTIFACT_KINDS } from "./artifact-schema.mjs";
 
 /**
@@ -215,12 +215,13 @@ export function artifactApi(state, store) {
         // attributable act, so the reason string travels with the artifact rather
         // than being consumed and discarded at the gate.
         ...(reason != null ? { wording_override_reason: reason } : {}),
-        // Carried on the record but NOT handed to the store: `insertArtifact` has a fixed
-        // column list, and the JSON tail column §3.4 calls for does not exist yet (the
-        // other half of review finding I6). This ticket is the VALIDATION, not the
-        // storage — the values would otherwise be silently dropped with no trace that
-        // they were ever supplied.
         ...(fields != null ? { fields } : {}),
+        // BLZ-332, §3.4: the two homes, split HERE because this is where the field
+        // definitions are known. A filterable field was promoted to a real cf_ column at
+        // definition time; everything else goes to the JSON tail. Never both — promotion
+        // is "decided once, at definition", so a value in two places is two answers.
+        ...splitCustomFields({ definitions: state.fieldDefinitions ?? [],
+                               values: fields ?? {}, project_key, kind }),
       };
       state.artifacts.push(artifact);
 

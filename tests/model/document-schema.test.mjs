@@ -9,8 +9,8 @@ function open() {
   db.exec("PRAGMA foreign_keys=ON;");
   db.exec(artifactDdl("sqlite"));
   db.exec(documentDdl("sqlite"));
-  db.exec(`INSERT INTO artifact VALUES ('a1','BLZ','requirement','REQ-001','T',NULL,NULL,'proposed','t','t');`);
-  db.exec(`INSERT INTO artifact VALUES ('a2','BLZ','requirement','REQ-002','U',NULL,NULL,'proposed','t','t');`);
+  db.exec(`INSERT INTO artifact (id, project_key, kind, ref, title, statement, body, status, created_at, updated_at) VALUES ('a1','BLZ','requirement','REQ-001','T',NULL,NULL,'proposed','t','t');`);
+  db.exec(`INSERT INTO artifact (id, project_key, kind, ref, title, statement, body, status, created_at, updated_at) VALUES ('a2','BLZ','requirement','REQ-002','U',NULL,NULL,'proposed','t','t');`);
   db.exec(`INSERT INTO document VALUES ('d1','BLZ','Safety case','requirements','draft','t','t');`);
   db.exec(`INSERT INTO document VALUES ('d2','BLZ','Subsystem spec','requirements','draft','t','t');`);
   return db;

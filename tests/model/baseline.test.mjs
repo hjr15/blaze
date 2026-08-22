@@ -12,7 +12,7 @@ function open() {
   db.exec(artifactDdl("sqlite"));
   db.exec(revisionDdl("sqlite"));
   db.exec(baselineDdl("sqlite"));
-  db.exec(`INSERT INTO artifact VALUES ('a1','BLZ','requirement','REQ-001','T',NULL,NULL,'proposed','t','t');`);
+  db.exec(`INSERT INTO artifact (id, project_key, kind, ref, title, statement, body, status, created_at, updated_at) VALUES ('a1','BLZ','requirement','REQ-001','T',NULL,NULL,'proposed','t','t');`);
   db.exec(`INSERT INTO artifact_revision VALUES ('rev1','a1','2026-01-01','me','{}');`);
   db.exec(`INSERT INTO baseline VALUES ('b1','BLZ','Release 1.0','2026-02-01','me',NULL);`);
   return db;
@@ -80,7 +80,7 @@ if (process.env.BLAZE_TEST_PG_URL) {
     await client.query(revisionDdl("postgres"));
     await client.query(baselineDdl("postgres"));
     await client.query(
-      `INSERT INTO artifact VALUES ('a1','BLZ','requirement','REQ-001','T',NULL,NULL,'proposed',now(),now())`);
+      `INSERT INTO artifact (id, project_key, kind, ref, title, statement, body, status, created_at, updated_at) VALUES ('a1','BLZ','requirement','REQ-001','T',NULL,NULL,'proposed',now(),now())`);
     await client.query(
       `INSERT INTO artifact_revision VALUES ('rev1','a1',now(),'me','{}')`);
     await client.query(

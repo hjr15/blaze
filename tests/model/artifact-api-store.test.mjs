@@ -442,6 +442,123 @@ describe("BLZ-330 (SQLite): reviewLink writes the real link.reviewed_at column",
   });
 });
 
+// BLZ-332 — §3.4's JSON tail: "everything else lives in a jsonb / JSON column, which STILL
+// TAKES CHECK CONSTRAINTS (the benchmark refuted my assumption that JSON means app-level
+// validation only)." Before this, a non-filterable value was validated by BLZ-328 and then
+// silently DROPPED — the write succeeded, the user was told nothing, the value was gone.
+describe("BLZ-332 (SQLite): the JSON tail, and the CHECK that proves §3.4's claim", () => {
+  const fd = (o) => ({ id: "fd1", project_key: "BLZ", key: "owner", label: "Owner",
+    data_type: "text", applies_to_kind: "requirement", is_filterable: false, ...o });
+
+  function wire(definitions = []) {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    state.fieldDefinitions = definitions;
+    return { db, api: artifactApi(state, store) };
+  }
+
+  test("a NON-filterable value round-trips into custom_fields", async () => {
+    const { db, api } = wire([fd({})]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                         fields: { owner: "ryan" } });
+    assert.equal(r.ok, true, r.error);
+    const row = db.prepare("SELECT custom_fields FROM artifact WHERE id = ?").get(r.artifact.id);
+    assert.deepEqual(JSON.parse(row.custom_fields), { owner: "ryan" });
+  });
+
+  test("a FILTERABLE value goes to its promoted column and is NOT duplicated into the tail", async () => {
+    // Promotion is "decided once, at definition" (§3.4). A value in both places is two
+    // answers that can disagree, with nothing to say which a filter should trust.
+    const { db, api } = wire([]);   // defineField below is what registers it
+    const def = await api.defineField(fd({ key: "risk", data_type: "number", is_filterable: true }));
+    assert.equal(def.ok, true, def.error);
+
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                         fields: { risk: 7 } });
+    assert.equal(r.ok, true, r.error);
+    const row = db.prepare("SELECT cf_risk, custom_fields FROM artifact WHERE id = ?").get(r.artifact.id);
+    assert.equal(row.cf_risk, 7, "the promoted column must hold the value");
+    assert.deepEqual(JSON.parse(row.custom_fields), {}, "and the tail must NOT also hold it");
+  });
+
+  test("no custom values writes a real empty object — never NULL, never 'undefined'", async () => {
+    // JSON.stringify(undefined) is the string "undefined", which is not valid JSON and
+    // would fail the column's own json_valid CHECK.
+    const { db, api } = wire([]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    const row = db.prepare("SELECT custom_fields FROM artifact WHERE id = ?").get(r.artifact.id);
+    assert.equal(row.custom_fields, "{}");
+  });
+
+  test("THE DATABASE refuses a non-object payload — a bare string, a number, an array", () => {
+    // §3.4's actual claim under test. If this passes only because the app validated first,
+    // the claim is unproven — so these go straight to SQL, around the API entirely.
+    const db = openSqlite();
+    const ins = (payload) => db.prepare(
+      `INSERT INTO artifact (id, project_key, kind, ref, title, status, created_at, updated_at, custom_fields)
+       VALUES ('x','BLZ','requirement','REQ-900','T','proposed','t','t',?)`).run(payload);
+    for (const bad of ['"just a string"', "42", '["a","b"]', "not json at all", "null"]) {
+      assert.throws(() => ins(bad), /CHECK|constraint/i, `${bad} must be refused by the column`);
+    }
+  });
+
+  test("and accepts a real object", () => {
+    const db = openSqlite();
+    db.prepare(
+      `INSERT INTO artifact (id, project_key, kind, ref, title, status, created_at, updated_at, custom_fields)
+       VALUES ('x','BLZ','requirement','REQ-900','T','proposed','t','t',?)`).run('{"a":1}');
+    assert.equal(db.prepare("SELECT count(*) n FROM artifact").get().n, 1);
+  });
+
+  test("a REFUSED write puts nothing in the tail", async () => {
+    const { db, api } = wire([fd({ is_required: true })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.equal(db.prepare("SELECT count(*) n FROM artifact").get().n, 0);
+  });
+
+  // Found by mutation: the API always supplies a tail, so `JSON.stringify(v)` without the
+  // `?? {}` fallback was invisible to every test through the API. A direct store call is
+  // the only thing that exercises it — and a direct store call is exactly what a future
+  // caller (a migration, an import) will be.
+  test("a store call with NO tail supplied still writes a valid empty object", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    await store.insertArtifact({ id: "x", project_key: "BLZ", kind: "requirement",
+      ref: "REQ-900", title: "T", status: "proposed", created_at: "t", updated_at: "t" });
+    assert.equal(db.prepare("SELECT custom_fields FROM artifact WHERE id='x'").get().custom_fields, "{}");
+  });
+
+  // Found by mutation: nothing noticed the column losing NOT NULL/DEFAULT, because the API
+  // always names it. These go around the API, which is the only way to test a DEFAULT.
+  test("the COLUMN defaults to an empty object when the INSERT omits it", () => {
+    const db = openSqlite();
+    db.prepare(
+      `INSERT INTO artifact (id, project_key, kind, ref, title, status, created_at, updated_at)
+       VALUES ('x','BLZ','requirement','REQ-900','T','proposed','t','t')`).run();
+    assert.equal(db.prepare("SELECT custom_fields FROM artifact WHERE id='x'").get().custom_fields, "{}");
+  });
+
+  test("an explicit NULL tail is REFUSED by the column", () => {
+    const db = openSqlite();
+    assert.throws(() => db.prepare(
+      `INSERT INTO artifact (id, project_key, kind, ref, title, status, created_at, updated_at, custom_fields)
+       VALUES ('x','BLZ','requirement','REQ-900','T','proposed','t','t',NULL)`).run(),
+      /NOT NULL|constraint/i);
+  });
+
+  test("the store refuses to interpolate an unsafe promoted column name", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    await assert.rejects(
+      () => store.insertArtifact({ id: "x", project_key: "BLZ", kind: "requirement",
+        ref: "REQ-900", title: "T", status: "proposed", created_at: "t", updated_at: "t",
+        promoted: { "cf_x; DROP TABLE artifact; --": 1 } }),
+      /unsafe column name/);
+  });
+});
+
 // --- Postgres ----------------------------------------------------------------------
 
 if (process.env.BLAZE_TEST_PG_URL) {
@@ -739,6 +856,51 @@ if (process.env.BLAZE_TEST_PG_URL) {
         const after = await db.query("SELECT reviewed_at FROM link WHERE id = $1", [l.link.id]);
         assert.notEqual(after.rows[0].reviewed_at, null, "timestamptz must accept the ISO string");
         assert.deepEqual(api.artifactHealth({ project_key: "BLZ" }).summary.stale, []);
+      } finally {
+        await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+        await db.end();
+      }
+    });
+    // BLZ-332: jsonb, and the CHECK that proves §3.4's claim on the engine that ships.
+    test("the JSON tail round-trips, the promoted column is not duplicated, and jsonb refuses a non-object", async () => {
+      const db = await openPg();
+      try {
+        const store = artifactStore(pgExec(db), { dialect: "postgres" });
+        const state = baseStatePg();
+        const api = artifactApi(state, store);
+
+        const def = await api.defineField({ id: "fd1", project_key: "BLZ", key: "risk",
+          label: "Risk", data_type: "number", applies_to_kind: "requirement", is_filterable: true });
+        assert.equal(def.ok, true, def.error);
+        await api.defineField({ id: "fd2", project_key: "BLZ", key: "owner", label: "Owner",
+          data_type: "text", applies_to_kind: "requirement", is_filterable: false });
+
+        const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                             fields: { risk: 7, owner: "ryan" } });
+        assert.equal(r.ok, true, r.error);
+        const { rows } = await db.query(
+          "SELECT cf_risk, custom_fields FROM artifact WHERE id = $1", [r.artifact.id]);
+        assert.equal(Number(rows[0].cf_risk), 7);
+        // pg returns jsonb already parsed — it is a real jsonb column, not text.
+        assert.deepEqual(rows[0].custom_fields, { owner: "ryan" });
+
+        // The DEFAULT is the guard worth having here. (The `::jsonb` cast on it is NOT
+        // load-bearing — unlike true_/false_, Postgres resolves an unknown literal to the
+        // column's type — so removing the cast breaks nothing, and that is stated in
+        // sql-dialect.mjs rather than implied by a test that would not fail.)
+        await db.query(
+          `INSERT INTO artifact (id, project_key, kind, ref, title, status, created_at, updated_at)
+           VALUES ('dflt','BLZ','requirement','REQ-901','T','proposed', now(), now())`);
+        const dflt = await db.query("SELECT custom_fields FROM artifact WHERE id = 'dflt'");
+        assert.deepEqual(dflt.rows[0].custom_fields, {}, "the jsonb DEFAULT must produce a real empty object");
+
+        for (const bad of ['"just a string"', "42", '["a","b"]', "null"]) {
+          await assert.rejects(
+            () => db.query(
+              `INSERT INTO artifact (id, project_key, kind, ref, title, status, created_at, updated_at, custom_fields)
+               VALUES ('x','BLZ','requirement','REQ-900','T','proposed', now(), now(), $1::jsonb)`, [bad]),
+            /check|constraint|violates/i, `${bad} must be refused by the column`);
+        }
       } finally {
         await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
         await db.end();

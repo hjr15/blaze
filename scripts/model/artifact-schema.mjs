@@ -23,10 +23,18 @@ CREATE TABLE IF NOT EXISTS artifact (
   status      ${d.txt} NOT NULL,
   created_at  ${d.ts} NOT NULL,
   updated_at  ${d.ts} NOT NULL,
+  -- BLZ-332, section 3.4: "everything else lives in a jsonb / JSON column, which STILL
+  -- TAKES CHECK CONSTRAINTS". Non-promoted custom field values live here. Declared at
+  -- CREATE TABLE time on purpose: the benchmark's rule is not to use SQLite
+  -- ALTER TABLE ADD CHECK, which works but rides undocumented behaviour.
+  -- NOT NULL with an empty-object default so "this artifact has no custom values" is a
+  -- real empty object rather than NULL, which every reader would then have to special-case.
+  custom_fields ${d.json} NOT NULL DEFAULT ${d.jsonEmpty},
   PRIMARY KEY (id),
   UNIQUE (project_key, ref),
   CHECK (kind IN (${kinds})),
-  CHECK (length(trim(title)) > 0)
+  CHECK (length(trim(title)) > 0),
+  CHECK (${d.jsonIsObject("custom_fields")})
 )${d.tbl};
 
 CREATE INDEX IF NOT EXISTS artifact_project_kind_idx ON artifact (project_key, kind, status);
