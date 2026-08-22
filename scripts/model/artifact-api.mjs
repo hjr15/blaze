@@ -9,7 +9,7 @@
 import { randomUUID } from "node:crypto";
 import { checkLink } from "./link-rules.mjs";
 import { checkGate } from "./gates.mjs";
-import { promotionPlan } from "./field-promotion.mjs";
+import { promotionPlan, TARGET_TABLE } from "./field-promotion.mjs";
 import { evaluateCoverage, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
@@ -172,15 +172,31 @@ export function artifactApi(state) {
       return { ok: true, error: null };
     },
 
+    // The Task 13 ruling made this route admin specifically to protect the
+    // install-wide column budget (ADR-0018) -- which only matters if the number the
+    // cap is checked against is real. `field.filterableCount` and `field.existingColumns`
+    // are caller-supplied request fields and are NEVER read: a caller sending
+    // `filterableCount: 0` must not be able to skip a cap that exists to protect every
+    // OTHER project's headroom (C5). The two counters are also keyed by target table
+    // (artifact vs ticket, via the same TARGET_TABLE lookup promotionPlan itself uses)
+    // per §3.4's "the two tables carry independent column budgets".
     async defineField(field) {
+      const table = TARGET_TABLE[field.applies_to_kind] ?? "ticket";
+      const sameTable = (state.fieldDefinitions ?? [])
+        .filter((d) => (TARGET_TABLE[d.applies_to_kind] ?? "ticket") === table);
+      const filterable = sameTable.filter((d) => d.is_filterable);
+
       const plan = promotionPlan({
         field,
-        existingColumns: state.columns ?? [],
-        filterableCount: field.filterableCount ?? 0,
+        existingColumns: filterable.map((d) => `cf_${d.key}`),
+        filterableCount: filterable.length,
         engine: state.engine ?? "sqlite",
       });
-      return plan.ok ? { ok: true, error: null, sql: plan.sql }
-                     : { ok: false, error: plan.error };
+      if (!plan.ok) return { ok: false, error: plan.error };
+
+      state.fieldDefinitions = state.fieldDefinitions ?? [];
+      state.fieldDefinitions.push({ ...field });
+      return { ok: true, error: null, sql: plan.sql };
     },
 
     // POST /api/baseline — baselining a document is the one deliberate checkpoint where

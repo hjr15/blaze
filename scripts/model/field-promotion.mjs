@@ -19,7 +19,10 @@ const SQL_TYPE = {
   sqlite:   { text: "TEXT", number: "REAL",    date: "TEXT", boolean: "INTEGER", enum: "TEXT" },
 };
 
-const TARGET_TABLE = { requirement: "artifact", architecture: "artifact" };
+// Exported: artifact-api.mjs's defineField needs the same table lookup to key its
+// own-computed filterableCount/existingColumns by target table (BLZ-321 C5) --
+// retyping it there would create a second copy that could silently drift from this one.
+export const TARGET_TABLE = { requirement: "artifact", architecture: "artifact" };
 
 export function promotionPlan({ field, existingColumns = [], filterableCount = 0, engine }) {
   if (!SQL_TYPE[engine]) return { ok: false, sql: null, error: `unknown engine ${engine}` };

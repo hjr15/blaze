@@ -55,10 +55,26 @@ describe("every rule is enforced through the API, not above it", () => {
   });
 
   test("field promotion past the cap is refused BY THE API", async () => {
-    const { api } = makeApi();
+    const { api, state } = makeApi();
+    state.fieldDefinitions = Array.from({ length: 200 }, (_, i) => (
+      { key: `f${i}`, applies_to_kind: "requirement", is_filterable: true }));
     const r = await api.defineField({ key: "x", data_type: "number", is_filterable: true,
-                                      applies_to_kind: "requirement", filterableCount: 200 });
+                                      applies_to_kind: "requirement" });
     assert.equal(r.ok, false);
+    assert.match(r.error, /200/);
+  });
+
+  // C5: `defineField` used to read `field.filterableCount` straight off the request --
+  // a caller-supplied number the API never verified against anything. Sending 0 made
+  // the install-wide 200-field cap (the budget Task 13's admin-only ruling exists to
+  // protect) never fire. The count must come from persisted state, never the request.
+  test("a caller-supplied filterableCount is IGNORED — the cap is enforced from real state", async () => {
+    const { api, state } = makeApi();
+    state.fieldDefinitions = Array.from({ length: 200 }, (_, i) => (
+      { key: `f${i}`, applies_to_kind: "requirement", is_filterable: true }));
+    const r = await api.defineField({ key: "x", data_type: "number", is_filterable: true,
+                                      applies_to_kind: "requirement", filterableCount: 0 });
+    assert.equal(r.ok, false, "filterableCount: 0 from the caller must not bypass the real count");
     assert.match(r.error, /200/);
   });
 
