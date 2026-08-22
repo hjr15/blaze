@@ -13,6 +13,7 @@ import { promotionPlan, TARGET_TABLE } from "./field-promotion.mjs";
 import { fieldBudget } from "./field-budget.mjs";
 import { evaluateCoverage, validateCoverageRule, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
+import { artifactHealth } from "./artifact-health.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
@@ -438,6 +439,30 @@ export function artifactApi(state, store) {
       }
 
       return { ok: true, error: null, baseline, members: memberRows };
+    },
+
+    // GET /api/artifact-health — §5's per-artifact orphan / missing-downstream /
+    // stale-since-change, and the first production caller staleness.mjs has ever had.
+    // A REPORT, never a verdict: untraced work is legal and counted, and inventing a
+    // requirement to close a gap makes the matrix a lie.
+    artifactHealth({ project_key } = {}) {
+      return artifactHealth({
+        project_key,
+        artifacts: state.artifacts,
+        links: links(),
+        revisions: state.artifactRevisions ?? [],
+      });
+    },
+
+    // POST /api/link/:id/review — the only thing that clears a stale indicator. Not a
+    // stored suspicion flag being cleared (§5 stores none); a review DATE recorded, which
+    // the computation then compares against the source's latest revision.
+    async reviewLink({ id, reviewedAt = new Date().toISOString() }) {
+      const link = state.links.find((l) => l.id === id);
+      if (!link) return { ok: false, error: `no such link ${id}` };
+      link.reviewed_at = reviewedAt;
+      if (store) await store.reviewLink({ id, reviewed_at: reviewedAt });
+      return { ok: true, error: null, link };
     },
 
     // GET /api/matrix

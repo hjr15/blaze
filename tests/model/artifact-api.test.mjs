@@ -751,3 +751,91 @@ describe("BLZ-329 (§3.4): the field budget is surfaced through the API, not onl
     assert.ok(b.artifact.remaining > 0);
   });
 });
+
+// BLZ-330 — §5's per-artifact indicators, reachable THROUGH THE API. staleness.mjs had
+// computed staleLinks since BLZ-313 with no consumer at all; per §4.5 a computation the
+// API cannot reach is a rule that does not exist.
+describe("BLZ-330 (§5): orphan / missing-downstream / stale-since-change through the API", () => {
+  function makeHealthApi() {
+    return makeApi({
+      artifacts: [
+        { id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed", project_key: "BLZ" },
+        { id: "a2", ref: "REQ-002", kind: "requirement", status: "proposed", project_key: "BLZ" },
+        { id: "d1", ref: "ADR-0001", kind: "architecture", status: "proposed", project_key: "BLZ" },
+      ],
+    });
+  }
+
+  test("an untouched project reports every artifact as an orphan, by ref", () => {
+    const { api } = makeHealthApi();
+    const h = api.artifactHealth({ project_key: "BLZ" });
+    assert.deepEqual(h.summary.orphans, ["ADR-0001", "REQ-001", "REQ-002"]);
+    assert.equal(h.summary.counted, 3);
+  });
+
+  test("a link created through the API changes both ends' indicators", async () => {
+    const { api } = makeHealthApi();
+    const r = await api.createLink({ typeName: "Addresses", sourceId: "d1", targetId: "a1" });
+    assert.equal(r.ok, true, r.error);
+
+    const byRef = Object.fromEntries(
+      api.artifactHealth({ project_key: "BLZ" }).artifacts.map((a) => [a.ref, a]));
+    // The requirement is now realised: not an orphan, not missing downstream.
+    assert.equal(byRef["REQ-001"].missingDownstream, false);
+    // The architecture item points at something, so it is not disconnected — but nothing
+    // realises IT, so it is still missing downstream. The two indicators must differ here.
+    assert.equal(byRef["ADR-0001"].orphan, false);
+    assert.equal(byRef["ADR-0001"].missingDownstream, true);
+    // And the untouched one is unchanged.
+    assert.equal(byRef["REQ-002"].orphan, true);
+  });
+
+  test("the denormalised join is used — health sees links by the same route checkLink does", async () => {
+    // state.links rows are link_type_id-keyed; artifactHealth must receive the joined
+    // shape, not raw rows, or every indicator silently reads zero links.
+    const { api } = makeHealthApi();
+    await api.createLink({ typeName: "Addresses", sourceId: "d1", targetId: "a1" });
+    const h = api.artifactHealth({ project_key: "BLZ" });
+    assert.equal(h.artifacts.find((a) => a.ref === "REQ-001").inbound, 1);
+  });
+
+  test("changing an artifact makes its outbound links stale, and reviewLink clears them", async () => {
+    const { api, state } = makeHealthApi();
+    const link = await api.createLink({ typeName: "Addresses", sourceId: "d1", targetId: "a1" });
+    assert.equal(link.ok, true, link.error);
+    // d1 changes: transition writes a revision (§3.7), which is what staleness compares.
+    state.linkTypes.push({ id: "lt9", name: "X", inverse_name: "Y",
+      source_kinds: "architecture", target_kinds: "requirement", min_card: 0, max_card: null });
+    await api.transition({ id: "d1", to: "proposed" });
+
+    let h = api.artifactHealth({ project_key: "BLZ" });
+    assert.deepEqual(h.summary.stale, ["ADR-0001"], "the artifact that CHANGED is the stale one");
+
+    const rev = await api.reviewLink({ id: link.link.id });
+    assert.equal(rev.ok, true, rev.error);
+    h = api.artifactHealth({ project_key: "BLZ" });
+    assert.deepEqual(h.summary.stale, [], "a reviewed link stops being stale");
+  });
+
+  test("reviewLink refuses an unknown link, naming it", async () => {
+    const { api } = makeHealthApi();
+    const r = await api.reviewLink({ id: "nope" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /nope/);
+  });
+
+  test("health is a REPORT — it never refuses and never invents a link", () => {
+    const { api, state } = makeHealthApi();
+    const before = state.links.length;
+    const h = api.artifactHealth({ project_key: "BLZ" });
+    assert.equal(state.links.length, before, "reading health must not create links");
+    assert.equal("ok" in h, false, "a report has no verdict");
+  });
+
+  test("another project's artifacts are not reported", () => {
+    const { api, state } = makeHealthApi();
+    state.artifacts.push({ id: "z1", ref: "REQ-900", kind: "requirement", project_key: "OTHER" });
+    const h = api.artifactHealth({ project_key: "BLZ" });
+    assert.equal(h.summary.counted, 3);
+  });
+});

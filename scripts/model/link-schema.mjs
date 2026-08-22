@@ -54,6 +54,12 @@ CREATE TABLE IF NOT EXISTS link (
   target_id    ${d.txt} NOT NULL,
   created_at   ${d.ts} NOT NULL,
   created_by   ${d.txt} NOT NULL DEFAULT 'unknown',
+  -- BLZ-330: staleness.mjs has always read l.reviewed_at and this column did not exist,
+  -- so it was always NULL and EVERY link whose source had any revision reported stale.
+  -- An indicator that is on for everything is off. Nullable on purpose: a link nobody
+  -- has re-reviewed since the source changed is exactly the case section 5 wants
+  -- surfaced, so "never reviewed" must be representable rather than defaulted away.
+  reviewed_at  ${d.ts},
   PRIMARY KEY (id),
   UNIQUE (link_type_id, source_id, target_id),
   CHECK (source_id <> target_id)

@@ -397,6 +397,51 @@ describe("BLZ-328 (SQLite): a field-validation refusal writes nothing to any tab
   });
 });
 
+// BLZ-330 — link.reviewed_at is a REAL column now, and the review has to land in it.
+// Before this ticket staleness.mjs read a column that did not exist, so reviewed_at was
+// always NULL and every link with a revised source reported stale. An indicator that is
+// on for everything is off.
+describe("BLZ-330 (SQLite): reviewLink writes the real link.reviewed_at column", () => {
+  test("a fresh link has NULL reviewed_at, and reviewLink sets it", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    const api = artifactApi(state, store);
+
+    const req = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    const arch = await api.createArtifact({ kind: "architecture", title: "A", project_key: "BLZ" });
+    const l = await api.createLink({ typeName: "Addresses", sourceId: arch.artifact.id, targetId: req.artifact.id });
+    assert.equal(l.ok, true, l.error);
+    assert.equal(db.prepare("SELECT reviewed_at FROM link WHERE id = ?").get(l.link.id).reviewed_at, null,
+      "never-reviewed must be representable, not defaulted away");
+
+    const r = await api.reviewLink({ id: l.link.id, reviewedAt: "2026-05-01T00:00:00.000Z" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(db.prepare("SELECT reviewed_at FROM link WHERE id = ?").get(l.link.id).reviewed_at,
+      "2026-05-01T00:00:00.000Z");
+  });
+
+  test("the stale indicator flips off once the REAL column is written", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    const api = artifactApi(state, store);
+
+    const req = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    const arch = await api.createArtifact({ kind: "architecture", title: "A", project_key: "BLZ" });
+    const l = await api.createLink({ typeName: "Addresses", sourceId: arch.artifact.id, targetId: req.artifact.id });
+
+    // createArtifact already wrote a revision for the architecture item (§3.7), so the
+    // link is stale from the moment it exists.
+    assert.deepEqual(api.artifactHealth({ project_key: "BLZ" }).summary.stale, ["ADR-0001"]);
+
+    await api.reviewLink({ id: l.link.id, reviewedAt: "2099-01-01T00:00:00.000Z" });
+    assert.deepEqual(api.artifactHealth({ project_key: "BLZ" }).summary.stale, []);
+    assert.notEqual(db.prepare("SELECT reviewed_at FROM link WHERE id = ?").get(l.link.id).reviewed_at, null,
+      "and the clearing value is really in the database, not only in memory");
+  });
+});
+
 // --- Postgres ----------------------------------------------------------------------
 
 if (process.env.BLAZE_TEST_PG_URL) {
@@ -667,6 +712,33 @@ if (process.env.BLAZE_TEST_PG_URL) {
                                               fields: { owner: "ryan" } });
         assert.equal(ok.ok, true, ok.error);
         assert.equal(ok.artifact.ref, "REQ-001", "the refused write must not have consumed REQ-001");
+      } finally {
+        await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+        await db.end();
+      }
+    });
+    // BLZ-330: reviewed_at as a real timestamptz, on the engine that ships.
+    test("reviewLink writes link.reviewed_at, and the stale indicator flips off", async () => {
+      const db = await openPg();
+      try {
+        const store = artifactStore(pgExec(db), { dialect: "postgres" });
+        const state = baseStatePg();
+        const api = artifactApi(state, store);
+
+        const req = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+        const arch = await api.createArtifact({ kind: "architecture", title: "A", project_key: "BLZ" });
+        const l = await api.createLink({ typeName: "Addresses", sourceId: arch.artifact.id, targetId: req.artifact.id });
+        assert.equal(l.ok, true, l.error);
+
+        const before = await db.query("SELECT reviewed_at FROM link WHERE id = $1", [l.link.id]);
+        assert.equal(before.rows[0].reviewed_at, null);
+        assert.deepEqual(api.artifactHealth({ project_key: "BLZ" }).summary.stale, ["ADR-0001"]);
+
+        const r = await api.reviewLink({ id: l.link.id, reviewedAt: "2099-01-01T00:00:00.000Z" });
+        assert.equal(r.ok, true, r.error);
+        const after = await db.query("SELECT reviewed_at FROM link WHERE id = $1", [l.link.id]);
+        assert.notEqual(after.rows[0].reviewed_at, null, "timestamptz must accept the ISO string");
+        assert.deepEqual(api.artifactHealth({ project_key: "BLZ" }).summary.stale, []);
       } finally {
         await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
         await db.end();

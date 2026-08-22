@@ -94,6 +94,18 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
         [l.id, l.link_type_id, l.source_id, l.target_id, l.created_at, l.created_by ?? "api"]);
     },
 
+    /**
+     * Mark a link re-reviewed as of `reviewed_at` (BLZ-330). This is the only way a link
+     * stops being stale: §5's indicator is computed by comparing this against the source
+     * artifact's latest revision, never by clearing a stored suspicion flag — IBM removed
+     * suspicion profiles at DNG 7.0.0 and Polarion's flag is invisible to its own API.
+     */
+    async reviewLink({ id, reviewed_at }) {
+      await exec.run(
+        `UPDATE link SET reviewed_at = ${p(0)} WHERE id = ${p(1)}`,
+        [reviewed_at ?? now(), id]);
+    },
+
     /** Project-scoped per §3.6 — no document_id column exists to carry one. */
     async insertBaseline(b) {
       await exec.run(
