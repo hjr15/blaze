@@ -129,6 +129,9 @@ decision. You can pick up at any of: the three remaining spec gaps above, the di
 extraction, or waiting on the soak for Task 14.
 
 **Board note (session 2):** BLZ-305..327 are now `in-progress`, not `defined` — nothing is merged, so
-that is the honest status. `blaze reconcile` cannot move them itself: `blaze.config.json` has
-`codeRepos: []`, so reconcile has no repo to read branch/PR state from. That is a board-wide config
-change affecting every project, so it was left for the operator rather than made unilaterally.
+that is the honest status, and it was set by hand. `blaze reconcile` correctly proposes nothing for
+them, and **no config change is needed** — `projects/BLZ/project.json` already sets
+`codeRepos: ["../blaze"]`. The children are bundled under one feature integration branch and so have
+no branch of their own, and BLZ-308's own branch claim is dropped by the INF-735 fail-closed gate
+(a feature branch carries its children's commits, never a `BLZ-308:` one). Both are correct. The
+signal appears when the PR is opened, via the house `KEY-n: description` PR title.

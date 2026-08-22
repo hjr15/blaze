@@ -388,8 +388,26 @@ Board: BLZ-305..326 moved defined -> in-progress (the work is built but nothing 
  Committed locally in blaze-pm-worktrees/v4-spine as 293aa30e. Not pushed — blaze-flush is the sole
  merger.
 
-Finding parked, NOT fixed: `blaze reconcile` can never move a BLZ engine ticket, because
- blaze.config.json has `codeRepos: []`. Reconcile derives status from branch + PR state in the
- registered code repos, and the blaze engine repo is not registered. That is why 22 tickets sat in
- `defined` while fourteen tasks were built. Left alone deliberately — it is a board-wide config
- change that affects every project's reconcile behaviour, and it is the operator's call.
+Finding parked, RETRACTED AND REPLACED (same session, on inspection of reconcile.mjs): the claim
+ that `blaze reconcile` cannot move a BLZ engine ticket "because blaze.config.json has
+ `codeRepos: []`" was WRONG. The board-level `[]` is only the fallback — config.mjs:219 prefers the
+ project's own, and projects/BLZ/project.json already sets `codeRepos: ["../blaze"]`. Reconcile
+ reaches the engine repo, and a worktree's branch is in the main repo's ref store, so
+ `for-each-ref refs/heads` sees `BLZ-308-v4-fields-baselines-api` too.
+
+ What actually happens is correct behaviour, twice over:
+  1. BLZ-310..327 have no branch of their own — they are bundled children of one feature integration
+     branch (the house feature-PR-bundling rule: PR unit = the feature). Their only signal would be
+     `shippedSet`, a `BLZ-n:` commit reachable from the DEFAULT branch, which requires a merge.
+     Nothing is merged, so there is nothing to read. Correct.
+  2. BLZ-308's OWN branch claim is dropped by the INF-735 fail-closed corroboration gate, because a
+     feature integration branch carries commits for its CHILDREN (BLZ-310..327) and never one whose
+     subject starts `BLZ-308:`. Verified: `git log BLZ-308-... ^main --format=%s | grep -c '^BLZ-308:'`
+     is 0.
+
+ So the tickets sat in `defined` because nothing had been merged and no PR existed — not because of
+ a misconfiguration. The narrow residual worth naming: a feature integration branch has no
+ branch-only signal before its PR exists. Once the PR is opened, `claimCorroborated` matches the
+ house `KEY-n: description` PR title and BLZ-308 corroborates normally. Pre-PR, `in-progress` is a
+ hand move — which is exactly what was done here. NOT worth code: the gate is fail-closed on
+ purpose, and loosening it is how INF-735's corrupted tickets happened.
