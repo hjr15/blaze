@@ -53,6 +53,22 @@ describe("coverage evaluation", () => {
       assert.ok(r.name && r.description, `${JSON.stringify(r)} needs a name and description`);
     }
   });
+
+  const ORPHAN_ADR = { name: "no-orphan-architecture", subject_kind: "architecture",
+                       definition: { requires_link: "Addresses", direction: "outbound", min: 1 } };
+
+  test("an OUTBOUND rule counts the source end, not the target", () => {
+    // The mirror of the inbound case. Without this, a mutation that ignores `direction`
+    // and always counts target_id passes the whole suite.
+    const artifacts = [{ id: "d1", ref: "ADR-0007", kind: "architecture" }];
+    const links = [{ type_name: "Addresses", source_id: "d1", target_id: "r1" }];
+    assert.deepEqual(evaluateCoverage({ rule: ORPHAN_ADR, artifacts, links }).violations, []);
+  });
+
+  test("an architecture item addressing nothing violates the outbound rule", () => {
+    const artifacts = [{ id: "d1", ref: "ADR-0007", kind: "architecture" }];
+    assert.equal(evaluateCoverage({ rule: ORPHAN_ADR, artifacts, links: [] }).violations.length, 1);
+  });
 });
 
 // --- schema ------------------------------------------------------------
