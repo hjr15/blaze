@@ -26,4 +26,13 @@ describe("ref allocation", () => {
     }
     assert.deepEqual(parseRef("REQ-014"), { kind: "requirement", num: 14 });
   });
+
+  test("the sequence does not stop at 999 — refs are never reused, so a project WILL pass it", () => {
+    // padStart pads but never truncates, so 1000 must round-trip rather than
+    // producing a ref parseRef cannot read.
+    assert.equal(nextRef({ kind: "requirement", existing: ["REQ-999"] }), "REQ-1000");
+    assert.deepEqual(parseRef("REQ-1000"), { kind: "requirement", num: 1000 });
+    assert.equal(nextRef({ kind: "requirement", existing: ["REQ-1000"] }), "REQ-1001");
+    assert.equal(nextRef({ kind: "architecture", existing: ["ADR-9999"] }), "ADR-10000");
+  });
 });

@@ -11,7 +11,7 @@ export const REF_PATTERNS = {
 export function parseRef(ref) {
   const s = String(ref ?? "");
   for (const [kind, { prefix, pad }] of Object.entries(REF_PATTERNS)) {
-    const m = s.match(new RegExp(`^${prefix}-(\\d{${pad}})$`));
+    const m = s.match(new RegExp(`^${prefix}-(\\d{${pad},})$`));
     if (m) return { kind, num: Number(m[1]) };
   }
   return null;
