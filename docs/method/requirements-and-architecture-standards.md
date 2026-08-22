@@ -198,7 +198,8 @@ taxonomy, generalized here from links to field content and document structure:
 | RQ-1 | Required fields present | `ref`, `verification`, `derived`, non-empty title/body | Shape (already shipped) | Yes, fully |
 | RQ-2 | Closed-set field validity | `category`, `quality_attribute`, `verification`, `derived` values are in their enums | Shape — **needs an engine change**: today `required` checks presence only, not value (`schema.md`); this is the concrete gap to close | Yes, fully, once the engine supports it |
 | RQ-3 | `ref` format, uniqueness, monotonic | `REQ-nnn`, never reused, never collided | Shape — **needs an engine change**: today `ref` allocation is hand-managed, unlike ticket ids which have a claim file | Yes, fully |
-| RQ-4 | Banned-construction lint | 29148 §5.2.7's list (superlatives, "user friendly", vague pronouns, "and/or", "provide support"/"including but not limited to", "if possible"/"as appropriate", "all"/"always"/"never") appearing in the one-line requirement statement | Shape, hard block **with mandatory `--reason` override** (extends the existing `requireLabels`/`requireComponents` `--reason` UX from a soft warning to an actual gate — see the disagreement section above for why this crosses from advisory to hard-block) | Yes, by word/phrase list — cannot detect every ambiguity, only these named constructions |
+| RQ-4a | Banned-construction lint, **block tier** | 29148 §5.2.7 constructions that are untestable in *every* context: `user friendly`, `easy to use`, `intuitive`, bare `fast`/`quick`/`rapid`, `as appropriate`, `as required`, `if possible`, `where possible`, `including but not limited to`, `etc.`, `and/or`, `provide support for`, `sufficient`, `adequate`, `reasonable`, `robust`, `seamless`, superlatives | Shape, hard block **with `--reason` override** (per [ADR-0017](../decisions/0017-requirement-quality-is-enforced-not-advised.md)) | Yes, by phrase list — detects only these named constructions, **not ambiguity in general** |
+| RQ-4b | Banned-construction lint, **warn tier** | `all`, `always`, `never`, `every`, `none`, `and` joining clauses, vague pronouns, `should` where `shall` is meant | Advisory — **cannot block**: *"the system shall never store plaintext passwords"* is a genuine, testable, correct requirement | Yes to flag, no to judge |
 | RQ-5 | Link type/endpoint validity | `Implements: feature→requirement`, `Addresses: architecture→requirement`, `Verifies: {story,feature}→requirement`, `Supersedes: architecture→architecture`, `Derives: requirement→requirement` | Shape (this is the typed-link meta-model table ADR-0015 point 1 deferred to "the requirements-practices work" — this is that table) | Yes, fully |
 | RQ-6 (gate) | `requirement → verified` requires a resolving `Verifies` link | The transition is refused without one | Gate, on the `verified` transition | Yes, fully — link either resolves or it doesn't |
 | RQ-7 (gate) | `goal → achieved` requires every child `requirement` to be in a terminal status | Query across all children of the goal | Gate, on the `achieved` transition — closes the exact gap `engineering-method.md` names as the reason `requirement` exists as its own layer ("is this finished?") | Yes, fully |
@@ -354,15 +355,18 @@ this decision needed an ADR at all.>
    presence; a `ref` allocator/claim-file analogous to the ticket-id one). These are the
    concrete "make it native" asks in this document — without them, several rules marked
    "shape, hard block" here are only convention, checked by review, same as today.
-2. **RQ-4's escalation from advisory prose to a hard block with mandatory `--reason`** is
-   the single biggest behavior change proposed here. It's argued above from the method doc's
-   own measured data, but it changes what `blaze new` does today, and the operator should
-   confirm before it ships that way rather than discover it live.
-3. **RQ-6 and RQ-7 mean `verified` (on `requirement`) and a gated `achieved` (on `goal`)
-   actually ship in v4**, reversing their current "designed but not shipped" status in
-   `schema.md`. They were held back before because they were return-visit gates with nothing
-   enforcing them. Attaching a hard gate changes that calculus — but it's a reversal of a
-   standing decision, worth an explicit yes.
+2. ~~**RQ-4's escalation to a hard block**~~ — **SETTLED 2026-08-22, and refined: two tiers,
+   not one.** The operator approved enforcement but identified that a single flat list was the
+   weakness. Split into RQ-4a (block, `--reason` overrides) and RQ-4b (warn only). The warn tier
+   exists because *"the system shall never store plaintext passwords"* is a genuine, testable
+   requirement that an `all`/`always`/`never` block would refuse. Both lists ship as
+   project-editable defaults — a client's contract language is not ours to overrule. See
+   [ADR-0017](../decisions/0017-requirement-quality-is-enforced-not-advised.md).
+3. ~~**RQ-6 and RQ-7 ship `verified` and gated `achieved`**~~ — **SETTLED 2026-08-22: ship both,
+   gated.** They were shelved as unenforced return-visit obligations, which measure at 0–15%.
+   A gate attaches the obligation to something the person actively wants, which is the same
+   reasoning ADR-0015 applied and which did not exist when they were shelved. See
+   [ADR-0017](../decisions/0017-requirement-quality-is-enforced-not-advised.md).
 4. **AQ-2's justification for using a gate is not the one ADR-0015 names** (timing/drafting,
    not corpus-coverage). Worth deciding whether that's folded into ADR-0015 as a second
    justification for the gate mechanism, or written up as ADR-0016.
