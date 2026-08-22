@@ -13,6 +13,30 @@ import { promotionPlan } from "./field-promotion.mjs";
 import { evaluateCoverage, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
+import { isTerminal } from "./workflows.mjs";
+
+/**
+ * The model is polymorphic across `artifact` and `ticket` (design §3.1/§3.3):
+ * `Implements`/`Verifies` start at a feature or story, and `goal:achieved` only ever
+ * exists on a ticket -- no artifact `kind` is ever "goal". A resolver that only checks
+ * `state.artifacts` therefore treats every ticket endpoint as absent, which is exactly
+ * the C1 defect (every trace link refused, `sourceKind`/`targetKind` resolving to the
+ * literal string "unknown"). This is the one seam both endpoint resolution (createLink)
+ * and gate-subject resolution (transition) must share, so they cannot silently diverge
+ * on which ids exist.
+ *
+ * A ticket has no `kind` column -- its `type` (feature/story/task/bug/goal/...) IS its
+ * kind in this vocabulary (schema.mjs's TYPES registry governs both), so it is exposed
+ * under the same `kind` key an artifact already carries. Checks artifacts first: an id
+ * collision between the two id spaces is not a case this branch needs to arbitrate.
+ */
+export function resolveEndpoint(state, id) {
+  const artifact = state.artifacts.find((a) => a.id === id);
+  if (artifact) return artifact;
+  const ticket = (state.tickets ?? []).find((t) => t.id === id);
+  if (ticket) return { ...ticket, kind: ticket.type };
+  return null;
+}
 
 /**
  * The denormalising join, written once. `checkLink`, `evaluateCoverage` and
@@ -27,9 +51,23 @@ export function denormaliseLinks({ links = [], linkTypes = [] }) {
 }
 
 export function artifactApi(state) {
-  const find = (id) => state.artifacts.find((a) => a.id === id);
   const typeByName = (n) => state.linkTypes.find((t) => t.name === n) ?? null;
   const links = () => denormaliseLinks({ links: state.links, linkTypes: state.linkTypes });
+
+  // A gate subject's children, resolved through the DEFAULT hierarchy's
+  // hierarchy_membership rows -- NOT parent_id, the column §3.3 built this table to
+  // replace (I1). A child can be an artifact (a goal's requirement) or a ticket, so
+  // each is resolved through resolveEndpoint too, and `terminal` is computed from the
+  // shared workflow registry rather than trusted as a field on the raw record.
+  const childrenOf = (itemId) => {
+    const defaultHierarchy = (state.hierarchies ?? []).find((h) => h.is_default);
+    if (!defaultHierarchy) return [];
+    return (state.hierarchyMemberships ?? [])
+      .filter((m) => m.hierarchy_id === defaultHierarchy.id && m.parent_id === itemId)
+      .map((m) => resolveEndpoint(state, m.item_id))
+      .filter(Boolean)
+      .map((c) => ({ ...c, terminal: isTerminal(c.kind, c.status) }));
+  };
 
   return {
     // POST /api/artifact — ref UNIQUENESS is a database constraint (artifact-schema.mjs
@@ -77,8 +115,8 @@ export function artifactApi(state) {
         (l) => l.type_name === typeName && l.source_id === sourceId).length;
       const verdict = checkLink({
         linkType: lt,
-        sourceKind: find(sourceId)?.kind ?? "unknown",
-        targetKind: find(targetId)?.kind ?? "unknown",
+        sourceKind: resolveEndpoint(state, sourceId)?.kind ?? "unknown",
+        targetKind: resolveEndpoint(state, targetId)?.kind ?? "unknown",
         existingCount,
       });
       if (!verdict.ok) return verdict;
@@ -91,18 +129,24 @@ export function artifactApi(state) {
     },
 
     async transition({ id, to }) {
-      const subject = find(id);
-      if (!subject) return { ok: false, error: `no such artifact ${id}` };
+      const subject = resolveEndpoint(state, id);
+      if (!subject) return { ok: false, error: `no such item ${id}` };
       const verdict = checkGate({
         action: `${subject.kind}:${to}`,
         subject,
         context: {
           links: links(),
-          children: state.artifacts.filter((a) => a.parent_id === subject.id),
+          children: childrenOf(subject.id),
         },
       });
       if (!verdict.ok) return verdict;
-      subject.status = to;
+      // resolveEndpoint returns the live artifact object by reference, but for a
+      // ticket it synthesises a { ...ticket, kind } copy (a ticket has no `kind`
+      // column to merge onto) -- write the status through to the real record, not
+      // the copy.
+      const record = state.artifacts.find((a) => a.id === id)
+        ?? (state.tickets ?? []).find((t) => t.id === id);
+      record.status = to;
       return { ok: true, error: null };
     },
 

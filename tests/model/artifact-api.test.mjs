@@ -17,6 +17,10 @@ import { ROUTE_SCOPES } from "../../scripts/model/serve-auth.mjs";
 function makeApi(overrides = {}) {
   const state = {
     artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed" }],
+    // Tickets are the OTHER half of the polymorphic model (C1): features and stories
+    // are tickets, not artifacts, and `kind` for a ticket is its `type`. Empty by
+    // default so existing artifact-only tests are unaffected.
+    tickets: [],
     linkTypes: [
       { id: "lt1", name: "Addresses", inverse_name: "Addressed by",
         source_kinds: "architecture", target_kinds: "requirement", min_card: 0, max_card: null },
@@ -70,6 +74,87 @@ describe("every rule is enforced through the API, not above it", () => {
       if (route.startsWith("POST ")) assert.notEqual(scope, "read", route);
       if (route.startsWith("GET ")) assert.equal(scope, "read", route);
     }
+  });
+});
+
+describe("C1: link endpoints and gate subjects resolve across BOTH artifact and ticket", () => {
+  // Implements/Verifies start at a feature or story -- a ticket, not an artifact.
+  // Before resolveEndpoint, `find()` only ever searched state.artifacts, so a ticket
+  // endpoint resolved to sourceKind "unknown" and every such link was refused,
+  // regardless of how the link type declared its legal sources.
+  test("Verifies can start at a ticket (feature) -- not just an artifact", async () => {
+    const { api, state } = makeApi({
+      tickets: [{ id: "f1", type: "feature", status: "defined" }],
+      linkTypes: [{ id: "lt3", name: "Verifies", inverse_name: "Verified by",
+        source_kinds: "story,feature", target_kinds: "requirement", min_card: 0, max_card: null }],
+    });
+    const r = await api.createLink({ typeName: "Verifies", sourceId: "f1", targetId: "a1" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(state.links.length, 1);
+  });
+
+  // The full chain the review found completely unreachable: no Verifies link could be
+  // created (C1) -> requirement:verified could never pass (RQ-6) -> and since
+  // every-requirement-verified is a DEFAULT coverage rule, document:baselined could
+  // never pass either. This proves the chain now closes end to end through the API.
+  test("end to end: a feature Verifies-links a requirement, which can then transition to verified", async () => {
+    const { api, state } = makeApi({
+      tickets: [{ id: "f1", type: "feature", status: "defined" }],
+      linkTypes: [{ id: "lt3", name: "Verifies", inverse_name: "Verified by",
+        source_kinds: "story,feature", target_kinds: "requirement", min_card: 0, max_card: null }],
+    });
+
+    const before = await api.transition({ id: "a1", to: "verified" });
+    assert.equal(before.ok, false, "must not pass before the link exists");
+
+    const link = await api.createLink({ typeName: "Verifies", sourceId: "f1", targetId: "a1" });
+    assert.equal(link.ok, true, link.error);
+
+    const after = await api.transition({ id: "a1", to: "verified" });
+    assert.equal(after.ok, true, after.error);
+    assert.equal(state.artifacts.find((a) => a.id === "a1").status, "verified");
+  });
+});
+
+describe("the goal:achieved gap: children resolved via hierarchy_membership, not parent_id", () => {
+  // goal:achieved was unreachable, not merely untested: no artifact can ever have kind
+  // "goal" (goal is a ticket type), and the old children lookup filtered
+  // state.artifacts by parent_id -- the column §3.3 built hierarchy_membership to
+  // replace. Both gaps have to close together for this gate to be exercisable at all.
+  function makeGoalApi() {
+    return makeApi({
+      tickets: [{ id: "g1", type: "goal", status: "in-progress" }],
+      artifacts: [
+        { id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed" },
+        { id: "a2", ref: "REQ-002", kind: "requirement", status: "proposed" },
+      ],
+      hierarchies: [{ id: "h1", project_key: "BLZ", name: "default", is_default: true }],
+      hierarchyMemberships: [
+        { id: "m1", hierarchy_id: "h1", item_id: "a1", parent_id: "g1", ord: 0 },
+        { id: "m2", hierarchy_id: "h1", item_id: "a2", parent_id: "g1", ord: 1 },
+      ],
+    });
+  }
+
+  test("a goal cannot reach achieved while a child requirement is non-terminal", async () => {
+    const { api } = makeGoalApi();
+    const r = await api.transition({ id: "g1", to: "achieved" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /REQ-001/);
+    assert.match(r.error, /REQ-002/);
+  });
+
+  test("...and CAN once every child requirement is terminal", async () => {
+    const { api, state } = makeGoalApi();
+    // "implemented" is a terminal status for the requirement workflow, and
+    // requirement:implemented is not a gated action, so this transition itself is
+    // ungated and simply records the status.
+    assert.equal((await api.transition({ id: "a1", to: "implemented" })).ok, true);
+    assert.equal((await api.transition({ id: "a2", to: "implemented" })).ok, true);
+
+    const r = await api.transition({ id: "g1", to: "achieved" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(state.tickets.find((t) => t.id === "g1").status, "achieved");
   });
 });
 
@@ -159,6 +244,11 @@ describe("document:baselined composes evaluateCoverage into checkGate, in the AP
         { id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed" },
         { id: "arch1", ref: "ADR-0001", kind: "architecture", status: "proposed" },
       ],
+      // A feature ticket, so the "baselining succeeds" test below can satisfy
+      // every-requirement-verified with a REAL Verifies link (source: story|feature —
+      // a ticket, not an artifact). Previously this test redefined Verifies as
+      // architecture-sourced to route around C1; restored to the true shape.
+      tickets: [{ id: "f1", type: "feature", status: "defined" }],
       documents: [{ id: "d1", title: "Spec", kind: "requirements", status: "draft" }],
       artifactUsages: [{ document_id: "d1", artifact_id: "a1", ord: 1, depth: 0 }],
     });
@@ -177,11 +267,13 @@ describe("document:baselined composes evaluateCoverage into checkGate, in the AP
     const { api, state } = makeDocApi();
     await api.createLink({ typeName: "Addresses", sourceId: "arch1", targetId: "a1" });
     // every-requirement-verified also applies to REQ-001 in DEFAULT_COVERAGE_RULES;
-    // supply a Verifies-typed link type so both coverage rules the document is subject
-    // to are satisfied.
+    // supply the REAL Verifies definition (source: story|feature) and satisfy it from
+    // the feature ticket, proving the link-schema.mjs shape actually works through the
+    // API rather than a shape the test invented to get around C1.
     state.linkTypes.push({ id: "lt3", name: "Verifies", inverse_name: "Verified by",
-      source_kinds: "architecture", target_kinds: "requirement", min_card: 0, max_card: null });
-    await api.createLink({ typeName: "Verifies", sourceId: "arch1", targetId: "a1" });
+      source_kinds: "story,feature", target_kinds: "requirement", min_card: 0, max_card: null });
+    const verifies = await api.createLink({ typeName: "Verifies", sourceId: "f1", targetId: "a1" });
+    assert.equal(verifies.ok, true, verifies.error);
 
     const r = await api.baselineDocument({ documentId: "d1", name: "v1" });
     assert.equal(r.ok, true);
