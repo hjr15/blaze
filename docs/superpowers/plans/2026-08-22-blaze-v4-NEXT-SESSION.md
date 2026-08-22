@@ -9,9 +9,9 @@
 
 | What | Where |
 |---|---|
-| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 37 commits ahead of `main`, clean tree |
+| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 38 commits ahead of `main`, clean tree |
 | Engine docs (ADRs 0014–0018, spec, plan, ledger, review) | `/home/rnamwoh/Documents/Code/blaze` on **`main`** — 14 commits, **unpushed** |
-| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..334, **unpushed** |
+| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..343, **unpushed** |
 | Competitive register + audits | same board worktree, `docs/competitive/` and `docs/audits/` |
 
 **Nothing has been pushed or merged.** That is deliberate — `blaze-pm` is published only by the
@@ -19,8 +19,9 @@
 
 ## State in one line
 
-**The spine is FULLY IMPLEMENTED. Every requirement in the spec has code behind it except §6, the
-migration. 1,695 tests, 1,695 pass, 0 fail, 0 skipped with Postgres enabled** (baseline before this
+**The spine is FULLY IMPLEMENTED and has been through a pre-merge review. Every requirement in the
+spec has code behind it except §6, the migration. 1,727 tests, 1,727 pass, 0 fail, 0 skipped with
+Postgres enabled** (baseline before this
 work: 1,267; end of session 1: 1,489). Task 14 / BLZ-324 — the migration — is the only outstanding
 work and is genuinely blocked on the soak.
 
@@ -57,8 +58,8 @@ than fixtures. Do not substitute a weaker check.
 ## Read these three, in this order
 
 1. **`docs/superpowers/specs/2026-08-22-blaze-v4-spine-design.md`** — the spec. Binding authority.
-2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **41 rulings** made
-   during execution (16 in session 1, R17–R41 in session 2), several reversing the plan's own text,
+2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **47 rulings** made
+   during execution (16 in session 1, R17–R47 in session 2), several reversing the plan's own text,
    plus every parked finding and accepted residual. If you are about to "fix" something that looks wrong, check here first — it may be a
    deliberate decision with a recorded reason.
 3. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-final-review.md`** — the whole-branch review
@@ -99,22 +100,43 @@ BLZ-324 and blocked below. Kept as a record, not as outstanding work:
 
 | Spec | Ticket | Commit | Rulings |
 |---|---|---|---|
-| §4.4 coverage-rule creation reports every violation | BLZ-327 | `ebaab09` | R17–R22 |
-| §4.1 required / enum / type / range validation | BLZ-328 | `516600a` | R23–R25 |
-| §3.4 field budget, install-wide and per project | BLZ-329 | `b9637d9` | R26–R27 |
-| §5 orphan / missing-downstream / stale-since-change | BLZ-330 | `8e82992` | R28–R30 |
-| — dialect extraction (follow-up, not a spec item) | BLZ-331 | `f40045c` | R31 |
-| §3.4 JSON tail column with CHECK constraints | BLZ-332 | `566e9a8` | R32–R36 |
-| §5 matrix filterable by custom field, both axes | BLZ-334 | `c00d485` | R37–R39 |
-| §4.3 advisory checks beyond WARN_TIER | BLZ-333 | `6575253` | R40–R41 |
+| §4.4 coverage-rule creation reports every violation | BLZ-327 | `1c3908a` | R17–R22 |
+| §4.1 required / enum / type / range validation | BLZ-328 | `761d929` | R23–R25 |
+| §3.4 field budget, install-wide and per project | BLZ-329 | `7714b24` | R26–R27 |
+| §5 orphan / missing-downstream / stale-since-change | BLZ-330 | `10684e3` | R28–R30 |
+| — dialect extraction (follow-up, not a spec item) | BLZ-331 | `2ff119c` | R31 |
+| §3.4 JSON tail column with CHECK constraints | BLZ-332 | `9a453fb` | R32–R36 |
+| §5 matrix filterable by custom field, both axes | BLZ-334 | `fdcaa8f` | R37–R39 |
+| §4.3 advisory checks beyond WARN_TIER | BLZ-333 | `72d82e6` | R40–R41 |
+
+| — pre-merge review fix round | BLZ-335/336/337 | `ade687b` | R42–R47 |
 
 **Nothing from the final review is outstanding.** If you are looking for the next thing to build,
-it is not here — it is either BLZ-324 (blocked, below) or specs 2–6, which are out of scope until
-the spine merges.
+it is not here — it is BLZ-324 (blocked, below), the deferred defects BLZ-338..343, or specs 2–6,
+which are out of scope until the spine merges.
+
+## The pre-merge review, and what it should teach you
+
+The branch was one command from merging on the strength of "1,695 tests, 1,695 pass". Two
+independent reviewers — one hunting correctness, one tasked ONLY with refuting "every guard
+discriminates" by mutation — found **seven real defects and nine behaviour-removing mutations the
+whole suite accepted silently**. Green is not correct, and it is not discriminating.
+
+The worst of them, C2, is this branch's own lesson repeating inside the work written to close the
+gaps the FIRST review found: `splitCustomFields` put a promoted value at `artifact.promoted.cf_risk`
+while every reader used `artifact.cf_risk`, so BLZ-334's matrix filter returned zero rows for the one
+artifact that matched — and its tests passed because the fixtures hand-built a shape the API never
+produced. **Two layers, each internally consistent, both green, mutually contradictory.**
+
+Do not skip the mutation pass, and do not let a test build its own fixture where it could go through
+the API instead.
+
+**BLZ-338..343 are reproduced, ticketed and deliberately NOT fixed** — they are pre-existing on the
+branch, and bundling unrelated fixes into a merge round is how a merge stops being reviewable.
 
 ## Recommended follow-up, already reasoned through
 
-~~**Extract the dialect helper.**~~ **DONE** — BLZ-331, `f40045c`. It was ten modules, not seven
+~~**Extract the dialect helper.**~~ **DONE** — BLZ-331, `2ff119c`. It was ten modules, not seven
 (the count predated BLZ-325/326/330). Verified by a zero-diff oracle: all 42 generated DDL
 statements byte-identical, including the carved-out `config-schema.mjs`. `config-schema.mjs` stays
 out for a recorded reason now, not just a carve-out (R31). The extraction's own new test caught a

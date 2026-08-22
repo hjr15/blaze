@@ -55,7 +55,7 @@ Ruling (F4): deferred minor — test-helper naming only, no behaviour.
 
 ## Progress
 
-Task 1 (BLZ-310): implemented, commit 128e67b, review clean (spec ✅, quality approved).
+Task 1 (BLZ-310): implemented, commit 6e71c23, review clean (spec ✅, quality approved).
  Reviewer independently reproduced the Step-5 discrimination check rather than trusting the report.
 Task 1: Ruling: the reviewer's non-finding — padStart does not truncate, so requirement 1000 emits
  REQ-1000 which parseRef's fixed-width \d{3} rejects — is REAL and LOAD-BEARING, and I am overruling
@@ -65,9 +65,9 @@ Task 1: Ruling: the reviewer's non-finding — padStart does not truncate, so re
  unparseable refs. Fix now: pad to a MINIMUM width, parse >= that width. Cost if wrong: two lines and
  two test updates, against a ceiling that would otherwise surface in production with no migration
  path (an unparseable ref cannot be renumbered — reuse is forbidden).
-Task 1: fix round 1/5 (1 addressed, 0 open — REQ-999 ceiling; commits 128e67b..8a39c38)
-Task 1 (BLZ-310): complete (commits dc68415..8a39c38, review clean). 5 tests.
-Task 2 (BLZ-311): complete (commits 8a39c38..8fb531a, review clean). 10 tests (6 sqlite + 4 real-pg).
+Task 1: fix round 1/5 (1 addressed, 0 open — REQ-999 ceiling; commits 6e71c23..c6a638c)
+Task 1 (BLZ-310): complete (commits dc68415..c6a638c, review clean). 5 tests.
+Task 2 (BLZ-311): complete (commits c6a638c..4dbd12a, review clean). 10 tests (6 sqlite + 4 real-pg).
  Reviewer independently re-ran against a live postgres:17 container and confirmed the parity regex
  is not vacuous (extracts 10 real columns per dialect).
 Task 2: Ruling: the brief's "Consumes: REF_PATTERNS from Task 1" is a plan defect — same class as
@@ -79,7 +79,7 @@ Task 2: Ruling: the brief's "Consumes: REF_PATTERNS from Task 1" is a plan defec
  acceptable, since such a client bypasses every other rule too.
 Task 2: minor (deferred): brief Interfaces blocks are aspirational in places; final review should
  confirm no other task inherits a phantom dependency.
-Task 3 (BLZ-312): complete (commits 8fb531a..7eadd2f, review clean). 6 tests; asymmetric FK proven by flipping RESTRICT->CASCADE.
+Task 3 (BLZ-312): complete (commits 4dbd12a..939e0da, review clean). 6 tests; asymmetric FK proven by flipping RESTRICT->CASCADE.
 Task 7: Ruling: the reviewer's Important finding is CORRECT and the defect is MINE — plan Task 7's
  test "only the LATEST revision matters, not the count" is vacuous against its own specified mutation.
  reviewed_at 2026-06-01 postdates both revisions (02-01, 03-01), so first-vs-max yields the same
@@ -89,14 +89,14 @@ Task 7: Ruling: the reviewer's Important finding is CORRECT and the defect is MI
  count-based bugs) and ADD one where reviewed_at falls BETWEEN the revisions, which is the only
  arrangement where first and latest disagree. Cost if wrong: nothing proves the max-tracking branch,
  in a function whose entire purpose is that staleness is derived rather than stored.
-Task 7: fix round 1/5 (1 addressed, 0 open — vacuous latest-revision test; commits c3993c6..6933dcb)
+Task 7: fix round 1/5 (1 addressed, 0 open — vacuous latest-revision test; commits a87202b..572aa94)
  Re-verification done by ME directly rather than by a dispatched re-reviewer: this implementer had
  already presented prose as captured output once, so I applied the mutation myself. Result: the new
  test fails 6/1 under first-seen tracking, restores to 7/7. Discrimination confirmed first-hand.
  Note: the descending-order test does NOT discriminate (first-seen IS the latest when input descends)
  and is not meant to — it guards order-independence in the correct implementation. The implementer
  reported this honestly, which is the behaviour I asked for.
-Task 7 (BLZ-313): complete (commits 7eadd2f..6933dcb, review clean). 13 tests across both files.
+Task 7 (BLZ-313): complete (commits 939e0da..572aa94, review clean). 13 tests across both files.
 Task 8: Ruling: the implementer's DONE_WITH_CONCERNS is CORRECT and the defect is MINE. The brief's
  rollup carried `if (id !== rootId) total += ...`, excluding the root's own value — which contradicts
  the brief's OWN cycle test (fixture {a:1,b:1}, root=a, expects 2; the brief's code returns 1). It is
@@ -122,13 +122,13 @@ Task 8: Ruling: the deeper problem is the TEST GAP, not the DDL. Task 8 shipped 
  use case passed review. The fix must add schema tests that exercise a real database, or the next
  schema defect lands the same way. Cost if wrong: more test surface than a pure-function task
  strictly needs, which is the correct side to err on for DDL.
-Task 8: fix round 1/5 (1 addressed, 0 open — root-storable PK + 6 schema tests; commits 65a9384..b216cb8)
+Task 8: fix round 1/5 (1 addressed, 0 open — root-storable PK + 6 schema tests; commits 7015a46..85590d3)
  Re-reviewer isolated the partial index by removing ONLY it: test 4 then fails alone, proving the
  index is load-bearing rather than incidentally satisfied. Also confirmed 12/12 on real Postgres 17.
  Second defect found and fixed in the same round, Postgres-only: `is_default boolean DEFAULT 0` —
  SQLite tolerates the integer, Postgres rejects it. This is the exact class of bug the both-engines
  rule exists for, found because the fix round required a real PG run.
-Task 8 (BLZ-314): complete (commits 6933dcb..b216cb8, review clean). 18 tests across both files.
+Task 8 (BLZ-314): complete (commits 572aa94..85590d3, review clean). 18 tests across both files.
 
 === FEATURE BLZ-306 (v4 document model) COMPLETE — tasks 1,2,3,7,8 ===
 
@@ -144,11 +144,11 @@ Ruling (batching): Tasks 4 and 5 (BLZ-315, BLZ-316) dispatched as ONE unit with 
  three constants plus a DDL string — too thin for its own review seat — and T5 is the only consumer
  of T4's shape, so a reviewer seeing them together can verify they agree, which separate reviews
  cannot. Cost if wrong: one diff carries two tickets, so a reviewer rejecting half rejects both.
-Tasks 4+5 (BLZ-315, BLZ-316): complete (commits b216cb8..3345cfa, review clean). 15 tests, 9 sqlite
+Tasks 4+5 (BLZ-315, BLZ-316): complete (commits 85590d3..0930189, review clean). 15 tests, 9 sqlite
  + 6 real-pg. Reviewer mutated targetKind out of checkLink to confirm the endpoint tests catch it,
  and confirmed the PG block is genuinely absent (not skip-and-green) when the env var is unset.
 Task 4: fix round 1/5 (1 addressed — ad-hoc PG script replaced with a permanent gated suite;
- commit 3345cfa). Raised by the IMPLEMENTER, not the reviewer: it did the required PG verification
+ commit 0930189). Raised by the IMPLEMENTER, not the reviewer: it did the required PG verification
  out-of-band to avoid deviating from "verbatim", then flagged that this was weaker than the sibling
  convention rather than banking it. Correct instinct; the three-valued-logic question I asked it to
  stop on turned out to be a non-issue (the explicit IS NULL resolves before the OR, so both engines
@@ -160,7 +160,7 @@ Ruling (batching): Tasks 9, 10 and 11 (BLZ-317/318/320) dispatched as ONE unit. 
  plan's single most important discrimination test (that "shall never store plaintext passwords" is
  NOT blocked), which deserves its own review attention. Cost if wrong: one diff carries three
  tickets.
-Tasks 9, 11 (BLZ-317, BLZ-320): implemented, commits 31c2997 and c1e0068. Task 10 BLOCKED by a
+Tasks 9, 11 (BLZ-317, BLZ-320): implemented, commits 9d548b4 and 17fe907. Task 10 BLOCKED by a
  defect in my own brief; implementer correctly refused to apply its own fix without a ruling.
 Task 10: Ruling: the blocker is REAL and mine. sectionHasContent's regex uses `\Z` as an
  end-of-string anchor — that is Python/PCRE. In JavaScript `\Z` matches a LITERAL Z. Verified
@@ -187,10 +187,10 @@ Task 10: Ruling: the implementer's FOURTH no-op mutation is correct — GATED_AC
  kind CHECK is generated from ARTIFACT_KINDS, and configSeed() derives its seeds from the engine
  registries — both for the identical reason that a hand-maintained duplicate stays valid when it goes
  stale. Cost if wrong: a small restructure of one pure function, no behaviour change.
-Task 10: fix round 2/5 (1 addressed — GATED_ACTIONS derived from the handler map; commit a5f4428).
+Task 10: fix round 2/5 (1 addressed — GATED_ACTIONS derived from the handler map; commit 3993da6).
  Verified behaviour-preserving: all 9 prior gate tests unchanged, and deleting one GATES entry now
  fails TWO tests from one mutation, which is the evidence registry and handlers are one fact.
-Task 15 (BLZ-319): complete (commit b3ed137, 7 tests). Both mutations genuinely discriminated — the
+Task 15 (BLZ-319): complete (commit ab7d073, 7 tests). Both mutations genuinely discriminated — the
  first of five prescribed mutations on this plan that were not no-ops. Implementer verified all 25
  entries are individually matchable (no dead config) and caught a shell-escaping error in its own
  throwaway check before reporting it as a defect. I re-verified the decisive cases directly:
@@ -211,7 +211,7 @@ Task 9: Ruling: reviewer's finding — `min` is never exercised above 1 — is r
 Ruling (branch): deleted the just-created BLZ-308 branch and returned to BLZ-307 to land these two
  fixes, then will re-cut BLZ-308 from the corrected head. BLZ-308 had no commits yet, so this is free;
  fixing forward on BLZ-308 would have put BLZ-307's corrections in the wrong feature's PR.
-Tasks 9,10,11 (BLZ-317/318/320): complete (commits 3345cfa..5acdc9d, review clean after 3 fix rounds).
+Tasks 9,10,11 (BLZ-317/318/320): complete (commits 0930189..2e2f32a, review clean after 3 fix rounds).
  Fix round 3/5: document:baselined coverage + min>1 coverage, both additive-only, both discrimination
  proofs genuine. 35 tests across the three files, 20 in coverage alone including real Postgres 17.
  Reviewer verified the GATED_ACTIONS restructure by deleting a DIFFERENT entry than the report had
@@ -221,7 +221,7 @@ FULL SUITE at the BLZ-307 boundary: 1360 tests, 1359 pass, 0 fail, 1 skipped (ba
  93 new tests, zero regressions in pre-existing code.
 
 === FEATURE BLZ-307 COMPLETE — tasks 4,5,9,10,15,11 ===
-Task 6 (BLZ-321): complete (commit bdb1e3f, review clean, no findings). 23 tests including executed
+Task 6 (BLZ-321): complete (commit ea44533, review clean, no findings). 23 tests including executed
  ALTER TABLE for all 5 data types on BOTH engines — not just asserting the emitted string, actually
  running it. Reviewer independently reverted the false_ token to literal 0 and reproduced the real
  Postgres error, then verified determinism across 5 runs of the race-prone trio and 4 full-suite runs.
@@ -234,7 +234,7 @@ Task 6: the implementer found and fixed a test-parallelism race IT introduced: i
  shared public.artifact table, which races with artifact-schema.test.mjs because node --test runs
  files in parallel. Isolated to its own schema. This is a class of flakiness worth watching for in
  every remaining PG-gated suite, and the warning was carried into Task 12's dispatch.
-Task 12 (BLZ-322): complete (commit c0060c0, review clean, no findings). 10 tests (5 sqlite + 5 pg),
+Task 12 (BLZ-322): complete (commit 0a99ef8, review clean, no findings). 10 tests (5 sqlite + 5 pg),
  own `baseline_test` PG schema with DROP SCHEMA CASCADE cleanup, so no race with sibling files.
  Full tests/model suite 667/667 twice under PG. Reviewer reproduced the RESTRICT->CASCADE mutation
  itself and added an unrequested hygiene check — dropping the composite PK to confirm the
@@ -254,7 +254,7 @@ Task 13: Ruling: `POST /api/field` is **admin**, and the pre-existing serve-auth
  (an admin having to define fields on a member's behalf).
  The implementer correctly refused to decide this itself and used "write" to keep the suite green
  while flagging it. That is the behaviour asked for.
-Task 13 (BLZ-323): complete (commits c0060c0..1d66f64, review clean). 34 tests. Reviewer verified both
+Task 13 (BLZ-323): complete (commits 0a99ef8..4ca696f, review clean). 34 tests. Reviewer verified both
  rulings applied, independently reproduced the admin/write pin proof, and added a FOURTH mutation the
  brief had not asked for — bypassing promotionPlan in defineField — which broke exactly the cap test.
  Confirmed denormaliseLinks is a single named exported helper with all 5 call sites routing through
@@ -296,7 +296,7 @@ Ruling (dialect extraction): ACCEPT the reviewer's recommendation as a follow-up
  blocker. `boolean DEFAULT 0` hit three separate times and ` STRICT` is retyped seven times with
  silent failure on omission — that is drift with evidence, not aesthetics. Leave config-schema.mjs
  alone. Cost if wrong: one more module to touch when a dialect changes.
-FINAL FIX WAVE: all 4 ADDRESSED (commits 1d66f64..e65b42e). Re-reviewer live-executed every claim:
+FINAL FIX WAVE: all 4 ADDRESSED (commits 4ca696f..092857a). Re-reviewer live-executed every claim:
  the C1 chain, the C5 bypass attempt with an explicit filterableCount 0 against 200 real definitions,
  warn-tier non-blocking, reason recording, and the empty-hierarchy goal. Suite 1406/1405/0 fail.
 Ruling (parked, deferred minor): a goal with NO hierarchy members vacuously satisfies goal:achieved.
@@ -310,11 +310,11 @@ Ruling (workspace retained): NOT deleting this workspace despite the fix wave be
  survives the scratch directory.
 
 === BOTH REMAINING CRITICALS FIXED ===
-BLZ-326 (ref claim ledger): commit de01c4d. Append-only ref_claim table + claimRef reading the
+BLZ-326 (ref claim ledger): commit 17ebe95. Append-only ref_claim table + claimRef reading the
  LEDGER, never live rows. Regression pinned: claim REQ-001..003, delete the REQ-003 artifact, claim
  again -> REQ-004. Mutation (point claimedRefs at `artifact`) broke 8 of 10 tests. Copied ADR-0005's
  precedent rather than inventing a mechanism.
-BLZ-325 (API/DDL boundary): commit 64afe8d. New artifact-store.mjs following the identity.mjs /
+BLZ-325 (API/DDL boundary): commit 0c15f80. New artifact-store.mjs following the identity.mjs /
  identity-store.mjs split — policy pure, I/O thin, exec interface so one code path serves the sync
  SQLite driver and async pg. createArtifact now writes complete rows and allocates through claimRef
  (the ledger's first production caller). baselineDocument is project-scoped with real revision pins,
@@ -336,7 +336,7 @@ Residuals accepted, recorded so they are not mistaken for oversights:
 Picked up from the next-session brief's "known spec gaps with no code behind them". §4.4 was the
  one the operator named directly (Jama's CS-013 silent grandfathering), and the final review's I4
  confirmed there was no rule-creation path at all. Ticketed as BLZ-327 before any code was written.
-Commit ebaab09 on BLZ-308-v4-fields-baselines-api.
+Commit 1c3908a on BLZ-308-v4-fields-baselines-api.
 
 Rulings made during this task:
 
@@ -413,8 +413,8 @@ Finding parked, RETRACTED AND REPLACED (same session, on inspection of reconcile
  purpose, and loosening it is how INF-735's corrupted tickets happened.
 
 === SESSION 2, PART 2 — THE REMAINING SPEC GAPS AND THE DIALECT EXTRACTION ===
-BLZ-328 (§4.1 validation, 516600a), BLZ-329 (§3.4 budget, b9637d9), BLZ-330 (§5 indicators,
- 8e82992), BLZ-331 (dialect extraction, f40045c). Every gap the final review named now has code
+BLZ-328 (§4.1 validation, 761d929), BLZ-329 (§3.4 budget, 7714b24), BLZ-330 (§5 indicators,
+ 10684e3), BLZ-331 (dialect extraction, 2ff119c). Every gap the final review named now has code
  behind it. Full suite 1,633 tests, 1,633 pass, 0 fail, 0 skipped with Postgres 17 (was 1,489 at
  the end of session 1).
 
@@ -485,8 +485,8 @@ Two false alarms from the new STRICT guard, narrowed rather than deleted: `ON DE
  is for the table-suffix construct `) STRICT;`, not the word.
 
 === SESSION 2, PART 3 — THE LAST THREE, AND THE SPEC IS FULLY IMPLEMENTED ===
-BLZ-332 (§3.4 JSON tail, 566e9a8), BLZ-334 (§5 matrix filtering, c00d485), BLZ-333 (§4.3 advisory,
- 6575253). With BLZ-327..331 these close every requirement in the spec except §6 (migration), which
+BLZ-332 (§3.4 JSON tail, 9a453fb), BLZ-334 (§5 matrix filtering, fdcaa8f), BLZ-333 (§4.3 advisory,
+ 72d82e6). With BLZ-327..331 these close every requirement in the spec except §6 (migration), which
  is BLZ-324 and blocked on the soak. Full suite 1,695 tests, 1,695 pass, 0 fail, 0 skipped with
  Postgres 17.
 
@@ -566,3 +566,82 @@ Pattern worth naming, since it has now fired ~11 times across this branch: every
 
 Incidental fix: two test fixtures used column-less `INSERT INTO artifact VALUES (...)`, which any
  new column breaks. Fixed by naming the columns, not by weakening the schema.
+
+=== SESSION 2, PART 4 — THE PRE-MERGE REVIEW, AND WHY THE BRANCH DID NOT MERGE CLEAN ===
+Before merging, two independent reviewers were dispatched over the whole 38-commit branch: one
+ hunting correctness defects, one tasked ONLY with refuting "every guard is proven to discriminate"
+ by mutation. Both found real things. Commit ade687b (BLZ-335/336/337).
+
+The headline, and the reason this section exists: **the branch was one command away from being
+ merged on the strength of "1,695 tests, 1,695 pass".** Green is not the same as correct, and it is
+ not the same as discriminating. Seven defects were confirmed against live source, and NINE
+ behaviour-removing mutations passed the entire suite silently.
+
+Nothing was taken on a reviewer's word. Every finding below was reproduced with a script against
+ live source BEFORE a ticket was written, and two reviewer claims were adjusted in the process
+ (see "reviewer claims corrected" below).
+
+Rulings:
+
+Ruling (R42 — the field budget must read the DATABASE, and this reverses my own BLZ-329 claim):
+ `state.fieldDefinitions` is one process's memory. BLZ-329's commit said "counts PERSISTED
+ definitions and never a caller-supplied number" — the second half was true, the first was not.
+ Two API instances over one store: the table held 2 rows and the budget reported 0. An install-wide
+ number computed from per-process memory is not an install-wide number. `fieldBudget()` became
+ async as a result; that is the cost of the number being true.
+
+Ruling (R43 — a promoted value has ONE shape, and this was the branch's own lesson repeating):
+ `splitCustomFields` returned `{custom_fields, promoted}`, the caller spread it, and the value
+ landed at `artifact.promoted.cf_risk` while the column and every reader used `artifact.cf_risk`.
+ BLZ-334 therefore did not work AT ALL through the API — matrix-filter returned zero rows for the
+ one artifact that matched. Its tests passed because their fixtures hand-built the flat shape the
+ API never produced. This is precisely the failure the final review named in session 1: two layers
+ each internally consistent, both green, mutually contradictory. It happened again, in the work
+ written to close the gaps that review found.
+
+Ruling (R44 — REVERSES R38): R38 said the matrix filter uses strict equality with no coercion. That
+ was WRONG and it was wrong in a way that only a cross-engine test could reveal: a promoted value
+ comes back as a different JS type per engine (SQLite has no boolean and stores 1/0; node-pg returns
+ `numeric` as a string and `date` as a Date), so `===` matched on one engine and matched nothing
+ on the other for identical data. Both sides are now canonicalised by the field's declared
+ data_type. The coercion is explicit and typed — a text field still does not match a number's string
+ form, which is what R38 was actually protecting.
+
+Ruling (R45 — creating a link IS an act of review): `reviewed_at` is seeded at creation. Leaving it
+ NULL meant every link was stale the instant it existed, because createArtifact always writes a
+ revision. BLZ-330 added that column with a comment saying "an indicator that is on for everything
+ is off" — and then left the indicator on for everything. NULL stays representable for an import or
+ migration that genuinely never reviewed anything.
+
+Ruling (R46 — a gate that silently APPROVES is worse than no gate): `childrenOf` resolved the
+ default hierarchy with no project filter, so a goal in project B was gated against project A's
+ hierarchy, found zero children, and passed with a non-terminal child. It leaves a record saying the
+ check was made. Scoped to the subject's own project; the recorded vacuous-pass residual still holds
+ where a project genuinely has no hierarchy.
+
+Ruling (R47 — the defaults must be persisted before `enabled` means anything): DEFAULT_COVERAGE_RULES
+ were copied into `state` and never INSERTed, so disabling one UPDATEd zero rows and returned
+ {ok:true}. In memory off, in the database (by absence) on, and a restart silently reverted it —
+ while `enabled` was indexed as though it were the source of truth.
+
+Reviewer claims corrected during adjudication (the reason findings are reproduced, not trusted):
+ - The correctness reviewer's C8 repro used a `story` child. Per RQ-7 the `goal:achieved` gate
+   blocks on non-terminal REQUIREMENT children specifically, so that fixture would have passed even
+   with the hierarchy resolved correctly. The defect is real; the repro was not. Rewritten with a
+   requirement child, and confirmed to fail against the unfixed code.
+ - The mutation reviewer reported the suite as 1,634 tests and could not reproduce 1,695. Correct —
+   they had no Postgres. Not a discrepancy in the claim.
+
+Deferred, NOT fixed, as BLZ-338..343: baselineDocument writing document.status to memory only;
+ transition writing a status the workflow does not declare (and `requirement:verified` being
+ unreachable from any legal status); createArtifact throwing on an unknown kind; state mutated
+ before the store write; ref allocation not project-scoped; min_card and the PG column ceiling both
+ dead. All reproduced. All pre-existing on the branch rather than introduced by BLZ-327..334, and
+ bundling unrelated fixes into a merge round is how a merge stops being reviewable.
+
+Hygiene: 24 commits carried a `Co-Authored-By` trailer that this repo's OWN `hygiene.yml` gate
+ rejects — 19 on the branch (11 from session 1) and 5 the docs work put on main. `main` was clean
+ before this session. Stripped from both refs with `git filter-branch --msg-filter`, on the operator's
+ explicit decision that the repo's gate outranks the global commit-trailer instruction inside this
+ repo. That rewrote every SHA, orphaning the 35 commit citations in this ledger and the brief — all
+ remapped by subject and verified to resolve. `node scripts/ci/hygiene-check.mjs main` is clean.

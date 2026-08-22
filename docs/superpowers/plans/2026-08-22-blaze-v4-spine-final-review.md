@@ -1,6 +1,6 @@
 # Blaze v4 spine — whole-branch final review
 
-**Date:** 2026-08-22 · **Branch:** `BLZ-306-v4-document-model` · **Range:** `dc68415..1d66f64` (24 commits)
+**Date:** 2026-08-22 · **Branch:** `BLZ-306-v4-document-model` · **Range:** `dc68415..4ca696f` (24 commits)
 **Reviewer scope:** cross-module consistency, seams, spec coverage, maintainability, suite health.
 Per-task review is not repeated. Recorded rulings are not re-litigated — only checked for consistent application.
 
