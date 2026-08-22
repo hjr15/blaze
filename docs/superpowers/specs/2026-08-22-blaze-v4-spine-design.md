@@ -117,7 +117,9 @@ field_definition  (id, project_key, key, label, data_type, is_filterable,
 ```
 
 - **`is_filterable` at definition time** promotes the field to a **real, named, typed
-  column** on the item table via `ALTER TABLE ADD COLUMN` — the 9.0 ms metadata-only path.
+  column** — on `artifact` when `applies_to_kind` is `requirement` or `architecture`, on
+  `ticket` when it is a work-item type — via `ALTER TABLE ADD COLUMN`, the 9.0 ms
+  metadata-only path. The two tables carry independent column budgets.
 - Everything else lives in a `jsonb` / JSON column, which **still takes `CHECK`
   constraints** (the benchmark refuted my assumption that JSON means app-level validation
   only).
@@ -130,12 +132,24 @@ field_definition  (id, project_key, key, label, data_type, is_filterable,
 | **Promote at definition time, never later** | promoting a populated field costs 6.5 s / 2.1 s |
 | **`STRICT` on every SQLite table holding custom fields** | without it a `REAL` column silently accepts `'oops'` |
 | **Refuse promotion past ~1,590 columns** | Postgres hard-refuses at 1,600; fail with a named error, not a raw `ALTER` failure |
-| **Hard cap 200 filterable fields per install** | the indexing knee is 200–400 (insert p95 3.15 → 51.4 ms) |
+| **Hard cap 200 filterable fields per table, install-wide** | the indexing knee is 200–400 (insert p95 3.15 → 51.4 ms) |
 | **Do not use SQLite `ALTER TABLE ADD CHECK`** | it works, but rides undocumented behaviour |
 
 The 200-field cap ≈ 1,250 total fields at the observed 16.1% filterable ratio — **above
 Atlassian's own "exceeding limit" threshold**. It must be **surfaced continuously**, never
 sprung (CS-008).
+
+**A consequence of ADR-0018 that must be stated plainly, because it will surprise people:**
+fields are *defined* per project, but promoted columns live on one **shared** table, so the
+column budget is **shared across every project in the installation**. A field promoted in
+project A consumes budget that project B can no longer use.
+
+This is the price of rejecting per-project physical tables, and it was paid deliberately:
+per-project tables collapse on cross-project queries — 130 ms at 1,000 tables, `out of
+shared memory` at 5,000 — and a cross-project traceability matrix is the product's core
+value. **The budget must therefore be reported install-wide and per project**, so one team
+cannot silently exhaust another's headroom. An installation approaching the cap needs to
+see *which projects* are consuming it, not just that it is close.
 
 ### 3.5 `link` and `link_type` — the meta-model
 
