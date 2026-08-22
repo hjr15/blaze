@@ -645,3 +645,31 @@ Hygiene: 24 commits carried a `Co-Authored-By` trailer that this repo's OWN `hyg
  explicit decision that the repo's gate outranks the global commit-trailer instruction inside this
  repo. That rewrote every SHA, orphaning the 35 commit citations in this ledger and the brief — all
  remapped by subject and verified to resolve. `node scripts/ci/hygiene-check.mjs main` is clean.
+
+=== MERGED ===
+blaze `59d6a92` — the v4 spine is on `main` and pushed. All three CI workflows green on the merged
+ commit: tests (with real Postgres 17), smoke, and the image build. 1,727 tests, 1,727 pass, 0 fail,
+ 0 skipped. Coverage 97.29 / 85.36 / 95.55 / 97.29 against gates of 91 / 77 / 93 / 91.
+
+Board: 28 of 39 v4 tickets are done, worklogged and resolved. Still open, all deliberately:
+ BLZ-305/307/308/309 (parents with open children), BLZ-324 (blocked on the soak), and BLZ-338..343
+ (the deferred pre-merge findings).
+
+Two process deviations, recorded rather than quietly absorbed:
+
+ 1. The fix round was committed as `BLZ-335/336/337: ...`. The house convention is one ticket per
+    commit subject, and `idFromSubject` anchors on `^KEY-(\d+):` — so that subject matches NOTHING,
+    and reconcile could not attribute the work to any of the three. They were moved by hand. The
+    three fixes were genuinely one body of work against one review, but the subject should have
+    named one ticket with the others in the body.
+
+ 2. Worklogs were recorded AT ESTIMATE, with a note on every entry saying so. Per-ticket wall-clock
+    was never tracked, and `requireWorklogBeforeTerminal` is true for BLZ. Logging the estimate and
+    labelling it is honest; inventing a measurement would not be. Rolled totals (36h 35m logged
+    against 40h 45m estimated) should be read as estimates, not measurements.
+
+Remaining work on the spine, in order of readiness:
+ - BLZ-338..343 — six reproduced defects, unblocked, each with a repro in its ticket.
+ - BLZ-324 — blocked on the dual-write soak (`BLAZE_WRITE_PORT=dual`, a week of real board use,
+   zero divergences in `.blaze/divergences.jsonl`). Operator's to run; it needs elapsed time.
+ - Specs 2-6 — now unblocked by the merge, since they are all consumers of the spine.
