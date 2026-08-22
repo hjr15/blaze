@@ -13,12 +13,8 @@
 // engineering firm arrives with an identity provider — which is a stated requirement,
 // not a maybe.
 
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", bool: "boolean", false_: "false" };
-  if (name === "sqlite") return { ts: "TEXT", bool: "INTEGER", false_: "0" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)} — expected 'sqlite' or 'postgres'`);
-}
 
+import { dialect } from "./sql-dialect.mjs";
 /** The three roles. A permissions matrix is deliberately refused — ADR-0013 §3. */
 export const ROLES = ["admin", "member", "viewer"];
 

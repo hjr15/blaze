@@ -34,6 +34,22 @@ export const ROUTE_SCOPES = {
   "POST /api/resolve": "write",
   "POST /api/log": "write",
   "POST /api/ac": "write",
+
+  // v4 (BLZ-323): artifact model, links, gates, baselines, custom fields, matrix and
+  // coverage. POST /api/field is "admin", not "write": defining a filterable field
+  // emits ALTER TABLE, and it spends the install-wide 200-filterable-field budget that
+  // ADR-0018 shares across every project in the installation — one project's member
+  // could exhaust another project's headroom. That is an administrative act. (An
+  // earlier revision of this file scored it "write" to satisfy an exact-equality
+  // invariant in the test below; that invariant was the thing that was wrong, and has
+  // since been loosened — see task-13-report.md fix round 1.) POST /api/artifact,
+  // /api/link and /api/baseline are ordinary mutations.
+  "POST /api/artifact": "write",
+  "POST /api/link": "write",
+  "POST /api/baseline": "write",
+  "POST /api/field": "admin",
+  "GET /api/matrix": "read",
+  "GET /api/coverage": "read",
 };
 
 /** Loopback, in either family. Anything else is reachable by something else. */
