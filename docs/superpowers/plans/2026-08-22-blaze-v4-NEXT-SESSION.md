@@ -9,9 +9,9 @@
 
 | What | Where |
 |---|---|
-| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 34 commits ahead of `main`, clean tree |
+| Engine code | `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-306-document-model`, branch **`BLZ-308-v4-fields-baselines-api`** — 37 commits ahead of `main`, clean tree |
 | Engine docs (ADRs 0014–0018, spec, plan, ledger, review) | `/home/rnamwoh/Documents/Code/blaze` on **`main`** — 14 commits, **unpushed** |
-| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..331, **unpushed** |
+| Board tickets | `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine`, branch **`BLZ-305-v4-spine`** — BLZ-305..334, **unpushed** |
 | Competitive register + audits | same board worktree, `docs/competitive/` and `docs/audits/` |
 
 **Nothing has been pushed or merged.** That is deliberate — `blaze-pm` is published only by the
@@ -19,10 +19,10 @@
 
 ## State in one line
 
-**Fourteen of fifteen planned tasks are built, plus BLZ-327..331 — every spec gap the final review
-named now has code behind it. 1,633 tests, 1,633 pass, 0 fail, 0 skipped with Postgres enabled**
-(baseline before this work: 1,267; end of session 1: 1,489). Task 14 — the migration — is the only
-planned task outstanding and is genuinely blocked.
+**The spine is FULLY IMPLEMENTED. Every requirement in the spec has code behind it except §6, the
+migration. 1,695 tests, 1,695 pass, 0 fail, 0 skipped with Postgres enabled** (baseline before this
+work: 1,267; end of session 1: 1,489). Task 14 / BLZ-324 — the migration — is the only outstanding
+work and is genuinely blocked on the soak.
 
 Verify before trusting that number:
 
@@ -57,8 +57,8 @@ than fixtures. Do not substitute a weaker check.
 ## Read these three, in this order
 
 1. **`docs/superpowers/specs/2026-08-22-blaze-v4-spine-design.md`** — the spec. Binding authority.
-2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **31 rulings** made
-   during execution (16 in session 1, R17–R31 in session 2), several reversing the plan's own text,
+2. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-execution-ledger.md`** — **41 rulings** made
+   during execution (16 in session 1, R17–R41 in session 2), several reversing the plan's own text,
    plus every parked finding and accepted residual. If you are about to "fix" something that looks wrong, check here first — it may be a
    deliberate decision with a recorded reason.
 3. **`docs/superpowers/plans/2026-08-22-blaze-v4-spine-final-review.md`** — the whole-branch review
@@ -92,29 +92,25 @@ Recorded in the ledger with reasoning:
 - A goal with no hierarchy members vacuously passes `goal:achieved`. Consistent with the house rule
   that untraced work is legal and counted, and the matrix publishes the count.
 
-## Known spec gaps — ALL CLOSED (session 2)
+## The spec is fully implemented — what shipped, and where the reasoning lives
 
-Every gap the final review named now has code behind it. Kept here as a record of what shipped,
-not as outstanding work:
+Every requirement in the design spec now has code behind it, **except §6 (migration)**, which is
+BLZ-324 and blocked below. Kept as a record, not as outstanding work:
 
-- **§4.4** — applying a coverage rule reports every current violation. BLZ-327, `ebaab09`.
-  The report is owed on *enable* as well as *create*; `enabled` is now honoured; coverage is
-  project-scoped. Rulings R17–R22.
-- **§4.1** — required-field / enum / type / range validation. BLZ-328, `516600a`. Runs before ref
-  allocation so a refused write burns nothing. Rulings R23–R25.
-- **§3.4** — the field budget, surfaced install-wide and per project. BLZ-329, `b9637d9`. Reported
-  on every successful promotion, not only inside a refusal, with `warn` at 80%. Rulings R26–R27.
-- **§5** — per-artifact orphan / missing-downstream / stale-since-change. BLZ-330, `8e82992`. Also
-  added the `link.reviewed_at` column staleness.mjs had always read and never had. Rulings R28–R30.
+| Spec | Ticket | Commit | Rulings |
+|---|---|---|---|
+| §4.4 coverage-rule creation reports every violation | BLZ-327 | `ebaab09` | R17–R22 |
+| §4.1 required / enum / type / range validation | BLZ-328 | `516600a` | R23–R25 |
+| §3.4 field budget, install-wide and per project | BLZ-329 | `b9637d9` | R26–R27 |
+| §5 orphan / missing-downstream / stale-since-change | BLZ-330 | `8e82992` | R28–R30 |
+| — dialect extraction (follow-up, not a spec item) | BLZ-331 | `f40045c` | R31 |
+| §3.4 JSON tail column with CHECK constraints | BLZ-332 | `566e9a8` | R32–R36 |
+| §5 matrix filterable by custom field, both axes | BLZ-334 | `c00d485` | R37–R39 |
+| §4.3 advisory checks beyond WARN_TIER | BLZ-333 | `6575253` | R40–R41 |
 
-Still genuinely absent, and **never ticketed because the review listed them only in passing** —
-decide whether they are wanted before building:
-
-- §4.3's advisory checks beyond WARN_TIER: singularity, necessity, verification-method
-  appropriateness, architecture-coverage percentage.
-- §3.4's JSON tail column with CHECK constraints (the *storage* half of I6; BLZ-329 was the
-  budget-reporting half). Custom field values are validated today but not persisted.
-- §5's "filterable by custom field on both axes" of the matrix.
+**Nothing from the final review is outstanding.** If you are looking for the next thing to build,
+it is not here — it is either BLZ-324 (blocked, below) or specs 2–6, which are out of scope until
+the spine merges.
 
 ## Recommended follow-up, already reasoned through
 
@@ -135,8 +131,14 @@ real bug it had introduced — returning the shared token object rather than a c
 ## If you are continuing rather than starting fresh
 
 Nothing is half-finished. The tree is clean, every commit is complete, and the ledger records every
-decision. You can pick up at any of: the three remaining spec gaps above, the dialect
-extraction, or waiting on the soak for Task 14.
+decision. **There is no unblocked engine work left on the spine.** The honest options are:
+
+1. **Review the branch and merge it.** 37 commits, 1,695 green tests. This is the operator's call
+   and the reason the branch was never pushed.
+2. **Run the dual-write soak** (below), which is the only thing that unblocks BLZ-324.
+3. **Start specs 2–6** — but only after the spine merges; they are all consumers of it.
+
+Do not go looking for spec gaps to close. There are none left.
 
 **Board note (session 2):** BLZ-305..327 are now `in-progress`, not `defined` — nothing is merged, so
 that is the honest status, and it was set by hand. `blaze reconcile` correctly proposes nothing for

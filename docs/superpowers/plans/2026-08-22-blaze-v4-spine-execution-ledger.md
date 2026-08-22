@@ -483,3 +483,86 @@ Bug found by a new test, kept because it is the point: the dialect extraction fi
 Two false alarms from the new STRICT guard, narrowed rather than deleted: `ON DELETE RESTRICT`
  contains the substring "STRICT", and hierarchy-schema.mjs has a comment mentioning it. The check
  is for the table-suffix construct `) STRICT;`, not the word.
+
+=== SESSION 2, PART 3 — THE LAST THREE, AND THE SPEC IS FULLY IMPLEMENTED ===
+BLZ-332 (§3.4 JSON tail, 566e9a8), BLZ-334 (§5 matrix filtering, c00d485), BLZ-333 (§4.3 advisory,
+ 6575253). With BLZ-327..331 these close every requirement in the spec except §6 (migration), which
+ is BLZ-324 and blocked on the soak. Full suite 1,695 tests, 1,695 pass, 0 fail, 0 skipped with
+ Postgres 17.
+
+Rulings:
+
+Ruling (R32 — the CHECK is tested by going AROUND the API): §3.4's claim is that a JSON column
+ "STILL TAKES CHECK CONSTRAINTS", i.e. that the database enforces it, not the app. Testing it
+ through createArtifact would only ever have proved that validateFieldValues works. The bad payloads
+ go straight to SQL: bare string, number, array, malformed text, JSON null — refused by the COLUMN
+ on both engines.
+
+Ruling (R33 — json_valid FIRST on SQLite): json_type() over a non-JSON string returns NULL, and a
+ NULL CHECK result counts as SATISFIED in SQLite. Checking the type alone lets any garbage string
+ through while looking like a constraint.
+
+Ruling (R34 — a custom value has exactly ONE home): §3.4 says promotion is "decided once, at
+ definition". A value in both the cf_ column and the tail is two answers that can disagree, with
+ nothing to say which a filter should trust. splitCustomFields is the single splitter, and
+ matrix-filter reads through the SAME function so a filter cannot disagree with the writer.
+
+Ruling (R35 — insertArtifact's dynamic columns are re-validated at interpolation): promoted columns
+ make the column list data-driven, the only place this store builds SQL from data. SAFE_COLUMN is
+ re-checked there even though promotionPlan already checked the key at definition time — "the caller
+ already checked" is exactly the assumption that stops being true later.
+
+Ruling (R36 — `ticket`'s tail is out of scope, said so on the ticket): the v3 write-port surface
+ (27+ NOT NULL columns, hand-written SQL in sqlite-schema.mjs and pg-schema.mjs, its own insert path)
+ is untouched by the v4 spine. Made explicit in BLZ-332's acceptance criteria so it does not later
+ read as an oversight.
+
+Ruling (R37 — an unknown filter key REFUSES rather than matching nothing): for a REPORT the failure
+ mode is worse than for a write. An empty matrix reads as a real finding — "no requirements are
+ high-risk" — when the truth is that the field name was typed wrong. A wrong answer nobody can tell
+ is wrong.
+
+Ruling (R38 — strict equality in the matrix filter): a loose == lets a number field match its own
+ string form, and the two engines disagree about which they hand back (SQLite REAL vs Postgres
+ numeric-as-string). A loose match would filter differently per engine for identical data.
+
+Ruling (R39 — `untraced` is computed from the FILTERED rows): otherwise the count describes a matrix
+ nobody is looking at — filter to one covered requirement and still be told two are untraced.
+
+Ruling (R40 — the advisory checks must not be NOISY, which is a design constraint not a nicety): an
+ advisory people learn to ignore is worse than none, because it trains them to ignore the next one.
+ Singularity therefore does NOT flag every "and" — a conjunction counts only when the second half
+ carries its own verb phrase. "shall record the first and last name" is one requirement.
+
+Ruling (R41 — architecture coverage always ships numerator and denominator, and null at zero): a
+ bare percentage cannot be checked; 50% of two and 50% of two thousand are very different facts.
+ Counted through a Set so duplicates cannot exceed 100%. total === 0 reports percent: null — "there
+ are no requirements" is not "0% of them are covered".
+
+Discrimination for this part: 35 mutations injected (10 + 11 + 14). SIX did not break a test. All
+ are reported rather than glossed, and five were closed:
+
+  BLZ-332 x4 — an undefined tail stringifying to "undefined", and the column losing NOT NULL/DEFAULT,
+   were both invisible because the API always supplies the value; closed with DIRECT store calls and
+   inserts that go around the API (the only way to test a DEFAULT at all, and what a migration or
+   import will be). splitCustomFields losing its scoping entirely was untested; closed with
+   same-named filterable definitions in another project and for another kind.
+  BLZ-333 x2 — removing the empty-statement branch and the missing-method branch. Both fell through
+   to the next check and still returned exactly ONE finding, so a test asserting the COUNT proved
+   nothing. Rewritten to assert the MESSAGE, since distinguishing "you wrote nothing" from "you
+   wrote a description" is the entire value of those branches.
+
+ The sixth is NOT a test gap and was deliberately left: the `::jsonb` cast on the Postgres tail
+ default. Unlike `boolean DEFAULT 0`, Postgres resolves an unknown literal to the column's own type,
+ so `DEFAULT '{}'` works and removing the cast is genuinely harmless. sql-dialect.mjs's comment had
+ OVERCLAIMED it as the same class of defect; the comment was corrected rather than a test written
+ that cannot fail. The DEFAULT itself is the guard and now has one.
+
+Pattern worth naming, since it has now fired ~11 times across this branch: every silent mutation was
+ a test whose assertion did not VARY with the thing under test — a count where only the message
+ changed, a fixture the API always populated, a numeric bound where the comparison could only ever
+ produce NaN. "If a mutation does not break a test, say so plainly" catches this and nothing else
+ does; fourteen clean per-task reviews did not.
+
+Incidental fix: two test fixtures used column-less `INSERT INTO artifact VALUES (...)`, which any
+ new column breaks. Fixed by naming the columns, not by weakening the schema.
