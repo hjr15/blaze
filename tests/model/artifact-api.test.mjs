@@ -398,3 +398,186 @@ describe("document:baselined composes evaluateCoverage into checkGate, in the AP
       [{ artifact_id: "a1", revision_id: "rev-a1-1" }]);
   });
 });
+
+// BLZ-327 — spec §4.4: "Applying a rule to existing data MUST report every current
+// violation. Jama's silent grandfathering (CS-013) is exactly the drift the operator
+// named. Retroactive *blocking* is not required; retroactive **reporting** is
+// mandatory."
+//
+// The final review's I4: there was no rule-creation path at all. `coverage()` is a
+// standing read, which is a DIFFERENT obligation -- the spec requires the report at the
+// moment of applying, so the person adding the rule sees what they have just made
+// non-compliant. A standing endpoint they may never open is exactly CS-013.
+describe("BLZ-327 (§4.4): applying a coverage rule reports every current violation", () => {
+  const RULE = {
+    project_key: "BLZ", name: "every-requirement-addressed-v2",
+    description: "Every requirement is addressed by an architecture decision.",
+    subject_kind: "requirement",
+    definition: { requires_link: "Addresses", direction: "inbound", min: 1 },
+  };
+
+  // Artifacts that already existed BEFORE the rule did -- the whole point of §4.4.
+  function makeRuleApi(count = 3) {
+    return makeApi({
+      artifacts: Array.from({ length: count }, (_, i) => ({
+        id: `a${i + 1}`, ref: `REQ-${String(i + 1).padStart(3, "0")}`,
+        kind: "requirement", status: "proposed", project_key: "BLZ",
+      })),
+      coverageRules: [],
+    });
+  }
+
+  test("defining a rule over pre-existing violating data reports every violation, by ref", async () => {
+    const { api } = makeRuleApi(3);
+    const r = await api.defineCoverageRule(RULE);
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.currentViolations.length, 3,
+      "a rule applied to three uncovered requirements must report three violations");
+    assert.deepEqual(r.currentViolations.map((v) => v.ref).sort(),
+      ["REQ-001", "REQ-002", "REQ-003"]);
+    assert.match(r.currentViolations[0].why, /Addresses/);
+  });
+
+  test("EVERY violation is reported — never a count, never a truncated sample", async () => {
+    const { api } = makeRuleApi(30);
+    const r = await api.defineCoverageRule(RULE);
+    assert.equal(r.currentViolations.length, 30);
+  });
+
+  test("creation SUCCEEDS despite violations — reporting is mandatory, blocking is not", async () => {
+    const { api, state } = makeRuleApi(3);
+    const r = await api.defineCoverageRule(RULE);
+    assert.equal(r.ok, true, r.error);
+    assert.ok(state.coverageRules.some((c) => c.name === RULE.name),
+      "the rule must be persisted even though existing data violates it");
+    assert.ok(api.coverage().some((c) => c.rule === RULE.name),
+      "and must be visible to the standing coverage read");
+  });
+
+  test("an already-compliant corpus reports no violations", async () => {
+    const { api, state } = makeRuleApi(1);
+    state.artifacts.push({ id: "arch1", ref: "ADR-0001", kind: "architecture",
+                           status: "proposed", project_key: "BLZ" });
+    const link = await api.createLink({ typeName: "Addresses", sourceId: "arch1", targetId: "a1" });
+    assert.equal(link.ok, true, link.error);
+    const r = await api.defineCoverageRule(RULE);
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.currentViolations, []);
+  });
+
+  // Without this, a rule scoped to one project silently reports another project's
+  // artifacts as violations -- and the person applying it acts on a lie.
+  test("a project-scoped rule does not report ANOTHER project's artifacts", async () => {
+    const { api, state } = makeRuleApi(1);
+    state.artifacts.push({ id: "z1", ref: "REQ-900", kind: "requirement",
+                           status: "proposed", project_key: "OTHER" });
+    const r = await api.defineCoverageRule(RULE);
+    assert.deepEqual(r.currentViolations.map((v) => v.ref), ["REQ-001"]);
+  });
+
+  describe("the rule is validated before it is persisted, and each refusal names what was wrong", () => {
+    const cases = [
+      ["a missing project_key", { project_key: undefined }, /project_key/],
+      ["an empty name", { name: "  " }, /name/],
+      ["an empty description", { description: "" }, /description/],
+      ["an unknown subject_kind", { subject_kind: "ticket" }, /subject_kind|ticket/],
+      ["an UNDECLARED link type", { definition: { requires_link: "Verifies", direction: "inbound", min: 1 } }, /Verifies|link type/],
+      ["a bogus direction", { definition: { requires_link: "Addresses", direction: "sideways", min: 1 } }, /direction|sideways/],
+      ["min below 1", { definition: { requires_link: "Addresses", direction: "inbound", min: 0 } }, /min/],
+      ["a non-integer min", { definition: { requires_link: "Addresses", direction: "inbound", min: 1.5 } }, /min/],
+      ["a missing definition", { definition: undefined }, /definition/],
+    ];
+    for (const [label, override, pattern] of cases) {
+      test(`${label} is REFUSED`, async () => {
+        const { api, state } = makeRuleApi(1);
+        const r = await api.defineCoverageRule({ ...RULE, ...override });
+        assert.equal(r.ok, false, `${label} was accepted`);
+        assert.match(r.error, pattern);
+        assert.equal(state.coverageRules.length, 0, "nothing may be persisted on refusal");
+      });
+    }
+  });
+
+  test("a duplicate (project_key, name) is refused BY THE API, naming the rule", async () => {
+    const { api } = makeRuleApi(1);
+    await api.defineCoverageRule(RULE);
+    const r = await api.defineCoverageRule({ ...RULE, description: "different text" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, new RegExp(RULE.name));
+  });
+
+  test("the same name in a DIFFERENT project is fine", async () => {
+    const { api } = makeRuleApi(1);
+    await api.defineCoverageRule(RULE);
+    const r = await api.defineCoverageRule({ ...RULE, project_key: "OTHER" });
+    assert.equal(r.ok, true, r.error);
+  });
+
+  // A rule introduced disabled and switched on later is the same act of application,
+  // and carries the same reporting obligation -- otherwise §4.4 is trivially routed
+  // around by defining every rule disabled.
+  describe("enabling a disabled rule is an act of application too", () => {
+    test("enabling reports the current violations", async () => {
+      const { api } = makeRuleApi(3);
+      const created = await api.defineCoverageRule({ ...RULE, enabled: false });
+      assert.equal(created.ok, true, created.error);
+      const r = await api.setCoverageRuleEnabled({ project_key: "BLZ", name: RULE.name, enabled: true });
+      assert.equal(r.ok, true, r.error);
+      assert.equal(r.currentViolations.length, 3);
+    });
+
+    test("DISABLING reports nothing — there is no obligation to report on withdrawal", async () => {
+      const { api } = makeRuleApi(3);
+      await api.defineCoverageRule(RULE);
+      const r = await api.setCoverageRuleEnabled({ project_key: "BLZ", name: RULE.name, enabled: false });
+      assert.equal(r.ok, true, r.error);
+      assert.equal(r.currentViolations, null);
+    });
+
+    test("an unknown rule is refused, naming it", async () => {
+      const { api } = makeRuleApi(1);
+      const r = await api.setCoverageRuleEnabled({ project_key: "BLZ", name: "no-such-rule", enabled: true });
+      assert.equal(r.ok, false);
+      assert.match(r.error, /no-such-rule/);
+    });
+  });
+
+  test("a DISABLED rule is not evaluated by the standing coverage read", async () => {
+    const { api } = makeRuleApi(3);
+    await api.defineCoverageRule({ ...RULE, enabled: false });
+    assert.equal(api.coverage().some((c) => c.rule === RULE.name), false,
+      "a disabled rule must not appear in coverage()");
+  });
+
+  test("a DISABLED rule does not refuse a baseline", async () => {
+    const { api, state } = makeApi({
+      artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed",
+                    project_key: "BLZ" }],
+      documents: [{ id: "d1", project_key: "BLZ", title: "Spec", kind: "requirements", status: "draft" }],
+      artifactUsages: [{ document_id: "d1", artifact_id: "a1", ord: 1, depth: 0 }],
+      artifactRevisions: [{ id: "rev1", artifact_id: "a1", at: "2026-01-01T00:00:00.000Z",
+                            actor: "seed", snapshot: "{}" }],
+      coverageRules: [],
+    });
+    await api.defineCoverageRule({ ...RULE, enabled: false });
+    const r = await api.baselineDocument({ documentId: "d1", name: "v1" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(state.baselines.length, 1);
+  });
+
+  // The shipped defaults are the rules in force when nobody has defined any. Defining
+  // one must not silently drop them -- that would make the FIRST rule anyone adds turn
+  // three standing rules off.
+  test("defining the first rule does not silently drop DEFAULT_COVERAGE_RULES", async () => {
+    const { api } = makeApi({
+      artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed",
+                    project_key: "BLZ" }],
+    });
+    const before = api.coverage().map((c) => c.rule);
+    assert.ok(before.includes("every-requirement-addressed"), "sanity: defaults are in force");
+    await api.defineCoverageRule(RULE);
+    const after = api.coverage().map((c) => c.rule);
+    for (const name of before) assert.ok(after.includes(name), `${name} was dropped`);
+    assert.ok(after.includes(RULE.name));
+  });
+});

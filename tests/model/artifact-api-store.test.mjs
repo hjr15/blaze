@@ -23,6 +23,7 @@ import { documentDdl } from "../../scripts/model/document-schema.mjs";
 import { baselineDdl } from "../../scripts/model/baseline-schema.mjs";
 import { fieldDdl } from "../../scripts/model/field-schema.mjs";
 import { refClaimDdl } from "../../scripts/model/ref-claim-schema.mjs";
+import { coverageDdl } from "../../scripts/model/coverage.mjs";
 
 function sqliteExec(db) {
   return {
@@ -41,6 +42,7 @@ function openSqlite() {
   db.exec(baselineDdl("sqlite"));
   db.exec(fieldDdl("sqlite"));
   db.exec(refClaimDdl("sqlite"));
+  db.exec(coverageDdl("sqlite"));
   // Addresses is the only link type these tests exercise — seeded straight into the
   // real link_type table so `link`'s FK resolves.
   db.prepare(`INSERT INTO link_type (id, project_key, name, inverse_name, source_kinds, target_kinds, min_card, max_card)
@@ -246,6 +248,95 @@ describe("the API/DDL boundary (SQLite): what the API returns is what the databa
   });
 });
 
+// BLZ-327 — the same API/DDL seam for §4.4's coverage rule. The structural hole the
+// final review named was that no test crossed this boundary: `defineCoverageRule`
+// returning a well-shaped object proves nothing about whether a row landed in
+// `coverage_rule`, and the two can be internally consistent and mutually contradictory.
+describe("BLZ-327 (SQLite): a coverage rule defined through the API lands in coverage_rule", () => {
+  const RULE = {
+    project_key: "BLZ", name: "every-requirement-addressed-v2",
+    description: "Every requirement is addressed by an architecture decision.",
+    subject_kind: "requirement",
+    definition: { requires_link: "Addresses", direction: "inbound", min: 2 },
+  };
+
+  test("the rule row is readable, every NOT NULL column populated, definition round-trips", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    state.coverageRules = [];
+    const api = artifactApi(state, store);
+
+    const r = await api.defineCoverageRule(RULE);
+    assert.equal(r.ok, true, r.error);
+
+    const row = db.prepare("SELECT * FROM coverage_rule WHERE id = ?").get(r.rule.id);
+    assert.ok(row, "the rule the API returned does not exist in coverage_rule");
+    for (const col of ["project_key", "name", "description", "subject_kind", "definition", "enabled"]) {
+      assert.notEqual(row[col], null, `coverage_rule.${col} is NULL`);
+      assert.notEqual(row[col], undefined, `coverage_rule.${col} is undefined`);
+    }
+    assert.equal(row.enabled, 1);
+    // `min: 2` specifically: a definition serialised as "[object Object]" or "{}" still
+    // satisfies a NOT NULL check, so the round-trip has to compare a real value that
+    // the DEFAULT rules do not already carry.
+    const back = await store.listCoverageRules({ project_key: "BLZ" });
+    assert.equal(back.length, 1);
+    assert.deepEqual(back[0].definition, RULE.definition);
+    assert.equal(back[0].enabled, true);
+  });
+
+  test("the §4.4 report is computed from artifacts that are REALLY in the database", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    state.coverageRules = [];
+    const api = artifactApi(state, store);
+
+    for (const title of ["R1", "R2", "R3"]) {
+      const a = await api.createArtifact({ kind: "requirement", title, project_key: "BLZ" });
+      assert.equal(a.ok, true, a.error);
+    }
+    assert.equal(db.prepare("SELECT count(*) n FROM artifact").get().n, 3);
+
+    const r = await api.defineCoverageRule({ ...RULE, definition: { ...RULE.definition, min: 1 } });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.currentViolations.map((v) => v.ref).sort(),
+      ["REQ-001", "REQ-002", "REQ-003"]);
+  });
+
+  test("disabling through the API updates the real `enabled` column, not just memory", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    state.coverageRules = [];
+    const api = artifactApi(state, store);
+
+    await api.defineCoverageRule(RULE);
+    const off = await api.setCoverageRuleEnabled({ project_key: "BLZ", name: RULE.name, enabled: false });
+    assert.equal(off.ok, true, off.error);
+    assert.equal(db.prepare("SELECT enabled FROM coverage_rule WHERE name = ?").get(RULE.name).enabled, 0);
+
+    const on = await api.setCoverageRuleEnabled({ project_key: "BLZ", name: RULE.name, enabled: true });
+    assert.equal(on.ok, true, on.error);
+    assert.equal(db.prepare("SELECT enabled FROM coverage_rule WHERE name = ?").get(RULE.name).enabled, 1);
+  });
+
+  test("the API refuses a duplicate BEFORE the UNIQUE constraint has to, and leaves one row", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    state.coverageRules = [];
+    const api = artifactApi(state, store);
+
+    await api.defineCoverageRule(RULE);
+    const dup = await api.defineCoverageRule({ ...RULE, id: "other" });
+    assert.equal(dup.ok, false);
+    assert.match(dup.error, new RegExp(RULE.name));
+    assert.equal(db.prepare("SELECT count(*) n FROM coverage_rule").get().n, 1);
+  });
+});
+
 // --- Postgres ----------------------------------------------------------------------
 
 if (process.env.BLAZE_TEST_PG_URL) {
@@ -273,6 +364,7 @@ if (process.env.BLAZE_TEST_PG_URL) {
     await client.query("DROP TABLE IF EXISTS artifact_revision CASCADE");
     await client.query("DROP TABLE IF EXISTS artifact CASCADE");
     await client.query("DROP TABLE IF EXISTS ref_claim CASCADE");
+    await client.query("DROP TABLE IF EXISTS coverage_rule CASCADE");
     await client.query(artifactDdl("postgres"));
     await client.query(revisionDdl("postgres"));
     await client.query(linkDdl("postgres"));
@@ -280,6 +372,7 @@ if (process.env.BLAZE_TEST_PG_URL) {
     await client.query(baselineDdl("postgres"));
     await client.query(fieldDdl("postgres"));
     await client.query(refClaimDdl("postgres"));
+    await client.query(coverageDdl("postgres"));
     await client.query(
       `INSERT INTO link_type (id, project_key, name, inverse_name, source_kinds, target_kinds, min_card, max_card)
        VALUES ('lt1','BLZ','Addresses','Addressed by','architecture','requirement',0,NULL)`);
@@ -413,6 +506,74 @@ if (process.env.BLAZE_TEST_PG_URL) {
         const r3 = await api.createArtifact({ kind: "requirement", title: "R3", project_key: "BLZ" });
         assert.equal(r3.ok, true, r3.error);
         assert.equal(r3.artifact.ref, "REQ-003", "REQ-002 must not be reissued");
+      } finally {
+        await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+        await db.end();
+      }
+    });
+    // BLZ-327: the same seam on the engine that actually ships. `enabled` is a real
+    // `boolean` here and an INTEGER in SQLite — the exact shape that made
+    // `boolean NOT NULL DEFAULT 0` ship three separate times on this branch.
+    test("a coverage rule defined through the API lands in coverage_rule, definition and enabled intact", async () => {
+      const db = await openPg();
+      try {
+        const store = artifactStore(pgExec(db), { dialect: "postgres" });
+        const state = baseStatePg();
+        state.coverageRules = [];
+        const api = artifactApi(state, store);
+
+        const RULE = {
+          project_key: "BLZ", name: "every-requirement-addressed-v2",
+          description: "Every requirement is addressed by an architecture decision.",
+          subject_kind: "requirement",
+          definition: { requires_link: "Addresses", direction: "inbound", min: 2 },
+        };
+        const r = await api.defineCoverageRule(RULE);
+        assert.equal(r.ok, true, r.error);
+
+        const { rows } = await db.query("SELECT * FROM coverage_rule WHERE id = $1", [r.rule.id]);
+        assert.equal(rows.length, 1);
+        for (const col of ["project_key", "name", "description", "subject_kind", "definition", "enabled"]) {
+          assert.notEqual(rows[0][col], null, `coverage_rule.${col} is NULL`);
+        }
+        assert.equal(rows[0].enabled, true, "enabled must be a real boolean true, not 1 or '1'");
+
+        const back = await store.listCoverageRules({ project_key: "BLZ" });
+        assert.deepEqual(back[0].definition, RULE.definition);
+        assert.equal(back[0].enabled, true);
+
+        const off = await api.setCoverageRuleEnabled({ project_key: "BLZ", name: RULE.name, enabled: false });
+        assert.equal(off.ok, true, off.error);
+        const after = await db.query("SELECT enabled FROM coverage_rule WHERE id = $1", [r.rule.id]);
+        assert.equal(after.rows[0].enabled, false);
+      } finally {
+        await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+        await db.end();
+      }
+    });
+
+    test("the §4.4 report names every requirement really present in the artifact table", async () => {
+      const db = await openPg();
+      try {
+        const store = artifactStore(pgExec(db), { dialect: "postgres" });
+        const state = baseStatePg();
+        state.coverageRules = [];
+        const api = artifactApi(state, store);
+
+        for (const title of ["R1", "R2", "R3"]) {
+          const a = await api.createArtifact({ kind: "requirement", title, project_key: "BLZ" });
+          assert.equal(a.ok, true, a.error);
+        }
+        const count = await db.query("SELECT count(*)::int n FROM artifact");
+        assert.equal(count.rows[0].n, 3);
+
+        const r = await api.defineCoverageRule({
+          project_key: "BLZ", name: "addressed", description: "d", subject_kind: "requirement",
+          definition: { requires_link: "Addresses", direction: "inbound", min: 1 },
+        });
+        assert.equal(r.ok, true, r.error);
+        assert.deepEqual(r.currentViolations.map((v) => v.ref).sort(),
+          ["REQ-001", "REQ-002", "REQ-003"]);
       } finally {
         await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
         await db.end();

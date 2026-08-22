@@ -10,7 +10,7 @@ import { randomUUID } from "node:crypto";
 import { checkLink } from "./link-rules.mjs";
 import { checkGate } from "./gates.mjs";
 import { promotionPlan, TARGET_TABLE } from "./field-promotion.mjs";
-import { evaluateCoverage, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
+import { evaluateCoverage, validateCoverageRule, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
@@ -66,6 +66,26 @@ export function denormaliseLinks({ links = [], linkTypes = [] }) {
 export function artifactApi(state, store) {
   const typeByName = (n) => state.linkTypes.find((t) => t.name === n) ?? null;
   const links = () => denormaliseLinks({ links: state.links, linkTypes: state.linkTypes });
+
+  // The rules in force. DEFAULT_COVERAGE_RULES apply when nobody has defined any --
+  // `state.coverageRules` absent means "defaults", `[]` means "deliberately none".
+  const allRules = () => state.coverageRules ?? DEFAULT_COVERAGE_RULES;
+  // `enabled` exists as a column and is indexed on; a disabled rule that still refuses
+  // a baseline, or still shows up in the standing read, makes the flag a lie. A rule
+  // record with no `enabled` key at all (the shipped defaults) is enabled.
+  const enabledRules = () => allRules().filter((r) => r.enabled !== false);
+  // Defining the FIRST rule must not silently drop the defaults -- that would make one
+  // addition switch three standing rules off, which is its own silent grandfathering.
+  const materialiseRules = () => {
+    state.coverageRules = state.coverageRules ?? DEFAULT_COVERAGE_RULES.map((r) => ({ ...r }));
+    return state.coverageRules;
+  };
+  // A rule carrying no project_key (the shipped defaults) is in force in EVERY project,
+  // so it collides with a same-named rule in any one of them.
+  const findRule = (rules, { project_key, name }) => rules.find(
+    (r) => r.name === name && (r.project_key == null || r.project_key === project_key)) ?? null;
+  const violationsFor = (rule) => evaluateCoverage(
+    { rule, artifacts: state.artifacts, links: links() }).violations;
 
   // A gate subject's children, resolved through the DEFAULT hierarchy's
   // hierarchy_membership rows -- NOT parent_id, the column §3.3 built this table to
@@ -330,8 +350,7 @@ export function artifactApi(state, store) {
       const artifacts = state.artifacts.filter((a) => memberIds.has(a.id));
       const denormalised = links();
 
-      const rules = state.coverageRules ?? DEFAULT_COVERAGE_RULES;
-      const coverageViolations = rules.flatMap(
+      const coverageViolations = enabledRules().flatMap(
         (rule) => evaluateCoverage({ rule, artifacts, links: denormalised }).violations);
 
       const verdict = checkGate({
@@ -390,11 +409,71 @@ export function artifactApi(state, store) {
       return buildMatrix({ rows, cols, links: links(), linkTypes: state.linkTypes });
     },
 
-    // GET /api/coverage
+    // GET /api/coverage — the STANDING read. Deliberately not the same obligation as
+    // defineCoverageRule's report: §4.4 requires the violation list at the moment of
+    // APPLYING, because an endpoint nobody opens is exactly the silent grandfathering
+    // CS-013 describes.
     coverage() {
-      const rules = state.coverageRules ?? DEFAULT_COVERAGE_RULES;
       const denormalised = links();
-      return rules.map((rule) => evaluateCoverage({ rule, artifacts: state.artifacts, links: denormalised }));
+      return enabledRules().map(
+        (rule) => evaluateCoverage({ rule, artifacts: state.artifacts, links: denormalised }));
+    },
+
+    // POST /api/coverage-rule — §4.4: "Applying a rule to existing data MUST report
+    // every current violation. Retroactive *blocking* is not required; retroactive
+    // **reporting** is mandatory." So creation SUCCEEDS over violating data and hands
+    // back every violation, named by ref — never a count, never a truncated sample.
+    // Jama's CS-013 grandfathering is the failure this closes: a rule introduced over
+    // a non-compliant corpus that nobody is ever told about.
+    //
+    // Uniqueness is checked HERE as well as by coverage_rule's UNIQUE (project_key,
+    // name), for the same reason ref FORMAT is checked here while ref UNIQUENESS is a
+    // constraint: the refusal has to name the rule, not surface a raw constraint error.
+    async defineCoverageRule({ id, project_key, name, description, subject_kind,
+                               definition, enabled = true }) {
+      const rule = {
+        id: id ?? randomUUID(), project_key,
+        name: typeof name === "string" ? name.trim() : name,
+        description: typeof description === "string" ? description.trim() : description,
+        subject_kind, definition, enabled: Boolean(enabled),
+      };
+      const verdict = validateCoverageRule({ rule, linkTypes: state.linkTypes });
+      if (!verdict.ok) return { ok: false, error: verdict.error };
+
+      const rules = materialiseRules();
+      if (findRule(rules, rule)) {
+        return { ok: false, error:
+          `a coverage rule named ${JSON.stringify(rule.name)} already applies to project `
+          + `${project_key} — rename it or edit the existing rule` };
+      }
+
+      rules.push(rule);
+      if (store) await store.insertCoverageRule(rule);
+
+      // Reported even when the rule is created DISABLED: the caller asked what this
+      // rule would say about the corpus, and answering only for enabled rules would
+      // let anyone dodge §4.4 by defining every rule disabled.
+      return { ok: true, error: null, rule, currentViolations: violationsFor(rule) };
+    },
+
+    // PATCH /api/coverage-rule — enabling a rule is the SAME act of application as
+    // creating one, and carries the same §4.4 reporting obligation. Without this,
+    // §4.4 is trivially routed around: define disabled, switch on silently.
+    // Disabling is a withdrawal, not an application, and reports nothing — `null`
+    // rather than `[]`, so "not asked" is distinguishable from "asked, none found".
+    async setCoverageRuleEnabled({ project_key, name, enabled }) {
+      const rule = findRule(materialiseRules(), { project_key, name });
+      if (!rule) {
+        return { ok: false, error:
+          `no coverage rule named ${JSON.stringify(name)} applies to project ${project_key}` };
+      }
+      rule.enabled = Boolean(enabled);
+      if (store) {
+        await store.setCoverageRuleEnabled(
+          { project_key: rule.project_key ?? project_key, name: rule.name, enabled: rule.enabled });
+      }
+      return { ok: true, error: null, rule,
+               currentViolations: rule.enabled ? violationsFor(rule) : null };
     },
   };
 }

@@ -121,6 +121,43 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
          f.enum_values ?? null, f.min_value ?? null, f.max_value ?? null]);
     },
 
+    /**
+     * §4.4's first-class coverage rule (BLZ-327). `definition` lives in `state` as an
+     * object (evaluateCoverage reads it structurally) and in the column as JSON text —
+     * serialised here, the one place that knows about the column, rather than making
+     * every caller remember. A caller that already handed over a string is passed
+     * through untouched, so this can never double-encode.
+     */
+    async insertCoverageRule(r) {
+      const definition = typeof r.definition === "string"
+        ? r.definition : JSON.stringify(r.definition ?? {});
+      await exec.run(
+        `INSERT INTO coverage_rule
+           (id, project_key, name, description, subject_kind, definition, enabled)
+         VALUES (${p(0)},${p(1)},${p(2)},${p(3)},${p(4)},${p(5)},${p(6)})`,
+        [r.id, r.project_key, r.name, r.description, r.subject_kind, definition,
+         boolVal(r.enabled !== false, dialect)]);
+    },
+
+    async setCoverageRuleEnabled({ project_key, name, enabled }) {
+      await exec.run(
+        `UPDATE coverage_rule SET enabled = ${p(0)} WHERE project_key = ${p(1)} AND name = ${p(2)}`,
+        [boolVal(Boolean(enabled), dialect), project_key, name]);
+    },
+
+    /** Reading a JSON column back is deserialisation, not policy — the split holds. */
+    async listCoverageRules({ project_key }) {
+      const rows = await exec.all(
+        `SELECT id, project_key, name, description, subject_kind, definition, enabled
+           FROM coverage_rule WHERE project_key = ${p(0)} ORDER BY name`,
+        [project_key]);
+      return rows.map((r) => ({
+        ...r,
+        definition: typeof r.definition === "string" ? JSON.parse(r.definition) : r.definition,
+        enabled: r.enabled === true || r.enabled === 1,
+      }));
+    },
+
     /** Executes the ALTER TABLE promotionPlan returned. promotionPlan itself never does. */
     async runDdl(sql) {
       if (!sql) return;

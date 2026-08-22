@@ -16,6 +16,52 @@ export const DEFAULT_COVERAGE_RULES = [
     definition: { requires_link: "Addresses", direction: "outbound", min: 1 } },
 ];
 
+export const COVERAGE_DIRECTIONS = ["inbound", "outbound"];
+
+/**
+ * Pure validation of a rule BEFORE it is persisted (§4.4, BLZ-327). Kept here rather
+ * than in artifact-api.mjs for the same reason every other decision function is pure:
+ * the API layer composes decisions, it does not make them.
+ *
+ * `requires_link` is checked against the DECLARED link types, not a free string —
+ * default deny (§4.1, CS-011/CS-012) applies to a rule naming a link type as much as
+ * to a link using one. A rule requiring a link type nobody declared can never be
+ * satisfied by anything, so it would report every artifact in the project as a
+ * violation forever, and the person reading that report cannot tell the difference
+ * between "nothing is covered" and "I typed the link name wrong".
+ */
+export function validateCoverageRule({ rule = {}, linkTypes = [] }) {
+  const bad = (error) => ({ ok: false, error });
+  if (!rule.project_key) return bad("a coverage rule needs a project_key");
+  if (!String(rule.name ?? "").trim()) return bad("a coverage rule needs a non-empty name");
+  if (!String(rule.description ?? "").trim()) {
+    return bad(`coverage rule ${JSON.stringify(rule.name)} needs a non-empty description — `
+      + "a refusal cites the rule, so the rule has to say what it is for");
+  }
+  if (!ARTIFACT_KINDS.includes(rule.subject_kind)) {
+    return bad(`unknown subject_kind ${JSON.stringify(rule.subject_kind)} — `
+      + `expected one of ${ARTIFACT_KINDS.join(", ")}`);
+  }
+  const d = rule.definition;
+  if (!d || typeof d !== "object") {
+    return bad("a coverage rule needs a definition { requires_link, direction, min }");
+  }
+  if (!linkTypes.some((t) => t.name === d.requires_link)) {
+    return bad(`unknown link type ${JSON.stringify(d.requires_link)} — a rule may only `
+      + "require a DECLARED link type, otherwise nothing can ever satisfy it");
+  }
+  if (!COVERAGE_DIRECTIONS.includes(d.direction)) {
+    return bad(`unknown direction ${JSON.stringify(d.direction)} — `
+      + `expected ${COVERAGE_DIRECTIONS.join(" or ")}`);
+  }
+  const min = d.min ?? 1;
+  if (!Number.isInteger(min) || min < 1) {
+    return bad(`min must be an integer of at least 1, got ${JSON.stringify(d.min)} — `
+      + "a rule requiring zero links is not a rule");
+  }
+  return { ok: true, error: null };
+}
+
 export function evaluateCoverage({ rule, artifacts = [], links = [] }) {
   const { requires_link, direction, min = 1 } = rule.definition ?? {};
   const counts = new Map();
@@ -27,6 +73,12 @@ export function evaluateCoverage({ rule, artifacts = [], links = [] }) {
   const violations = [];
   for (const a of artifacts) {
     if (a.kind !== rule.subject_kind) continue;
+    // A rule is PROJECT-scoped (coverage_rule.project_key). Without this, applying a
+    // rule in one project reports another project's artifacts as violations, and the
+    // person acting on that report acts on a lie. Only an explicit mismatch skips:
+    // artifact.project_key is NOT NULL in the real schema, so a record without one is
+    // a pure-decision fixture, and those predate project scoping entirely.
+    if (rule.project_key && a.project_key && a.project_key !== rule.project_key) continue;
     const n = counts.get(a.id) ?? 0;
     if (n < min) {
       violations.push({ ref: a.ref, why:
