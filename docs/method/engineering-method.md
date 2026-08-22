@@ -199,6 +199,13 @@ belong to.
 
 ## Traceability is a soft gate, audited, not enforced at write time
 
+> **Superseded for v4 by [ADR-0015](../decisions/0015-traceability-enforcement-shape-rules-block-coverage-rules-gate.md).** That ADR keeps this
+> section's core argument — coverage cannot be enforced at write time, because the
+> requirement a piece of work traces to often does not exist yet — but rejects the
+> conclusion that an audit report is therefore sufficient. The measured completion rates
+> in "Known limits" below are the evidence against it: an audit nobody acts on is not a
+> soft gate, it is no gate. Under v4, coverage rules block at named gates instead.
+
 The `Implements` / `Addresses` / `Verifies` / `Supersedes` / `Derives` links
 are not validated at write time the way `parent` legality and cycles are. A
 hard rejection sounds safer, but it has a specific, fatal failure mode here:
