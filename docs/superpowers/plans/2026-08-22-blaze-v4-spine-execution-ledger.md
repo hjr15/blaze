@@ -308,3 +308,26 @@ Ruling (workspace retained): NOT deleting this workspace despite the fix wave be
  two Criticals are parked as open tickets rather than resolved — the work is not finished, and this
  ledger is the only record of twelve rulings. Copying it into the repo as a committed artifact so it
  survives the scratch directory.
+
+=== BOTH REMAINING CRITICALS FIXED ===
+BLZ-326 (ref claim ledger): commit de01c4d. Append-only ref_claim table + claimRef reading the
+ LEDGER, never live rows. Regression pinned: claim REQ-001..003, delete the REQ-003 artifact, claim
+ again -> REQ-004. Mutation (point claimedRefs at `artifact`) broke 8 of 10 tests. Copied ADR-0005's
+ precedent rather than inventing a mechanism.
+BLZ-325 (API/DDL boundary): commit 64afe8d. New artifact-store.mjs following the identity.mjs /
+ identity-store.mjs split — policy pure, I/O thin, exec interface so one code path serves the sync
+ SQLite driver and async pg. createArtifact now writes complete rows and allocates through claimRef
+ (the ledger's first production caller). baselineDocument is project-scoped with real revision pins,
+ so it no longer contradicts baseline.test.mjs:96. defineField EXECUTES the ALTER rather than
+ returning a string. All three mutations discriminated.
+FULL SUITE with Postgres: 1489 tests, 1489 pass, 0 fail, 0 skipped. Baseline was 1267.
+
+Residuals accepted, recorded so they are not mistaken for oversights:
+ - `transition` does not persist a TICKET-kind subject's status — that is the pre-existing v3
+   write-port surface (27+ NOT NULL columns), out of scope and untouched.
+ - Explicit-ref monotonicity is checked against max(live, ledger) rather than the ledger alone,
+   because claimRef only auto-allocates and has no "claim this specific number" path. The real
+   UNIQUE(project_key, ref) constraint backstops any collision.
+ - With no store wired, ref allocation still uses the old live-array nextRef. That preserves ~150
+   pre-existing policy tests that never construct a database. The reuse bug therefore still exists
+   on the storeless path — acceptable only because production always has a store.
