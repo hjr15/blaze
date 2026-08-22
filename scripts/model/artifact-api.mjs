@@ -14,6 +14,7 @@ import { evaluateCoverage, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
+import { lintStatement } from "./wording-lint.mjs";
 
 /**
  * The model is polymorphic across `artifact` and `ticket` (design §3.1/§3.3):
@@ -74,7 +75,23 @@ export function artifactApi(state) {
     // UNIQUE (project_key, ref)), because it must hold under concurrent writers. Ref
     // FORMAT and MONOTONICITY belong here instead, where the refusal can name the
     // expected shape rather than surfacing a raw constraint-violation error.
-    async createArtifact({ kind, title, ref, ...rest }) {
+    // RQ-4a (ADR-0017, design §4.1): the banned-construction lint is a write-time
+    // block, not advisory -- "a rule the API cannot see does not exist" (§4.5), and
+    // until this call existed lintStatement was reachable only from its own test.
+    // Block tier refuses without a `reason`; a firm transcribing a client's
+    // contractual wording verbatim can still record one and proceed (ADR-0017's own
+    // justification for the override existing at all). Warn tier never blocks --
+    // "the system shall never store plaintext passwords" is a genuine requirement --
+    // and is surfaced on the response either way so it is not just silently dropped.
+    async createArtifact({ kind, title, ref, statement, reason, ...rest }) {
+      const lint = lintStatement(statement);
+      if (lint.blocked.length && !reason) {
+        return { ok: false, error:
+          `statement blocked by wording lint: `
+          + lint.blocked.map((b) => `"${b.phrase}" (${b.why})`).join("; ")
+          + ` — pass a reason to record a deliberate override` };
+      }
+
       const existingRefs = state.artifacts.filter((a) => a.kind === kind).map((a) => a.ref);
 
       let finalRef = ref;
@@ -103,10 +120,15 @@ export function artifactApi(state) {
       }
 
       const artifact = {
-        id: randomUUID(), kind, title, ref: finalRef, status: rest.status ?? "proposed", ...rest,
+        id: randomUUID(), kind, title, ref: finalRef, statement,
+        status: rest.status ?? "proposed", ...rest,
+        // Recorded per ADR-0017, not merely accepted -- an override is a deliberate,
+        // attributable act, so the reason string travels with the artifact rather
+        // than being consumed and discarded at the gate.
+        ...(reason != null ? { wording_override_reason: reason } : {}),
       };
       state.artifacts.push(artifact);
-      return { ok: true, error: null, artifact };
+      return { ok: true, error: null, artifact, warnings: lint.warnings };
     },
 
     async createLink({ typeName, sourceId, targetId }) {

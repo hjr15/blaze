@@ -158,6 +158,34 @@ describe("the goal:achieved gap: children resolved via hierarchy_membership, not
   });
 });
 
+describe("C4: RQ-4a's wording lint is wired into createArtifact, not just its own test", () => {
+  test("a block-tier statement is refused, naming the phrase and why", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", title: "x",
+      statement: "The system shall be user friendly." });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /user friendly/);
+  });
+
+  test("the same statement succeeds once a reason is given, and the reason is recorded", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", title: "x",
+      statement: "The system shall be user friendly.",
+      reason: "client contract wording, verbatim" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.artifact.wording_override_reason, "client contract wording, verbatim");
+  });
+
+  test("a warn-tier statement succeeds WITH a warning, and is never refused", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", title: "x",
+      statement: "The system shall never store plaintext passwords." });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.warnings.length, 1);
+    assert.match(r.warnings[0].phrase, /never/);
+  });
+});
+
 describe("ref format and monotonicity are enforced at the API, not the database", () => {
   // Ref UNIQUENESS is a database constraint (must hold under concurrency). Ref FORMAT
   // and MONOTONICITY are enforced here, where the refusal can name the expected shape.
