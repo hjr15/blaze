@@ -37,3 +37,18 @@ CREATE INDEX IF NOT EXISTS artifact_project_kind_idx ON artifact (project_key, k
 CREATE INDEX IF NOT EXISTS artifact_ref_idx ON artifact (project_key, ref);
 `;
 }
+
+export function revisionDdl(name) {
+  const d = dialect(name);
+  return `
+CREATE TABLE IF NOT EXISTS artifact_revision (
+  id          ${d.txt} NOT NULL,
+  artifact_id ${d.txt} NOT NULL REFERENCES artifact (id) ON DELETE CASCADE,
+  at          ${d.ts} NOT NULL,
+  actor       ${d.txt} NOT NULL DEFAULT 'unknown',
+  snapshot    ${d.txt} NOT NULL,
+  PRIMARY KEY (id)
+)${d.tbl};
+CREATE INDEX IF NOT EXISTS artifact_revision_artifact_idx ON artifact_revision (artifact_id, at);
+`;
+}
