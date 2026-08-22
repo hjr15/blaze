@@ -839,3 +839,111 @@ describe("BLZ-330 (§5): orphan / missing-downstream / stale-since-change throug
     assert.equal(h.summary.counted, 3);
   });
 });
+
+// BLZ-334 — §5: "Filterable by custom field on BOTH axes."
+describe("BLZ-334 (§5): the matrix filters each axis independently", () => {
+  const R = (ref, o = {}) => ({ id: ref, ref, kind: "requirement", project_key: "BLZ", ...o });
+  const D = (ref, o = {}) => ({ id: ref, ref, kind: "architecture", project_key: "BLZ", ...o });
+  const DEFS = [
+    { project_key: "BLZ", applies_to_kind: "requirement", key: "risk",
+      data_type: "number", is_filterable: true },
+    { project_key: "BLZ", applies_to_kind: "architecture", key: "layer",
+      data_type: "text", is_filterable: false },
+  ];
+  const ROWS = [R("REQ-001", { cf_risk: 9 }), R("REQ-002", { cf_risk: 1 })];
+  const COLS = [D("ADR-0001", { custom_fields: { layer: "data" } }),
+                D("ADR-0002", { custom_fields: { layer: "ui" } })];
+
+  function makeMatrixApi() {
+    const { api, state } = makeApi({
+      artifacts: [...ROWS, ...COLS],
+      fieldDefinitions: DEFS,
+    });
+    return { api, state };
+  }
+  const linkAll = async (api) => {
+    for (const d of COLS) for (const r of ROWS) {
+      await api.createLink({ typeName: "Addresses", sourceId: d.id, targetId: r.id });
+    }
+  };
+
+  test("no filters behaves exactly as before — both axes complete", async () => {
+    const { api } = makeMatrixApi();
+    await linkAll(api);
+    const m = api.matrix({ rows: ROWS, cols: COLS });
+    assert.deepEqual(m.rows.map((r) => r.ref), ["REQ-001", "REQ-002"]);
+    assert.deepEqual(m.cols.map((c) => c.ref), ["ADR-0001", "ADR-0002"]);
+  });
+
+  test("a ROW filter leaves the COLUMN axis complete", async () => {
+    const { api } = makeMatrixApi();
+    await linkAll(api);
+    const m = api.matrix({ rows: ROWS, cols: COLS, rowFilter: { key: "risk", equals: 9 } });
+    assert.deepEqual(m.rows.map((r) => r.ref), ["REQ-001"]);
+    assert.deepEqual(m.cols.map((c) => c.ref), ["ADR-0001", "ADR-0002"],
+      "filtering rows must not touch the column axis");
+  });
+
+  test("a COLUMN filter leaves the ROW axis complete — the other half nobody implements", async () => {
+    const { api } = makeMatrixApi();
+    await linkAll(api);
+    const m = api.matrix({ rows: ROWS, cols: COLS, colFilter: { key: "layer", equals: "ui" } });
+    assert.deepEqual(m.cols.map((c) => c.ref), ["ADR-0002"]);
+    assert.deepEqual(m.rows.map((r) => r.ref), ["REQ-001", "REQ-002"]);
+  });
+
+  test("both axes filter at once, independently", async () => {
+    const { api } = makeMatrixApi();
+    await linkAll(api);
+    const m = api.matrix({ rows: ROWS, cols: COLS,
+      rowFilter: { key: "risk", equals: 9 }, colFilter: { key: "layer", equals: "ui" } });
+    assert.deepEqual(m.rows.map((r) => r.ref), ["REQ-001"]);
+    assert.deepEqual(m.cols.map((c) => c.ref), ["ADR-0002"]);
+  });
+
+  test("no cell survives for a filtered-out COLUMN", async () => {
+    const { api } = makeMatrixApi();
+    await linkAll(api);
+    const m = api.matrix({ rows: ROWS, cols: COLS, colFilter: { key: "layer", equals: "ui" } });
+    for (const cells of Object.values(m.cells)) {
+      assert.deepEqual(Object.keys(cells), ["ADR-0002"],
+        "a cell keyed to a filtered-out column is a link to something not on the axis");
+    }
+  });
+
+  test("`untraced` describes the FILTERED rows, not the unfiltered ones", async () => {
+    // Otherwise the count describes a matrix nobody is looking at: filter to one covered
+    // requirement and still be told two are untraced.
+    const { api } = makeMatrixApi();
+    // Only REQ-002 gets a link, so unfiltered `untraced` is [REQ-001].
+    await api.createLink({ typeName: "Addresses", sourceId: "ADR-0001", targetId: "REQ-002" });
+    assert.deepEqual(api.matrix({ rows: ROWS, cols: COLS }).untraced, ["REQ-001"]);
+    // Filter to REQ-002 alone: it IS traced, so nothing is untraced.
+    const m = api.matrix({ rows: ROWS, cols: COLS, rowFilter: { key: "risk", equals: 1 } });
+    assert.deepEqual(m.untraced, []);
+  });
+
+  test("an unknown ROW field key is refused, naming the axis and the key", () => {
+    const { api } = makeMatrixApi();
+    const m = api.matrix({ rows: ROWS, cols: COLS, rowFilter: { key: "nope", equals: 1 } });
+    assert.equal(m.ok, false);
+    assert.match(m.error, /row filter/);
+    assert.match(m.error, /nope/);
+  });
+
+  test("an unknown COLUMN field key is refused too, and says which axis", () => {
+    const { api } = makeMatrixApi();
+    const m = api.matrix({ rows: ROWS, cols: COLS, colFilter: { key: "nope", equals: 1 } });
+    assert.equal(m.ok, false);
+    assert.match(m.error, /column filter/);
+  });
+
+  test("a field defined for the ROW kind is unknown to a COLUMN filter", () => {
+    // `risk` exists, but only for requirements. Accepting it on the architecture axis
+    // would match nothing and report an empty column set as a real result.
+    const { api } = makeMatrixApi();
+    const m = api.matrix({ rows: ROWS, cols: COLS, colFilter: { key: "risk", equals: 9 } });
+    assert.equal(m.ok, false);
+    assert.match(m.error, /column filter/);
+  });
+});

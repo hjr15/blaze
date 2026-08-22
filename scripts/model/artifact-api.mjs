@@ -14,6 +14,7 @@ import { fieldBudget } from "./field-budget.mjs";
 import { evaluateCoverage, validateCoverageRule, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
 import { artifactHealth } from "./artifact-health.mjs";
+import { filterByField } from "./matrix-filter.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
@@ -466,9 +467,26 @@ export function artifactApi(state, store) {
       return { ok: true, error: null, link };
     },
 
-    // GET /api/matrix
-    matrix({ rows, cols }) {
-      return buildMatrix({ rows, cols, links: links(), linkTypes: state.linkTypes });
+    // GET /api/matrix — §5: "Filterable by custom field on BOTH axes." Each axis filters
+    // INDEPENDENTLY: a filter applied to rows only is the common half-implementation, and
+    // it makes the column axis a lie. `untraced` is computed by buildMatrix from whatever
+    // rows it is handed, so filtering BEFORE the call is what makes the count describe the
+    // matrix the person is actually looking at.
+    matrix({ rows, cols, rowFilter = null, colFilter = null,
+             project_key = "BLZ", rowKind = "requirement", colKind = "architecture" }) {
+      const defs = state.fieldDefinitions ?? [];
+      const r = filterByField({ items: rows ?? [], definitions: defs, filter: rowFilter,
+                                project_key, kind: rowKind });
+      if (!r.ok) return { ok: false, error: `row filter: ${r.error}` };
+      const c = filterByField({ items: cols ?? [], definitions: defs, filter: colFilter,
+                                project_key, kind: colKind });
+      if (!c.ok) return { ok: false, error: `column filter: ${c.error}` };
+
+      // Cells are keyed off the SURVIVING columns only (buildMatrix already skips a link
+      // whose source is not in `cols`), so a filtered-out item cannot leave a dangling
+      // cell behind.
+      return buildMatrix({ rows: r.items, cols: c.items, links: links(),
+                           linkTypes: state.linkTypes });
     },
 
     // GET /api/coverage — the STANDING read. Deliberately not the same obligation as
