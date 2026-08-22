@@ -673,3 +673,59 @@ Remaining work on the spine, in order of readiness:
  - BLZ-324 — blocked on the dual-write soak (`BLAZE_WRITE_PORT=dual`, a week of real board use,
    zero divergences in `.blaze/divergences.jsonl`). Operator's to run; it needs elapsed time.
  - Specs 2-6 — now unblocked by the merge, since they are all consumers of the spine.
+
+=== SESSION 2, PART 5 — THE SIX DEFERRED DEFECTS (BLZ-338..343) ===
+Bundled as feature BLZ-344 on branch `BLZ-344-deferred-review-defects`, PR #88. Opened as a PR
+ rather than merged directly, deliberately: `hygiene.yml` fires only `on: pull_request`, so the
+ spine's direct-to-main merge never exercised it. It passes on the PR — the gate has now actually
+ run rather than been assumed.
+
+Rulings:
+
+Ruling (R48 — `verified` is added ADDITIVELY, and `implemented` stays terminal): the gate
+ `requirement:verified` targeted a status DEFAULT_WORKFLOWS did not have, so it was unreachable
+ from any legal status. Spec §4.2, the standards doc (RQ-6) and ADR-0017 all name it and the
+ operator settled "ship both" on 2026-08-22, so the WORKFLOW was what was wrong, not the gate.
+ Making `verified` a required waypoint AFTER `implemented` would have reclassified every existing
+ implemented requirement as non-terminal and started refusing goal:achieved gates that pass today
+ — a data migration wearing the costume of a bug fix. Added as a sibling terminal instead.
+
+ OPEN POLICY QUESTION, deliberately not settled here: with `implemented` still terminal, a goal
+ can be achieved carrying requirements that were never verified. That may well be wrong. It is a
+ decision about what the method REQUIRES, not about what this defect was, and making it silently
+ inside a bug fix would be exactly the move R48 refuses.
+
+Ruling (R49 — the DEFAULT_WORKFLOWS regression anchor did its job, and that is worth recording):
+ `workflows.test.mjs` asserts the exact shape of every shipped workflow. It caught the R48 change
+ and forced it to be a conscious edit with reasoning beside it, rather than a side effect nobody
+ reviewed. This is the pattern worth copying: an anchor over a small, load-bearing, rarely-changed
+ constant is cheap and it converts silent drift into a decision.
+
+Ruling (R50 — `min_card` needed NEW SURFACE, not just a check): it is a FLOOR, so no creation path
+ can ever violate it — only a removal can, and there was no removal path. Adding the check to
+ checkLink alone would have left it unenforceable by construction, which is the same defect one
+ layer up and precisely what BLZ-343 was about. `removeLink` is what gives the constraint a caller.
+
+Ruling (R51 — the store write happens BEFORE the state mutation, everywhere): createArtifact,
+ createLink and baselineDocument all pushed to `state` and then awaited, so a constraint violation
+ left a phantom the database had refused. For links that phantom inflated the `existingCount` that
+ max_card is checked against, so one rejected duplicate could make a legitimate later link refuse.
+ The driver error now surfaces as a named refusal rather than escaping the API.
+
+Discrimination: 13 mutations injected. TWELVE broke a test immediately. ONE did not and is reported
+ rather than glossed — removing the "undeclared status" branch, because "banana" then fell through
+ to canTransition, which ALSO refuses and whose message ALSO contains "banana". A test asserting
+ only ok===false and the status name could not tell the two branches apart. Rewritten to assert
+ each branch's distinct message; it now breaks.
+
+ That is the twelfth instance of this exact shape on this branch, and every single one has been the
+ same thing: **the assertion did not vary with the thing under test.** It is worth stating as a rule
+ rather than a war story — when two guards can both produce a refusal, asserting "it refused" tests
+ neither of them.
+
+Two of my own tests needed correcting once the fixes landed, both because the fix was RIGHT: the
+ BLZ-336 goal fixtures started at `defined`, and the goal workflow is
+ defined -> in-progress -> achieved, which BLZ-339's new transition validation now enforces.
+
+FULL SUITE: 1,753 tests, 1,753 pass, 0 fail, 0 skipped under `npm run test:coverage` with real
+ Postgres 17. Coverage 97.40 / 85.49 / 95.55 / 97.40 against gates of 91 / 77 / 93 / 91.
