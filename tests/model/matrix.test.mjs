@@ -39,4 +39,14 @@ describe("the matrix is a QUERY over typed links, never a maintained artefact", 
     assert.equal(m.cells["r1"]["d1"].type, "Mystery");
     assert.equal(m.cells["r1"]["d1"].inverse, null);
   });
+
+  test("a link whose source is NOT on the column axis is excluded", () => {
+    // Without this the colIds filter is dead code: every other fixture's source_id is
+    // already a valid column, so removing the filter changes nothing.
+    const links = [{ type_name: "Addresses", source_id: "NOT-A-COLUMN", target_id: "r1" }];
+    const m = buildMatrix({ rows, cols, links, linkTypes });
+    assert.equal(m.cells["r1"], undefined, "no cell for a link outside the column set");
+    assert.deepEqual(m.untraced.sort(), ["REQ-001", "REQ-002"],
+      "and the row stays untraced — an off-axis link must not count as coverage");
+  });
 });
