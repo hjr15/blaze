@@ -73,12 +73,22 @@ test("DEFAULT_WORKFLOWS holds today's exact definitions (regression anchor)", ()
       resolutionOnTerminal: { mitigated: "done", accepted: "done", obsolete: "wont-do" },
     },
     requirement: {
-      statuses: ["proposed", "implemented", "rejected", "obsolete"],
-      terminal: ["implemented", "rejected", "obsolete"],
-      transitions: [["proposed", "implemented"], ["proposed", "rejected"], ["proposed", "obsolete"],
+      // BLZ-339: `verified` added. gates.mjs enumerates `requirement:verified` and spec §4.2,
+      // the standards doc (RQ-6) and ADR-0017 all name it, so the gate targeted a status the
+      // workflow did not have — it was unreachable from any legal status. ADDITIVE:
+      // `implemented` stays terminal, because making it a required waypoint would reclassify
+      // every existing implemented requirement and start refusing goal:achieved gates that
+      // pass today. This anchor is what forced that to be a decision rather than a side
+      // effect, which is exactly what it is for.
+      statuses: ["proposed", "implemented", "verified", "rejected", "obsolete"],
+      terminal: ["implemented", "verified", "rejected", "obsolete"],
+      transitions: [["proposed", "implemented"], ["proposed", "verified"],
+                    ["implemented", "verified"], ["verified", "obsolete"],
+                    ["proposed", "rejected"], ["proposed", "obsolete"],
                     ["implemented", "obsolete"]],
       reopenTo: "proposed",
-      resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" },
+      resolutionOnTerminal: { implemented: "done", verified: "done", rejected: "wont-do",
+                              obsolete: "wont-do" },
     },
     architecture: {
       statuses: ["proposed", "accepted", "rejected"],

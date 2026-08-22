@@ -232,8 +232,10 @@ describe("BLZ-336: goal:achieved resolves the hierarchy of its OWN project", () 
     artifacts: [{ id: "rB", ref: "REQ-001", kind: "requirement", status: "proposed", project_key: "B" }],
     links: [], linkTypes: [{ ...LT }],
     tickets: [
-      { id: "gB", type: "goal", status: "defined", project_key: "B" },
-      { id: "gA", type: "goal", status: "defined", project_key: "A" },
+      // in-progress, not defined: the goal workflow is defined -> in-progress -> achieved,
+      // and BLZ-339 now enforces transitions. A goal being closed is in-progress by then.
+      { id: "gB", type: "goal", status: "in-progress", project_key: "B" },
+      { id: "gA", type: "goal", status: "in-progress", project_key: "A" },
     ],
     // Project A's default hierarchy comes FIRST, which is what made the unscoped
     // `.find(h => h.is_default)` pick the wrong one.
