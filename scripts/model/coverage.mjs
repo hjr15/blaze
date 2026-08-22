@@ -3,6 +3,7 @@
 // Not hardcoded queries: a rule has a NAME, so a refusal can cite the rule that
 // refused rather than saying "coverage incomplete", which nobody can act on.
 import { ARTIFACT_KINDS } from "./artifact-schema.mjs";
+import { dialect } from "./sql-dialect.mjs";
 
 export const DEFAULT_COVERAGE_RULES = [
   { name: "every-requirement-addressed", subject_kind: "requirement",
@@ -101,11 +102,6 @@ export function evaluateCoverage({ rule, artifacts = [], links = [] }) {
 //  2. `boolean NOT NULL DEFAULT 0` is rejected by Postgres — an untyped integer literal
 //     does not implicitly cast to boolean. `enabled` uses the `true_` dialect token,
 //     never a literal.
-function dialect(name) {
-  if (name === "postgres") return { txt: "text", bool: "boolean", true_: "true", tbl: "" };
-  if (name === "sqlite")   return { txt: "TEXT", bool: "INTEGER", true_: "1", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
 export function coverageDdl(name) {
   const d = dialect(name);

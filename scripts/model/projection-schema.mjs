@@ -19,12 +19,8 @@
 // hottest predicate in the system, and it is what makes `ticket → status` expressible
 // as a two-column FK against the ticket's own (project_key, type) at all.
 
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", bool: "boolean", false_: "false" };
-  if (name === "sqlite")   return { ts: "TEXT",        bool: "INTEGER", false_: "0" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)} — expected 'sqlite' or 'postgres'`);
-}
 
+import { dialect } from "./sql-dialect.mjs";
 export function projectionDdl(name) {
   const d = dialect(name);
   return `

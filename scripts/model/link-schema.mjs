@@ -8,6 +8,7 @@
 // source_kinds/target_kinds are stored as comma-separated text rather than an array
 // type, because Postgres has arrays and SQLite does not, and the read path must be
 // identical in both.
+import { dialect } from "./sql-dialect.mjs";
 export const DEFAULT_LINK_TYPES = [
   { name: "Implements", inverse_name: "Implemented by", source_kinds: ["feature"],
     target_kinds: ["requirement"], min_card: 0, max_card: null },
@@ -21,11 +22,6 @@ export const DEFAULT_LINK_TYPES = [
     target_kinds: ["requirement"], min_card: 0, max_card: null },
 ];
 
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", txt: "text", int: "integer", tbl: "" };
-  if (name === "sqlite")   return { ts: "TEXT", txt: "TEXT", int: "INTEGER", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
 export function linkDdl(name) {
   const d = dialect(name);

@@ -3,12 +3,8 @@
 // DOORS baselined per module, which forced baseline SETS to be invented to group them.
 // The existence of the fix is evidence of the original mistake, so we baseline at
 // project scope from the start.
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", txt: "text", tbl: "" };
-  if (name === "sqlite")   return { ts: "TEXT", txt: "TEXT", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
+import { dialect } from "./sql-dialect.mjs";
 export function baselineDdl(name) {
   const d = dialect(name);
   return `

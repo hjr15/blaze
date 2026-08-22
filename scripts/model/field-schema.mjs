@@ -11,11 +11,7 @@
 //     literal does not implicitly cast to boolean. is_filterable and is_required use
 //     the `false_` dialect token (coverage.mjs / hierarchy-schema.mjs pattern),
 //     never a literal `0`.
-function dialect(name) {
-  if (name === "postgres") return { txt: "text", int: "integer", bool: "boolean", false_: "false", tbl: "" };
-  if (name === "sqlite")   return { txt: "TEXT", int: "INTEGER", bool: "INTEGER", false_: "0", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
+import { dialect } from "./sql-dialect.mjs";
 export const DATA_TYPES = ["text", "number", "date", "boolean", "enum"];
 
 export function fieldDdl(name) {

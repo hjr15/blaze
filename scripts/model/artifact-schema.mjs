@@ -4,13 +4,9 @@
 // Table-level constraints come after every column: SQLite requires it, Postgres
 // tolerates it (sqlite-schema.mjs:18). btrim() is Postgres-only, so emptiness uses
 // the portable length(trim(x)) form.
+import { dialect } from "./sql-dialect.mjs";
 export const ARTIFACT_KINDS = ["requirement", "architecture"];
 
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", txt: "text", tbl: "" };
-  if (name === "sqlite")   return { ts: "TEXT", txt: "TEXT", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
 export function artifactDdl(name) {
   const d = dialect(name);

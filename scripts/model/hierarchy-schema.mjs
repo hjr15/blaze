@@ -3,12 +3,8 @@
 // Replaces a single parent_id, which forecloses the core Structure use case: a
 // delivery hierarchy, a safety hierarchy and a contractual-deliverable hierarchy
 // coexisting over one set of items.
-function dialect(name) {
-  if (name === "postgres") return { txt: "text", int: "integer", bool: "boolean", false_: "false", tbl: "" };
-  if (name === "sqlite")   return { txt: "TEXT", int: "INTEGER", bool: "INTEGER", false_: "0", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
+import { dialect } from "./sql-dialect.mjs";
 export function hierarchyDdl(name) {
   const d = dialect(name);
   return `

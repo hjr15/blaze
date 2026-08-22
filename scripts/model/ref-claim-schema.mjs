@@ -27,12 +27,8 @@
 // Table-level constraints come after every column: SQLite STRICT requires it, Postgres
 // tolerates it (artifact-schema.mjs).
 import { REF_PATTERNS } from "./ref-allocator.mjs";
+import { dialect } from "./sql-dialect.mjs";
 
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", txt: "text", int: "integer", tbl: "" };
-  if (name === "sqlite")   return { ts: "TEXT", txt: "TEXT", int: "INTEGER", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
 export function refClaimDdl(name) {
   const d = dialect(name);

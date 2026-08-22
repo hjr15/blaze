@@ -4,13 +4,9 @@
 // appear in the safety case, the subsystem spec and the customer submission without
 // three copies that drift. Ordering and indent depth belong to the USAGE, so the same
 // requirement is top-level in one document and nested in another.
+import { dialect } from "./sql-dialect.mjs";
 export const DOCUMENT_KINDS = ["requirements", "architecture"];
 
-function dialect(name) {
-  if (name === "postgres") return { ts: "timestamptz", txt: "text", int: "integer", tbl: "" };
-  if (name === "sqlite")   return { ts: "TEXT", txt: "TEXT", int: "INTEGER", tbl: " STRICT" };
-  throw new Error(`unknown dialect ${JSON.stringify(name)}`);
-}
 
 export function documentDdl(name) {
   const d = dialect(name);
