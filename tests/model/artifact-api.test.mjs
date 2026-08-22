@@ -947,3 +947,80 @@ describe("BLZ-334 (§5): the matrix filters each axis independently", () => {
     assert.match(m.error, /column filter/);
   });
 });
+
+// BLZ-333 — §4.3: "Reported, NEVER BLOCKING." The tier split is load-bearing: blurring
+// §4.1 and §4.3 is how a governance tool becomes something teams route around.
+describe("BLZ-333 (§4.3): advisory findings are surfaced by the API and never block", () => {
+  test("an artifact failing every advisory check STILL CREATES", async () => {
+    const { api, state } = makeApi({ artifacts: [] });
+    const r = await api.createArtifact({
+      kind: "requirement", title: "R", project_key: "BLZ",
+      statement: "The system is a web app.", verification_method: "vibes" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(state.artifacts.length, 1, "an advisory must never prevent the write");
+    assert.ok(r.advisories.length >= 2, "and the findings must come back on the response");
+  });
+
+  test("every advisory finding names the check that produced it", async () => {
+    const { api } = makeApi({ artifacts: [] });
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+      statement: "The system is a web app.", verification_method: "vibes" });
+    for (const f of r.advisories) assert.ok(f.check, `${JSON.stringify(f)} has no check name`);
+  });
+
+  test("a clean statement returns an empty advisory list, not a missing key", async () => {
+    const { api } = makeApi({ artifacts: [] });
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+      statement: "The system shall lock the account after 5 failed attempts.",
+      verification_method: "test" });
+    assert.deepEqual(r.advisories, []);
+  });
+
+  test("advisory and the §4.1 BLOCK are different tiers, and both are reachable", async () => {
+    // The load-bearing distinction. A wording-lint block refuses; an advisory does not.
+    const { api } = makeApi({ artifacts: [] });
+    const blocked = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+      statement: "The system shall be user-friendly." });
+    assert.equal(blocked.ok, false, "§4.1 blocks");
+
+    const advised = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+      statement: "The system is a web app." });
+    assert.equal(advised.ok, true, "§4.3 does not");
+    assert.ok(advised.advisories.length > 0);
+  });
+
+  test("the project advisory reports architecture coverage with its numerator and denominator", async () => {
+    const { api } = makeApi({
+      artifacts: [
+        { id: "r1", ref: "REQ-001", kind: "requirement", project_key: "BLZ", statement: "The system shall x." },
+        { id: "r2", ref: "REQ-002", kind: "requirement", project_key: "BLZ", statement: "The system shall y." },
+        { id: "d1", ref: "ADR-0001", kind: "architecture", project_key: "BLZ" },
+      ],
+    });
+    await api.createLink({ typeName: "Addresses", sourceId: "d1", targetId: "r1" });
+    const a = api.advisory({ project_key: "BLZ" });
+    assert.equal(a.architectureCoverage.covered, 1);
+    assert.equal(a.architectureCoverage.total, 2);
+    assert.equal(a.architectureCoverage.percent, 50);
+    assert.deepEqual(a.architectureCoverage.uncovered, ["REQ-002"],
+      "and names which requirements are uncovered, not just how many");
+  });
+
+  test("a project with no requirements reports percent null, never 0% and never NaN", () => {
+    const { api } = makeApi({ artifacts: [] });
+    assert.equal(api.advisory({ project_key: "BLZ" }).architectureCoverage.percent, null);
+  });
+
+  test("the project advisory lists only statements that have findings", () => {
+    const { api } = makeApi({
+      artifacts: [
+        { id: "r1", ref: "REQ-001", kind: "requirement", project_key: "BLZ",
+          statement: "The system shall lock the account.", verification_method: "test" },
+        { id: "r2", ref: "REQ-002", kind: "requirement", project_key: "BLZ",
+          statement: "The system is nice.", verification_method: "test" },
+      ],
+    });
+    const a = api.advisory({ project_key: "BLZ" });
+    assert.deepEqual(a.statements.map((s) => s.ref), ["REQ-002"]);
+  });
+});

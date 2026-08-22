@@ -18,6 +18,7 @@ import { filterByField } from "./matrix-filter.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
+import { adviseStatement, architectureCoverage } from "./advisory.mjs";
 import { validateFieldValues, splitCustomFields } from "./field-validation.mjs";
 import { ARTIFACT_KINDS } from "./artifact-schema.mjs";
 
@@ -243,7 +244,13 @@ export function artifactApi(state, store) {
         await store.insertRevision(revision);
       }
 
-      return { ok: true, error: null, artifact, warnings: lint.warnings };
+      // §4.3 (BLZ-333): advisory findings ride back on the SUCCESSFUL response. They never
+      // block — the §4 tier split is load-bearing, and a rule that sometimes refuses is
+      // not advisory. Surfaced here because "a rule the API cannot see does not exist"
+      // (§4.5) applies to a report as much as to a block.
+      const advice = adviseStatement({ statement, method: rest.verification_method });
+      return { ok: true, error: null, artifact,
+               warnings: lint.warnings, advisories: advice.findings };
     },
 
     async createLink({ typeName, sourceId, targetId }) {
@@ -441,6 +448,24 @@ export function artifactApi(state, store) {
       }
 
       return { ok: true, error: null, baseline, members: memberRows };
+    },
+
+    // GET /api/advisory — §4.3's project-level advisory, alongside the per-statement
+    // findings createArtifact returns. Architecture coverage is a PERCENTAGE that always
+    // travels with its numerator and denominator: a bare percentage cannot be checked.
+    advisory({ project_key } = {}) {
+      const artifacts = state.artifacts.filter(
+        (a) => project_key == null || a.project_key == null || a.project_key === project_key);
+      return {
+        project_key,
+        architectureCoverage: architectureCoverage({ artifacts, links: links() }),
+        statements: artifacts
+          .filter((a) => a.kind === "requirement")
+          .map((a) => ({ ref: a.ref,
+            findings: adviseStatement({ statement: a.statement,
+                                        method: a.verification_method }).findings }))
+          .filter((s2) => s2.findings.length),
+      };
     },
 
     // GET /api/artifact-health — §5's per-artifact orphan / missing-downstream /
