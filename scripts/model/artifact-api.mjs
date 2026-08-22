@@ -10,6 +10,7 @@ import { randomUUID } from "node:crypto";
 import { checkLink } from "./link-rules.mjs";
 import { checkGate } from "./gates.mjs";
 import { promotionPlan, TARGET_TABLE } from "./field-promotion.mjs";
+import { fieldBudget } from "./field-budget.mjs";
 import { evaluateCoverage, validateCoverageRule, DEFAULT_COVERAGE_RULES } from "./coverage.mjs";
 import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
@@ -87,6 +88,10 @@ export function artifactApi(state, store) {
     (r) => r.name === name && (r.project_key == null || r.project_key === project_key)) ?? null;
   const violationsFor = (rule) => evaluateCoverage(
     { rule, artifacts: state.artifacts, links: links() }).violations;
+  // A closure, not `this.fieldBudget` — every other shared read in this file is one, and a
+  // destructured `const { defineField } = api` would silently lose a `this`-bound call.
+  const budgetFor = (project_key = null) =>
+    fieldBudget({ definitions: state.fieldDefinitions ?? [], project_key });
 
   // A gate subject's children, resolved through the DEFAULT hierarchy's
   // hierarchy_membership rows -- NOT parent_id, the column §3.3 built this table to
@@ -340,7 +345,19 @@ export function artifactApi(state, store) {
         await store.runDdl(plan.sql);
       }
 
-      return { ok: true, error: null, sql: plan.sql };
+      // BLZ-329, §3.4: the budget is reported on SUCCESS, not only inside a refusal.
+      // Learning the cap at the moment you are denied is what "sprung" means (CS-008);
+      // seeing the remaining headroom on every promotion is what "continuously" means.
+      // Computed AFTER the push so it reflects the promotion that just happened.
+      return { ok: true, error: null, sql: plan.sql,
+               budget: budgetFor(field.project_key ?? null) };
+    },
+
+    // GET /api/field-budget — the standing surface for §3.4's install-wide budget. Counts
+    // PERSISTED definitions and never a caller-supplied number: a request sending
+    // `filterableCount: 0` skipping the cap was the C5 defect.
+    fieldBudget({ project_key = null } = {}) {
+      return budgetFor(project_key);
     },
 
     // POST /api/baseline — baselining a document is the one deliberate checkpoint where

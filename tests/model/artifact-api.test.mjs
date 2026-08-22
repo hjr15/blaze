@@ -692,3 +692,62 @@ describe("BLZ-328 (§4.1): required, enum, type and range are enforced BY THE AP
     assert.match(lintOnly.error, /wording lint/);
   });
 });
+
+// BLZ-329 — §3.4: the cap "must be surfaced CONTINUOUSLY, never sprung (CS-008)".
+describe("BLZ-329 (§3.4): the field budget is surfaced through the API, not only on refusal", () => {
+  const fd = (o) => ({ project_key: "BLZ", applies_to_kind: "requirement",
+                       is_filterable: true, data_type: "text", key: "k", ...o });
+
+  test("a SUCCESSFUL defineField returns the post-promotion budget", async () => {
+    const { api } = makeApi({ fieldDefinitions: [] });
+    const r = await api.defineField(fd({ key: "risk", data_type: "number" }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.budget.artifact.used, 1, "the budget must include the promotion that just happened");
+    assert.equal(r.budget.artifact.remaining, 199);
+  });
+
+  test("the standing read is available without defining anything", async () => {
+    const { api } = makeApi({ fieldDefinitions: [fd({ key: "a" }), fd({ key: "b" })] });
+    assert.equal(api.fieldBudget().artifact.used, 2);
+  });
+
+  test("the count comes from PERSISTED state, never from the request (the C5 defect)", async () => {
+    const { api } = makeApi({
+      fieldDefinitions: Array.from({ length: 40 }, (_, i) => fd({ key: `k${i}` })) });
+    // A caller insisting the budget is empty must not be believed.
+    const r = await api.defineField(fd({ key: "sneaky", filterableCount: 0, existingColumns: [] }));
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.budget.artifact.used, 41);
+  });
+
+  test("asked as a project, the budget shows what OTHER projects have spent", async () => {
+    const { api } = makeApi({ fieldDefinitions: [
+      fd({ key: "a", project_key: "BLZ" }),
+      fd({ key: "b", project_key: "OTHER" }),
+      fd({ key: "c", project_key: "OTHER" }),
+    ]});
+    const b = api.fieldBudget({ project_key: "BLZ" });
+    assert.equal(b.artifact.yours, 1);
+    assert.equal(b.artifact.others, 2);
+    assert.deepEqual(b.artifact.byProject[0], { project_key: "OTHER", used: 2 });
+  });
+
+  test("the refusal path still fires, and the budget it reports agrees with the read", async () => {
+    const { api, state } = makeApi({
+      fieldDefinitions: Array.from({ length: 200 }, (_, i) => fd({ key: `k${i}` })) });
+    assert.equal(api.fieldBudget().artifact.exhausted, true);
+    const r = await api.defineField(fd({ key: "onemore" }));
+    assert.equal(r.ok, false);
+    assert.match(r.error, /200/);
+    assert.equal(state.fieldDefinitions.length, 200, "a refused promotion must not be recorded");
+  });
+
+  test("`warn` fires before the cap, so approaching it is visible while there is headroom", async () => {
+    const { api } = makeApi({
+      fieldDefinitions: Array.from({ length: 160 }, (_, i) => fd({ key: `k${i}` })) });
+    const b = api.fieldBudget();
+    assert.equal(b.artifact.warn, true);
+    assert.equal(b.artifact.exhausted, false);
+    assert.ok(b.artifact.remaining > 0);
+  });
+});
