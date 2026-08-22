@@ -104,6 +104,35 @@ indicator of exactly this failure**, rather than discovering it at an audit.
 This risk is accepted, not solved. If baseline rates fall, this ADR is the thing to
 revisit.
 
+## Amendment, 2026-08-22 — a gate has two justifications, not one
+
+This ADR originally justified gates on **decidability**: coverage rules need a corpus-wide
+query and cannot be settled from one item, so they cannot block a write.
+
+The requirements-standards work surfaced a second, distinct justification, and it is worth
+naming because it licenses gates this ADR would otherwise forbid.
+
+**Timing.** Some checks *are* fully decidable from one item's own content, yet still belong
+at a transition rather than at every write — because they would be legitimately false while
+the author is still drafting. The example that forced this: an architecture decision must
+carry non-empty `Context`, `Decision` and `Consequences` sections **before it is accepted**.
+That is decidable from the one ticket. But enforcing it on every edit makes a half-written
+`proposed` decision unsaveable, which is the same failure this ADR already rejected for
+coverage — *"a gate that blocks the thing people are trying to do gets routed around, not
+respected."*
+
+**So the rule is: a check blocks at write time only if it is both decidable from the item
+alone AND true of a legitimate draft.** Fail either test and it belongs at a gate.
+
+| | Decidable from one item | Needs a corpus query |
+|---|---|---|
+| **True of a legitimate draft** | **Write-time block** — e.g. link endpoint validity | *(empty — a corpus query is never available at write time)* |
+| **False while drafting** | **Gate** — e.g. ADR structural completeness | **Gate** — e.g. every requirement addressed |
+
+Folded in here rather than recorded separately because it changes no decision — the
+mechanism and its consequences are unchanged. It widens the *set of rules eligible* for the
+gate mechanism, and the widening needed to be written down where the mechanism is defined.
+
 ## What this obliges the v4 design to do
 
 1. **A typed link meta-model** declaring, per link type, the permitted source and target
