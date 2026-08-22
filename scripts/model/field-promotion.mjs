@@ -34,7 +34,17 @@ export function promotionPlan({ field, existingColumns = [], filterableCount = 0
 
   const col = `cf_${field.key}`;
   if (existingColumns.includes(col)) {
-    return { ok: false, sql: null, error: `column ${col} already exists on this table` };
+    // ADR-0018's consequence that "will surprise people", surfaced at the moment it bites:
+    // fields are DEFINED per project but promoted columns live on one SHARED table, so
+    // another project having promoted this key already is enough to refuse. field_definition's
+    // UNIQUE (project_key, key, applies_to_kind) permits two projects to define `risk`, and
+    // promotion maps both to one `artifact.cf_risk` — the DDL and the promotion rule disagree,
+    // and before BLZ-335 that disagreement surfaced as a raw `duplicate column name` from the
+    // driver rather than a refusal anyone could act on.
+    return { ok: false, sql: null, error:
+      `column ${col} already exists on this table — promoted columns are shared across every `
+      + "project in the installation, so another project may already have promoted this key. "
+      + "Rename the field, or mark it unfilterable so it lives in the JSON tail." };
   }
   if (filterableCount >= FILTERABLE_CAP) {
     return { ok: false, sql: null, error:

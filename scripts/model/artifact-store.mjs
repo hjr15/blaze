@@ -97,7 +97,11 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
       const vals = [a.id, a.project_key, a.kind, a.ref, a.title, a.statement ?? null,
                     a.body ?? null, a.status, a.created_at, a.updated_at,
                     jsonTail(a.custom_fields)];
-      for (const [col, v] of Object.entries(a.promoted ?? {})) {
+      // BLZ-335 (C2): promoted values live FLAT on the record as `cf_<key>` — the same shape
+      // the column has and every reader expects — so they are picked up by prefix here rather
+      // than from a separate `promoted` sub-object that only this method knew about.
+      for (const [col, v] of Object.entries(a)) {
+        if (!col.startsWith("cf_")) continue;
         if (!SAFE_COLUMN.test(col)) {
           throw new Error(`refusing to build SQL with the unsafe column name ${JSON.stringify(col)}`);
         }
@@ -125,9 +129,13 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
 
     async insertLink(l) {
       await exec.run(
-        `INSERT INTO link (id, link_type_id, source_id, target_id, created_at, created_by)
-         VALUES (${p(0)},${p(1)},${p(2)},${p(3)},${p(4)},${p(5)})`,
-        [l.id, l.link_type_id, l.source_id, l.target_id, l.created_at, l.created_by ?? "api"]);
+        `INSERT INTO link (id, link_type_id, source_id, target_id, created_at, created_by, reviewed_at)
+         VALUES (${p(0)},${p(1)},${p(2)},${p(3)},${p(4)},${p(5)},${p(6)})`,
+        [l.id, l.link_type_id, l.source_id, l.target_id, l.created_at, l.created_by ?? "api",
+         // BLZ-335 (C10): seeded, never NULL on creation. NULL means "never reviewed", which
+         // is a real state a migration or import can produce — it is not what a link someone
+         // just created means.
+         l.reviewed_at ?? l.created_at]);
     },
 
     /**
@@ -187,6 +195,12 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
          boolVal(r.enabled !== false, dialect)]);
     },
 
+    async listCoverageRuleNames({ project_key }) {
+      const rows = await exec.all(
+        `SELECT name FROM coverage_rule WHERE project_key = ${p(0)}`, [project_key]);
+      return rows.map((r) => r.name);
+    },
+
     async setCoverageRuleEnabled({ project_key, name, enabled }) {
       await exec.run(
         `UPDATE coverage_rule SET enabled = ${p(0)} WHERE project_key = ${p(1)} AND name = ${p(2)}`,
@@ -203,6 +217,26 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
         ...r,
         definition: typeof r.definition === "string" ? JSON.parse(r.definition) : r.definition,
         enabled: r.enabled === true || r.enabled === 1,
+      }));
+    },
+
+    /**
+     * BLZ-335 (C1). The install-wide field budget and the duplicate-column guard have to
+     * count what the DATABASE holds, not what this process happens to remember. Without
+     * this, a second process starts with an empty `state`, reports `used: 0` against a
+     * table holding 200 rows, and drives promotion straight into a raw
+     * `duplicate column name` from the driver. BLZ-329's stated claim — "counts PERSISTED
+     * definitions" — was only ever true within one long-lived process.
+     */
+    async listFieldDefinitions() {
+      const rows = await exec.all(
+        `SELECT id, project_key, key, label, data_type, applies_to_kind,
+                is_filterable, is_required, enum_values, min_value, max_value
+           FROM field_definition`, []);
+      return rows.map((r) => ({
+        ...r,
+        is_filterable: r.is_filterable === true || r.is_filterable === 1,
+        is_required: r.is_required === true || r.is_required === 1,
       }));
     },
 

@@ -149,3 +149,22 @@ describe("scoping and the house rule that untraced work is legal", () => {
     assert.deepEqual(h.summary.stale, ["ADR-0001", "ADR-0002"]);
   });
 });
+
+// BLZ-337 — both null-project forgiveness clauses were unreachable: every fixture stamped
+// project_key. They exist so the pure-decision fixtures that predate project scoping keep
+// working, which means they need a fixture that actually omits it.
+describe("BLZ-337: artifacts without a project_key are still reported", () => {
+  test("an artifact with NO project_key is included in a project-scoped report", () => {
+    const h = artifactHealth({ project_key: "BLZ",
+      artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement" }], links: [] });
+    assert.deepEqual(h.artifacts.map((a) => a.ref), ["REQ-001"]);
+  });
+
+  test("and asking with NO project_key reports every artifact, whatever its project", () => {
+    const h = artifactHealth({
+      artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement", project_key: "BLZ" },
+                  { id: "z1", ref: "REQ-900", kind: "requirement", project_key: "OTHER" }],
+      links: [] });
+    assert.equal(h.summary.counted, 2);
+  });
+})

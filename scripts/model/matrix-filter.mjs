@@ -8,7 +8,7 @@
 // and the decision is allowed to change per project.
 //
 // PURE and SYNCHRONOUS, like every other decision function here.
-import { splitCustomFields } from "./field-validation.mjs";
+import { promotedColumn } from "./field-validation.mjs";
 
 /**
  * SQLite hands `custom_fields` back as JSON TEXT where Postgres hands back a parsed
@@ -47,20 +47,51 @@ export function filterByField({ items = [], definitions = [], filter = null,
       + `filtering on it would report an empty matrix as though it were a result` };
   }
 
-  // Which home this key uses is decided by the SAME split the write path uses, so a filter
-  // can never disagree with where the value was actually put.
-  const { promoted } = splitCustomFields({
-    definitions: scoped, values: { [filter.key]: null }, project_key, kind });
-  const column = Object.keys(promoted)[0] ?? null;
-
+  // Which home this key uses is decided by the SAME resolver the write path uses, so a
+  // filter can never disagree with where the value was actually put.
+  const column = promotedColumn({ definitions: scoped, key: filter.key, project_key, kind });
   const read = (item) => (column ? item[column] : tailOf(item)[filter.key]);
 
-  return {
-    ok: true, error: null,
-    // Strict equality on purpose. A loose `==` would let a number field match its own
-    // string form, and the two engines disagree about which one they hand back (SQLite
-    // REAL vs Postgres numeric-as-string), so a loose match would filter differently per
-    // engine for the same data.
-    items: items.filter((i) => read(i) === filter.equals),
-  };
+  // BLZ-335 (C5). A promoted value comes back in a DIFFERENT JS type depending on the
+  // engine, so a raw `===` matched on one and matched nothing on the other for identical
+  // data — the worst kind of divergence, because both answers look like results:
+  //   boolean  SQLite stores 1/0 (there is no boolean type); Postgres returns a real boolean
+  //   number   Postgres `numeric` arrives from node-pg as a STRING; SQLite REAL as a number
+  //   date     Postgres `date` arrives as a Date object; SQLite TEXT as an ISO string
+  // Both sides are normalised to one canonical form BEFORE comparing, using the field's
+  // declared data_type — the only thing that knows which of these applies. Comparison stays
+  // strict; the coercion is explicit and typed, not a loose `==` that would also let a text
+  // field match a number.
+  const canon = canonical(def.data_type);
+  const want = canon(filter.equals);
+  return { ok: true, error: null, items: items.filter((i) => canon(read(i)) === want) };
+}
+
+function canonical(data_type) {
+  if (data_type === "boolean") {
+    return (v) => (v == null ? null
+      : v === true || v === 1 || v === "1" || v === "true" ? true
+      : v === false || v === 0 || v === "0" || v === "false" ? false
+      : null);
+  }
+  if (data_type === "number") {
+    return (v) => {
+      if (v == null || typeof v === "boolean" || (typeof v === "string" && v.trim() === "")) return null;
+      const n = Number(v);
+      return Number.isFinite(n) ? n : null;
+    };
+  }
+  if (data_type === "date") {
+    // To a calendar DAY, not an instant: a `date` column has no time, and a Date object from
+    // node-pg carries a midnight that would never equal the string a caller filters with.
+    return (v) => {
+      if (v == null) return null;
+      if (v instanceof Date) return Number.isNaN(v.getTime()) ? null : v.toISOString().slice(0, 10);
+      const s = String(v).trim();
+      return /^\d{4}-\d{2}-\d{2}/.test(s) ? s.slice(0, 10) : null;
+    };
+  }
+  // text and enum: compare as strings, so an engine returning a number for a text column
+  // cannot silently miss. `null` stays null so a missing value never equals a supplied one.
+  return (v) => (v == null ? null : String(v));
 }

@@ -708,7 +708,7 @@ describe("BLZ-329 (§3.4): the field budget is surfaced through the API, not onl
 
   test("the standing read is available without defining anything", async () => {
     const { api } = makeApi({ fieldDefinitions: [fd({ key: "a" }), fd({ key: "b" })] });
-    assert.equal(api.fieldBudget().artifact.used, 2);
+    assert.equal((await api.fieldBudget()).artifact.used, 2);
   });
 
   test("the count comes from PERSISTED state, never from the request (the C5 defect)", async () => {
@@ -726,7 +726,7 @@ describe("BLZ-329 (§3.4): the field budget is surfaced through the API, not onl
       fd({ key: "b", project_key: "OTHER" }),
       fd({ key: "c", project_key: "OTHER" }),
     ]});
-    const b = api.fieldBudget({ project_key: "BLZ" });
+    const b = await api.fieldBudget({ project_key: "BLZ" });
     assert.equal(b.artifact.yours, 1);
     assert.equal(b.artifact.others, 2);
     assert.deepEqual(b.artifact.byProject[0], { project_key: "OTHER", used: 2 });
@@ -735,7 +735,7 @@ describe("BLZ-329 (§3.4): the field budget is surfaced through the API, not onl
   test("the refusal path still fires, and the budget it reports agrees with the read", async () => {
     const { api, state } = makeApi({
       fieldDefinitions: Array.from({ length: 200 }, (_, i) => fd({ key: `k${i}` })) });
-    assert.equal(api.fieldBudget().artifact.exhausted, true);
+    assert.equal((await api.fieldBudget()).artifact.exhausted, true);
     const r = await api.defineField(fd({ key: "onemore" }));
     assert.equal(r.ok, false);
     assert.match(r.error, /200/);
@@ -745,7 +745,7 @@ describe("BLZ-329 (§3.4): the field budget is surfaced through the API, not onl
   test("`warn` fires before the cap, so approaching it is visible while there is headroom", async () => {
     const { api } = makeApi({
       fieldDefinitions: Array.from({ length: 160 }, (_, i) => fd({ key: `k${i}` })) });
-    const b = api.fieldBudget();
+    const b = await api.fieldBudget();
     assert.equal(b.artifact.warn, true);
     assert.equal(b.artifact.exhausted, false);
     assert.ok(b.artifact.remaining > 0);
@@ -804,8 +804,10 @@ describe("BLZ-330 (§5): orphan / missing-downstream / stale-since-change throug
     const link = await api.createLink({ typeName: "Addresses", sourceId: "d1", targetId: "a1" });
     assert.equal(link.ok, true, link.error);
     // d1 changes: transition writes a revision (§3.7), which is what staleness compares.
-    state.linkTypes.push({ id: "lt9", name: "X", inverse_name: "Y",
-      source_kinds: "architecture", target_kinds: "requirement", min_card: 0, max_card: null });
+    // BLZ-335 (C10): the link is seeded reviewed at creation, so it is NOT stale yet. Roll
+    // the review behind the change to exercise the indicator.
+    assert.deepEqual(api.artifactHealth({ project_key: "BLZ" }).summary.stale, []);
+    await api.reviewLink({ id: link.link.id, reviewedAt: "1999-01-01T00:00:00.000Z" });
     await api.transition({ id: "d1", to: "proposed" });
 
     let h = api.artifactHealth({ project_key: "BLZ" });

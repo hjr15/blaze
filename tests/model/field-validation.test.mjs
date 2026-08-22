@@ -210,9 +210,12 @@ describe("splitCustomFields routes each value to exactly one home", () => {
     splitCustomFields({ definitions, values, project_key: "BLZ", kind: "requirement" });
 
   test("a filterable field goes to its cf_ column, a non-filterable one to the tail", () => {
+    // Flat since BLZ-335 (C2): the promoted value sits at cf_<key> on the record itself,
+    // the same shape the column has. It used to be nested under `promoted`, which meant the
+    // writer and every reader disagreed about where a value lived.
     const r = split([d({ key: "risk", is_filterable: true }), d({ key: "owner" })],
                     { risk: 7, owner: "ryan" });
-    assert.deepEqual(r.promoted, { cf_risk: 7 });
+    assert.equal(r.cf_risk, 7);
     assert.deepEqual(r.custom_fields, { owner: "ryan" });
   });
 
@@ -220,20 +223,40 @@ describe("splitCustomFields routes each value to exactly one home", () => {
     // Without scoping, project OTHER's promotion decision silently routes BLZ's value to a
     // cf_ column that BLZ's table may not even have.
     const r = split([d({ key: "risk", is_filterable: true, project_key: "OTHER" })], { risk: 7 });
-    assert.deepEqual(r.promoted, {});
+    assert.equal("cf_risk" in r, false);
     assert.deepEqual(r.custom_fields, { risk: 7 });
   });
 
   test("a same-named FILTERABLE definition for another KIND does not promote it either", () => {
     const r = split([d({ key: "risk", is_filterable: true, applies_to_kind: "architecture" })],
                     { risk: 7 });
-    assert.deepEqual(r.promoted, {});
+    assert.equal("cf_risk" in r, false);
     assert.deepEqual(r.custom_fields, { risk: 7 });
   });
 
   test("no values at all yields an empty object, never null", () => {
     const r = split([], {});
     assert.deepEqual(r.custom_fields, {});
-    assert.deepEqual(r.promoted, {});
+    assert.deepEqual(Object.keys(r).filter((k) => k.startsWith("cf_")), []);
+  });
+});
+
+// BLZ-337 — the unknown-data_type refusal could be deleted with nothing failing.
+describe("BLZ-337: an unknown data_type is refused in code, not left to the DB CHECK", () => {
+  test("a value for a field whose data_type is unknown is REFUSED", () => {
+    const r = validateFieldValues({
+      definitions: [{ project_key: "BLZ", applies_to_kind: "requirement", key: "x",
+                      data_type: "duration", is_required: false }],
+      values: { x: "anything at all" }, project_key: "BLZ", kind: "requirement" });
+    assert.equal(r.ok, false, "an unknown type must not silently accept every value");
+    assert.match(r.error, /duration/);
+  });
+
+  test("and a known data_type is unaffected", () => {
+    const r = validateFieldValues({
+      definitions: [{ project_key: "BLZ", applies_to_kind: "requirement", key: "x",
+                      data_type: "text", is_required: false }],
+      values: { x: "fine" }, project_key: "BLZ", kind: "requirement" });
+    assert.equal(r.ok, true, r.error);
   });
 });

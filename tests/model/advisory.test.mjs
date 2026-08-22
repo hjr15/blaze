@@ -180,3 +180,36 @@ describe("adviseStatement composes them, and NOTHING here blocks", () => {
     assert.deepEqual(a.findings, []);
   });
 });
+
+// BLZ-337 — gaps found by adversarial mutation review. Each of these was written because
+// deleting the behaviour it covers passed the ENTIRE 1,695-test suite silently.
+describe("BLZ-337: gaps that the suite accepted silently", () => {
+  test("a SINGLE-obligation sentence with two clauses is flagged (the CLAUSE_JOIN branch)", () => {
+    // Every existing positive fixture had TWO shall/musts, so it fired the other branch and
+    // the whole clause-join arm could be deleted with nothing failing — the exact "a filter
+    // every fixture already satisfies" shape. One `shall`, two clauses.
+    const f = checkSingularity("The system shall lock the account and will email the user.");
+    assert.equal(f.length, 1, "one obligation word, two clauses — still two requirements");
+    assert.equal(f[0].check, "singularity");
+  });
+
+  test("and the noun-phrase case still does NOT fire, with one obligation", () => {
+    // The discriminating pair. Without this, 'flag every and' would satisfy the test above.
+    assert.deepEqual(checkSingularity("The system shall record the first and last name."), []);
+  });
+
+  test("a quantitative threshold verified by DEMONSTRATION is flagged, not just by inspection", () => {
+    const f = checkVerificationMethod({
+      statement: "The API shall respond within 200 ms.", method: "demonstration" });
+    assert.equal(f.length, 1);
+    assert.match(f[0].why, /demonstration/i);
+  });
+
+  test("uncovered refs come back SORTED, with enough of them for order to mean anything", () => {
+    // The only previous fixture had one element, so the sort was unprovable.
+    const req = (id) => ({ id, ref: id, kind: "requirement" });
+    const c = architectureCoverage({
+      artifacts: [req("REQ-003"), req("REQ-001"), req("REQ-002")], links: [] });
+    assert.deepEqual(c.uncovered, ["REQ-001", "REQ-002", "REQ-003"]);
+  });
+});

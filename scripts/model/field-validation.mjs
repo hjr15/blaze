@@ -142,19 +142,31 @@ export function validateFieldValues({ definitions = [], values = {}, project_key
  * Scoped the same way validateFieldValues is, and by the same rule — a call site that has
  * to remember to scope is a call site that eventually will not.
  *
- * @returns { custom_fields, promoted } — `custom_fields` always an object (never null, so
- *   the NOT NULL column never has to be special-cased), `promoted` keyed by COLUMN name.
+ * @returns { custom_fields, ...cf_<key> } — ONE shape, deliberately flat (BLZ-335 C2). The
+ *   first version returned `{ custom_fields, promoted }` and the caller spread it onto the
+ *   artifact, so a promoted value sat at `artifact.promoted.cf_risk` while the table column
+ *   and every reader used `artifact.cf_risk`. matrix-filter returned zero rows for the one
+ *   artifact that matched, and its tests passed only because their fixtures hand-built the
+ *   flat shape the API never produced. `custom_fields` is always an object, never null, so
+ *   the NOT NULL column never has to be special-cased.
  */
 export function splitCustomFields({ definitions = [], values = {}, project_key, kind }) {
   const scoped = definitions.filter(
     (d) => d.project_key === project_key && d.applies_to_kind === kind);
   const filterable = new Set(scoped.filter((d) => d.is_filterable).map((d) => d.key));
 
-  const custom_fields = {};
-  const promoted = {};
+  const out = { custom_fields: {} };
   for (const [key, value] of Object.entries(values)) {
-    if (filterable.has(key)) promoted[`cf_${key}`] = value;
-    else custom_fields[key] = value;
+    if (filterable.has(key)) out[`cf_${key}`] = value;
+    else out.custom_fields[key] = value;
   }
-  return { custom_fields, promoted };
+  return out;
+}
+
+/** The column a key promotes to, or null if it lives in the tail. One definition, so the
+ *  writer and every reader cannot disagree about where a value is. */
+export function promotedColumn({ definitions = [], key, project_key, kind }) {
+  const def = definitions.find(
+    (d) => d.key === key && d.project_key === project_key && d.applies_to_kind === kind);
+  return def?.is_filterable ? `cf_${key}` : null;
 }

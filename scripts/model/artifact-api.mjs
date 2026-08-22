@@ -93,16 +93,31 @@ export function artifactApi(state, store) {
     { rule, artifacts: state.artifacts, links: links() }).violations;
   // A closure, not `this.fieldBudget` — every other shared read in this file is one, and a
   // destructured `const { defineField } = api` would silently lose a `this`-bound call.
-  const budgetFor = (project_key = null) =>
-    fieldBudget({ definitions: state.fieldDefinitions ?? [], project_key });
+  // BLZ-335 (C1): PERSISTED rows when a store is wired, `state` only as the pure-decision
+  // fallback the storeless test suite uses. `state.fieldDefinitions` is one process's memory
+  // and the budget is an INSTALL-WIDE number — the two are only the same in a single
+  // long-lived process, which production is not.
+  const definitionsFor = async () =>
+    (store ? await store.listFieldDefinitions() : (state.fieldDefinitions ?? []));
+  const budgetFor = async (project_key = null) =>
+    fieldBudget({ definitions: await definitionsFor(), project_key });
 
   // A gate subject's children, resolved through the DEFAULT hierarchy's
   // hierarchy_membership rows -- NOT parent_id, the column §3.3 built this table to
   // replace (I1). A child can be an artifact (a goal's requirement) or a ticket, so
   // each is resolved through resolveEndpoint too, and `terminal` is computed from the
   // shared workflow registry rather than trusted as a field on the raw record.
-  const childrenOf = (itemId) => {
-    const defaultHierarchy = (state.hierarchies ?? []).find((h) => h.is_default);
+  const childrenOf = (itemId, project_key = null) => {
+    // BLZ-336: scoped to the SUBJECT'S OWN project. Unscoped, `.find(h => h.is_default)`
+    // returned whichever project's default hierarchy happened to be first in the array —
+    // and nothing constrains one default per installation. A goal in project B with a
+    // non-terminal child was gated against project A's hierarchy, found zero children there,
+    // and `goal:achieved` returned {ok:true}. A governance gate that silently APPROVES is
+    // worse than one that is absent, because it leaves a record saying the check was made.
+    const hierarchies = (state.hierarchies ?? []).filter(
+      (h) => h.is_default && (project_key == null || h.project_key == null
+                              || h.project_key === project_key));
+    const defaultHierarchy = hierarchies[0];
     if (!defaultHierarchy) return [];
     return (state.hierarchyMemberships ?? [])
       .filter((m) => m.hierarchy_id === defaultHierarchy.id && m.parent_id === itemId)
@@ -264,9 +279,16 @@ export function artifactApi(state, store) {
         existingCount,
       });
       if (!verdict.ok) return verdict;
+      // BLZ-335 (C10): `reviewed_at` is SEEDED at creation. Without it, createArtifact always
+      // writes a revision (§3.7) and a null reviewed_at means stale, so every link was stale
+      // the instant it existed — the exact "an indicator that is on for everything is off"
+      // failure the column was added to fix. Creating a link IS an act of review: the person
+      // just asserted this relationship holds as of now. What §5 wants surfaced is a change
+      // that happened AFTER that assertion.
+      const createdAt = new Date().toISOString();
       const link = {
         id: randomUUID(), link_type_id: lt.id, source_id: sourceId, target_id: targetId,
-        created_at: new Date().toISOString(), created_by: "api",
+        created_at: createdAt, created_by: "api", reviewed_at: createdAt,
       };
       state.links.push(link);
       if (store) await store.insertLink(link);
@@ -281,7 +303,9 @@ export function artifactApi(state, store) {
         subject,
         context: {
           links: links(),
-          children: childrenOf(subject.id),
+          // The subject's own project — an artifact carries project_key, and a ticket does
+          // too. Null means "unscoped", which is the pure-decision fixture case.
+          children: childrenOf(subject.id, subject.project_key ?? null),
         },
       });
       if (!verdict.ok) return verdict;
@@ -329,7 +353,8 @@ export function artifactApi(state, store) {
         return { ok: false, error: "defineField needs a project_key" };
       }
       const table = TARGET_TABLE[field.applies_to_kind] ?? "ticket";
-      const sameTable = (state.fieldDefinitions ?? [])
+      const known = await definitionsFor();
+      const sameTable = known
         .filter((d) => (TARGET_TABLE[d.applies_to_kind] ?? "ticket") === table);
       const filterable = sameTable.filter((d) => d.is_filterable);
 
@@ -360,13 +385,13 @@ export function artifactApi(state, store) {
       // seeing the remaining headroom on every promotion is what "continuously" means.
       // Computed AFTER the push so it reflects the promotion that just happened.
       return { ok: true, error: null, sql: plan.sql,
-               budget: budgetFor(field.project_key ?? null) };
+               budget: await budgetFor(field.project_key ?? null) };
     },
 
     // GET /api/field-budget — the standing surface for §3.4's install-wide budget. Counts
     // PERSISTED definitions and never a caller-supplied number: a request sending
     // `filterableCount: 0` skipping the cap was the C5 defect.
-    fieldBudget({ project_key = null } = {}) {
+    async fieldBudget({ project_key = null } = {}) {
       return budgetFor(project_key);
     },
 
@@ -514,6 +539,33 @@ export function artifactApi(state, store) {
                            linkTypes: state.linkTypes });
     },
 
+    /**
+     * Write the shipped defaults into `coverage_rule` for a project the first time anything
+     * needs them to be durable. Idempotent, and a no-op with no store wired.
+     */
+    async persistDefaultCoverageRules({ project_key }) {
+      if (!store || !project_key) return { ok: true, error: null, inserted: [] };
+      const existing = new Set(await store.listCoverageRuleNames({ project_key }));
+      const inserted = [];
+      for (const d of DEFAULT_COVERAGE_RULES) {
+        if (existing.has(d.name)) continue;
+        const row = { id: randomUUID(), project_key, ...d, enabled: d.enabled !== false };
+        await store.insertCoverageRule(row);
+        inserted.push(row.name);
+        const rules = materialiseRules();
+        const live = findRule(rules, { project_key, name: d.name });
+        if (live) { live.id = row.id; live.project_key = project_key; }
+      }
+      return { ok: true, error: null, inserted };
+    },
+
+    /** The rules as the DATABASE holds them — the durable answer, not this process's copy. */
+    async loadCoverageRules({ project_key = "BLZ" } = {}) {
+      if (!store) return allRules();
+      await this.persistDefaultCoverageRules({ project_key });
+      return store.listCoverageRules({ project_key });
+    },
+
     // GET /api/coverage — the STANDING read. Deliberately not the same obligation as
     // defineCoverageRule's report: §4.4 requires the violation list at the moment of
     // APPLYING, because an endpoint nobody opens is exactly the silent grandfathering
@@ -567,6 +619,12 @@ export function artifactApi(state, store) {
     // Disabling is a withdrawal, not an application, and reports nothing — `null`
     // rather than `[]`, so "not asked" is distinguishable from "asked, none found".
     async setCoverageRuleEnabled({ project_key, name, enabled }) {
+      // BLZ-335 (C3): DEFAULT_COVERAGE_RULES were only ever copied into `state`, never
+      // INSERTed, so the UPDATE below matched zero rows and returned {ok:true}. In memory the
+      // rule was off; the database said (by absence) it was on, and a restart silently turned
+      // it back on. `enabled` is even indexed on, as though it were the source of truth.
+      // Materialising them into the table is what makes the flag mean anything.
+      await this.persistDefaultCoverageRules({ project_key });
       const rule = findRule(materialiseRules(), { project_key, name });
       if (!rule) {
         return { ok: false, error:

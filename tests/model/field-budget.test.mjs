@@ -121,3 +121,13 @@ describe("approaching the cap is observable, not merely inferable", () => {
     assert.equal(b.ticket.exhausted, false);
   });
 });
+
+// BLZ-337 — the localeCompare tie-break was unprovable: every fixture had distinct counts.
+describe("BLZ-337: projects consuming the SAME amount are ordered deterministically", () => {
+  test("equal consumers are broken by project key, so the report does not shuffle", () => {
+    const defs = ["BBB", "AAA", "CCC"].flatMap((project_key) =>
+      Array.from({ length: 3 }, (_, i) => f({ key: `${project_key}${i}`, project_key })));
+    const b = fieldBudget({ definitions: defs });
+    assert.deepEqual(b.artifact.byProject.map((p) => p.project_key), ["AAA", "BBB", "CCC"]);
+  });
+});

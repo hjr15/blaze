@@ -222,3 +222,27 @@ if (process.env.BLAZE_TEST_PG_URL) {
     });
   });
 }
+
+// BLZ-337 — the `min = 1` default could be deleted with nothing failing: every fixture set
+// `min` explicitly. A persisted rule with no `min` is LEGAL (validateCoverageRule accepts
+// `d.min ?? 1`), and without the default `n < undefined` is always false, so such a rule
+// silently flags nothing forever. A coverage rule that can never fire is the same class of
+// failure as CS-013's silent grandfathering.
+describe("BLZ-337: a rule with no explicit `min` still requires one link", () => {
+  const NO_MIN = { name: "addressed", subject_kind: "requirement",
+                   definition: { requires_link: "Addresses", direction: "inbound" } };
+
+  test("an uncovered requirement VIOLATES a min-less rule", () => {
+    const r = evaluateCoverage({ rule: NO_MIN,
+      artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement" }], links: [] });
+    assert.equal(r.violations.length, 1, "the default of 1 must apply, not `undefined`");
+    assert.match(r.violations[0].why, /at least 1/);
+  });
+
+  test("and one link satisfies it", () => {
+    const r = evaluateCoverage({ rule: NO_MIN,
+      artifacts: [{ id: "a1", ref: "REQ-001", kind: "requirement" }],
+      links: [{ type_name: "Addresses", source_id: "d1", target_id: "a1" }] });
+    assert.deepEqual(r.violations, []);
+  });
+});

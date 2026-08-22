@@ -46,12 +46,40 @@ describe("a filter reads a promoted column or the JSON tail, transparently", () 
     assert.deepEqual(r.items.map((i) => i.ref), ["REQ-001"]);
   });
 
-  test("comparison does not coerce — cf_risk 7 is not matched by the string '7'", () => {
-    // A loose == would make a number field match its own string form and vice versa,
-    // which then differs by engine (SQLite REAL vs Postgres numeric-as-string).
-    const items = [A("REQ-001", { cf_risk: 7 })];
-    assert.equal(filterByField({ items, definitions: DEFS, filter: { key: "risk", equals: "7" } }).items.length, 0);
-    assert.equal(filterByField({ items, definitions: DEFS, filter: { key: "risk", equals: 7 } }).items.length, 1);
+  test("a NUMBER field matches its own string form — the engines disagree about which they return", () => {
+    // REVERSED by BLZ-335 (C5). The original assertion (strict ===, no coercion) was WRONG:
+    // Postgres `numeric` arrives from node-pg as a STRING and SQLite REAL as a number, so a
+    // strict comparison matched on one engine and matched nothing on the other for identical
+    // data. Both sides are now canonicalised by the field's declared data_type before
+    // comparing — explicit and typed, not a loose ==.
+    for (const stored of [7, "7"]) {
+      for (const wanted of [7, "7"]) {
+        assert.equal(
+          filterByField({ items: [A("REQ-001", { cf_risk: stored })], definitions: DEFS,
+                          filter: { key: "risk", equals: wanted } }).items.length, 1,
+          `stored ${JSON.stringify(stored)} must match wanted ${JSON.stringify(wanted)}`);
+      }
+    }
+    assert.equal(
+      filterByField({ items: [A("REQ-001", { cf_risk: 7 })], definitions: DEFS,
+                      filter: { key: "risk", equals: 8 } }).items.length, 0,
+      "but a different number must still not match");
+  });
+
+  test("coercion is TYPED, not loose — a text field is not matched by a number's string form", () => {
+    // The guard the reversed test above used to provide, kept: canonicalising by data_type
+    // must not become a general `==`.
+    const items = [A("REQ-001", { custom_fields: { owner: "7" } })];
+    assert.equal(filterByField({ items, definitions: DEFS, filter: { key: "owner", equals: "7" } }).items.length, 1);
+    assert.equal(filterByField({ items, definitions: DEFS, filter: { key: "owner", equals: "ryan" } }).items.length, 0);
+  });
+
+  test("a MISSING value never equals a supplied one, whatever the type", () => {
+    const items = [A("REQ-001")];
+    for (const [key, want] of [["risk", 0], ["owner", ""]]) {
+      assert.equal(filterByField({ items, definitions: DEFS, filter: { key, equals: want } }).items.length, 0,
+        `absent must not match ${JSON.stringify(want)}`);
+    }
   });
 
   test("an UNKNOWN field key is REFUSED, naming it", () => {
@@ -74,5 +102,28 @@ describe("a filter reads a promoted column or the JSON tail, transparently", () 
     const r = filterByField({ items: [A("REQ-001")], definitions: defs,
                               filter: { key: "risk", equals: 1 }, kind: "requirement" });
     assert.equal(r.ok, false, "a field defined only for architecture is unknown to a requirement filter");
+  });
+});
+
+// BLZ-337 — two gaps the suite accepted silently.
+describe("BLZ-337: filter scoping and the empty-filter contract", () => {
+  test("a same-named definition in ANOTHER PROJECT does not satisfy this filter", () => {
+    // Fixtures only ever varied `kind`, never project, so the project clause of the scoping
+    // could be deleted entirely with nothing failing.
+    const foreign = [{ project_key: "OTHER", applies_to_kind: "requirement", key: "risk",
+                       data_type: "number", is_filterable: true }];
+    const r = filterByField({ items: [A("REQ-001", { cf_risk: 7 })], definitions: foreign,
+                              filter: { key: "risk", equals: 7 }, project_key: "BLZ" });
+    assert.equal(r.ok, false, "a field defined only in project OTHER is unknown to a BLZ filter");
+    assert.match(r.error, /risk/);
+  });
+
+  test("an EMPTY filter object means 'no filter', not a refusal", () => {
+    // `{}` arrives from a UI that always sends the key. Treating it as a refusal turns a
+    // blank filter box into an error; treating it as "match nothing" is worse still.
+    const items = [A("REQ-001"), A("REQ-002")];
+    const r = filterByField({ items, definitions: DEFS, filter: {} });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.items, items);
   });
 });
