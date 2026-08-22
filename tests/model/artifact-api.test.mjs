@@ -581,3 +581,114 @@ describe("BLZ-327 (§4.4): applying a coverage rule reports every current violat
     assert.ok(after.includes(RULE.name));
   });
 });
+
+// BLZ-328 — §4.1's third write-time block, proven THROUGH THE API per §4.5. `is_required`,
+// `enum_values`, `min_value` and `max_value` had been columns nothing read since BLZ-321.
+describe("BLZ-328 (§4.1): required, enum, type and range are enforced BY THE API", () => {
+  function makeFieldApi(definitions) {
+    return makeApi({
+      artifacts: [],
+      fieldDefinitions: definitions,
+    });
+  }
+  const defn = (o) => ({
+    project_key: "BLZ", applies_to_kind: "requirement", data_type: "text",
+    is_required: false, enum_values: null, min_value: null, max_value: null, ...o,
+  });
+
+  test("a missing required field refuses createArtifact, naming the field", async () => {
+    const { api } = makeFieldApi([defn({ key: "owner", is_required: true })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /owner/);
+  });
+
+  test("supplying it succeeds", async () => {
+    const { api } = makeFieldApi([defn({ key: "owner", is_required: true })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                         fields: { owner: "ryan" } });
+    assert.equal(r.ok, true, r.error);
+    assert.deepEqual(r.artifact.fields, { owner: "ryan" });
+  });
+
+  test("an out-of-enum value is refused BY THE API and the legal values come back", async () => {
+    const { api } = makeFieldApi([defn({ key: "sev", data_type: "enum", enum_values: "low,high" })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                         fields: { sev: "nope" } });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /low/);
+    assert.match(r.error, /high/);
+  });
+
+  test("an out-of-range number is refused BY THE API", async () => {
+    const { api } = makeFieldApi([defn({ key: "score", data_type: "number", min_value: "1", max_value: "5" })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                         fields: { score: 9 } });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /range/);
+  });
+
+  test("EVERY violation comes back in one refusal, not just the first", async () => {
+    const { api } = makeFieldApi([
+      defn({ key: "owner", is_required: true }),
+      defn({ key: "sev", data_type: "enum", enum_values: "low,high" }),
+      defn({ key: "score", data_type: "number", min_value: "1", max_value: "5" }),
+    ]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                         fields: { sev: "nope", score: 99 } });
+    assert.equal(r.ok, false);
+    assert.equal(r.violations.length, 3);
+    assert.deepEqual(r.violations.map((v) => v.key).sort(), ["owner", "score", "sev"]);
+  });
+
+  // A refused write that has already burned a ref leaves a permanent hole in the
+  // sequence -- and the ledger (BLZ-326) is append-only, so it can never be reclaimed.
+  test("a refused write records NOTHING — no artifact, no revision, no ref consumed", async () => {
+    const { api, state } = makeFieldApi([defn({ key: "owner", is_required: true })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.equal(state.artifacts.length, 0);
+    assert.equal((state.artifactRevisions ?? []).length, 0);
+
+    const ok = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                          fields: { owner: "ryan" } });
+    assert.equal(ok.ok, true, ok.error);
+    assert.equal(ok.artifact.ref, "REQ-001", "the refused write must not have consumed REQ-001");
+  });
+
+  test("a field defined for ARCHITECTURE does not constrain a requirement write", async () => {
+    const { api } = makeFieldApi([
+      defn({ key: "owner", is_required: true, applies_to_kind: "architecture" })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, true, r.error);
+  });
+
+  test("a field defined for ANOTHER project does not constrain this one", async () => {
+    const { api } = makeFieldApi([defn({ key: "owner", is_required: true, project_key: "OTHER" })]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, true, r.error);
+  });
+
+  test("with no field definitions at all, createArtifact is unchanged", async () => {
+    const { api } = makeFieldApi([]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, true, r.error);
+  });
+
+  // Order matters: the ref is allocated AFTER validation, and the wording lint is a
+  // separate block. A field violation must not be masked by, or mask, the lint.
+  test("a field violation and a wording-lint block are both reachable", async () => {
+    const { api } = makeFieldApi([defn({ key: "owner", is_required: true })]);
+    const both = await api.createArtifact({
+      kind: "requirement", title: "R", project_key: "BLZ",
+      statement: "The system shall be user-friendly and etc." });
+    assert.equal(both.ok, false);
+    assert.match(both.error, /owner/, "the field block runs first and names the field");
+
+    const lintOnly = await api.createArtifact({
+      kind: "requirement", title: "R", project_key: "BLZ", fields: { owner: "ryan" },
+      statement: "The system shall be user-friendly and etc." });
+    assert.equal(lintOnly.ok, false, "and the lint is still reachable once fields are valid");
+    assert.match(lintOnly.error, /wording lint/);
+  });
+});

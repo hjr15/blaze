@@ -337,6 +337,66 @@ describe("BLZ-327 (SQLite): a coverage rule defined through the API lands in cov
   });
 });
 
+// BLZ-328 — a refused write must leave the DATABASE untouched, not merely the in-memory
+// arrays. The two can disagree: `state.artifacts.length === 0` says nothing about whether
+// an INSERT already ran, and the ref_claim ledger is append-only, so a burned ref is a
+// permanent hole in the sequence.
+describe("BLZ-328 (SQLite): a field-validation refusal writes nothing to any table", () => {
+  const defn = (o) => ({
+    id: "fd1", project_key: "BLZ", key: "owner", label: "Owner", data_type: "text",
+    applies_to_kind: "requirement", is_filterable: false, is_required: true,
+    enum_values: null, min_value: null, max_value: null, ...o,
+  });
+
+  function wire(definitions) {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    state.fieldDefinitions = definitions;
+    return { db, api: artifactApi(state, store), state };
+  }
+
+  test("no artifact row, no revision row, and no ref_claim row", async () => {
+    const { db, api } = wire([defn({})]);
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /owner/);
+    assert.equal(db.prepare("SELECT count(*) n FROM artifact").get().n, 0);
+    assert.equal(db.prepare("SELECT count(*) n FROM artifact_revision").get().n, 0);
+    assert.equal(db.prepare("SELECT count(*) n FROM ref_claim").get().n, 0,
+      "a refused write must not burn a ref — the ledger is append-only");
+  });
+
+  test("and the next VALID write still gets REQ-001", async () => {
+    const { db, api } = wire([defn({})]);
+    await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    const ok = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                          fields: { owner: "ryan" } });
+    assert.equal(ok.ok, true, ok.error);
+    assert.equal(ok.artifact.ref, "REQ-001");
+    assert.equal(db.prepare("SELECT ref FROM artifact").get().ref, "REQ-001");
+  });
+
+  // The definitions the API validates against are the ones a REAL field_definition table
+  // holds -- read back through the store, not a hand-built fixture that could disagree
+  // with what defineField actually persists.
+  test("the constraint that refuses is the one defineField really persisted", async () => {
+    const db = openSqlite();
+    const store = artifactStore(sqliteExec(db), { dialect: "sqlite" });
+    const state = baseState();
+    const api = artifactApi(state, store);
+
+    const f = await api.defineField(defn({ is_required: true }));
+    assert.equal(f.ok, true, f.error);
+    const row = db.prepare("SELECT is_required FROM field_definition WHERE key = 'owner'").get();
+    assert.equal(row.is_required, 1, "is_required must survive the round trip as 1, not NULL");
+
+    const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /owner/);
+  });
+});
+
 // --- Postgres ----------------------------------------------------------------------
 
 if (process.env.BLAZE_TEST_PG_URL) {
@@ -574,6 +634,39 @@ if (process.env.BLAZE_TEST_PG_URL) {
         assert.equal(r.ok, true, r.error);
         assert.deepEqual(r.currentViolations.map((v) => v.ref).sort(),
           ["REQ-001", "REQ-002", "REQ-003"]);
+      } finally {
+        await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
+        await db.end();
+      }
+    });
+    // BLZ-328: the same refusal, against the engine that ships.
+    test("a field-validation refusal writes nothing to artifact, artifact_revision or ref_claim", async () => {
+      const db = await openPg();
+      try {
+        const store = artifactStore(pgExec(db), { dialect: "postgres" });
+        const state = baseStatePg();
+        const api = artifactApi(state, store);
+
+        const f = await api.defineField({
+          id: "fd1", project_key: "BLZ", key: "owner", label: "Owner", data_type: "text",
+          applies_to_kind: "requirement", is_filterable: false, is_required: true,
+        });
+        assert.equal(f.ok, true, f.error);
+        const def = await db.query("SELECT is_required FROM field_definition WHERE key = 'owner'");
+        assert.equal(def.rows[0].is_required, true, "must be a real boolean true");
+
+        const r = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ" });
+        assert.equal(r.ok, false);
+        assert.match(r.error, /owner/);
+        for (const t of ["artifact", "artifact_revision", "ref_claim"]) {
+          const { rows } = await db.query(`SELECT count(*)::int n FROM ${t}`);
+          assert.equal(rows[0].n, 0, `${t} must be empty after a refused write`);
+        }
+
+        const ok = await api.createArtifact({ kind: "requirement", title: "R", project_key: "BLZ",
+                                              fields: { owner: "ryan" } });
+        assert.equal(ok.ok, true, ok.error);
+        assert.equal(ok.artifact.ref, "REQ-001", "the refused write must not have consumed REQ-001");
       } finally {
         await db.query(`DROP SCHEMA IF EXISTS ${SCHEMA} CASCADE`).catch(() => {});
         await db.end();

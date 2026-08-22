@@ -15,6 +15,7 @@ import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
+import { validateFieldValues } from "./field-validation.mjs";
 import { ARTIFACT_KINDS } from "./artifact-schema.mjs";
 
 /**
@@ -128,13 +129,25 @@ export function artifactApi(state, store) {
     // pure in-memory fixtures the rest of this suite uses never withdraw an artifact
     // mid-test, and keeping the old live-set fallback there avoids requiring every
     // existing test to stand up a database purely to allocate a ref.
-    async createArtifact({ kind, title, ref, statement, reason, project_key, ...rest }) {
+    async createArtifact({ kind, title, ref, statement, reason, project_key, fields, ...rest }) {
       if (!project_key) {
         return { ok: false, error: "createArtifact needs a project_key" };
       }
       if (!String(title ?? "").trim()) {
         return { ok: false, error: "createArtifact needs a non-empty title" };
       }
+
+      // §4.1's third write-time block (BLZ-328). Custom field values arrive under an
+      // explicit `fields` key rather than being fished out of `...rest`: required-field
+      // presence has to know which keys the caller actually supplied, and `rest` conflates
+      // them with real artifact columns like `body` and `status`. Validated BEFORE the ref
+      // is allocated, so a refused write consumes nothing from the ledger.
+      const fieldVerdict = validateFieldValues({
+        definitions: state.fieldDefinitions ?? [], values: fields ?? {}, project_key, kind });
+      if (!fieldVerdict.ok) {
+        return { ok: false, error: fieldVerdict.error, violations: fieldVerdict.violations };
+      }
+
       const lint = lintStatement(statement);
       if (lint.blocked.length && !reason) {
         return { ok: false, error:
@@ -196,6 +209,12 @@ export function artifactApi(state, store) {
         // attributable act, so the reason string travels with the artifact rather
         // than being consumed and discarded at the gate.
         ...(reason != null ? { wording_override_reason: reason } : {}),
+        // Carried on the record but NOT handed to the store: `insertArtifact` has a fixed
+        // column list, and the JSON tail column §3.4 calls for does not exist yet (the
+        // other half of review finding I6). This ticket is the VALIDATION, not the
+        // storage — the values would otherwise be silently dropped with no trace that
+        // they were ever supplied.
+        ...(fields != null ? { fields } : {}),
       };
       state.artifacts.push(artifact);
 
