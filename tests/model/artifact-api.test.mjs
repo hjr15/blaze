@@ -177,7 +177,7 @@ describe("the goal:achieved gap: children resolved via hierarchy_membership, not
 describe("C4: RQ-4a's wording lint is wired into createArtifact, not just its own test", () => {
   test("a block-tier statement is refused, naming the phrase and why", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x",
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ",
       statement: "The system shall be user friendly." });
     assert.equal(r.ok, false);
     assert.match(r.error, /user friendly/);
@@ -185,7 +185,7 @@ describe("C4: RQ-4a's wording lint is wired into createArtifact, not just its ow
 
   test("the same statement succeeds once a reason is given, and the reason is recorded", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x",
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ",
       statement: "The system shall be user friendly.",
       reason: "client contract wording, verbatim" });
     assert.equal(r.ok, true, r.error);
@@ -194,11 +194,46 @@ describe("C4: RQ-4a's wording lint is wired into createArtifact, not just its ow
 
   test("a warn-tier statement succeeds WITH a warning, and is never refused", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x",
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ",
       statement: "The system shall never store plaintext passwords." });
     assert.equal(r.ok, true, r.error);
     assert.equal(r.warnings.length, 1);
     assert.match(r.warnings[0].phrase, /never/);
+  });
+});
+
+describe("BLZ-325: createArtifact refuses a row the real schema could not hold", () => {
+  // artifactDdl: project_key and title are both NOT NULL, and title also carries
+  // CHECK (length(trim(title)) > 0). Refused here, with a named reason, rather than
+  // surfacing as a raw NOT NULL / CHECK constraint violation from the database.
+  test("a missing project_key is refused", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", title: "x" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /project_key/);
+  });
+
+  test("a missing title is refused", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /title/);
+  });
+
+  test("a blank (whitespace-only) title is refused", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", title: "   ", project_key: "BLZ" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /title/);
+  });
+
+  test("a well-formed artifact carries project_key, created_at and updated_at", async () => {
+    const { api } = makeApi();
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ" });
+    assert.equal(r.ok, true, r.error);
+    assert.equal(r.artifact.project_key, "BLZ");
+    assert.ok(r.artifact.created_at);
+    assert.ok(r.artifact.updated_at);
   });
 });
 
@@ -207,35 +242,35 @@ describe("ref format and monotonicity are enforced at the API, not the database"
   // and MONOTONICITY are enforced here, where the refusal can name the expected shape.
   test("a malformed ref is refused, naming the expected shape", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x", ref: "NOTAREF" });
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ", ref: "NOTAREF" });
     assert.equal(r.ok, false);
     assert.match(r.error, /REQ-nnn/);
   });
 
   test("a ref of the wrong kind is refused", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x", ref: "ADR-0001" });
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ", ref: "ADR-0001" });
     assert.equal(r.ok, false);
     assert.match(r.error, /architecture ref/);
   });
 
   test("a ref that does not advance past the highest allocated one is refused", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x", ref: "REQ-001" });
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ", ref: "REQ-001" });
     assert.equal(r.ok, false);
     assert.match(r.error, /monotonically/);
   });
 
   test("a well-formed, advancing ref is accepted", async () => {
     const { api, state } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x", ref: "REQ-002" });
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ", ref: "REQ-002" });
     assert.equal(r.ok, true);
     assert.equal(state.artifacts.length, 2);
   });
 
   test("omitting the ref allocates the next one", async () => {
     const { api } = makeApi();
-    const r = await api.createArtifact({ kind: "requirement", title: "x" });
+    const r = await api.createArtifact({ kind: "requirement", title: "x", project_key: "BLZ" });
     assert.equal(r.ok, true);
     assert.equal(r.artifact.ref, "REQ-002");
   });
@@ -293,8 +328,19 @@ describe("document:baselined composes evaluateCoverage into checkGate, in the AP
       // a ticket, not an artifact). Previously this test redefined Verifies as
       // architecture-sourced to route around C1; restored to the true shape.
       tickets: [{ id: "f1", type: "feature", status: "defined" }],
-      documents: [{ id: "d1", title: "Spec", kind: "requirements", status: "draft" }],
+      // project_key: baselineDocument (§3.6) derives the baseline's own project_key
+      // from the document's, so the document must carry one — it is NOT NULL in
+      // documentDdl regardless.
+      documents: [{ id: "d1", project_key: "BLZ", title: "Spec", kind: "requirements", status: "draft" }],
       artifactUsages: [{ document_id: "d1", artifact_id: "a1", ord: 1, depth: 0 }],
+      // A revision for a1, the one member document usages reference. Seeded directly
+      // here (rather than only via createArtifact) because these artifacts are also
+      // seeded directly — a fixture stands in for "this artifact already existed
+      // before this test", and baselineDocument now requires a real revision to pin.
+      artifactRevisions: [
+        { id: "rev-a1-1", artifact_id: "a1", at: "2026-01-01T00:00:00.000Z",
+          actor: "seed", snapshot: "{}" },
+      ],
     });
     return { api, state };
   }
@@ -305,6 +351,25 @@ describe("document:baselined composes evaluateCoverage into checkGate, in the AP
     assert.equal(r.ok, false);
     assert.match(r.error, /REQ-001/);
     assert.match(r.error, /Addresses/);
+  });
+
+  // BLZ-325: a member with no revision recorded must refuse the baseline BEFORE it is
+  // ever created, naming the ref — never a NULL pin, per §3.6/§3.7. Coverage is
+  // satisfied first here, specifically so the failure under test is the revision
+  // check, not the (already-covered) coverage gate.
+  test("baselining is refused when a member artifact has no revision recorded", async () => {
+    const { api, state } = makeDocApi();
+    state.artifactRevisions.length = 0;   // a1 now has no revision to pin
+    await api.createLink({ typeName: "Addresses", sourceId: "arch1", targetId: "a1" });
+    state.linkTypes.push({ id: "lt3", name: "Verifies", inverse_name: "Verified by",
+      source_kinds: "story,feature", target_kinds: "requirement", min_card: 0, max_card: null });
+    await api.createLink({ typeName: "Verifies", sourceId: "f1", targetId: "a1" });
+
+    const r = await api.baselineDocument({ documentId: "d1", name: "v1" });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /REQ-001/);
+    assert.match(r.error, /revision/);
+    assert.equal((state.baselines ?? []).length, 0, "no baseline must be recorded on refusal");
   });
 
   test("baselining succeeds once coverage is clean, and records the baseline", async () => {
@@ -320,9 +385,16 @@ describe("document:baselined composes evaluateCoverage into checkGate, in the AP
     assert.equal(verifies.ok, true, verifies.error);
 
     const r = await api.baselineDocument({ documentId: "d1", name: "v1" });
-    assert.equal(r.ok, true);
+    assert.equal(r.ok, true, r.error);
     assert.equal(state.documents[0].status, "baselined");
     assert.equal(state.baselines.length, 1);
-    assert.deepEqual(state.baselines[0].member_ids, ["a1"]);
+    // §3.6: project-scoped, not per-document — no document_id, no member_ids array on
+    // the baseline itself; membership lives in baseline_member, pinned to a revision.
+    assert.equal(state.baselines[0].project_key, "BLZ");
+    assert.equal("document_id" in state.baselines[0], false);
+    assert.equal("member_ids" in state.baselines[0], false);
+    assert.deepEqual(
+      state.baselineMembers.map((m) => ({ artifact_id: m.artifact_id, revision_id: m.revision_id })),
+      [{ artifact_id: "a1", revision_id: "rev-a1-1" }]);
   });
 });

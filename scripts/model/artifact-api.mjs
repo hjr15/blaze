@@ -15,6 +15,7 @@ import { buildMatrix } from "./matrix.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
 import { isTerminal } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
+import { ARTIFACT_KINDS } from "./artifact-schema.mjs";
 
 /**
  * The model is polymorphic across `artifact` and `ticket` (design §3.1/§3.3):
@@ -51,7 +52,18 @@ export function denormaliseLinks({ links = [], linkTypes = [] }) {
   return links.map((l) => ({ ...l, type_name: typeById.get(l.link_type_id)?.name ?? null }));
 }
 
-export function artifactApi(state) {
+/**
+ * @param state  the in-memory record set the pure decision functions (checkLink,
+ *   checkGate, evaluateCoverage, buildMatrix) read from and this API keeps current —
+ *   unchanged from before BLZ-325.
+ * @param store  OPTIONAL — an `artifactStore(exec, {dialect})` (artifact-store.mjs),
+ *   the I/O half of this API, following the identity.mjs/identity-store.mjs split.
+ *   When given, every mutating method ALSO persists to the real schema the other
+ *   thirteen modules define, instead of stopping at `state`'s in-memory arrays — the
+ *   defect BLZ-325 exists to close (in-memory-only behaviour when `store` is omitted
+ *   is preserved for the existing pure-decision test suite, which never wires one).
+ */
+export function artifactApi(state, store) {
   const typeByName = (n) => state.linkTypes.find((t) => t.name === n) ?? null;
   const links = () => denormaliseLinks({ links: state.links, linkTypes: state.linkTypes });
 
@@ -83,7 +95,26 @@ export function artifactApi(state) {
     // justification for the override existing at all). Warn tier never blocks --
     // "the system shall never store plaintext passwords" is a genuine requirement --
     // and is surfaced on the response either way so it is not just silently dropped.
-    async createArtifact({ kind, title, ref, statement, reason, ...rest }) {
+    // BLZ-325 (C2/C3): a createArtifact output that cannot be inserted into the real
+    // `artifact` table proves nothing about what the API actually does. `project_key`
+    // and a non-empty `title` are both NOT NULL / CHECKed in artifactDdl, so both are
+    // validated here rather than left to surface as a raw constraint violation.
+    // `created_at`/`updated_at` are stamped here for the same reason.
+    //
+    // Ref allocation: when `ref` is omitted, allocation goes through the ref_claim
+    // LEDGER (claimRef, BLZ-326) rather than `nextRef` over the live artifact set --
+    // that live-set read is exactly the C3 defect (a withdrawn artifact's ref gets
+    // silently reissued). The ledger read only happens when a `store` is wired; the
+    // pure in-memory fixtures the rest of this suite uses never withdraw an artifact
+    // mid-test, and keeping the old live-set fallback there avoids requiring every
+    // existing test to stand up a database purely to allocate a ref.
+    async createArtifact({ kind, title, ref, statement, reason, project_key, ...rest }) {
+      if (!project_key) {
+        return { ok: false, error: "createArtifact needs a project_key" };
+      }
+      if (!String(title ?? "").trim()) {
+        return { ok: false, error: "createArtifact needs a non-empty title" };
+      }
       const lint = lintStatement(statement);
       if (lint.blocked.length && !reason) {
         return { ok: false, error:
@@ -96,7 +127,9 @@ export function artifactApi(state) {
 
       let finalRef = ref;
       if (finalRef == null) {
-        finalRef = nextRef({ kind, existing: existingRefs });
+        finalRef = store
+          ? await store.claimRef({ project_key, kind })
+          : nextRef({ kind, existing: existingRefs });
       } else {
         const parsed = parseRef(finalRef);
         if (!parsed) {
@@ -108,26 +141,61 @@ export function artifactApi(state) {
           return { ok: false, error:
             `ref ${finalRef} is a ${parsed.kind} ref and cannot be used for a ${kind}` };
         }
-        const highest = existingRefs.reduce((max, r) => {
+        let highest = existingRefs.reduce((max, r) => {
           const p = parseRef(r);
           return p && p.num > max ? p.num : max;
         }, 0);
+        // The ledger may remember a claim the live artifact set no longer does (the
+        // artifact it named was withdrawn) -- combine both so an explicit ref cannot
+        // reuse either one's memory of what was already handed out.
+        if (store) {
+          const claimed = await store.claimedRefs({ project_key, kind });
+          highest = claimed.reduce((max, r) => {
+            const p = parseRef(r);
+            return p && p.num > max ? p.num : max;
+          }, highest);
+        }
         if (parsed.num <= highest) {
           return { ok: false, error:
             `ref ${finalRef} does not advance past the highest allocated ${kind} ref `
             + `(currently ${highest}) — refs must increase monotonically` };
         }
+        // Register the caller's explicit choice in the ledger too, so a LATER omitted-
+        // ref allocation (claimRef) can never hand this same number back out.
+        if (store) {
+          await store.registerRef({ project_key, kind, num: parsed.num, ref: finalRef });
+        }
       }
 
+      const now = new Date().toISOString();
       const artifact = {
-        id: randomUUID(), kind, title, ref: finalRef, statement,
+        id: randomUUID(), project_key, kind, title, ref: finalRef, statement,
         status: rest.status ?? "proposed", ...rest,
+        created_at: now, updated_at: now,
         // Recorded per ADR-0017, not merely accepted -- an override is a deliberate,
         // attributable act, so the reason string travels with the artifact rather
         // than being consumed and discarded at the gate.
         ...(reason != null ? { wording_override_reason: reason } : {}),
       };
       state.artifacts.push(artifact);
+
+      // §3.7: every change to an artifact writes a revision row -- append-only, and
+      // this is what a baseline pins (never the live artifact). Recorded in `state`
+      // regardless of `store`, so baselineDocument's revision lookup works the same
+      // way whether or not a real database is wired.
+      const revision = {
+        id: randomUUID(), artifact_id: artifact.id, at: now, actor: "api",
+        snapshot: JSON.stringify({ title: artifact.title, statement: artifact.statement,
+                                    body: artifact.body ?? null, status: artifact.status }),
+      };
+      state.artifactRevisions = state.artifactRevisions ?? [];
+      state.artifactRevisions.push(revision);
+
+      if (store) {
+        await store.insertArtifact(artifact);
+        await store.insertRevision(revision);
+      }
+
       return { ok: true, error: null, artifact, warnings: lint.warnings };
     },
 
@@ -147,6 +215,7 @@ export function artifactApi(state) {
         created_at: new Date().toISOString(), created_by: "api",
       };
       state.links.push(link);
+      if (store) await store.insertLink(link);
       return { ok: true, error: null, link };
     },
 
@@ -169,6 +238,27 @@ export function artifactApi(state) {
       const record = state.artifacts.find((a) => a.id === id)
         ?? (state.tickets ?? []).find((t) => t.id === id);
       record.status = to;
+
+      // Only an `artifact` row exists in the schema this ticket reconciles against --
+      // a ticket's own persistence is the pre-existing v3 write port (write-port.mjs),
+      // a separate and much larger surface this ticket does not touch. §3.7's "every
+      // change writes a revision" applies to artifacts.
+      if (ARTIFACT_KINDS.includes(subject.kind)) {
+        const now = new Date().toISOString();
+        record.updated_at = now;
+        const revision = {
+          id: randomUUID(), artifact_id: id, at: now, actor: "api",
+          snapshot: JSON.stringify({ title: record.title, statement: record.statement,
+                                      body: record.body ?? null, status: record.status }),
+        };
+        state.artifactRevisions = state.artifactRevisions ?? [];
+        state.artifactRevisions.push(revision);
+        if (store) {
+          await store.updateArtifactStatus({ id, status: to, updated_at: now });
+          await store.insertRevision(revision);
+        }
+      }
+
       return { ok: true, error: null };
     },
 
@@ -181,21 +271,36 @@ export function artifactApi(state) {
     // (artifact vs ticket, via the same TARGET_TABLE lookup promotionPlan itself uses)
     // per §3.4's "the two tables carry independent column budgets".
     async defineField(field) {
+      if (store && !field.project_key) {
+        return { ok: false, error: "defineField needs a project_key" };
+      }
       const table = TARGET_TABLE[field.applies_to_kind] ?? "ticket";
       const sameTable = (state.fieldDefinitions ?? [])
         .filter((d) => (TARGET_TABLE[d.applies_to_kind] ?? "ticket") === table);
       const filterable = sameTable.filter((d) => d.is_filterable);
 
+      // The engine a promoted column's SQL type must match is the STORE's dialect,
+      // not an unrelated `state.engine` flag -- generating SQLite's `REAL` and running
+      // it against a wired Postgres store would fail the ALTER TABLE outright.
       const plan = promotionPlan({
         field,
         existingColumns: filterable.map((d) => `cf_${d.key}`),
         filterableCount: filterable.length,
-        engine: state.engine ?? "sqlite",
+        engine: store?.dialect ?? state.engine ?? "sqlite",
       });
       if (!plan.ok) return { ok: false, error: plan.error };
 
+      const record = { id: field.id ?? randomUUID(), ...field };
       state.fieldDefinitions = state.fieldDefinitions ?? [];
-      state.fieldDefinitions.push({ ...field });
+      state.fieldDefinitions.push(record);
+
+      if (store) {
+        await store.insertFieldDefinition(record);
+        // promotionPlan returns SQL, it never executes it (its own header says so) --
+        // this is the one place that actually runs the ALTER TABLE it returned.
+        await store.runDdl(plan.sql);
+      }
+
       return { ok: true, error: null, sql: plan.sql };
     },
 
@@ -204,9 +309,19 @@ export function artifactApi(state) {
     // the four gates have nothing to do with coverage). The composition — run every
     // coverage rule over this document's artifacts, then hand the violations to
     // checkGate — belongs here, in the API layer, per the task-13 ruling.
+    // BLZ-325 (C2, §3.6): a baseline is scoped to the PROJECT, never the document --
+    // `document_id` is not a column `baselineDdl` defines, and baseline.test.mjs:96
+    // asserts exactly that shape. The baseline's project_key is the document's own
+    // (the document already carries one; nothing new for the caller to supply). Every
+    // member is pinned to a specific `revision_id` (§3.7) rather than the live
+    // artifact -- an artifact with no revision recorded yet is a caller error the
+    // baseline must refuse, never a NULL pin.
     async baselineDocument({ documentId, name, note, createdBy = "api" }) {
       const document = (state.documents ?? []).find((d) => d.id === documentId);
       if (!document) return { ok: false, error: `no such document ${documentId}` };
+      if (!document.project_key) {
+        return { ok: false, error: `document ${documentId} has no project_key` };
+      }
 
       const memberIds = new Set(
         (state.artifactUsages ?? [])
@@ -226,14 +341,48 @@ export function artifactApi(state) {
       });
       if (!verdict.ok) return verdict;
 
+      // The LATEST revision per member, by insertion order (artifact_revision is
+      // append-only, so the last entry recorded for an id is the current one). Every
+      // member must resolve one -- a requirement created before revisions existed, or
+      // never re-created through createArtifact/transition, has none, and that is
+      // reported by name rather than silently pinning nothing.
+      const revisions = state.artifactRevisions ?? [];
+      const missing = [];
+      const members = [];
+      for (const artifactId of memberIds) {
+        let latest = null;
+        for (const r of revisions) if (r.artifact_id === artifactId) latest = r;
+        if (!latest) {
+          const a = state.artifacts.find((x) => x.id === artifactId);
+          missing.push(a?.ref ?? artifactId);
+          continue;
+        }
+        members.push({ artifact_id: artifactId, revision_id: latest.id });
+      }
+      if (missing.length) {
+        return { ok: false, error:
+          `cannot baseline: no revision recorded for ${missing.join(", ")} -- `
+          + "a baseline pins a revision, never the live artifact" };
+      }
+
       document.status = "baselined";
       const baseline = {
-        id: randomUUID(), name, note: note ?? null, document_id: documentId,
-        member_ids: [...memberIds], created_at: new Date().toISOString(), created_by: createdBy,
+        id: randomUUID(), project_key: document.project_key, name, note: note ?? null,
+        created_at: new Date().toISOString(), created_by: createdBy,
       };
       state.baselines = state.baselines ?? [];
       state.baselines.push(baseline);
-      return { ok: true, error: null, baseline };
+
+      state.baselineMembers = state.baselineMembers ?? [];
+      const memberRows = members.map((m) => ({ baseline_id: baseline.id, ...m }));
+      state.baselineMembers.push(...memberRows);
+
+      if (store) {
+        await store.insertBaseline(baseline);
+        for (const m of memberRows) await store.insertBaselineMember(m);
+      }
+
+      return { ok: true, error: null, baseline, members: memberRows };
     },
 
     // GET /api/matrix
