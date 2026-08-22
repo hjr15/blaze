@@ -24,7 +24,15 @@ const SQL_TYPE = {
 // retyping it there would create a second copy that could silently drift from this one.
 export const TARGET_TABLE = { requirement: "artifact", architecture: "artifact" };
 
-export function promotionPlan({ field, existingColumns = [], filterableCount = 0, engine }) {
+/**
+ * @param tableColumnCount  BLZ-343 — the table's REAL column count. The ceiling used to test
+ *   `existingColumns.length`, but the caller passes only the `cf_` subset, bounded by
+ *   FILTERABLE_CAP at 200 — so the branch could never fire, and its message described a
+ *   number that excluded every base column. Omitted, the ceiling falls back to the cf_ count,
+ *   which preserves the old behaviour for callers that cannot count columns.
+ */
+export function promotionPlan({ field, existingColumns = [], filterableCount = 0, engine,
+                                tableColumnCount = null }) {
   if (!SQL_TYPE[engine]) return { ok: false, sql: null, error: `unknown engine ${engine}` };
   if (!SAFE_IDENT.test(String(field?.key ?? ""))) {
     return { ok: false, sql: null,
@@ -52,10 +60,11 @@ export function promotionPlan({ field, existingColumns = [], filterableCount = 0
       + `filterable fields, and the cap is ${FILTERABLE_CAP}. Past roughly 200 indexed fields `
       + `insert p95 degrades from 3.15ms to 51.4ms. Mark the field unfilterable, or retire one.` };
   }
-  if (engine === "postgres" && existingColumns.length >= PG_COLUMN_CEILING) {
+  const columns = tableColumnCount ?? existingColumns.length;
+  if (engine === "postgres" && columns >= PG_COLUMN_CEILING) {
     return { ok: false, sql: null, error:
-      `refusing to promote ${field.key}: this table has ${existingColumns.length} columns and `
-      + `Postgres hard-refuses at 1600.` };
+      `refusing to promote ${field.key}: this table has ${columns} columns and Postgres `
+      + `hard-refuses at 1600 — the ceiling here is ${PG_COLUMN_CEILING}.` };
   }
 
   const table = TARGET_TABLE[field.applies_to_kind] ?? "ticket";

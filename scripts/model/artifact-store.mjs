@@ -150,6 +150,13 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
         [reviewed_at ?? now(), id]);
     },
 
+    /** BLZ-338: a baseline over a document with no record of being baselined is not one. */
+    async updateDocumentStatus({ id, status, updated_at = now() }) {
+      await exec.run(
+        `UPDATE document SET status = ${p(0)}, updated_at = ${p(1)} WHERE id = ${p(2)}`,
+        [status, updated_at, id]);
+    },
+
     /** Project-scoped per §3.6 — no document_id column exists to carry one. */
     async insertBaseline(b) {
       await exec.run(
@@ -238,6 +245,29 @@ export function artifactStore(exec, { dialect = "sqlite", now = () => new Date()
         is_filterable: r.is_filterable === true || r.is_filterable === 1,
         is_required: r.is_required === true || r.is_required === 1,
       }));
+    },
+
+    /**
+     * BLZ-343: the REAL column count, so the Postgres 1,600-column ceiling is reachable.
+     * Postgres counts through information_schema; SQLite through PRAGMA table_info, which
+     * `all()` returns as one row per column.
+     */
+    async countColumns(table) {
+      if (!/^[a-z_][a-z0-9_]*$/.test(String(table))) {
+        throw new Error(`refusing to inspect the unsafe table name ${JSON.stringify(table)}`);
+      }
+      if (dialect === "postgres") {
+        const rows = await exec.all(
+          `SELECT count(*)::int AS n FROM information_schema.columns WHERE table_name = ${p(0)}`,
+          [table]);
+        return Number(rows[0]?.n ?? 0);
+      }
+      return (await exec.all(`PRAGMA table_info(${table})`, [])).length;
+    },
+
+    /** BLZ-343: the removal path min_card exists to constrain. */
+    async deleteLink({ id }) {
+      await exec.run(`DELETE FROM link WHERE id = ${p(0)}`, [id]);
     },
 
     /** Executes the ALTER TABLE promotionPlan returned. promotionPlan itself never does. */

@@ -30,12 +30,26 @@ export const DEFAULT_WORKFLOWS = {
   // The requirements-driven model's two workflows (blaze-pm ADR-0014). Shipped as defaults
   // so a board gets the documented model without an override — BLZ-231.
   requirement: {
-    statuses: ["proposed", "implemented", "rejected", "obsolete"],
-    terminal: ["implemented", "rejected", "obsolete"],
-    transitions: [["proposed", "implemented"], ["proposed", "rejected"], ["proposed", "obsolete"],
+    // BLZ-339: `verified` is declared here because gates.mjs enumerates
+    // `requirement:verified`, and spec section 4.2, the standards doc (RQ-6) and ADR-0017 all
+    // name it — the operator settled "ship both" on 2026-08-22. Without it the gate was
+    // unreachable from any legal status, so it was either dead or the one path that wrote an
+    // illegal status; both readings are defects.
+    //
+    // ADDITIVE on purpose: `implemented` STAYS terminal. Inserting `verified` as a required
+    // step after it would reclassify every existing implemented requirement as non-terminal
+    // and start refusing goal:achieved gates that pass today — a data migration wearing the
+    // costume of a bug fix. Whether verification SHOULD be required before a goal can be
+    // achieved is a policy question; it is recorded in the ledger, not settled here.
+    statuses: ["proposed", "implemented", "verified", "rejected", "obsolete"],
+    terminal: ["implemented", "verified", "rejected", "obsolete"],
+    transitions: [["proposed", "implemented"], ["proposed", "verified"],
+                  ["implemented", "verified"], ["verified", "obsolete"],
+                  ["proposed", "rejected"], ["proposed", "obsolete"],
                   ["implemented", "obsolete"]],
     reopenTo: "proposed",
-    resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" },
+    resolutionOnTerminal: { implemented: "done", verified: "done", rejected: "wont-do",
+                            obsolete: "wont-do" },
   },
   architecture: {
     statuses: ["proposed", "accepted", "rejected"],

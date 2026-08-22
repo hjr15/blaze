@@ -16,7 +16,7 @@ import { buildMatrix } from "./matrix.mjs";
 import { artifactHealth } from "./artifact-health.mjs";
 import { filterByField } from "./matrix-filter.mjs";
 import { parseRef, nextRef } from "./ref-allocator.mjs";
-import { isTerminal } from "./workflows.mjs";
+import { isTerminal, statusesFor, canTransition } from "./workflows.mjs";
 import { lintStatement } from "./wording-lint.mjs";
 import { adviseStatement, architectureCoverage } from "./advisory.mjs";
 import { validateFieldValues, splitCustomFields } from "./field-validation.mjs";
@@ -159,6 +159,15 @@ export function artifactApi(state, store) {
       if (!String(title ?? "").trim()) {
         return { ok: false, error: "createArtifact needs a non-empty title" };
       }
+      // BLZ-340: refuse by name. `artifact` already CHECKs kind, and ARTIFACT_KINDS was
+      // imported but used only further down — so an unknown kind fell through to the ref
+      // allocator and surfaced as an uncaught `no ref scheme for kind "feature"`, which is a
+      // crash, not a refusal. Checked here beside project_key and title, for the same reason.
+      if (!ARTIFACT_KINDS.includes(kind)) {
+        return { ok: false, error:
+          `${JSON.stringify(kind)} is not an artifact kind — expected `
+          + `${ARTIFACT_KINDS.join(" or ")}. Work items are tickets, not artifacts.` };
+      }
 
       // §4.1's third write-time block (BLZ-328). Custom field values arrive under an
       // explicit `fields` key rather than being fished out of `...rest`: required-field
@@ -179,7 +188,17 @@ export function artifactApi(state, store) {
           + ` — pass a reason to record a deliberate override` };
       }
 
-      const existingRefs = state.artifacts.filter((a) => a.kind === kind).map((a) => a.ref);
+      // BLZ-342: scoped to the PROJECT. `artifact` is UNIQUE (project_key, ref) and claimRef
+      // is keyed on (project_key, kind), so an unscoped scan disagreed with both halves of
+      // its own schema: project B's first requirement was refused at REQ-001 ("does not
+      // advance past 5") and, with no store wired, was allocated REQ-006 off project A.
+      // Only an EXPLICIT mismatch is skipped: artifact.project_key is NOT NULL in the real
+      // schema, so a record without one is a pure-decision fixture predating project scoping.
+      // Same rule as evaluateCoverage and artifactHealth, so the three cannot drift.
+      const existingRefs = state.artifacts
+        .filter((a) => a.kind === kind
+                       && (a.project_key == null || a.project_key === project_key))
+        .map((a) => a.ref);
 
       let finalRef = ref;
       if (finalRef == null) {
@@ -240,8 +259,6 @@ export function artifactApi(state, store) {
         ...splitCustomFields({ definitions: state.fieldDefinitions ?? [],
                                values: fields ?? {}, project_key, kind }),
       };
-      state.artifacts.push(artifact);
-
       // §3.7: every change to an artifact writes a revision row -- append-only, and
       // this is what a baseline pins (never the live artifact). Recorded in `state`
       // regardless of `store`, so baselineDocument's revision lookup works the same
@@ -251,13 +268,21 @@ export function artifactApi(state, store) {
         snapshot: JSON.stringify({ title: artifact.title, statement: artifact.statement,
                                     body: artifact.body ?? null, status: artifact.status }),
       };
+      // BLZ-341: the STORE writes FIRST, and `state` is updated only once it succeeded. The
+      // old order pushed to state and then awaited, so a constraint violation left a phantom
+      // the database had refused — and for links that phantom inflated the `existingCount`
+      // that max_card is checked against.
+      if (store) {
+        try {
+          await store.insertArtifact(artifact);
+          await store.insertRevision(revision);
+        } catch (e) {
+          return { ok: false, error: `could not store artifact ${finalRef}: ${e.message}` };
+        }
+      }
+      state.artifacts.push(artifact);
       state.artifactRevisions = state.artifactRevisions ?? [];
       state.artifactRevisions.push(revision);
-
-      if (store) {
-        await store.insertArtifact(artifact);
-        await store.insertRevision(revision);
-      }
 
       // §4.3 (BLZ-333): advisory findings ride back on the SUCCESSFUL response. They never
       // block — the §4 tier split is load-bearing, and a rule that sometimes refuses is
@@ -290,14 +315,67 @@ export function artifactApi(state, store) {
         id: randomUUID(), link_type_id: lt.id, source_id: sourceId, target_id: targetId,
         created_at: createdAt, created_by: "api", reviewed_at: createdAt,
       };
+      if (store) {
+        try {
+          await store.insertLink(link);
+        } catch (e) {
+          return { ok: false, error: `could not store link: ${e.message}` };
+        }
+      }
       state.links.push(link);
-      if (store) await store.insertLink(link);
       return { ok: true, error: null, link };
+    },
+
+    // DELETE /api/link/:id — BLZ-343. This exists because `min_card` cannot be enforced
+    // anywhere else: it is a FLOOR, so creating a link can never violate it and only removing
+    // one can. Without a removal path the constraint was declared in the DDL, CHECKed there,
+    // and unenforceable by construction.
+    async removeLink({ id }) {
+      const link = state.links.find((l) => l.id === id);
+      if (!link) return { ok: false, error: `no such link ${id}` };
+      const lt = state.linkTypes.find((t) => t.id === link.link_type_id) ?? null;
+      const denormalised = links();
+      const remaining = denormalised.filter(
+        (l) => l.type_name === lt?.name && l.source_id === link.source_id && l.id !== id).length;
+
+      const verdict = checkLink({
+        linkType: lt,
+        sourceKind: resolveEndpoint(state, link.source_id)?.kind ?? "unknown",
+        targetKind: resolveEndpoint(state, link.target_id)?.kind ?? "unknown",
+        existingCount: remaining + 1,
+        finalCount: remaining,
+      });
+      if (!verdict.ok) return verdict;
+
+      if (store) {
+        try {
+          await store.deleteLink({ id });
+        } catch (e) {
+          return { ok: false, error: `could not remove link ${id}: ${e.message}` };
+        }
+      }
+      state.links = state.links.filter((l) => l.id !== id);
+      return { ok: true, error: null, removed: link };
     },
 
     async transition({ id, to }) {
       const subject = resolveEndpoint(state, id);
       if (!subject) return { ok: false, error: `no such item ${id}` };
+      // BLZ-339: the WORKFLOW is checked before the gate. `record.status = to` was assigned
+      // with no canTransition/statusesFor check and `artifact` has no CHECK on status, so the
+      // API could write a status the model does not have — and isTerminal() then reported
+      // false for it forever, jamming any parent goal's gate.
+      const legal = statusesFor(subject.kind);
+      if (legal.length && !legal.includes(to)) {
+        return { ok: false, error:
+          `${JSON.stringify(to)} is not a declared ${subject.kind} status — expected `
+          + legal.join(", ") };
+      }
+      if (legal.length && subject.status !== to
+          && !canTransition(subject.kind, subject.status, to)) {
+        return { ok: false, error: `${subject.kind} cannot go from ${subject.status} to ${to}` };
+      }
+
       const verdict = checkGate({
         action: `${subject.kind}:${to}`,
         subject,
@@ -366,6 +444,8 @@ export function artifactApi(state, store) {
         existingColumns: filterable.map((d) => `cf_${d.key}`),
         filterableCount: filterable.length,
         engine: store?.dialect ?? state.engine ?? "sqlite",
+        // BLZ-343: the table's REAL width, so the 1,600-column ceiling can actually fire.
+        tableColumnCount: store ? await store.countColumns(table) : null,
       });
       if (!plan.ok) return { ok: false, error: plan.error };
 
@@ -455,6 +535,16 @@ export function artifactApi(state, store) {
           + "a baseline pins a revision, never the live artifact" };
       }
 
+      // BLZ-338: persisted, not only in memory. The `document` table kept its old status
+      // forever while the baseline row landed — a baseline over a document that has no
+      // record of being baselined.
+      if (store) {
+        try {
+          await store.updateDocumentStatus({ id: documentId, status: "baselined" });
+        } catch (e) {
+          return { ok: false, error: `could not baseline document ${documentId}: ${e.message}` };
+        }
+      }
       document.status = "baselined";
       const baseline = {
         id: randomUUID(), project_key: document.project_key, name, note: note ?? null,
