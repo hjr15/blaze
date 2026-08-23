@@ -15,6 +15,10 @@
 // evaluateCoverage's output into that context happens in a later API task, not here.
 const REQUIRED_ADR_SECTIONS = ["Context", "Decision", "Consequences"];
 
+// The requirement statuses that let a goal be achieved. `implemented` is deliberately
+// absent — see the `goal:achieved` handler below.
+const GOAL_SATISFYING_REQUIREMENT = new Set(["verified", "rejected", "obsolete"]);
+
 // Each gate is a function from ({subject, context}) to a list of failures.
 // GATED_ACTIONS is DERIVED from these keys — a handler cannot exist without being
 // registered, and a registered action cannot exist without a handler. The previous
@@ -25,9 +29,19 @@ const GATES = {
       (l) => l.type_name === "Verifies" && l.target_id === subject.id);
     return has ? [] : [{ ref: subject.ref, why: "no resolving Verifies link" }];
   },
+  // BLZ-353 / ruling R48. This gate used to filter on `!c.terminal`, and `implemented` IS
+  // terminal (workflows.mjs), so a requirement that was delivered but never verified
+  // satisfied a goal. The operator settled the policy on 2026-08-23: verification is
+  // required.
+  //
+  // Deliberately NOT done here: making `implemented` non-terminal. That would reclassify
+  // every implemented requirement mid-lifecycle and change every roll-up and report that
+  // counts terminal states. The requirement's own lifecycle is unchanged; what changed is
+  // what SATISFIES A GOAL. `rejected` and `obsolete` are decisions not to deliver, so they
+  // do not block — only delivered-but-unverified does.
   "goal:achieved": ({ context }) =>
     (context.children ?? [])
-      .filter((c) => c.kind === "requirement" && !c.terminal)
+      .filter((c) => c.kind === "requirement" && !GOAL_SATISFYING_REQUIREMENT.has(c.status))
       .map((c) => ({ ref: c.ref, why: `still ${c.status ?? "open"}` })),
   "architecture:accepted": ({ subject }) =>
     REQUIRED_ADR_SECTIONS

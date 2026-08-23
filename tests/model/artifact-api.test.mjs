@@ -160,13 +160,48 @@ describe("the goal:achieved gap: children resolved via hierarchy_membership, not
     assert.match(r.error, /REQ-002/);
   });
 
-  test("...and CAN once every child requirement is terminal", async () => {
+  // BLZ-353 / ruling R48. This test previously drove both children to "implemented" and
+  // asserted the goal COULD be achieved -- `implemented` is terminal, and the gate filtered
+  // on terminality. The operator settled the policy on 2026-08-23: verification is required,
+  // so implemented-but-unverified no longer satisfies a goal. The old assertion is now the
+  // refusal case below, and the pass case has to go all the way to `verified`.
+  test("...and STILL cannot once they are merely implemented, unverified (R48)", async () => {
     const { api, state } = makeGoalApi();
-    // "implemented" is a terminal status for the requirement workflow, and
-    // requirement:implemented is not a gated action, so this transition itself is
-    // ungated and simply records the status.
     assert.equal((await api.transition({ id: "a1", to: "implemented" })).ok, true);
     assert.equal((await api.transition({ id: "a2", to: "implemented" })).ok, true);
+
+    const r = await api.transition({ id: "g1", to: "achieved" });
+    assert.equal(r.ok, false, "implemented is delivered, not verified");
+    assert.match(r.error, /REQ-001/);
+    assert.match(r.error, /REQ-002/);
+    assert.match(r.error, /implemented/, "the refusal must name the blocking status");
+    assert.equal(state.tickets.find((t) => t.id === "g1").status, "in-progress",
+      "a refused gate must not have moved the goal");
+  });
+
+  test("...and CAN once every child requirement is VERIFIED (R48)", async () => {
+    const { api, state } = makeApi({
+      tickets: [{ id: "g1", type: "goal", status: "in-progress" },
+                { id: "f1", type: "feature", status: "defined" }],
+      artifacts: [
+        { id: "a1", ref: "REQ-001", kind: "requirement", status: "proposed" },
+        { id: "a2", ref: "REQ-002", kind: "requirement", status: "proposed" },
+      ],
+      linkTypes: [{ id: "lt3", name: "Verifies", inverse_name: "Verified by",
+        source_kinds: "story,feature", target_kinds: "requirement", min_card: 0, max_card: null }],
+      hierarchies: [{ id: "h1", project_key: "BLZ", name: "default", is_default: true }],
+      hierarchyMemberships: [
+        { id: "m1", hierarchy_id: "h1", item_id: "a1", parent_id: "g1", ord: 0 },
+        { id: "m2", hierarchy_id: "h1", item_id: "a2", parent_id: "g1", ord: 1 },
+      ],
+    });
+    // Verification is not a status you can simply assert: requirement:verified is gated on a
+    // resolving Verifies link (RQ-6). That is the point -- the goal gate now inherits that
+    // evidence requirement transitively.
+    for (const id of ["a1", "a2"]) {
+      assert.equal((await api.createLink({ typeName: "Verifies", sourceId: "f1", targetId: id })).ok, true);
+      assert.equal((await api.transition({ id, to: "verified" })).ok, true);
+    }
 
     const r = await api.transition({ id: "g1", to: "achieved" });
     assert.equal(r.ok, true, r.error);

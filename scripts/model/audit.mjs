@@ -26,6 +26,24 @@ export const HARD_KINDS = new Set([
   "duplicate-status",
 ]);
 
+// BLZ-353 / R48. Deliberately NOT in HARD_KINDS, and the reason is load-bearing.
+//
+// `terminal-goal-unverified-requirement` is raised by the RUNNER, not by auditCorpus, for
+// the same reason as duplicate-status: it is a function of the walk (status is the
+// directory), not of frontmatter.
+//
+// It is SOFT on evidence, against the ticket's own initial expectation. BLZ-353 predicted
+// zero pre-existing violations and reasoned that hard was therefore affordable. That
+// measurement was wrong — it walked a terminal set that omitted `achieved`, the goal
+// workflow's actual terminal status. The real count on this board is 7, all under NCA-1,
+// and one of them (NCA-24) is still `proposed` — never delivered — which means NCA-1
+// reached `achieved` through a path that bypassed the gate entirely.
+//
+// Shipping this hard would fail `blaze audit` on day one for a pre-existing defect, and the
+// comment at the top of this file explains why that is the wrong trade: a gate that fails on
+// debt is a gate people learn to skip, which costs the hard findings too. It flips to hard
+// once NCA-1 is resolved — see the tracking ticket named in BLZ-353.
+
 // Types whose classification lives in typed fields rather than labels (BLZ-234).
 const LABEL_EXEMPT = new Set(["requirement", "architecture", "risk"]);
 

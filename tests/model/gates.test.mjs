@@ -28,13 +28,37 @@ describe("gates", () => {
     assert.equal(r.ok, true);
   });
 
-  test("goal -> achieved is refused while ANY child requirement is non-terminal (RQ-7)", () => {
+  test("goal -> achieved is refused while ANY child requirement is unsatisfied (RQ-7)", () => {
+    // BLZ-353 changed the satisfying set: this case used `implemented` as the satisfied
+    // child, which no longer satisfies a goal. `verified` carries the original intent —
+    // that a genuinely satisfied child is not listed among the failures.
     const r = checkGate({ action: "goal:achieved", subject: { id: "g1" }, context: {
-      children: [{ ref: "REQ-001", kind: "requirement", status: "implemented", terminal: true },
+      children: [{ ref: "REQ-001", kind: "requirement", status: "verified", terminal: true },
                  { ref: "REQ-002", kind: "requirement", status: "proposed", terminal: false }] } });
     assert.equal(r.ok, false);
     assert.match(r.error, /REQ-002/);
     assert.doesNotMatch(r.error, /REQ-001/, "a satisfied child must not be listed as a failure");
+  });
+
+  test("goal -> achieved is refused while a child requirement is implemented-but-unverified (R48)", () => {
+    // BLZ-353. `implemented` is terminal for the requirement's OWN lifecycle, so the old
+    // `!terminal` filter let an unverified requirement satisfy a goal. Verification is now
+    // required: a goal cannot be achieved carrying a requirement nobody verified.
+    const r = checkGate({ action: "goal:achieved", subject: { id: "g1" }, context: {
+      children: [{ ref: "REQ-001", kind: "requirement", status: "implemented", terminal: true }] } });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /REQ-001/);
+    assert.match(r.error, /implemented/, "the refusal must name the status, not just the ref");
+  });
+
+  test("goal -> achieved accepts verified, rejected and obsolete requirements (R48)", () => {
+    // rejected and obsolete are decisions NOT to deliver the requirement, so they do not
+    // block. Only `implemented` — delivered but unverified — does.
+    const r = checkGate({ action: "goal:achieved", subject: { id: "g1" }, context: {
+      children: [{ ref: "REQ-001", kind: "requirement", status: "verified", terminal: true },
+                 { ref: "REQ-002", kind: "requirement", status: "rejected", terminal: true },
+                 { ref: "REQ-003", kind: "requirement", status: "obsolete", terminal: true }] } });
+    assert.equal(r.ok, true);
   });
 
   test("architecture -> accepted requires Context, Decision AND Consequences (AQ-2)", () => {
