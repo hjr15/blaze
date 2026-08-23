@@ -34,9 +34,41 @@ test("file overrides defaults; loops deep-merge", () => {
   const cfg = loadConfig({ root: dir, env: {} });
   assert.equal(cfg.key, "PROJ");
   assert.equal(cfg.loops.groomer.intervalSec, 99);
-  assert.equal(cfg.loops.groomer.enabled, true); // default preserved
+  assert.equal(cfg.loops.groomer.enabled, false); // default preserved
   assert.equal(cfg.loops.reconcile.intervalSec, 60); // default branch intact
   rmSync(dir, { recursive: true, force: true });
+});
+
+// BLZ-347: the groomer spawns the configured `agentCommand` on a timer with the full
+// inherited environment, and the supervisor auto-starts every enabled loop. Shipping it
+// on meant every default install ran that without asking. Reconcile stays on — it only
+// runs git and moves files. Pinned so a default flip has to be a deliberate edit here.
+test("BLZ-347: the groomer ships disabled; reconcile ships enabled", () => {
+  const dir = withConfig({ key: "PROJ" });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.loops.groomer.enabled, false,
+    "an agent-spawning loop is opt-in, never a shipped default");
+  assert.equal(cfg.loops.reconcile.enabled, true);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// BLZ-347: both spawnSync bounds must have a shipped default. Without maxBuffer, Node's
+// 1 MB stdout cap silently kills a chatty agent and misreports it as a non-zero exit;
+// without timeout, a hung agent wedges the loop and (spawnSync being synchronous) the
+// whole supervisor process with it.
+test("BLZ-347: groomer subprocess bounds have defaults and are overridable", () => {
+  const dir = withConfig({ key: "PROJ" });
+  const cfg = loadConfig({ root: dir, env: {} });
+  assert.equal(cfg.loops.groomer.timeoutSec, 900);
+  assert.equal(cfg.loops.groomer.maxBufferMb, 16);
+
+  const dir2 = withConfig({ key: "PROJ", loops: { groomer: { timeoutSec: 60, maxBufferMb: 4 } } });
+  const cfg2 = loadConfig({ root: dir2, env: {} });
+  assert.equal(cfg2.loops.groomer.timeoutSec, 60);
+  assert.equal(cfg2.loops.groomer.maxBufferMb, 4);
+  assert.equal(cfg2.loops.groomer.columns.length, 1, "unrelated defaults survive the merge");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(dir2, { recursive: true, force: true });
 });
 
 test("env overrides win over file", () => {

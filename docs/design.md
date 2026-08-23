@@ -141,10 +141,31 @@ and the agent prompt share a source):
    (`git revert` of that commit).
 
 **Autonomy & safety:** auto-commit, review via git — the same posture reconcile
-already uses for moves. Bounded by construction: the groomer only ever touches ticket
-`.md` files in the board repo (never the code repo, never code), each change is its
-own small revertable commit, and config scopes which columns it grooms and how often.
-A `groomer.enabled: false` switch turns it off entirely.
+already uses for moves. Each change is its own small revertable commit, and config
+scopes which columns it grooms and how often.
+
+The guard is **advisory, not a boundary** — say it that way, because earlier wording here
+("bounded by construction") and in the first draft of ADR-0019 ("detected, not prevented")
+both claimed more than the code delivers. A security review defeated the detect-and-revert
+version three ways with live repros
+([ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md), BLZ-347).
+
+What actually contains the agent is: the loop shipping **`enabled: false`**, the operator's
+decision to turn it on, and the permission posture of whatever `agentCommand` names. Blaze
+spawns a process with the operator's own privileges and cannot stop it writing anywhere the
+operator can write.
+
+What the guard does, as defence in depth: it hashes the whole data root before and after
+every pass, refuses any change to a path other than the ticket being groomed — `.git/`,
+gitignored files and symlinks included — reverts per path from the snapshot's own bytes,
+and then re-checks the tree to confirm the revert actually happened. Every git invocation
+runs with `core.fsmonitor=false` and `core.hooksPath=/dev/null`, because both are config an
+agent can write and git will otherwise execute. It does not cover network calls, writes
+outside the data root, or a process that outlives the pass; the ADR lists the gaps in full.
+
+The subprocess is bounded by `timeoutSec` (default 900) and `maxBufferMb` (default 16).
+`spawnSync` blocks the supervisor's HTTP server for the whole run, so an agent run is a
+board outage for its duration, capped by that timeout.
 
 ## Configuration — `blaze.config.json`
 
@@ -161,7 +182,8 @@ A `groomer.enabled: false` switch turns it off entirely.
   "agentCommand": "claude -p",
   "loops": {
     "reconcile": { "enabled": true, "intervalSec": 60 },
-    "groomer":   { "enabled": true, "intervalSec": 300, "columns": ["backlog"] }
+    "groomer":   { "enabled": false, "intervalSec": 300, "columns": ["backlog"],
+                   "timeoutSec": 900, "maxBufferMb": 16 }
   }
 }
 ```
@@ -176,7 +198,7 @@ A `groomer.enabled: false` switch turns it off entirely.
 | `defaultLabels` | Label taxonomy (docs + groomer prompt + scaffolder) | generic set |
 | `port` | Web app port | `4321` |
 | `agentCommand` | Command the groomer spawns (the prompt is appended) | `"claude -p"` |
-| `loops` | Per-loop enable / cadence / groomed columns | shown above |
+| `loops` | Per-loop enable / cadence / groomed columns; the groomer also takes `timeoutSec` and `maxBufferMb` for its subprocess. **The groomer ships disabled** — see [ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md) | shown above |
 
 `scripts/config.mjs` loads this with defaults + env overrides (`BLAZE_CODE_REPO`,
 `BLAZE_KEY`, `BLAZE_PORT`, `BLAZE_AGENT_COMMAND`), and exports the key→regex derivation
