@@ -17,7 +17,7 @@ The engine declares two constants in `scripts/model/schema-version.mjs`
 
 | Constant | Value | Meaning |
 |---|---|---|
-| `SCHEMA_VERSION` | `1` | the contract this engine writes/speaks |
+| `SCHEMA_VERSION` | `2` | the contract this engine writes/speaks |
 | `MIN_SCHEMA_VERSION` | `1` | the oldest contract this engine still reads |
 
 A board loads iff `MIN_SCHEMA_VERSION <= schemaVersion <= SCHEMA_VERSION`:
@@ -75,9 +75,14 @@ ambient data root.
 - BLZ-109's `sprint`/`start`/`due` fields are the first additive change
   post-ADR-0002 and deliberately do not bump `SCHEMA_VERSION` — see
   [ADR-0004](decisions/0004-sprints-are-additive-not-a-schema-bump.md).
-- There is deliberately **no migrator today**: at version 1 there is nothing
-  to migrate. The PR that first ships a breaking schema change ships its
-  migration path. (`blaze migrate` is unrelated — it is the external-tracker
-  importer.)
+- **Version 2 shipped with its migration path, and that path is the error
+  message.** BLZ-298 removed three config keys (`provider`, `terminal`,
+  `codeRepo`) that nothing read — a breaking contract change, so it bumped
+  `SCHEMA_VERSION` to 2. The migration for a board carrying one of them is to
+  delete it, and `REMOVED_KEYS` in `scripts/model/schema-version.mjs` names each
+  key with the reason and prints it on refusal. There is still no *migrator
+  program*; the rule remains that the PR shipping a breaking change ships the
+  path, whatever shape that path takes. (`blaze migrate` is unrelated — it is
+  the external-tracker importer.)
 - Decision record:
   [ADR-0002](decisions/0002-config-schema-versioning.md).
