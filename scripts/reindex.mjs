@@ -27,6 +27,21 @@ for (const a of process.argv.slice(2)) {
 // must work from any cwd — so calling resolveRoots() first would make it throw
 // on exactly the invocation that doesn't need it. dataRoot mirrors
 // BLAZE_PROJECTS_DIR's semantics: the parent of the projects dir.
+//
+// BLZ-107 decision — the argv override STAYS, and an explicit <dir> re-resolves
+// dataRoot from that directory (`<dir>/..`, where its own blaze.config.json
+// sits). Everything downstream is thereby aimed at the SAME board: the
+// schemaVersion guard, the .blaze/ cache location, and the transitions build.
+// The rejected alternative was dropping the override — but `blaze reindex
+// <dir>` is a real user-facing form (cli.mjs passes `rest` through) and
+// retargeting from any cwd is the point of it.
+//
+// This line is therefore load-bearing for the guard below, not just for where
+// the cache lands: taking dataRoot from ambient roots while projectsDir comes
+// from argv validates one board's stamp while indexing a different one — a
+// board stamped outside the compat window would be indexed against a foreign
+// board's config, exit 0, and write its index into that foreign board's
+// .blaze/. Pinned by tests/reindex.test.mjs.
 const explicit = positional[0] ? resolvePath(positional[0]) : null;
 const roots = explicit ? null : resolveRoots();
 const projectsDir = explicit || roots.projectsDir;
@@ -37,6 +52,8 @@ try {
   // Config-schema version guard (ADR-0002): reindex re-validates every ticket
   // against the schema, so it must not run against a board contract it may
   // misread. loadConfig throws `blaze: …` on an incompatible schemaVersion.
+  // `dataRoot` here is always the root of the board being INDEXED — see the
+  // BLZ-107 note above; it is not the ambient/CWD board when <dir> is given.
   loadConfig({ root: dataRoot });
   // BLZ-121: reindex is the one mutates:true verb with no defence-in-depth of
   // its own — it writes derived, gitignored caches directly (no
