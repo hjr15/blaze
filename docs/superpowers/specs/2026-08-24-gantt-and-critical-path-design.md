@@ -176,7 +176,7 @@ an earlier draft overstated that.** Two cases stay explicit, both found by revie
   decisive ground is **mutability after write**, and it is BLZ-354 §5.3's own, given there for
   `focus`: *"the ticket can be deleted **after** the view is saved. Blocking at write time would
   not stop it, and blocking at read time would make a saved view retroactively invalid. Render an
-  empty view with a named reason."* A sprint is data re-read per render (ADR-0004), so it can
+  empty view with a named reason — never a 500, never a silent empty."* A sprint is data re-read per render (ADR-0004), so it can
   vanish the same way, and §5.3's next row says exactly that about a stale `sprint` value. **This
   is advisory for the same reason `focus` is, and the fix is the same: a named reason at render
   time.**
@@ -193,8 +193,13 @@ an earlier draft overstated that.** Two cases stay explicit, both found by revie
   the registry, so there is nothing per-project to test here yet.)
 
 The sprint-selection chain itself — requested → active → first registered (`gantt.mjs:33-36`) —
-is **unchanged and still a precedence rule**. It is a rule about *which sprint*, not about *which
-axis*, and §10 keeps it.
+is a rule about *which sprint*, not about *which axis*, and this spec changes none of it.
+
+**Spec 2 (BLZ-364) does.** It deletes the chain's `|| list[0]` tail, on the ground that a silent
+fall-through to an arbitrary sprint is the mechanism behind §1.1's stale-`S2` picture, and
+replaces it with a named no-selection state. That is spec 2's call and this spec does not
+contradict it — but a reader of both should know the chain is *"unchanged"* only as far as spec 3
+is concerned.
 
 **The migrated builtin `gantt` row gets `axis: 'sprint'`**, so the *row set and the axis window*
 are unchanged for every existing user. A new view created by an operator gets `axis: 'schedule'`.
@@ -534,7 +539,8 @@ Three rules, and the first two are the ones that matter.
 
 ### 5.3 `showCriticalPath: true` with `axis: 'sprint'` is legal, and warns
 
-This combination cannot draw a chain, and that is knowable in advance. It is **not blocked** —
+This combination draws no chain **on this corpus** — §1.3's zero same-sprint edges — and that is
+knowable in advance. It is **not blocked** —
 it is **advisory**, which is BLZ-354 §5.3's third bucket, *"Advisory, never blocking"*.
 
 **Three drafts of this paragraph reached that conclusion by three different arguments, and the
@@ -543,9 +549,10 @@ than getting a fact wrong:
 
 - **Draft 1** quoted BLZ-354 §5.3 with a "never" silently inserted — a misquotation that happened
   to reach the right answer.
-- **Draft 2** quoted faithfully, misread the sentence's subject, declared the source
-  self-contradictory, and instructed that it be **edited at source**.
-- **Draft 3** promoted ADR-0015 to *"the one rule"* deciding this and §2.1 — and then applied its
+- **Draft 2** removed the inserted word and kept the conclusion, quoting faithfully.
+- **Draft 3** misread the faithful quotation's subject, declared the source self-contradictory,
+  and instructed that it be **edited at source**.
+- **Draft 4** promoted ADR-0015 to *"the one rule"* deciding this and §2.1 — and then applied its
   decidability test in **opposite directions** in the two sections, calling a board-wide edge
   query "decidable at write time" here while calling a single registry lookup "not decidable from
   the item alone" there. Both cannot be right.
@@ -565,9 +572,18 @@ asking *"which of this sprint's tickets sit on the board's critical path"* is as
 question with a useful per-ticket answer, and refusing to save that view would refuse the
 question. So the combination is legitimate, and it is advisory.
 
-**And ADR-0015's two outcomes are block and gate — "advisory" is neither.** BLZ-354 §5.3 supplies
-the third bucket that ADR-0015's matrix has no cell for, which is why that table, not the ADR, is
-the operative authority for both this section and §2.1.
+**ADR-0015's matrix has two outcomes — block and gate — and "advisory" is neither. The third
+mechanism is v4 spine §4.3, and it is established *per ADR-0015* rather than against it.** Spine
+§4's heading is *"Enforcement — three mechanisms, per ADR-0015"*, and its three subsections are
+**§4.1 Write-time blocks, §4.2 Gates, §4.3 Advisory** — *"Reported, never blocking"*. BLZ-354
+§5.3's "Advisory, never blocking" table is downstream of it: the spine is dated 2026-08-22 and
+BLZ-354 2026-08-23.
+
+**That matters because it removes a question an earlier draft created and could not answer.** That
+draft named BLZ-354 §5.3 as *"the operative authority"* over ADR-0015 — a spec outranking an
+accepted ADR, which would be a real problem. It is not the situation: the spine adds a third
+mechanism under the ADR's own authority, and this spec is using it, not overriding anything. The
+spec quoted spine §4 two paragraphs above and missed §4.3 twenty-five lines below it.
 
 So it renders, with:
 
@@ -760,7 +776,7 @@ registry default**:
 
 | Layer | Default | Why |
 |---|---|---|
-| `ganttModel`'s parameter | **`'sprint'`** | every existing caller and all 27 tests pass a sprint registry and expect sprint behaviour |
+| `ganttModel`'s parameter | **`'sprint'`** | every existing production caller passes a sprint registry and expects sprint behaviour |
 | A newly created view's `config_json` (§6) | **`'schedule'`** | the axis this spec argues for |
 | The migrated builtin row (§2.1) | `'sprint'` | so the row set and window are unchanged |
 
@@ -773,22 +789,37 @@ The rule:
 > **A view's defaults are materialised into `config_json` at create time. The model parameter's
 > default is a fallback for direct callers only, and no stored row ever relies on it.**
 
-Without it, §9's mutation 8 — *"default `axis` to `'sprint'` for a newly created view"* — is not a
-mutation, because the fall-through path already produces it.
+**That rule needs one amendment to BLZ-354 §6.2, and without it the rule and the migration
+contradict each other.** §6.2's seed emits every builtin row with **`config_json = '{}'`**, so the
+migrated `gantt` row would store no `axis` and would have to rely on a fall-through default —
+which this rule forbids — or take the registry's `'schedule'`, which flips the builtin to the
+schedule axis and destroys §2.1's whole expected-delta argument. **The amendment is one line: the
+seeded `gantt` row gets `config_json = '{"axis":"sprint"}'`, not `'{}'`.** It is BLZ-354's file to
+change and it is named here rather than assumed.
 
-**If the model parameter defaulted to `'schedule'` instead, the tests that break are the two
-asserting the empty-registry branch** — `tests/model/gantt.test.mjs:29` *"no sprints → empty"* and
-`tests/views/gantt.test.mjs:92` *"empty model shows a create-a-sprint prompt, not a frame"*. Both
-pass `{ active: null, sprints: [] }`, and §7 removes the `EMPTY` return for `axis: 'schedule'`, so
-the branch they assert would no longer exist.
+With the rule and the amendment, §9's mutation 8 — *"default `axis` to `'sprint'` for a newly
+created view"* — is killable. Without them the fall-through path already produces that mutant, so
+it is not a mutation at all.
 
-**An earlier draft listed eleven other tests here and the list did not survive checking.** `:177`
-is the determinism test, which an axis default cannot change; `:70`, `:78`, `:87` assert the
-delivery-type filter and its warnings, and every fixture row carries `sprint: "S1"` from `R()`, so
-their assertions are unchanged by a row-filter switch; `:43`, `:52`, `:62` pass an explicit
-`sprint`, which stays a row filter on either axis. That draft also claimed *"all 27 tests pass a
-sprint registry"* — **25 do**, and the other two are exactly the ones above. The correction is
-smaller and sharper than the claim it replaces.
+**If the model parameter defaulted to `'schedule'` instead, at least four tests break**, and the
+count is stated as a floor because a full counterfactual needs the implementation:
+
+| Test | Breaks because |
+|---|---|
+| `tests/model/gantt.test.mjs:29` "no sprints → empty" | §7 removes the `EMPTY` return for `axis: 'schedule'`; it passes `{ active: null, sprints: [] }` |
+| `tests/views/gantt.test.mjs:92` "empty model shows a create-a-sprint prompt" | same branch |
+| `tests/model/gantt.test.mjs:147` "nowX is a number when now is inside the axis" | asserts `nowX === X("2026-07-20") === 224`, and `X` (`:25`) is anchored to **S1's window**. §2.2's schedule window is not that window, so the constant cannot survive |
+| `tests/views/gantt.test.mjs:52` "the today-marker renders at nowX" | asserts `x1="444"` = `GUTTER + 224`, the same anchor |
+| `tests/model/gantt.test.mjs:37` "absent sprint param falls back to active" | asserts `selected === "S1"`; on a schedule axis either the selection chain still runs — contradicting §7's *"needs no registry"* — or `selected` is null |
+
+**Two earlier drafts got this wrong in opposite directions.** The first listed eleven tests, of
+which seven do not break: `:177` is the determinism test; `:70`, `:78`, `:87` assert the
+delivery-type filter with every fixture row carrying `sprint: "S1"`; `:43`, `:52`, `:62` pass an
+explicit `sprint`, which stays a row filter on either axis. The second corrected that to *"the two
+asserting the empty-registry branch"* — and dropped `:37`, `:147`, `:152` and `:157` without
+addressing them, three of which do break. **This is the third time this paragraph has been wrong,
+and each time by reasoning about the change instead of running it.** The honest statement is a
+floor, not a count.
 
 **This table has now been wrong twice.** The first draft said "25 of 27", counting only the two
 deleted. The second said "22 … 3 rewritten", having re-measured the `barKind` assertions and
