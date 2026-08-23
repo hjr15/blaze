@@ -172,11 +172,13 @@ an earlier draft overstated that.** Two cases stay explicit, both found by revie
   window. Stated because it was undefined.
 - **`{ axis: 'sprint' }` where no sprint applies** — `gantt.mjs:30-31` returns `EMPTY`, and
   **9 of 11 projects have never had a sprint** (§1.2). The enum does not rule this out, and
-  **neither does a write-time block, which an earlier draft of this bullet proposed and which
-  BLZ-354 §5.3 forbids**: its advisory table lists *"`sprint` naming a sprint no longer in the
-  registry"* under **"Advisory, never blocking"**, on the ground that *"`sprints.json` is data,
-  re-read per render"*. A sprint can vanish after the view is saved, so blocking at write time
-  would not prevent the state. The rule is therefore **read-time only**: the view renders the
+  **neither does a write-time block, which an earlier draft of this bullet proposed.** The
+  decisive ground is ADR-0015's **first** test rather than its second: whether a sprint exists is
+  **not decidable from the item alone** — it needs the registry, which ADR-0004 makes data
+  re-read per render — so it lands in ADR-0015's corpus-query column, whose write-time cell is
+  explicitly *"(empty — a corpus query is never available at write time)"* (`:127-131`). BLZ-354
+  §5.3's advisory row points the same way, but it covers a **stale** `sprint` value rather than an
+  absent registry, so it is corroboration and not the argument. The rule is therefore **read-time only**: the view renders the
   named reason *"this view's axis is sprint-scoped and no sprint applies"* rather than an empty
   frame — which is the same treatment §5.3 gives a `focus` pointing at a deleted ticket. (An
   earlier draft also scoped this per project. Sprints carry no project key until spec 2 changes
@@ -191,7 +193,9 @@ are unchanged for every existing user. A new view created by an operator gets `a
 **The default that ships and the default that migrates are deliberately different, and that is a
 one-release condition rather than the end state:** once `import-deps` (BLZ-360 §5.5) has populated
 `Precedes`, the builtin should flip to `'schedule'` too, and **that flip is its own ticket** with
-its own expected-delta list.
+its own expected-delta list. **What exactly triggers it is not settled — §13.2 carries the
+question**, and "once `import-deps` has populated `Precedes`" is this section's proposal rather
+than a decision.
 
 **But the zero-diff oracle does NOT diff to nothing, and an earlier draft of this section claimed
 it would.** BLZ-354 §6.4's oracle — *"render all six views on the live 11-project board before and
@@ -342,6 +346,13 @@ BLZ-360 §8.2 predicts the four kinds collapse. Measured on the live corpus, two
 | `open-end` — start only | **0** — the corpus holds **zero** start-without-due tickets | **deleted** |
 | `open-start` — due only | **0 in any sprint** — the 2 due-only tickets carry no sprint | **deleted** |
 | `unplanned` — neither | **42** (S2: 11, S4: 6, S5: 20, S1: 3, S3: 2) | **splits**: 27 → `complete`, 14 → `scheduled`, 1 → `milestone` (§4.2). It is not renamed `unscheduled`; an earlier draft said so and contradicted §4.2's own count. |
+
+**Both "0" rows are true of the sprint axis and one of them is not true of the schedule axis.**
+`open-start`'s zero is measured as *"0 in any sprint"*, and on the schedule axis the two due-only
+tickets **are** in scope — `OBA-668` (terminal) and `OMA-4` (non-terminal). §4.2 gives `OBA-668` a
+rule and BLZ-360 §4 turns `OMA-4`'s `due` into a `deadline` rather than a bar end, so neither
+needs the deleted branch; but "costs nothing in the corpus" is a sprint-axis statement and is
+recorded as one.
 
 `gantt.mjs:71` and `:72` are **dead code paths on this board**, and have been since the view
 shipped. Deleting them costs nothing in the corpus and costs exactly **two tests** —
@@ -514,31 +525,47 @@ Three rules, and the first two are the ones that matter.
 
 ### 5.3 `showCriticalPath: true` with `axis: 'sprint'` is legal, and warns
 
-It is decidable at write time that this combination cannot draw a chain. It is **not blocked**.
+It is decidable at write time that this combination cannot draw a chain. It is **not blocked**,
+and the rule that decides it is **ADR-0015's**, quoted identically by BLZ-354 §5.3 and by v4 spine
+§4:
 
-**Getting the reason right requires noticing that BLZ-354 §5.3's prose and its own table
-disagree, and this spec follows the table.** The prose reads *"blocks at write time only if
-decidable from the item alone AND true of a legitimate draft"* — quoted verbatim, and as written
-it says the opposite of what it means: being true of a legitimate draft would be a reason **to**
-block. The table immediately beneath it supplies the missing word — its first row is *"unknown
-`type` — decidable; **never legitimate**"* — so the operative rule is **block only when the
-condition is decidable AND never true of a legitimate draft.**
+> *"A check blocks at **write time** only if it is **both** decidable from the item alone **and**
+> true of a legitimate draft. Fail either test and it belongs at a **gate**."*
+> — `docs/decisions/0015-…:124-125`
 
-An earlier draft of this section quoted the prose with a "never" silently inserted, which was a
-misquotation; the correction quoted it faithfully and left an inference that no longer followed
-from it. Both were wrong in opposite directions. The rule this spec applies is the table's, and it
-is flagged here because **BLZ-354's prose sentence should be fixed at source** — this spec is not
-the only reader that will trip on it.
+**The subject of "true of a legitimate draft" is the check, not the offending condition**, and
+ADR-0015's matrix (`:127-131`) is what makes that unambiguous: *link endpoint validity* is true of
+a legitimate draft — a legitimate draft has valid endpoints — so it may block at write time;
+*ADR structural completeness* is **false while drafting** — a half-written `proposed` decision is
+legitimately incomplete — so it belongs at a gate.
 
-Under that rule, a sprint-axis critical-path view is a **legitimate draft**, so it is not blocked:
-"which of this sprint's tickets sit on the board's critical path" is a real question with a useful
-answer, and the answer is per-ticket rather than per-chain. What it cannot do is show the chain.
-So it renders, with:
+Applied here: the check is *"this view can draw a chain."* A legitimate draft can carry
+`axis: 'sprint'` **and** `showCriticalPath: true` and still not draw one, so the check is **false
+of a legitimate draft**, it fails ADR-0015's second test, and it is **not** a write-time block.
+"Which of this sprint's tickets sit on the board's critical path" is a real question with a useful
+answer; the answer is per-ticket rather than per-chain. What it cannot do is show the chain. So it
+renders, with:
+
+**Two earlier drafts of this paragraph got the rule wrong in opposite directions, and the second
+was worse than the first.** The first quoted BLZ-354 with a "never" silently inserted — a
+misquotation that happened to reach the right conclusion. The second quoted faithfully, misread
+the subject of the sentence, concluded that the prose *"says the opposite of what it means"*, and
+instructed that **BLZ-354's prose should be fixed at source** — an edit to a merged spec, arising
+from a misreading, of a sentence that is a verbatim quotation of an accepted ADR. It also breached
+this spec's own preamble. Recorded because a correction that proposes editing its own source is
+the most expensive kind of wrong.
 
 ```
 critical-path decoration is on and the axis is sprint-scoped: 0 of this sprint's
-36 dependencies have both endpoints in the sprint, so no chain is drawn.
+dependencies have both endpoints in the sprint, so no chain is drawn.
 ```
+
+**The number is deliberately absent, and it was deliberately present one draft ago.** A correction
+pass inserted *"36 dependencies"* here — the board-wide count of delivery non-terminal `Blocks`
+stand-in edges — into a string scoped to **one sprint**, where the true count is not 36 for any
+sprint: only **one** of the 47 tickets in that graph carries a sprint at all (`INF-657`, S3). It
+is the same defect §5.2 was corrected for, reinstated thirty lines below the correction, which is
+why §5.2's rule is written as a rule rather than as a fix.
 
 ---
 
@@ -690,11 +717,11 @@ inferred:
 |---|---|---|
 | `tests/model/gantt.test.mjs:105` "open-end bar (start only)" | the deleted branch | **deleted with the behaviour** (§4.1) |
 | `tests/model/gantt.test.mjs:113` "open-start bar (due only)" | the deleted branch | **deleted with the behaviour** (§4.1) |
-| `tests/model/gantt.test.mjs:100` | `barKind === "solid"` | **rewritten** — the kind is `scheduled`/`actual` |
+| `tests/model/gantt.test.mjs:100` | `barKind === "solid"` | **rewritten** — and to `milestone`, not `scheduled`. The `R()` helper (`:11-15`) defaults `status: "defined"` and sets **no `estimate` at all**, so every fixture row built from it is non-terminal and zero-duration |
 | `tests/model/gantt.test.mjs:124` | `barKind === "unplanned"` | **rewritten** — the kind splits (§4.2) |
 | `tests/model/gantt.test.mjs:131` "a start one day later lands at a strictly greater, EXACT x" | `x === 224` / `x === 252`, derived from each row's `start` | **rewritten** — those rows are non-terminal and estimate-less, so §4.2 makes them `milestone` and §2.1 positions them at ES, not at `start` |
 | `tests/model/gantt.test.mjs:164` "two rows under different epics → two groups" | `groups[].epicId`, three times (`:167`, `:168`, `:172`) | **rewritten** — §6 renames the field to `parentId` |
-| `tests/views/gantt.test.mjs:41` "a bar `<rect>` carries data-id and the model's EXACT x + width" | `data-id="A-1"` at `x = GUTTER+224`, `width = 84` | **rewritten** — same rows, same reason as `:131` |
+| `tests/views/gantt.test.mjs:42` "a bar `<rect>` carries data-id and the model's EXACT x + width" | `data-id="A-1"` at `x = GUTTER+224`, `width = 84` | **rewritten** — same fixture shape, same reason as `:131` |
 | `tests/views/gantt.test.mjs:85` "status drives the bar fill" | `data-id="B-1"[^>]*fill-opacity="0.35"` where `B-1` is `{task, done, start, due}` | **rewritten — and it is the load-bearing one** |
 
 **That last row is a trap and it must be named.** `B-1` is precisely §4.2's `actual`, which
@@ -706,6 +733,24 @@ as well as the status.
 
 So: **19 of 27 pass unchanged, 2 are deleted with their behaviour, 6 are rewritten**, and all
 eight are named here and in the PR body.
+
+**That 19 holds only because `ganttModel`'s own `axis` default is `'sprint'`, and this spec has to
+say so explicitly.** `ganttModel`'s signature today is
+`({ index, sprints, sprint, project = "all", now })` (`gantt.mjs:29`) — it has no `axis` parameter
+at all, so adding one means choosing its default, and **that default is not the same as §6's
+registry default**:
+
+| Layer | Default | Why |
+|---|---|---|
+| `ganttModel`'s parameter | **`'sprint'`** | every existing caller and all 27 tests pass a sprint registry and expect sprint behaviour |
+| A newly created view's `config_json` (§6) | **`'schedule'`** | the axis this spec argues for |
+| The migrated builtin row (§2.1) | `'sprint'` | so the row set and window are unchanged |
+
+**If the model parameter defaulted to `'schedule'` instead, eleven further tests change
+behaviour** — `:37`, `:43`, `:52`, `:62`, `:70`, `:78`, `:87`, `:147`, `:152`, `:157`, `:177` all
+exercise sprint selection, sprint scoping or the axis — and the floor would be wrong for a third
+time. Two different defaults at two different layers is the kind of thing that reads as an
+inconsistency and is actually the only way to keep the blast radius at 8.
 
 **This table has now been wrong twice.** The first draft said "25 of 27", counting only the two
 deleted. The second said "22 … 3 rewritten", having re-measured the `barKind` assertions and
@@ -741,9 +786,9 @@ the exercise:**
 - **Mutations 3 and 4 have no existing coverage to build on.** Measured: `grep -rn "bar-" tests/`
   returns **0 hits**, and `tests/views/page-golden.html` contains **0** `<rect` elements — the
   golden fixture ships no `sprints.json`, so it renders the `gantt-empty` branch. **No golden
-  anywhere in this repo contains a single Gantt bar.** §7's claim that "the golden-SVG tests stay
-  the gate" is therefore true of determinism and **false at bar level**, and a golden with bars in
-  it is a prerequisite for this spec, not a nicety.
+  anywhere in this repo contains a single Gantt bar.** That is why §7 says the golden-SVG tests
+  gate determinism *and nothing else*, and why **a golden with bars in it is a prerequisite for
+  this spec rather than a nicety**.
 
 **Any mutation that survives is named in the PR body as a hole in the suite.**
 
@@ -781,6 +826,7 @@ and the S2 registry state (an active sprint whose axis excludes today).
 | **ADR-0016 — Node stays the runtime** | The view consumes a solve measured at 95.7 ms for 10k tasks / 25k edges; this board is 533 and 36. The `worker_threads` trigger (>50 ms, or >10k schedulable) is BLZ-360's and is nowhere near. |
 | **ADR-0018 — hybrid custom fields** | No new column. The view reads BLZ-360 §2's five; `config_json` is a JSON tail excluded from promotion by BLZ-354 §4.2. |
 | **ADR-0001 — `Blocks` stays advisory** | Untouched. §1.3 counts `Blocks` edges as evidence about the corpus and draws none of them; the view draws `Precedes`. |
+| **ADR-0015 — write-time blocks vs gates** | The one rule §2.1 and §5.3 both turn on: *"a check blocks at write time only if it is both decidable from the item alone and true of a legitimate draft"* (`:124-125`), with its matrix at `:127-131`. Neither of this spec's two candidate blocks passes it, and both are read-time reasons instead. |
 | **BLZ-354 §3 — the record shape** | `gantt` is a `(scope, project_key, type, name, config)` row with five config keys and no second table (§6). |
 
 ---
@@ -843,12 +889,25 @@ builtin's default is its own ticket for the same reason.
    - BLZ-360 §5.5 is operator-driven — *"the operator resolves them; the tool never guesses"* —
      so nothing lands "on the day it runs".
 
-   **The real question, which is smaller and still open:** those ≤10 edges point at a *terminal*
-   ticket, and BLZ-360 §6.2 already answers what a scheduler does with one — it *"still
-   contributes as a boundary condition … supplying a finish time to its non-terminal successors"*.
-   So they are boundary conditions rather than errors, and `unscheduled` gains no members from
-   them. What is genuinely undecided is whether `import-deps` should **offer** such an edge to the
-   operator at all, given the schedule treats it as a constant.
+   **The real question, which is smaller and still open.** Those ≤10 edges point *at* a terminal
+   ticket — the terminal ticket is the **successor**, not the predecessor:
+
+   ```
+   BLZ-97→INF-556  INF-276→INF-275  INF-281→OBA-246  INF-37→INF-100  INF-789→OBA-693
+   INF-95→INF-100  INF-657→INF-650  OBA-724→OBA-717  OBA-869→OBA-859  OBA-706→OBA-707
+   ```
+
+   **That orientation matters, and an earlier draft cited the wrong rule for it.** BLZ-360 §6.2's
+   boundary-condition clause — *"supplying a finish time to its non-terminal successors"* — is
+   about a terminal **predecessor**. A terminal **successor** is not a boundary condition at all;
+   it is simply removed by §6.2's node filter (step 2), and the edge goes with it. The conclusion
+   is unchanged — `unscheduled` gains no members — but it follows from the node filter, not from
+   the boundary rule.
+
+   **And 4 of the 10 are mutual pairs** — `INF-276↔INF-275`, `INF-281↔OBA-246`, `INF-37↔INF-100`,
+   `INF-95↔INF-100` — so they are among §5.5's 124 undecidable pairs and have no direction to
+   import in the first place. What is genuinely undecided is whether `import-deps` should
+   **offer** an edge whose target is terminal at all, given the solve discards it.
 5. **What does the schedule axis cost to render at 11 projects?** BLZ-354 §11.2 asks the same of
    project-scoped `metrics` and this repo's own rule applies: *"needs a measurement, not an
    assumption."* 561 rows × 90 day columns is unmeasured. The current view's worst case is
