@@ -45,6 +45,9 @@ export const SUPERVISOR_SCOPES = {
   "POST /control/revert": "write",
 };
 
+/** A commit sha and nothing else — hex only, so no argv of git's can be spelled with it. */
+export const SHA_RE = /^[0-9a-fA-F]{4,40}$/;
+
 /** The scope one of this server's own routes needs, or null if it owns no such route. */
 export function supervisorScopeFor(method, pathname) {
   return SUPERVISOR_SCOPES[`${String(method).toUpperCase()} ${pathname}`] ?? null;
@@ -359,9 +362,23 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       let body = "";
       req.on("data", (c) => (body += c));
       req.on("end", () => {
+        let sha;
+        try { ({ sha } = JSON.parse(body || "{}")); }
+        catch { return json(400, { errors: ["bad json body"] }); }
+        // BLZ-359: `sha` came off the wire and went straight into an argv with no `--`
+        // ahead of it, so a value beginning with `-` was parsed by git as an OPTION
+        // rather than a commit. There is no shell here, so this was never RCE — but
+        // `--strategy-option=...`-shaped input is still an attacker choosing git's
+        // behaviour, and the endpoint's whole job is to run git. Refused at the door
+        // AND separated with `--`, because either alone is one edit away from gone.
+        if (!SHA_RE.test(String(sha ?? ""))) {
+          bus.publish({ type: "error", loop: "groomer",
+                        message: `revert refused: ${JSON.stringify(sha ?? null)} is not a commit sha`,
+                        ts: today() });
+          return json(400, { errors: ["not a commit sha"] });
+        }
         try {
-          const { sha } = JSON.parse(body || "{}");
-          execFileSync("git", ["-C", root, "revert", "--no-edit", sha]);
+          execFileSync("git", ["-C", root, "revert", "--no-edit", "--", sha]);
           bus.publish({ type: "status", loop: "groomer", state: `reverted ${sha.slice(0, 7)}`, ts: today() });
         } catch (e) {
           bus.publish({ type: "error", loop: "groomer", message: `revert failed: ${e.message}`, ts: today() });

@@ -359,6 +359,11 @@ non-loopback `blaze board` needs before it will start. There is no separate
 bootstrap path: the first admin is created by exactly this command, through
 exactly the code every later user takes (ADR-0013 §5).
 
+**A server that is already running does not pick it up.** Both `blaze board` and
+`blaze start` read the roster **once, at boot**, so a board that was serving before
+this command keeps serving unauthenticated until it is restarted. Restart it — and
+until you have, treat the board as still open.
+
 The token is printed **once**. Only its SHA-256 hash is stored, so it cannot be
 read back — if you lose it, issue another. Tokens carry a `blz_` prefix so they
 are recognisable in a log and matchable by secret-scanning.
@@ -374,6 +379,9 @@ API token (shown once — copy it now, it is not recoverable):
 
 scopes: read, write, admin
 Use it as:  Authorization: Bearer <token>
+
+NOTE: a server that is ALREADY RUNNING does not pick this up — it read the
+      roster at boot. Restart `blaze board` / `blaze start` to apply it.
 ```
 
 Identities live in `<board>/.blaze/identity.db`, mode `0600` inside a `0700`

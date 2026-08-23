@@ -343,6 +343,123 @@ describe("BLZ-359: a BROKEN roster refuses — it must never fall through to una
   }
 });
 
+describe("BLZ-359: a gate that CANNOT decide is a refusal, not a pass", () => {
+  // Ported from tests/identity-resilience.test.mjs §2, which covers serve.mjs's identical
+  // branch. It was the one survivor of the security review's independent mutation set:
+  //
+  //     -  return json(503, { errors: ["authentication is temporarily unavailable"] });
+  //     +  decision = { ok: true, status: 200, error: null, principal: null };
+  //
+  // left all 35 supervisor tests green, and the exploit then worked — truncate a running
+  // board's identity.db, present any bogus token with a valid CSRF header, and
+  // /control/revert returned 204 with the revert commit landing. An untested fail-closed
+  // branch is a fail-OPEN branch waiting for an edit.
+  //
+  // The store is injected, so this needs no read-only mount and no lock: it isolates the
+  // one thing under test — what the handler does when the gate throws.
+  const explodingIdentity = () => ({
+    state: "healthy", hasIdentity: true, error: null, close() {},
+    store: { authenticate: async () => { throw new Error("database is locked"); } },
+  });
+
+  test("a read whose gate throws is 503, and the server survives to answer again", async () => {
+    const dir = board();
+    const { app, base } = await boot(dir, { identity: explodingIdentity() });
+    try {
+      const r = await fetch(`${base}/api/hash`, { headers: { authorization: "Bearer blz_whatever" } });
+      assert.equal(r.status, 503);
+      assert.match((await r.json()).errors[0], /unavailable/i);
+      // The point of not rethrowing: a second request still gets an answer rather than
+      // the process having exited for every connected session.
+      const again = await fetch(`${base}/api/hash`, { headers: { authorization: "Bearer blz_whatever" } });
+      assert.equal(again.status, 503, "the server must still be listening");
+    } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("it FAILS CLOSED — /control/revert with a thrown gate does not reach git", async () => {
+    const dir = board();
+    const sha = revertableSha(dir);
+    const { app, base } = await boot(dir, { identity: explodingIdentity() });
+    try {
+      const r = await ctl(base, "/control/revert",
+        { token: "blz_whatever", body: { sha } });
+      assert.equal(r.status, 503);
+      assert.equal(reverted(dir), false,
+        "a request the gate could not decide must not reach the shell-out");
+    } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("...and /control/groomer/run with a thrown gate dispatches no agent", async () => {
+    const dir = board();
+    const { app, base } = await boot(dir, { identity: explodingIdentity() });
+    try {
+      const r = await ctl(base, "/control/groomer/run", { token: "blz_whatever" });
+      assert.equal(r.status, 503);
+      await new Promise((res) => setTimeout(res, 100));
+      assert.equal(groomed(dir), false);
+    } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("board CONTENT with a thrown gate is refused too, and leaks no ticket", async () => {
+    const dir = board();
+    const { app, base } = await boot(dir, { identity: explodingIdentity() });
+    try {
+      const r = await fetch(`${base}/`, { headers: { authorization: "Bearer blz_whatever" } });
+      assert.equal(r.status, 503);
+      assert.doesNotMatch(await r.text(), /SECRETTICKET/);
+    } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-359: `sha` reaches git as a commit, never as an option", () => {
+  // Security review W4. `sha` came off the wire into an argv with no `--` ahead of it, so
+  // a value starting with `-` was parsed by git as an option. No shell, so never RCE —
+  // but the endpoint's job is to run git, and this is an attacker choosing its behaviour.
+  const nasty = {
+    "a long option": "--strategy-option=theirs",
+    "a short option": "-n",
+    "an option after a valid-looking prefix": "-mHEAD",
+    "a refspec, not a sha": "HEAD",
+    "a path": "../../etc/passwd",
+    "empty": "",
+  };
+
+  for (const [label, sha] of Object.entries(nasty)) {
+    test(`${label} is refused before git is invoked`, async () => {
+      const dir = board();
+      const before = execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" });
+      const { app, base } = await boot(dir);           // no identities: the OPEN board
+      try {
+        const r = await ctl(base, "/control/revert", { body: { sha } });
+        assert.equal(r.status, 400, `${JSON.stringify(sha)} must not reach git`);
+        assert.match((await r.json()).errors[0], /not a commit sha/);
+        assert.equal(execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }),
+          before, "HEAD must not have moved");
+      } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+    });
+  }
+
+  test("a real sha still reverts — the validation is not a blanket refusal", async () => {
+    const dir = board();
+    const sha = revertableSha(dir);
+    const { app, base } = await boot(dir);
+    try {
+      assert.equal((await ctl(base, "/control/revert", { body: { sha } })).status, 204);
+      assert.equal(reverted(dir), true);
+    } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+
+  test("an abbreviated sha still reverts", async () => {
+    const dir = board();
+    const sha = revertableSha(dir).slice(0, 8);
+    const { app, base } = await boot(dir);
+    try {
+      assert.equal((await ctl(base, "/control/revert", { body: { sha } })).status, 204);
+      assert.equal(reverted(dir), true);
+    } finally { app.server.close(); rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
 describe("BLZ-359: an unclassified route under the gate fails closed", () => {
   test("an unknown /control/* verb is 404 — not 204, and not the last route's scope", async () => {
     const dir = board();

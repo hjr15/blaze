@@ -147,6 +147,14 @@ both servers, because the page is rendered server-side and carries every ticket.
 Create the first identity — which turns authentication on — with
 [`blaze user add`](guide/commands.md#user).
 
+**Both servers read the roster once, at boot.** `startServer()` and `createApp()` each
+resolve `loadIdentity()` a single time, so adding the first user to a board that is
+ALREADY SERVING does not turn authentication on for that process — it keeps serving
+unauthenticated until it is restarted. That is the same on both, and `blaze user add`
+says so in its output. Re-reading the roster per request would fix it for real and is
+tracked separately; doing it on one server and not the other would replace one rule an
+operator has to know with two.
+
 The `x-blaze-csrf` header is **not** authentication and never was — on either server: it
 is a per-process `randomUUID()` embedded in the served HTML, readable by anyone who can
 `GET /`. It is forgery protection for the browser flow, retained as defence-in-depth
