@@ -28,13 +28,39 @@ import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 
 const PR_RANK = { MERGED: 3, OPEN: 2, CLOSED: 1 };
 
-function sh(cmd, args, opts = {}) {
+// --- shelling out, in two layers (BLZ-350) ------------------------------------
+// `shResult` is the honest one: it reports WHAT happened — exit status, stderr,
+// whether the binary was even found — so a caller can tell "succeeded with no
+// output" from "failed". `sh` is the lossy convenience wrapper that collapses
+// that into "trimmed stdout, or null", which is what the git probes below
+// actually want (`rev-parse --verify` failing IS the answer to "does this ref
+// exist?").
+//
+// Every `sh` call site was audited before this split; all ten are `git` probes
+// whose failure is either meaningless or already handled by the `|| ""` /
+// `!== null` idiom around them. Their behaviour is unchanged, deliberately.
+// The ONE call that must not be lossy is the forge call, and it uses `shResult`.
+export function shResult(cmd, args, opts = {}) {
   try {
-    return execFileSync(cmd, args, {
-      encoding: "utf8", stdio: ["ignore", "pipe", "ignore"],
+    const stdout = execFileSync(cmd, args, {
+      encoding: "utf8", stdio: ["ignore", "pipe", "pipe"],
       maxBuffer: 64 * 1024 * 1024, ...opts,
-    }).trim();
-  } catch { return null; }
+    });
+    return { ok: true, stdout: String(stdout).trim(), stderr: "", status: 0 };
+  } catch (e) {
+    return {
+      ok: false,
+      stdout: e && e.stdout ? String(e.stdout).trim() : "",
+      // ENOENT (binary not installed) has no stderr — fall back to the error's own text.
+      stderr: (e && e.stderr ? String(e.stderr).trim() : "") || (e && e.message ? String(e.message).trim() : ""),
+      status: e && typeof e.status === "number" ? e.status : null,
+    };
+  }
+}
+
+function sh(cmd, args, opts = {}) {
+  const r = shResult(cmd, args, opts);
+  return r.ok ? r.stdout : null;
 }
 
 // --- pure decision: git signal + current status + type → target status --------
@@ -169,9 +195,139 @@ export function buildBranchMap(refs, idFromRef, { key, shippedSet, inspect }) {
   return branchMap;
 }
 
+// --- the forge, such as it is: `gh` speaks GitHub and nothing else (BLZ-350) ---
+// Blaze is GitHub-only. That is a stated non-goal, not an oversight (docs/design.md
+// "Non-goals"), and this code does NOT widen it. What it does is stop the narrowing
+// from being invisible: on a non-GitHub remote `gh pr list` fails, and the old
+// `sh()` turned that failure into `null`, which `JSON.parse(null || "[]")` turned
+// into "this repo has no pull requests". Since `decide()` reaches "in-review" only
+// through its `pr` branch, the delivery workflow quietly lost a state and reported
+// a clean run.
+//
+// Hosts we can name, we classify BEFORE spending a subprocess on them; hosts we
+// cannot, we hand to `gh` and report whatever it says. GitHub Enterprise Server is
+// self-hosted under an arbitrary hostname, so "unknown" must stay optimistic —
+// guessing "unsupported" for a GHES host would break working boards.
+//
+// CRITICAL (review regression, caught before merge): classify EVERY remote, not
+// just `origin`. `gh` resolves its base repo from ANY GitHub remote it finds, so a
+// repo whose only GitHub remote is named `upstream` — or one with `origin` on
+// GitLab and `upstream` on GitHub — reads its PRs perfectly today. An origin-only
+// check refused those repos a `gh` call and told them, falsely, that they had no
+// forge: this ticket's own defect, re-introduced on the remote-name axis. The
+// short-circuit is therefore an ALL quantifier — every remote must be unreadable
+// before we decline to ask `gh`. One github-or-unknown remote is enough to ask.
+
+/** Hostnames that are definitely a forge `gh` cannot talk to. Deliberately a
+ *  short, precise list: a wrong "unsupported" verdict silently disables PR
+ *  reading, so anything not listed falls through to `gh` itself. */
+const NON_GITHUB_HOST = [
+  /(^|\.)gitlab\./, /(^|\.)bitbucket\./, /(^|\.)gitea\./, /(^|\.)forgejo\./,
+  /^codeberg\.org$/, /^git\.sr\.ht$/, /(^|\.)dev\.azure\.com$/, /\.visualstudio\.com$/,
+  /^git\.launchpad\.net$/, /^gitee\.com$/,
+];
+
+/** Pure: a git remote URL → the host it names, or null for a local path remote.
+ *  Handles the three shapes git accepts: scheme URLs, scp-style `git@host:path`,
+ *  and bare filesystem paths. */
+export function remoteHost(url) {
+  const u = (url || "").trim();
+  if (!u) return null;
+  // scheme://[user@]host[:port]/path
+  const scheme = /^[a-z][a-z0-9+.-]*:\/\/(?:[^@/]*@)?([^:/?#]+)/i.exec(u);
+  if (scheme) return scheme[1].toLowerCase();
+  if (u.startsWith("file://")) return null;
+  // scp-style: [user@]host:path — a colon with no leading slash before it.
+  const scp = /^(?:[^@/]+@)?([^/:]+):(?!\/)/.exec(u);
+  if (scp) return scp[1].toLowerCase();
+  return null; // /abs/path, ../rel/path — a local remote has no host
+}
+
+/** Pure: a git remote URL → { host, kind }, where kind is one of
+ *  "github"      — `gh` can read it (github.com, a *github* hostname, or $GH_HOST)
+ *  "unsupported" — a forge `gh` provably cannot read
+ *  "unknown"     — could be GitHub Enterprise Server; let `gh` answer
+ *  "none"        — no remote, or a local-path remote: there is no forge at all */
+export function classifyRemote(url, { ghHost = process.env.GH_HOST } = {}) {
+  const host = remoteHost(url);
+  if (!host) return { host: null, kind: "none" };
+  if (ghHost && host === String(ghHost).trim().toLowerCase()) return { host, kind: "github" };
+  if (NON_GITHUB_HOST.some((re) => re.test(host))) return { host, kind: "unsupported" };
+  if (host === "github.com" || host.endsWith(".github.com") || host.includes("github")) {
+    return { host, kind: "github" };
+  }
+  return { host, kind: "unknown" };
+}
+
+const UNREACHABLE = 'PR state could not be read, so "in-review" is unreachable for this repo '
+  + "(branch and merged-commit signals are unaffected).";
+
+/** Pure: `git config --get-regexp` output → the remote URLs it lists, in order.
+ *  Lines look like `remote.origin.url https://github.com/o/r.git`. */
+export function parseRemoteUrls(configOutput) {
+  return (configOutput || "").split("\n")
+    .map((line) => /^remote\.(?:.+)\.url\s+(.+)$/.exec(line.trim()))
+    .filter(Boolean)
+    .map((m) => m[1].trim())
+    .filter(Boolean);
+}
+
+/** Read one repo's pull requests, reporting failure AS failure.
+ *  Returns `{ prs, forgeErrors }` — an empty `prs` with an empty `forgeErrors`
+ *  means "this repo genuinely has no pull requests", and nothing else does.
+ *  `run` is injectable so the classification can be tested without `gh` present. */
+export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HOST } = {}) {
+  // EVERY remote, not just origin — see the note above the host table.
+  const cfg = run("git", ["-C", repoPath, "config", "--get-regexp", "^remote\\..*\\.url"]);
+  const urls = cfg.ok ? parseRemoteUrls(cfg.stdout) : [];
+  const seen = urls.map((u) => ({ url: u, ...classifyRemote(u, { ghHost }) }));
+  // "unknown" could be a GHES install under any hostname, so it counts as askable.
+  const askable = seen.some((r) => r.kind === "github" || r.kind === "unknown");
+  const hosted = seen.filter((r) => r.host);
+
+  if (!askable && !hosted.length) {
+    return { prs: [], forgeErrors: [{
+      repo: repoPath, remotes: urls, host: null, reason: "no-remote",
+      message: `${repoPath} has no git remote on a forge (${urls.length ? "its remotes are local paths" : "it has no remotes configured"}), `
+        + "and Blaze reads pull requests through the GitHub CLI (`gh`). " + UNREACHABLE,
+    }] };
+  }
+  if (!askable) {
+    const hosts = [...new Set(hosted.map((r) => r.host))];
+    return { prs: [], forgeErrors: [{
+      repo: repoPath, remotes: urls, host: hosts[0], hosts, reason: "unsupported-forge",
+      message: `${repoPath} has git remotes on ${hosts.join(", ")} and nowhere else, but Blaze reads `
+        + "pull requests through the GitHub CLI (`gh`), which supports GitHub.com and GitHub "
+        + `Enterprise Server only. ${UNREACHABLE} Blaze is GitHub-only by design — see `
+        + 'docs/design.md "Non-goals".',
+    }] };
+  }
+
+  const askedHost = (seen.find((r) => r.kind === "github") || seen.find((r) => r.kind === "unknown")).host;
+  const res = run("gh", ["pr", "list", "--state", "all", "--limit", "1000",
+    "--json", "number,url,headRefName,state,title"], { cwd: repoPath });
+  if (!res.ok) {
+    const detail = (res.stderr || "").split("\n").filter(Boolean)[0] || `exit ${res.status}`;
+    return { prs: [], forgeErrors: [{
+      repo: repoPath, remotes: urls, host: askedHost, reason: "gh-failed", status: res.status, detail,
+      message: `\`gh pr list\` failed in ${repoPath} (remote host: ${askedHost || "unknown"}): ${detail}. `
+        + `${UNREACHABLE} A failed forge call is not an empty pull-request list.`,
+    }] };
+  }
+  try {
+    const prs = JSON.parse(res.stdout || "[]");
+    return { prs: Array.isArray(prs) ? prs : [], forgeErrors: [] };
+  } catch (e) {
+    return { prs: [], forgeErrors: [{
+      repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unparsable", detail: String(e.message || e),
+      message: `\`gh pr list\` returned output Blaze could not parse as JSON in ${repoPath}. ${UNREACHABLE}`,
+    }] };
+  }
+}
+
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
 function gatherRepo(repoPath, idFromRef, key, { fetch }) {
-  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set() };
+  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [] };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
   if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
 
@@ -187,9 +343,10 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
     if (id) shippedSet.add(id);
   }
 
-  const prJson = sh("gh", ["pr", "list", "--state", "all", "--limit", "1000",
-    "--json", "number,url,headRefName,state,title"], { cwd: repoPath });
-  const prMap = buildPrMap(JSON.parse(prJson || "[]"), idFromRef, shippedSet);
+  // BLZ-350: `gh` is the only forge call in the tree, and it is the one call whose
+  // failure must NOT be laundered into an empty result — see gatherPrs.
+  const { prs, forgeErrors } = gatherPrs(repoPath);
+  const prMap = buildPrMap(prs, idFromRef, shippedSet);
 
   const refs = (sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
     "refs/heads", "refs/remotes/origin"]) || "")
@@ -209,7 +366,7 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   });
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
-  return { prMap, branchMap, shippedSet };
+  return { prMap, branchMap, shippedSet, forgeErrors };
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
@@ -218,7 +375,7 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
 // failed to resolve reported "already in sync" having scanned nothing at all.
 function gatherProject(project, { fetch }) {
   const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
-  const missingRepos = [];
+  const missingRepos = [], forgeErrors = [];
   let scannedRepos = 0;
   for (const repo of project.codeRepoPaths) {
     if (!existsSync(repo) || !existsSync(join(repo, ".git"))) { missingRepos.push(repo); continue; }
@@ -230,9 +387,10 @@ function gatherProject(project, { fetch }) {
     }
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
+    for (const f of r.forgeErrors || []) forgeErrors.push(f);
   }
   return {
-    prMap, branchMap, shippedSet, missingRepos, scannedRepos,
+    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors,
     configuredRepos: project.codeRepoPaths.length,
   };
 }
@@ -261,7 +419,7 @@ export async function reconcile({
   const cfg = loadConfig({ root });
   const keys = listProjects(cfg);
   if (!keys.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false,
-    missingRepos: [], scannedRepos: 0, configuredRepos: 0 };
+    missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [] };
 
   const sig = new Map();
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
@@ -320,7 +478,11 @@ export async function reconcile({
   const missingRepos = [...new Set([...sig.values()].flatMap((g) => g.missingRepos))];
   const scannedRepos = [...sig.values()].reduce((n, g) => n + g.scannedRepos, 0);
   const configuredRepos = [...sig.values()].reduce((n, g) => n + g.configuredRepos, 0);
-  return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos };
+  // BLZ-350: the forge outcome travels with the result. An empty prMap now means
+  // "no pull requests"; anything else that happened is named here instead.
+  const forgeErrors = [...sig.values()].flatMap((g) => g.forgeErrors || []);
+  return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos,
+           forgeErrors };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -343,6 +505,16 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // on change", and this is not a change, it is a reason not to trust the run.
   for (const p of r.missingRepos || []) {
     console.error(`reconcile: WARNING — codeRepo not found, skipped: ${p}`);
+  }
+  // BLZ-350: an unreadable forge is a degraded run, not a clean one. It is NOT
+  // fatal — branch and merged-commit signals still reconcile, and on an
+  // unsupported forge the condition is permanent, so exiting non-zero on every
+  // run would be a nuisance rather than information. It is said, every time,
+  // on stderr, regardless of --quiet (same rule as the missing-repo warning:
+  // --quiet means "print only on change", and this is a reason not to trust
+  // the run rather than a change).
+  for (const f of r.forgeErrors || []) {
+    console.error(`reconcile: FORGE UNREADABLE — ${f.message}`);
   }
   if (r.configuredRepos > 0 && r.scannedRepos === 0) {
     console.error(`reconcile: FAILED — none of the ${r.configuredRepos} configured codeRepo(s) could be read, so NOTHING was scanned.`);

@@ -46,8 +46,15 @@ the reconcile engine shells out to `git` and `gh`.
   brainstorm — autonomous implementers are deferred.)
 - No embedded Anthropic SDK and no API key handling inside Blaze — the agent CLI owns
   auth. (A provider seam is possible later; not built now.)
-- No MCP server; no second git provider (GitHub via `gh` only, with a clean
-  `provider` seam); no database; no login.
+- No MCP server; no second git provider (GitHub via `gh` only); no database; no
+  login. **Corrected (BLZ-350):** this bullet used to promise "a clean `provider`
+  seam". There is no such seam. `provider` was removed from the config contract by
+  BLZ-298 and is now a hard load error (`scripts/model/schema-version.mjs`,
+  `REMOVED_KEYS`), precisely because nothing read it. The doc promised a seam the
+  engine rejects; the engine is right and the promise is withdrawn. Reintroducing a
+  forge seam reverses a shipped decision and needs an ADR. What BLZ-350 changed is
+  not the scope but the silence — see
+  [Forge support and status reachability](guide/how-it-works.md#forge-support-and-status-reachability).
 - No migration of the predecessor tool onto Blaze, and no changes to the code repo
   it mirrors. That mirror appears only as the README's worked example.
 
@@ -236,7 +243,10 @@ Delta from the original:
 - **Refactor:** extract the pure decision `decide(state, currentDir, config) →
   { target, branchVal, prVal, moved }`; this is what the tests exercise. The
   file-moving/committing shell wraps it, behaviour unchanged.
-- GitHub via `gh` retained; the PR-gathering step is the future `provider` seam.
+- GitHub via `gh` retained. The PR-gathering step was once described here as "the
+  future `provider` seam"; it is not one, and `provider` is a rejected config key
+  (see Non-goals). It is a single `gh pr list` call, and since BLZ-350 its failure
+  is reported (`forgeErrors`) rather than laundered into an empty PR list.
 - Exposed both as a CLI (today's flags) and as a callable the supervisor runs on a
   timer, emitting each move to the SSE bus.
 

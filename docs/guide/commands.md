@@ -62,6 +62,13 @@ what it would change and writes nothing.
 | `--fetch` | Fetch the linked code repo before comparing. | off |
 | `--quiet` | Suppress output for tickets already in sync. | off |
 
+PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub
+Enterprise Server only. On any other remote, `in-review` is unreachable and
+reconcile prints a `FORGE UNREADABLE` line to stderr on every run (including under
+`--quiet`) rather than reporting a clean board; it still exits 0, because the
+branch and merged-commit signals are unaffected. See
+[Forge support and status reachability](how-it-works.md#forge-support-and-status-reachability).
+
 ## groom
 
 ```

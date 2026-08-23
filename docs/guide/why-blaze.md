@@ -89,7 +89,11 @@ Look elsewhere when:
   branch/PR state. They never cut branches or edit code in the mirrored repo.
   That boundary is deliberate.
 - you need a second git provider — GitHub via `gh` is the one implemented, and
-  that remains a non-goal.
+  that remains a non-goal. On a GitLab/Bitbucket/Gitea remote reconcile still
+  drives `in-progress` and `done` from branches and commits, but `in-review` is
+  reachable only through a pull request and so cannot be reached at all. Blaze
+  tells you this on every run rather than reporting a clean board — see
+  [Forge support and status reachability](how-it-works.md#forge-support-and-status-reachability).
 
 **A hosted API, an MCP server and a database backend used to be on that list.**
 They were described here as "non-goals by design, not gaps waiting to be filled".
