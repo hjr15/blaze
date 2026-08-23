@@ -214,3 +214,39 @@ feature. The thin slice's "no new dependency, no key storage, no sandbox" must a
 - **The transcript sink** — flagged by the backend lane as the one genuinely irreversible
   decision. Recommended shape: `<dataRoot>/.blaze/runs/<run_id>/transcript.jsonl`, gitignored,
   DB stores a pointer and byte offset, ticket gets one summary line. Not yet ratified.
+
+---
+
+## 7. Decisions taken (2026-08-23, with the operator)
+
+| # | Decision | Note |
+|---|---|---|
+| Q1 | "Work on it" = **drive the ticket to done**, rungs (a)→(d) | Reverses `design.md:44-46` ("no code-writing worker loops") for every option |
+| Q2 | **Self-hosted: (a)**. **Cloud SaaS: (c) hybrid, paired runner** | Server-side (b) rejected on the BUILD MATRIX, not on key custody |
+| Q3 | Collapses — **Blaze holds no LLM key at all** | Only stored secret is a runner pairing token, same class as `api_token` |
+| Q4 | Collapses — you cannot overspend a key you do not hold | What survives is run-count fan-out, not token cost |
+| Q5 | Moves out of Blaze — provider config belongs to the runner | `agentCommand`'s naive space-split needs redesigning regardless (BLZ-349) |
+| Q6 | Transcripts: **JSONL under `.blaze/runs/<run_id>/`**, gitignored | DB stores pointer + byte offset; ticket gets one summary line |
+| Q7 | **Spec sprint dispatch in full, including concurrency** | Default concurrency limit **1**, configurable upward — the mechanism is specified, the blast radius is not shipped open |
+| — | Run records live in the board's own database | Not a choice: on self-hosted it is the only database that exists |
+| — | Runs are **attributed to a ticket, carrying `project_key`** | Per-project metrics are a `GROUP BY`, exactly as every existing project metric already is |
+
+### Terminology, recorded because it caused a real misunderstanding
+
+In Blaze, **a board sits ABOVE projects**: *"One installation is one board"* (ADR-0014:14), and
+one board contains many projects (this operator's board holds 11). `blaze board` renders the
+whole installation.
+
+The operator's working model is the **Jira** one — a project contains several boards, which are
+views. Blaze does not have that concept. **Whether it should is a real product question and is
+explicitly NOT settled here.** It is unrelated to run storage, and it must not be smuggled into
+BLZ-345.
+
+### Still unresolved, deliberately
+
+- **Cross-customer queue sharding under cloud SaaS.** Deferred on ADR-0013's own rule — *"not to
+  be built ahead of a customer who asks."* There are zero SaaS customers. Revisit when N > 0.
+- **Whether a GitHub App's approving review satisfies required-approvals.** Unverified;
+  `github-actions[bot]` is documented as not counting, no primary source found for custom Apps.
+- **Q6's interface shape beyond the transcript sink** — chat panel vs run-detail view,
+  streaming vs polling, resumability, second-user visibility.
