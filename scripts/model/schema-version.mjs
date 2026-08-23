@@ -52,8 +52,17 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
       + `Delete ${present.length === 1 ? "it" : "them"} — nothing else changes. `
       + "See https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md" };
   }
-  const v = cfg ? cfg.schemaVersion : undefined;
-  if (v === undefined || v === null) return { ok: true, error: null }; // pre-versioning board = v1
+  // An absent (or null) stamp is the pre-versioning baseline, DEFINED as v1 — so it
+  // resolves to 1 and then goes through the same window check as an explicit
+  // `schemaVersion: 1`, rather than short-circuiting past it (BLZ-357). Returning ok
+  // early made the too-old branch unreachable for unstamped boards at every value of
+  // `min`, so the live (unstamped) board would have kept loading the day
+  // MIN_SCHEMA_VERSION was raised — the exact migration this guard exists to make safe.
+  const raw = cfg ? cfg.schemaVersion : undefined;
+  const absent = raw === undefined || raw === null;
+  const v = absent ? 1 : raw;
+  // Only an explicit stamp can be invalid: an absent one resolved to the literal 1
+  // above, so it passes this check by construction rather than by a guard here.
   if (typeof v !== "number" || !Number.isInteger(v) || v < 1) {
     // Quote non-numbers (via JSON.stringify) so a stringified digit like "1"
     // renders as `"1"`, not the self-contradictory bare `1`; numbers render
@@ -66,6 +75,12 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
     return { ok: false, error: `board schemaVersion ${v} is newer than this engine supports (supported: ${min}..${current}); upgrade the engine — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
   }
   if (v < min) {
+    // An unstamped board has no value to correct — it has a key to ADD. Saying
+    // "schemaVersion undefined" would send its operator looking for a key that is
+    // not there, so name the absence and the value to write.
+    if (absent) {
+      return { ok: false, error: `blaze.config.json has no schemaVersion stamp — an absent stamp means schema v1, which is older than this engine supports (supported: ${min}..${current}); once the board is on this engine's contract, add \`"schemaVersion": ${current}\` — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
+    }
     return { ok: false, error: `board schemaVersion ${v} is older than this engine supports (supported: ${min}..${current}) — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
   }
   return { ok: true, error: null };

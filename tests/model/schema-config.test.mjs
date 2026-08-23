@@ -82,6 +82,12 @@ test("checkSchemaVersion: a version newer than the engine fails, naming version,
   assert.match(r.error, /board schemaVersion 99/);
   assert.match(r.error, new RegExp(`${MIN_SCHEMA_VERSION}\\.\\.${SCHEMA_VERSION}`));           // the engine's supported range
   assert.match(r.error, /docs\/schema-versioning\.md/);
+
+  // The boundary, not just a far-off 99: `current + 1` is the first rejected value,
+  // and only pinning it makes the comparison falsifiable at its edge.
+  const edge = checkSchemaVersion({ schemaVersion: 3 }, { current: 2, min: 1 });
+  assert.equal(edge.ok, false, "current + 1 must be rejected");
+  assert.match(edge.error, /board schemaVersion 3 is newer/);
 });
 
 test("checkSchemaVersion: the too-old branch is reachable with injected constants", () => {
@@ -92,6 +98,40 @@ test("checkSchemaVersion: the too-old branch is reachable with injected constant
   assert.match(r.error, /board schemaVersion 1 is older/);
   assert.match(r.error, /2\.\.3/);
   assert.match(r.error, /docs\/schema-versioning\.md/);
+});
+
+test("checkSchemaVersion: an absent stamp is REJECTED when min > 1 — it means v1, not a bypass", () => {
+  // BLZ-357: the absent-stamp branch used to return ok:true unconditionally, BEFORE
+  // the window check ran. An absent stamp means v1 (its own comment says so), so at
+  // min 2 it is out of window and must fail exactly as an explicit `schemaVersion: 1`
+  // does. Latent at the real constants (MIN === 1); live the day MIN is raised, which
+  // is the migration this guard exists to make safe.
+  for (const cfg of [{ key: "OBA", projects: ["OBA"] }, { schemaVersion: null }]) {
+    const r = checkSchemaVersion(cfg, { current: 3, min: 2 });
+    assert.equal(r.ok, false, `an unstamped board must be rejected at min 2: ${JSON.stringify(cfg)}`);
+    assert.match(r.error, /2\.\.3/);                              // the engine's supported range
+    assert.match(r.error, /docs\/schema-versioning\.md/);
+  }
+});
+
+test("checkSchemaVersion: a rejected unstamped board is told the stamp is ABSENT, and which value to add", () => {
+  // An operator whose blaze.config.json has no such key must not be told
+  // "schemaVersion undefined" — there is no value to correct, there is a key to ADD.
+  const r = checkSchemaVersion({ key: "OBA", projects: ["OBA"] }, { current: 3, min: 2 });
+  assert.equal(r.ok, false);
+  assert.match(r.error, /no schemaVersion stamp/, "must say the stamp is absent");
+  assert.doesNotMatch(r.error, /undefined|null/, "must never report a value the config does not have");
+  assert.match(r.error, /"schemaVersion": 3/, "must name the value to add");
+  assert.doesNotMatch(r.error, /blaze \w+/, "guard must point at docs, never a command");
+});
+
+test("checkSchemaVersion: an absent stamp still LOADS at min === 1 — every existing board is unstamped", () => {
+  // Back-compat is not optional: the live blaze-pm board carries no stamp. Asserted
+  // against the REAL constants and against an injected window that still includes v1.
+  assert.deepEqual(checkSchemaVersion({ key: "OBA", projects: ["OBA"] }), { ok: true, error: null });
+  assert.deepEqual(checkSchemaVersion({ schemaVersion: null }), { ok: true, error: null });
+  assert.deepEqual(checkSchemaVersion({}, { current: 9, min: 1 }), { ok: true, error: null });
+  assert.deepEqual(checkSchemaVersion(undefined, { current: 9, min: 1 }), { ok: true, error: null });
 });
 
 test("checkSchemaVersion: non-positive-integer stamps are invalid", () => {
