@@ -46,11 +46,11 @@ Verified against the working tree at `7e4ba4e`, not assumed.
 | `ganttModel` scopes rows by `r.sprint === sel.id` and takes its axis window from the selected sprint | **confirmed** | `scripts/model/gantt.mjs:57-59` (rows), `:39-44` (axis) |
 | Four bar kinds branch on `r.start`/`r.due` | **confirmed** | `gantt.mjs:67-73` |
 | Sprint selection is *requested → active → first registered* | **confirmed** | `gantt.mjs:33-36` |
-| The model already returns `warnings: string[]` and the caller renders it | **confirmed** | `gantt.mjs:60`, `:64`; `views/gantt.mjs` consumes `gm` only |
+| The model already returns `warnings: string[]` and the caller renders it | **confirmed** | declared `gantt.mjs:60`, pushed `:64`, returned `:100`; `views/gantt.mjs` consumes `gm` only |
 | Non-delivery rows in a sprint are dropped into `warnings`, never rendered | **confirmed** | `gantt.mjs:63-65`, guarded by `isDelivery` at `:23-25` |
 | Groups are one header per distinct `parent` | **confirmed** | `gantt.mjs:89-98` — the code and its comment both say "epic", a type retired by BLZ-231 |
 | `nowX` is `null` whenever `now` falls outside the axis | **confirmed** | `gantt.mjs:54` |
-| The gantt is reached by a `switch` case and a boolean | **confirmed** | `views/page.mjs:47-67` (`renderView`), `:68` (`VIEW_NAMES`) |
+| The gantt is reached by a `switch` case and a boolean | **confirmed** | `views/page.mjs:47-67` (`renderView`), `:68` (the `VIEW_NAMES` array), `:114` (the enabled-boolean gate) |
 | The model is pure and deterministic — no `Date.now()`, no `localeCompare` | **confirmed** | `gantt.mjs:6-8`, `:17`, `:29` (`now` injected) |
 | The gantt has a test suite worth preserving | **confirmed, 27 tests** | `tests/model/gantt.test.mjs` (18), `tests/views/gantt.test.mjs` (9) |
 
@@ -64,21 +64,32 @@ ganttModel({ index, sprints, sprint: undefined, now: 2026-08-24T00:00:00Z })
   → barKinds: { unplanned: 11 }
 ```
 
-**Eleven identical full-width bars and no today-marker.** The registry's `active` pointer is
+**Eleven identical bars, all the same width, and no today-marker.** The registry's `active` pointer is
 `S2`, a sprint that ran **2026-08-02 → 2026-08-05** and ended 19 days ago; not one of its 11
-tickets carries a date, so every bar spans the whole window; and `now` is outside the axis, so
-`gantt.mjs:54` returns `null` and the marker is not drawn.
+tickets carries a date, so every bar spans the sprint window — `w = 112` against an
+`axis.width` of `168`, i.e. **67%**, since `gantt.mjs:73` runs an `unplanned` bar from `winStart`
+to `winEnd`, not across the padded axis; and `now` is outside the axis, so `gantt.mjs:54` returns
+`null` and the marker is not drawn.
 
 The today-marker is absent on **four of the five** registered sprints — every axis except S5's
 ends before 2026-08-24:
 
-| Sprint | Window | Axis rendered | Rows | `nowX` |
-|---|---|---|---|---|
-| S1 | 2026-07-24 → 2026-07-29 | 2026-07-23 → 2026-07-31 | 16 | `null` |
-| **S2 (active)** | 2026-08-02 → 2026-08-05 | 2026-08-01 → 2026-08-07 | 11 | `null` |
-| S3 | 2026-08-07 → 2026-08-16 | 2026-08-06 → 2026-08-18 | 27 | `null` |
-| S4 | 2026-08-10 → 2026-08-16 | 2026-08-09 → 2026-08-18 | 6 | `null` |
-| S5 | 2026-08-11 → 2026-08-22 | 2026-08-10 → 2026-08-24 | 20 | 392 |
+| Sprint | Window | Day columns rendered | Rows | `nowX` | axis width |
+|---|---|---|---|---|---|
+| S1 | 2026-07-24 → 2026-07-29 | 2026-07-23 → 2026-07-30 | 16 | `null` | 224 |
+| **S2 (active)** | 2026-08-02 → 2026-08-05 | 2026-08-01 → 2026-08-06 | 11 | `null` | 168 |
+| S3 | 2026-08-07 → 2026-08-16 | 2026-08-06 → 2026-08-17 | 27 | `null` | 336 |
+| S4 | 2026-08-10 → 2026-08-16 | 2026-08-09 → 2026-08-17 | 6 | `null` | 252 |
+| S5 | 2026-08-11 → 2026-08-22 | 2026-08-10 → 2026-08-23 | 20 | **392** | **392** |
+
+The column range is the **last day column**, not `axis.endMs`, which is exclusive
+(`gantt.mjs:43`). Getting that wrong is easy and it hides the next row.
+
+**S5's marker is degenerate, not present.** `nowX = 392` and `axis.width = 392` are the same
+number: `gantt.mjs:54` admits `now` when `now <= endMs` and `endMs` is *exclusive*, so
+2026-08-24 passes the test while having **no day column on the axis**. The marker paints on the
+chart's right border, for a date the chart does not contain. So the honest statement is stronger
+than "absent on four of five": it is **absent on four and degenerate on the fifth**.
 
 **This is not a defect in `gantt.mjs`.** Every line of it is doing what it was specified to do in
 BLZ-109. It is a defect in *what the view is scoped to*: a sprint axis shows the past, because a
@@ -138,7 +149,7 @@ part that ships wrong. One enum has no illegal state to rule on:
 axis: 'schedule' | 'sprint'      // default: 'schedule'
 ```
 
-`sprint` survives as BLZ-354 §5.2 requires — *"it is what the renderer does today and it must
+`sprint` survives as BLZ-354 **§8.2** requires — *"it is what the renderer does today and it must
 keep working"* — but it is demoted to what it always was underneath: **a row filter**, which
 additionally supplies the axis window when and only when `axis: 'sprint'`.
 
@@ -147,13 +158,48 @@ additionally supplies the axis window when and only when `axis: 'sprint'`.
 | `'schedule'` | every schedulable ticket in scope; `sprint`, if set, filters them | §2.2 |
 | `'sprint'` | today's behaviour exactly — `r.sprint === sel.id` (`gantt.mjs:57-59`) | today's behaviour exactly — `[sel.start - 1d, sel.end + 1d]` (`gantt.mjs:39-44`) |
 
-**The migrated builtin `gantt` row gets `axis: 'sprint'`**, so BLZ-354 §6.2's zero-diff oracle —
-*"render all six views on the live 11-project board before and after the cutover and diff the
-HTML"* — still diffs to nothing. A new view created by an operator gets `axis: 'schedule'`. **The
-default that ships and the default that migrates are deliberately different, and that is a
-one-release condition, not the end state:** once `import-deps` (BLZ-360 §5.5) has populated
-`Precedes`, the builtin should flip to `'schedule'` too, and that flip is its own ticket with its
-own zero-diff expected-delta list.
+**The enum removes the precedence rule between two axis keys; it does not remove every rule, and
+an earlier draft overstated that.** Two cases stay explicit, both found by review:
+
+- **`{ axis: 'schedule', sprint: 'S3' }`** — `sprint` filters the rows and does **not** touch the
+  window. "In scope" in §2.2 means *the rows this view renders after every filter*, `sprint`
+  included, so a schedule-axis view filtered to S3 spans S3's tickets' derived dates, not S3's
+  window. Stated because it was undefined.
+- **`{ axis: 'sprint' }` on a project with no sprint registry** — `gantt.mjs:30-31` returns
+  `EMPTY`, and **9 of 11 projects have never had a sprint** (§1.2). The enum does not rule this
+  out, so the *type registry* does: a project-scoped view may not be saved with `axis: 'sprint'`
+  unless a sprint exists for that project, and an existing view whose last sprint is deleted
+  renders the named reason *"this view's axis is sprint-scoped and project X has no sprints"*
+  rather than an empty frame. That is a write-time block plus a read-time reason, exactly the
+  split BLZ-354 §5.3 prescribes.
+
+The sprint-selection chain itself — requested → active → first registered (`gantt.mjs:33-36`) —
+is **unchanged and still a precedence rule**. It is a rule about *which sprint*, not about *which
+axis*, and §10 keeps it.
+
+**The migrated builtin `gantt` row gets `axis: 'sprint'`**, so the *row set and the axis window*
+are unchanged for every existing user. A new view created by an operator gets `axis: 'schedule'`.
+
+**But the zero-diff oracle does NOT diff to nothing, and an earlier draft of this section claimed
+it would.** BLZ-354 §6.4's oracle — *"render all six views on the live 11-project board before and
+after the cutover and diff the HTML"* — compares HTML, and §4.2 replaces the bar vocabulary
+**unconditionally, on both axes**. `views/gantt.mjs:74` emits `class="bar bar-${barKind}"`, so a
+renamed kind is a changed attribute. Measured by running the real `ganttModel` over all five
+sprints and mapping each row through §4.2:
+
+| | Today | After |
+|---|---|---|
+| Bars drawn | **80** (`solid` 38, `unplanned` 42) | **80** (`actual` 27, `complete` 27, `scheduled` 24, `milestone` 2) |
+| Bars whose class changes | — | **80 of 80** |
+
+Transitions: `solid→actual` 27, `solid→scheduled` 10, `solid→milestone` 1, `complete←unplanned`
+27, `unplanned→scheduled` 14, `unplanned→milestone` 1. Geometry moves too, because a `scheduled`
+bar runs ES→EF rather than `start`→`due`.
+
+**So the gantt view ships with an expected-delta list of all 80 bars, in the shape BLZ-360 §4.1
+requires of the date migration** — *"the oracle gains an explicit expected-delta list"* — and an
+81st changed bar fails it. Claiming zero diff and shipping 80 is exactly the class of defect this
+repo's review bar exists to catch; it was caught here by review, not by the author.
 
 ### 2.2 The schedule axis window
 
@@ -161,7 +207,8 @@ own zero-diff expected-delta list.
 
 ```
 start = min(project_epoch, earliest deadline in scope, earliest frozen actual start in scope)
-end   = max(latest EF in scope, latest deadline in scope) + 1 working day
+end   = max(latest EF in scope, latest deadline in scope, latest frozen actual due in scope)
+        + 1 working day
 ```
 
 **`min` with the earliest deadline, rather than starting at `project_epoch`, is a decision this
@@ -190,7 +237,7 @@ tickets; the justification holds for `deadline` and is currently vacuous for `no
 
 ### 2.3 Day columns, and the one thing that does not scale
 
-`gantt.mjs:41-53` builds one column per day at `PX_PER_DAY = 28`. Over a sprint that is 6–14
+`gantt.mjs:47-53` builds one column per day at `PX_PER_DAY` (`:16`) `= 28`. Over a sprint that is 6–14
 columns. Over the schedule axis it is the span above.
 
 Measured today, the schedule axis would span **2026-07-24 → 2026-10-21 = 90 calendar days =
@@ -210,10 +257,16 @@ So the frozen actuals reach further back than any constraint does, and dropping 
 §4.2 renders those 28 tickets, and an axis that excludes rows it draws is not an axis. Wide,
 scrollable, and fine.
 
+**`latest frozen actual due` is in the `max` for symmetry with that same argument, and it is
+latent today** — the latest terminal `due` is 2026-08-14, well inside `OMA-4`'s 2026-10-20. It is
+specified anyway because the asymmetry is only invisible while some deadline happens to sit
+further out, and a board with no far-future deadline would clip the actuals it draws. An earlier
+draft omitted it and the omission was found by review.
+
 **It does not stay fine, and the trigger is stated rather than guessed:** one column per day at
 28 px is 10,220 px per year. **When the schedule axis exceeds 180 days, the model switches its
 column unit from day to week** and `axis.pxPerDay` becomes `axis.pxPerUnit` with a declared
-`unit`. Not built in v1 — 75 days is inside the budget — but the field is named now so the
+`unit`. Not built in v1 — 90 days is inside the budget — but the field is named now so the
 renderer is not rewritten later. `OMA-4` alone would trip a 60-day threshold, which is why the
 threshold is 180 and not 60.
 
@@ -227,20 +280,31 @@ BLZ-354 §10.2 kept it and predicted its removal:
 > member decides nothing. It is kept for one release … **Whoever writes spec 3 should expect to
 > delete it.**"*
 
-**Deleted, and not for the reason the prediction gave.** Spec 1 kept it because *"the migration
-leaves 28 terminal tickets carrying frozen actuals while every open ticket carries derived dates,
-and a Gantt has to be able to say which it is rendering."*
+**Deleted — and an earlier draft of this section claimed the reason was novel, which was false
+because it had trimmed the source mid-sentence.** Spec 1's full sentence is:
 
-**Measured, that premise does not survive: a single Gantt renders both kinds at once.** The board
-holds **28 terminal tickets with frozen actual dates** and **533 schedulable tickets** with
-derived ones, and no filter in this spec separates them — a project view over `INF` shows both.
-So "which is it rendering" has no per-view answer; it has a **per-row** answer.
+> *"…and a Gantt has to be able to say which it is rendering — **but it should be re-examined once
+> that distinction lives on the row (`schedule_run_id`) rather than in a view's config.** Whoever
+> writes spec 3 should expect to delete it."*
+
+The clause after the dash **is** the `schedule_run_id` argument this section makes. So spec 1
+named both the decision and its reason, and this spec supplies neither. What it does supply is the
+**measurement that closes it**, which spec 1 did not have:
+
+**A single Gantt renders both kinds at once, so the question spec 1 wanted the key to answer has
+no per-view answer at all.** The board holds **28 terminal tickets with frozen actual dates** and
+**533 schedulable tickets** with derived ones, and no filter in this spec separates them — a
+project view over `INF` shows both. "Which is it rendering" is therefore not a property of the
+view; it is a property of each row.
 
 And the row already carries it. BLZ-360 §2.2 gives every scheduled row a `schedule_run_id`, and
 §6.2 says a terminal ticket *"is never a node … and the scheduler has no write path to them"* —
 so `schedule_run_id IS NULL` **is** the discriminator, exactly. A `dateSource` key would be a
 second, coarser source of the same fact, able to disagree with the rows it describes. §4.2 makes
 the distinction visible where it actually lives: in the bar.
+
+**The one-release deferral spec 1 attached to the deletion is therefore not needed**, and that —
+rather than the reason — is what this section adds.
 
 ---
 
@@ -253,10 +317,10 @@ BLZ-360 §8.2 predicts the four kinds collapse. Measured on the live corpus, two
 
 | Kind (`gantt.mjs:70-73`) | Rows on the live corpus | Fate |
 |---|---|---|
-| `solid` — start + due | **38** (S1: 13, S3: 25) | becomes `scheduled` / `actual` (§4.2) |
+| `solid` — start + due | **38** (S1: 13, S3: 25) | **splits**: 27 → `actual`, 10 → `scheduled`, 1 → `milestone` (§4.2) |
 | `open-end` — start only | **0** — the corpus holds **zero** start-without-due tickets | **deleted** |
 | `open-start` — due only | **0 in any sprint** — the 2 due-only tickets carry no sprint | **deleted** |
-| `unplanned` — neither | **42** (S2: 11, S4: 6, S5: 20, S1: 3, S3: 2) | renamed `unscheduled`, narrowed (§4.2) |
+| `unplanned` — neither | **42** (S2: 11, S4: 6, S5: 20, S1: 3, S3: 2) | **splits**: 27 → `complete`, 14 → `scheduled`, 1 → `milestone` (§4.2). It is not renamed `unscheduled`; an earlier draft said so and contradicted §4.2's own count. |
 
 `gantt.mjs:71` and `:72` are **dead code paths on this board**, and have been since the view
 shipped. Deleting them costs nothing in the corpus and costs exactly **two tests** —
@@ -269,12 +333,41 @@ PR names it. Both are.
 
 ### 4.2 The four kinds after
 
-| Kind | When | Why it is its own kind |
+**The partition must be total, and an earlier draft's was not.** Its four kinds all required
+either non-terminal status or frozen dates, so a **terminal delivery ticket carrying no dates**
+matched none of them — and measured, that is **27 of the 80 bars the sprint Gantt draws today
+(34%)**, `OBA-621`, `OBA-622`, `OBA-623`, `OBA-413`, `OBA-485` and 22 more. Review found it; the
+fix is a fifth kind, and the fifth kind is also what §4.1's `unplanned` rows actually become.
+
+| Kind | When | Rows today (sprint axis / schedule axis) |
 |---|---|---|
-| `scheduled` | non-terminal, in the solve graph, `estimate > 0` | ES → EF, the ordinary bar |
-| **`actual`** | **terminal, carrying frozen dates** | **new — see below** |
-| `milestone` | non-terminal, in the solve graph, no estimate | **zero-width — see below** |
-| `unscheduled` | outside the solve graph, or an SCC member | carries the reason string; never a date. **Zero members today** — see below |
+| `scheduled` | non-terminal, `estimate > 0` | **24 / 393** |
+| `milestone` | non-terminal, no estimate — zero-duration | **2 / 140** |
+| **`actual`** | terminal, carrying frozen dates | **27 / 28** |
+| **`complete`** | terminal, carrying no dates | **27 / excluded** |
+| `unscheduled` | in an SCC, or a dropped edge leaves it unsolvable | **0 / 0** |
+
+The first four are **exhaustive over every delivery ticket** — 2,179 of them, partitioning as
+28 `actual` + 1,618 undated-terminal + 393 `scheduled` + 140 `milestone` with **no remainder**,
+verified by construction rather than asserted.
+
+**`complete` exists because a done ticket with no dates has no extent, and today the renderer
+invents one.** `gantt.mjs:73` runs an `unplanned` bar from `winStart` to `winEnd`, so those 27
+rows currently claim to have taken the whole sprint. On a sprint axis the window is at least a
+true statement to sprint precision, so `complete` renders as a filled fixed-width marker at the
+sprint's end. **On the schedule axis it is excluded with a stated count**, because there is no
+window to be imprecise within and inventing a position is a lie. Excluded, not silently dropped:
+the view says *"1,618 completed tickets carry no dates and are not shown"*.
+
+That exclusion is also what keeps the schedule axis's row set sane: **561 rows** (533 schedulable
++ 28 dated terminal), not 2,179 — of which **74.3% would be undated done work**.
+
+**`unscheduled` really does have zero members, and the reason is weaker than it looks.** Of its
+causes, 0 SCCs is a genuine measurement; "0 dangling `Precedes` targets" is **vacuous, because
+there are 0 `Precedes` edges of any kind**. Worse, it does not survive the action §5.2 recommends:
+**33 `Blocks` edges have a schedulable source and a non-schedulable target** (and 54 the other
+way), so `import-deps` would create 33 would-be dangling targets the moment it runs. So
+`unscheduled` is defensive today and will not stay defensive — see §13.4.
 
 **`unscheduled` has no members on this corpus, and that is worth stating before the kind is
 built.** It has exactly three causes, and all three measure zero: the non-terminal delivery graph
@@ -339,7 +432,7 @@ exist yet, `duration = estimate` in minutes, isolated nodes included:
 | …starting at `project_epoch` because nothing precedes them | **505 (94.7%)** |
 | Tickets in the dependency graph at all | 47 |
 | Dependency edges | 36 |
-| Longest chain **by ticket count** | **4** — `SN-27 → SN-28 → SN-33 → SN-36`, 840 min total |
+| Longest chain **by ticket count** | **4 tickets — and it is a four-way tie**: `SN-27→SN-28→SN-33→SN-36`, `SN-19→SN-20→SN-23→SN-36`, `SN-19→SN-21→SN-23→SN-36`, `SN-19→SN-22→SN-23→SN-36` |
 | Heaviest **chain** by duration | 3,780 min = 7.88 working days — `BLZ-254 → BLZ-265` |
 | **Latest early finish over the whole corpus** | **4,800 min = 10.0 working days** |
 | **The critical path** | **`BLZ-253` — one ticket, 4,800 min, 0 predecessors, 0 successors** |
@@ -368,34 +461,42 @@ Three rules, and the first two are the ones that matter.
    ```
    critical-path-degenerate   critical path is 1 ticket (BLZ-253, 10.0 working days) and
                               contains no dependency. 505 of 533 schedulable tickets (94.7%)
-                              have no predecessor; 36 Precedes edges exist over 47 tickets.
+                              have no predecessor, and 0 Precedes edges exist.
                               Run `blaze schedule import-deps` to reconcile the 392 Blocks
                               edges (BLZ-360 §5.5).
    ```
 
+   **The counts in that string are read from the solve, never hardcoded, and the `Precedes` count
+   is genuinely `0`.** An earlier draft wrote *"36 Precedes edges exist"*, taking the count from
+   the 36 **`Blocks`** edges this spec uses as a stand-in for measurement — while §4.2 of the same
+   document said there are no `Precedes` edges at all. The two statements could not both be true
+   and the finding string was the wrong one.
+
    It follows BLZ-360 §7.2's rule exactly — *"a finding that says only 'deadline missed' is a
    defect"* — by carrying the counts and naming the action. It is **soft** by
-   `scripts/model/audit.mjs:29-46`'s own test: HARD means the corpus is *wrong*, and a corpus
+   `scripts/model/audit.mjs:9-11`'s own test: HARD means the corpus is *wrong*, and a corpus
    with few dependencies is not wrong, it is just sparse.
 
 3. **A dependency edge is drawn only when both endpoints are on screen.** With `axis: 'schedule'`
-   and no filter that is every edge; under a `project` filter or `axis: 'sprint'` it is often
-   none (§1.3 — zero, on this corpus). When edges are hidden by scope, the view says how many:
-   *"14 dependencies not shown (endpoint out of scope)"*. Silently dropping them would make a
+   and no filter that is every edge. Measured, the two filters differ enormously: a `project`
+   scope hides at most **1** edge on this corpus (`CRP-8 → SN-5`, the only cross-project one of
+   the 36), while `axis: 'sprint'` hides **all 36** (§1.3). When edges are hidden by scope, the
+   view says how many: *"1 dependency not shown (endpoint out of scope)"*, with the count read
+   from the solve. Silently dropping them would make a
    filtered Gantt look like a board with no dependencies, which is the exact false picture §1.3
    shows the current view already paints.
 
 ### 5.3 `showCriticalPath: true` with `axis: 'sprint'` is legal, and warns
 
 It is decidable at write time that this combination cannot draw a chain. It is **not blocked**,
-because BLZ-354 §5.3 sets the test — *blocks at write time only if decidable from the item alone
-**AND** never true of a legitimate draft* — and this is a legitimate draft: "which of this
+because BLZ-354 §5.3 sets the test — *"blocks at write time only if decidable from the item alone
+AND true of a legitimate draft"* — and a sprint-axis critical-path view is a legitimate draft: "which of this
 sprint's tickets sit on the board's critical path" is a real question with a useful answer, and
 the answer is per-ticket, not per-chain. What it cannot do is show the chain. So it renders, with:
 
 ```
 critical-path decoration is on and the axis is sprint-scoped: 0 of this sprint's
-dependencies have both endpoints in the sprint, so no chain is drawn.
+36 dependencies have both endpoints in the sprint, so no chain is drawn.
 ```
 
 ---
@@ -471,14 +572,18 @@ addition beside it."*
 | No edges | `Precedes` edges, both-endpoints-visible (§5.2) |
 | `groups[].epicId` (`:96`) | `groups[].parentId` (§6) |
 
-**What does not change, and is load-bearing:** purity. No `Date.now()`, no `Math.random()`, `now`
+**A golden fixture with bars in it does not exist and must be built first** — see §9. **What does
+not change, and is load-bearing:** purity. No `Date.now()`, no `Math.random()`, `now`
 injected by the caller, the locale-independent `cmp` at `:17`, ties broken by id. BLZ-360 §6.1
 inherits this rule from `gantt.mjs`'s own header verbatim, so the scheduler and the view already
 agree on it. The golden-SVG tests depend on it and they stay the gate.
 
 **The model still receives a built index and returns positioned rows.** It gains the schedule as
 an input — computed by the kernel's pure pass (BLZ-360 §6.3: lazy, recomputed on read) — and does
-not compute it itself. A view that ran its own CPM would be a second implementation able to
+not compute it itself. **That plumbing does not exist yet and is named here rather than assumed:**
+`ganttModel`'s only production caller is `views/page.mjs:63`, and `renderView`'s parameter object
+(`page.mjs:47`) carries nothing schedule-shaped, so `renderView` gains a `schedule` argument
+alongside `transitions` — which is the same shape `metrics` already uses at `page.mjs:51`. A view that ran its own CPM would be a second implementation able to
 disagree with `blaze schedule --write`, which is the condition BLZ-360 §6.3's conformance test
 exists to prevent.
 
@@ -515,16 +620,40 @@ What this spec adds is the **presentation** rule that keeps 11 findings from bei
 > `due` by `schedule migrate-dates` and already in the past"*, expandable to the list. Eleven
 > separate red rows on first open is how a view teaches an operator to ignore it.
 
-That framing is checkable rather than cosmetic: a migrated deadline is exactly one whose ticket
-appears in the 40-id expected-delta list BLZ-360 §4.1 requires the zero-diff oracle to carry, so
-the view can name the set without guessing.
+**That framing needs a set the view can compute, and an earlier draft named the wrong one.** It
+said a migrated deadline is *"exactly one whose ticket appears in the 40-id expected-delta list"* —
+but BLZ-360 §4's 40 ids are **28 terminal + 12 non-terminal**, so membership identifies a *dated*
+ticket, not a *migrated deadline*. The correct set is the 12-id non-terminal cohort, and the
+migration must therefore record **which** of the 40 became a `deadline` rather than only that they
+changed. That is a one-line addition to BLZ-360 §4.1's expected-delta list and it is flagged here
+rather than assumed.
 
 ---
 
 ## 9. Testing, and the mutation discipline
 
-TDD throughout. The 27 existing gantt tests are the regression floor: **25 must still pass**, and
-the 2 deleted are named in §4.1 and in the PR body.
+TDD throughout, and the regression floor is **lower than an earlier draft claimed**. That draft
+said *"25 of 27 must still pass"*, counting only the two tests that die with §4.1's deleted
+branches. Review found two more, and the count is now measured against the files rather than
+inferred:
+
+| Test | Asserts | Fate under this spec |
+|---|---|---|
+| `tests/model/gantt.test.mjs:105` "open-end bar (start only)" | the deleted branch | **deleted with the behaviour** (§4.1) |
+| `tests/model/gantt.test.mjs:113` "open-start bar (due only)" | the deleted branch | **deleted with the behaviour** (§4.1) |
+| `tests/model/gantt.test.mjs:100` | `barKind === "solid"` | **rewritten** — the kind is `scheduled`/`actual` |
+| `tests/model/gantt.test.mjs:124` | `barKind === "unplanned"` | **rewritten** — the kind splits (§4.2) |
+| `tests/views/gantt.test.mjs:85` "status drives the bar fill" | `data-id="B-1"[^>]*fill-opacity="0.35"` where `B-1` is `{task, done, start, due}` | **rewritten — and it is the load-bearing one** |
+
+**That last row is a trap and it must be named.** `B-1` is precisely §4.2's `actual`, which
+requires a distinct fill; but `fillFor()` (`views/gantt.mjs:33-37`) derives fill from **status
+alone**. So implementing §4.2 correctly breaks `:85`, and leaving `:85` passing means `actual` has
+no distinct fill — **which makes §9's mutation 4 survive by construction**. The test and the
+decoration cannot both stand as written, and the resolution is that `fillFor` takes the bar kind
+as well as the status.
+
+So: **22 of 27 pass unchanged, 2 are deleted with their behaviour, 3 are rewritten**, and all five
+are named here and in the PR body.
 
 BLZ-360 §11 requires that a mutation which does not break a test be reported plainly rather than
 quietly fixed. The same discipline, on this spec's own computation — **each must break at least
@@ -539,6 +668,22 @@ one test:**
 7. Report the critical path without its length (§5.2 rule 1).
 8. Default `axis` to `'sprint'` for a newly created view (§2.1).
 9. Let `ganttModel` compute its own CPM rather than consuming the kernel's (§7).
+
+**Three of these nine are not killable by the suite as it stands, and saying so is the point of
+the exercise:**
+
+- **Mutation 9 is behaviourally unobservable and cannot be killed by any output assertion.** A
+  *correct* second CPM inside `ganttModel` produces byte-identical output; only an incorrect one
+  differs, and the mutation does not require incorrectness. It is killable only **structurally** —
+  by injecting a schedule whose values deliberately disagree with what a re-solve would produce
+  and asserting the *injected* values reach the bars. That test is named here because without it
+  the mutation is untestable, and an untestable mutation in a discipline list is decoration.
+- **Mutations 3 and 4 have no existing coverage to build on.** Measured: `grep -rn "bar-" tests/`
+  returns **0 hits**, and `tests/views/page-golden.html` contains **0** `<rect` elements — the
+  golden fixture ships no `sprints.json`, so it renders the `gantt-empty` branch. **No golden
+  anywhere in this repo contains a single Gantt bar.** §7's claim that "the golden-SVG tests stay
+  the gate" is therefore true of determinism and **false at bar level**, and a golden with bars in
+  it is a prerequisite for this spec, not a nicety.
 
 **Any mutation that survives is named in the PR body as a hole in the suite.**
 
@@ -585,12 +730,19 @@ and the S2 registry state (an active sprint whose axis excludes today).
 **This spec raises none, and the reason is a test rather than an omission.** Every decision above
 is either a view-layer default (`axis`, bar kinds, group key), a rendering consequence of a
 decision an ADR already carries (`milestone`, `actual`, the deadline pin), or a config-key
-addition inside a table ADR-0021 already establishes. None changes a system-wide invariant, none
-is expensive to reverse, and none contradicts an existing ADR.
+addition inside the `view` table BLZ-354 §3 establishes.
+
+**One correction to that sentence's earlier form, which cited "a table ADR-0021 already
+establishes".** `docs/decisions/` stops at **ADR-0020**; ADR-0021 is a `status: proposed` draft
+living in BLZ-354 Appendix A and no file exists for it. An argument that this spec needs no ADR
+cannot lean on an unwritten one, so it leans on the spec instead — and **this spec's own
+prerequisite is therefore that ADR-0021 and ADR-0022 are written**, which is BLZ-354's and
+BLZ-360's work, not a gap here. None of §1–§11 changes a system-wide invariant, none is expensive
+to reverse, and none contradicts an ADR that does exist.
 
 **What would need one:** making the schedule axis the *only* axis (retiring `axis: 'sprint'`
 rather than defaulting away from it) — because that deletes the sprint Gantt BLZ-109 shipped and
-BLZ-354 §5.2 promised would keep working. §2.1 deliberately does not do that, and the flip of the
+BLZ-354 §8.2 promised would keep working. §2.1 deliberately does not do that, and the flip of the
 builtin's default is its own ticket for the same reason.
 
 ---
@@ -613,14 +765,18 @@ builtin's default is its own ticket for the same reason.
    carries the full chain including foreign ids. Whether the *bars* for those foreign tickets are
    drawn, greyed, or omitted with a count is not decided here. Only **1** of the 36 open
    dependency edges crosses a project today, so the question is real but cheap.
-4. **Is `unscheduled` worth building in v1 at all?** §4.2 measures **zero** members from all
-   three of its causes — 0 SCCs, 0 dangling `Precedes` targets, and no schedulable ticket outside
-   the solve graph. It is specified because BLZ-360 §6.2 makes the cycle path non-negotiable
-   (*"a scheduler that refuses to produce any output because one was authored tomorrow is a
-   scheduler nobody runs"*), and the same argument carries to rendering it. But it will ship
-   tested only against synthetic fixtures, and that is a weaker guarantee than every other kind
-   in §4.2 gets.
+4. **`unscheduled` is empty today and will not be after `import-deps` — by how much is not
+   decided.** Its zero rests on three causes of unequal quality: 0 SCCs is a real measurement;
+   "no schedulable ticket outside the solve graph" is a tautology; and "0 dangling `Precedes`
+   targets" is **vacuous, because 0 `Precedes` edges exist**. Measured, **33 `Blocks` edges have a
+   schedulable source and a non-schedulable target** (54 the other way), so §5.5's reconciliation —
+   which §5.2's own finding tells the operator to run — creates up to 33 dangling targets on the
+   day it lands. BLZ-360 §6.2 says such an edge *"is dropped from the solve and raises the existing
+   `dangling-target` HARD audit finding"*, which would take a HARD gate from 0 violations to as
+   many as 33 in one commit. **Whether `import-deps` must refuse to emit an edge whose target is
+   terminal, or emit it and accept the findings, is not this spec's to decide — but it is a
+   decision that has to be made before `import-deps` runs, and nothing currently records it.**
 5. **What does the schedule axis cost to render at 11 projects?** BLZ-354 §11.2 asks the same of
    project-scoped `metrics` and this repo's own rule applies: *"needs a measurement, not an
-   assumption."* 533 rows × ~75 day columns is unmeasured. The current view's worst case is 27
+   assumption."* 561 rows × 90 day columns is unmeasured. The current view's worst case is 27
    rows × 13 columns.
