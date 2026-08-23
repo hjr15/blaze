@@ -12,8 +12,10 @@ expressed as a view, and how a sprint that disagrees with the schedule is report
 one:** BLZ-354 §8.1 hands over the **single global `active` pointer** (§1, §2), and BLZ-360 §8.1
 hands over **sprint-membership-versus-schedule** (§4). Conflating them would lose one.
 
-**Its inputs are merged and are not reopened:** the two kernel specs (BLZ-354, BLZ-360) and spec
-3. The operator settled both kernel decisions on 2026-08-23.
+**Its inputs are the two kernel specs (BLZ-354, BLZ-360) and spec 3, and none is reopened here.**
+The operator settled both kernel decisions on 2026-08-23. **The kernel specs are merged; spec 3 is
+not** — it lands in PR #104 and the link above resolves only once it does, which is why the merge
+order is 3 → 2 → 4.
 
 Every number was measured against the live board on 2026-08-24 — **2,613 tickets, 11 projects, 5
 sprints, 499 transitions** — by running the measurement, not by citing one.
@@ -24,11 +26,14 @@ sprints, 499 transitions** — by running the measurement, not by citing one.
 
 > **1. A sprint belongs to exactly one project, and `active` becomes a per-project pointer.**
 >
-> **2. A sprint board forecasts from measured velocity, not from a computed capacity — because
-> the obvious capacity denominator is wrong on this board by 3.97×.**
+> **2. The sprint board draws a capacity bar at `working_days × minutes_per_day`. Velocity is
+> deferred, because the transitions log records when the board was written, not when work
+> happened.**
 
 The first was named as a gap by BLZ-354 §8.1 and left unaddressed. The second is this spec's, and
-§3 is the measurement that forces it.
+§3 is the measurement that forces it — **after an earlier draft of §3 forced the opposite
+conclusion from the wrong population.** That reversal is recorded in place rather than tidied
+away.
 
 ---
 
@@ -58,10 +63,16 @@ registry's fields are `{ id, name, start, end }` — measured, there is no `proj
 operator encodes the project **in the sprint's name**, four times as a prefix and once
 (`S2`) as a ticket id that merely looks like one.
 
-That last detail matters for §2.2: **the name is not a parseable source of the project.** `S2`'s
-name begins `"OBA-1 re-baseline"`, where `OBA-1` is a ticket, not the project key `OBA`. A
-migration that split the name on the first token would be right four times out of five and
-silently wrong once, which is the worst available ratio.
+That last detail matters for §2.2: **the name is not a reliable source of the project.** `S2`'s
+name begins `"OBA-1 re-baseline"`, where `OBA-1` is a ticket id, not the project key `OBA`.
+
+**Stated precisely, because an earlier draft overstated it.** That draft said name-parsing would be
+*"right four times out of five and silently wrong once, which is the worst available ratio"*. It
+would not be silently wrong: a first-token split yields `"OBA-1"`, which is **not a project key**,
+so the migration would **refuse it loudly** — and a parser that also split on `-` would get `OBA`,
+S2's **correct** project. No realistic parse assigns S2 a wrong project. The real argument needs no
+rhetoric: **ticket membership is measured and exact, and a sprint name is a display string nobody
+promised would parse.**
 
 ### 1.2 The single pointer is not merely awkward — it is already wrong
 
@@ -152,24 +163,45 @@ undecidable mutual pairs, for the same reason.
 `{ "OBA": "S2" }`, taking the key from S2's own derived project. `loadSprints` accepts both shapes
 for one config-schema version and normalises the scalar on read, so a board that never re-saves
 its registry keeps working — the guarantee BLZ-354 §6.1 gives `blaze.config.json` and the same
-one applies here. It is then retired through `REMOVED_KEYS` in `scripts/model/schema-version.mjs`,
-the mechanism BLZ-298 built for exactly this, with a message naming the replacement:
+one applies here. **It is NOT retired through `REMOVED_KEYS`, and an earlier draft of this paragraph specified
+exactly that.** Three things rule it out, all checkable:
 
-```
-active: "a scalar `active` is now per-project — use { \"<PROJECT>\": \"<SPRINT_ID>\" }.
-         Yours was migrated at the per-project cutover; delete this form."
-```
+1. **It reads the wrong file.** `REMOVED_KEYS` (`schema-version.mjs:30`) is consumed only by
+   `checkSchemaVersion`, whose only caller is `config.mjs:56` on the parsed **`blaze.config.json`**,
+   and whose error text is the hard-coded *"blaze.config.json sets a key this engine no longer
+   reads"*. `sprints.json` never reaches it, so the specified message would name the wrong file.
+2. **It fails BLZ-298's own entrance test**, stated in the doc comment above it: *"Each was
+   accepted by `loadConfig` and **read by NOTHING** — verified by grep."* `active` is read at
+   `gantt.mjs:33`, `sprints.mjs:67` and `sprints.mjs:83`. `REMOVED_KEYS` is for promises the
+   software does not keep; `active` is a promise it does keep.
+3. **`sprints.json` carries no version stamp at all**, so "for one config-schema version" is not
+   expressible in it.
+
+**The mechanism is `loadSprints`'s own normalisation, and it is permanent rather than windowed.**
+`activeFor` (§6.1) accepts both shapes forever; `saveSprints` only ever writes the map. A scalar
+survives being read and never survives being written, which needs no version gate.
+
+**And ADR-0004's bump test has to be run rather than asserted.** Its decision is *"sprints are an
+additive change — `SCHEMA_VERSION` stays 1"*, and its test is whether an older engine would
+**silently misread** a board written by a newer one. It would: an engine without `activeFor` reads
+`active: { OBA: "S5" }`, finds no `s.id` matching an object, and falls to `list[0]` — quietly the
+wrong sprint, which is the bump condition, not the additive one. **So this change is not additive
+under ADR-0004's own rule.** Deleting `gantt.mjs:36`'s `|| list[0]` tail (§6.1) is what converts
+the silent misread into a named no-selection state, and it is therefore a prerequisite for keeping
+`SCHEMA_VERSION` at 1 rather than an incidental tidy-up.
 
 ### 2.3 Validation
 
 `validateSprintFields` (`sprints.mjs:37-51`) already refuses a `sprint` value absent from the
-registry and validates ISO dates and `start > end`. Three rules are added, all decidable from the
-item alone and therefore write-time blocks per BLZ-354 §5.3:
+registry and validates ISO dates and `start > end`. Three rules are added. **All three pass both halves of the v4 spine §4.1 / ADR-0015 test —
+decidable from the item alone **and** true of a legitimate draft** (an earlier draft of this
+sentence quoted only the first half). **"The item" is whatever is being written**, which for rules
+1 and 3 is a *sprint registry entry* rather than a ticket:
 
 | Rule | Refusal |
 |---|---|
 | a sprint's `project` names a project that does not exist | names the key and lists the 11 that do |
-| a ticket's `sprint` names a sprint owned by a **different** project than the ticket | *"BLZ-364 is in project BLZ; sprint S5 belongs to OBA"* |
+| a ticket's `sprint` names a sprint owned by a **different** project than the ticket | *"BLZ-364 is in project BLZ; sprint S5 belongs to OBA"* — the only ticket-write rule of the three, and the reason §6.2 changes `validateSprintFields`'s options bag from `{ sprintIds }` to `{ sprints }`: a `Set` of ids cannot carry each sprint's project |
 | `active[K]` names a sprint whose `project` is not `K` | names both |
 
 The second is the one with teeth, and it is currently unenforceable: **0 tickets violate it
@@ -181,7 +213,12 @@ narrower claim than a corpus-wide gate and needs no migration.
 
 ---
 
-## 3. Capacity — the obvious denominator is wrong by 3.97×
+## 3. Capacity works. Velocity is what this board cannot yet measure.
+
+**This section reverses an earlier draft of itself, and the reversal is the most useful thing in
+this spec.** That draft claimed capacity was wrong by 3.97× and shipped velocity instead. It had
+compared **board-wide throughput** against **one sprint's capacity** — two different populations —
+and the number that actually answers the question was in the same measurement run, unused.
 
 ### 3.1 What BLZ-360 hands over
 
@@ -189,96 +226,100 @@ narrower claim than a corpus-wide gate and needs no migration.
 > `estimate_minutes` and calendar arithmetic, and it is also spec 2's capacity unit — one number,
 > two consumers, no second definition."* — BLZ-360 §2.3
 
-That is the right rule for *the scheduler*, and this spec keeps it: `minutes_per_day` stays one
-number with one definition, and §4 uses it. **What this spec refuses is the inference that
-`working_days × minutes_per_day` is a sprint's capacity.**
+BLZ-360 §8.1 is titled *"Spec 2 — sprint capacity: **served**"*. This spec agrees, and §3.2 is
+why. **`minutes_per_day`'s second consumer is §3.2's capacity bar** — an earlier draft removed that
+consumer entirely and then claimed in §8 to have honoured *"one number, two consumers"* literally,
+which it had not.
 
-### 3.2 The measurement
+### 3.2 Sprint commitment against a one-person capacity — the measurement that decides it
 
-Over the transitions log's own span — **2026-07-16 → 2026-08-22, 38 calendar days, 27 working
-days** — the board closed:
+A capacity bar plots **that sprint's committed estimate** against **that sprint's capacity**.
+Measured, with working days counted Mon–Fri inside each window:
 
-| | Value | Against a 1-person capacity of 27 × 480 = **12,960 min** |
-|---|---|---|
-| Distinct tickets reaching a terminal status | **399** | |
-| Sum of their `estimate` | **51,470 min** | **3.97×** |
-| Sum of their `worklog` | **40,669 min** | **3.14×** |
-
-**Both measures exceed the denominator, and they agree with each other within 26%.** That
-matters: `estimate` could be inflated, but `worklog` is separately recorded actual effort, and it
-says the same thing. The board records **roughly four workers' worth** of throughput.
-
-The per-sprint view says it too. Throughput inside each sprint's window, board-wide, against that
-window's one-person capacity: **S1 7.38×, S2 3.14×, S3 3.80×, S4 3.95×, S5 3.93×.**
-
-**The explanation is not a mystery and it is the point:** this is an agent-driven board — the
-product it tracks is a tool for dispatching agents (ADR-0020, BLZ-345) — so work happens in
-parallel and a human workday is not the unit of supply.
-
-### 3.3 What that rules out
-
-**A sprint board that draws a capacity bar at `working_days × 480` would show every sprint on this
-board as 300–700% over-committed.** `scripts/model/audit.mjs`'s own header names the failure
-mode: *"a gate that fails on the fill queue is a gate people learn to skip, which costs the hard
-findings too."* A capacity bar that is always red is that gate with a progress bar drawn on it.
-
-Three responses were considered:
-
-| Option | Refused / taken |
-|---|---|
-| Add a `team_size` multiplier to board config | **Refused.** It makes the number configurable rather than correct — and BLZ-360's roll-up section already names the standard: *"a number you have to configure to be correct is not a number you can trust"* (`hierarchy-rollup.mjs:8-9`). It also has no natural value: measured, this board has **2 distinct assignees, one of which is `unassigned`** (2,531 of 2,613 tickets), so nothing in the corpus supplies the integer. |
-| Derive capacity from assignees | **Refused, and it is the trap.** **521 of 533 schedulable tickets (97.7%) are unassigned.** An assignee-derived denominator computes a capacity of approximately zero and reports infinite over-commitment. |
-| **Forecast from measured velocity** | **Taken.** §3.4. |
-
-### 3.4 Velocity is measured, and it is the forecast
-
-**A sprint's commitment is compared to the median of the last N sprints' completed work, not to a
-theoretical supply.** That is what a velocity-based agile practice does, it needs no denominator
-this board cannot supply, and every input already exists.
-
-Velocity for sprint `S` = the sum of `estimate_minutes` over tickets that (a) carry `sprint = S`
-and (b) reached a terminal status inside `[S.start, S.end]`, read from
-`.blaze/transitions.json` — the same log `metricsModel` already consumes (`views/page.mjs:51`).
-
-Measured, and reported here with its problems rather than as a clean series:
-
-| Sprint | Tagged | Committed est. (min) | Closed **in window**, tagged | Velocity (min) |
+| Sprint | Committed | Working days | Capacity @480 | Ratio |
 |---|---|---|---|---|
-| S1 | 16 | 1,845 | 9 | **1,485** |
-| S2 | 11 | 615 | 5 | **180** |
-| S3 | 27 | 1,655 | **0** | **0** |
-| S4 | 6 | 540 | 6 | **540** |
-| S5 | 20 | 1,955 | 9 | **1,070** |
+| S1 | 1,845 | 4 | 1,920 | **0.96** |
+| S2 | 615 | 3 | 1,440 | 0.43 |
+| S3 | 1,655 | 6 | 2,880 | 0.57 |
+| S4 | 540 | 5 | 2,400 | 0.23 |
+| S5 | 1,955 | 9 | 4,320 | 0.45 |
 
-**Three honest problems with this series, all measured:**
+**Every sprint is under capacity, and none has ever exceeded it.** S1 at **0.96** is almost exactly
+one person-week, which is the strongest evidence available that `minutes_per_day = 480` with a
+team of one is the operator's own implicit model — not an assumption this spec imposes.
 
-1. **S3's velocity is zero and its tickets were not abandoned.** 14 of its 27 tickets are terminal
-   today; none of them transitioned inside the window. Work tagged to a sprint routinely closes
-   after it ends, so a strict in-window rule under-reports.
-2. **20.6% of all terminal arrivals (83 of 402) fall outside every sprint window.** Sprint-shaped
-   accounting misses a fifth of the board's completions outright.
-3. **The transitions log covers 16% of the corpus** — 417 distinct ticket ids of 2,613, starting
-   2026-07-16. Velocity is computable only from that date forward, and any figure quoted over a
-   longer window is wrong.
+**So the capacity bar ships**, at `working_days × schedule.minutes_per_day`, with the team size
+left at 1 and no configuration knob. It is BLZ-360's one number with one definition and a second
+consumer, exactly as §2.3 asks.
 
-**So velocity ships with its denominator stated, not as a bare number.** The sprint board renders
-*"velocity: median 540 min over 5 sprints (S3 = 0; 3 of 5 sprints closed work after their
-window)"* rather than *"velocity: 540"*. **A number whose caveat is not on screen with it is a
-number that will be quoted without the caveat.**
+### 3.3 The board-wide 3.97× is real, and it does not mean what it looks like
 
-**And capacity is not drawn at all in v1.** Named as a gap in §9, not filled with a figure that
-measurement says is wrong by 3.97×.
+Over the transitions log's own span — 2026-07-16 → 2026-08-22, 38 calendar days, **27 working
+days** — the board closed **399 distinct tickets, 51,470 estimate-minutes and 40,669 logged
+minutes** against a one-person capacity of **12,960**: **3.97×** and **3.14×**.
 
----
+**The arithmetic is right and the inference an earlier draft drew from it — "roughly four workers'
+worth of throughput" — does not follow.** Measured:
+
+- The 402 terminal-arrival events occupy **62 distinct timestamps**.
+- **346 of 402 (86%) arrive in identical-timestamp batches of five or more** — the largest are 38,
+  35, 29, 28, 19 and 18 tickets sharing one instant.
+
+Those are **bulk board writes**, not execution. A transition's `ts` records when the board was
+reconciled, not when the work happened, so the ratio measures write batching and cannot be read as
+parallelism. **Nothing in this spec now rests on it**, and it is kept only because the earlier
+draft's conclusion was built on it and a reader deserves to know why that conclusion is gone.
+
+The honest statement the two measurements support together is narrower and still worth having:
+**sprint-tagged work is a small, comfortably-loaded slice of a board that closes far more than it
+tracks in sprints** — 80 of 2,613 tickets carry a sprint at all (§1.2).
+
+### 3.4 Velocity is deferred, because the log does not record when work happened
+
+An earlier draft made velocity the forecast. **The transitions log cannot support it**, and the
+per-sprint measurement is unambiguous. For each sprint's tagged tickets, classifying the latest
+terminal arrival against the sprint window:
+
+| Sprint | Tagged | In window | **After end** | **Before start** | **No record at all** |
+|---|---|---|---|---|---|
+| S1 | 16 | 9 | 0 | 0 | 7 |
+| S2 | 11 | 5 | 0 | 0 | 6 |
+| S3 | 27 | **0** | 0 | **8** | **19** |
+| S4 | 6 | 6 | 0 | 0 | 0 |
+| S5 | 20 | 9 | 0 | 0 | 11 |
+
+**Three things follow, and the first two contradict what the earlier draft asserted:**
+
+1. **Zero of five sprints closed tagged work after their window.** The earlier draft said *"3 of 5
+   sprints closed work after their window"* and built problem 1 — *"work tagged to a sprint
+   routinely closes after it ends"* — on it. Not one sprint-tagged ticket on this board did.
+2. **S3's zero velocity is not late closure.** Of its 27 tagged tickets, **8 reached a terminal
+   status *before* the sprint began** and **19 have no terminal transition on record at all**.
+   That is retroactive tagging of already-finished work plus missing history — a different defect
+   with a different fix, and relaxing the in-window rule recovers none of it.
+3. **43 of the 80 sprint-tagged tickets (54%) have no terminal record**, against a log covering
+   **417 of 2,613 ids (16%)** and starting 2026-07-16.
+
+**So velocity is not computed in v1.** A number derived from a batch-written, 16%-complete log
+would be presented as a measurement of throughput while measuring the reconcile cadence. §9 carries
+it as the gap it is, and the condition to revisit is stated rather than left open: **a transitions
+log whose terminal arrivals are not dominated by batch timestamps** — today 86% of them are.
 
 ## 4. The sprint-vs-schedule conflict, split in two
 
 BLZ-360 §8.1 hands this over, flagging it as unmeasured:
 
-> *"sprint membership is a grouping, not a scheduling constraint. The scheduler does not treat
-> `sprint: S3` as a date window… The consequence is a real and visible one — a ticket can sit in
-> sprint S3 with a derived start after S3 ends — and it is surfaced as spec 2's own finding, not
-> silently reconciled. **This is a judgement call with no measurement behind it.**"*
+> *"**One decision spec 2 inherits and may want to revisit:** sprint membership is a grouping, not
+> a scheduling constraint. The scheduler does not treat `sprint: S3` as a date window. **If it did,
+> sprint assignment and the dependency graph would fight, and there is no correct winner.** The
+> consequence is a real and visible one — a ticket can sit in sprint S3 with a derived start after
+> S3 ends — and it is surfaced as spec 2's own finding, not silently reconciled. **This is a
+> judgement call with no measurement behind it.**"*
+
+Quoted in full because an earlier draft's ellipsis removed both the reason (*"there is no correct
+winner"*) and the framing (*"may want to revisit"*), presenting an explicitly reopenable ruling as
+settled. **This spec does not revisit it** — §4 reports the disagreement and reconciles nothing —
+but the option was BLZ-360's to offer and is not this spec's to quietly close.
 
 **Measured, the consequence is total: 26 of 26.** Every schedulable sprint-tagged ticket sits in a
 sprint that ended before `project_epoch`, so under the kernel's rules every one of them gets a
@@ -300,6 +341,19 @@ fit?), every case has a stated outcome:
 | **current** | terminal | — | no finding | **0** |
 | **future** | any | — | no finding — nothing is late yet | **0** |
 
+**Four cases fall outside that table and each needs a stated outcome, because a classification
+claimed total with a hole in it is this programme's most repeated defect:**
+
+| Case | Outcome | Count today |
+|---|---|---|
+| A ticket whose `sprint` is **not in the registry** | **No sprint finding.** `buildIndex` already emits *"sprint 'X' not in registry"* as a **warning, never an error** (`index.mjs`, tested at `sprints.test.mjs:119`), and that stays the only report. There is no window to call ended or current. | **0** |
+| An open ticket in a **current** sprint with **no derived start** (spec 3's `unscheduled`) | No finding — neither `> sprint.end` nor `≤ sprint.end` holds, and inventing one would report a schedule that does not exist. | **0** (spec 3 §4.2 measures `unscheduled` at 0) |
+| `sprint.end === today` | **Current, not ended.** A sprint is over the day *after* its end date. Stated because "ended" was otherwise undefined on the boundary. | **0** |
+| A **non-delivery** ticket carrying a sprint | No finding. `gantt.mjs:63` already drops non-delivery rows into `warnings`, and a schedule comparison is meaningless for a type with no derived dates. | **0** |
+
+All four are zero today, so all four are **defensive and untested against corpus data** — the same
+weaker guarantee §7's mutations 11 and 12 carry.
+
 The `current` and `future` rows are all zero **because all five sprint windows ended before
 2026-08-24** (§1.2), not because those cases cannot occur. So `sprint-window-missed` — the finding
 BLZ-360 §8.1 actually asked for — ships with **no corpus row exercising it**, and must be tested
@@ -312,7 +366,9 @@ committed to a live sprint the schedule says it cannot make"* — a statement ab
 actionable by moving the commitment. Collapsing them produces 26 findings that all mean the first
 thing while being named as if they meant the second.
 
-Both are **soft**, by `audit.mjs:29-46`'s test: the corpus is not wrong in either case. And
+Both are **soft**, by `audit.mjs:9-13`'s test — *"HARD — the corpus is WRONG … SOFT — a FILL
+QUEUE"* — because the corpus is not wrong in either case. (`:29-46` is the BLZ-353 comment that
+§2.3 cites for a different purpose; an earlier draft used it for both.) And
 `sprint-overrun` is rendered **grouped with a count**, per spec 3 §8's rule — *"26 tickets remain
 open in sprints that have ended (S2: 2, S3: 13, S5: 11)"* — because 26 individual rows on first
 open is the same noise problem in a different colour.
@@ -338,9 +394,12 @@ config: { sprint: 'S5', statusFilter: 'active', columnSet: 'delivery',
 registry entry for `board` gains `sprint` alongside spec 1 §5.2's proposed `columnSet`,
 `swimlaneBy` and `cardFields`.
 
-**One key is refused rather than added.** `swimlaneBy: 'assignee'` is in the example above because
-spec 1 proposed it, and it is **useless on this board**: 2,531 of 2,613 tickets are `unassigned`,
-so an assignee swimlane renders one lane holding 96.9% of the cards and a second holding the rest.
+**One key ships with a deliberately different default.** `swimlaneBy: 'assignee'` is in the example
+above because spec 1 proposed it, and it is **useless on this board** — but the figure that shows
+that is not the board-wide one. A swimlane partitions *the sprint board's* cards, and measured,
+**80 of 80 sprint-tagged tickets are `unassigned`: 100%, across all five sprints.** An assignee
+swimlane renders exactly one lane. *(An earlier draft cited the board-wide 2,531 of 2,613 = 96.9%
+and described "a second lane holding the rest". On a sprint board there is no second lane.)*
 It ships because it is right for a board that assigns work and costs nothing when unused — but
 **the default is `swimlaneBy: 'none'`**, and defaulting it to `'assignee'` would give every new
 sprint board a degenerate layout on this corpus. Measured, not assumed.
@@ -362,7 +421,7 @@ sprint board a degenerate layout on this corpus. Measured, not assumed.
 **Spec 3's §9 was wrong about its test cost twice, in both cases by reasoning about the change
 instead of grepping for it. So this section greps first.**
 
-**Production callers of `loadSprints` — 7 call sites across 5 files, and only 3 are affected:**
+**Production callers of `loadSprints` — 7 call sites across 5 files, of which 4 are affected:**
 
 | Call site | Reads | Affected |
 |---|---|---|
@@ -370,37 +429,65 @@ instead of grepping for it. So this section greps first.**
 | `new.mjs:83` | `const { sprints } = …` | **no** |
 | `model/index.mjs:230` | `… .sprints` | **no** |
 | `views/page.mjs:62` | passes the whole registry to `ganttModel`, which reads `.active` at `gantt.mjs:33` | **yes** |
-| `sprint-runner.mjs:42`, `:52`, `:62` | reads `.active` | **yes** |
+| `sprint-runner.mjs:42` | reads `.active` | **yes** |
+| `sprint-runner.mjs:52` | reads `.active` | **yes** |
+| `sprint-runner.mjs:62` | reads `.active` | **yes** |
 
-**Four of seven call sites read only `.sprints` and do not change at all.** That is a fact about
-the seam rather than luck: `ADR-0004` made sprints data read per render, and the `active` pointer
-is used by exactly the two surfaces that need to *pick* a sprint.
+**Three of seven read only `.sprints` and do not change.** *(An earlier draft of this table said
+"four of seven … only 3 affected" — it counted rows rather than call sites and inverted the
+result. The three unaffected sites are a fact about the seam: ADR-0004 made sprints data read per
+render, and `active` is touched only by the two surfaces that must **pick** a sprint.)*
 
-**Test fixtures carrying a scalar `active` — 7 files, not one:**
-`tests/model/sprints.test.mjs` (26 occurrences), `tests/model/gantt.test.mjs:20`, `:30`,
-`tests/views/gantt.test.mjs:11`, `:93`, `tests/views/page.test.mjs:118`, `tests/new.test.mjs:124`,
-`tests/edit.test.mjs:96`.
+**Test fixtures carrying a scalar `active` — 6 files:** `tests/model/sprints.test.mjs`
+(**28** occurrences), `tests/model/gantt.test.mjs:20`, `tests/views/gantt.test.mjs:11`,
+`tests/views/page.test.mjs:118`, `tests/new.test.mjs:124`, `tests/edit.test.mjs:96`. *(An earlier
+draft said 7 files and 26 occurrences; the two extra "files" were the `active: null` empty-registry
+lines at `model/gantt.test.mjs:30` and `views/gantt.test.mjs:93`, which carry no scalar id.)*
 
-**This measurement is why `activeFor(registry, project)` exists.** The first draft of §2.1 had
-`ganttModel` read `sprints.active` directly and normalise inside `loadSprints`. But **five of the
-seven fixture files construct a registry literal and hand it straight to `ganttModel`, bypassing
-`loadSprints` entirely** — so normalising on read would leave those five fixtures feeding an
-un-normalised scalar into a reader expecting a map, and `gantt.mjs:36`'s
-`list.find(s => s.id === active)` would silently fall through to `list[0]`. **A silent fallback to
-the wrong sprint is exactly the class of defect this board has been bitten by**, so the accessor
-takes both shapes and is the single normalisation point:
+**Only 2 of those 6 bypass `loadSprints`** — `model/gantt.test.mjs:20` and `views/gantt.test.mjs:11`
+pass a registry literal straight to `ganttModel`. The other four (`new`, `edit`, `views/page`, and
+`sprints` itself) `writeFileSync` a real `sprints.json` and go **through** `loadSprints`;
+`page.test.mjs`'s own comment says *"the fixture is a real data root"*. *(An earlier draft said
+"five of the seven", and that sentence claimed to have been "produced by the grep rather than
+recovered from a review". It was not: the grep says two. The claim is corrected and the boast is
+withdrawn.)*
+
+Two files is still two files, so the accessor stands — a literal registry reaching `ganttModel`
+must not be misread:
 
 ```js
 export function activeFor(registry, project) {
   const a = registry.active;
   if (a == null) return null;
-  return typeof a === "string" ? a : (a[project] ?? null);   // legacy scalar | per-project map
+  if (typeof a === "string") return a;              // legacy scalar
+  if (project && project !== "all") return a[project] ?? null;
+  return soleValue(a);                              // see below — NEVER a silent list[0]
 }
 ```
 
-With it, **only `tests/model/sprints.test.mjs` must change**; the other six fixture files keep
-working unchanged. That is the design's justification, and it was produced by the grep rather than
-recovered from a review.
+**`project === "all"` is the case that matters, and an earlier draft of this accessor got it
+wrong in the most embarrassing possible way.** `ganttModel`'s signature defaults `project = "all"`
+(`gantt.mjs:29`) and so does `viewEnvelope`'s (`page.mjs:108`) — **"all" is the landing page.** A
+naive `a[project] ?? null` returns `null` there, and `gantt.mjs:36`'s
+`|| list.find(…) || list[0]` chain then selects **`S1`** — a sprint that ended 2026-07-29, *older*
+than the stale `S2` the board picks today. Reproduced by execution:
+
+```
+today (scalar "S2")                  → selected S2, 16 → 11 bars
+per-project map, project="all"       → selected S1
+```
+
+So the accessor **reintroduced the exact `list[0]` fallback it was written to prevent**, and made
+the symptom worse. Two rules close it:
+
+1. **`activeFor` with `project === "all"` returns the sole entry if the map has exactly one, and
+   `null` otherwise.** An installation-wide Gantt has no single active sprint once sprints are
+   per-project, and pretending otherwise is what produced S1.
+2. **`gantt.mjs:36`'s `|| list[0]` tail is deleted.** No active sprint is a **named state** —
+   §2.1's read-time reason — not a silent pick. That tail is the mechanism behind both this defect
+   and §1.2's stale pointer, and nothing this spec does is safe while it survives.
+
+With those, **only `tests/model/sprints.test.mjs` changes** among fixture files.
 
 ### 6.2 What must be rewritten in `sprints.test.mjs`
 
@@ -413,16 +500,22 @@ Of its **28** tests, classified by opening the file rather than by inference:
 | `:151`, `:159`, `:167`, `:172`, `:183`, `:190` — `addSprint` ×6 | `project` becomes required |
 | `:195`, `:202` — `setActive` ×2 | the signature gains `project` |
 | `:209`, `:223` — `formatSprintList` ×2 | output gains the project and per-project active markers |
-| `:59`–`:83` — `validateSprintFields` ×8 | **only if** the options bag changes from `{ sprintIds }` to `{ sprints }` |
+| `:59`, `:62`, `:67`, `:70`, `:74`, `:79`, `:82` — `validateSprintFields` ×**7** | the options bag gains the registry (below) |
 
-**So 16 of 28 change outright, and 8 more change only under a signature choice this spec can
-avoid.** It avoids it: `validateSprintFields` keeps `{ sprintIds }` and takes the sprint registry
-as an **additional optional** key, so its 8 existing tests and its 2 production callers
-(`new.mjs:84`, `edit.mjs:71`) are untouched and the new §2.3 rules get their own tests.
+**14 of 28 change outright** — 2 + 2 + 6 + 2 + 2 — *(an earlier draft said 16, which its own table
+never summed to, and counted the `validateSprintFields` block as 8 tests when it is 7)*.
 
-**Final count: 16 of 28 rewritten in `sprints.test.mjs`, 0 elsewhere, 0 deleted.** Any test outside
-that file that breaks is a defect in `activeFor`, not an expected cost — which makes it a check
-rather than a budget.
+**The `validateSprintFields` 7 change too, and its 2 production callers with them.** An earlier
+draft kept its `{ sprintIds }` bag "additional optional" so those 9 sites stayed untouched — but
+§2.3's rule 2 needs each sprint's **project**, and a `Set` of ids cannot carry it. Both callers
+build the bag inline (`new.mjs:84`, `edit.mjs:71` — `{ sprintIds: new Set(sprints.map(s => s.id)) }`),
+so keeping the signature means the registry never arrives and **rule 2 — "the one with teeth" —
+never fires in production.** The bag becomes `{ sprints }` and the two callers pass the registry
+they already loaded.
+
+**Final count: 21 of 28 rewritten in `sprints.test.mjs`, plus 2 production call sites; 0 tests
+elsewhere, 0 deleted.** Any test outside that file that breaks is a defect in `activeFor` rather
+than an expected cost — a check, not a budget.
 
 ---
 
@@ -468,17 +561,23 @@ stale `active: "S2"` pointer itself.
 | **ADR-0011 — no new required runtime dependency** | Nothing added. Velocity is a pure reduce over two arrays. |
 | **ADR-0014 — no board or tenant discriminator** | `project` is not one: it names a project inside one installation, the same way `ticket.project` already does. |
 | **ADR-0018 — hybrid custom fields** | No new ticket column. `sprint` stays the existing frontmatter field. |
-| **BLZ-360 §2.3 — one `minutes_per_day`** | Honoured literally: it stays one number with one definition, used for schedule arithmetic. §3 declines to *also* call it capacity, which is not a second definition — it is one fewer. |
+| **BLZ-360 §2.3 — one `minutes_per_day`** | Honoured with both consumers intact: the scheduler's arithmetic, and §3.2's sprint capacity bar. One number, one definition, two readers — which is what §2.3 asks and what BLZ-360 §8.1 means by *"sprint capacity: served"*. |
 
 ---
 
 ## 9. What this spec does NOT solve
 
-- **Capacity.** §3 measures the obvious denominator wrong by 3.97× and ships velocity instead. A
-  real capacity model needs a supply number this board does not contain. **This is the largest
-  honest gap.**
-- **Burndown.** Needs a daily remaining-work series; the transitions log covers 16% of the corpus
-  and starts 2026-07-16, so a burndown before that date is undrawable. Deferred with its reason.
+- **Velocity.** §3.4 measures the transitions log unable to support it — 0 of 5 sprints closed
+  tagged work after their window as an earlier draft assumed, 43 of 80 sprint-tagged tickets have
+  no terminal record at all, and 86% of arrivals are batch writes. **This is the largest honest
+  gap**, and the condition to revisit it is stated rather than left open: a log whose terminal
+  arrivals are not batch-dominated.
+- **Burndown.** Same source, same problem, and worse — a burndown needs a *daily* series from a log
+  carrying 62 distinct timestamps across 38 days.
+- **Team size above one.** §3.2's capacity bar assumes one person, because S1's 0.96 is the only
+  evidence the corpus offers and nothing in it supplies a larger integer — the board has **2
+  distinct assignee values, one of which is `unassigned`** (2,531 of 2,613 tickets). A `team_size`
+  field is deferred, not refused; it needs a second person first.
 - **Sprint close-out as an event.** No ceremony, no carry-over gesture, no "move unfinished to the
   next sprint" command. §4 reports the 26 overruns; it does not offer to fix them.
 - **Cross-project sprints.** §2.1 refuses them on measurement; a later ruling would reopen it.
