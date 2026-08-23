@@ -118,7 +118,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
       const { reconcile } = await import("./reconcile.mjs");
       const r = await reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
-      return json(200, { changes: r.changes || [] });
+      // BLZ-350: a thin preview and an unreadable forge look identical otherwise.
+      return json(200, { changes: r.changes || [], forgeErrors: r.forgeErrors || [] });
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {

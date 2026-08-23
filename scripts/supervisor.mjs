@@ -77,6 +77,21 @@ const ACTIVITY_SCRIPT = `
           fetch("/control/" + g.dataset.loop + "/" + b.dataset.act, { method: "POST" }))));
   </script>`;
 
+/** BLZ-350: reconcile's forge outcomes → activity-feed events, deduped.
+ *  Pure and exported so the "say it once" rule is testable without a live loop:
+ *  the reconcile loop runs on a timer and an unsupported forge is a PERMANENT
+ *  condition, so republishing every tick would bury the feed it warns through.
+ *  `said` is the caller's memory of what has already been announced. */
+export function newForgeErrorEvents(forgeErrors, said) {
+  const out = [];
+  for (const f of forgeErrors || []) {
+    if (!f || !f.message || said.has(f.message)) continue;
+    said.add(f.message);
+    out.push({ type: "error", loop: "reconcile", message: `forge unreadable — ${f.message}` });
+  }
+  return out;
+}
+
 export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
   const bus = createBus();
   // BLZ-133: the app serves THIS root's board. pageHtml/contentHash used to fall
@@ -86,6 +101,8 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
   const projectsDir = join(root, "projects");
 
   const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
+  // BLZ-350: forge problems already announced, so a timer loop reports each once.
+  const forgeSaid = new Set();
 
   // Mirrors serve.mjs's aheadCount() so the client's sync badge works the same
   // under supervisor mode.
@@ -109,6 +126,10 @@ export function createApp(cfg, { root = resolveRoots().dataRoot } = {}) {
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
       const r = await reconcile({ fetch: true, commit: true, push: true, root, projectsDir });
+      // BLZ-350: an unreadable forge is the loop's version of the silence the CLI
+      // now breaks. Without this the app runs reconcile every tick, never reaches
+      // "in-review", and the activity feed shows a healthy board.
+      for (const e of newForgeErrorEvents(r && r.forgeErrors, forgeSaid)) bus.publish({ ...e, ts: today() });
       if (r && r.ok && r.changes) {
         for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
       } else if (r && !r.ok) {

@@ -122,7 +122,7 @@ small commit per ticket, scoped to the files it actually touched.
 | `blaze resolve <id> <done\|wont-do\|duplicate\|cannot-reproduce>` | Set a non-default resolution without moving the file |
 | `blaze log <id> <minutes>` | Append a worklog entry |
 | `blaze rollup [<id>]` | Print rolled-up estimate/logged time for one node, or a summary of every goal/epic |
-| `blaze reconcile [--apply] [--fetch]` | Mirror a linked code repo's branch/PR state onto delivery-workflow tickets (dry-run by default) |
+| `blaze reconcile [--apply] [--fetch]` | Mirror a linked code repo's branch/PR state onto delivery-workflow tickets (dry-run by default). PR state is read with `gh`, so **GitHub only** — on any other remote `in-review` is unreachable and reconcile says so on every run ([details](docs/guide/how-it-works.md#forge-support-and-status-reachability)) |
 | `blaze edit <id> ...` | Edit ticket fields |
 | `blaze link [--rm] <id> <TYPE> <target>` | Add (or `--rm` remove) a typed link on `<id>` — `TYPE` ∈ `Blocks`/`Relates`/`Duplicate`/`Cloners` |
 | `blaze reindex` | Rebuild/validate the on-disk index (warns on malformed or dangling `links` entries) |

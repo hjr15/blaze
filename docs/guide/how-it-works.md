@@ -53,6 +53,68 @@ names. Reconcile is dry-run by default; `--apply` commits the resulting moves
 locally. It never pushes — pushing is not something reconcile does, under any
 flag.
 
+## Forge support and status reachability
+
+**Blaze reads pull requests through the GitHub CLI (`gh`), and that is the only
+forge it supports.** This is a stated non-goal, not a gap (see
+[`design.md`](../design.md) → Non-goals). There is no `provider` config key — it
+was removed and is now a hard load error.
+
+`gh` speaks GitHub.com and GitHub Enterprise Server. Reconcile derives ticket
+status from three independent signals, and only one of them needs a forge:
+
+| Signal | Read via | Drives |
+|---|---|---|
+| Branch named `<KEY>-<n>-…` | `git for-each-ref` | `in-progress` |
+| `<KEY>-<n>: …` commit on the default branch | `git log` | `done` (bundled children) |
+| Pull request for `<KEY>-<n>` | `gh pr list` | `in-review` (OPEN), `done` (MERGED), `in-progress` (CLOSED) |
+
+So the reachable statuses depend on where the code repo's remotes point. Note
+**remotes**, plural, and not just `origin`: `gh` resolves its base repo from *any*
+GitHub remote, so a repo whose only GitHub remote is named `upstream` — or one with
+`origin` on GitLab and `upstream` on GitHub — reads its pull requests normally.
+
+| Remote host(s) | `in-progress` | `in-review` | `done` |
+|---|---|---|---|
+| At least one remote on GitHub.com | yes | yes | yes |
+| At least one remote on GitHub Enterprise Server (`gh auth login --hostname …`, or `GH_HOST`) | yes | yes | yes |
+| At least one remote on a host Blaze cannot classify | yes | yes, if `gh` can read it | yes |
+| **Every** remote on GitLab, Bitbucket, Gitea, Forgejo/Codeberg, Azure DevOps or sourcehut | yes | **no** | yes, only via a `<KEY>-<n>:` commit on the default branch — never via a merged PR |
+| No remotes, or only local-path remotes | yes | **no** | same as above |
+
+An unclassifiable host is handed to `gh` rather than pre-rejected, because GitHub
+Enterprise Server is self-hosted under an arbitrary hostname and guessing
+"unsupported" would break a working board.
+
+`in-review` is reachable **only** through a pull request, so when no remote is
+readable that status cannot be reached at all. Until BLZ-350 that happened in
+silence: the failed `gh` call was turned into an empty pull-request list and
+reconcile reported a clean, in-sync run.
+
+It now says so. Every unreadable forge is named on stderr, on every run,
+regardless of `--quiet`:
+
+```
+reconcile: FORGE UNREADABLE — /path/to/svc has an `origin` remote on gitlab.com, but
+Blaze reads pull requests through the GitHub CLI (`gh`), which supports GitHub.com and
+GitHub Enterprise Server only. PR state could not be read, so "in-review" is unreachable
+for this repo (branch and merged-commit signals are unaffected). …
+```
+
+The same line appears when `gh` is missing, unauthenticated, or fails for any
+other reason — its own stderr is quoted — and the programmatic caller gets the
+list as `forgeErrors` on the reconcile result.
+
+It is a **warning, not a fatal error**: reconcile still exits 0, because the
+branch and commit signals genuinely did reconcile, and on an unsupported forge
+the condition is permanent — failing every run would be noise rather than
+information. Exit 1 stays reserved for "nothing was scanned at all".
+
+**This includes a code repo with no remotes at all.** A local-only mirror is a
+legitimate setup, but `in-review` is just as unreachable there, so it is reported
+on the same terms rather than being treated as a special quiet case. If that is
+your deliberate configuration, the line is expected and harmless.
+
 ## The loops behind `blaze start`
 
 `blaze start` (or bare `blaze`) boots the board plus two loops on timers:
