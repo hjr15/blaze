@@ -24,11 +24,18 @@ A board loads iff `MIN_SCHEMA_VERSION <= schemaVersion <= SCHEMA_VERSION`:
 
 | Board's `schemaVersion` | Outcome |
 |---|---|
-| absent (or `null`) | treated as `1` — the pre-versioning baseline — and loads |
+| absent (or `null`) | resolved to `1` — the pre-versioning baseline — and then put through this same window, exactly as an explicit `1` is: it loads while `MIN_SCHEMA_VERSION` is `1`, and fails loud once `MIN_SCHEMA_VERSION` is raised past it |
 | in `[MIN, CURRENT]` | loads |
 | `> SCHEMA_VERSION` | fails loud — the board was written by a newer engine |
 | `< MIN_SCHEMA_VERSION` | fails loud — the board predates this engine's window |
 | not a positive integer | fails loud — invalid stamp |
+
+An absent stamp is **not** a bypass. It is a value — v1 — and it is checked like
+any other, so no board can outlive the compat window merely by carrying no
+stamp. That matters because most existing boards (the live `blaze-pm` board
+included) predate the stamp and carry none: today, at `MIN_SCHEMA_VERSION` `1`,
+they all load; on the day `MIN_SCHEMA_VERSION` is raised, they all fail loud
+together, and the release that raises it carries their migration path.
 
 The guard fires in `loadConfig` — covering every command that loads config,
 including `blaze move`/`edit`/`link`/`log`/`resolve`/`new`, where the check
@@ -63,6 +70,12 @@ ambient data root.
   contract this engine reads. The release that raised `MIN_SCHEMA_VERSION`
   documents its migration path in its release notes. (Today `MIN` is `1`, so
   this cannot occur.)
+- **"no schemaVersion stamp"** — the board carries no stamp at all, which
+  means v1, and v1 is below this engine's `MIN_SCHEMA_VERSION`. There is no
+  wrong value to correct: follow the migration path in the release notes of the
+  version that raised `MIN_SCHEMA_VERSION`, then add the key the message names
+  (`"schemaVersion": <SCHEMA_VERSION>`) to `blaze.config.json`. (Today `MIN` is
+  `1`, so this cannot occur.)
 - **"invalid schemaVersion"** — the stamp is not a positive integer.
   Hand-edit `blaze.config.json` to a valid version, or remove the key
   entirely — absent means v1.
