@@ -37,6 +37,13 @@ groomer loops on their configured timers. Bare `blaze` is equivalent to
 `blaze.config.json`. The loops it runs write through git the same as running
 their commands directly.
 
+This is a **second HTTP server**, separate from [`blaze board`](#board), and the same
+access rules apply to it (ADR-0013). Its `/control/*` routes need a `write`-scoped
+token once the board has users — `/control/groomer/run` dispatches the configured
+agent and `/control/revert` runs `git revert` — and its `/events` stream and board
+content need `read`. It **always binds `127.0.0.1`** and ignores `HOST`, so unlike
+`blaze board` there is no configuration that exposes it beyond this machine.
+
 ## board
 
 ```
@@ -77,10 +84,13 @@ edit, resolve, log, acceptance-criteria toggle). Parses no CLI args.
 An unclassified `/api/*` route returns `404`; a route added without a scope fails
 closed rather than inheriting the last one's.
 
-The `x-blaze-csrf` header is **not** authentication — it is a per-process value
-embedded in the served page, readable by anyone who can `GET /`. It is forgery
-protection for the browser flow, retained as defence-in-depth alongside the token
-check, never as a substitute for it.
+The `x-blaze-csrf` header is **not** authentication — on either server. It is a
+per-process value embedded in the served page, readable by anyone who can `GET /`. It is
+forgery protection for the browser flow, retained as defence-in-depth alongside the token
+check, never as a substitute for it. `blaze start` also requires it on `/control/*`,
+where it is the only control that covers a loopback board with no users at all: the gate
+has no credential to ask for there, but a page in your own browser can still POST
+cross-origin to `http://localhost:<port>/control/revert` without one.
 
 ## reconcile
 

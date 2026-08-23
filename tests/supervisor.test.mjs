@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { loadConfig } from "../scripts/config.mjs";
 import { createApp } from "../scripts/supervisor.mjs";
+import { CSRF } from "../scripts/views/page.mjs";
 
 function gitBoard() {
   const dir = mkdtempSync(join(tmpdir(), "blaze-sup-"));
@@ -40,10 +41,14 @@ function sseFirstEvent(port) {
   });
 }
 
-function post(port, path) {
+// BLZ-359: /control/* now requires the CSRF header as forgery protection for the
+// browser flow (it is NOT authentication — see supervisor-identity.test.mjs, which
+// proves both directions and proves the header alone never satisfies the gate). This
+// board has no identities, so the gate itself asks for nothing, exactly as before.
+function post(port, path, headers = { "x-blaze-csrf": CSRF }) {
   return new Promise((resolve, reject) => {
     import("node:http").then(({ request }) => {
-      const req = request({ port, path, method: "POST" }, (res) => { res.resume(); res.on("end", resolve); });
+      const req = request({ port, path, method: "POST", headers }, (res) => { res.resume(); res.on("end", resolve); });
       req.on("error", reject);
       req.end();
     });
