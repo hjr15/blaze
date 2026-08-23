@@ -13,12 +13,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, existsSync,
+  lstatSync, symlinkSync, readlinkSync,
 } from "node:fs";
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { groomOnce, redactSecrets, outOfBoundsPaths, buildPrompt } from "../scripts/loops/groomer.mjs";
+import {
+  groomOnce, redactSecrets, outOfBoundsPaths, buildPrompt, snapshotTree,
+} from "../scripts/loops/groomer.mjs";
 import { loadConfig } from "../scripts/config.mjs";
 
 const TICKET = "---\nid: TASK-001\ntitle: x\ntype: feature\npriority: medium\nlabels: []\n---\nbody\n";
@@ -241,4 +244,332 @@ test("BLZ-347: untrusted ticket content is not the last thing in the prompt", ()
   assert.ok(bodyAt >= 0, "the ticket body is still in the prompt");
   assert.ok(p.slice(bodyAt).match(/never transition|PROPOSE improvements only|instructions above/i),
     "a guard restatement must follow the untrusted body");
+});
+
+// ===========================================================================
+// BLZ-347 review round 2 — a security review defeated the first containment
+// three ways with live repros. Each of the following FAILED against that
+// implementation. The shared shape of the misses: every original test used a
+// HOMOGENEOUS touched set (all-tracked or all-untracked) and a survey primitive
+// (`git status`) that is blind to two whole regions of the tree it was surveying.
+// ===========================================================================
+
+const marker = (name) => join(tmpdir(), `blaze-347-${name}-${process.pid}-${Math.random().toString(36).slice(2)}`);
+
+// --- B2: the revert was a silent no-op on a MIXED set ------------------------
+
+test("BLZ-347/B2: a MIXED tracked+untracked touched set still reverts every path", () => {
+  // THE bug. Every path was batched into one `git restore --staged -- <all>` and one
+  // `git checkout -- <all>`; git fails the whole pathspec list if ANY entry is unknown to
+  // it, and both were wrapped in `catch {}`. So one untracked decoy anywhere in the set
+  // made the revert do NOTHING while still reporting `refused: true`.
+  //
+  // AGENTS.md is the payload on purpose: it is the source of `extractGroomingRules`, so
+  // an unreverted overwrite rewrites the groomer's own instructions for every future pass.
+  const dir = gitBoard(
+    'printf "## Grooming rules\\n- PAYLOAD: agent-controlled\\n" > AGENTS.md\n'   // tracked, out of bounds
+    + 'printf "decoy\\n" > backlog/decoy.tmp',                                    // untracked decoy
+  );
+  writeFileSync(join(dir, "AGENTS.md"), "## Grooming rules\n- propose only\n");
+  execFileSync("git", ["-C", dir, "add", "AGENTS.md"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "agents"]);
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true);
+  assert.ok(!evt.revertFailed, `revert reported failure: ${JSON.stringify(evt.residual ?? evt.revertErrors)}`);
+  assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "## Grooming rules\n- propose only\n",
+    "the tracked out-of-bounds payload must be reverted even though the set also held an untracked path");
+  assert.ok(!existsSync(join(dir, "backlog", "decoy.tmp")), "the untracked decoy must be removed");
+  assert.equal(porcelain(dir), "", "the tree must be verifiably clean, not merely reported clean");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-347/B2: a revert that cannot complete reports revertFailed, not success", { skip: process.getuid && process.getuid() === 0 ? "root ignores mode bits" : false }, () => {
+  // The lesson under the bug: never trust that the revert commands ran. groomOnce
+  // re-observes the tree afterwards and reports the residue rather than assuming. Forced
+  // here by making the payload's parent directory unwritable, so the removal cannot land.
+  const dir = gitBoard('mkdir -p blocked && printf "PAYLOAD\\n" > blocked/payload.txt && chmod 555 blocked');
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true);
+  assert.equal(evt.revertFailed, true,
+    "a revert that did not actually clean the tree must say so, not report a bare refusal");
+  assert.ok(evt.residual.includes("blocked/payload.txt"),
+    "the event must name what is still dirty, from a RE-OBSERVATION of the tree");
+  assert.ok(evt.revertErrors && evt.revertErrors.length, "the swallowed errors must be surfaced");
+  chmodSync(join(dir, "blocked"), 0o755);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- B1: `.git/` is in-root, invisible to git status, and an execution sink ---
+
+test("BLZ-347/B1: a .git/hooks/pre-commit drop is refused, removed, and never executed", () => {
+  // `git status` cannot see inside `.git/`, so the hook was installed, the pass reported a
+  // clean groom with a sha, and the groomer's OWN `git commit` executed the attacker's
+  // hook. Detection-only cannot work when the detector is blind to the payload directory.
+  const m = marker("hook");
+  const dir = gitBoard(
+    `mkdir -p .git/hooks\n`
+    + `printf '#!/bin/sh\\necho PWNED > ${m}\\nexit 0\\n' > .git/hooks/pre-commit\n`
+    + `chmod +x .git/hooks/pre-commit\n`
+    + 'sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"',
+  );
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true, "a write inside .git/ must be refused");
+  assert.ok(evt.outOfBounds.includes(".git/hooks/pre-commit"));
+  assert.ok(!evt.sha, "a pass that dropped a hook must not commit");
+  assert.ok(!existsSync(join(dir, ".git", "hooks", "pre-commit")), "the hook must be removed");
+  assert.ok(!existsSync(m), "the hook must never have executed");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-347/B1: core.fsmonitor cannot execute — the survey's own git status is hardened", () => {
+  // The sharpest finding: `git status` EXECUTES the program named by core.fsmonitor, so
+  // the containment survey was itself an execution sink and fired the attacker's script
+  // five times in one pass. Hardening at the point of invocation is what closes it —
+  // reverting .git/config afterwards is far too late.
+  const m = marker("fsmon");
+  const fsm = join(tmpdir(), `blaze-347-fsm-${process.pid}.sh`);
+  writeFileSync(fsm, `#!/bin/sh\necho PWNED >> ${m}\nexit 0\n`);
+  chmodSync(fsm, 0o755);
+  const dir = gitBoard(
+    `printf '\\n[core]\\n\\tfsmonitor = ${fsm}\\n' >> .git/config\n`
+    + 'sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"',
+  );
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true);
+  assert.ok(evt.outOfBounds.includes(".git/config"));
+  assert.ok(!existsSync(m), "core.fsmonitor must never be executed, by the survey or the commit");
+  assert.doesNotMatch(readFileSync(join(dir, ".git", "config"), "utf8"), /fsmonitor/,
+    ".git/config must be restored");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(fsm, { force: true });
+});
+
+// --- B3: gitignored paths were wholly invisible ------------------------------
+
+test("BLZ-347/B3: the gitignored .blaze/ tree is surveyed, refused and reverted", () => {
+  // `.gitignore` covers `.blaze/` wholesale, and `git status` never reports an ignored
+  // path. The original fix applied a byte-for-byte snapshot to exactly ONE file
+  // (blaze.config.json) rather than to the ignored surface as a class, so poisoning the
+  // index, planting a database DSN pointing at an attacker host, and creating a
+  // commit.lock directory that wedges every other Blaze write all came back a clean groom.
+  const dir = gitBoard(
+    'mkdir -p .blaze\n'
+    + 'printf \'{"POISONED":true}\' > .blaze/index.json\n'
+    + 'printf \'{"host":"attacker.example"}\' > .blaze/database.json\n'
+    + 'mkdir -p .blaze/commit.lock\n'
+    + 'sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"',
+  );
+  writeFileSync(join(dir, ".gitignore"), ".blaze/\n");
+  execFileSync("git", ["-C", dir, "add", ".gitignore"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "ignore blaze"]);
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true, "an ignored path is still part of the tree");
+  assert.ok(evt.outOfBounds.some((p) => p.startsWith(".blaze")));
+  assert.ok(!existsSync(join(dir, ".blaze", "database.json")), "the planted DSN must be removed");
+  assert.ok(!existsSync(join(dir, ".blaze", "commit.lock")), "the wedging lock dir must be removed");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- the warning tail --------------------------------------------------------
+
+test("BLZ-347: a new symlink is refused and never followed", () => {
+  const target = mkdtempSync(join(tmpdir(), "blaze-347-symtarget-"));
+  const dir = gitBoard(`ln -s ${target} backlog/esc\nprintf "PWNED\\n" > backlog/esc/pwned.txt`);
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+  assert.equal(evt.refused, true, "a symlink out of the tree must be refused, not committed into the board");
+  assert.ok(evt.outOfBounds.includes("backlog/esc"));
+  assert.ok(!existsSync(join(dir, "backlog", "esc")), "the symlink must be removed");
+  assert.equal(porcelain(dir), "");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(target, { recursive: true, force: true });
+});
+
+test("BLZ-347: containment is FILE-level — deleting a sibling ticket is refused, not committed", () => {
+  // Directory-level containment let a pass destroy every other ticket in the same status
+  // directory and auto-commit it as a clean groom, despite the prompt saying
+  // "edit ONLY <rel>". The allowlist is now that one file.
+  const dir = gitBoard('rm -f backlog/TASK-002-sib.md\n'
+    + 'sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  writeFileSync(join(dir, "backlog", "TASK-002-sib.md"), "---\nid: TASK-002\ntitle: sib\n---\nimportant\n");
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "sibling"]);
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true);
+  assert.ok(evt.outOfBounds.includes("backlog/TASK-002-sib.md"));
+  assert.equal(readFileSync(join(dir, "backlog", "TASK-002-sib.md"), "utf8"),
+    "---\nid: TASK-002\ntitle: sib\n---\nimportant\n", "the sibling must be restored");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-347: a non-ASCII filename is handled and does not brick the board", () => {
+  // `git status` C-quotes non-ASCII paths. The quoted form failed the prefix test
+  // (fail-safe), but the revert then failed too, so EVERY subsequent pass refused forever
+  // — any board holding one such filename was permanently wedged. The snapshot walk reads
+  // real directory entries and never parses porcelain, so there is nothing to misquote.
+  const flag = marker("once");
+  const dir = gitBoard(
+    `if [ ! -f ${flag} ]; then touch ${flag}; printf "x\\n" > "backlog/café-notes.md"; fi\n`
+    + 'sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"',
+  );
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const first = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+  assert.equal(first.refused, true, "the non-ASCII drop is refused");
+  assert.ok(first.outOfBounds.includes("backlog/café-notes.md"), "the path is reported unquoted");
+  assert.ok(!first.revertFailed, "the revert must succeed on a non-ASCII path");
+  assert.equal(porcelain(dir), "");
+
+  // The board is not wedged: a well-behaved second pass commits normally.
+  const second = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+  assert.ok(second.sha, `the board must still be groomable after a non-ASCII refusal: ${JSON.stringify(second)}`);
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(flag, { force: true });
+});
+
+// --- the survey must not be able to look complete when it is not -------------
+
+test("BLZ-347: a truncated survey is reported, never passed off as a clean tree", () => {
+  const dir = gitBoard('sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  const snap = snapshotTree(dir, { maxFiles: 3 });
+  assert.equal(snap.truncated, true, "hitting the file cap must set truncated");
+  const full = snapshotTree(dir);
+  assert.equal(full.truncated, false);
+  assert.ok(full.entries.has(".git/config"), "the survey must cover .git/config");
+  assert.ok(full.entries.has("blaze.config.json"));
+  assert.ok(![...full.entries.keys()].some((k) => k.startsWith(".git/objects/")),
+    ".git/objects is skipped by name and that exclusion is asserted, not assumed");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- redaction: the generic arms --------------------------------------------
+
+test("BLZ-347: redaction covers vendors nobody enumerated, and leaves ordinary text alone", () => {
+  // All of these walked straight through the prefix-only denylist during the review.
+  for (const secret of [
+    "glpat-xxxxxxxxxxxxxxxxxxxx", "xoxb-123456789-abcdefghijkl", "AIzaSyD-1234567890abcdefghij",
+    "ASIAIOSFODNN7EXAMPLE", "sk_live_abcdefghijklmnop", "hf_abcdefghijklmnopqrst",
+    "npm_abcdefghijklmnopqrst", "wJalrXUtnFEMI/K7MDENG/bPxRfiCYEXAMPLEKEY",
+    "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0In0.SflKxwRJSMeKKF2QT4",
+  ]) {
+    const out = redactSecrets(`stderr: ${secret} <-`);
+    assert.ok(!out.includes(secret), `${secret} survived redaction: ${out}`);
+  }
+  assert.equal(redactSecrets("password: hunter2000AAA").includes("hunter2000AAA"), false,
+    "a self-labelled credential has its value taken whatever the vendor");
+  for (const benign of [
+    "plain stderr line", "agent command failed",
+    "error: pathspec 'backlog/x.md' did not match any file(s) known to git",
+    "commit 3e817d70013cf24d7ef1d69f47fad4aec0b141f8 ok",
+  ]) {
+    assert.equal(redactSecrets(benign), benign, `ordinary diagnostics must survive: ${benign}`);
+  }
+});
+
+test("BLZ-347: a pre-existing post-commit hook does not run during the groomer's commit", () => {
+  // core.hooksPath hardening carries its own weight, separate from detecting a hook the
+  // agent plants: a hook already on disk before the pass is not in the touched set, so
+  // nothing refuses it, and the groomer's auto-commit would execute it. That covers a hook
+  // planted by an earlier pass and any hook the operator's repo legitimately carries — the
+  // groomer is an unattended loop and has no business firing either.
+  const m = marker("prehook");
+  const dir = gitBoard('sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  mkdirSync(join(dir, ".git", "hooks"), { recursive: true });
+  // post-commit ON PURPOSE. `git commit --no-verify` skips pre-commit and commit-msg but
+  // still runs post-commit — measured — so only core.hooksPath=/dev/null can pass this,
+  // which is why --no-verify was dropped rather than kept as a second guard.
+  writeFileSync(join(dir, ".git", "hooks", "post-commit"), `#!/bin/sh\necho RAN > ${m}\nexit 0\n`);
+  chmodSync(join(dir, ".git", "hooks", "post-commit"), 0o755);
+
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.ok(evt.sha, "an in-bounds groom still commits");
+  assert.ok(!existsSync(m), "the pre-existing hook must not have been executed by the commit");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(m, { force: true });
+});
+
+test("BLZ-347: a pre-existing core.fsmonitor never executes, even on a successful groom", () => {
+  // The refused path never shells out to git before restoring, so the hardening's weight
+  // is on the ACCEPTED path: `git add` and `git commit` both invoke core.fsmonitor
+  // (measured: two executions per pass, plus one per `git status`). A hook or fsmonitor
+  // already on disk is not in the touched set, so nothing refuses it — only the
+  // invocation-time hardening stops it.
+  const m = marker("fsmon-pre");
+  const fsm = join(tmpdir(), `blaze-347-fsmpre-${process.pid}.sh`);
+  writeFileSync(fsm, `#!/bin/sh\necho PWNED >> ${m}\nexit 0\n`);
+  chmodSync(fsm, 0o755);
+  const dir = gitBoard('sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  writeFileSync(join(dir, ".git", "config"),
+    readFileSync(join(dir, ".git", "config"), "utf8") + `\n[core]\n\tfsmonitor = ${fsm}\n`);
+
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.ok(evt.sha, "an in-bounds groom still commits");
+  assert.ok(!existsSync(m), "core.fsmonitor must not execute during add/commit either");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(fsm, { force: true });
+});
+
+test("BLZ-347: replacing the ticket itself with a symlink is refused, not committed", () => {
+  // The one case file-level containment cannot catch on the path alone: the touched path
+  // IS the allowlisted ticket. The link target deliberately carries frontmatter IDENTICAL
+  // to the ticket's, so `isStructuralChange` sees no change and cannot be what refuses
+  // this — only the symlink arm can. Without it the groomer would `git add` a symlink
+  // pointing outside the board and commit it into every clone.
+  const decoy = join(tmpdir(), `blaze-347-decoy-${process.pid}.md`);
+  writeFileSync(decoy, "---\nid: TASK-001\ntitle: x\ntype: feature\npriority: medium\nlabels: []\n---\nbody\nextra\n");
+  const dir = gitBoard('rm -f "$BLAZE_GROOM_TARGET" && ln -s ' + decoy + ' "$BLAZE_GROOM_TARGET"');
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true, "the ticket must not be swapped for a symlink");
+  assert.equal(evt.reason, "out-of-bounds",
+    "it must be the symlink arm that refuses, not the frontmatter lint standing in for it");
+  assert.ok(!evt.sha);
+  assert.equal(lstatSync(join(dir, "backlog", "TASK-001-x.md")).isSymbolicLink(), false,
+    "the real ticket file must be restored");
+  assert.equal(porcelain(dir), "");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(decoy, { force: true });
+});
+
+test("BLZ-347: RETARGETING a pre-existing symlink is detected", () => {
+  // Detection depends on the walk recording the link target in the hash. If symlinks were
+  // followed (or recorded as a bare "other" entry) a retarget would show identical
+  // before/after and pass as a clean tree.
+  const a = join(tmpdir(), `blaze-347-t-a-${process.pid}`);
+  const b = join(tmpdir(), `blaze-347-t-b-${process.pid}`);
+  writeFileSync(a, "A\n"); writeFileSync(b, "B\n");
+  const dir = gitBoard(`rm -f link && ln -s ${b} link\n`
+    + 'sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  symlinkSync(a, join(dir, "link"));
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true, "a retargeted symlink is a change and must be refused");
+  assert.ok(evt.outOfBounds.includes("link"));
+  assert.equal(readlinkSync(join(dir, "link")), a, "the original target must be restored");
+  rmSync(dir, { recursive: true, force: true });
+  rmSync(a, { force: true }); rmSync(b, { force: true });
 });

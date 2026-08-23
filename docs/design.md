@@ -137,21 +137,28 @@ and the agent prompt share a source):
 already uses for moves. Each change is its own small revertable commit, and config
 scopes which columns it grooms and how often.
 
-Containment is **detected, not prevented** — say it that way, because the earlier wording
-here ("bounded by construction") claimed a boundary that did not exist
+The guard is **advisory, not a boundary** — say it that way, because earlier wording here
+("bounded by construction") and in the first draft of ADR-0019 ("detected, not prevented")
+both claimed more than the code delivers. A security review defeated the detect-and-revert
+version three ways with live repros
 ([ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md), BLZ-347).
-Blaze runs whatever `agentCommand` names; it cannot stop that process writing anywhere the
-operator's own account can write. What it does do is survey the **whole** working tree
-after every pass and, if the agent touched anything outside the groomable status
-directories, revert the entire pass and report `refused` rather than commit it —
-`blaze.config.json` included, snapshot byte-for-byte outside git so a gitignored config is
-still covered. A network call, a write outside the data root, or a process that outlives
-the pass is beyond what a diff can see.
 
-For that reason **the groomer ships `enabled: false`.** Turn it on deliberately, per board.
-The subprocess is bounded by `timeoutSec` (default 900) and `maxBufferMb` (default 16);
-note that `spawnSync` blocks the supervisor's HTTP server for the whole run, so an agent
-run is a board outage for its duration, capped by that timeout.
+What actually contains the agent is: the loop shipping **`enabled: false`**, the operator's
+decision to turn it on, and the permission posture of whatever `agentCommand` names. Blaze
+spawns a process with the operator's own privileges and cannot stop it writing anywhere the
+operator can write.
+
+What the guard does, as defence in depth: it hashes the whole data root before and after
+every pass, refuses any change to a path other than the ticket being groomed — `.git/`,
+gitignored files and symlinks included — reverts per path from the snapshot's own bytes,
+and then re-checks the tree to confirm the revert actually happened. Every git invocation
+runs with `core.fsmonitor=false` and `core.hooksPath=/dev/null`, because both are config an
+agent can write and git will otherwise execute. It does not cover network calls, writes
+outside the data root, or a process that outlives the pass; the ADR lists the gaps in full.
+
+The subprocess is bounded by `timeoutSec` (default 900) and `maxBufferMb` (default 16).
+`spawnSync` blocks the supervisor's HTTP server for the whole run, so an agent run is a
+board outage for its duration, capped by that timeout.
 
 ## Configuration — `blaze.config.json`
 
