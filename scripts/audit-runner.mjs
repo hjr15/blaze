@@ -4,7 +4,7 @@
 // Read-only. Exits non-zero only on a HARD finding — a soft finding is a fill queue and
 // must never fail a run (blaze-pm ADR-0011). BLZ-137.
 import { readFileSync } from "node:fs";
-import { join, dirname, resolve as resolvePath } from "node:path";
+import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { auditCorpus, summarise, HARD_KINDS } from "./model/audit.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
@@ -84,6 +84,60 @@ for (const [id, files] of filesById) {
     report.findings.push({ ticket: id, kind: "duplicate-status", detail: files.sort().join(", ") });
   }
 }
+// BLZ-353 / ruling R48: a goal must not be terminal while a requirement beneath it was only
+// ever implemented, never verified. Raised HERE for the same reason `duplicate-status` is —
+// status is the directory, so it is a property of the WALK, and `auditCorpus` is a function
+// of frontmatter, which carries no path.
+//
+// The `goal:achieved` gate (gates.mjs) refuses this prospectively. This finding catches the
+// states the gate cannot: a ticket moved by a direct file write, which bypasses `blaze`
+// entirely, and any board that predates the gate. HARD rather than soft because it is not a
+// fill queue — an achieved goal resting on unverified requirements is a corpus that asserts
+// something untrue — and because it is affordable: measured across this board's 2,596
+// tickets on 2026-08-23, 83 requirements sit at `implemented` and NONE has a terminal
+// ancestor, so turning this on fails no existing board.
+// This walks `parent` directly and touches NEITHER roll-up, deliberately. BLZ-353's ACs ask
+// which is authoritative here; the answer is neither, because they compute different things:
+// `model/rollup.mjs` rolls TIME (estimate/worklog) over `ticket.parent`, and
+// `model/hierarchy-rollup.mjs` rolls arbitrary values over `hierarchy_membership` with
+// duplicate-exclusion. Goal satisfaction is neither a time sum nor a hierarchy value, so
+// reconciling those two is a real question (their parent models and dedup policies differ)
+// but it is not this ticket's, and resolving it as a side effect here would be exactly the
+// silent reconciliation the ACs warn against.
+//
+// KNOWN LIMITATION: `parent` is the only association this sees, because the markdown corpus
+// is the only thing on disk. A requirement associated with a goal ONLY through a v4
+// `hierarchy_membership` row would not be found. That is not currently reachable — no v4
+// table ships (`createDbSchema` installs the v3 ticket tables only) — but it must be revisited
+// when they do.
+const statusOf = new Map();
+const fmById = new Map();
+for (const t of tickets) {
+  const id = t.frontmatter?.id;
+  if (!id) continue;
+  statusOf.set(id, basename(dirname(t.file)));
+  fmById.set(id, t.frontmatter);
+}
+const GOAL_TERMINAL = new Set(["done", "achieved", "accepted", "canceled", "duplicate"]);
+const REQUIREMENT_SATISFYING = new Set(["verified", "rejected", "obsolete"]);
+for (const [id, fm] of fmById) {
+  if (fm.type !== "requirement") continue;
+  if (REQUIREMENT_SATISFYING.has(statusOf.get(id))) continue;
+  // Walk to the nearest terminal ancestor. Cycle-guarded: a malformed parent chain is
+  // already its own finding, and this pass must not hang on one.
+  const seen = new Set([id]);
+  let parent = fm.parent || null;
+  while (parent && fmById.has(parent) && !seen.has(parent)) {
+    seen.add(parent);
+    if (GOAL_TERMINAL.has(statusOf.get(parent))) {
+      report.findings.push({ ticket: parent, kind: "terminal-goal-unverified-requirement",
+        detail: `${id} is ${statusOf.get(id)}, not verified` });
+      break;
+    }
+    parent = fmById.get(parent).parent || null;
+  }
+}
+
 // auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
 // that reports a hard finding and still exits 0 is not a gate.
 report.ok = !report.findings.some((f) => HARD_KINDS.has(f.kind));

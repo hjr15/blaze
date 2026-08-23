@@ -79,8 +79,31 @@ block, using the shape in `schema-customization.md`:
 
 | Workflow | Status sequence | Terminal | Reopen target |
 |---|---|---|---|
-| `requirement` | `proposed → approved → implemented → verified` (`rejected`, `obsolete` reachable from any status) | `verified`, `rejected`, `obsolete` | `proposed` |
+| `requirement` | `proposed → approved → implemented → verified` (`rejected`, `obsolete` reachable from any status) | `verified`, `rejected`, `obsolete` — see the note below on `implemented` | `proposed` |
 | `architecture` | `proposed → accepted → superseded` (`rejected`, `deprecated` reachable from any status) | `superseded`, `rejected`, `deprecated` | `proposed` |
+
+### `implemented` is terminal for resolution, but does not satisfy a goal
+
+The table above omits `implemented` from the requirement workflow's terminal set, and that has
+been the documented method since it was written. The engine disagreed: `workflows.mjs` lists
+`implemented` as terminal so that it auto-sets `resolution: done`, and until 2026-08-23 the
+`goal:achieved` gate filtered on terminality alone — so a goal could close over requirements
+nobody had verified. Ruling R48 (BLZ-353) resolved the divergence in the method's favour.
+
+The two senses are now distinguished explicitly, because conflating them is what caused the
+gap:
+
+- **Terminal for the requirement's own lifecycle.** `implemented` still sets `resolution: done`
+  and still ends the requirement's active work. Nothing about existing requirements changed,
+  and no migration was required.
+- **Satisfying for a goal.** Only `verified`, `rejected` and `obsolete`. `verified` is the
+  evidence case, and it is gated on a resolving `Verifies` link, so it cannot be asserted
+  without something demonstrating it. `rejected` and `obsolete` are decisions *not* to deliver,
+  so they do not block. `implemented` is delivered-but-unproven, and a goal resting on it
+  claims more than the board can support.
+
+`blaze audit` reports any board already in that state as
+`terminal-goal-unverified-requirement`.
 
 ## `feature` is a deliberate local coinage
 

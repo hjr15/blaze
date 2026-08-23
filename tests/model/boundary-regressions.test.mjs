@@ -253,7 +253,11 @@ describe("BLZ-336: goal:achieved resolves the hierarchy of its OWN project", () 
 
   test("the same goal passes once its child IS terminal — the gate still works", async () => {
     const state = twoProjects();
-    state.artifacts.find((a) => a.id === "rB").status = "implemented";   // terminal
+    // BLZ-353/R48: was "implemented". That is still terminal for the requirement's own
+    // lifecycle, but no longer SATISFIES a goal, so it would now fail here for a reason
+    // that has nothing to do with what this test is about (hierarchy scoping). "verified"
+    // is the satisfying status and keeps the test measuring the thing it was written for.
+    state.artifacts.find((a) => a.id === "rB").status = "verified";
     const r = await artifactApi(state).transition({ id: "gB", to: "achieved" });
     assert.equal(r.ok, true, r.error);
   });
