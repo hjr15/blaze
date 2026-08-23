@@ -17,7 +17,13 @@ const REQUIRED_ADR_SECTIONS = ["Context", "Decision", "Consequences"];
 
 // The requirement statuses that let a goal be achieved. `implemented` is deliberately
 // absent — see the `goal:achieved` handler below.
-const GOAL_SATISFYING_REQUIREMENT = new Set(["verified", "rejected", "obsolete"]);
+export const GOAL_SATISFYING_REQUIREMENT = new Set(["verified", "rejected", "obsolete"]);
+
+// BLZ-361: exported as the published contract, not as an implementation detail. A board whose
+// workflow override omits one of these makes this gate unsatisfiable — no goal carrying a
+// delivered requirement could ever be achieved — and it did exactly that, silently, because a
+// workflow override REPLACES the default rather than merging into it. `validateSchema` reads
+// this set so the requirement and the check can never drift apart.
 
 // Each gate is a function from ({subject, context}) to a list of failures.
 // GATED_ACTIONS is DERIVED from these keys — a handler cannot exist without being

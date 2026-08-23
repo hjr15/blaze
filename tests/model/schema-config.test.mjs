@@ -179,3 +179,61 @@ test("checkSchemaVersion: error text names no command, only the docs path", () =
     assert.doesNotMatch(r.error, /blaze \w+/, "guard must point at docs, never a command");
   }
 });
+
+// BLZ-361: an override must not silently omit a status the engine's gates require.
+//
+// The board's own blaze.config.json overrode the requirement workflow with the pre-BLZ-339
+// status list — no `verified`. `mergeWorkflows` is `{...defaults, ...override}`, a shallow merge
+// at the workflow-NAME level, so the override wholly replaced the default including its statuses
+// array. Nothing noticed.
+//
+// The consequence was worse than a broken board: BLZ-353's `goal:achieved` gate requires every
+// child requirement to reach `verified`, `rejected` or `obsolete`. With `verified` unreachable,
+// no goal carrying a delivered requirement could ever be achieved, and the audit finding BLZ-353
+// shipped could never clear — a gate whose success state does not exist.
+//
+// Narrowing a workflow on purpose stays legal; that is what an override is for. What is now
+// illegal is doing it SILENTLY to a status the engine's own gates depend on.
+const BLZ361_NARROWED = {
+  workflows: {
+    requirement: {
+      statuses: ["proposed", "implemented", "rejected", "obsolete"],
+      terminal: ["implemented", "rejected", "obsolete"],
+      transitions: [["proposed", "implemented"], ["proposed", "rejected"]],
+      reopenTo: "proposed",
+    },
+  },
+};
+
+test("BLZ-361: the exact board override that caused this is reported", () => {
+  const errors = validateSchema(BLZ361_NARROWED);
+  assert.ok(errors.some((e) => /verified/.test(e)),
+    `expected an error naming the missing status, got ${JSON.stringify(errors)}`);
+  assert.ok(errors.some((e) => /requirement/.test(e)), "and naming the workflow");
+});
+
+test("BLZ-361: the error explains WHY the status is required, not just that it is", () => {
+  // An operator told "verified is missing" adds it and moves on. An operator told which gate
+  // depends on it can decide whether they wanted that gate at all.
+  const [msg] = validateSchema(BLZ361_NARROWED).filter((e) => /verified/.test(e));
+  assert.match(msg, /goal|achiev|gate/i, `error must name the dependency: ${msg}`);
+});
+
+test("BLZ-361: a workflow carrying every gate-required status passes", () => {
+  // The control. Without it the check could pass by always failing.
+  const ok = {
+    workflows: {
+      requirement: {
+        statuses: ["proposed", "implemented", "verified", "rejected", "obsolete"],
+        terminal: ["implemented", "verified", "rejected", "obsolete"],
+        transitions: [["proposed", "implemented"], ["implemented", "verified"]],
+        reopenTo: "proposed",
+      },
+    },
+  };
+  assert.deepEqual(validateSchema(ok).filter((e) => /verified/.test(e)), []);
+});
+
+test("BLZ-361: a board with no override at all is unaffected", () => {
+  assert.deepEqual(validateSchema({ workflows: {} }).filter((e) => /verified/.test(e)), []);
+});
