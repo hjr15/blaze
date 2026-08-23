@@ -41,9 +41,13 @@ the reconcile engine shells out to `git` and `gh`.
 
 ## Non-goals (YAGNI)
 
-- **No code-writing worker loops.** The loops keep the *board*; they never cut
-  branches or write code in the mirrored repo. (This was an explicit fork in the
-  brainstorm — autonomous implementers are deferred.)
+- ~~**No code-writing worker loops.**~~ **Superseded (BLZ-352, 2026-08-23) — see
+  [ADR-0020](decisions/0020-autonomous-implementers-are-no-longer-deferred.md).** This
+  bullet said the loops "never cut branches or write code in the mirrored repo", and
+  that autonomous implementers were deferred. Deferral was right while the capability
+  was unproven; BLZ-349 proved it. Blaze may now dispatch a work item to an agent that
+  writes code and opens a PR — **with the ceiling at `in-review`: Blaze never merges.**
+  The bullet below it, on API-key handling, is **not** superseded and still holds.
 - No embedded Anthropic SDK and no API key handling inside Blaze — the agent CLI owns
   auth. (A provider seam is possible later; not built now.)
 - No MCP server; no second git provider (GitHub via `gh` only); no database; no
