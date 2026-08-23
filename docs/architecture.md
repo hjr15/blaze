@@ -136,6 +136,7 @@ and carries every ticket.
 | none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary |
 | none | anything else | **`blaze board` refuses to start**, naming both fixes. `checkBindSafety` is called before `.listen()`, so nothing is ever served. This is the behaviour *until a first-run setup flow exists*, not a permanent design choice |
 | one or more | any | Every `/api/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
+| **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **`blaze board` refuses to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
 
 Create the first identity — which turns authentication on — with
 [`blaze user add`](guide/commands.md#user).

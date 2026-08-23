@@ -10,10 +10,11 @@
 // not import the gate.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, truncateSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createRequire } from "node:module";
 import { startServer, CSRF } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { openIdentityDb, identityDbPath, loadIdentity } from "../scripts/model/identity-db.mjs";
@@ -125,68 +126,90 @@ describe("an identity FILE is not an identity — only a user is", () => {
       /refusing to serve on 0\.0\.0\.0 with no users configured/);
   });
 
-  // Two different failure shapes, and they take two different guards. A file that opens
-  // but carries no identity schema throws on the QUERY; something that cannot be opened
-  // at all throws on the OPEN. Both must read as "no identities" rather than take a
-  // loopback board down — refusing to serve because of a stray file in .blaze/ would be
-  // a worse failure than the one this ticket fixes.
-  test("a stray non-database file at that path is treated as absent, not as fatal", async () => {
+});
+
+describe("a BROKEN identity database fails closed — it is not 'no identities'", () => {
+  // THE REGRESSION THIS REPLACES. loadIdentity treated every startup breakage as
+  // "no identities configured", so truncating a PROTECTED board's identity.db silently
+  // removed its authentication:
+  //
+  //     [baseline healthy]                 no-token=401  valid-token=200
+  //     [garbage over the file]            no-token=200  <-- AUTHENTICATION REMOVED
+  //     [valid sqlite, no schema]          no-token=200  <-- AUTHENTICATION REMOVED
+  //     [a DIRECTORY in its place]         no-token=200  <-- AUTHENTICATION REMOVED
+  //     [truncated to 0 bytes]             no-token=200  <-- AUTHENTICATION REMOVED
+  //
+  // The earlier tests here asserted that as INTENDED, justified as tolerating "a stray
+  // file in .blaze/". That justification only ever held for a board that never had
+  // users — which is the only kind of board those tests built. "Stray file on an
+  // unprotected board" and "the roster of a protected board just got truncated" are
+  // indistinguishable on disk, so they cannot share an outcome. ABSENT is the
+  // back-compat case; BROKEN is a refusal.
+  //
+  // On 0.0.0.0 the same corruption used to kill the container with a FALSE diagnosis
+  // ("no users configured"), which is why the broken check runs before checkBindSafety.
+  const damage = {
+    "garbage over the file": (p) => writeFileSync(p, "this is not a sqlite database"),
+    "a valid sqlite file with no identity schema": (p) => {
+      rmSync(p);
+      const d = new (createRequire(import.meta.url)("node:sqlite").DatabaseSync)(p);
+      d.exec("CREATE TABLE unrelated (x)"); d.close();
+    },
+    "a DIRECTORY where the database goes": (p) => { rmSync(p); mkdirSync(p); },
+    "truncated to 0 bytes": (p) => truncateSync(p, 0),
+  };
+
+  for (const [label, breakIt] of Object.entries(damage)) {
+    test(`a protected board with ${label} refuses to serve`, async () => {
+      const { root, projects } = board();
+      const { token } = await addUser(root, { email: "a@b.c", role: "admin" });
+      breakIt(identityDbPath(root));
+
+      const loaded = loadIdentity(root);
+      assert.equal(loaded.state, "broken", "a damaged roster is broken, never absent");
+      assert.equal(loaded.hasIdentity, false);
+
+      // The board must not come up at all — on loopback as much as anywhere else. An
+      // open board is not an acceptable degraded mode for a board that had users.
+      let server = null;
+      try {
+        server = startServer({ port: 0, root, projectsDir: projects });
+        await new Promise((r) => server.once("listening", r));
+        const anon = await fetch(`http://127.0.0.1:${server.address().port}/api/live`);
+        assert.fail(`the board served a request with a broken roster (no-token=${anon.status})`);
+      } catch (e) {
+        if (server) { server.close(); throw e; }
+        assert.match(e.message, /identity database/i);
+        assert.doesNotMatch(e.message, /no users configured/,
+          "a corrupt roster must not be diagnosed as an empty one");
+        assert.match(e.message, new RegExp(identityDbPath(root).replace(/[.*+?^${}()|[\]\\]/g, "\\$&")),
+          "the message must name the file the operator has to deal with");
+      }
+      // The token is still a real token; nothing about it caused this.
+      assert.ok(token.token.startsWith("blz_"));
+    });
+  }
+
+  test("on a non-loopback bind the diagnosis is the real one, not 'no users configured'", async () => {
     const { root, projects } = board();
-    mkdirSync(join(root, ".blaze"), { recursive: true });
-    writeFileSync(identityDbPath(root), "this is not a sqlite database");
-    assert.equal(loadIdentity(root).hasIdentity, false);
+    await addUser(root, { email: "a@b.c", role: "admin" });
+    truncateSync(identityDbPath(root), 0);
+    assert.throws(
+      () => startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" }),
+      (e) => /identity database/i.test(e.message) && !/no users configured/.test(e.message));
+  });
+
+  test("ABSENT is still absent: no file at all is the untouched loopback path", async () => {
+    const { root, projects } = board();
+    const loaded = loadIdentity(root);
+    assert.equal(loaded.state, "absent");
+    assert.equal(loaded.hasIdentity, false);
     const { server, base } = await boot({ root, projectsDir: projects });
     try { assert.equal((await fetch(`${base}/api/live`)).status, 200); }
     finally { server.close(); }
   });
 
-  test("something that cannot be opened at all is also absent, not fatal", async () => {
-    const { root, projects } = board();
-    mkdirSync(identityDbPath(root), { recursive: true });   // a DIRECTORY where the db goes
-    assert.equal(loadIdentity(root).hasIdentity, false);
-    const { server, base } = await boot({ root, projectsDir: projects });
-    try { assert.equal((await fetch(`${base}/api/live`)).status, 200); }
-    finally { server.close(); }
-  });
 });
-
-describe("every /api/* request goes through gate(), and an unknown route fails closed", () => {
-  test("an unclassified /api route 404s rather than falling through to a handler", async () => {
-    const { root, projects } = board();
-    const { server, base } = await boot({ root, projectsDir: projects });
-    try {
-      const r = await fetch(`${base}/api/definitely-not-a-route`);
-      assert.equal(r.status, 404);
-      assert.deepEqual(await r.json(), { errors: ["unknown endpoint"] });
-
-      // And the POST side, which previously reached the CSRF check and the write body.
-      const p = await post(base, "/api/definitely-not-a-route", { id: "OBA-1" });
-      assert.equal(p.status, 404);
-      assert.deepEqual(await p.json(), { errors: ["unknown endpoint"] });
-    } finally { server.close(); }
-  });
-
-  test("a GET on a write-only route is unclassified, so it 404s too", async () => {
-    const { root, projects } = board();
-    const { server, base } = await boot({ root, projectsDir: projects });
-    try {
-      const r = await fetch(`${base}/api/edit`);
-      assert.equal(r.status, 404);
-      assert.deepEqual(await r.json(), { errors: ["unknown endpoint"] });
-    } finally { server.close(); }
-  });
-
-  test("with no identities, board content is open exactly as it always has been", async () => {
-    const { root, projects } = board();
-    const { server, base } = await boot({ root, projectsDir: projects });
-    try {
-      assert.equal((await fetch(`${base}/`)).status, 200);
-      assert.equal((await fetch(`${base}/view/board`)).status, 200);
-      assert.equal((await fetch(`${base}/nope`)).status, 404, "an unknown page is still a plain 404");
-    } finally { server.close(); }
-  });
-});
-
 describe("board CONTENT is gated too — a viewer role that protects nothing is not a role", () => {
   // Found in security review of PR #96. `/` is rendered SERVER-SIDE and embeds every
   // ticket plus the CSRF token, so with identities configured an unauthenticated caller

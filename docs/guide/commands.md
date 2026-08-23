@@ -62,6 +62,12 @@ edit, resolve, log, acceptance-criteria toggle). Parses no CLI args.
   The token's scopes are re-intersected with its owner's *current* role on every
   request, so demoting a user immediately narrows every token they hold.
 
+- **`.blaze/identity.db` exists but is unreadable** (truncated, corrupt, or not a
+  database) — `blaze board` **refuses to start** and names the file. This is never
+  read as "no users": on disk a stray file and a truncated roster look identical, and
+  treating the second as the first would silently remove authentication from a board
+  that had it.
+
   A browser cannot set that header itself, so once a board has users its content is
   reachable from the API, from `curl`, or behind a reverse proxy that adds the
   header — not from a bare browser tab. The board was already unusable in a browser

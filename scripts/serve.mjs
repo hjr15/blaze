@@ -101,6 +101,10 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   //
   // Checked BEFORE .listen(), and thrown rather than logged: a warning printed next to a
   // socket that is already accepting connections is not a refusal.
+  // BEFORE the bind check, so a damaged roster is diagnosed as a damaged roster. Reading
+  // it as "no identities" both removed authentication from a loopback board and, on
+  // 0.0.0.0, killed the container with the false message "no users configured".
+  if (identity?.state === "broken") throw new Error(identity.error);
   const bind = checkBindSafety({ host, hasIdentity: Boolean(identity?.hasIdentity) });
   if (!bind.ok) throw new Error(bind.error);
   // null when no identity is configured — which gate() reads as the loopback case that

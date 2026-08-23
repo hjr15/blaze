@@ -76,45 +76,110 @@ export function openIdentityDb(dataRoot, { create = false } = {}) {
   db.exec("PRAGMA foreign_keys = ON;");
   //
   // DELIBERATELY NOT WAL, and this is not an oversight — please do not "fix" it.
-  // A WAL database cannot be opened AT ALL on a read-only filesystem: SQLite needs to
-  // write -wal/-shm to read it, so even a SELECT fails with "attempt to write a readonly
-  // database". Measured both ways against a 0444 file in a 0555 directory:
-  //     journal_mode=delete  -> SELECT ok, UPDATE refused          (what we want)
-  //     journal_mode=wal     -> OPEN/SELECT FAILS                  (board unauthenticable)
+  // A WAL database on a READ-ONLY filesystem cannot be QUERIED: SQLite must create
+  // -wal/-shm to read it. Measured against a 0444 file in a 0555 directory:
+  //
+  //   journal_mode=delete, clean close      ctor ok,  SELECT ok
+  //   journal_mode=wal,    clean close      ctor ok,  SELECT FAILS
+  //                                                   "attempt to write a readonly database"
+  //   journal_mode=wal,    unclean exit     ctor ok,  SELECT ok  (sidecars still present)
+  //
+  // Two details worth stating exactly, so nobody disproves a sloppy version of this and
+  // re-adds WAL on the strength of it. The CONSTRUCTOR always succeeds — node:sqlite
+  // opens lazily, so the failure surfaces on the first statement, not on open. And a WAL
+  // database whose -wal/-shm sidecars survived an unclean exit reads fine read-only.
+  // Neither rescues the case that matters: SQLite REMOVES those sidecars on a clean
+  // close, so a board shut down properly and then mounted read-only is the failing row.
+  //
   // `docker run -v <board>:/data:ro` is the Dockerfile's own hardened deployment, and the
   // mode is sticky: setting WAL once on a writable board breaks every later read-only
   // mount of it. busy_timeout already fixes the contention this was meant to address.
-  if (create) {
-    db.exec(identityDdl("sqlite"));
-    harden(path, 0o600);
-  }
+  if (create) db.exec(identityDdl("sqlite"));
+  // Tightened on EVERY open, not only on creation. The read path — loadIdentity, which
+  // every startServer boot takes — is the one that runs constantly, and leaving it out
+  // meant a file loosened after creation stayed loosened for the life of the board.
+  harden(path, 0o600);
   const exec = identityExec(db);
   return { db, exec, path, store: identityStore(exec, { dialect: "sqlite" }) };
 }
 
 /**
+ * The message a board gets when its roster exists but cannot be read.
+ *
+ * Deliberately NOT the bind-safety wording. Diagnosing a corrupt roster as "no users
+ * configured" sent operators to `blaze user add` for a database that was already there —
+ * the one instruction guaranteed not to help.
+ */
+function brokenIdentityError(path, cause) {
+  return `blaze: refusing to serve — the identity database at ${path}\n`
+    + "exists but cannot be read.\n\n"
+    + `    ${String(cause?.message ?? cause).trim()}\n\n`
+    + "This is a REFUSAL rather than a warning because the two possibilities are\n"
+    + "indistinguishable from here: a stray file on a board that never had users, or the\n"
+    + "roster of a protected board that has just been truncated. Treating the second as\n"
+    + "the first silently removes authentication from a board that had it.\n\n"
+    + "If this board genuinely has no users and the file is a stray, remove it:\n"
+    + `    rm ${path}\n\n`
+    + "Otherwise restore it from a backup, or start a new roster:\n"
+    + "    blaze user add --email you@example.com --role admin\n";
+}
+
+/**
  * What the server needs to know before it binds.
  *
- * @returns { store, hasIdentity, close } — `store` is null when there is nothing to
- *   authenticate against, which is exactly the argument `gate()` wants for the
- *   loopback case. `close` is always callable.
+ * THREE STATES, and the distinction between the first two is the whole point:
+ *
+ *   absent   no .blaze/identity.db at all   -> loopback serves unauthenticated, exactly
+ *                                              as Blaze always has. The back-compat path.
+ *   broken   the file is there but will not open, or carries no identity schema
+ *                                           -> REFUSE. Never "no identities".
+ *   empty    schema present, zero users     -> loopback, as for absent. This is the state
+ *                                              a future `user remove` of the last user
+ *                                              reaches, and it is a working database
+ *                                              saying something true.
+ *   healthy  schema present, at least one user -> authenticate every request.
+ *
+ * An earlier revision collapsed broken into absent, justified as tolerating "a stray file
+ * in .blaze/". That justification only holds for a board that NEVER HAD USERS, and on
+ * disk those two cases look identical — so corrupting a protected board's identity.db
+ * removed its authentication outright (no-token went from 401 to 200). Anything that
+ * exists at this path must be a working identity database or the board does not come up.
+ *
+ * A 0-byte file counts as broken, not absent, even though SQLite opens it happily as an
+ * empty database: nothing creates this path except openIdentityDb(create: true), which
+ * always applies the DDL, and truncation-to-zero is the single most common way a file is
+ * destroyed. Reading it as "no users" would leave the widest hole of all of them open.
+ *
+ * @returns { state, store, hasIdentity, error, close } — `store` is null unless healthy,
+ *   which is exactly the argument `gate()` wants for the loopback case. `close` is always
+ *   callable.
  */
 export function loadIdentity(dataRoot) {
-  const none = { store: null, hasIdentity: false, close() {} };
+  const path = identityDbPath(dataRoot);
+  const absent = { state: "absent", store: null, hasIdentity: false, error: null, close() {} };
+  if (!existsSync(path)) return absent;
+
+  const broken = (cause) => ({
+    state: "broken", store: null, hasIdentity: false,
+    error: brokenIdentityError(path, cause), close() {},
+  });
+
   let opened;
-  try { opened = openIdentityDb(dataRoot); } catch { return none; }
-  if (!opened) return none;
+  try { opened = openIdentityDb(dataRoot); } catch (e) { return broken(e); }
+  // Vanished between the existsSync and the open. Genuinely absent, not damaged.
+  if (!opened) return absent;
+
   const close = () => { try { opened.db.close(); } catch { /* already closed */ } };
-  let n = 0;
+  let n;
   try {
     n = Number(opened.exec.all("SELECT count(*) AS n FROM app_user", [])?.[0]?.n ?? 0);
-  } catch {
-    // A file that exists but carries no identity schema is not an identity. Treated as
-    // absent rather than fatal: refusing to serve a loopback board because something
-    // left a stray file in .blaze/ would be a worse failure than the one being fixed.
+  } catch (e) {
     close();
-    return none;
+    return broken(e);
   }
-  if (n === 0) { close(); return none; }
-  return { store: opened.store, hasIdentity: true, close };
+  if (n === 0) {
+    close();
+    return { state: "empty", store: null, hasIdentity: false, error: null, close() {} };
+  }
+  return { state: "healthy", store: opened.store, hasIdentity: true, error: null, close };
 }

@@ -187,11 +187,34 @@ describe("W3. the identity database is not world-readable", () => {
       "a group-writable .blaze/ lets a same-group user REPLACE identity.db");
   });
 
-  test("openIdentityDb tightens an already-loose file rather than trusting it", () => {
+  // The SECOND open is create:false — the read path every startServer boot takes, and the
+  // one this test used to skip by passing create:true twice. Hardening lived inside
+  // `if (create)`, so a file loosened after creation was never tightened again:
+  //     loosened to:                        dir=777  file=666
+  //     after loadIdentity:                 dir=700  file=666   <-- file NOT tightened
+  // The directory assertion is what kills the mutation "harden the directory only when
+  // create" — the defence W3 actually rested on, which survived unnoticed.
+  test("the READ path tightens an already-loose file and directory, not just create", () => {
     const { root } = board();
     openIdentityDb(root, { create: true }).db.close();
-    chmodSync(identityDbPath(root), 0o644);
-    openIdentityDb(root, { create: true }).db.close();
+    chmodSync(join(root, ".blaze"), 0o777);
+    chmodSync(identityDbPath(root), 0o666);
+
+    openIdentityDb(root, { create: false }).db.close();
+    assert.equal(statSync(identityDbPath(root)).mode & 0o777, 0o600,
+      "a loosened file must be tightened on an ordinary open");
+    assert.equal(statSync(join(root, ".blaze")).mode & 0o777, 0o700,
+      "a loosened directory must be tightened on an ordinary open");
+  });
+
+  test("loadIdentity — the actual boot path — tightens both", async () => {
+    const { root } = board();
+    await addUser(root, { email: "l@b.c", role: "admin" });
+    chmodSync(join(root, ".blaze"), 0o777);
+    chmodSync(identityDbPath(root), 0o666);
+
+    loadIdentity(root).close();
     assert.equal(statSync(identityDbPath(root)).mode & 0o777, 0o600);
+    assert.equal(statSync(join(root, ".blaze")).mode & 0o777, 0o700);
   });
 });
