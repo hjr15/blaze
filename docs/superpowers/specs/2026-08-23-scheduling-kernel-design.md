@@ -8,6 +8,13 @@ constraint fields, the derived fields, which is authoritative when they disagree
 hand-set dates migrate, how a schedule conflict is represented, which link store carries
 dependency edges, and the scheduling semantics themselves.
 
+**Reconciled with the sibling kernel spec** ([`2026-08-23-project-owned-views-design.md`](2026-08-23-project-owned-views-design.md),
+BLZ-354) after both were written in parallel without sight of each other. Five points where the two
+disagreed are now decided identically in both files, each recording which spec yielded and why: the
+ADR number (§12), the schema-installation event and the `view` table's home (§6.4.1), the
+`project_key = '*'` sentinel (§13.1), the two different `link_type` tables (§5.3), and this spec
+answering the `start_date`/`due_date` question spec 1 had left open (spec 1 §10.2).
+
 **The operator's decision, recorded in BLZ-360 and not revisited here:**
 
 > **Constraints are inputs; dates are derived.**
@@ -28,9 +35,9 @@ Verified, not assumed. Four of these contradict something the ticket or the plan
 
 | Claim | Verdict | Evidence |
 |---|---|---|
-| `gantt.mjs` branches on `r.start`/`r.due` into `solid`/`open-end`/`open-start`/`unplanned` | **confirmed** | `scripts/model/gantt.mjs:67-74` |
+| `gantt.mjs` branches on `r.start`/`r.due` into `solid`/`open-end`/`open-start`/`unplanned` | **confirmed** | `scripts/model/gantt.mjs:67-73` |
 | `ticket` carries `estimate_minutes`, `start_date`, `due_date` | **confirmed** | `scripts/model/sqlite-schema.mjs:41,44-45`; frontmatter keys are the short `estimate`/`start`/`due` (`scripts/model/index.mjs:214-215`) |
-| The v4 `link` table's `DEFAULT_LINK_TYPES` has no dependency type | **confirmed** | `scripts/model/link-schema.mjs:12-24` — `Implements`, `Addresses`, `Verifies`, `Supersedes`, `Derives`. Nothing else. |
+| The v4 `link` table's `DEFAULT_LINK_TYPES` has no dependency type | **confirmed** | `scripts/model/link-schema.mjs:12-23` — `Implements`, `Addresses`, `Verifies`, `Supersedes`, `Derives`. Nothing else. |
 | Not one v4 table ships | **confirmed** | `createDbSchema` (`db-schema-version.mjs:127-160`) execs `SQLITE_DDL`/`PG_DDL` + `metaDdl` and nothing else. `linkDdl`, `hierarchyDdl`, `artifactDdl`, `documentDdl`, `fieldDdl` are all defined and **called by no create path**. |
 | There are *two* competing link stores | **wrong — there are three** | v3 frontmatter `links:` (`links.mjs`), the v3 **`ticket_link` table which does ship** (`sqlite-schema.mjs:95`), and the v4 `link` table which does not. The ticket names only the first and third. |
 | `fields.mjs` says "id/project/dates are read-only" | **the comment contradicts the code** | `EDITABLE_FIELDS` (`fields.mjs:13-16`) contains `"due"` and `"start"`; `new-runner.mjs:47-48` accepts `--start`/`--due`. §4 makes the comment true. |
@@ -48,15 +55,28 @@ Verified, not assumed. Four of these contradict something the ticket or the plan
 | **Mutual pairs (`A→B` *and* `B→A`)** | **124 pairs = 248 edges = 63.3% of all edges** | the majority of the corpus carries **no usable direction** |
 | Strongly-connected components | **39, spanning 135 tickets** | the `Blocks` graph is **not a DAG** |
 | SCCs containing a non-terminal ticket | 15, spanning 27 open tickets | |
+| **SCCs in the graph the scheduler actually solves** (delivery endpoints, terminal nodes removed) | **0, spanning 0 tickets** | **no cycle exists among open tickets** — §5.4 |
 | Dangling targets | **0** | link hygiene is not the problem here; direction is |
 | Cross-project edges | 22 | |
 
-**The root cause is nameable, and it is a modelling gap rather than user error.** `LINK_TYPES`
-(`links.mjs:16`) is `{Blocks, Relates, Duplicate, Cloners, Implements, Addresses}` — **there is
-no inverse for `Blocks`.** So "is blocked by" gets written as a second `Blocks`. INF-276's body
-says *"**Blocked by INF-275** (need FreshRSS running…)"* while its frontmatter says
-`{ type: Blocks, target: INF-275 }`, and INF-275 says the same thing back. That is the whole
-124-pair phenomenon.
+**The root cause is nameable, and it is a modelling gap rather than user error — but it is
+narrower than "there is no inverse for `Blocks`", which is false of this repo.** The inverse
+exists: `config-schema.mjs:26-28` declares `INVERSE = { Blocks: "Blocked by", Cloners: "Cloned by",
+… }` and `configSeed` writes it to `blaze_config.link_type.inverse_name` (`:226-232`). Its own
+comment says why it lives there — *"Display-only inverses. Not derivable from LINK_TYPES, which is
+a bare Set."*
+
+**The correct statement is one layer down: frontmatter has no way to write the inverse.**
+`LINK_TYPES` (`links.mjs:14`) is a bare `Set` — `{Blocks, Relates, Duplicate, Cloners, Implements,
+Addresses}` — and `lintLinks` (`links.mjs:28`) refuses any `type` outside it. `Blocked by` is a
+display string the database knows and the authoring path cannot emit, so the only direction an
+operator can author is `Blocks`, and "is blocked by" gets written as a second `Blocks` from the
+other end. INF-276's body says *"**Blocked by INF-275** (need FreshRSS running…)"* while its
+frontmatter says `{ type: Blocks, target: INF-275 }`, and INF-275 says the same thing back. That
+is the whole 124-pair phenomenon.
+
+The conclusion is unchanged by the correction: a **writable, directed** dependency type is what is
+missing, and §5 introduces one.
 
 Under ADR-0001's advisory semantics a cycle costs nothing, so nothing ever surfaced it. Under
 CPM semantics a cycle is fatal. **This measurement is the single most load-bearing input to §5.**
@@ -79,7 +99,7 @@ nothing here.
 |---|---|---|---|
 | `estimate_minutes` | `estimate` | INTEGER | **unchanged.** Existing CHECK (`>0 AND %5=0`) stands. |
 | `constraint_start_no_earlier_than` | `not_before` | TEXT, ISO date | **new.** A lower bound on the derived start. Nullable; most tickets have none. |
-| `deadline` | `deadline` | TEXT, ISO date | **new.** An external commitment. **Never clamps anything** — see §4. |
+| `deadline` | `deadline` | TEXT, ISO date | **new.** An external commitment. **Never clamps anything — this spec's decision, not the operator's** (see §3). |
 
 The long column / short frontmatter key split follows the existing precedent exactly
 (`estimate` → `estimate_minutes`, `start` → `start_date`, mapped in `sqlite-storage.mjs:25-26`).
@@ -109,10 +129,11 @@ two consumers, no second definition. **Holidays and per-person calendars are not
 
 ### 2.4 Field-budget impact
 
-Five new columns on `ticket`. ADR-0018's cap is **200 filterable fields per table**; `ticket`
-had 31 columns of which 5 were indexed and filtered. This adds two indexed (`is_critical`,
-`deadline`) — comfortably inside the cap, and it must show in `blaze db status` like every other
-promoted column.
+Five new columns on `ticket`. **ADR-0018's cap is 200 filterable fields *per install*, not per
+table** (ADR-0018:71) — one budget shared by every table in the installation, which is why spec 1
+§4.2 refuses to spend any of it on view config. `ticket` had 31 columns of which 5 were indexed and
+filtered (ADR-0018:66-69). This adds two indexed (`is_critical`, `deadline`) — comfortably inside
+the install-wide cap, and it must show in `blaze db status` like every other promoted column.
 
 ---
 
@@ -125,6 +146,15 @@ A `deadline` and a derived `due_date` that disagree is not a contradiction to be
 the finding this whole model exists to produce (§4). The `deadline` is not moved to match the
 schedule, and the `due_date` is not clamped to match the deadline. **Both values persist, and
 their delta is the output.**
+
+**Flagged as this spec's inference, not the operator's instruction.** BLZ-360 says only that a
+deadline the derived dates cannot meet is *"a finding, not a silently-overwritten field"*; the word
+**clamp** appears nowhere in the ticket. This spec escalates that to **`deadline` bounds nothing in
+the forward pass at all** — it is read only by `scheduleFindings` (§7), never by the CPM passes
+(§6.1). The escalation is deliberate: a `deadline` that participates in the forward pass would move
+`due_date`, which is the overwrite the operator ruled out, one indirection later. But it is a
+decision made here, and a later operator ruling that a deadline should act as a late-finish
+constraint would change §6.1 and not §3.
 
 The one exception is stated in §6.4: a ticket in a **terminal** status is never scheduled, and
 its `start_date`/`due_date` are actuals owned by history, not by either party.
@@ -231,6 +261,17 @@ Added to `DEFAULT_LINK_TYPES` (`link-schema.mjs:12`):
   min_card: 0, max_card: null }
 ```
 
+**There are two tables called `link_type`, and only one of them is this one.**
+`blaze_config.link_type` (`config-schema.mjs:131-137`) is `name text PRIMARY KEY` with no
+`project_key`, seeded from `LINK_TYPES` + `INVERSE` in `links.mjs`; the v4 `link_type`
+(`link-schema.mjs:29-44`) is `UNIQUE (project_key, name)`, seeded from `DEFAULT_LINK_TYPES`. Spec 1
+§4.4 cites the **first** as the precedent for its seeded `view_type` table; everything in this
+section and in §13.1 is about the **second**. The consequence is concrete: **adding `Precedes` to
+`DEFAULT_LINK_TYPES` touches only the v4 table.** The frontmatter path seeds from `links.mjs` and
+would not know the type exists — which is why §5.5's `import-deps` is an operator-driven tool and
+not a lint, and why a `Precedes` written into frontmatter would be refused by `lintLinks` until
+`LINK_TYPES` is extended too.
+
 Endpoints are **declared, and anything undeclared is refused** (ADR-0015, already the file's
 stated default). One new column on `link`:
 
@@ -243,21 +284,64 @@ It is taken anyway because a zero-default column costs nothing now and retro-fit
 schema-version bump later, and because the alternative — a `link_schedule` side table for one
 integer — is worse. Every non-dependency link type ignores it.
 
-### 5.4 The default-deny endpoint rule does most of the cleanup for free
+### 5.4 The default-deny endpoint rule does most of the cleanup for free — and the rest of it too
 
-Restricting `Precedes` to delivery types, and skipping terminal tickets because they are never
-scheduled, collapses the cycle problem measured in §1.1:
+**Two different restrictions, measured separately, because the earlier draft of this section
+conflated them and drew the wrong conclusion from the merged number.** Restricting `Precedes` to
+delivery types is an *endpoint* rule and removes edges. Skipping terminal tickets is a *scheduling*
+rule and removes nodes. They are applied at different layers and they do not produce the same
+graph.
 
-| | All `Blocks` edges | Restricted to delivery types |
+Measured by one Tarjan pass per column over the live 2,610-ticket corpus, counting only
+non-trivial SCCs (size > 1, or a self-loop):
+
+| | All `Blocks` edges, all tickets | Delivery endpoints only | Delivery endpoints **and** non-terminal nodes |
+|---|---|---|---|
+| Edges kept | 392 | **334 (85.2%)** — 58 refused (breakdown below) | — |
+| Nodes in the graph | 317 touched | delivery endpoints on both ends | delivery **and** non-terminal on both ends |
+| Non-trivial SCCs | 39 over 135 tickets | 25 over 99 tickets | **0 over 0 tickets** |
+| SCCs *containing* a non-terminal ticket | 15, 27 open tickets | 3, 4 open tickets | n/a — no SCC survives |
+
+**The corrected headline: there is no cycle among open tickets. Zero.** The earlier `3 SCCs /
+4 open tickets` figure was the *delivery-only* column — SCCs that merely **contain** at least one
+non-terminal member — and the caption wrongly described it as if terminal tickets had also been
+removed. They had not. Removing them collapses all three:
+
+| Delivery SCC | Members | What happens when terminal nodes leave the graph |
 |---|---|---|
-| Edges | 392 | **334 (85.2%)** — 58 refused, almost all `risk ↔ feature` pairs |
-| SCCs | 39 over 135 tickets | **25 over 99 tickets** |
-| **SCCs containing a non-terminal ticket** | **15, 27 open tickets** | **3, 4 open tickets** |
+| `INF-275 ↔ INF-276` | INF-275 `done`, INF-276 `defined` | the only edge pair runs through a `done` node — dissolves |
+| `OBA-246 ↔ INF-281` | OBA-246 `done`, INF-281 `defined` | same shape — dissolves |
+| `INF-95/36/99/100/37` | INF-36, INF-99, INF-100 `done`; INF-95, INF-37 `defined` | the return path runs through the three `done` nodes; INF-95 and INF-37 have no cycle between themselves — dissolves |
 
-The three survivors are `INF-275↔INF-276`, `OBA-246↔INF-281`, and `INF-95/36/99/100/37`.
-**The operator's real cycle-resolution backlog is three items, not thirty-nine.** A risk does not
-belong in a delivery critical path, `gantt.mjs:24` already excludes non-delivery types from bar
-rows, and the link meta-model's default-deny enforces the same rule one layer down.
+**Every cycle in the delivery graph is held together by at least one `done` ticket.** That is not a
+coincidence and it is the real finding: cycles accumulated where nobody was ever going to be
+blocked, because under ADR-0001's advisory semantics they cost nothing.
+
+**The consequences, all three of them, are the opposite of what the earlier number implied:**
+
+1. **The operator's cycle-resolution backlog for scheduling purposes is zero, not three and not
+   thirty-nine.** The 39 SCCs are real and remain real as `Blocks` hygiene; none of them can stop a
+   schedule, because a scheduler never traverses a terminal node (§6.2).
+2. `dependency-cycle` **cannot be justified as soft by an existing-violations count**, because the
+   count is zero. §7.1 is rewritten accordingly.
+3. The proposed flip-to-hard trigger *"when the open-SCC count reaches zero"* **would fire on day
+   one**, which makes it not a trigger. §7.1 replaces it.
+
+The 58 refused edges, by endpoint type pair, measured:
+
+| Pair | Count |
+|---|---|
+| `risk → feature` / `feature → risk` | 18 + 18 = **36 (62%)** |
+| `story → risk` / `risk → story` | 5 + 5 = 10 |
+| `task → goal` | 6 |
+| `goal → goal` | 2 |
+| `goal → feature`, `feature → goal`, `risk → goal`, `risk → task` | 1 each = 4 |
+
+So "almost all `risk ↔ feature`" was an overstatement: it is 36 of 58, a clear majority but not
+almost all, and a fifth of the refusals are `goal`-endpoint edges rather than risk edges at all.
+The rule still holds — a risk does not belong in a delivery critical path, `gantt.mjs:24` already
+excludes non-delivery types from bar rows, and the link meta-model's default-deny enforces the same
+rule one layer down — but it is doing two jobs, not one.
 
 ### 5.5 The 392 existing `Blocks` edges are not machine-migrated
 
@@ -301,9 +385,35 @@ tests depend on it.
 
 ### 6.2 The four cases BLZ-360 names
 
+**Stated plainly first, because §5.4's correction turns on it and because getting it wrong
+destroys §4's frozen actuals: terminal tickets are NOT in the graph the scheduler solves.**
+
+The solve graph is built by filtering, in this order, and the order is part of the rule:
+
+1. **Edges** — keep a `Precedes` edge only if both endpoints are declared delivery kinds (§5.3's
+   `source_kinds`/`target_kinds`). This is the meta-model's default-deny and it happens at the
+   store.
+2. **Nodes** — drop every ticket for which `isTerminal(type, status)` (`workflows.mjs:87`) is true.
+   A terminal ticket is never a node, never a member of an SCC, and is **never marked
+   `unscheduled`**. Its `start_date`/`due_date` are actuals owned by history (§3, §4) and the
+   scheduler has no write path to them.
+3. **Tarjan** runs over what is left. Over the live corpus that graph has **zero non-trivial SCCs**
+   (§5.4).
+
+The rule that makes this safe to state once: **`unscheduled` is a property only a node can carry,
+and a terminal ticket is not a node.** If Tarjan ran over the full graph including terminal nodes,
+the "every member is marked `unscheduled`" row below would mark `done` tickets unscheduled and
+overwrite the 28 frozen actuals §4 exists to protect. It does not, because they are filtered out
+one step earlier. Mutation 5 in §11 is the test that holds this: *remove the terminal-ticket
+exemption so `done` tickets are rescheduled* must break at least one test.
+
+A terminal ticket still *contributes* as a boundary condition — the "Terminal ticket" row below —
+by supplying a finish time to its non-terminal successors. Supplying a boundary value is not
+membership in the graph.
+
 | Case | Behaviour | Why |
 |---|---|---|
-| **Cycle in the graph** | The SCC is found by one Tarjan pass. **Every member is marked `unscheduled`, reason `dependency-cycle`, and the rest of the graph still schedules.** Edges *into* the SCC from outside are honoured; edges *out of* it are treated as unconstrained. | Non-negotiable: 25 SCCs exist in the live delivery graph today. A scheduler that refuses to produce any output because of a cycle among four `done` tickets is a scheduler nobody runs. The out-edge relaxation is an **approximation and is stated as one** — successors of a cycle get an optimistic date. |
+| **Cycle in the graph** | The SCC is found by one Tarjan pass **over the non-terminal delivery graph defined above**. **Every member is marked `unscheduled`, reason `dependency-cycle`, and the rest of the graph still schedules.** Edges *into* the SCC from outside are honoured; edges *out of* it are treated as unconstrained. | **Zero such SCCs exist today** (§5.4) — so this path is defensive, not remedial, and it must be tested against a synthetic cycle rather than a corpus one. It is still non-negotiable: the 39 SCCs in the raw `Blocks` graph show that cycles are what this corpus produces when nothing enforces direction, and a scheduler that refuses to produce any output because one was authored tomorrow is a scheduler nobody runs. The out-edge relaxation is an **approximation and is stated as one** — successors of a cycle get an optimistic date. |
 | **Ticket with no estimate** | `duration = 0`. It is a **milestone**, not an error: `ES = EF`, and it still propagates its predecessors' finish to its successors. A soft finding is raised only if the ticket's *type* declares `estimate` required (`story`/`task`/`bug`, per `schema.mjs:20-22`). | 35.2% of the corpus has no estimate. Erroring is not available. A zero-duration node is the standard CPM answer and it keeps the chain connected. |
 | **Constraint but no dependencies** | `not_before` is simply a lower bound in the forward pass; with no predecessors, `ES = max(project_epoch, not_before)`. A `deadline` with no dependencies still produces a finding when `EF > deadline`. | The constraint fields are not parasitic on the dependency graph. This is the common case for the 12 migrated open tickets in §4, and it must work with zero edges. |
 | **Dependency crossing projects** | **Allowed and scheduled.** The scheduler's unit of solve is **the board, not the project.** | 22 cross-project `Blocks` edges exist today, and ADR-0014 forbids a board discriminator — so there is exactly one graph and pretending otherwise is a fiction. A project-scoped view that shows a date derived from a foreign chain **must say so**: every finding and every critical-path output carries the full chain including foreign ids. |
@@ -312,7 +422,7 @@ Two more cases, decided here because they will otherwise be discovered in implem
 
 | Case | Behaviour |
 |---|---|
-| **Terminal ticket** | Never scheduled. Its `start_date`/`due_date` are actuals (§4). As a predecessor it does not hold anything back: `EF = its actual due, or project_epoch if it has none`. |
+| **Terminal ticket** | **Not a node in the solve graph at all** (see above). Never scheduled, never an SCC member, never marked `unscheduled`; its `start_date`/`due_date` are actuals (§4) and the scheduler has no write path to them. As a *boundary condition* for a non-terminal successor it does not hold anything back: `EF = its actual due, or project_epoch if it has none`. |
 | **Dangling `Precedes` target** | The edge is dropped from the solve and raises the existing `dangling-target` HARD audit finding. Zero exist today, and the link meta-model's FK makes it unreachable in the DB path — the rule exists for the frontmatter path until §5.5 completes. |
 
 ### 6.3 Eager or lazy
@@ -358,16 +468,58 @@ says spec 4 goes last *because* it is the schema-installation event, and simulta
 (the scheduler) comes first. But `Precedes` lives in the v4 `link` table, and **`createDbSchema`
 installs no v4 table at all**. Spec 3 cannot be built on a table spec 4 has not yet installed.
 
-**Resolution:** installation moves here. `DB_SCHEMA_VERSION` goes **1 → 2**, and `createDbSchema`
-gains `linkDdl(dialect)` plus the five `ticket` columns from §2. Spec 4 stops being the
-installation event and becomes an ordinary consumer. The existing guard already handles the
-consequence correctly — an engine at version 1 opening a version-2 database gets `state: "newer"`
-and a refusal naming the upgrade, which is exactly the defect `db-schema-version.mjs` was written
-for.
+**Resolution: this spec owns DB schema version 2, and it is the only owner.** `DB_SCHEMA_VERSION`
+goes **1 → 2** (`db-schema-version.mjs:24`), and `applyCreate` (`:143-159`) gains three DDLs plus
+the five `ticket` columns from §2. Spec 4 stops being the installation event and becomes an
+ordinary consumer. The existing guard already handles the consequence correctly — an engine at
+version 1 opening a version-2 database gets `state: "newer"` and a refusal naming the upgrade,
+which is exactly the defect `db-schema-version.mjs` was written for.
 
-`blaze db migrate` must add the five columns via `ALTER TABLE ADD COLUMN` — the **9.0 ms
-metadata-only path** (ADR-0018), never a generated column, and `STRICT` stays on every SQLite
-table that holds them.
+**What version 2 installs, and the line that decides membership:**
+
+| DDL | Table(s) | Why it is in version 2 |
+|---|---|---|
+| `linkDdl` (`link-schema.mjs:26`) | `link_type`, `link` | `Precedes` lives here. Without it the scheduler cannot be built at all — this is the circularity that forced the move. |
+| `hierarchyDdl` (`hierarchy-schema.mjs:8`) | `hierarchy`, `hierarchy_membership` | §8.3 chooses `hierarchy-rollup.mjs`, which reads `hierarchy_membership`. A chosen roll-up with no create path is a decision that cannot be executed. |
+| the five `ticket` columns (§2) | `ticket` | `ALTER TABLE ADD COLUMN`, the **9.0 ms metadata-only path** (ADR-0018), never a generated column; `STRICT` stays on every SQLite table that holds them. |
+| **`viewDdl`** — spec 1 §3's `view` table | `view`, `view_type` | See below. Spec 1 deferred its installation and had no other home; this is that home. |
+
+**And what version 2 deliberately does NOT install:** `artifactDdl`, `revisionDdl`, `documentDdl`,
+`fieldDdl`. Those stay behind the db-primary Phase 2 cutover, because that is what the v4 spine
+actually gates on them: spine `:265-267` says *"A document has no status directory to live in, so
+the fs write port cannot represent this model."* **That rationale is specific to the
+document/artifact model and it does not generalise.** `link`, `hierarchy` and `view` are all
+representable on either write port; nothing about them requires the cutover, and holding them
+behind it was an over-read of that line.
+
+**Why one version bump rather than three.** Each table shipped separately means its own
+`DB_SCHEMA_VERSION` bump, its own `MIN_DB_SCHEMA_VERSION` window, and its own upgrade refusal for
+operators to sequence. `applyCreate` already installs the whole v3 schema in one `exec.run` per DDL
+(`:149-154`); version 2 is the same shape with four more.
+
+#### 6.4.1 The `view` table — resolving a collision with spec 1
+
+**This is a decided cross-spec collision, recorded in both files.** Spec 1 (BLZ-354,
+`2026-08-23-project-owned-views-design.md`) §6.2 declined the schema-installation event, deferring
+`view` to *"the Phase 2 db-primary cutover, which v4 spine §6 already makes the prerequisite for
+every new v4 table."* This spec §6.4 claimed the same event. Two specs written in parallel produced
+one event with two answers, and the net effect was that `view` had **no** installation path at all.
+
+**This spec yields nothing and spec 1 yields its deferral, for two reasons that are checkable
+rather than a matter of preference:**
+
+1. **The deferral rests on a misquotation of its own source.** Spine §6 does not make the cutover a
+   prerequisite for every new v4 table; `:265-267` makes it a prerequisite for the
+   *document/artifact* migration, and states a rationale — no status directory, fs write port
+   cannot represent it — that is true of `document` and false of `view`.
+2. **Version 2 has to happen regardless**, because `Precedes` needs `link` and the scheduler needs
+   `Precedes`. Given one unavoidable version bump, adding `view` to it costs one DDL; deferring it
+   costs a second bump later for no gained property.
+
+So: **`viewDdl` ships in version 2, installed by this event.** Spec 1 keeps every other decision
+about the `view` table untouched — its columns, its `scope` tag, its partial unique indexes, its
+`CHECK`, its `view_type` FK and its seeded registry are spec 1's and are not restated here. This
+spec owns only *when the DDL runs*. Spec 1 §6.2 has been amended to point here.
 
 ---
 
@@ -382,7 +534,7 @@ in CI is invisible to an agent; one that shows only in CI is invisible to the op
 | Kind | Severity | Raised when |
 |---|---|---|
 | `deadline-unreachable` | **soft** | derived `due_date` > `deadline` |
-| `dependency-cycle` | **soft, with a named flip trigger** | a `Precedes` SCC contains a non-terminal ticket |
+| `dependency-cycle` | **soft, and the reason is not a violation count** | a `Precedes` SCC exists in the non-terminal delivery graph (§6.2) |
 | `schedule-stale` | soft | `schedule_run_id` is not the latest run |
 
 **Why `deadline-unreachable` is soft.** `audit.mjs`'s own header defines the split: HARD means
@@ -391,11 +543,35 @@ statement about a correct corpus. And the file's load-bearing warning applies di
 that fails on the fill queue is a gate people learn to skip, which costs the hard findings too."*
 Neither kind goes in `HARD_KINDS`.
 
-**Why `dependency-cycle` is soft on day one.** Because 3 open SCCs exist (§5.4). This follows the
-`terminal-goal-unverified-requirement` precedent in `audit.mjs:30-48` **including its lesson**:
-BLZ-353 predicted zero pre-existing violations, shipped on that prediction, and was wrong. The
-prediction here is replaced by a measurement of exactly 3, and the ADR names the flip-to-hard
-trigger: **`dependency-cycle` becomes HARD when the open-SCC count reaches zero**, tracked by its
+**Why `dependency-cycle` is soft on day one — and it is not the reason an earlier draft gave.**
+That draft argued it from a backlog of 3 open SCCs. **The measurement is zero** (§5.4): the
+non-terminal delivery graph has no cycle, so there is no pre-existing debt to be lenient about, and
+the *"a gate that fails on the fill queue is a gate people learn to skip"* argument does not apply
+here at all.
+
+It is soft for a different and narrower reason: **a `Precedes` cycle is a statement about the plan,
+not about the corpus.** `scripts/model/audit.mjs:29-46` sets the test — HARD means *the corpus is
+WRONG*. A `Precedes` cycle is two well-formed links whose combination is unschedulable; both rows
+are valid, both endpoints resolve, and the FK holds. That is the same category as
+`deadline-unreachable` above, and it gets the same severity for the same reason. Neither goes in
+`HARD_KINDS`.
+
+**The flip-to-hard trigger is replaced, because the old one was unfireable.** *"`dependency-cycle`
+becomes HARD when the open-SCC count reaches zero"* was written against the wrong number; against
+the real one it fires immediately, on day one, which makes it a condition rather than a trigger.
+The replacement is a **coverage** trigger, not a debt trigger:
+
+> **`dependency-cycle` flips to HARD once `Precedes` is the sole declared input to the scheduler —
+> that is, once §5.5's `import-deps` reconciliation is closed and no scheduled ticket depends on a
+> `Blocks` edge for its ordering.** Until then a cycle can be an artefact of a half-migrated graph,
+> which is not the operator's error to be gated on.
+
+The `terminal-goal-unverified-requirement` precedent (`scripts/model/audit.mjs:29-46`) is still the
+one to follow, but for its **lesson** rather than its shape: BLZ-353 predicted zero pre-existing
+violations, shipped hard on that prediction, and the prediction was wrong because it walked a
+terminal set that omitted `achieved`. This spec's zero is a measurement over the real corpus rather
+than a prediction — and it is still not being used to justify shipping hard, precisely because
+BLZ-353 shows what a zero that turns out to be a definition error costs. The flip is tracked by its
 own ticket, exactly as BLZ-353's was.
 
 ### 7.2 What a finding says
@@ -422,7 +598,7 @@ this model worth more than a hand-set date.
 
 ### 7.3 On the views
 
-`gantt.mjs` already returns `warnings: string[]` (`gantt.mjs:61`) and the caller renders it. The
+`gantt.mjs` already returns `warnings: string[]` (`gantt.mjs:60`) and the caller renders it. The
 same strings go there. Beyond the string, the bar itself carries `is_critical` and a
 `deadline-unreachable` marker with the deadline drawn as a separate pin at its own date — **so the
 gap is visible as a gap**, which is the entire point of not clamping one field to the other.
@@ -446,7 +622,7 @@ judgement call with no measurement behind it.**
 
 ### 8.2 Spec 3 — the scheduler and Gantt: **served, and it changes `gantt.mjs` structurally**
 
-The four bar kinds at `gantt.mjs:69-74` collapse:
+The four bar kinds at `gantt.mjs:70-73` collapse:
 
 | Today | Under this model |
 |---|---|
@@ -465,27 +641,60 @@ not an addition beside it.
 
 ### 8.3 Spec 4 — date roll-up: **served, but neither existing roll-up is the right one as written**
 
-BLZ-360 asks which implementation the scheduler uses. **The scheduler uses neither, and that is
-the answer.** CPM runs over the dependency graph; a parent's dates are a roll-up *of* the finished
-schedule, computed afterwards. The two are different operations over different graphs.
+**Attribution corrected.** An earlier draft twice credited this question to BLZ-360 — *"BLZ-360 asks
+which implementation the scheduler uses"* and *"the condition BLZ-360 flagged"*. **BLZ-360 has no
+roll-up acceptance criterion and asks no roll-up question.** Its only mention of the subject is one
+clause of context at `BLZ-360:26` — *"the choice decides spec 3's scheduler, spec 2's sprint
+capacity and spec 4's date roll-up"* — and its six ACs are about constraint fields, migration,
+conflict representation, the link store, the ADR, and mutation discipline. The two-roll-ups
+condition is flagged in the repo, not in the ticket: `scripts/audit-runner.mjs:100-106` already
+records it — *"reconciling those two is a real question (their parent models and dedup policies
+differ) but it is not this ticket's."*
+
+**What this section is, then:** not an AC, but a consequence this spec cannot avoid answering,
+because §6.4 decides which tables version 2 installs and a roll-up with no table is not installable.
+Spec 4 owns the roll-up; this section fixes only the part §6.4 touches.
+
+**The scheduler itself uses neither roll-up, and that is the first answer.** CPM runs over the
+dependency graph; a parent's dates are a roll-up *of* the finished schedule, computed afterwards.
+The two are different operations over different graphs.
 
 For the roll-up itself:
 
 | | `rollup.mjs` | `hierarchy-rollup.mjs` |
 |---|---|---|
-| Graph | `ticket.parent` | `hierarchy_membership` (a v4 table — **does not ship**) |
-| Dedup | none | **yes**, and it is also the cycle guard |
-| Operation | `+=` over `est`/`log`, hardcoded | `total += value`, hardcoded |
+| Graph | `ticket.parent` — one parent per row, so a **tree** | `hierarchy_membership` — `UNIQUE (hierarchy_id, item_id, parent_id)` permits an item under several parents, so a **DAG** |
+| Cycle guard | **yes** — a per-traversal `visited` Set (`rollup.mjs:30,34-35`) | yes — the same `seen` Set (`hierarchy-rollup.mjs:17,22-23`) |
+| Duplicate exclusion | **not applicable** — a tree cannot reach a node twice, so the guard never fires on a well-formed corpus | **load-bearing** — a DAG can, and the header states duplicates are excluded by default |
+| Operation | `+=` over `est`/`log`, hardcoded pair | `total += value`, hardcoded operator, arbitrary `values` map |
+| Ships today | yes | **no** — depends on `hierarchy_membership`, installed by §6.4 |
+
+**Correction to an earlier draft: `rollup.mjs` was described as "Dedup: none", and that is false.**
+It has a per-traversal `visited` Set at `rollup.mjs:30,34-35`, and its own header says
+*"Cycle-guarded (a per-traversal visited set)"* and *"no node is counted twice within one
+traversal."* One of the two stated reasons to prefer `hierarchy-rollup.mjs` therefore does not
+exist.
+
+**Re-examined, the preference still holds — but on one reason, not two, and it is a different
+reason.** The surviving distinction is not *"one dedups and one does not"*; both guard. It is
+**what the guard is for**: over `ticket.parent` a node is unreachable twice, so `rollup.mjs`'s Set
+only ever catches a malformed cycle, while over `hierarchy_membership` a node is *legitimately*
+reachable twice and `hierarchy-rollup.mjs`'s Set is what stops it being counted twice. A roll-up
+that must serve multiple named hierarchies (v4 spine §3.3) needs the DAG-shaped one, and
+`rollup.mjs` cannot be adapted to it without replacing its graph — at which point it is the other
+function.
 
 **Neither can roll dates as written, because dates do not sum.** A parent's start is the `min` of
 its children's starts and its due is the `max` — not a total.
 
 **Decision: `hierarchy-rollup.mjs` survives; it gains a `combine` parameter (default sum).** Dates
-roll with `min`/`max`, time keeps summing, and there is one dedup-and-cycle guard rather than two.
-This is a small change to a 25-line pure function and it is the one that keeps ADR-0016's measured
-fast path. `rollup.mjs` keeps rolling time over `parent` until the hierarchy tables ship (§6.4),
-then is retired — **and it is retired, not left beside its replacement**, because two roll-ups that
-disagree is the condition BLZ-360 flagged.
+roll with `min`/`max`, time keeps summing, and there is one implementation over the graph that can
+actually express several hierarchies. This is a small change to an **18-line** pure function
+(`hierarchy-rollup.mjs:10-27`) and it is the one that keeps ADR-0016's measured fast path.
+`rollup.mjs` keeps rolling time over `parent` until `hierarchyDdl` installs — **which §6.4 now does,
+in DB schema version 2** — then is retired, and it is retired rather than left beside its
+replacement, because two roll-ups that disagree is exactly the condition `audit-runner.mjs:100-106`
+declined to resolve as a side effect.
 
 A parent's rolled dates are **derived from derived data** and are never persisted to
 `start_date`/`due_date` on the parent row. Persisting them would make a parent's dates writable by
@@ -526,7 +735,7 @@ Stated plainly, as ADR-0014's and spec 1's convention requires.
 | **ADR-0011 — no new required runtime dependency** | Nothing is added. `package.json` has zero `dependencies`; `pg` is an optional peer. CPM, Tarjan and the roll-up are pure JS over already-loaded data, in the shape both existing roll-ups already use. |
 | **ADR-0014 — no board or tenant discriminator** | Not one column above discriminates a board. The scheduler's unit of solve is the whole board precisely *because* there is only ever one (§6.2). |
 | **ADR-0016 — Node stays the runtime** | Its CPM benchmark is what makes §6.3's lazy choice affordable, and its event-loop finding is what scopes the `worker_threads` trigger. |
-| **ADR-0018 — hybrid custom fields** | Five typed columns, zero JSON tail, no `STORED` generated columns, `ALTER TABLE ADD COLUMN` + backfill, `STRICT` retained, well inside the 200-field cap. |
+| **ADR-0018 — hybrid custom fields** | Five typed columns, zero JSON tail, no `STORED` generated columns, `ALTER TABLE ADD COLUMN` + backfill, `STRICT` retained, well inside the **200-filterable-fields-per-install** cap (ADR-0018:71 — per install, not per table; §2.4). |
 | **ADR-0001 — `Blocks` stays advisory** | Untouched (§5.2). No superseding ADR is raised. |
 
 ---
@@ -559,7 +768,19 @@ carrying `due: 2026-10-20` with no start.
 
 ## 12. The ADR
 
-**ADR-0021** (next free number; 0020 is the highest present). One-line decision:
+**ADR-0022.** One-line decision:
+
+> **Number collision, resolved.** This spec and spec 1 (BLZ-354) were written in parallel and each
+> independently computed *"next free number; 0020 is the highest present"* — so both claimed
+> **ADR-0021**. **Spec 1 keeps 0021; this spec takes 0022.** The allocation rule is the lower
+> ticket number, and it is not arbitrary here: ADR-0021 renames the tenancy unit to
+> **installation** and is the vocabulary ADR-0022's own text has to be written in — 0022 cites
+> ADR-0018's *"200 filterable fields per install"* and §6.4's installation event, both of which
+> read differently before 0021 lands. A number is only reserved once the file exists in
+> `docs/decisions/`; until then, two parallel authors will always compute the same next-free
+> number, and this is the second time in this PR that a parallel-authoring collision was found by
+> review rather than by either author.
+
 
 > **Dependency edges, effort and date constraints are inputs; `start_date`, `due_date`, float and
 > the critical path are outputs computed by the scheduler and never hand-set. Dependency edges are
@@ -572,11 +793,41 @@ is small enough to review by hand.
 
 ## 13. Open questions
 
-1. **A cross-project `Precedes` has no unambiguous `link_type` row.** `link_type` is
-   `UNIQUE (project_key, name)` (`link-schema.mjs:38`), so `Precedes` is per-project — and the 21
-   cross-project edges then have two candidate type rows. **Proposed:** a reserved
-   `project_key = '*'` for built-in system link types. Not decided; it touches `link_type`'s
-   uniqueness contract and belongs to whoever owns that table.
+1. **A cross-project `Precedes` has no unambiguous `link_type` row.** The v4 `link_type` is
+   `UNIQUE (project_key, name)` (`link-schema.mjs:39`), so `Precedes` is per-project — and the **22**
+   cross-project edges (measured; §1.1 says 22 and an earlier draft of this line said 21, which was
+   the typo) then have two candidate type rows.
+
+   **Proposed: `project_key = '*'` for built-in system link types — and it is a reuse, not a new
+   sentinel.** `BOARD_SCOPE = "*"` already exists at `config-schema.mjs:33` and already carries
+   exactly this meaning — *installation-wide, not per project* — for **six** scope columns seeded by
+   `configSeed` (`config-schema.mjs:236,240,247,257,265,267,270`): `workflow.scope`,
+   `workflow_status.scope`, `workflow_transition.scope`, `ticket_type.scope`, `type_parent.scope`
+   and `type_required_field.scope`. An earlier draft proposed it as new. It is not.
+
+   **Cross-spec collision, decided.** Spec 1 (BLZ-354) §3.3 **rejects** this sentinel outright —
+   *"Minting a third sentinel to fix a terminology collision is the mistake this ticket exists to
+   stop."* Two specs in one PR proposing and forbidding the same sentinel is not a difference of
+   taste, so one yields. **The resolution is a rule that decides both cases rather than a
+   preference between them:**
+
+   > **`'*'` is legal in a scope column on a config/meta table, and illegal in an owner column that
+   > carries a foreign key to `blaze_config.project (key)`.**
+
+   `link_type.project_key` is the first kind: `link-schema.mjs:29-44` declares no FK to `project`,
+   and `link_type` is a meta table seeded from code constants exactly like the six columns
+   `BOARD_SCOPE` already serves. `view.project_key` is the second kind: spec 1 §3 gives it
+   `FOREIGN KEY (project_key) REFERENCES blaze_config.project (key) ON DELETE CASCADE`, and `'*'`
+   is not a project, so the sentinel would have to delete the FK to exist.
+
+   **So each spec yields half, and each half is the half it was wrong about.** This spec yields the
+   claim that the sentinel is **new** — it is `BOARD_SCOPE`, five columns old. Spec 1 yields the
+   claim that using it here would be **minting a third sentinel** and that scope sentinels are
+   wrong in principle — its actual decisive argument is the FK, which stands on its own and is
+   unaffected. Spec 1 §3.3 has been amended to the FK argument and to point here. Still open is
+   only the mechanical question this proposal always had: whether `link_type`'s uniqueness contract
+   should special-case `'*'` in lookup order (project row wins, `'*'` row is the fallback), which
+   belongs to whoever owns that table.
 2. **Frontmatter key spelling.** `not_before` vs the column's full
    `constraint_start_no_earlier_than`. §2.1 picks the short form on the existing
    `estimate`/`estimate_minutes` precedent, but the operator named the long one.
@@ -584,5 +835,11 @@ is small enough to review by hand.
    latest `deadline` is undefined when no deadline exists. Needs one rule.
 4. **Whether `schedule_run_id` is a timestamp or a content hash.** A hash makes an unchanged
    re-solve a no-op — worth it only if re-solves turn out to be frequent.
-5. **Whether the 3 open cycles (§5.4) are fixed before or after the scheduler ships.** Before is
-   cleaner; after is what the soft-finding design is for.
+5. **~~Whether the 3 open cycles are fixed before or after the scheduler ships.~~ Closed by
+   measurement: there are none** (§5.4 — 0 SCCs over 0 tickets in the non-terminal delivery graph).
+   Nothing has to be fixed before the scheduler ships. What replaces it is a *hygiene* question that
+   is not the scheduler's: **the 39 SCCs in the raw `Blocks` graph, 15 of which contain an open
+   ticket, are still there** and still misdescribe the board to a human reader. They cannot block a
+   schedule, so they are not this spec's gate — but §5.5's `import-deps` reconciliation is where an
+   operator will actually see them, and that is the moment to decide whether they get cleaned up or
+   left as advisory noise.

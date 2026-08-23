@@ -9,6 +9,13 @@ the existing six. This spec settles the record, its storage, its config shape an
 validation, the migration, and the URL and CLI surface, so specs 2–4 can be written
 against something instead of around it.
 
+**Reconciled with the sibling kernel spec** ([`2026-08-23-scheduling-kernel-design.md`](2026-08-23-scheduling-kernel-design.md),
+BLZ-360) after both were written in parallel without sight of each other. Five points where the two
+disagreed are now decided identically in both files, each recording which spec yielded and why:
+the ADR number (Appendix A), the schema-installation event and the `view` table's home (§6.2), the
+`project_key = '*'` sentinel (§3.3), the two different `link_type` tables (§4.4), and the
+`start_date`/`due_date` question this spec had left open (§10.2).
+
 ---
 
 ## 0. What is already decided, and is not reopened here
@@ -45,7 +52,7 @@ and one of them changes the design.**
 | `board` force-enabled after the merge | `scripts/config.mjs:65` |
 | The legal names are a hardcoded array | `scripts/views/page.mjs:68` — `VIEW_NAMES` |
 | Dispatch is a `switch` over that array | `scripts/views/page.mjs:47-67` — `renderView()` |
-| The clamp is re-applied twice more in the view layer | `scripts/views/page.mjs:111`, `:145` |
+| The clamp is re-applied twice more in the view layer | `scripts/views/page.mjs:113`, `:145` |
 
 So **a view today has no identity, no name, and no configuration.** It is a renderer module
 reached by a string, gated by a boolean. There is nothing to give three Gantts.
@@ -53,7 +60,7 @@ reached by a string, gated by a boolean. There is nothing to give three Gantts.
 ### 1.2 The config a view instance needs already exists — as a query string
 
 `pageHtml()` and `viewEnvelope()` take `{ project, focus, flat, sprint, view }`
-(`page.mjs:113`, `:130-143`), fed straight from the URL at `serve.mjs:206-211`. The status
+(`page.mjs:108`, `:129-139`), fed straight from the URL at `serve.mjs:202-206`. The status
 chips resolve through `model/filters.mjs:statusFilter()`. Those parameters *are* the
 per-view configuration; they are simply thrown away on every request.
 
@@ -64,7 +71,7 @@ URL are the same object at two different lifetimes, and §5 invents almost no ne
 
 The ticket says *"'board' is already one view among six."* True, and incomplete.
 `scripts/model/boards.mjs` — `deriveBoards()` — groups workflows into **N boards per
-installation**, each with its own column set, rendered as board pills at `page.mjs:158-163`.
+installation**, each with its own column set, rendered as board pills at `page.mjs:156`.
 
 So `board` today means, simultaneously:
 
@@ -124,7 +131,7 @@ The tenancy unit is an **installation**; `install` in identifiers.
 | `site` | implies a deployment URL, which is ADR-0012's territory. |
 
 **Why `installation` wins:** it is already the word the ADR corpus uses in prose. ADR-0012's
-*title* is "how an installation selects and stores its database"; ADR-0014's own decision
+*title* is "How an installation **selects, verifies and stores** its database"; ADR-0014's own decision
 sentence is "one installation is one board". Adopting it introduces nothing — it **promotes
 a word already in informal use into the structural slot "board" wrongly occupies**. The
 rename is a deletion, not an addition.
@@ -139,11 +146,12 @@ A **board is a kanban view type.** That meaning survives untouched. Everything e
 | `blaze_config.board` table | installation config singleton | `blaze_config.installation` |
 | `cfg.boardTitle` (`config.mjs:15`) | display name | `installationTitle`; `boardTitle` retired via `REMOVED_KEYS` |
 | `blaze board` (`cli.mjs:31`) | serve the web UI | `blaze serve`, with `board` kept as a permanent alias |
-| `deriveBoards()` / board pills (`model/boards.mjs`, `page.mjs:158`) | workflow-derived column groupings | `deriveColumnSets()` / `column_set` — the "Delivery / Risk" pills |
+| `deriveBoards()` / board pills (`model/boards.mjs`, `page.mjs:156`) | workflow-derived column groupings | `deriveColumnSets()` / `column_set` — the "Delivery / Risk" pills |
 | `boardModel()` (`views/data.mjs:24`) | the read model behind board, list, map **and** metrics | `itemModel()` — it was never board-specific |
 | `views.board`, `VIEW_NAMES[0]`, `views/board.mjs` | the kanban renderer | **unchanged** |
 
-**Cost, stated:** 430 occurrences of "board" across 77 `.mjs` files, plus 47 doc files. Most
+**Cost, stated:** 430 occurrences of "board" across 77 `.mjs` files under `scripts/`, plus **49**
+doc files under `docs/` (51 including the two root `.md` files). Most
 are prose or meaning (2), which is correct and must survive.
 
 **Therefore the rename is per-meaning, never global.** A single `sed s/board/installation/g`
@@ -204,19 +212,63 @@ is distinct in a unique index, so two installation views could both be slugged `
 the constraint would permit it. The two partial indexes above are the fix, and they are also
 the reason this section exists: it is exactly the kind of defect that ships green.
 
-**Not measured.** Partial unique indexes on `node:sqlite` are asserted from documentation.
-This repo's own precedent is that 32 conformance assertions missed a Postgres date bug
-because not one compared a date value — so this needs a conformance test on both engines
-before the DDL is trusted. Carried as open question §11.3.
+**Measured, on `node:sqlite` (SQLite 3.53.3 under Node 24), not asserted from documentation.**
+Four cases, run against the exact DDL above:
+
+| Case | Result |
+|---|---|
+| Naive `UNIQUE (project_key, slug)`, two installation rows both slugged `gantt` (`project_key` NULL) | **accepted both** — the trap is real, not theoretical |
+| Partial `view_slug_install`, same two rows | refused: `UNIQUE constraint failed: v.slug` |
+| Partial `view_slug_project`, two `BLZ` rows both slugged `gantt` | refused: `UNIQUE constraint failed: v.project_key, v.slug` |
+| Same slug `gantt` under `BLZ` and under `OBA` | accepted, which is correct |
+
+The `CHECK` pairing `scope` with `project_key` was exercised in the same run and refuses
+`('installation','BLZ')`. So the DDL as written does what §3 claims on the SQLite side.
+
+**And the pattern is already in this repo**, which the first draft of this section missed:
+`hierarchy-schema.mjs:38-42` solves the identical NULL-distinct trap with a partial unique index,
+and its comment already says *"NULLs compare distinct under UNIQUE in both engines… Both SQLite and
+Postgres support partial indexes."* This section is applying an existing house solution, not
+inventing one.
+
+**What is still owed:** the Postgres half. This repo's own precedent is that 32 conformance
+assertions missed a Postgres date bug because not one compared a date value, so the two-engine
+conformance test still gates the DDL — but it is now confirming a measured SQLite result rather
+than testing an assumption on both sides. Narrowed accordingly in §11.3.
 
 ### 3.3 Rejected shapes
 
 | Shape | Refused because |
 |---|---|
-| **Sentinel `project_key = '*'`** (matching `membership.scope_key`, `identity-schema.mjs:61`, and `workflow.scope`, `config-schema.mjs:33`) | destroys the FK to `blaze_config.project(key)` — `'*'` is not a project. And `'*'` already carries **two different** sentinel meanings here: identity's *"every scope"* and config's *"installation-wide, not per project"*. Minting a third sentinel to fix a terminology collision is the mistake this ticket exists to stop. |
+| **Sentinel `project_key = '*'`** (as in `membership.scope_key`, `identity-schema.mjs:61`, and the six `scope` columns seeded from `BOARD_SCOPE`, `config-schema.mjs:33`) | **destroys the FK to `blaze_config.project (key)` — `'*'` is not a project.** That is the whole argument and it is sufficient: the `view` table declares `FOREIGN KEY (project_key) REFERENCES blaze_config.project (key) ON DELETE CASCADE`, and adopting the sentinel means deleting that FK and re-implementing referential integrity in application code. See the correction immediately below — an earlier draft argued this from "a third sentinel" instead, which was wrong on the facts. |
 | **A synthetic `__ALL__` project row** | explicitly rejected by the operator as the "synthetic all-projects pseudo-project". |
 | **Two tables, `installation_view` + `project_view`** | every consumer — switcher, router, renderer, validator — then UNIONs and duplicates its rules. The union is one table and one `CHECK`. |
 | **Nullable `project_key` with no tag** | the thing the ticket flagged. `NULL` would mean both "installation-owned" and "owner not yet set", and nothing would stop the second from existing. |
+
+**Correction, and a cross-spec collision decided in both files.** An earlier draft of the first row
+added a second argument — *"`'*'` already carries two different sentinel meanings here… minting a
+third sentinel to fix a terminology collision is the mistake this ticket exists to stop."* **That
+argument is withdrawn, because it is wrong twice over.** `'*'` is not two meanings plus a proposed
+third: `BOARD_SCOPE = "*"` at `config-schema.mjs:33` is *one* established meaning —
+*installation-wide, not per project* — already seeded to six columns (`workflow.scope`,
+`workflow_status.scope`, `workflow_transition.scope`, `ticket_type.scope`, `type_parent.scope`,
+`type_required_field.scope`, at `:236-270`). Using it in a seventh place is reuse, not minting.
+
+This mattered because the sibling kernel spec in this PR — BLZ-360,
+[`2026-08-23-scheduling-kernel-design.md`](2026-08-23-scheduling-kernel-design.md) §13.1 — **proposes
+exactly this sentinel** for `link_type.project_key`, so the two specs forbade and proposed the same
+thing. **The resolution, recorded identically in both files, is a rule rather than a preference:**
+
+> **`'*'` is legal in a scope column on a config/meta table, and illegal in an owner column that
+> carries a foreign key to `blaze_config.project (key)`.**
+
+`link_type` (`link-schema.mjs:29-44`) declares no FK to `project` and is a meta table seeded from
+code constants, exactly like the six columns `BOARD_SCOPE` already serves — so the sentinel is
+legal there. `view.project_key` has the FK — so it is illegal here, and the `scope` tag stands.
+
+**Each spec yields the half it was wrong about.** This spec yields the *principle* (scope sentinels
+are not a mistake, and this one is not new) and keeps the *outcome* (no sentinel in `view`), which
+the FK decides on its own. BLZ-360 §13.1 yields its claim that the sentinel would be **new**.
 
 ---
 
@@ -263,9 +315,18 @@ repo's zero-dependency count is unchanged.
 ### 4.4 `view_type` is a seeded table, matching the existing pattern
 
 `blaze_config.priority`, `blaze_config.resolution` and `blaze_config.link_type` are all
-tables **seeded from code constants** (`config-schema.mjs:120-137`, seeded around `:233`).
+tables **seeded from code constants** (`config-schema.mjs:120-137`, seeded at `:226-232`).
 `view_type` follows them exactly: seeded from the code registry (§5.1) at migrate time, so
 `view.type` gets a real FK and a real refusal rather than an application-layer string check.
+
+**Which `link_type` — because there are two, and neither this spec nor its sibling noticed at first
+draft.** `blaze_config.link_type` (`config-schema.mjs:131-137`) is `name text PRIMARY KEY`, no
+`project_key`, seeded from `LINK_TYPES` + `INVERSE` in `links.mjs`. The v4 `link_type`
+(`link-schema.mjs:29-44`) is a different table with a surrogate `id` and
+`UNIQUE (project_key, name)`, seeded from `DEFAULT_LINK_TYPES`. **The precedent cited here is the
+first one** — installation-wide, code-seeded, one row per name — which is the shape `view_type`
+wants. BLZ-360 §5.3 and §13.1 build on the **second**. They are not the same table and the two
+specs are not citing the same precedent.
 
 The honest gap, carried as open question §11.4: no constraint can express *"this type row has
 a renderer module behind it"*. A type row whose module was deleted is a row that cannot
@@ -291,10 +352,12 @@ Today: a `switch` case. It becomes a **declared type descriptor, in code**.
 }
 ```
 
-**The registry is code, not user data,** and that is the difference from `link_type`. A link
-type is a thing users define. A view type is a renderer module — a row without a module
-cannot render, and a module without a row is invisible. One source of truth, seeded into
-`view_type` per §4.4.
+**The registry is code, not user data,** and that is the difference from the **v4** `link_type`
+(`link-schema.mjs:29-44`), which is per-project and is a thing users define. A view type is a
+renderer module — a row without a module cannot render, and a module without a row is invisible.
+One source of truth, seeded into `view_type` per §4.4. (The `blaze_config.link_type` cited in §4.4
+as the *table shape* precedent is code-seeded and installation-wide, which is why it is the right
+shape and the v4 one is not.)
 
 `scopes` is the mechanism that keeps the two levels genuinely separated: a type may declare
 itself installation-only or project-only, and the registry is where that argument is
@@ -317,16 +380,21 @@ parameter or chip state. Nothing invented.
 `project` is deliberately **not** a config key — it is the `scope`/`project_key` pair. A view
 cannot re-scope itself out from under its owner.
 
-**Tier 2 — per type.** Illustrative, and each spec owns its own row:
+**Tier 2 — per type. Illustrative, each spec owns its own row, and — unlike tier 1 — most of these
+keys are *proposed here*, not lifted from something that exists.** Marked so, because §8.4 depends
+on the distinction:
 
-| Type | Keys |
-|---|---|
-| `board` | `columnSet`, `swimlaneBy`, `cardFields` |
-| `list` | `columns`, `sortBy` |
-| `gantt` | `sprint`, `dateSource`, `showCriticalPath`, `groupBy`, `hierarchy` |
-| `metrics` | `window`, `transitionsSince` |
-| `map` | `linkTypes`, `depth` |
-| `live` | `pollSec` |
+| Type | Keys | Provenance |
+|---|---|---|
+| `board` | `columnSet`, `swimlaneBy`, `cardFields` | `columnSet` is **this spec's own rename** of `deriveBoards()`'s output (§2.1) — it does not exist under that name today. `swimlaneBy` and `cardFields` are **new**. |
+| `list` | `columns`, `sortBy` | `columns` exists in `blaze.config.json` (`config.mjs:16`) as the status-column list — a different meaning, reused here. `sortBy` is **new**. |
+| `gantt` | `sprint`, `dateSource`, `showCriticalPath`, `groupBy`, `hierarchy` | `sprint` exists (`?sprint=`, `gantt.mjs:57-58`). `hierarchy` is specified by v4 spine §3.3. `dateSource`, `showCriticalPath`, `groupBy` are **new** — see §10.2 for what BLZ-360 does to `dateSource`. |
+| `metrics` | `window`, `transitionsSince` | both **new**; `metricsModel` takes `transitions` and `now` but neither key exists. |
+| `map` | `linkTypes`, `depth` | both **new**; `graphModel` takes `focus` only. |
+| `live` | `pollSec` | **new**; `live.render()` takes no arguments at all (`views/live.mjs:3`). |
+
+The tier-2 set being mostly new is not a defect — a view type's config is exactly the thing this
+spec exists to invent. It is recorded because §8.4 originally claimed the opposite.
 
 **Tier 3 — unknown keys are refused, not ignored.** This is the direct descendant of
 `REMOVED_KEYS` in `scripts/model/schema-version.mjs`, which already rules that *"a config key
@@ -369,10 +437,33 @@ Every refusal **names the rule and the offending key**, per v4 spine §4.2.
 `config.mjs:39`, `:64` and `:65` do not change. No `schemaVersion` bump. **A board that never
 creates a project view never notices this spec exists.**
 
-### 6.2 The six become installation-scoped rows — at the db-primary cutover, not before
+### 6.2 The six become installation-scoped rows — at DB schema version 2
 
-v4 spine §6 already makes the Phase 2 db-primary cutover the prerequisite for every new v4
-table. `view` inherits that prerequisite; it does not add one.
+**Corrected, and it resolves a collision that left this table with no installation path at all.**
+An earlier draft of this section declined the schema-installation event, on the grounds that *"v4
+spine §6 already makes the Phase 2 db-primary cutover the prerequisite for every new v4 table."*
+**It does not.** Spine `:265-267` states that prerequisite for the **document/artifact** migration
+specifically, and gives a rationale that is specific to it: *"A document has no status directory to
+live in, so the fs write port cannot represent this model."* That is true of `document`, and false
+of `view` — a view row is representable on either write port. The deferral was an over-read of one
+line.
+
+Meanwhile the sibling kernel spec in this PR — BLZ-360,
+[`2026-08-23-scheduling-kernel-design.md`](2026-08-23-scheduling-kernel-design.md) §6.4 — **claimed**
+the schema-installation event, because `Precedes` needs the v4 `link` table and nothing installs it.
+One spec claiming the event and the other declining it meant `view` had no create path in either.
+
+**Resolution, recorded in both files: BLZ-360 §6.4 owns DB schema version 2, and `viewDdl` ships in
+it.** This spec yields the installation event; it keeps every other decision about the table —
+the columns, the `scope` tag, the two partial unique indexes, the `CHECK`, the `view_type` FK and
+the seeded registry are all §3's and §4's and are unchanged. What changes is only *when the DDL
+runs*: `DB_SCHEMA_VERSION` 1 → 2, alongside `linkDdl`, `hierarchyDdl` and BLZ-360's five `ticket`
+columns. `artifactDdl` / `documentDdl` / `fieldDdl` stay behind the Phase 2 cutover, which is what
+spine `:265-267` actually gates.
+
+**This does not weaken §6.1.** An existing `blaze.config.json` carrying `views: {...}` keeps working
+unchanged through v3 regardless of when the table is installed; the seed below runs when the
+database becomes the source of truth for views, and the two events are separable.
 
 The seed reads **`blaze_config.board.views_json`** (`config-schema.mjs:93`) — which already
 holds this map in the database — and emits six rows:
@@ -393,7 +484,7 @@ config_json  = '{}'
 `VIEW_NAMES`, so the switcher renders identically.
 
 **The `board` clamp becomes one rule instead of three.** `cfg.views.board = true` is
-currently re-asserted in three places — `config.mjs:65`, `page.mjs:111`, `page.mjs:145` —
+currently re-asserted in three places — `config.mjs:65`, `page.mjs:113`, `page.mjs:145` —
 which is itself a finding. It becomes a single store-level invariant: **the builtin
 installation `board` row may not be deleted or disabled.** Its intent (the shell always has a
 default view) is kept; its triplication is not.
@@ -407,7 +498,9 @@ views: "views are rows now — `blaze view list --installation`. Your six were m
         at the db-primary cutover; delete this key."
 ```
 
-and raise `MIN_SCHEMA_VERSION` past the current `SCHEMA_VERSION = 2`. That produces a
+and raise `MIN_SCHEMA_VERSION` past the current `SCHEMA_VERSION = 2` — the **config** schema
+version in `schema-version.mjs`, which is a different number from the `DB_SCHEMA_VERSION` of §6.2.
+That produces a
 **hard, named error carrying its own fix** — precisely what `REMOVED_KEYS` was built for
 (BLZ-298) — rather than a silent drop, which is the behaviour it was built to stop.
 
@@ -424,7 +517,7 @@ against real data rather than fixtures.
 
 ### 7.1 Today, verified
 
-- `GET /?view=&project=&focus=&flat=&sprint=` → full page (`serve.mjs:206-211`)
+- `GET /?view=&project=&focus=&flat=&sprint=` → full page (`serve.mjs:201-211`; the five parameters are read at `:202-206`)
 - `GET /view/<name>` → JSON envelope for the client-side swap (`serve.mjs:187-198`)
 - `blaze board` → `serve.mjs`, arguments silently discarded (`cli.mjs:31`, `:94`)
 
@@ -450,17 +543,31 @@ one-click origin story instead of a new form.
 **`blaze board` keeps working and keeps serving the installation.** It becomes a permanent
 alias for `blaze serve`. Nothing an operator types today breaks.
 
-New verb `blaze view`, as its own `view-runner.mjs` matching every other verb's shape, with
-`cli.mjs`'s `mutates` classification applied per subcommand:
+New verb `blaze view`, as its own `view-runner.mjs` matching every other verb's shape:
 
 ```
-blaze view list  [--project KEY | --installation]     # mutates: false
+blaze view list  [--project KEY | --installation]
 blaze view new   --type gantt --name "Q3 schedule" [--project KEY] [--set k=v …]
 blaze view edit  <slug> [--project KEY] --set k=v
 blaze view rm    <slug> [--project KEY]
-blaze view open  <slug> [--project KEY]               # prints the URL; mutates: false
+blaze view open  <slug> [--project KEY]               # prints the URL
 blaze serve      [--project KEY] [--view <slug>]
 ```
+
+**`mutates` is classified per verb, not per subcommand — corrected.** An earlier draft annotated
+`view list` and `view open` as `mutates: false` beside a mutating `view new`/`edit`/`rm`. That
+split is not expressible today: `mutates` is a property of the `SUBCOMMANDS` entry
+(`cli.mjs:27-51`), and `cli.mjs:89` refuses to **spawn** the runner under `BLAZE_READONLY` before
+any argument is parsed. There is exactly one flag per verb.
+
+**Decision: `blaze view` is classified `mutates: true` unconditionally**, following the precedent
+the dispatch table already sets and states — `reconcile` defaults to a dry run but `--apply`
+commits, and `cli.mjs:21-26` classifies it *"true unconditionally (simpler and safer than
+flag-dependent classification)"*. The cost is real and small: under `BLAZE_READONLY=1`,
+`blaze view list` is refused even though it writes nothing. **Whoever wants read-only listing under
+`BLAZE_READONLY` must change the dispatch table** — either a per-subcommand `mutates` map (a real
+change to `cli.mjs`'s single-lookup shape) or a separate read-only verb. That is a decision for the
+CLI, not something a view spec can assert by annotating a code block.
 
 **Precondition:** `blaze serve --project KEY` requires flipping `noArgs` at `cli.mjs:31`.
 Until that lands, `blaze board BLZ` exits 0 and ignores the argument (§1.6) — so it must not
@@ -499,11 +606,19 @@ config: { dateSource: 'derived', showCriticalPath: true, groupBy: 'hierarchy',
 
 Two Gantts with different filters = two rows. **Passes.**
 
-**What it exposes:** the *other* kernel question the ticket names — are `start_date` /
-`due_date` inputs or derived outputs? — surfaces here as a single config key, `dateSource`.
-That is useful evidence: it shows the two kernel questions are **separable**. This spec
-defines the key's existence; spec 3 decides its legal values and its default. **This spec
-does not answer it** (§10.2).
+**What it exposes, updated for the sibling spec that landed in the same PR:** the *other* kernel
+question the ticket names — are `start_date` / `due_date` inputs or derived outputs? — surfaced here
+as a single config key, `dateSource`. **BLZ-360 has since answered it: constraints are inputs, dates
+are derived, always.** The separability evidence stands (the two kernel questions really were
+answerable independently), but the consequence for this spec has changed — see §10.2. `dateSource`
+is now a closed key set with one legal value, which is a key that decides nothing.
+
+**Second exposure, also from the sibling spec:** the `sprint` key listed for `gantt` in §5.2 is
+today's mechanism (`gantt.mjs:57-58` scopes rows to the selected sprint and builds its axis from
+that sprint's window), and BLZ-360 §8.2 states that a critical-path Gantt **cannot** be sprint-shaped
+— a zero-float chain crosses sprints and crosses projects. So `gantt` needs a second, mutually
+exclusive axis key. This spec keeps `sprint` (it is what the renderer does today and it must keep
+working) and records the conflict rather than resolving it; §10.2 carries it.
 
 ### 8.3 Spec 4 — hierarchy reporting is a report view
 
@@ -532,13 +647,46 @@ spec 4.
 **Verdict:** the view model is not the risk for spec 4. The renderer and the hierarchy table
 are.
 
-### 8.4 What the test actually proved
+### 8.4 What the test actually proved — restated honestly
 
-All three are `(type, name, config)` differing only in `config`. Every config key above maps
-to something that **already exists** (`statusFilter`, `sprint`, `focus`, `flat`,
-`columnSet`) or is **already specified** by the v4 spine (`hierarchy`, `rollupDuplicates`,
-`columns`). **No key was invented to make the model work.** That is the test passing rather
-than being satisfied.
+An earlier draft of this section claimed: *"Every config key above maps to something that already
+exists … No key was invented to make the model work. That is the test passing rather than being
+satisfied."* **That claim is false, and §8.3 already models the right tone for saying so —
+"this one strains, and saying it passes would be dishonest."** The same standard applies here.
+
+**Keys used in §8.1–§8.3 that do not exist anywhere in `scripts/`:** `swimlaneBy`,
+`showCriticalPath`, `dateSource`, `rootTypes`, `cardFields`, `pollSec`, `transitionsSince` — seven,
+verified by grep. And `columnSet` was listed as existing when it is **this spec's own proposed
+rename** of `deriveBoards()` (§2.1); it exists as a concept, under a different name, only because
+this spec renames it.
+
+**What is genuinely pre-existing** is the tier-1 set and a small tail: `focus`, `flat` and `sprint`
+(live query parameters, read at `serve.mjs:202-206`), `statusFilter`
+(`model/filters.mjs:statusFilter`), and the chip/type/label/component/assignee filters. **What is
+specified but unbuilt:** `hierarchy` and `columns` (v4 spine §3.3), and `rollupDuplicates`, which
+is that section's rule — *"Rollup must exclude duplicates by default"* (spine `:107`) — spelled as
+a key here for the first time. **What is invented here:** the eight above, plus `sortBy` and
+`groupBy`, which appear nowhere in `scripts/`, and `linkTypes` / `depth` / `window`, which appear
+in `scripts/` only as unrelated identifiers in other modules and are new *as view config*.
+
+**So what did the test actually establish?** Something weaker than the earlier claim and still
+worth having:
+
+1. **The record shape holds.** All three specs are `(scope, project_key, type, name, config)` rows
+   differing only in `config`. No spec needed a second table, a nullable owner, or a column the
+   others do not use. **That is what §8 set out to falsify, and it survived.**
+2. **The universal tier is real.** Tier 1 was derived from live query parameters, not designed —
+   that half of §5.2 is evidence, not invention.
+3. **The per-type tier is design, not discovery.** Most tier-2 keys are proposed here for the first
+   time (§5.2 marks each one), which is legitimate — a view type's configuration is precisely what
+   this spec exists to define — but it means the three examples cannot corroborate the key set.
+   They were written by the same author, in the same week, from the same table.
+
+**Verdict: satisfied, not passed.** The test discriminates on structure and it passed on structure.
+It does not discriminate on the config vocabulary, because the vocabulary was largely written to
+fit. The real test of the key set is spec 2, 3 and 4 being written by someone else and needing a
+key §5.2 does not have — and §9 already carries that as a live risk ("config keys drift from what
+renderers honour").
 
 ---
 
@@ -547,10 +695,10 @@ than being satisfied.
 | Risk | Mitigation | Honest residual |
 |---|---|---|
 | The `board` rename half-applies and leaves the codebase in two vocabularies | per-meaning tickets (§2.1), each landing with the tests that name the old word; never a global substitution | 430 occurrences across 77 files; a partial rename is worse than none, and the window is real |
-| `NULL`-distinct-in-`UNIQUE` lets two installation views share a slug | partial unique indexes (§3.2) | unverified on `node:sqlite` (§11.3) |
+| `NULL`-distinct-in-`UNIQUE` lets two installation views share a slug | partial unique indexes (§3.2), the same fix `hierarchy-schema.mjs:38-42` already uses | **verified on `node:sqlite` 3.53.3** — both duplicate cases refused, the naive `UNIQUE` shown to accept them; Postgres still owed (§11.3) |
 | Someone reads `project_key IS NULL` instead of `scope` | written rule plus a grep test (§3.1) | a convention with a test is still a convention |
 | Per-project `metrics` views multiply an expensive recompute | measure before promising (§11.2) | unmeasured today |
-| Config keys drift from what renderers honour | tier-3 closed key set, refused at write time (§5.2) | the registry and the renderer can still disagree; only a test catches it |
+| Config keys drift from what renderers honour | tier-3 closed key set, refused at write time (§5.2) | the registry and the renderer can still disagree; only a test catches it. Sharpened by §8.4: most tier-2 keys are proposed here, so the falsification test corroborates the *shape* and not the *vocabulary* |
 | An operator creates 40 views and cannot find any of them | `ord`, and a default view per scope | no answer for search or grouping of views |
 
 ---
@@ -563,8 +711,24 @@ Stated plainly, because several of these are things a reader will reasonably exp
    is always `'*'` today. A project view is precisely the thing you would eventually scope a
    token to — and the operator's rejected option (views-span-any-set) was rejected *for*
    permissions reasons, so the expectation is fair. **There is no answer here.**
-2. **`start_date` / `due_date` — inputs or derived outputs.** The other kernel question. It
-   appears as `dateSource` (§8.2) and is left open on purpose.
+2. **`start_date` / `due_date` — inputs or derived outputs. Answered, by the sibling spec in this
+   PR, and this entry is corrected rather than removed.** An earlier draft left it "open on
+   purpose". BLZ-360
+   ([`2026-08-23-scheduling-kernel-design.md`](2026-08-23-scheduling-kernel-design.md)) answers it:
+   **constraints are inputs; `start_date`, `due_date`, float and the critical path are derived and
+   never hand-set.** Two consequences land on this spec:
+
+   - **`dateSource` (§5.2, §8.2) is now a closed key set with exactly one legal value.** A key whose
+     enum has one member decides nothing. It is kept for one release rather than deleted, because
+     the migration (BLZ-360 §4) leaves 28 terminal tickets carrying *frozen actuals* while every
+     open ticket carries derived dates, and a Gantt has to be able to say which it is rendering —
+     but it should be re-examined once that distinction lives on the row (`schedule_run_id`) rather
+     than in a view's config. **Whoever writes spec 3 should expect to delete it.**
+   - **`gantt`'s `sprint` key is not sufficient.** BLZ-360 §8.2 states that a critical-path view
+     cannot be sprint-shaped — a zero-float chain crosses sprints and crosses projects — and needs
+     a schedule-horizon axis instead. `sprint` stays (it is what `gantt.mjs:57-58` does today and it
+     must keep working), so `gantt` will carry two mutually exclusive axis keys and a rule for
+     which wins. **That rule is spec 3's and is not written here.**
 3. **Per-project sprints.** Named in §8.1; spec 2's.
 4. **Sharing or duplicating a view across projects.** A view has one owner, by the operator's
    decision. "Duplicate into project X" is a client-side copy producing a second row, not a
@@ -589,8 +753,13 @@ Stated plainly, because several of these are things a reader will reasonably exp
    `boardModel(..., flat: true)` per render (`page.mjs:50-56`). Eleven per-project metrics
    views is 11× that compute. **Needs a measurement, not an assumption** — this repo's own
    rule.
-3. **Partial unique indexes on both engines.** Asserted from documentation; unverified on
-   `node:sqlite`. A conformance test on both engines gates the DDL (§3.2).
+3. **Partial unique indexes — narrowed to Postgres.** No longer open on SQLite: measured on
+   `node:sqlite` 3.53.3 (§3.2), where the naive `UNIQUE (project_key, slug)` accepts two
+   installation rows both slugged `gantt` and the partial-index DDL refuses both duplicate cases
+   with the `CHECK` enforced. The repo already relies on the same construct at
+   `hierarchy-schema.mjs:38-42`. **Still open:** the Postgres half, and the two-engine conformance
+   test still gates the DDL — this repo's own precedent is 32 conformance assertions that missed a
+   Postgres date bug because not one compared a date value.
 4. **Seeded `view_type` table vs. code-only registry.** Recommending the seeded table for
    consistency with `priority` / `resolution` / `link_type`. The counter-argument stands: no
    constraint can express "this type has a renderer module", so the table is a convention with
@@ -605,6 +774,16 @@ Stated plainly, because several of these are things a reader will reasonably exp
 ---
 
 ## Appendix A — ADR-0021, draft
+
+**Number collision with the sibling spec, resolved.** This spec and BLZ-360
+([`2026-08-23-scheduling-kernel-design.md`](2026-08-23-scheduling-kernel-design.md) §12) were
+written in parallel and each independently computed *"next free number; 0020 is the highest
+present"*. Both claimed **ADR-0021**. **This spec keeps 0021; BLZ-360's becomes ADR-0022.** The
+allocation rule is the lower ticket number, and here it also matches the dependency: ADR-0021 renames
+the tenancy unit to **installation**, and ADR-0022's text has to be written in that vocabulary — it
+cites ADR-0018's *"200 filterable fields per install"* and an installation-level schema event, both
+of which read differently before 0021 lands. A number is only reserved once the file exists in
+`docs/decisions/`; until then two parallel authors will always compute the same next-free number.
 
 > **ADR-0021 — The tenancy unit is an installation; a board is a view type**
 >
@@ -627,13 +806,25 @@ Stated plainly, because several of these are things a reader will reasonably exp
 > no tenant, board or installation discriminator, and `scope` is not one — it takes exactly
 > two values forever and names a level of ownership *within* one installation.
 >
-> **Consequences.** 430 occurrences of "board" across 77 `.mjs` files and 47 doc files are
+> **Consequences.** 430 occurrences of "board" across 77 `.mjs` files under `scripts/` and 49 doc
+> files are
 > re-read per meaning; the one correct meaning survives untouched, which is why the rename is
 > per-meaning and never a global substitution. `blaze board` survives as an alias.
 > `blaze.config.json`'s `views: {...}` keeps working through v3 and is retired via
 > `REMOVED_KEYS` afterwards.
 
 ## Appendix B — the ADR-0014 amendment, language only
+
+**AC fidelity, flagged rather than silently exceeded.** BLZ-354 AC-2 constrains this amendment to
+*"language ONLY — its ruling is explicitly restated as unchanged."* Edits 1 and 3 below are pure
+language. **Edit 2 is not: it rewrites ADR-0014:12's singleton list on factual grounds** (§1.4 —
+the ADR names `board_config`, a table that has never existed; omits `blaze_config.config_version`,
+which does; and counts `migration_mode` twice as "the two write-rules tables"). It is kept, because
+the correction is verified against the working tree and leaving a known-wrong sentence in an ADR to
+satisfy a scope word would be the worse outcome — and because AC-3 independently requires that
+*"what the v4 schema actually contains (vs ADR-0014's description of v3) is verified and recorded"*,
+which is exactly what edit 2 records. But it **exceeds AC-2 as written**, it is a Context edit rather
+than a Decision edit, and it should be approved as such rather than waved through as language.
 
 Three edits. **The Decision, Consequences and "Revisit if" sections are not touched.**
 
