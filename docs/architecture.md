@@ -115,19 +115,68 @@ flowchart TB
 
 ## HTTP surface
 
-The board serves a small JSON API over `127.0.0.1` (a per-process CSRF token
-guards the writes):
+The board serves a small JSON API. **Every `/api/*` request `blaze board` serves passes
+through `model/serve-auth.mjs`'s `gate()`**, which classifies the route and decides it;
+an `/api/*` route with no classification is a `404`, so an endpoint added without a
+scope fails closed rather than inheriting the previous one's. Board content — `GET /`
+and `GET /view/<name>` — is gated at `read`, because the page is rendered server-side
+and carries every ticket.
 
-| Method | Route | Purpose |
+> **Scope of that claim.** It covers `serve.mjs`, the board server. `blaze start`
+> (`supervisor.mjs`) runs a **second, separate HTTP server** on `127.0.0.1` that imports
+> neither `gate` nor `checkBindSafety`, and its `/control/*` routes — including
+> `/control/revert`, which shells out to `git revert` — take no token and no CSRF
+> header. That is pre-existing and loopback-only, not introduced or fixed here; it is
+> tracked separately.
+
+**Who may call it depends on whether the board has any identities** (ADR-0013):
+
+| Identities | Bind address | Behaviour |
 |---|---|---|
-| GET | `/` | The board page (`views/page.mjs`) |
-| GET | `/view/<name>` | JSON fragment (`{ view, html, chipbar, crumbs, total, subline }`) for a client-side view swap; 404 for an unknown or config-disabled view (`views.<name>: false`, see [AGENTS.md — Configuration](../AGENTS.md#configuration)) |
-| GET | `/api/hash` | Cheap content hash — the client reloads only when tickets change |
-| GET | `/api/sync` | Unsynced-commit count for the `⇧ N ahead` badge |
-| GET | `/api/live` | Live agent-activity feed (`model/activity.mjs`) |
-| GET | `/api/panel?id=` | Detail-panel HTML for one ticket |
-| GET | `/api/reconcile-preview` | Dry-run of the code-bound moves reconcile would make |
-| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push) |
+| none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary |
+| none | anything else | **`blaze board` refuses to start**, naming both fixes. `checkBindSafety` is called before `.listen()`, so nothing is ever served. This is the behaviour *until a first-run setup flow exists*, not a permanent design choice |
+| one or more | any | Every `/api/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
+| **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **`blaze board` refuses to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
+
+Create the first identity — which turns authentication on — with
+[`blaze user add`](guide/commands.md#user).
+
+The `x-blaze-csrf` header is **not** authentication and never was: it is a
+per-process `randomUUID()` embedded in the served HTML, readable by anyone who can
+`GET /`. It is forgery protection for the browser flow, retained as defence-in-depth
+alongside the gate, and removed with the last cookie (ADR-0013 §7).
+
+Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member** =
+`read, write`, **admin** = `read, write, admin`.
+
+| Method | Route | Scope | Purpose |
+|---|---|---|---|
+| GET | `/` | `read` | The board page (`views/page.mjs`) — rendered server-side, so it carries every ticket and the CSRF token |
+| GET | `/view/<name>` | `read` | JSON fragment (`{ view, html, chipbar, crumbs, total, subline }`) for a client-side view swap; 404 for an unknown or config-disabled view (`views.<name>: false`, see [AGENTS.md — Configuration](../AGENTS.md#configuration)) |
+| GET | `/api/hash` | `read` | Cheap content hash — the client reloads only when tickets change |
+| GET | `/api/sync` | `read` | Unsynced-commit count for the `⇧ N ahead` badge |
+| GET | `/api/live` | `read` | Live agent-activity feed (`model/activity.mjs`) |
+| GET | `/api/panel?id=` | `read` | Detail-panel HTML for one ticket |
+| GET | `/api/reconcile-preview` | `read` | Dry-run of the code-bound moves reconcile would make |
+| GET | `/api/matrix` · `/api/coverage` | `read` | v4 traceability matrix and coverage (BLZ-323) |
+| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push) |
+| POST | `/api/artifact` · `/api/link` · `/api/baseline` | `write` | v4 artifact model mutations (BLZ-323) |
+| POST | `/api/field` | `admin` | Defining a filterable field emits `ALTER TABLE` and spends the install-wide field budget ADR-0018 shares across every project — an administrative act, not an ordinary write |
+| *anything else under* `/api/` | — | **`404 unknown endpoint`** — unclassified is denied |
+
+`ROUTE_SCOPES` in `scripts/model/serve-auth.mjs` is the single source of the `/api/*`
+rows; `pageScopeFor()` beside it owns the two content rows. An `/api/*` route absent
+from `ROUTE_SCOPES` cannot be called through `serve.mjs` at all. An unknown *page* path
+is still a plain `404` rather than an auth decision — the page router is not a fixed
+table, and turning every typo into a `401` would both change long-standing behaviour and
+leak whether a path exists.
+
+**A browser cannot set an `Authorization` header itself.** Once a board has users, its
+content is reachable from the API, from `curl`, or through a reverse proxy that adds the
+header — not from a bare browser tab. That is a known gap, not a finished story: the
+board was already unusable in a browser at that point (the page rendered while every XHR
+returned `401`), and gating `/` makes the failure honest instead of leaky. A first-run
+sign-in flow is tracked separately and will replace this.
 
 ## Engine ⟂ data split
 

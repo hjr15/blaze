@@ -88,6 +88,25 @@ export function scopeFor(method, pathname) {
   return ROUTE_SCOPES[`${String(method).toUpperCase()} ${pathname}`] ?? null;
 }
 
+/**
+ * The scope a board CONTENT route needs, or null if this is not one.
+ *
+ * Kept apart from ROUTE_SCOPES on purpose. `/api/*` is fail-closed — an unclassified
+ * route is a 404 — but the page router is not a fixed table, and turning every unknown
+ * path into an auth decision would break the plain 404 the board has always returned.
+ * So this answers only for the routes that actually serve ticket content.
+ *
+ * `/` is rendered server-side and embeds the whole board, which is why it needs `read`:
+ * an ungated `/` hands every ticket to an unauthenticated caller and makes `viewer` a
+ * role that protects nothing.
+ */
+export function pageScopeFor(method, pathname) {
+  if (String(method).toUpperCase() !== "GET") return null;
+  if (pathname === "/") return "read";
+  if (/^\/view\/[a-z]+$/.test(pathname)) return "read";
+  return null;
+}
+
 /** The bearer token, or "" — a malformed header is treated as absent, never guessed at. */
 export function bearerFrom(headers) {
   const raw = String(headers?.authorization ?? headers?.Authorization ?? "").trim();
@@ -101,8 +120,11 @@ export function bearerFrom(headers) {
  * @param store  an identityStore, or null when no identity is configured
  * @returns { ok, status, error, principal }
  */
-export async function gate({ method, pathname, headers, store }) {
-  const operation = scopeFor(method, pathname);
+export async function gate({ method, pathname, headers, store, operation: forced }) {
+  // `forced` lets a caller decide a route this table does not own — the board content
+  // routes, whose scope comes from pageScopeFor(). /api/* still resolves here, so an
+  // unclassified API route is still a 404.
+  const operation = forced ?? scopeFor(method, pathname);
   if (!operation) {
     // Unknown /api/* route. Denied rather than passed through: a route added without a
     // classification must not inherit whatever the last one had.

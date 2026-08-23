@@ -75,7 +75,7 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
   const { file } = await writePort.write({
     project: found.project, status: found.status,
     frontmatter: fm, body: found.body, currentFile: found.file,
-  });
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   return { ok: true, id, file };
 }
 
@@ -109,6 +109,6 @@ export async function applyToggleAc(projectsDir, id, { index, checked }, opts = 
   const { file } = await writePort.write({
     project: found.project, status: found.status,
     frontmatter: fm, body: lines.join("\n"), currentFile: found.file,
-  });
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   return { ok: true, id, file };
 }

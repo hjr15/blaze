@@ -1,6 +1,6 @@
 # Command reference
 
-Every `blaze` invocation is `blaze <subcommand> [args] [flags]`. There are 15
+Every `blaze` invocation is `blaze <subcommand> [args] [flags]`. There are 16
 subcommands. Most that write commit immediately (`commitMode: per-op`,
 the default) or queue into a session ledger (`commitMode: batch`) — see
 [Commit modes](#commit-modes) below.
@@ -22,6 +22,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
+| [`user`](#user) | Add a board user and issue its API token | yes |
 
 ## start
 
@@ -42,9 +43,44 @@ their commands directly.
 blaze board
 ```
 
-Serves the read/write dashboard at `/` plus the `/api/*` write endpoints
-(move, edit, resolve, log, acceptance-criteria toggle). Each write endpoint
-is guarded by an `x-blaze-csrf` header. Parses no CLI args.
+Serves the read/write dashboard at `/` plus the `/api/*` endpoints (move,
+edit, resolve, log, acceptance-criteria toggle). Parses no CLI args.
+
+**Access depends on whether the board has any users** (ADR-0013). See
+[HTTP surface](../architecture.md#http-surface) for which route needs which scope.
+
+- **No users configured, bound to loopback** — served without authentication,
+  exactly as Blaze always has. The bind address *is* the boundary, and that is
+  unchanged for every single-operator board.
+- **No users configured, bound to anything else** (`HOST=0.0.0.0`, a LAN address,
+  a container) — `blaze board` **refuses to start** and tells you both fixes. It
+  is checked before the socket is opened, so nothing is served. This is the
+  behaviour *until a first-run setup flow exists*, not a permanent design choice.
+- **One or more users** — every `/api/*` call needs
+  `Authorization: Bearer blz_…`, **and so does board content** (`GET /`,
+  `GET /view/<name>`): the page is rendered server-side and carries every ticket.
+  The token's scopes are re-intersected with its owner's *current* role on every
+  request, so demoting a user immediately narrows every token they hold.
+
+- **`.blaze/identity.db` exists but is unreadable** (truncated, corrupt, or not a
+  database) — `blaze board` **refuses to start** and names the file. This is never
+  read as "no users": on disk a stray file and a truncated roster look identical, and
+  treating the second as the first would silently remove authentication from a board
+  that had it.
+
+  A browser cannot set that header itself, so once a board has users its content is
+  reachable from the API, from `curl`, or behind a reverse proxy that adds the
+  header — not from a bare browser tab. The board was already unusable in a browser
+  at that point (the page rendered while every XHR returned `401`); gating `/` makes
+  that honest rather than leaky. A sign-in flow is tracked separately.
+
+An unclassified `/api/*` route returns `404`; a route added without a scope fails
+closed rather than inheriting the last one's.
+
+The `x-blaze-csrf` header is **not** authentication — it is a per-process value
+embedded in the served page, readable by anyone who can `GET /`. It is forgery
+protection for the browser flow, retained as defence-in-depth alongside the token
+check, never as a substitute for it.
 
 ## reconcile
 
@@ -299,6 +335,43 @@ the reviewed ledger.
 
 ---
 
+## user
+
+```
+blaze user add --email <address> [--role admin|member|viewer] [--name <display name>]
+```
+
+Creates a board user and issues its first API token. `--role` defaults to
+`member`.
+
+**Adding the first user turns authentication on for this board**, and is what a
+non-loopback `blaze board` needs before it will start. There is no separate
+bootstrap path: the first admin is created by exactly this command, through
+exactly the code every later user takes (ADR-0013 §5).
+
+The token is printed **once**. Only its SHA-256 hash is stored, so it cannot be
+read back — if you lose it, issue another. Tokens carry a `blz_` prefix so they
+are recognisable in a log and matchable by secret-scanning.
+
+```
+$ blaze user add --email you@example.com --role admin
+user you@example.com created with role admin
+identities: /path/to/board/.blaze/identity.db
+
+API token (shown once — copy it now, it is not recoverable):
+
+    blz_xxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxxx
+
+scopes: read, write, admin
+Use it as:  Authorization: Bearer <token>
+```
+
+Identities live in `<board>/.blaze/identity.db`, mode `0600` inside a `0700`
+directory — local to the deployment, never committed with the tickets. `blaze user
+add` **adds `.blaze/` to the board's `.gitignore` if no rule already covers it**, and
+says so; if the board is not a git work tree it warns instead. A token's scopes can
+never exceed its owner's role, at issue time or at use time.
+
 ## Help
 
 `blaze --help` (or `-h`) prints a usage line plus the full command list with
@@ -317,7 +390,7 @@ this page is the reference.
 | `BLAZE_KEY` | Ticket id prefix override. | the `key` in `blaze.config.json` |
 | `BLAZE_PORT` | Board port. | 4321, unless overridden (see below) |
 | `PORT` | Board port; takes precedence over `BLAZE_PORT` and config. | — |
-| `HOST` | Bind host for `blaze board`. `blaze start` / bare `blaze` always binds `127.0.0.1`. | `127.0.0.1` |
+| `HOST` | Bind host for `blaze board`. `blaze start` / bare `blaze` always binds `127.0.0.1`. **A non-loopback value on a board with no users refuses to start** — see [`board`](#board) and [`user`](#user). | `127.0.0.1` |
 | `BLAZE_AGENT_COMMAND` | The command `groom` spawns to act on a ticket. | `agentCommand` in `blaze.config.json` |
 | `BLAZE_COMMIT_MODE` | `per-op` or `batch`. | `per-op` |
 | `BLAZE_CODE_REPO` | Code repo `reconcile` mirrors against, when not set per-project. | none |

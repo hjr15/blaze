@@ -17,6 +17,36 @@ ENV BLAZE_PROJECTS_DIR=/data/projects
 # serve.mjs binds HOST || 127.0.0.1 by default, which is loopback *inside*
 # the container netns — unreachable via a published -p port from the host.
 # Bind all interfaces here; host-level exposure is still gated by -p.
+#
+# BLZ-348: that reasoning is unchanged and still correct. What changed is that
+# ADR-0013's bind check is now actually CALLED, and 0.0.0.0 is precisely the
+# case it was written to refuse. A container started with no users configured
+# therefore exits 1 at startup with the two fixes named, rather than serving an
+# unauthenticated board with every mutating route open to whatever can reach the
+# published port. That refusal is the point of the image change, not a
+# regression in it. Two supported ways to run it:
+#
+#   1. Bring an identity. Create it once against the data repo on the host —
+#        blaze user add --email you@example.com --role admin
+#      — which writes <data>/.blaze/identity.db. The bind-mount at /data carries
+#      it in, and every /api/* call then needs Authorization: Bearer blz_…
+#
+#   2. Or keep the container loopback-only and publish nothing:
+#        docker run -v <data-repo>:/data -e HOST=127.0.0.1 --network host <image>
+#
+# `-p` alone is NOT a credential and never was; it is a routing decision made by
+# whoever runs the container, and a wrong one is silent. See docs/architecture.md
+# — HTTP surface.
+#
+# THIS REFUSAL IS CURRENT BEHAVIOUR, NOT THE PERMANENT DESIGN. It is correct while
+# the only way to create the first user is a CLI command run against the data repo.
+# A first-run setup flow that asks for the initial sysadmin account is tracked
+# separately and will REPLACE this refusal rather than patch it.
+#
+# A read-only data mount is supported and encouraged for a read-only board:
+#   docker run -v <data-repo>:/data:ro -p 4321:4321 <image>
+# Authentication works there — the last-used token stamp is best-effort and a
+# failure to write it never fails a request, let alone the process.
 ENV HOST=0.0.0.0
 # node:alpine ships a uid-1000 `node` user; match the laptop owner so the
 # bind-mounted .git/projects are writable and git raises no dubious-ownership.
