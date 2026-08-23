@@ -21,6 +21,6 @@ export async function applyResolve(projectsDir, id, resolution, opts = {}) {
   const { file } = await writePort.write({
     project: found.project, status: found.status,
     frontmatter: fm, body: found.body, currentFile: found.file,
-  });
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   return { ok: true, id, resolution, file };
 }

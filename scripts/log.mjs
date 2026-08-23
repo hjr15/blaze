@@ -32,6 +32,6 @@ export async function applyLog(projectsDir, id, minutes, opts = {}) {
   const { file } = await writePort.write({
     project: found.project, status: found.status,
     frontmatter: fm, body: found.body, currentFile: found.file,
-  });
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   return { ok: true, id, minutes: rounded, total_worklog_minutes: total, file };
 }

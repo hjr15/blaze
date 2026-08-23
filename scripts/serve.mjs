@@ -25,6 +25,9 @@ import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
+import { checkBindSafety, gate } from "./model/serve-auth.mjs";
+import { loadIdentity } from "./model/identity-db.mjs";
+import { actorFor } from "./model/identity.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
 // BLZ-133: config is read lazily, and from the board being SERVED rather than
@@ -90,10 +93,37 @@ function envPort() {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null;
 }
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views } = {}) {
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views, identity = loadIdentity(root) } = {}) {
+  // BLZ-348, ADR-0013. checkBindSafety() has existed and been tested since BLZ-304 and
+  // was called by nothing, so the one control written for exactly this configuration was
+  // dead code: an operator publishing the port to a LAN interface got an unauthenticated
+  // board with every mutating route open, and Blaze raised nothing.
+  //
+  // Checked BEFORE .listen(), and thrown rather than logged: a warning printed next to a
+  // socket that is already accepting connections is not a refusal.
+  const bind = checkBindSafety({ host, hasIdentity: Boolean(identity?.hasIdentity) });
+  if (!bind.ok) throw new Error(bind.error);
+  // null when no identity is configured — which gate() reads as the loopback case that
+  // the check above has just vouched for, and serves without auth exactly as always.
+  const store = identity?.hasIdentity ? identity.store : null;
+
   return createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
+
+    // Every /api/* request, classified and decided in ONE place. An unclassified route
+    // is a 404 here rather than falling through to whichever handler happens to match
+    // later — a route added without a scope must not inherit the last one's.
+    let principal = null;
+    if (u.pathname.startsWith("/api/")) {
+      const decision = await gate({ method: req.method, pathname: u.pathname,
+                                    headers: req.headers, store });
+      if (!decision.ok) return json(decision.status, { errors: [decision.error] });
+      principal = decision.principal;
+    }
+    // ADR-0013 §6: the name the event log records for this caller. "unknown" when there
+    // is no principal, which is the historic default the column already carried.
+    const actor = actorFor(principal);
 
     if (req.method === "GET" && u.pathname === "/api/hash") {
       res.writeHead(200, { "content-type": "text/plain" });
@@ -148,6 +178,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, sprint, view, views, projectsDir }));
     }
     if (req.method === "POST") {
+      // NOT authentication, and never was — ADR-0013 §7 and the ADR's own reproduction:
+      // this value is a per-process randomUUID() embedded in the served HTML, readable
+      // by anyone who can GET /. It is forgery protection for the browser flow, and it
+      // is retained as defence-in-depth ALONGSIDE the gate above, which is the thing
+      // that asks for a credential. It is removed with the last cookie, not before.
       if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
       // BLZ-121 defence-in-depth, checked here (before any apply* call below,
       // not just inside commitOrQueue) and as a plain 403 rather than a thrown
@@ -187,7 +222,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         await resolveWritePort({ dataRoot: root, projectsDir });
       try {
       if (u.pathname === "/api/move") {
-        const r = await applyMove(projectsDir, payload.id, payload.to, { today, writePort });
+        const r = await applyMove(projectsDir, payload.id, payload.to, { today, writePort, actor, source: "api" });
         if (!r.ok) return json(422, { errors: r.errors });
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
         const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
@@ -195,19 +230,19 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         return json(200, { ok: true, resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {
-        const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today, writePort });
+        const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today, writePort, actor, source: "api" });
         return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`, "edit");
       }
       if (u.pathname === "/api/resolve") {
-        const r = await applyResolve(projectsDir, payload.id, payload.resolution, { today, writePort });
+        const r = await applyResolve(projectsDir, payload.id, payload.resolution, { today, writePort, actor, source: "api" });
         return done(r, `${payload.id}: resolve ${payload.resolution}`, "resolve");
       }
       if (u.pathname === "/api/log") {
-        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today, writePort });
+        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today, writePort, actor, source: "api" });
         return done(r, `${payload.id}: log ${payload.minutes}m`, "log");
       }
       if (u.pathname === "/api/ac") {
-        const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort });
+        const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort, actor, source: "api" });
         return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
       }
       return json(404, { errors: ["not found"] });
@@ -226,6 +261,17 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // "listening" handler — after the port was already bound, so the process
   // crash-looped instead of failing to start (BLZ-133 regression).
   const root = resolveRoots().dataRoot;
-  const server = startServer({ root });
+  // BLZ-348: the bind refusal has to be LOUD and FATAL here, not a stack trace. This is
+  // the container path — the Dockerfile sets HOST=0.0.0.0 because loopback inside a
+  // container netns is unreachable through a published -p port, which is correct and
+  // is exactly the configuration checkBindSafety was written for. A container with no
+  // identities now exits 1 with the two fixes named, instead of serving an open board.
+  let server;
+  try {
+    server = startServer({ root });
+  } catch (e) {
+    console.error(e.message);
+    process.exit(1);
+  }
   server.on("listening", () => console.log(`${cfgFor(root).boardTitle} board → http://localhost:${server.address().port}`));
 }

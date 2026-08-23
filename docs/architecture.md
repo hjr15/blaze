@@ -115,19 +115,47 @@ flowchart TB
 
 ## HTTP surface
 
-The board serves a small JSON API over `127.0.0.1` (a per-process CSRF token
-guards the writes):
+The board serves a small JSON API. **Every `/api/*` request passes through
+`model/serve-auth.mjs`'s `gate()`**, which classifies the route and decides it; a
+route with no classification is a `404`, so an endpoint added without a scope fails
+closed rather than inheriting the previous one's.
 
-| Method | Route | Purpose |
+**Who may call it depends on whether the board has any identities** (ADR-0013):
+
+| Identities | Bind address | Behaviour |
 |---|---|---|
-| GET | `/` | The board page (`views/page.mjs`) |
-| GET | `/view/<name>` | JSON fragment (`{ view, html, chipbar, crumbs, total, subline }`) for a client-side view swap; 404 for an unknown or config-disabled view (`views.<name>: false`, see [AGENTS.md — Configuration](../AGENTS.md#configuration)) |
-| GET | `/api/hash` | Cheap content hash — the client reloads only when tickets change |
-| GET | `/api/sync` | Unsynced-commit count for the `⇧ N ahead` badge |
-| GET | `/api/live` | Live agent-activity feed (`model/activity.mjs`) |
-| GET | `/api/panel?id=` | Detail-panel HTML for one ticket |
-| GET | `/api/reconcile-preview` | Dry-run of the code-bound moves reconcile would make |
-| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push) |
+| none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary |
+| none | anything else | **`blaze board` refuses to start**, naming both fixes. `checkBindSafety` is called before `.listen()`, so nothing is ever served |
+| one or more | any | Every `/api/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
+
+Create the first identity — which turns authentication on — with
+[`blaze user add`](guide/commands.md#user).
+
+The `x-blaze-csrf` header is **not** authentication and never was: it is a
+per-process `randomUUID()` embedded in the served HTML, readable by anyone who can
+`GET /`. It is forgery protection for the browser flow, retained as defence-in-depth
+alongside the gate, and removed with the last cookie (ADR-0013 §7).
+
+Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member** =
+`read, write`, **admin** = `read, write, admin`.
+
+| Method | Route | Scope | Purpose |
+|---|---|---|---|
+| GET | `/` | — (ungated) | The board page (`views/page.mjs`) |
+| GET | `/view/<name>` | — (ungated) | JSON fragment (`{ view, html, chipbar, crumbs, total, subline }`) for a client-side view swap; 404 for an unknown or config-disabled view (`views.<name>: false`, see [AGENTS.md — Configuration](../AGENTS.md#configuration)) |
+| GET | `/api/hash` | `read` | Cheap content hash — the client reloads only when tickets change |
+| GET | `/api/sync` | `read` | Unsynced-commit count for the `⇧ N ahead` badge |
+| GET | `/api/live` | `read` | Live agent-activity feed (`model/activity.mjs`) |
+| GET | `/api/panel?id=` | `read` | Detail-panel HTML for one ticket |
+| GET | `/api/reconcile-preview` | `read` | Dry-run of the code-bound moves reconcile would make |
+| GET | `/api/matrix` · `/api/coverage` | `read` | v4 traceability matrix and coverage (BLZ-323) |
+| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push) |
+| POST | `/api/artifact` · `/api/link` · `/api/baseline` | `write` | v4 artifact model mutations (BLZ-323) |
+| POST | `/api/field` | `admin` | Defining a filterable field emits `ALTER TABLE` and spends the install-wide field budget ADR-0018 shares across every project — an administrative act, not an ordinary write |
+| *anything else under* `/api/` | — | **`404 unknown endpoint`** — unclassified is denied |
+
+`ROUTE_SCOPES` in `scripts/model/serve-auth.mjs` is the single source of this table.
+A `/api/*` route absent from it cannot be called at all.
 
 ## Engine ⟂ data split
 

@@ -44,6 +44,10 @@ const SUBCOMMANDS = {
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
   migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
   publish: { file: "publish-runner.mjs", desc: "sweep local queues and trigger the flush", mutates: true },
+  // BLZ-348: the command serve-auth.mjs's bind refusal has named since BLZ-304, and
+  // which did not exist. Adding the first user turns authentication on for the board
+  // (ADR-0013 §5 — the bootstrap admin is a user, not an exception), so it mutates.
+  user: { file: "user-runner.mjs", desc: "add a user and issue its API token", mutates: true },
 };
 
 function printUsage() {

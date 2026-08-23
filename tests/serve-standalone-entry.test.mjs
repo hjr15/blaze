@@ -89,3 +89,36 @@ test("PORT=0 means 'any free port', not 'unset' — even with 4321 already taken
   assert.doesNotMatch(stderr, /EADDRINUSE/, `PORT=0 must not bind the configured port:\n${stderr}`);
   assert.ok(port && port !== 4321, `expected an ephemeral port, got ${port}\nstderr: ${stderr}`);
 });
+
+// BLZ-348: the container path, as a real process.
+//
+// The Dockerfile sets HOST=0.0.0.0 — correctly, because loopback inside a container
+// netns is unreachable through a published -p port. That is exactly the configuration
+// ADR-0013's `checkBindSafety` was written for, and it was never called. An operator who
+// published the port to a LAN interface got an unauthenticated board with every mutating
+// route open. The container must now fail LOUDLY at startup instead of serving.
+//
+// Spawned rather than imported, for the same reason as the tests above: the exit code and
+// the stderr are the contract here, and neither exists inside startServer().
+test("HOST=0.0.0.0 with no identities exits non-zero and names the two fixes", async () => {
+  const child = spawn(process.execPath, [SERVE], {
+    cwd: BOARD,
+    env: { ...process.env, PORT: "0", HOST: "0.0.0.0", BLAZE_PROJECTS_DIR: join(BOARD, "projects") },
+    stdio: ["ignore", "pipe", "pipe"],
+  });
+  let stdout = "", stderr = "";
+  child.stdout.on("data", (b) => { stdout += b; });
+  child.stderr.on("data", (b) => { stderr += b; });
+
+  const code = await new Promise((resolve) => {
+    const done = setTimeout(() => { child.kill("SIGKILL"); resolve("still-running"); }, 8000);
+    child.on("exit", (c) => { clearTimeout(done); resolve(c); });
+  });
+
+  assert.equal(code, 1, `expected a refusal, got ${code}\nstdout: ${stdout}\nstderr: ${stderr}`);
+  assert.doesNotMatch(stdout, /board → http:\/\//, "it must not announce a board it refused to serve");
+  assert.match(stderr, /refusing to serve on 0\.0\.0\.0 with no users configured/);
+  assert.match(stderr, /HOST=127\.0\.0\.1 blaze board/, "the loopback fix must be named");
+  assert.match(stderr, /blaze user add --email \S+ --role admin/, "the identity fix must be named");
+  assert.doesNotMatch(stderr, /at startServer/, "a stack trace is not a refusal message");
+});

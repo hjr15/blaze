@@ -168,8 +168,36 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
   const asList = (v) => (Array.isArray(v) ? v
     : typeof v === "string" ? v.split(",").map((x) => x.trim()).filter(Boolean) : []);
 
-  async function persist({ project, status, frontmatter: fm, body }) {
+  /**
+   * ADR-0013 §6, wired by BLZ-348: every event records WHO.
+   *
+   * `ticket_event.actor` has existed since the first schema with a default of 'unknown'
+   * and both drivers already read and write it — nothing had ever set it, because
+   * nothing appended an event on the live write path either. The actor arrives as the
+   * port's CONTEXT rather than as part of the ticket: it belongs to the event, not to
+   * the row.
+   *
+   * The kind is derived from what the database already held, so the caller does not have
+   * to describe its own operation and cannot describe it wrongly: no prior row is a
+   * `create`, a changed status is a `transition` (the only kind whose shape the schema
+   * constrains, and both statuses are supplied), anything else is an `edit`.
+   */
+  async function recordEvent({ id, prior, status, ctx }) {
+    const transition = prior !== null && prior !== status;
+    const kind = prior === null ? "create" : transition ? "transition" : "edit";
+    await exec.run(
+      `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
+       VALUES (${ph(0)}, ${ph(1)}, ${ph(2)}, ${ph(3)}, ${ph(4)}, ${ph(5)}, ${ph(6)})`,
+      [id, kind, new Date().toISOString(), ctx?.actor ?? "unknown", ctx?.source ?? "cli",
+       transition ? prior : null, transition ? status : null]);
+  }
+
+  async function persist({ project, status, frontmatter: fm, body }, ctx) {
     const id = fm.id;
+    // Read BEFORE the upsert: afterwards there is no way to tell a create from an edit,
+    // and no way to recover the status a transition came from.
+    const priorRows = await exec.all(`SELECT status FROM ticket WHERE id = ${ph(0)}`, [id]);
+    const prior = priorRows?.length ? priorRows[0].status : null;
 
     // parent_type is DERIVED, never taken from frontmatter — frontmatter has no such
     // field. The soak surfaced this on the live board: writing parent_id with a NULL
@@ -245,6 +273,7 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
          VALUES (${ph(0)}, ${ph(1)}, ${ph(2)}, ${ph(3)})`,
         [id, w.date ?? fm.updated, mins, w.note ?? null]);
     }
+    await recordEvent({ id, prior, status, ctx });
     return { file: id };   // an opaque handle, never a path — BLZ-271
   }
 
@@ -254,8 +283,8 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
       const rows = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [frontmatter.id]);
       return Boolean(rows?.length);
     },
-    async write(t) { return persist(t); },
-    async move(t) { const r = await persist(t); return { ...r, fromFile: t.currentFile }; },
+    async write(t, ctx) { return persist(t, ctx); },
+    async move(t, ctx) { const r = await persist(t, ctx); return { ...r, fromFile: t.currentFile }; },
     async read(id) {
       // `::text` on every date column in Postgres — see the note in pg-storage.mjs.
       // `pg` decodes a `date` into a JS Date at LOCAL midnight, moving 2026-01-01 to

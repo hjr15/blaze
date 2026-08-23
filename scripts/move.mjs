@@ -58,10 +58,12 @@ export async function applyMove(projectsDir, id, toStatus, opts = {}) {
   // path — handed a database handle it produced "done/BLZ-9" and still returned
   // ok:true, the BLZ-122 class reintroduced. The verb now states WHAT it wants
   // persisted; where that lives is the adapter's answer (BLZ-271, BLZ-293).
+  // BLZ-348 / ADR-0013 §6: who did it. Carried as the port's CONTEXT rather than as
+  // part of the ticket — the actor belongs to the event log, never to the ticket row.
   const { file: destFile, fromFile } = await writePort.move({
     project: found.project, status: toStatus,
     frontmatter: fm, body: plan.body, currentFile: found.file,
-  });
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
 
   return { ok: true, id, from: found.status, to: toStatus, fromFile: fromFile ?? found.file, file: destFile, resolution: plan.resolution, warnings };
 }
