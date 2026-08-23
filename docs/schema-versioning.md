@@ -41,13 +41,18 @@ is the one command that is genuinely schema-agnostic — it commits an explicit
 list of already-written files and never consults the schema — and stays
 uncovered by design.
 
-`reindex`'s guard validates the stamp at the resolved **data root**
-(`dataRoot`), not the `projects/` directory it actually indexes. Those
-normally coincide, but `blaze reindex` also accepts an explicit
-`projects/`-dir argument to retarget which tickets get indexed; passed a
-directory belonging to a *different* board, the guard still checks the
-original board's stamp, not that other board's. Passing an explicit
-`projects/`-dir argument for a different board is not covered by this guard.
+`reindex` accepts an explicit `projects/`-dir argument (`blaze reindex <dir>`)
+to retarget which board's tickets get indexed. That argument re-resolves the
+data root too — `<dir>/..`, where that board's own `blaze.config.json` sits —
+so the guard validates the stamp of the board actually being indexed, from any
+cwd, and the rebuilt `.blaze/` cache lands under that same board (BLZ-107). A
+board stamped outside the compat window fails loud whether it is reached
+through the cwd, `BLAZE_PROJECTS_DIR`, or an explicit `<dir>`.
+
+Two things do **not** follow the `<dir>` argument, by design: `BLAZE_DB_DIR`,
+which is an explicit override of the cache location and wins if set; and
+`blaze rollup`, which has no dir argument at all and always guards the
+ambient data root.
 
 ## If the guard stopped you
 
