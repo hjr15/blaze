@@ -176,13 +176,71 @@ describe("every /api/* request goes through gate(), and an unknown route fails c
     } finally { server.close(); }
   });
 
-  test("non-/api paths are untouched by the gate", async () => {
+  test("with no identities, board content is open exactly as it always has been", async () => {
     const { root, projects } = board();
     const { server, base } = await boot({ root, projectsDir: projects });
     try {
       assert.equal((await fetch(`${base}/`)).status, 200);
-      assert.equal((await fetch(`${base}/nope`)).status, 404);
+      assert.equal((await fetch(`${base}/view/board`)).status, 200);
+      assert.equal((await fetch(`${base}/nope`)).status, 404, "an unknown page is still a plain 404");
     } finally { server.close(); }
+  });
+});
+
+describe("board CONTENT is gated too — a viewer role that protects nothing is not a role", () => {
+  // Found in security review of PR #96. `/` is rendered SERVER-SIDE and embeds every
+  // ticket plus the CSRF token, so with identities configured an unauthenticated caller
+  // could read the whole board while /api/live correctly 401'd beside it. The board was
+  // already unusable in a browser at that point — the page rendered and then every XHR
+  // 401'd — so gating `/` does not take away a working flow; it makes a broken one honest.
+  test("GET / requires read once identities exist", async () => {
+    const { root, projects } = board();
+    const { token } = await addUser(root, { email: "r@example.com", role: "viewer" });
+    const { server, base } = await boot({ root, projectsDir: projects });
+    try {
+      const anon = await fetch(`${base}/`);
+      assert.equal(anon.status, 401);
+      const body = await anon.text();
+      assert.doesNotMatch(body, /OBA-1/, "an unauthenticated caller must not receive ticket content");
+      assert.match(body, /Authorization: Bearer/, "the refusal must say how to authenticate");
+
+      const authed = await fetch(`${base}/`, { headers: { authorization: `Bearer ${token.token}` } });
+      assert.equal(authed.status, 200);
+      assert.match(await authed.text(), /OBA-1/);
+    } finally { server.close(); }
+  });
+
+  test("GET /view/<name> requires read once identities exist", async () => {
+    const { root, projects } = board();
+    const { token } = await addUser(root, { email: "v@example.com", role: "viewer" });
+    const { server, base } = await boot({ root, projectsDir: projects });
+    try {
+      assert.equal((await fetch(`${base}/view/board`)).status, 401);
+      assert.equal((await fetch(`${base}/view/board`,
+        { headers: { authorization: `Bearer ${token.token}` } })).status, 200);
+    } finally { server.close(); }
+  });
+
+  test("the CSRF token is no longer harvestable without a credential", async () => {
+    // ADR-0013's reproduction step 1 was "anonymous GET / -> token harvested".
+    const { root, projects } = board();
+    await addUser(root, { email: "c@example.com", role: "admin" });
+    const { server, base } = await boot({ root, projectsDir: projects });
+    try {
+      const body = await (await fetch(`${base}/`)).text();
+      assert.doesNotMatch(body, /[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/,
+        "no CSRF uuid may appear in an unauthenticated response");
+    } finally { server.close(); }
+  });
+
+  test("an unknown page path is still a plain 404, not an auth decision", async () => {
+    // The page router is not a fixed table. Turning every unknown path into a 401 would
+    // change what the board has always returned for a typo, and leak whether a path exists.
+    const { root, projects } = board();
+    await addUser(root, { email: "n@example.com", role: "admin" });
+    const { server, base } = await boot({ root, projectsDir: projects });
+    try { assert.equal((await fetch(`${base}/nope`)).status, 404); }
+    finally { server.close(); }
   });
 });
 

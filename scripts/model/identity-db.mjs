@@ -17,7 +17,7 @@
 // Everything here is SYNCHRONOUS. `startServer()` must decide whether it may bind at all
 // before it calls `.listen()`, and a bind check that resolves a microtask later is a bind
 // check that runs after the socket is open.
-import { existsSync, mkdirSync } from "node:fs";
+import { existsSync, mkdirSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { identityDdl } from "./identity-schema.mjs";
@@ -31,6 +31,17 @@ export const identityDbPath = (dataRoot) => join(dataRoot, ".blaze", "identity.d
 // it, and never prints its experimental warning.
 function DatabaseSync() {
   return createRequire(import.meta.url)("node:sqlite").DatabaseSync;
+}
+
+/**
+ * Tighten permissions, best-effort.
+ *
+ * Never fatal: on a read-only mount or a filesystem with no POSIX modes the chmod
+ * cannot succeed and must not stop a board from authenticating. It is defence for the
+ * machine that CREATED the file, which is the machine that can act on it.
+ */
+function harden(target, mode) {
+  try { chmodSync(target, mode); } catch { /* not ours to tighten */ }
 }
 
 /** The {run, all} shape identityStore wants, over a synchronous node:sqlite handle. */
@@ -52,10 +63,31 @@ export function identityExec(db) {
 export function openIdentityDb(dataRoot, { create = false } = {}) {
   const path = identityDbPath(dataRoot);
   if (!create && !existsSync(path)) return null;
-  mkdirSync(dirname(path), { recursive: true });
+  // 0700, not the default 0755. The roster and its roles are not world-readable, and a
+  // group-writable .blaze/ would let any same-group local user REPLACE identity.db with
+  // one naming themselves admin — a substitution the token hashes do nothing to prevent.
+  mkdirSync(dirname(path), { recursive: true, mode: 0o700 });
+  harden(dirname(path), 0o700);
   const db = new (DatabaseSync())(path);
+  // busy_timeout, because node:sqlite defaults to 0: an authentication's last-used UPDATE
+  // collided instantly with any concurrent `blaze user add` and threw SQLITE_BUSY. Five
+  // seconds is far beyond a write this small; it waits instead of failing.
+  db.exec("PRAGMA busy_timeout = 5000;");
   db.exec("PRAGMA foreign_keys = ON;");
-  if (create) db.exec(identityDdl("sqlite"));
+  //
+  // DELIBERATELY NOT WAL, and this is not an oversight — please do not "fix" it.
+  // A WAL database cannot be opened AT ALL on a read-only filesystem: SQLite needs to
+  // write -wal/-shm to read it, so even a SELECT fails with "attempt to write a readonly
+  // database". Measured both ways against a 0444 file in a 0555 directory:
+  //     journal_mode=delete  -> SELECT ok, UPDATE refused          (what we want)
+  //     journal_mode=wal     -> OPEN/SELECT FAILS                  (board unauthenticable)
+  // `docker run -v <board>:/data:ro` is the Dockerfile's own hardened deployment, and the
+  // mode is sticky: setting WAL once on a writable board breaks every later read-only
+  // mount of it. busy_timeout already fixes the contention this was meant to address.
+  if (create) {
+    db.exec(identityDdl("sqlite"));
+    harden(path, 0o600);
+  }
   const exec = identityExec(db);
   return { db, exec, path, store: identityStore(exec, { dialect: "sqlite" }) };
 }

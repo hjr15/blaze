@@ -54,11 +54,19 @@ edit, resolve, log, acceptance-criteria toggle). Parses no CLI args.
   unchanged for every single-operator board.
 - **No users configured, bound to anything else** (`HOST=0.0.0.0`, a LAN address,
   a container) — `blaze board` **refuses to start** and tells you both fixes. It
-  is checked before the socket is opened, so nothing is served.
+  is checked before the socket is opened, so nothing is served. This is the
+  behaviour *until a first-run setup flow exists*, not a permanent design choice.
 - **One or more users** — every `/api/*` call needs
-  `Authorization: Bearer blz_…`. The token's scopes are re-intersected with its
-  owner's *current* role on every request, so demoting a user immediately narrows
-  every token they hold.
+  `Authorization: Bearer blz_…`, **and so does board content** (`GET /`,
+  `GET /view/<name>`): the page is rendered server-side and carries every ticket.
+  The token's scopes are re-intersected with its owner's *current* role on every
+  request, so demoting a user immediately narrows every token they hold.
+
+  A browser cannot set that header itself, so once a board has users its content is
+  reachable from the API, from `curl`, or behind a reverse proxy that adds the
+  header — not from a bare browser tab. The board was already unusable in a browser
+  at that point (the page rendered while every XHR returned `401`); gating `/` makes
+  that honest rather than leaky. A sign-in flow is tracked separately.
 
 An unclassified `/api/*` route returns `404`; a route added without a scope fails
 closed rather than inheriting the last one's.
@@ -352,8 +360,10 @@ scopes: read, write, admin
 Use it as:  Authorization: Bearer <token>
 ```
 
-Identities live in `<board>/.blaze/identity.db`, which is gitignored — they are
-local to the deployment, never committed with the tickets. A token's scopes can
+Identities live in `<board>/.blaze/identity.db`, mode `0600` inside a `0700`
+directory — local to the deployment, never committed with the tickets. `blaze user
+add` **adds `.blaze/` to the board's `.gitignore` if no rule already covers it**, and
+says so; if the board is not a git work tree it warns instead. A token's scopes can
 never exceed its owner's role, at issue time or at use time.
 
 ## Help

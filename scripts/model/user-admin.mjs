@@ -7,6 +7,9 @@
 //
 // `serve-auth.mjs`'s bind refusal has named this command since BLZ-304. Until now it
 // named nothing — the message was accurate about the fix and wrong about the tool.
+import { existsSync, readFileSync, appendFileSync } from "node:fs";
+import { join } from "node:path";
+import { spawnSync } from "node:child_process";
 import { ROLES, ROLE_SCOPES } from "./identity-schema.mjs";
 import { openIdentityDb } from "./identity-db.mjs";
 
@@ -65,4 +68,39 @@ export async function addUser(dataRoot, { email, role = "member", displayName = 
   } finally {
     try { opened.db.close(); } catch { /* already closed */ }
   }
+}
+
+/**
+ * Make sure `.blaze/` is actually ignored before an identity database lands in it.
+ *
+ * `blaze init` appends this rule, so a board it created is already covered — but a board
+ * that predates it, or one assembled by hand, is not, and `blaze user add` would leave
+ * the identity database one `git add -A` from being committed. "It is gitignored" was a
+ * conditional claim stated as an unconditional one.
+ *
+ * Asked of git rather than by reading .gitignore: the rule can legitimately live in a
+ * parent .gitignore, in .git/info/exclude, or in the user's global excludesFile, and
+ * appending a duplicate in those cases would be noise.
+ *
+ * @returns { state, path } — 'already' | 'added' | 'not-a-repo' | 'unavailable'
+ */
+export function ensureIdentityIgnored(dataRoot) {
+  const gitignore = join(dataRoot, ".gitignore");
+  const git = (...args) => spawnSync("git", ["-C", dataRoot, ...args], { encoding: "utf8" });
+
+  const inside = git("rev-parse", "--is-inside-work-tree");
+  if (inside.error) return { state: "unavailable", path: gitignore };
+  if (inside.status !== 0 || inside.stdout.trim() !== "true") {
+    return { state: "not-a-repo", path: gitignore };
+  }
+  // --no-index: the path need not exist yet, and check-ignore is the only thing that
+  // knows about every source of ignore rules.
+  if (git("check-ignore", "--no-index", "-q", ".blaze/identity.db").status === 0) {
+    return { state: "already", path: gitignore };
+  }
+  const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
+  const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+  appendFileSync(gitignore,
+    `${prefix}\n# Blaze runtime state, including identity.db — never commit credentials\n.blaze/\n`);
+  return { state: "added", path: gitignore };
 }

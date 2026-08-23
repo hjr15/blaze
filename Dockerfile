@@ -37,6 +37,16 @@ ENV BLAZE_PROJECTS_DIR=/data/projects
 # `-p` alone is NOT a credential and never was; it is a routing decision made by
 # whoever runs the container, and a wrong one is silent. See docs/architecture.md
 # — HTTP surface.
+#
+# THIS REFUSAL IS CURRENT BEHAVIOUR, NOT THE PERMANENT DESIGN. It is correct while
+# the only way to create the first user is a CLI command run against the data repo.
+# A first-run setup flow that asks for the initial sysadmin account is tracked
+# separately and will REPLACE this refusal rather than patch it.
+#
+# A read-only data mount is supported and encouraged for a read-only board:
+#   docker run -v <data-repo>:/data:ro -p 4321:4321 <image>
+# Authentication works there — the last-used token stamp is best-effort and a
+# failure to write it never fails a request, let alone the process.
 ENV HOST=0.0.0.0
 # node:alpine ships a uid-1000 `node` user; match the laptop owner so the
 # bind-mounted .git/projects are writable and git raises no dubious-ownership.

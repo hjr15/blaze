@@ -9,12 +9,12 @@
 // nobody can run is worse than no message.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, existsSync } from "node:fs";
+import { mkdtempSync, existsSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
-import { addUser, parseUserArgv } from "../scripts/model/user-admin.mjs";
+import { execFileSync, spawnSync } from "node:child_process";
+import { addUser, parseUserArgv, ensureIdentityIgnored } from "../scripts/model/user-admin.mjs";
 import { identityDbPath, loadIdentity } from "../scripts/model/identity-db.mjs";
 import { TOKEN_PREFIX } from "../scripts/model/identity.mjs";
 
@@ -115,5 +115,59 @@ describe("the CLI verb the refusal message names", () => {
   test("`blaze user --help` describes the verb", () => {
     const out = execFileSync(process.execPath, [CLI, "user", "--help"], { encoding: "utf8" });
     assert.match(out, /usage: blaze user/);
+  });
+});
+
+describe("W5: the identity database must never become committable", () => {
+  // The PR claimed identities are "gitignored". That was conditional and stated
+  // unconditionally: `blaze init` appends `.blaze/`, but a board not created by it has
+  // no such rule, and a review board showed `?? .blaze/` after `blaze user add` — one
+  // `git add -A` from committing the roster and its token hashes.
+  const gitBoard = () => {
+    const root = boardRoot();
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    return root;
+  };
+
+  test("a board with no rule gets one, and the database is then invisible to git", () => {
+    const root = gitBoard();
+    const r = ensureIdentityIgnored(root);
+    assert.equal(r.state, "added");
+    assert.match(readFileSync(join(root, ".gitignore"), "utf8"), /^\.blaze\/$/m);
+  });
+
+  test("`blaze user add` leaves nothing untracked behind it", () => {
+    const root = gitBoard();
+    execFileSync(process.execPath, [CLI, "user", "add", "--email", "g@example.com", "--role", "admin"],
+      { encoding: "utf8", env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") } });
+    const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
+    assert.doesNotMatch(status, /\.blaze/,
+      `the identity database must not be stageable:\n${status}`);
+    assert.equal(
+      execFileSync("git", ["-C", root, "check-ignore", "--no-index", "-q", ".blaze/identity.db"],
+        { encoding: "utf8", stdio: "pipe" }), "");
+  });
+
+  test("an existing rule is respected rather than duplicated", () => {
+    const root = gitBoard();
+    writeFileSync(join(root, ".gitignore"), ".blaze/\n");
+    assert.equal(ensureIdentityIgnored(root).state, "already");
+    assert.equal(readFileSync(join(root, ".gitignore"), "utf8").match(/\.blaze\//g).length, 1);
+  });
+
+  test("a board that is not a git work tree is reported, not silently ignored", () => {
+    assert.equal(ensureIdentityIgnored(boardRoot()).state, "not-a-repo");
+  });
+
+  test("...and `blaze user add` warns loudly there", () => {
+    const root = boardRoot();
+    const r = spawnSync(process.execPath,
+      [CLI, "user", "add", "--email", "w@example.com", "--role", "admin"],
+      { encoding: "utf8", env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") } });
+    assert.equal(r.status, 0);
+    assert.match(r.stderr, /WARNING/);
+    assert.match(r.stderr, /NOT covered by a gitignore rule/);
   });
 });

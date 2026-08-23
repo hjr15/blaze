@@ -5,7 +5,7 @@
 // argument parsing and the creation itself live in model/user-admin.mjs, where they are
 // covered; this owns only the process — stdout, stderr and the exit code.
 import { resolveRoots } from "./config.mjs";
-import { parseUserArgv, addUser } from "./model/user-admin.mjs";
+import { parseUserArgv, addUser, ensureIdentityIgnored } from "./model/user-admin.mjs";
 import { ROLES } from "./model/identity-schema.mjs";
 import { identityDbPath } from "./model/identity-db.mjs";
 
@@ -40,6 +40,18 @@ try {
   });
   console.log(`user ${user.email} created with role ${user.role}`);
   console.log(`identities: ${identityDbPath(dataRoot)}`);
+  // The identity database must never be committable. Reported, never silent — this
+  // writes to the operator's .gitignore, and a change to their repo they did not ask
+  // for is a change they have to be told about.
+  const ignored = ensureIdentityIgnored(dataRoot);
+  if (ignored.state === "added") {
+    console.log(`note: added '.blaze/' to ${ignored.path} so this is never committed`);
+  } else if (ignored.state === "not-a-repo" || ignored.state === "unavailable") {
+    console.warn("");
+    console.warn(`WARNING: ${identityDbPath(dataRoot)} is NOT covered by a gitignore rule`);
+    console.warn("         (this board is not a git work tree, so none could be added).");
+    console.warn("         Do not commit it — it holds your user roster and token hashes.");
+  }
   console.log("");
   console.log("API token (shown once — copy it now, it is not recoverable):");
   console.log("");

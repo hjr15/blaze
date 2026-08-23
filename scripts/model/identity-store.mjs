@@ -143,7 +143,19 @@ export function identityStore(exec, { dialect = "sqlite", now = () => new Date()
 
     const found = await api.lookupByHash(hashToken(raw));
     const result = verify({ presented: raw, operation, lookup: () => found });
-    if (result.ok) await api.touchToken(result.principal.tokenId);
+    // A LAST-USED STAMP MUST NEVER FAIL THE REQUEST THAT EARNED IT. This is the only
+    // write on the authentication path, and it is pure telemetry: the caller has already
+    // been verified, and `last_used_at` informs nothing that decides access.
+    //
+    // Unguarded it took the whole board process down. `authenticate` is awaited at the
+    // top of an async HTTP handler, so this rejection was unhandled and Node exited —
+    // remotely triggerable by any authenticated read whenever identity.db could not be
+    // written: a `-v <board>:/data:ro` mount (the Dockerfile's own hardened deployment),
+    // or a concurrent `blaze user add` holding the write lock.
+    if (result.ok) {
+      try { await api.touchToken(result.principal.tokenId); }
+      catch { /* telemetry only — an unstampable token is still a valid one */ }
+    }
     return result;
   };
 

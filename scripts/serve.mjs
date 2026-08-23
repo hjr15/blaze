@@ -25,7 +25,7 @@ import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
-import { checkBindSafety, gate } from "./model/serve-auth.mjs";
+import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { actorFor } from "./model/identity.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
@@ -115,10 +115,39 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // is a 404 here rather than falling through to whichever handler happens to match
     // later — a route added without a scope must not inherit the last one's.
     let principal = null;
-    if (u.pathname.startsWith("/api/")) {
-      const decision = await gate({ method: req.method, pathname: u.pathname,
-                                    headers: req.headers, store });
-      if (!decision.ok) return json(decision.status, { errors: [decision.error] });
+    // Board CONTENT is gated too, at `read`. `/` is rendered SERVER-SIDE and carries
+    // every ticket, so leaving it open made `viewer` a role that protected nothing: a
+    // caller with no credential could read the whole board — and the CSRF token with it
+    // — while /api/live correctly 401'd beside it.
+    const apiRoute = u.pathname.startsWith("/api/");
+    const pageScope = apiRoute ? null : pageScopeFor(req.method, u.pathname);
+    if (apiRoute || pageScope) {
+      let decision;
+      try {
+        decision = await gate({ method: req.method, pathname: u.pathname,
+                                headers: req.headers, store, operation: pageScope ?? undefined });
+      } catch {
+        // THE GATE COULD NOT DECIDE, so the answer is no. Never rethrow: this handler has
+        // no wrapping try/catch, and an uncaught throw here ends the process for every
+        // connected session rather than refusing one request — which is exactly what a
+        // read-only or locked identity.db used to do. 503, because the caller may well be
+        // entitled and should retry, and it is the operator's database that is unwell.
+        return json(503, { errors: ["authentication is temporarily unavailable"] });
+      }
+      if (!decision.ok) {
+        // A page route answers in prose. It is reached by a browser, and a JSON envelope
+        // there tells a human nothing about what to do next.
+        if (pageScope) {
+          res.writeHead(decision.status, { "content-type": "text/plain; charset=utf-8" });
+          res.end(`${decision.error}\n\nThis board has users configured, so its content `
+            + "requires a token:\n\n    Authorization: Bearer blz_...\n\n"
+            + "Issue one with `blaze user add`. A browser cannot set that header itself — "
+            + "put a\nreverse proxy in front that adds it, or use the API directly, until "
+            + "the sign-in\nflow lands.\n");
+          return;
+        }
+        return json(decision.status, { errors: [decision.error] });
+      }
       principal = decision.principal;
     }
     // ADR-0013 §6: the name the event log records for this caller. "unknown" when there
