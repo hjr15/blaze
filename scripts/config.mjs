@@ -20,7 +20,21 @@ const DEFAULTS = {
   commitMode: "per-op",
   loops: {
     reconcile: { enabled: true, intervalSec: 60 },
-    groomer: { enabled: true, intervalSec: 300, columns: ["backlog"] },
+    // BLZ-347 — the groomer ships DISABLED, deliberately. It was `enabled: true`, and the
+    // supervisor auto-starts every enabled loop, so every default install spawned the
+    // configured `agentCommand` with the full inherited environment every 300s without the
+    // operator ever asking for it. Containment (groomer.mjs) now detects and reverts
+    // out-of-bounds writes, but detection is after the fact and cannot see a network call
+    // or a process that outlives the pass — and `spawnSync` still blocks the supervisor's
+    // HTTP server for the duration of every run. Launching an arbitrary agent CLI on a
+    // timer is an opt-in, not a default. Turn it on with
+    // `"loops": { "groomer": { "enabled": true } }`.
+    // timeoutSec/maxBufferMb bound that subprocess: no unbounded run, and no silent kill
+    // at Node's 1 MB stdout default misreported as a generic non-zero exit.
+    groomer: {
+      enabled: false, intervalSec: 300, columns: ["backlog"],
+      timeoutSec: 900, maxBufferMb: 16,
+    },
   },
   views: { board: true, list: true, live: true, metrics: true, map: true, gantt: true },
 };

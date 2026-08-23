@@ -134,10 +134,24 @@ and the agent prompt share a source):
    (`git revert` of that commit).
 
 **Autonomy & safety:** auto-commit, review via git — the same posture reconcile
-already uses for moves. Bounded by construction: the groomer only ever touches ticket
-`.md` files in the board repo (never the code repo, never code), each change is its
-own small revertable commit, and config scopes which columns it grooms and how often.
-A `groomer.enabled: false` switch turns it off entirely.
+already uses for moves. Each change is its own small revertable commit, and config
+scopes which columns it grooms and how often.
+
+Containment is **detected, not prevented** — say it that way, because the earlier wording
+here ("bounded by construction") claimed a boundary that did not exist
+([ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md), BLZ-347).
+Blaze runs whatever `agentCommand` names; it cannot stop that process writing anywhere the
+operator's own account can write. What it does do is survey the **whole** working tree
+after every pass and, if the agent touched anything outside the groomable status
+directories, revert the entire pass and report `refused` rather than commit it —
+`blaze.config.json` included, snapshot byte-for-byte outside git so a gitignored config is
+still covered. A network call, a write outside the data root, or a process that outlives
+the pass is beyond what a diff can see.
+
+For that reason **the groomer ships `enabled: false`.** Turn it on deliberately, per board.
+The subprocess is bounded by `timeoutSec` (default 900) and `maxBufferMb` (default 16);
+note that `spawnSync` blocks the supervisor's HTTP server for the whole run, so an agent
+run is a board outage for its duration, capped by that timeout.
 
 ## Configuration — `blaze.config.json`
 
@@ -154,7 +168,8 @@ A `groomer.enabled: false` switch turns it off entirely.
   "agentCommand": "claude -p",
   "loops": {
     "reconcile": { "enabled": true, "intervalSec": 60 },
-    "groomer":   { "enabled": true, "intervalSec": 300, "columns": ["backlog"] }
+    "groomer":   { "enabled": false, "intervalSec": 300, "columns": ["backlog"],
+                   "timeoutSec": 900, "maxBufferMb": 16 }
   }
 }
 ```
@@ -169,7 +184,7 @@ A `groomer.enabled: false` switch turns it off entirely.
 | `defaultLabels` | Label taxonomy (docs + groomer prompt + scaffolder) | generic set |
 | `port` | Web app port | `4321` |
 | `agentCommand` | Command the groomer spawns (the prompt is appended) | `"claude -p"` |
-| `loops` | Per-loop enable / cadence / groomed columns | shown above |
+| `loops` | Per-loop enable / cadence / groomed columns; the groomer also takes `timeoutSec` and `maxBufferMb` for its subprocess. **The groomer ships disabled** — see [ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md) | shown above |
 
 `scripts/config.mjs` loads this with defaults + env overrides (`BLAZE_CODE_REPO`,
 `BLAZE_KEY`, `BLAZE_PORT`, `BLAZE_AGENT_COMMAND`), and exports the key→regex derivation
