@@ -1,0 +1,6 @@
+{
+  "key": "FIX",
+  "projects": ["FIX"],
+  "schemaVersion": 2,
+  "provider": "github"
+}

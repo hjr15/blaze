@@ -1,0 +1,42 @@
+name: board-gate
+
+# BLZ-351: before this workflow, .github/workflows/ had no reference to a board
+# checkout of any kind, and the board repo (blaze-pm) has no CI of its own — so a
+# config-schema change in this engine (ADR-0002, scripts/model/schema-version.mjs)
+# could ship and break every existing board with nothing catching it until a human
+# ran a command by hand. That happened live: `blaze reconcile` started exiting 1 on
+# the operator's real board over its stale `provider` key, and nothing was watching.
+#
+# The real board repo is private and separate — wiring it into this repo's CI would
+# need a token and couple the two repos. Instead this job runs the real `blaze` CLI
+# against a synthetic fixture board committed here (tests/fixtures/board-gate-*):
+# self-contained, no credentials, runs on every PR. tests/board-gate.test.mjs proves
+# the gate discriminates in BOTH directions — a good fixture board passes, and a
+# fixture board carrying a removed config key (`provider`) or an out-of-window
+# `schemaVersion` fails loud — so this is never a gate that only ever goes green.
+on:
+  pull_request:
+
+jobs:
+  board-gate:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: blaze audit — good fixture board must load and pass
+        run: node scripts/audit-runner.mjs tests/fixtures/board-gate-good/projects
+
+      - name: blaze reconcile --dry-run — good fixture board must load and pass
+        run: node scripts/reconcile.mjs
+        env:
+          BLAZE_PROJECTS_DIR: tests/fixtures/board-gate-good/projects
+
+      - name: Prove the gate discriminates (good passes; removed-key / bad-schemaVersion fail loud)
+        run: node --test tests/board-gate.test.mjs
