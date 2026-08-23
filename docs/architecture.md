@@ -115,36 +115,55 @@ flowchart TB
 
 ## HTTP surface
 
-The board serves a small JSON API. **Every `/api/*` request `blaze board` serves passes
-through `model/serve-auth.mjs`'s `gate()`**, which classifies the route and decides it;
-an `/api/*` route with no classification is a `404`, so an endpoint added without a
-scope fails closed rather than inheriting the previous one's. Board content — `GET /`
-and `GET /view/<name>` — is gated at `read`, because the page is rendered server-side
-and carries every ticket.
+Blaze runs **two HTTP servers**, and the claim below is true of both. `blaze board`
+serves `serve.mjs`; `blaze start` — and bare `blaze`, the default command — serves
+`supervisor.mjs`, which is the board plus a control strip and an activity stream.
 
-> **Scope of that claim.** It covers `serve.mjs`, the board server. `blaze start`
-> (`supervisor.mjs`) runs a **second, separate HTTP server** on `127.0.0.1` that imports
-> neither `gate` nor `checkBindSafety`, and its `/control/*` routes — including
-> `/control/revert`, which shells out to `git revert` — take no token and no CSRF
-> header. That is pre-existing and loopback-only, not introduced or fixed here; it is
-> tracked separately.
+**Every request either server answers under `/api/*`, `/control/*`, `/events`, `/` or
+`/view/<name>` passes through `model/serve-auth.mjs`'s `gate()`**, which classifies the
+route and decides it. An `/api/*` or `/control/*` route with no classification is a
+`404`, so an endpoint added without a scope fails closed rather than inheriting the
+previous one's. Board content — `GET /` and `GET /view/<name>` — is gated at `read` on
+both servers, because the page is rendered server-side and carries every ticket.
+
+> **The two servers differ in what they bind, not in whether they gate.** `serve.mjs`
+> honours `HOST` and therefore consults `checkBindSafety` on a value an operator chose.
+> `supervisor.mjs` is **loopback-by-construction**: it does not read `HOST`, binds
+> `127.0.0.1`, and nothing widens it — `/control/revert` shells out to `git revert` and
+> `/control/groomer/run` dispatches the configured agent, and neither belongs on an
+> interface reachable from off the machine even with a token. `checkBindSafety` is still
+> called there, on `startSupervisor`'s `host` argument, and both halves are pinned by
+> test (`tests/supervisor-bind.test.mjs`) so a later edit cannot quietly widen the bind.
 
 **Who may call it depends on whether the board has any identities** (ADR-0013):
 
 | Identities | Bind address | Behaviour |
 |---|---|---|
-| none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary |
+| none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary. This is `blaze start`'s only case, since it binds nothing else |
 | none | anything else | **`blaze board` refuses to start**, naming both fixes. `checkBindSafety` is called before `.listen()`, so nothing is ever served. This is the behaviour *until a first-run setup flow exists*, not a permanent design choice |
-| one or more | any | Every `/api/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
-| **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **`blaze board` refuses to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
+| one or more | any | Every `/api/*` and `/control/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
+| **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **Both servers refuse to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
 
 Create the first identity — which turns authentication on — with
 [`blaze user add`](guide/commands.md#user).
 
-The `x-blaze-csrf` header is **not** authentication and never was: it is a
-per-process `randomUUID()` embedded in the served HTML, readable by anyone who can
+**Both servers read the roster once, at boot.** `startServer()` and `createApp()` each
+resolve `loadIdentity()` a single time, so adding the first user to a board that is
+ALREADY SERVING does not turn authentication on for that process — it keeps serving
+unauthenticated until it is restarted. That is the same on both, and `blaze user add`
+says so in its output. Re-reading the roster per request would fix it for real and is
+tracked separately; doing it on one server and not the other would replace one rule an
+operator has to know with two.
+
+The `x-blaze-csrf` header is **not** authentication and never was — on either server: it
+is a per-process `randomUUID()` embedded in the served HTML, readable by anyone who can
 `GET /`. It is forgery protection for the browser flow, retained as defence-in-depth
-alongside the gate, and removed with the last cookie (ADR-0013 §7).
+alongside the gate, and removed with the last cookie (ADR-0013 §7). `supervisor.mjs`
+requires it on every `/control/*` POST for one reason the board server does not share:
+on a loopback board with no users the gate has no credential to demand, and a page in
+the operator's own browser can POST cross-origin to `http://localhost:<port>/control/revert`
+as a "simple request" — no preflight, response unreadable, side effect done. A token
+cannot refuse that request and this does; it is still not a credential.
 
 Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member** =
 `read, write`, **admin** = `read, write, admin`.
@@ -164,12 +183,24 @@ Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member
 | POST | `/api/field` | `admin` | Defining a filterable field emits `ALTER TABLE` and spends the install-wide field budget ADR-0018 shares across every project — an administrative act, not an ordinary write |
 | *anything else under* `/api/` | — | **`404 unknown endpoint`** — unclassified is denied |
 
+`blaze start` (`supervisor.mjs`) serves the rows above that exist on it — `/`,
+`/view/<name>`, `/api/hash`, `/api/sync` — at the same scopes, plus these of its own:
+
+| Method | Route | Scope | Purpose |
+|---|---|---|---|
+| GET | `/events` | `read` | Server-sent activity stream — it names ticket ids and commit shas |
+| POST | `/control/{reconcile,groomer}/{start,stop,run}` | `write` | Start, stop or fire one pass of a loop. `groomer/run` is the **agent-dispatch** endpoint; `reconcile/run` commits and pushes. None of them is a read — `start`/`stop` decide whether the other two happen at all |
+| POST | `/control/revert` | `write` | `git revert --no-edit <sha>` on the board repo, for the ↩ button on a groom event |
+| *anything else under* `/control/` | — | **`404 unknown endpoint`** — unclassified is denied |
+
 `ROUTE_SCOPES` in `scripts/model/serve-auth.mjs` is the single source of the `/api/*`
-rows; `pageScopeFor()` beside it owns the two content rows. An `/api/*` route absent
-from `ROUTE_SCOPES` cannot be called through `serve.mjs` at all. An unknown *page* path
-is still a plain `404` rather than an auth decision — the page router is not a fixed
-table, and turning every typo into a `401` would both change long-standing behaviour and
-leak whether a path exists.
+rows; `pageScopeFor()` beside it owns the two content rows; `SUPERVISOR_SCOPES` in
+`scripts/supervisor.mjs` owns the supervisor-only rows. The first two are shared by both
+servers, so the routes they have in common cannot drift apart. An `/api/*` route absent
+from `ROUTE_SCOPES`, or a `/control/*` route absent from `SUPERVISOR_SCOPES`, cannot be
+called at all. An unknown *page* path is still a plain `404` rather than an auth decision
+— the page router is not a fixed table, and turning every typo into a `401` would both
+change long-standing behaviour and leak whether a path exists.
 
 **A browser cannot set an `Authorization` header itself.** Once a board has users, its
 content is reachable from the API, from `curl`, or through a reverse proxy that adds the

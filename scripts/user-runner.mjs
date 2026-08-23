@@ -16,7 +16,8 @@ const USAGE = [
   "",
   "Creates the user and issues its first API token. The token is printed ONCE and",
   "stored only as a SHA-256 hash — it cannot be read back. Adding the first user",
-  "turns authentication on for this board.",
+  "turns authentication on for this board — for servers started AFTER this command.",
+  "A running `blaze board` or `blaze start` read the roster once, at boot; restart it.",
 ].join("\n");
 
 const argv = process.argv.slice(2);
@@ -59,6 +60,13 @@ try {
   console.log("");
   console.log(`scopes: ${token.scopes.join(", ")}`);
   console.log("Use it as:  Authorization: Bearer <token>");
+  // BLZ-359. Both servers read the roster ONCE, at boot (serve.mjs:startServer and
+  // supervisor.mjs:createApp), so an operator who adds the first user to a board that is
+  // already serving gets a board that is still open and no indication of it. Said here
+  // because this is the moment they believe they have just turned authentication on.
+  console.log("");
+  console.log("NOTE: a server that is ALREADY RUNNING does not pick this up — it read the");
+  console.log("      roster at boot. Restart `blaze board` / `blaze start` to apply it.");
 } catch (e) {
   console.error(`blaze: ${e.message}`);
   process.exit(1);
