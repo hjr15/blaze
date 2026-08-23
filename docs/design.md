@@ -148,7 +148,7 @@ The guard is **advisory, not a boundary** — say it that way, because earlier w
 ("bounded by construction") and in the first draft of ADR-0019 ("detected, not prevented")
 both claimed more than the code delivers. A security review defeated the detect-and-revert
 version three ways with live repros
-([ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md), BLZ-347).
+([ADR-0019](decisions/0019-the-groomers-guard-is-advisory.md), BLZ-347).
 
 What actually contains the agent is: the loop shipping **`enabled: false`**, the operator's
 decision to turn it on, and the permission posture of whatever `agentCommand` names. Blaze
@@ -198,7 +198,7 @@ board outage for its duration, capped by that timeout.
 | `defaultLabels` | Label taxonomy (docs + groomer prompt + scaffolder) | generic set |
 | `port` | Web app port | `4321` |
 | `agentCommand` | Command the groomer spawns (the prompt is appended) | `"claude -p"` |
-| `loops` | Per-loop enable / cadence / groomed columns; the groomer also takes `timeoutSec` and `maxBufferMb` for its subprocess. **The groomer ships disabled** — see [ADR-0019](decisions/0019-groomer-containment-is-a-full-tree-diff-check.md) | shown above |
+| `loops` | Per-loop enable / cadence / groomed columns; the groomer also takes `timeoutSec` and `maxBufferMb` for its subprocess. **The groomer ships disabled** — see [ADR-0019](decisions/0019-the-groomers-guard-is-advisory.md) | shown above |
 
 `scripts/config.mjs` loads this with defaults + env overrides (`BLAZE_CODE_REPO`,
 `BLAZE_KEY`, `BLAZE_PORT`, `BLAZE_AGENT_COMMAND`), and exports the key→regex derivation
