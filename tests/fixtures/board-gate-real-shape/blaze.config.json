@@ -1,0 +1,234 @@
+{
+  "projects": [
+    "ACA",
+    "BLZ",
+    "CRP",
+    "FL",
+    "INF",
+    "KPA",
+    "NCA",
+    "OBA",
+    "OMA",
+    "SN",
+    "STA"
+  ],
+  "boardTitle": "Blaze-PM",
+  "codeRepos": [],
+  "commitMode": "batch",
+  "defaultLabels": [
+    "frontend",
+    "backend",
+    "infra",
+    "docs"
+  ],
+  "port": 4321,
+  "agentCommand": "claude -p",
+  "views": {
+    "map": true,
+    "live": false
+  },
+  "loops": {
+    "reconcile": {
+      "enabled": false,
+      "intervalSec": 60
+    },
+    "groomer": {
+      "enabled": false,
+      "intervalSec": 300,
+      "columns": [
+        "defined"
+      ]
+    }
+  },
+  "schema": {
+    "types": {
+      "requirement": {
+        "level": 3,
+        "workflow": "requirement",
+        "parentTypes": [
+          "goal"
+        ],
+        "required": [
+          "title",
+          "description"
+        ]
+      },
+      "architecture": {
+        "level": 2,
+        "workflow": "architecture",
+        "parentTypes": [
+          "requirement",
+          "goal"
+        ],
+        "required": [
+          "title",
+          "description"
+        ]
+      },
+      "feature": {
+        "level": 1,
+        "workflow": "delivery",
+        "parentTypes": [
+          "architecture",
+          "requirement",
+          "goal"
+        ],
+        "required": [
+          "title",
+          "description"
+        ]
+      },
+      "goal": {
+        "level": 4,
+        "workflow": "goal",
+        "parentTypes": [],
+        "required": [
+          "title",
+          "description"
+        ]
+      },
+      "epic": {
+        "level": 1,
+        "workflow": "delivery",
+        "parentTypes": [],
+        "required": [
+          "title",
+          "description"
+        ]
+      },
+      "risk": {
+        "level": 1,
+        "workflow": "risk",
+        "parentTypes": [
+          "goal",
+          "requirement",
+          "architecture",
+          "feature"
+        ],
+        "required": [
+          "title",
+          "description",
+          "likelihood",
+          "impact"
+        ]
+      },
+      "story": {
+        "level": 0,
+        "workflow": "delivery",
+        "parentTypes": [
+          "requirement",
+          "feature"
+        ],
+        "required": [
+          "title",
+          "description",
+          "estimate"
+        ]
+      },
+      "task": {
+        "level": 0,
+        "workflow": "delivery",
+        "parentTypes": [
+          "feature",
+          "story"
+        ],
+        "required": [
+          "title",
+          "description",
+          "estimate"
+        ]
+      },
+      "bug": {
+        "level": 0,
+        "workflow": "delivery",
+        "parentTypes": [
+          "feature",
+          "story"
+        ],
+        "required": [
+          "title",
+          "description",
+          "estimate"
+        ]
+      },
+      "subtask": {
+        "level": -1,
+        "workflow": "delivery",
+        "parentTypes": [
+          "story",
+          "task",
+          "bug"
+        ],
+        "required": [
+          "title",
+          "description"
+        ]
+      }
+    },
+    "workflows": {
+      "requirement": {
+        "statuses": [
+          "proposed",
+          "implemented",
+          "rejected",
+          "obsolete"
+        ],
+        "terminal": [
+          "implemented",
+          "rejected",
+          "obsolete"
+        ],
+        "transitions": [
+          [
+            "proposed",
+            "implemented"
+          ],
+          [
+            "proposed",
+            "rejected"
+          ],
+          [
+            "proposed",
+            "obsolete"
+          ],
+          [
+            "implemented",
+            "obsolete"
+          ]
+        ],
+        "reopenTo": "proposed",
+        "resolutionOnTerminal": {
+          "implemented": "done",
+          "rejected": "wont-do",
+          "obsolete": "wont-do"
+        }
+      },
+      "architecture": {
+        "statuses": [
+          "proposed",
+          "accepted",
+          "rejected"
+        ],
+        "terminal": [
+          "accepted",
+          "rejected"
+        ],
+        "transitions": [
+          [
+            "proposed",
+            "accepted"
+          ],
+          [
+            "proposed",
+            "rejected"
+          ]
+        ],
+        "reopenTo": "proposed",
+        "resolutionOnTerminal": {
+          "accepted": "done",
+          "rejected": "wont-do"
+        }
+      }
+    }
+  }
+}
