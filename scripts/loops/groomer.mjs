@@ -405,6 +405,18 @@ export function diffSnapshots(before, after) {
   return [...new Set(out)].sort();
 }
 
+/**
+ * `git status --porcelain` as a set of lines. Never parsed into paths — BLZ-347 deleted
+ * that parser — only compared against a baseline to answer "is there dirt that was not
+ * here before this pass".
+ */
+export function porcelainLines(root) {
+  try {
+    return git(root, ["status", "--porcelain", "--untracked-files=all"])
+      .split("\n").map((l) => l.trimEnd()).filter(Boolean);
+  } catch { return []; }
+}
+
 export function commitMessage(id, files) {
   return `chore(groom): ${id} ${files.length} file(s) groomed`;
 }
@@ -539,6 +551,21 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   const maxBufferMb = Number(gcfg.maxBufferMb ?? DEFAULT_MAX_BUFFER_MB);
 
   const before = snapshotTree(root);
+  // BLZ-347 review round 3 — a BASELINE, captured before the agent runs.
+  //
+  // The revert check used to test `porcelain` for any content at all. That fires on an
+  // operator's ordinary uncommitted work, so every refusal on a working board reported
+  // `revertFailed: true` alongside `residual: []` — the event simultaneously claiming the
+  // revert failed and that nothing was left behind — and the console line printed the
+  // operator's own files as "still dirty". An alarm that cannot tell a real revert failure
+  // from someone's WIP is an alarm that gets ignored, which is the same failure mode as B2.
+  //
+  // Kept rather than dropped, because it observes something `residual` structurally
+  // cannot: `residual` is a CONTENT diff and never looks at the index. An agent that
+  // stages a change and then restores the file's bytes leaves before==after content, so
+  // the path never enters `touched` and never reaches restoreSnapshot, while the index
+  // still diverges from HEAD. Only git sees that.
+  const porcelainBaseline = new Set(porcelainLines(root));
 
   const r = spawnSync(cmd, [...args, prompt], {
     cwd: root,
@@ -564,27 +591,55 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
     .concat(touched.filter((f) => (after.entries.get(f) || {}).t === "l"));
   const strayPaths = [...new Set(stray)].sort();
   const changed = touched.filter((f) => !strayPaths.includes(f));
-  const surveyIncomplete = before.truncated || after.truncated
-    || before.unreadable.length > 0 || after.unreadable.length > 0;
+  // BLZ-347 review round 3 — deliberately NOT baselined, unlike the porcelain check above.
+  // A blind spot in the survey is a blind spot whoever caused it: if a directory cannot be
+  // read, the guard genuinely did not observe that part of the tree this pass, and saying
+  // so is a true statement rather than a false alarm. What it must not be is an
+  // unactionable boolean an operator learns to ignore, so it names the gap.
+  // `degraded` was previously computed and silently dropped.
+  const surveyGaps = {
+    truncated: before.truncated || after.truncated,
+    degraded: before.degraded || after.degraded,
+    unreadable: [...new Set([...before.unreadable, ...after.unreadable])].slice(0, 20),
+  };
+  //
+  // Two different failures, deliberately reported as two different flags rather than
+  // conflated under one. `truncated`/`unreadable` are DETECTION gaps — a region of the
+  // tree the guard did not observe at all, which is what every containment claim rests on.
+  // `degraded` is a REMEDIATION gap — the region was observed and any change to it WILL be
+  // detected, but the snapshot holds no bytes for it (over the size cap), so reverting it
+  // falls back to `git checkout` and an untracked file there could not be restored at all.
+  // An operator seeing one flag for both would read a large attachment on the board as a
+  // hole in detection, which it is not.
+  const surveyIncomplete = surveyGaps.truncated || surveyGaps.unreadable.length > 0;
+  const stampSurvey = (evt) => {
+    if (surveyIncomplete) evt.surveyIncomplete = true;
+    if (surveyGaps.degraded) evt.restoreDegraded = true;
+    if (surveyIncomplete || surveyGaps.degraded) evt.surveyGaps = surveyGaps;
+    return evt;
+  };
 
   const refuse = (reason, extra) => {
     const { failures } = restoreSnapshot(root, before, touched);
     // Verify by RE-OBSERVING, not by trusting the commands above. An unverified revert is
     // what let a payload survive a `refused: true` event.
     const residual = diffSnapshots(before, snapshotTree(root));
-    let porcelain = "";
-    try { porcelain = git(root, ["status", "--porcelain", "--untracked-files=all"]).trim(); } catch {}
+    // Only dirt this pass introduced counts. Anything already in the baseline is the
+    // operator's, and is none of the groomer's business.
+    const newDirt = porcelainLines(root).filter((l) => !porcelainBaseline.has(l));
     const evt = {
       type: "groom", id: ticket.id, refused: true, reason,
       outOfBounds: strayPaths, ts: today, ...extra,
     };
-    if (residual.length || porcelain || failures.length) {
+    if (residual.length || newDirt.length || failures.length) {
       evt.revertFailed = true;
       evt.residual = residual;
+      if (newDirt.length) evt.newDirt = newDirt;
       if (failures.length) evt.revertErrors = failures.map((f) => redactSecrets(f).slice(0, 200));
-      console.error(`groomer: REVERT INCOMPLETE on ${ticket.id}; still dirty: ${residual.join(", ") || porcelain}`);
+      console.error(`groomer: REVERT INCOMPLETE on ${ticket.id}; still dirty: `
+        + `${[...residual, ...newDirt].join(", ")}`);
     }
-    if (surveyIncomplete) evt.surveyIncomplete = true;
+    stampSurvey(evt);
     console.error(`groomer: refused (${reason}) on ${ticket.id}: ${strayPaths.join(", ")}`);
     return evt;
   };
@@ -602,8 +657,7 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
     // Redact BEFORE truncating: slicing first can leave a half-key in the transcript.
     const evt = { type: "groom", id: ticket.id, error: redactSecrets(raw).slice(0, 200), ts: today };
     if (timedOut) evt.timedOut = true;
-    if (surveyIncomplete) evt.surveyIncomplete = true;
-    return evt;
+    return stampSurvey(evt);
   }
 
   const record = () => {
@@ -614,9 +668,7 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
 
   if (!changed.length) {
     record(); // mark groomed so we don't re-run on a no-op
-    const evt = { type: "groom", id: ticket.id, noop: true, ts: today };
-    if (surveyIncomplete) evt.surveyIncomplete = true;
-    return evt;
+    return stampSurvey({ type: "groom", id: ticket.id, noop: true, ts: today });
   }
 
   // Content lint on the groomed ticket itself: structural frontmatter fields must only be
@@ -629,9 +681,7 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   git(root, ["commit", "-m", commitMessage(ticket.id, changed), "--", ...changed]);
   const sha = git(root, ["rev-parse", "HEAD"]).trim();
   record();
-  const evt = { type: "groom", id: ticket.id, sha, files: changed, ts: today };
-  if (surveyIncomplete) evt.surveyIncomplete = true;
-  return evt;
+  return stampSurvey({ type: "groom", id: ticket.id, sha, files: changed, ts: today });
 }
 
 // CLI: `node scripts/loops/groomer.mjs` runs one grooming pass.

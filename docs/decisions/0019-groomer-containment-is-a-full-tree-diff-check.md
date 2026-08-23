@@ -88,6 +88,31 @@ and materially stronger than what was reviewed:
   leaked `glpat-`, `xoxb-`, `AIza…`, `ASIA…`, `sk_live_`, `hf_`, `npm_`, raw AWS secret
   keys and JWTs during review.
 
+## Alarm quality is part of the guard, not decoration
+
+A guard whose alarm fires on ordinary conditions is a guard that gets ignored, so the
+report is held to the same standard as the mechanism. Three rules fell out of review:
+
+- **An alarm must be baselined against what it did not cause.** The revert check
+  originally tested `git status` for any output at all. On a board with ordinary
+  uncommitted work that meant `revertFailed: true` on every refusal, next to
+  `residual: []` — the same event claiming the revert failed and that nothing was left
+  behind — while the console printed the operator's own files as "still dirty". The
+  porcelain check is now compared against a baseline captured before the agent runs, so
+  only dirt this pass introduced counts.
+- **Keep a check that observes something the others cannot.** The porcelain term was
+  baselined rather than deleted: `residual` is a *content* diff and never looks at the
+  index. An agent that stages a change and then restores the file's bytes leaves
+  before == after, so the path never enters the touched set and never reaches the revert,
+  while the index still diverges from HEAD. Only git sees that.
+- **Do not conflate two different failures under one flag.** `surveyIncomplete`
+  (truncated walk, unreadable region) is a **detection** gap and undermines every claim
+  the guard makes. `restoreDegraded` (a file over the snapshot's content cap) is a
+  **remediation** gap — the change is still detected, but the snapshot holds no bytes to
+  put back. They are reported separately, and both name the region rather than raising an
+  opaque boolean. Neither is baselined, and that is deliberate: a region the guard could
+  not observe is unobserved whoever made it so.
+
 ## What it does not cover — the exhaustive list
 
 - Anything that is not a file write inside the data root: network calls, writes outside the

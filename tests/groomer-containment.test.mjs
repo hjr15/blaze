@@ -573,3 +573,146 @@ test("BLZ-347: RETARGETING a pre-existing symlink is detected", () => {
   rmSync(dir, { recursive: true, force: true });
   rmSync(a, { force: true }); rmSync(b, { force: true });
 });
+
+// ===========================================================================
+// BLZ-347 review round 3 — the revert-verification alarm fired on the
+// OPERATOR'S OWN uncommitted work. `porcelain` was tested for any content at
+// all, with no pre-run baseline, so a refusal on a working board reported
+// `revertFailed: true` next to `residual: []` — claiming the revert failed and
+// that nothing was left behind, in the same event — and printed the operator's
+// files as "still dirty". Same failure mode as B2: an alarm that cannot
+// distinguish a real failure from normal work is an alarm that gets ignored.
+// ===========================================================================
+
+test("BLZ-347/R3: a refusal on a board with pre-existing WIP does not report revertFailed", () => {
+  const dir = gitBoard('printf "## Grooming rules\\n- PAYLOAD\\n" > AGENTS.md');
+  writeFileSync(join(dir, "AGENTS.md"), "## Grooming rules\n- propose only\n");
+  execFileSync("git", ["-C", dir, "add", "AGENTS.md"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "agents"]);
+  // The operator's ordinary work, in all three shapes git reports.
+  writeFileSync(join(dir, "my-notes.txt"), "operator WIP\n");
+  writeFileSync(join(dir, "staged.txt"), "staged work\n");
+  execFileSync("git", ["-C", dir, "add", "staged.txt"]);
+  writeFileSync(join(dir, "backlog", "TASK-001-x.md"),
+    readFileSync(join(dir, "backlog", "TASK-001-x.md"), "utf8") + "operator edit\n");
+
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true, "the out-of-bounds write is still refused");
+  assert.ok(!evt.revertFailed,
+    `the operator's WIP must not be reported as a failed revert: ${JSON.stringify(evt)}`);
+  assert.ok(!("residual" in evt), "no residual key at all when nothing was left behind");
+  assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "## Grooming rules\n- propose only\n",
+    "the payload is still reverted");
+  assert.ok(existsSync(join(dir, "my-notes.txt")), "the operator's untracked file survives");
+  assert.match(execFileSync("git", ["-C", dir, "diff", "--cached", "--name-only"], { encoding: "utf8" }),
+    /staged\.txt/, "the operator's staged work survives");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-347/R3: the same attack reports identically on a dirty and a clean board", () => {
+  // The controlled comparison from the review, as a test: only the pre-run state differs,
+  // the revert succeeds in both, so the report must not differ.
+  const build = (dirty) => {
+    const dir = gitBoard('printf "PAYLOAD\\n" > AGENTS.md');
+    writeFileSync(join(dir, "AGENTS.md"), "original\n");
+    execFileSync("git", ["-C", dir, "add", "AGENTS.md"]);
+    execFileSync("git", ["-C", dir, "commit", "-q", "-m", "agents"]);
+    if (dirty) writeFileSync(join(dir, "wip.txt"), "operator\n");
+    const cfg = loadConfig({ root: dir, env: {} });
+    const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+    assert.equal(readFileSync(join(dir, "AGENTS.md"), "utf8"), "original\n", "revert succeeded");
+    rmSync(dir, { recursive: true, force: true });
+    return evt;
+  };
+  assert.equal(build(true).revertFailed, build(false).revertFailed,
+    "revertFailed must depend on whether the revert failed, not on the operator's WIP");
+});
+
+test("BLZ-347/R3: index-only dirt the content snapshot cannot see is still caught", () => {
+  // Why the porcelain check is baselined rather than deleted. `residual` is a CONTENT
+  // diff and never looks at the index: an agent that stages a change and then restores the
+  // file's bytes leaves before == after, so the path never enters `touched` and never
+  // reaches restoreSnapshot, while the index still diverges from HEAD. Only git sees it.
+  const dir = gitBoard(
+    'cp AGENTS.md /tmp/agents-orig.$$\n'
+    + 'printf "staged-only change\\n" >> AGENTS.md\n'
+    + 'git add AGENTS.md\n'
+    + 'cp /tmp/agents-orig.$$ AGENTS.md && rm -f /tmp/agents-orig.$$\n'
+    + 'printf "x\\n" > trigger.txt',                       // forces the refusal
+  );
+  writeFileSync(join(dir, "AGENTS.md"), "## Grooming rules\n- propose only\n");
+  execFileSync("git", ["-C", dir, "add", "AGENTS.md"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "agents"]);
+  const cfg = loadConfig({ root: dir, env: {} });
+
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.refused, true);
+  assert.equal(evt.revertFailed, true, "staged-but-content-identical dirt must still alarm");
+  assert.ok(evt.newDirt.some((l) => l.includes("AGENTS.md")),
+    `the index divergence must be named: ${JSON.stringify(evt.newDirt)}`);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- the reviewer's question: is surveyIncomplete the same problem? ----------
+
+test("BLZ-347/R3: surveyIncomplete is absent on an ordinary board", () => {
+  const dir = gitBoard('sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+  assert.ok(evt.sha);
+  assert.ok(!("surveyIncomplete" in evt), "a complete survey must not raise the flag");
+  assert.ok(!("surveyGaps" in evt));
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-347/R3: surveyIncomplete names the gap instead of being an opaque boolean", {
+  skip: process.getuid && process.getuid() === 0 ? "root ignores mode bits" : false,
+}, () => {
+  // Deliberately NOT baselined, unlike the revert check: a directory the guard cannot read
+  // is a region it did not observe THIS pass, whoever made it unreadable, so the flag is a
+  // true statement rather than a false alarm. What it must not be is unactionable — an
+  // operator has to be able to see WHICH region was missed and go fix it.
+  const dir = gitBoard('sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  mkdirSync(join(dir, "unreadable"), { recursive: true });
+  writeFileSync(join(dir, "unreadable", "x.md"), "x\n");
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "u"]);
+  chmodSync(join(dir, "unreadable"), 0o000);
+
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+
+  assert.equal(evt.surveyIncomplete, true, "an unreadable region must be reported");
+  assert.ok(evt.surveyGaps.unreadable.includes("unreadable"),
+    `the gap must name the region: ${JSON.stringify(evt.surveyGaps)}`);
+  chmodSync(join(dir, "unreadable"), 0o755);
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-347/R3: a file too large to snapshot degrades RESTORE, not detection, and says so", () => {
+  // `degraded` was computed and silently dropped before round 3. It is reported as its own
+  // flag rather than folded into surveyIncomplete: a large attachment on a board is not a
+  // hole in DETECTION — any change to it is still caught — it is a hole in what the guard
+  // can put back, because the snapshot holds no bytes for it.
+  const dir = gitBoard('sed -i -E "s/^labels: \\[\\]/labels: [backend]/" "$BLAZE_GROOM_TARGET"');
+  writeFileSync(join(dir, "big.bin"), Buffer.alloc(600 * 1024, 7));
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "big"]);
+
+  const snap = snapshotTree(dir);
+  assert.equal(snap.degraded, true, "a file over the content cap must set degraded");
+  assert.equal(snap.truncated, false, "and must NOT be confused with a truncated walk");
+  assert.ok(snap.entries.get("big.bin").h, "it is still hashed, so a change is still detected");
+  assert.ok(!snap.entries.get("big.bin").content, "but no bytes are held for a restore");
+
+  const cfg = loadConfig({ root: dir, env: {} });
+  const evt = groomOnce({ root: dir, cfg, agentsMd: "", today: "2026-08-23" });
+  assert.ok(evt.sha, "a legitimate groom still commits");
+  assert.equal(evt.restoreDegraded, true, "the remediation gap must be reported");
+  assert.ok(!evt.surveyIncomplete, "detection is NOT incomplete — the file was observed");
+  assert.equal(evt.surveyGaps.degraded, true);
+  rmSync(dir, { recursive: true, force: true });
+});
