@@ -689,8 +689,26 @@ its children's starts and its due is the `max` — not a total.
 
 **Decision: `hierarchy-rollup.mjs` survives; it gains a `combine` parameter (default sum).** Dates
 roll with `min`/`max`, time keeps summing, and there is one implementation over the graph that can
-actually express several hierarchies. This is a small change to an **18-line** pure function
-(`hierarchy-rollup.mjs:10-27`) and it is the one that keeps ADR-0016's measured fast path.
+actually express several hierarchies. It is the one that keeps ADR-0016's measured fast path.
+
+**This section called that "a small change to an 18-line pure function". Both halves are wrong, and
+spec 4 measured it — amended under BLZ-368.** The function is **19** lines
+(`hierarchy-rollup.mjs:10-28`), and `combine` alone is not sufficient:
+
+- **The two functions have different *shapes*, not just different graphs.** `rollUp(index)` returns
+  a **Map of every id** with **five** fields; `rollup({…, rootId})` returns **one number** for
+  **one** root.
+- **`rollUp` is not a leaf consumer.** It runs inside `boardModel` (`views/data.mjs:63`), which
+  `page.mjs:115` and `:151` call for **every** view render — so it is computed under all six views
+  and read by `views/board.mjs` alone.
+- **Measured, the naive per-id swap is 842 ms against a 5.2 ms median** — and still one field short
+  of what `boardModel` reads. A per-root API called once per row throws away exactly the whole-tree
+  pass ADR-0016 measured at 6.0× faster than a recursive CTE.
+
+So `hierarchy-rollup.mjs` gains **two** things: `combine`, and a **`rollupAll` whole-tree entry
+point** returning a Map. Only then is `rollup.mjs` removable without a large regression on four
+views' read model. **The decision itself is unchanged** — `hierarchy-rollup.mjs` survives and
+`rollup.mjs` retires; only the cost estimate was wrong.
 `rollup.mjs` keeps rolling time over `parent` until `hierarchyDdl` installs — **which §6.4 now does,
 in DB schema version 2** — then is retired, and it is retired rather than left beside its
 replacement, because two roll-ups that disagree is exactly the condition `audit-runner.mjs:100-106`
