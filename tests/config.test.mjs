@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import { loadConfig, loadProject, ambientSchemaOverride } from "../scripts/config.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = REPO;
 
 function withConfig(json) {
   const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
@@ -273,4 +274,64 @@ test("loadConfig accepts an un-versioned (legacy) config unchanged", () => {
   assert.equal(cfg.key, "OBA");
   assert.equal(cfg.schemaVersion, undefined);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- ADR-0022 §2.3: the schedule calendar (BLZ-375) --------------------------
+// `minutes_per_day` is the SINGLE conversion between estimate_minutes and calendar
+// arithmetic, and it is also spec 2 §3.2's capacity-bar denominator. One number, one
+// definition, two consumers — so nothing may hardcode 480 or Mon–Fri anywhere else.
+test("schedule defaults to 480 minutes/day and Mon–Fri", () => {
+  const cfg = loadConfig({ root: mkdtempSync(join(tmpdir(), "blaze-cfg-")), env: {} });
+  assert.equal(cfg.schedule.minutes_per_day, 480);
+  assert.deepEqual(cfg.schedule.working_days, [1, 2, 3, 4, 5]);
+});
+
+test("schedule deep-merges, so setting one key keeps the other's default", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ schema_version: 2, schedule: { minutes_per_day: 300 } }));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(cfg.schedule.minutes_per_day, 300);
+  assert.deepEqual(cfg.schedule.working_days, [1, 2, 3, 4, 5],
+    "a partial schedule block must not blank the key it does not mention");
+});
+
+test("a working week may be redefined, including a six-day one", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ schema_version: 2, schedule: { working_days: [0, 1, 2, 3, 4, 5, 6] } }));
+  assert.deepEqual(loadConfig({ root, env: {} }).schedule.working_days, [0, 1, 2, 3, 4, 5, 6]);
+});
+
+test("a non-positive minutes_per_day is refused, naming the key", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  for (const bad of [0, -1, "480", null]) {
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ schema_version: 2, schedule: { minutes_per_day: bad } }));
+    assert.throws(() => loadConfig({ root, env: {} }), /schedule\.minutes_per_day/,
+      `minutes_per_day ${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("an empty or malformed working_days is refused — a week with no days is not a calendar", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  for (const bad of [[], [7], [-1], ["mon"], "Mon-Fri", {}]) {
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ schema_version: 2, schedule: { working_days: bad } }));
+    assert.throws(() => loadConfig({ root, env: {} }), /schedule\.working_days/,
+      `working_days ${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("NOTHING hardcodes 480 or a Mon–Fri literal outside config.mjs", async () => {
+  // The second definition ADR-0022 §2.3 forbids. Spec 4's amended §8.3 makes the same point
+  // about the roll-up: a value the software could read and instead hardcodes is a second
+  // source of truth. This is a grep test because the rule is a rule, not a convention.
+  const { readdirSync, readFileSync: rf } = await import("node:fs");
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(join(d, e.name)) : (e.name.endsWith(".mjs") ? [join(d, e.name)] : []));
+  const offenders = walk(join(ROOT, "scripts"))
+    .filter((f) => !f.endsWith("config.mjs"))
+    .filter((f) => /\b480\b/.test(rf(f, "utf8")));
+  assert.deepEqual(offenders, [], `these hardcode 480 instead of reading schedule.minutes_per_day`);
 });
