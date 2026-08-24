@@ -10,6 +10,7 @@
 // registries at build time. Retyping them here would create a second source of truth
 // that drifts the first time someone adds a type — and drifts silently, because a
 // hand-written seed list is still valid SQL when it is wrong.
+import { join, dirname } from "node:path";
 import { PRIORITIES, DEFAULT_TYPES } from "./schema.mjs";
 import { RESOLUTIONS, DEFAULT_WORKFLOWS } from "./workflows.mjs";
 import { LINK_TYPES, TRACE_LINK_TYPES } from "./links.mjs";
@@ -311,6 +312,49 @@ export function configSeedSql(name, seed = configSeed()) {
 /** `ATTACH` statement a SQLite caller runs before the config DDL. */
 export function sqliteAttachConfig(path = ":memory:") {
   return `ATTACH DATABASE '${String(path).replace(/'/g, "''")}' AS blaze_config;`;
+}
+
+/**
+ * Where the config namespace's file lives for a given main database (BLZ-377).
+ *
+ * Beside the database it belongs to, following `identityDbPath`'s precedent of a second
+ * SQLite file under `.blaze/`. Derived from the main path rather than from `dataRoot` so
+ * that ONE rule serves both openers — `openSqliteRead` is handed a path and never sees a
+ * data root.
+ *
+ * `:memory:` maps to `:memory:`, which ATTACHes a SEPARATE anonymous in-memory database.
+ * Giving an in-memory database an on-disk config file would leave a stray `config.db` in
+ * whatever directory a test happened to run from.
+ */
+export function configDbPathFor(mainPath) {
+  return mainPath === ":memory:" ? ":memory:" : join(dirname(mainPath), "config.db");
+}
+
+/**
+ * The seed, in one transaction, SYNCHRONOUSLY (BLZ-377).
+ *
+ * Not a duplicate of `seedConfigInTransaction` for style. That function is `async`, and
+ * node:sqlite's driver is synchronous: every `await` in it defers to a microtask, so a
+ * synchronous caller like `createDbSchemaSync` returns BEFORE the seed has run and hands
+ * back a database whose config tables are still empty. There is no way to await it from a
+ * sync path — that is structural, the same split `readSchemaFactsSync` already makes.
+ *
+ * The transaction is load-bearing for the same reason it is there: `workflow.reopen_to` is
+ * a deferred circular FK, so the seed is only consistent at COMMIT and fails on the first
+ * `workflow` row without one.
+ *
+ * @param run  (sql, params) => void — a SYNCHRONOUS execute. Passing an async one silently
+ *             reintroduces the very bug this exists to avoid.
+ */
+export function seedConfigSync(run, name, seed = configSeed()) {
+  run("BEGIN", []);
+  try {
+    for (const { sql, params } of configSeedSql(name, seed)) run(sql, params);
+    run("COMMIT", []);
+  } catch (e) {
+    try { run("ROLLBACK", []); } catch { /* the original error is what matters */ }
+    throw e;
+  }
 }
 
 /**

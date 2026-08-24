@@ -17,6 +17,9 @@ import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
 export const shadowDbPath = (dataRoot) => join(dataRoot, ".blaze", "blaze.db");
+/** The config namespace's file, beside the shadow (BLZ-377). Same rule as `configDbPathFor`,
+ *  spelled in terms of a data root for callers that have one. */
+export const configDbPath = (dataRoot) => join(dataRoot, ".blaze", "config.db");
 export const divergenceLogPath = (dataRoot) => join(dataRoot, ".blaze", "divergences.jsonl");
 export const soakStatePath = (dataRoot) => join(dataRoot, ".blaze", "soak-ops.jsonl");
 
@@ -45,6 +48,10 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   const db = new DatabaseSync(path);
   const { SQLITE_PRAGMAS } = await import("./sqlite-schema.mjs");
   db.exec(SQLITE_PRAGMAS);
+  // BLZ-377: same contract as openSqliteRead — the config namespace is attached on every
+  // open, because the opener is the only thing that knows where its file lives.
+  const { sqliteAttachConfig, configDbPathFor } = await import("./config-schema.mjs");
+  db.exec(sqliteAttachConfig(configDbPathFor(path)));
   const exec = sqliteExec(db);
   const { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } =
     await import("./db-schema-version.mjs");

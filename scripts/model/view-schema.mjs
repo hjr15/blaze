@@ -112,3 +112,22 @@ CREATE UNIQUE INDEX IF NOT EXISTS ${n.idx("view_slug_install", "view")}
   (slug)              WHERE scope = 'installation';
 `;
 }
+
+/**
+ * The `view_type` seed, from `VIEW_TYPES` (BLZ-377).
+ *
+ * Beside the DDL that declares the table, so the registry stays the one source. `view_type`
+ * is deliberately NOT folded into `configSeedSql`'s ORDER: that list is config-schema's own
+ * tables, and reaching across would couple it to this module for one row set. There is no
+ * circular FK here, so unlike the config seed this needs no transaction.
+ */
+export function viewTypeSeedSql(name) {
+  if (name !== "sqlite" && name !== "postgres") {
+    throw new Error(`unknown dialect ${JSON.stringify(name)} — expected 'sqlite' or 'postgres'`);
+  }
+  const ph = (i) => (name === "postgres" ? `$${i + 1}` : "?");
+  return VIEW_TYPES.map(({ name: n, label }) => ({
+    sql: `INSERT INTO blaze_config.view_type (name, label) VALUES (${ph(0)}, ${ph(1)})`,
+    params: [n, label],
+  }));
+}

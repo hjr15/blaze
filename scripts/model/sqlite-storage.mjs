@@ -15,6 +15,7 @@
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-schema-version.mjs";
+import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
 // BLZ-391. This projected 15 of a ticket's 28 frontmatter keys: `loadCorpus` WROTE the other
@@ -62,6 +63,11 @@ function toRecord(row, links, labels, components, worklog) {
 export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   const db = new DatabaseSync(path);
   db.exec(SQLITE_PRAGMAS);
+  // BLZ-377: the config namespace is a SECOND file beside this one, and it is attached on
+  // EVERY open, not only on create — `blaze_config.view` has to be readable too. The attach
+  // itself creates nothing but an empty file; the DDL is still the explicit, named operation
+  // `createDbSchemaSync` performs, which is what BLZ-297 requires.
+  db.exec(sqliteAttachConfig(configDbPathFor(path)));
 
   const exec = {
     run(sql, params = []) { return params.length ? db.prepare(sql).run(...params) : db.exec(sql); },

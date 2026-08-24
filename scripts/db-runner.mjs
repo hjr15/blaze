@@ -5,7 +5,7 @@
 // operation, plus the command that reads back what a dual-write soak has found.
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolveRoots, loadConfig } from "./config.mjs";
-import { openShadow, shadowDbPath, divergenceLogPath,
+import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
          readSoakState } from "./model/write-port-resolve.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
@@ -27,7 +27,15 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
     err("holds, including any divergences not yet reviewed.");
     return 1;
   }
-  if (force && existsSync(path)) rmSync(path, { force: true });
+  // BLZ-377: the config namespace is a SECOND file, and it is just as derived as the shadow.
+  // Removing only `blaze.db` left a stale `config.db` beside a fresh one — the create then
+  // re-seeded a `view_type` that already had its six rows and died on the UNIQUE constraint.
+  // A half-replaced pair is exactly the state `--force` exists to avoid, so both go together.
+  const cfgPath = configDbPath(dataRoot);
+  if (force) {
+    if (existsSync(path)) rmSync(path, { force: true });
+    if (existsSync(cfgPath)) rmSync(cfgPath, { force: true });
+  }
 
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.

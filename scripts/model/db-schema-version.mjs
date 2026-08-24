@@ -21,6 +21,8 @@ import { SQLITE_DDL } from "./sqlite-schema.mjs";
 import { PG_DDL } from "./pg-schema.mjs";
 import { linkDdl } from "./link-schema.mjs";
 import { hierarchyDdl } from "./hierarchy-schema.mjs";
+import { configDdl, seedConfigSync, seedConfigInTransaction } from "./config-schema.mjs";
+import { viewDdl, viewTypeSeedSql } from "./view-schema.mjs";
 
 /** Bump when a change makes an OLDER engine unable to read a database this one writes. */
 // 3 under BLZ-390: the seven v3 SQLite tables gained ` STRICT`, which changes their definitions.
@@ -28,7 +30,13 @@ import { hierarchyDdl } from "./hierarchy-schema.mjs";
 // version is what forces a rebuild. Safe for the same reason version 2 was: the shadow is
 // DERIVED, lives under .blaze/, and `blaze db init --force` recreates it from the corpus — there
 // is no upgrade to write and no data to lose.
-export const DB_SCHEMA_VERSION = 3;
+//
+// 4 under BLZ-377, which installs the `blaze_config` namespace and `view`/`view_type` in it.
+// BLZ-377's own acceptance criteria say this "probably wants version 3" — that was written
+// before BLZ-390 shipped 3. Adding tables to an ALREADY-SHIPPED version retroactively is
+// exactly the silent schema change the stamp exists to prevent: a v3 shadow created last week
+// has no blaze_config, a v3 shadow created today would, and nothing could tell them apart.
+export const DB_SCHEMA_VERSION = 4;
 /**
  * The oldest stamp this engine can still read.
  *
@@ -44,8 +52,11 @@ export const DB_SCHEMA_VERSION = 3;
  * migrated — there is no upgrade path in this module and version 2 does not add one.
  */
 // Rises with it, for the same reason: a v2 shadow's tables are not STRICT, so a v3 engine that
-// accepted one would silently lose the guarantee this version exists to add.
-export const MIN_DB_SCHEMA_VERSION = 3;
+// accepted one would silently lose the guarantee this version exists to add. Rises again to 4
+// under BLZ-377: a v3 shadow has no `blaze_config` at all, so a v4 engine that accepted one
+// would fail later on `no such table: blaze_config.view` — the raw-SQL-error-instead-of-a-named-
+// refusal failure this whole module exists to replace.
+export const MIN_DB_SCHEMA_VERSION = 4;
 
 const DOCS = "https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md";
 
@@ -203,16 +214,48 @@ function applyCreate(exec, dialect, state) {
   // Phase 2 cutover, which is what spine :265-267 actually gates — on the document/artifact
   // model, whose rationale (no status directory, the fs port cannot represent it) is false
   // of `link` and `hierarchy`.
+  // BLZ-377: the config namespace must already be ATTACHed. Only an OPENER knows the path,
+  // and the attach is needed on EVERY open rather than only on create — a read has to see
+  // `blaze_config.view` too — so it belongs there, not here. Attaching `:memory:` from here
+  // as a convenience would put a real installation's config in memory, where it would vanish
+  // on close and every restart would look like a fresh board. Refuse instead, by name.
+  if (dialect === "sqlite") {
+    const attached = exec.all("PRAGMA database_list", []).map((r) => r.name);
+    if (!attached.includes("blaze_config")) {
+      throw new Error(
+        "blaze: the blaze_config namespace is not attached, so the config schema cannot be "
+        + "created. The opener must ATTACH it before creating — see sqliteAttachConfig() and "
+        + `configDbPathFor(). Attached databases: ${attached.join(", ")}`);
+    }
+  }
   const runs = [
     exec.run(ddl, []),
     exec.run(linkDdl(dialect), []),
     exec.run(hierarchyDdl(dialect), []),
     exec.run(metaDdl(dialect), []),
+    // `configDdl` emits `CREATE SCHEMA IF NOT EXISTS blaze_config` on Postgres and nothing on
+    // SQLite, where the ATTACH above IS the namespace. `viewDdl` must follow it: `view`'s FKs
+    // point at `project` (config's) and `view_type` (its own), and BLZ-371 established that in
+    // SQLite an FK cannot cross a database file — which is why `view` lives here at all.
+    exec.run(configDdl(dialect), []),
+    exec.run(viewDdl(dialect), []),
+    ...viewTypeSeedSql(dialect).map(({ sql, params }) => exec.run(sql, params)),
     exec.run(
       `INSERT INTO blaze_meta (key, value) VALUES (${ph(dialect, 0)}, ${ph(dialect, 1)})`,
       ["schema_version", String(DB_SCHEMA_VERSION)]),
   ];
   // Await only if the driver actually returned promises — one body, both drivers.
   const done = { created: true, version: DB_SCHEMA_VERSION };
-  return runs.some((r) => r instanceof Promise) ? Promise.all(runs).then(() => done) : done;
+  // The config seed is NOT in `runs`: it needs its own transaction, because
+  // `workflow.reopen_to` is a deferred circular FK and the seed is only consistent at COMMIT.
+  // The sync driver needs the SYNCHRONOUS twin — `seedConfigInTransaction` is async, so with
+  // node:sqlite every await in it defers to a microtask and this function would return with
+  // the config tables still empty.
+  if (runs.some((r) => r instanceof Promise)) {
+    return Promise.all(runs)
+      .then(() => seedConfigInTransaction((sql, params) => exec.run(sql, params), dialect))
+      .then(() => done);
+  }
+  seedConfigSync((sql, params) => exec.run(sql, params), dialect);
+  return done;
 }
