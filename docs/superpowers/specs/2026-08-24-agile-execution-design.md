@@ -729,8 +729,16 @@ stale `active: "S2"` pointer itself.
   gives sprint → project, never project → which sprint is active. `blaze sprint migrate` re-seeds a
   named default; it does not recover the operator's choice. The alternative is a
   `MIN_SCHEMA_VERSION` bump that refuses old engines outright, which this spec does not take. **This
-  is the cost of the additive shape and it is unrecoverable** — the largest gap *in kind*, against
-  velocity's above, which is the largest in what the spec cannot deliver.
+  is the cost of the additive shape, and **a loss that has already happened is unrecoverable** —
+  the largest gap *in kind*, against velocity's above, which is the largest in what the spec cannot
+  deliver. **The window that allows it is a different thing and is closable**, which is the
+  distinction the next paragraph turns on.
+
+  **Accepted now, tracked for removal: BLZ-369.** The operator's ruling on 2026-08-24 was to take
+  the additive shape *and* close this window later, so this is not a gap the spec settles for. The
+  two candidate mechanisms are the `MIN_SCHEMA_VERSION` bump above and a version stamp in
+  `sprints.json` plus a warning on a trampled registry; neither is designed here, and BLZ-369 owns
+  the choice.
 - **Sprint close-out as an event.** No ceremony, no carry-over gesture, no "move unfinished to the
   next sprint" command. §4 reports the 26 overruns; it does not offer to fix them.
 - **Cross-project sprints.** §2.1 refuses them on measurement; a later ruling would reopen it.
