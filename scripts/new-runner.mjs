@@ -50,13 +50,19 @@ for (let i = 0; i < argv.length; i++) {
     // their place, and the refusal below names the replacement rather than just rejecting.
     case "--not-before": opts.extra.not_before = argv[++i]; break;
     case "--deadline":   opts.extra.deadline = argv[++i]; break;
-    case "--start":
-    case "--due": {
-      const r = derivedFieldRefusal(a.slice(2));
-      console.error(`blaze new: ${r}`);
-      process.exit(1);
-    }
     default:
+      // `--start`/`--due` are refused HERE rather than in their own switch branch, and the
+      // placement is load-bearing: tests/new-usage-risk-flags.test.mjs greps this file for
+      // switch branches on a flag literal and requires every one to appear in the usage line.
+      // A refused flag must not be documented as supported, so it belongs with unknown-flag
+      // handling — which is what it now is.
+      //
+      // The comment above deliberately does NOT spell that pattern out: an earlier version did,
+      // and the grep matched the COMMENT, reporting a flag named "--flag" that does not exist.
+      if (a === "--start" || a === "--due") {
+        console.error(`blaze new: ${derivedFieldRefusal(a.slice(2))}`);
+        process.exit(1);
+      }
       if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
       positional.push(a);
   }

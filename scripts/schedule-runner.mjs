@@ -8,8 +8,8 @@
 // DRY-RUN IS THE DEFAULT for both, and `--write` exists only on migrate-dates. §4.1: the dry-run
 // "is reviewed by a human before the write", and §5.5's import is operator-driven by design —
 // the tool never guesses a direction, so it has nothing to write on its own.
-import { readFileSync, writeFileSync } from "node:fs";
-import { walkTickets } from "./model/index.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
+import { fsStorage } from "./model/storage.mjs";
 import { parseTicket, serializeTicket } from "./model/ticket.mjs";
 import { planDateMigration } from "./model/migrate-dates.mjs";
 import { planDependencyImport, DISPOSITION } from "./model/import-deps.mjs";
@@ -39,7 +39,10 @@ if (sub === "import-deps" && write) {
 
 const { projectsDir } = resolveRoots();
 const tickets = [];
-for (const t of walkTickets(projectsDir)) {
+// Through the READ SEAM (ADR-0009), not a bespoke walk. tests/model/seam-closure.test.mjs
+// enforces this and caught an earlier version of this file calling walkTickets directly —
+// "a bespoke directory walk outside the seam is how contentHash hid for four slices".
+for (const t of fsReadStorage.listTickets(projectsDir)) {
   const fm = t.frontmatter ?? {};
   if (fm.id == null) continue;
   tickets.push({
@@ -84,10 +87,12 @@ if (sub === "migrate-dates") {
     let n = 0;
     for (const ch of plan.changes) {
       const file = byId.get(ch.id).file;
-      const parsed = parseTicket(readFileSync(file, "utf8"));
+      // Through the WRITE SEAM, for the same reason: seam-closure.test.mjs refuses a
+      // writeFileSync on a ticket path from anywhere but model/storage.mjs.
+      const parsed = parseTicket(fsStorage.read(file));
       for (const k of ch.clears) delete parsed.frontmatter[k];
       Object.assign(parsed.frontmatter, ch.sets);
-      writeFileSync(file, serializeTicket(parsed));
+      fsStorage.write(file, serializeTicket(parsed));
       n++;
     }
     console.log("");
