@@ -122,7 +122,8 @@ Build order. **Every step is DONE. Steps 1–3 merged as `6d31e54` (PR #110, BLZ
 merged under BLZ-379. There is nothing to start here.**
 
 1. ~~**DB schema version 1 → 2**~~ — **done.** `applyCreate` installs `linkDdl` and
-   `hierarchyDdl`; `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` are both **2**. **`viewDdl` is
+   `hierarchyDdl`; `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` were both **2** — **both are 3
+   since BLZ-390 put `STRICT` on the seven `SQLITE_DDL` tables and on `blaze_meta`**. **`viewDdl` is
    deliberately NOT installed** — see the corrections below.
 2. ~~**`Precedes` / `Follows`**~~ — **done.** Both endpoint sets
    `["feature","story","task","bug","subtask"]`, plus `lag_minutes INTEGER NOT NULL DEFAULT 0`
@@ -159,7 +160,7 @@ merged under BLZ-379. There is nothing to start here.**
   false of the v3 core. **BLZ-376.**
 
 **One decision the specs were silent on:** `MIN_DB_SCHEMA_VERSION` rose to **2**, so a v1 shadow
-is refused. Safe because the shadow is derived — `blaze db init --force` rebuilds it from the
+is refused. **It rose again to 3 under BLZ-390, so a v2 shadow is refused too.** Safe because the shadow is derived — `blaze db init --force` rebuilds it from the
 corpus — and `docs/schema-versioning.md` now documents it.
 
 **TDD, and the mutation list is already written for you.** BLZ-360 §11 names eight mutations that
@@ -180,7 +181,7 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 | Ticket | State | Notes |
 |---|---|---|
 | **BLZ-369** | `defined` | **Operator decision 2026-08-24: accept now, remove later.** An old engine's `loadSprints → setActive → saveSprints` destroys `activeByProject`, because `loadSprints` whitelists two keys (`sprints.mjs:14`). It is operator-entered state nothing can reconstruct. Candidates: a `MIN_SCHEMA_VERSION` bump, or a version stamp in `sprints.json` plus a warning. Neither designed. |
-| ~~**BLZ-376**~~ | **`done`** | The STRICT claim above, corrected in the spec. Its second half — whether the v3 tables *should* be STRICT — is **BLZ-390**, which measured **0 of 21,372 live rows** violating, plus one structural blocker (`projection_meta.config_version` is declared `bigint`, not a STRICT-legal type). |
+| ~~**BLZ-376**~~ | **`done`** | The STRICT claim above, corrected in the spec. Its second half — whether the v3 tables *should* be STRICT — is **BLZ-390**, which measured **0 rows** violate a `STRICT` declaration — **19,686** in the seven tables it was applied to, **21,413** across all 26 installed tables (~1,724 of them in tables STRICT never touched) violating, plus one structural blocker (`projection_meta.config_version` is declared `bigint`, not a STRICT-legal type). |
 | **BLZ-377** | `defined` | `blaze_config` + `viewDdl`. Blocks spec 1's view table and therefore spec 4's report view. |
 | ~~**BLZ-378**~~ | **`done`** | Closed with **BLZ-383** under BLZ-388: they were the same question. The solve's node set is now the declared `Precedes` source kinds, read from the same `link_type` entry as the edge rule, so there is no second definition to disagree. An epic is chart-only **by design** — BLZ-360 §8.3: a parent's dates are a roll-up *of* the finished schedule, not a CPM input. That roll-up is spec 4's and is **not built**, so an epic currently has no derived dates at all. |
 | **BLZ-362** | `defined` | ADR-0014's three factual errors. Small, independent, no prerequisites. ADR-0021 already records what is wrong. |

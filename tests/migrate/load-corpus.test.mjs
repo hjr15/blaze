@@ -33,7 +33,10 @@ test("a clean corpus loads every ticket with nothing skipped", () => {
   const s = openSqliteRead(":memory:", { create: true });
   const r = loadCorpus(s.db, dir);
   assert.equal(r.tickets, 2);
-  assert.deepEqual(r.skipped, { noId: 0, badId: 0, insertFailed: [] });
+  // `worklogDropped` joined the shape under BLZ-393: this file's header promises "nothing is
+  // silently dropped — every skip is counted and named", and a sub-half-minute worklog entry
+  // rounds to 0 and used to vanish from the tally as well as from the database.
+  assert.deepEqual(r.skipped, { worklogDropped: [], noId: 0, badId: 0, insertFailed: [] });
   assert.equal(s.getTicket(null, "BLZ-2").found.frontmatter.parent, "BLZ-1",
     "the parent resolves — pass two runs after every ticket exists");
 });

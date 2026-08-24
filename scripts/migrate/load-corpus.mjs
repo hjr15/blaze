@@ -9,6 +9,7 @@
 // hands back a tally tells you about all of them, which is what you need before
 // cutover. Nothing is silently dropped — every skip is counted and named.
 import { parseAcBlocks } from "../model/ac-blocks.mjs";
+import { storableEstimate } from "../model/time.mjs";
 import { extraFields } from "../model/write-port.mjs";
 import { fsReadStorage } from "../model/read-storage.mjs";
 
@@ -21,16 +22,9 @@ function isoDate(v, fallback) {
 }
 
 /** estimate is text in frontmatter and an integer here; 242 tickets have none. */
-function estimate(v) {
-  const n = Number(String(v ?? "").trim());
-  // Rounded BEFORE the %5 test, so this agrees with write-port.mjs's `est`. They disagreed:
-  // JS `%` gives `10.5 % 5 === 0.5` so this dropped the value to null, while SQLite's `%` casts
-  // to integer so the other writer stored 10.5 as a REAL in an INTEGER column. Two writers, two
-  // answers for one input — and under STRICT (BLZ-390) the second one now throws.
-  if (!Number.isFinite(n) || n <= 0) return null;
-  const r = Math.round(n);
-  return r > 0 && r % 5 === 0 ? r : null;
-}
+// `storableEstimate` is time.mjs's one rule, shared with write-port.mjs. These two disagreed
+// three ways about `estimate: 7` until it existed.
+const estimate = storableEstimate;
 
 /**
  * @param db      an open SQLite handle with the schema applied
@@ -49,7 +43,7 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   const report = {
     tickets: 0, links: 0, worklog: 0, criteria: 0, notes: 0, acHeadings: 0,
     labels: 0, components: 0,
-    skipped: { noId: 0, badId: 0, insertFailed: [] },
+    skipped: { worklogDropped: [], noId: 0, badId: 0, insertFailed: [] },
     danglingLinks: 0, danglingParents: 0,
     // A ticket with no title still loads — losing it would be worse — but the id is
     // substituted, and substituting is inventing. Counted so the tally never claims a
@@ -145,8 +139,14 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
       // the one guarding the ticket insert, so a single bad worklog row killed the entire load
       // with an uncaught throw and left the BEGIN uncommitted — against this file's own promise
       // to "load what it can and hand back a tally". Now it is a counted skip like any other.
+      // COUNTED, not `continue`d. This file's header promises "nothing is silently dropped —
+      // every skip is counted and named", and `Math.round(0.4)` is 0, so a sub-half-minute
+      // entry vanished from the tally as well as from the database.
       const m = Math.round(Number(w?.minutes));
-      if (!Number.isFinite(m) || m <= 0) continue;
+      if (!Number.isFinite(m) || m <= 0) {
+        report.skipped.worklogDropped.push({ id, minutes: w?.minutes ?? null });
+        continue;
+      }
       try {
         insWork.run(id, isoDate(w.date, now), m, w.note ?? null);
         report.worklog++;

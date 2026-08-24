@@ -173,39 +173,43 @@ test("REVIEW — a fractional worklog `minutes` does not break the load under ST
   assert.equal(row.frontmatter.worklog[0].minutes, 2, "1.5 rounds to 2, it does not vanish");
 });
 
-test("REVIEW — a fractional `estimate` is refused by BOTH writers, not stored as a REAL", async () => {
-  // The two writers disagreed on `10.5`. `loadCorpus` dropped it to null (JS `%` gives 0.5),
-  // while `write-port`'s `est` returned it unrounded and SQLite's `%` — which casts to integer
-  // — let it pass the CHECK, so the row landed as REAL in an INTEGER column. STRICT now refuses
-  // that, so `est` goes through `roundEstimate`, time.mjs's single definition of the 5-minute
-  // policy. Rounding merely to an INTEGER would not do: Math.round(10.5) is 11, which fails the
-  // column's own `% 5 = 0` CHECK.
-  const dir = mkdtempSync(join(tmpdir(), "frac-e-"));
+test("REVIEW — BOTH writers give the SAME answer for a non-storable estimate", async () => {
+  // The previous version of this test PASSED against the pre-fix tree, so it covered nothing:
+  // it never called `est`, and `roundEstimate(10.5)` was already 10 either way. The defect was
+  // that the two writers DISAGREED — filesystem 7, loadCorpus null, write-port 5 — and that
+  // write-port INVENTED, `roundEstimate(1)` being 5 in a path that only mirrors.
+  const { storableEstimate } = await import("../../scripts/model/time.mjs");
+  for (const [input, want] of [[7, null], [10.5, null], [1, null], [0.4, null], [30, 30], [5, 5]]) {
+    assert.equal(storableEstimate(input), want, `storableEstimate(${input})`);
+  }
+  // And the mirror really uses it: a non-storable estimate lands as NULL, not as an invention.
+  const dir = mkdtempSync(join(tmpdir(), "est-"));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
-    "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\nestimate: 10.5\n---\nb\n");
-  const s = openSqliteRead(":memory:", { create: true });
-  const r = loadCorpus(s.db, dir);
-  assert.equal(r.tickets, 1, "the load completes rather than throwing");
-  assert.equal(String([...s.listTickets(null)][0].frontmatter.estimate), "",
-    "loadCorpus drops a non-multiple, which is its long-standing behaviour");
-
-  const { roundEstimate } = await import("../../scripts/model/time.mjs");
-  assert.equal(roundEstimate(10.5), 10, "and write-port's est now agrees, via the one policy");
-  assert.equal(roundEstimate(10.5) % 5, 0, "always a multiple of 5, so the CHECK holds");
+    "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\nestimate: 7\n---\nb\n");
+  const s2 = openSqliteRead(":memory:", { create: true });
+  assert.equal(loadCorpus(s2.db, dir).tickets, 1);
+  assert.equal(String([...s2.listTickets(null)][0].frontmatter.estimate), "",
+    "7 is not storable, so it is NULL — never rounded up to 5 or down to 5");
 });
 
-test("REVIEW — a worklog row that STILL cannot be inserted is a COUNTED skip, not a crash", () => {
-  // The loop sat outside the ticket insert's try/catch, so one bad row killed the whole load
-  // and left the transaction uncommitted — against this file's promise to "load what it can and
-  // hand back a tally". A date that will not coerce is the remaining way in.
-  const dir = mkdtempSync(join(tmpdir(), "frac-x-"));
+test("REVIEW — a worklog entry that rounds to zero is COUNTED, not silently dropped", () => {
+  // Also replaced: the previous version's fixture used `minutes: 30` and a valid date, so it
+  // inserted cleanly and asserted only that `insertFailed` was an array. It passed pre-fix.
+  // load-corpus.mjs's header promises "nothing is silently dropped — every skip is counted and
+  // named", and Math.round(0.4) is 0.
+  const dir = mkdtempSync(join(tmpdir(), "drop-"));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
     "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\n"
-    + "worklog:\n  - { date: 2026-01-05, minutes: 30 }\n---\nb\n");
-  const s = openSqliteRead(":memory:", { create: true });
-  const r = loadCorpus(s.db, dir);
-  assert.equal(r.tickets, 1, "the load completes and reports a tally either way");
-  assert.ok(Array.isArray(r.skipped.insertFailed), "and insertFailed is where a bad row lands");
+    + "worklog:\n  - { date: 2026-01-05, minutes: 0.4 }\n"
+    + "  - { date: 2026-01-06, minutes: 30 }\n---\nb\n");
+  const s2 = openSqliteRead(":memory:", { create: true });
+  const r = loadCorpus(s2.db, dir);
+  assert.equal(r.worklog, 1, "only the storable entry is written");
+  // The RAW value as written, not a coerced one: `coerceScalar`'s integer regex leaves "0.4" a
+  // string, and a tally of what was dropped should say what the file actually said.
+  assert.deepEqual(r.skipped.worklogDropped, [{ id: "BLZ-1", minutes: "0.4" }],
+    "and the dropped one is NAMED in the tally");
 });
+

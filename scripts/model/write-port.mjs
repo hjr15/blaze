@@ -19,7 +19,7 @@
 // where it is. Flipping the default then becomes a one-line decision backed by
 // evidence, taken deliberately in Phase 2 (BLZ-254), rather than a leap.
 import { ticketPath, fsStorage } from "./storage.mjs";
-import { roundEstimate } from "./time.mjs";
+import { storableEstimate } from "./time.mjs";
 import { serializeTicket } from "./ticket.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 
@@ -166,16 +166,11 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
   const est = (v) => {
     if (v === "" || v === null || v === undefined) return null;
     const n = Number(v);
-    // Through `roundEstimate`, which is time.mjs's SINGLE definition of the 5-minute policy —
-    // not a second rounding rule here. Two reasons it has to round at all:
-    //
-    //   the column is INTEGER, and under STRICT (BLZ-390) a hand-edited `estimate: 10.5` is
-    //     refused outright rather than silently stored as REAL, which is what used to happen;
-    //   the column also CHECKs `% 5 = 0`, so rounding merely to an INTEGER is not enough —
-    //     Math.round(10.5) is 11 and would fail the CHECK instead.
-    //
-    // SQLite's `%` casts to integer first, which is why 10.5 passed that CHECK before.
-    return Number.isFinite(n) && n > 0 ? roundEstimate(n) : null;
+    // `storableEstimate`, shared with load-corpus.mjs. An earlier pass used `roundEstimate`
+    // here and that was wrong twice over: it INVENTS (roundEstimate(1) is 5) in a path that
+    // only mirrors, and it still disagreed with the other writer — `estimate: 7` gave
+    // filesystem 7, loadCorpus null, write-port 5. Three answers for one input.
+    return storableEstimate(v);
   };
   const nz = (v) => (v === "" || v === undefined ? null : v);
 
@@ -316,7 +311,8 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
       const rows = await exec.all(
         `SELECT id, project_key, num, type, status, title, priority, resolution, parent_id,
                 parent_type, assignee, estimate_minutes, sprint_id,
-                ${d("start_date")}, ${d("due_date")}, body,
+                ${d("start_date")}, ${d("due_date")},
+                ${d("constraint_start_no_earlier_than")}, ${d("deadline")}, body,
                 ${d("created_on")}, ${d("updated_on")},
                 branch, pr, ref, category, verification, derived, likelihood, impact,
                 extra_json
@@ -340,6 +336,13 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
           parent: r.parent_id ?? "", assignee: r.assignee,
           estimate: r.estimate_minutes ?? "", sprint: r.sprint_id ?? "",
           start: r.start_date ?? "", due: r.due_date ?? "",
+          // Added with the two columns `persist` writes. Putting them in COLUMN_FIELDS took
+          // them OUT of extra_json — which had been the only path by which this reader ever
+          // returned them — so persist wrote and read could not see, and every dual write
+          // reported loss. Two DB read projections that disagree is exactly what COLUMN_FIELDS'
+          // own comment warns about; `openSqliteRead` had them and this one did not.
+          ...(r.constraint_start_no_earlier_than == null ? {} : { not_before: r.constraint_start_no_earlier_than }),
+          ...(r.deadline == null ? {} : { deadline: r.deadline }),
           created: r.created_on, updated: r.updated_on,
           ...(r.branch       == null ? {} : { branch: r.branch }),
           ...(r.pr           == null ? {} : { pr: r.pr }),
