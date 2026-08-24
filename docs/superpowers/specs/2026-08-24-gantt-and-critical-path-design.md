@@ -908,11 +908,12 @@ decision an ADR already carries (`milestone`, `actual`, the deadline pin), or a 
 addition inside the `view` table BLZ-354 §3 establishes.
 
 **One correction to that sentence's earlier form, which cited "a table ADR-0021 already
-establishes".** `docs/decisions/` stops at **ADR-0020**; ADR-0021 is a `status: proposed` draft
-living in BLZ-354 Appendix A and no file exists for it. An argument that this spec needs no ADR
-cannot lean on an unwritten one, so it leans on the spec instead — and **this spec's own
-prerequisite is therefore that ADR-0021 and ADR-0022 are written**, which is BLZ-354's and
-BLZ-360's work, not a gap here. None of §1–§11 changes a system-wide invariant, none is expensive
+establishes".** When this spec merged, `docs/decisions/` stopped at **ADR-0020** and ADR-0021 was a
+`status: proposed` draft living in BLZ-354 Appendix A with no file behind it. An argument that this
+spec needs no ADR cannot lean on an unwritten one, so it leaned on the spec instead. **That
+prerequisite is now discharged: BLZ-366 transcribed both drafts into
+[`0021`](../../decisions/0021-the-tenancy-unit-is-an-installation-a-board-is-a-view-type.md) and
+[`0022`](../../decisions/0022-constraints-are-inputs-dates-are-derived.md).** None of §1–§11 changes a system-wide invariant, none is expensive
 to reverse, and none contradicts an ADR that does exist.
 
 **What would need one:** making the schedule axis the *only* axis (retiring `axis: 'sprint'`
