@@ -83,8 +83,13 @@ test("validateSprintFields: empty-string sprint (membership clear) is clean", ()
   assert.deepEqual(validateSprintFields({ sprint: "" }, { sprintIds: IDS }), []);
 });
 
-test("EDITABLE_FIELDS includes sprint, start, due", () => {
-  for (const f of ["sprint", "start", "due"]) assert.ok(EDITABLE_FIELDS.has(f), f);
+test("EDITABLE_FIELDS includes sprint, and NOT the dates the scheduler owns", () => {
+  // Inverted by BLZ-386, not deleted: this test pinned the pre-ADR-0022 contract, where a
+  // sprint's dates and a ticket's dates were both operator inputs. `sprint` still is. `start`
+  // and `due` are scheduler outputs now, and `not_before`/`deadline` are what an operator sets.
+  assert.ok(EDITABLE_FIELDS.has("sprint"));
+  for (const f of ["not_before", "deadline"]) assert.ok(EDITABLE_FIELDS.has(f), f);
+  for (const f of ["start", "due"]) assert.equal(EDITABLE_FIELDS.has(f), false, f);
 });
 
 test("serializeTicket places sprint/start/due right after estimate", () => {

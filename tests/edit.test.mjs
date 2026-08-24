@@ -111,14 +111,17 @@ test("applyEdit rejects an unregistered sprint id, no write", async () => {
   rmSync(root, { recursive: true, force: true });
 });
 
-test("applyEdit rejects start after due, no write on the failing patch", async () => {
+test("applyEdit rejects not_before after deadline, no write on the failing patch", async () => {
+  // Was "rejects start after due" until BLZ-386. Those two are scheduler outputs now and
+  // applyEdit refuses them outright (see derived-dates-not-editable.test.mjs); the ordering
+  // rule they carried moved to the constraint pair an operator actually sets.
   const { root, projects } = fixture();
-  const r1 = await applyEdit(projects, "OBA-1", { start: "2026-07-25" }, {});
+  const r1 = await applyEdit(projects, "OBA-1", { not_before: "2026-07-25" }, {});
   assert.equal(r1.ok, true, JSON.stringify(r1.errors));
   const before = readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8");
-  const r2 = await applyEdit(projects, "OBA-1", { due: "2026-07-20" }, {});
+  const r2 = await applyEdit(projects, "OBA-1", { deadline: "2026-07-20" }, {});
   assert.equal(r2.ok, false);
-  assert.ok(r2.errors.some((e) => /start.*after.*due/i.test(e)));
+  assert.ok(r2.errors.some((e) => /not_before.*after.*deadline/i.test(e)));
   assert.equal(readFileSync(join(projects, "OBA", "defined", "OBA-1.md"), "utf8"), before);
   rmSync(root, { recursive: true, force: true });
 });
