@@ -753,7 +753,7 @@ Stated plainly, as ADR-0014's and spec 1's convention requires.
 | **ADR-0011 — no new required runtime dependency** | Nothing is added. `package.json` has zero `dependencies`; `pg` is an optional peer. CPM, Tarjan and the roll-up are pure JS over already-loaded data, in the shape both existing roll-ups already use. |
 | **ADR-0014 — no board or tenant discriminator** | Not one column above discriminates a board. The scheduler's unit of solve is the whole board precisely *because* there is only ever one (§6.2). |
 | **ADR-0016 — Node stays the runtime** | Its CPM benchmark is what makes §6.3's lazy choice affordable, and its event-loop finding is what scopes the `worker_threads` trigger. |
-| **ADR-0018 — hybrid custom fields** | Five typed columns, zero JSON tail, no `STORED` generated columns, `ALTER TABLE ADD COLUMN` + backfill, ~~`STRICT` retained~~ (**false — see BLZ-376**: zero of the eight v3 tables are STRICT; the v4 modules are), well inside the **200-filterable-fields-per-install** cap (ADR-0018:71 — per install, not per table; §2.4). |
+| **ADR-0018 — hybrid custom fields** | Five typed columns, zero JSON tail, no `STORED` generated columns, `ALTER TABLE ADD COLUMN` + backfill, ~~`STRICT` retained~~ (**false — see BLZ-376**: zero of the **seven** tables in `SQLITE_DDL` are STRICT; the v4 modules are), well inside the **200-filterable-fields-per-install** cap (ADR-0018:71 — per install, not per table; §2.4). |
 | **ADR-0001 — `Blocks` stays advisory** | Untouched (§5.2). No superseding ADR is raised. |
 
 ---

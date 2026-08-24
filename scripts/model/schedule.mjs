@@ -245,30 +245,24 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     kept.push({ src, target, lag_minutes: Number(l.lag_minutes ?? 0) });
   }
 
-  // --- filter 2: nodes, dropping every terminal ticket ----------------------------------
+  // --- filter 2: nodes — non-terminal, and a declared Precedes SOURCE kind ---------------
   //
-  // A node must ALSO resolve to the delivery workflow, and that half is an INFERENCE this
-  // module is making rather than a rule it is quoting. BLZ-360 §6.2's numbered list names only
-  // the edge-kind rule and terminality — but §6.2's cycle row and §7.1 both call the
-  // population "the non-terminal DELIVERY graph", and without this the solve would hand a
-  // derived start_date and due_date to every non-terminal `goal`, `risk`, `requirement` and
-  // `architecture` ticket. Measured on the live board: 203 of them (43/65/89/6), against 538
-  // delivery tickets. None can carry an edge — Precedes' endpoint kinds refuse them — so each
-  // would be an isolated node given dates CPM never derived.
+  // The node rule is ADR-0022's, §What the scheduler treats as a node, and it is no longer this
+  // module's inference: BLZ-383 asked whether it was §6.2's rule or a reading, and BLZ-388
+  // decided and recorded it. `isNodeKind` above is where it comes from.
   //
-  // Whether this is §6.2's rule or this module's reading is TRACKED AS BLZ-383 rather than
-  // settled here — adding a filter to a merged spec's normative list is a decision, not a fact
-  // correction. Mutation 5b guards it meanwhile.
+  // Two things it excludes, for two different reasons:
+  //
+  //   non-delivery types — a `goal`, `risk`, `requirement` or `architecture` would otherwise be
+  //     an isolated node handed a derived start_date and due_date CPM never meant for it.
+  //     Measured 2026-08-25: 203 of them (43/65/89/6) against 535 nodes. None can carry an edge
+  //     anyway, because Precedes' endpoint kinds refuse all four.
+  //   `epic` — a container. BLZ-360 §8.3: "a parent's dates are a roll-up OF the finished
+  //     schedule, computed afterwards", so scheduling one computes the same quantity twice.
   //
   // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
   // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
   // another board, which is why the filter is here rather than left to luck.
-  //
-  // `epic` stays a node: it resolves to the delivery workflow even though it is not a Precedes
-  // endpoint. That is BLZ-378's disagreement — HYPOTHETICAL on this
-  // board, which holds zero tickets of type `epic`, and BLZ-378 is explicitly on record
-  // retracting an earlier `link-schema.mjs` comment that called it live. Pinned by a test
-  // rather than silently resolved here.
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);
