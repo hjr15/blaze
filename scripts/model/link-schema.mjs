@@ -34,9 +34,11 @@ export const DEFAULT_LINK_TYPES = [
   // citing gantt.mjs as evidence. There are SIX delivery-workflow types — `epic` is the
   // sixth — and gantt.mjs's isDelivery() is `workflowFor(type) === "delivery"`, so it
   // INCLUDES epic. A retained epic therefore draws a Gantt bar but can never be a Precedes
-  // endpoint: on the chart, off the critical path. `epic` was retired by BLZ-231 and is
-  // legacy-but-loadable data, so that gap is live rather than hypothetical. The list matches
-  // the ADR; whether it should also carry `epic` is BLZ-378's question, not this module's.
+  // endpoint: on the chart, off the critical path. `epic` was retired by BLZ-231 but is
+  // still legally loadable, so the gap is real — though currently HYPOTHETICAL rather than
+  // live: the board holds zero tickets of type epic, and schema.mjs retires it by leaving it
+  // no legal parent, so no new one can be created. The list matches the ADR; whether it
+  // should also carry `epic` is BLZ-378.
   { name: "Precedes",   inverse_name: "Follows",        source_kinds: ["feature", "story", "task", "bug", "subtask"],
     target_kinds: ["feature", "story", "task", "bug", "subtask"], min_card: 0, max_card: null },
 ];
@@ -77,9 +79,12 @@ CREATE TABLE IF NOT EXISTS link (
   reviewed_at  ${d.ts},
   -- ADR-0022's link table. The column itself is BLZ-360 section 5.3's, which calls a
   -- scheduling-specific column on a generic table a smell in as many words.
-  -- Keep this comment free of semicolons and of the word S-T-R-I-C-T: sql-dialect.test.mjs
-  -- splits statements on a non-greedy match to the first semicolon, and separately asserts
-  -- the Postgres form contains no such token anywhere. Both fire on comment text. Taken anyway: a zero-default column costs nothing now and
+  -- Keep this comment free of semicolons: sql-dialect.test.mjs splits statements on a
+  -- non-greedy match to the first one, so a semicolon here truncates the match before the
+  -- table suffix it is checking for. An earlier version of this note also warned against the
+  -- word the suffix uses. That was wrong, measured — the test asserts the CONSTRUCT
+  -- (a closing paren, the suffix, a semicolon) and its own comment says so, noting that
+  -- ON DELETE RESTRICT contains the substring and is a false alarm rather than a finding. Taken anyway: a zero-default column costs nothing now and
   -- retro-fitting one costs a schema-version bump later, and the alternative — a
   -- link_schedule side table for one integer — is worse. Every non-dependency link type
   -- ignores it. No CHECK on the sign: a negative lag is a lead, which finish-to-start

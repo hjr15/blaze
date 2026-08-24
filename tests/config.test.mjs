@@ -303,6 +303,35 @@ test("a working week may be redefined, including a six-day one", () => {
   assert.deepEqual(loadConfig({ root, env: {} }).schedule.working_days, [0, 1, 2, 3, 4, 5, 6]);
 });
 
+test("a wrong-SHAPED schedule block is refused, not silently defaulted", () => {
+  // The operator most likely to be wrong is the one a silent default leaves with no message
+  // and a calendar they did not ask for. Absent is fine; present-and-not-an-object is not.
+  // Deleting the shape guard broke NO test before this one existed.
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  for (const bad of ["8h", [480], 480, null, true]) {
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ schema_version: 2, schedule: bad }));
+    assert.throws(() => loadConfig({ root, env: {} }), /schedule must be an object/,
+      `schedule ${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("an unknown schedule key is refused, naming it and the legal ones", () => {
+  // REMOVED_KEYS' rule, applied at the same altitude: a config key nothing reads is a
+  // promise the software does not keep. `minutesPerDay` is the typo this actually catches.
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ schema_version: 2, schedule: { minutesPerDay: 300 } }));
+  assert.throws(() => loadConfig({ root, env: {} }), /minutesPerDay/);
+  assert.throws(() => loadConfig({ root, env: {} }), /minutes_per_day, working_days/);
+});
+
+test("an ABSENT schedule block is fine — only a present-and-wrong one is refused", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ schema_version: 2 }));
+  assert.equal(loadConfig({ root, env: {} }).schedule.minutes_per_day, 480);
+});
+
 test("a non-positive minutes_per_day is refused, naming the key", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
   for (const bad of [0, -1, "480", null]) {

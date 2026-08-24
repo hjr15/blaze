@@ -201,6 +201,8 @@ board outage for its duration, capped by that timeout.
 | `columns` / `terminal` | Lifecycle columns / sticky terminal columns | the seven shown |
 | `defaultLabels` | Label taxonomy (docs + groomer prompt + scaffolder) | generic set |
 | `port` | Web app port | `4321` |
+| `schedule.minutes_per_day` | Minutes of capacity in one working day. The only conversion between `estimate` and calendar time, and the denominator a sprint capacity bar divides by — one number, two consumers | `480` |
+| `schedule.working_days` | Which weekdays count, as `getUTCDay()` numbers (`0` = Sunday) | `[1,2,3,4,5]` |
 | `agentCommand` | Command the groomer spawns (the prompt is appended) | `"claude -p"` |
 | `loops` | Per-loop enable / cadence / groomed columns; the groomer also takes `timeoutSec` and `maxBufferMb` for its subprocess. **The groomer ships disabled** — see [ADR-0019](decisions/0019-the-groomers-guard-is-advisory.md) | shown above |
 

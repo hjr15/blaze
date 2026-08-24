@@ -130,12 +130,20 @@ if (process.env.BLAZE_TEST_PG_URL) {
     url.pathname = `/${PGDB}`;
     const db = new pg.Client(url.toString());
     await db.connect();
-    await db.query("CREATE SCHEMA blaze_config");
-    await db.query("CREATE TABLE blaze_config.project (key text PRIMARY KEY)");
-    await db.query("INSERT INTO blaze_config.project (key) VALUES ('BLZ'), ('OBA')");
-    await db.query(viewDdl("postgres"));
-    for (const t of VIEW_TYPES) {
-      await db.query("INSERT INTO blaze_config.view_type (name, label) VALUES ($1,$2)", [t.name, t.label]);
+    // Setup after connect() must not leak the client: an unclosed pg client keeps the event
+    // loop alive, so the file hangs to timeout instead of reporting the real error — the same
+    // failure shape this helper was rewritten to eliminate.
+    try {
+      await db.query("CREATE SCHEMA blaze_config");
+      await db.query("CREATE TABLE blaze_config.project (key text PRIMARY KEY)");
+      await db.query("INSERT INTO blaze_config.project (key) VALUES ('BLZ'), ('OBA')");
+      await db.query(viewDdl("postgres"));
+      for (const t of VIEW_TYPES) {
+        await db.query("INSERT INTO blaze_config.view_type (name, label) VALUES ($1,$2)", [t.name, t.label]);
+      }
+    } catch (e) {
+      await closePg(db);
+      throw e;
     }
     return db;
   }

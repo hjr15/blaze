@@ -236,39 +236,26 @@ if (process.env.BLAZE_TEST_PG_URL) {
     });
 
     test("lag_minutes round-trips through Postgres, including a negative lead", async () => {
-
       const db = await openPg();
-
       try {
-
         await db.query(`INSERT INTO link_type (id, project_key, name, inverse_name, source_kinds, target_kinds)
 
                         VALUES ('lt1','BLZ','Precedes','Follows','task','task')`);
-
         await db.query(`INSERT INTO link (id, link_type_id, source_id, target_id, created_at)
 
                         VALUES ('l1','lt1','BLZ-1','BLZ-2', now())`);
-
         const d = await db.query("SELECT lag_minutes FROM link WHERE id='l1'");
-
         assert.equal(d.rows[0].lag_minutes, 0, "the zero default must hold in Postgres too");
-
         await db.query(`INSERT INTO link (id, link_type_id, source_id, target_id, created_at, lag_minutes)
 
                         VALUES ('l2','lt1','BLZ-3','BLZ-4', now(), -120)`);
-
         const n = await db.query("SELECT lag_minutes FROM link WHERE id='l2'");
-
         assert.equal(n.rows[0].lag_minutes, -120, "a negative lag is a lead and no CHECK forbids it");
-
         await assert.rejects(() => db.query("UPDATE link SET lag_minutes = NULL WHERE id='l1'"), /null/i);
-
       } finally {
         await db.end();
       }
-
     });
-
 
     test("deleting a link type that still has links is REFUSED (ON DELETE RESTRICT)", async () => {
       const db = await openPg();
@@ -299,11 +286,13 @@ describe("Precedes / Follows (ADR-0022)", () => {
     assert.equal(p.inverse_name, "Follows");
   });
 
-  test("both endpoints are the five delivery kinds — a risk or a goal is refused by the meta-model", () => {
+  test("both endpoints are the five kinds ADR-0022 names — a risk or a goal is refused", () => {
     const p = precedes();
-    const delivery = ["bug", "feature", "story", "subtask", "task"];
-    assert.deepEqual([...p.source_kinds].sort(), delivery);
-    assert.deepEqual([...p.target_kinds].sort(), delivery);
+    // NOT "the delivery kinds": there are six delivery-workflow types and `epic` is the
+    // sixth, so this list is narrower than isDelivery(). BLZ-378 carries that gap.
+    const adrKinds = ["bug", "feature", "story", "subtask", "task"];
+    assert.deepEqual([...p.source_kinds].sort(), adrKinds);
+    assert.deepEqual([...p.target_kinds].sort(), adrKinds);
     // 58 of the 392 live Blocks edges are refused by exactly this rule, 36 of them
     // risk<->feature. A risk does not belong in a delivery critical path.
     assert.ok(!p.source_kinds.includes("risk") && !p.target_kinds.includes("risk"));
