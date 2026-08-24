@@ -38,7 +38,7 @@ cd /home/rnamwoh/Documents/Code/blaze
 git fetch origin && git status --short && git log origin/main --oneline -5
 ```
 
-Expect `main` clean at or after `01cae45 BLZ-366: write ADR-0021 and ADR-0022 … (#107)`.
+Expect `main` clean at or after `3c586d9 docs: the kernel's first three steps are done (#111)`.
 
 ```bash
 docker run --rm -d -e POSTGRES_PASSWORD=x -p 55443:5432 --name v4chk postgres:17-alpine
@@ -69,9 +69,11 @@ cd /home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine
 git status -sb && node /home/rnamwoh/Documents/Code/blaze/scripts/cli.mjs audit | tail -5
 ```
 
-Expect clean, on `BLZ-305-v4-spine`, **77 commits unpushed — that is correct, do not push**, and
-`ok=true` with the four soft categories (`empty-labels` 806, `empty-components` 685,
-`missing-parent` 25, `terminal-goal-unverified-requirement` 1).
+Expect clean, on `BLZ-305-v4-spine`, **88 commits unpushed — that is correct, do not push**, and
+`ok=true`. `audit | tail -3` shows `missing-parent` 25 and
+`terminal-goal-unverified-requirement` 1; the full listing also carries `empty-labels` 806 and
+`empty-components` 685. All four are soft. The unpushed count only ever rises — treat a *higher*
+number as normal and a lower one as the CronJob having flushed.
 
 ---
 
@@ -122,10 +124,16 @@ Start at step 4.**
 4. **The CPM solve — START HERE.** Forward/backward pass, float, critical path, over the
    non-terminal delivery graph. BLZ-360 §6.1–§6.2. Determinism is a hard requirement: no
    `Date.now()`, no `Math.random()`, `now` injected, locale-independent `cmp`, ties broken by id.
-   **Settle spec 3 §13.1's horizon question first** — it proposes `max(EF)` over the completed
+   **Settle spec 3 §13 item 1's horizon question first** — it proposes `max(EF)` over the completed
    forward pass and argues the self-reference is apparent rather than real. That is a proposal
    into an open question, not a decision.
 5. **`scheduleFindings()`** — one function, so `blaze audit` and the views cannot drift.
+
+**Steps 4 and 5 are ticketed.** Feature **BLZ-379** under BLZ-305, with **BLZ-380** (settle the
+horizon, 60 min), **BLZ-381** (the passes, float, critical path, 360 min) and **BLZ-382**
+(`scheduleFindings()`, 180 min). They carry the design detail inline, so the feature is startable
+without re-reading three specs. **BLZ-380 gates BLZ-381** — the backward pass cannot be tested
+against an unstated seed.
 
 **Four corrections implementation forced, all ticketed:**
 
@@ -153,7 +161,7 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 **Two things the specs tell you the kernel needs that its own spec understated:**
 - `hierarchy-rollup.mjs` needs a **`rollupAll` whole-tree entry point**, not only `combine`
   (BLZ-368; measured 842 ms against 5.2 ms for the naive swap).
-- Spec 3 §13.1 proposes the backward pass's horizon is `max(EF)` over the completed forward pass,
+- Spec 3 §13 item 1 proposes the backward pass's horizon is `max(EF)` over the completed forward pass,
   and that its apparent self-reference is not real. That is a **proposal into an open question**,
   not a decision — settle it before you code the backward pass.
 
@@ -163,6 +171,10 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 
 | Ticket | State | Notes |
 |---|---|---|
+| **BLZ-379** | `defined` | **The current lane — feature, parent BLZ-305.** The CPM solve and its findings; §3 steps 4–5. Children BLZ-380/381/382. |
+| **BLZ-380** | `defined` | Settle the backward pass's horizon (spec 3 §13 item 1's proposal) and record it. **Do first** — BLZ-381 depends on it. |
+| **BLZ-381** | `defined` | Forward/backward passes, float, critical path. Carries BLZ-360 §11's eight mutations as its acceptance. |
+| **BLZ-382** | `defined` | `scheduleFindings()` — the one function `blaze audit` and the views both read. |
 | **BLZ-369** | `defined` | **Operator decision 2026-08-24: accept now, remove later.** An old engine's `loadSprints → setActive → saveSprints` destroys `activeByProject`, because `loadSprints` whitelists two keys (`sprints.mjs:14`). It is operator-entered state nothing can reconstruct. Candidates: a `MIN_SCHEMA_VERSION` bump, or a version stamp in `sprints.json` plus a warning. Neither designed. |
 | **BLZ-376** | `defined` | The STRICT claim above. Small, independent. |
 | **BLZ-377** | `defined` | `blaze_config` + `viewDdl`. Blocks spec 1's view table and therefore spec 4's report view. |
@@ -178,7 +190,7 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 ## 5. Out of scope
 
 - **Do not push `blaze-pm`.** The `blaze-flush` CronJob (23:50 Australia/Sydney) is the sole
-  merger. Work there ends at a local commit. 77 commits waiting is correct.
+  merger. Work there ends at a local commit. 88 commits waiting is correct.
 - **Do not touch the NCA project.** Parked by the operator on 2026-08-23. NCA-40 is a real false
   green and it will keep.
 - **Do not run the BLZ-324 soak** on the operator's behalf.
