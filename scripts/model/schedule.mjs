@@ -241,6 +241,10 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // delivery tickets. None can carry an edge — Precedes' endpoint kinds refuse them — so each
   // would be an isolated node given dates CPM never derived.
   //
+  // Whether this is §6.2's rule or this module's reading is TRACKED AS BLZ-383 rather than
+  // settled here — adding a filter to a merged spec's normative list is a decision, not a fact
+  // correction. Mutation 5b guards it meanwhile.
+  //
   // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
   // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
   // another board, which is why the filter is here rather than left to luck.
