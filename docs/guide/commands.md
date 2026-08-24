@@ -240,7 +240,9 @@ In-place edit of one whitelisted field. Any other field name errors.
 | Arg | Meaning |
 |---|---|
 | `<id>` | Ticket id. |
-| `<field>` | One of: `title`, `assignee`, `priority`, `labels`, `components`, `estimate`, `parent`, `likelihood`, `impact`, `due`, `sprint`, `start`. |
+| `<field>` | One of: `title`, `type`, `assignee`, `priority`, `labels`, `components`, `estimate`, `parent`, `likelihood`, `impact`, `sprint`, `not_before`, `deadline`. |
+
+**`start` and `due` are no longer editable** (ADR-0022, BLZ-386). They are the scheduler's derived outputs now; `not_before` and `deadline` are the constraints that drive them. Editing either is refused with a message naming its replacement — `start is derived by the scheduler; set 'not_before' to constrain it`. A `not_before` later than its own `deadline` is refused too: that pair cannot both hold, which is a different thing from a deadline the plan happens to miss.
 | `<value>` | New value for the field. |
 
 ## link
@@ -346,6 +348,38 @@ the reviewed ledger.
 > changes sitting in the same repo.
 
 ---
+
+## schedule
+
+```
+blaze schedule migrate-dates [--dry-run | --write]
+blaze schedule import-deps   [--dry-run]
+```
+
+The two one-time steps that make the scheduling kernel live (ADR-0022; BLZ-360 §4 and §5.5).
+**Dry-run is the default for both**, and `import-deps` has no `--write` at all.
+
+`migrate-dates` reinterprets the dates already on the board, **split on terminality**, and the split
+is the whole correctness argument:
+
+| Cohort | What happens |
+|---|---|
+| terminal (`done`, `achieved`, …) | **frozen as actuals, kept byte-for-byte.** Re-deriving them would overwrite history with a forecast. |
+| non-terminal | `due` → `deadline`, `start` → `not_before`; the derived fields are cleared and recomputed. |
+| undated | untouched. |
+
+It prints one line per affected ticket naming the cohort and both fields, for review before the
+write. It is idempotent — a second `--write` is a no-op, not a clobber. The write should be **one
+commit with the ids in its body**.
+
+`import-deps` proposes `Precedes` edges from the existing advisory `Blocks` links. **It never
+guesses**: a `Blocks` pair written from both ends carries no direction, so every mutual pair is
+reported `undecidable` and you resolve it. A machine that picks a direction for one is right half
+the time, and the wrong half is an invisible schedule error. Edges whose endpoints `Precedes` does
+not declare are reported `refused` with the kind that refused them, never silently dropped.
+
+`Blocks` and `Precedes` coexist indefinitely — `Blocks` stays the advisory human signal, `Precedes`
+is the scheduler's input, and nothing lints them against each other. ADR-0001 is unchanged.
 
 ## user
 
