@@ -17,12 +17,16 @@
 //
 // The graph is built by filtering IN THIS ORDER, and the order is part of the rule
 // (BLZ-360 §6.2):
-//   1. Edges — keep a `Precedes` edge only if both endpoints are declared delivery kinds.
-//      The meta-model's default-deny, read from DEFAULT_LINK_TYPES rather than restated.
-//   2. Nodes — drop every ticket for which isTerminal(type, status) holds. A terminal
-//      ticket is never a node, never an SCC member, and is NEVER marked `unscheduled`: its
-//      dates are frozen actuals owned by history. If Tarjan ran over the full graph the
-//      "every SCC member is unscheduled" rule would overwrite them.
+//   1. Edges — keep a `Precedes` edge only if both endpoints are DECLARED PRECEDES ENDPOINT
+//      KINDS. Deliberately not "the delivery kinds": there are six delivery-workflow types and
+//      `epic` is the sixth, a conflation link-schema.mjs warns against in as many words. Read
+//      from DEFAULT_LINK_TYPES rather than restated.
+//   2. Nodes — a ticket whose type is a declared Precedes SOURCE kind, and which is not
+//      terminal (ADR-0022 §What the scheduler treats as a node). The same entry as rule 1, so
+//      the node set and the edge set cannot drift. A terminal ticket is never a node, never an
+//      SCC member, and is NEVER marked `unscheduled`: its dates are frozen actuals owned by
+//      history. If Tarjan ran over the full graph the "every SCC member is unscheduled" rule
+//      would overwrite them.
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";

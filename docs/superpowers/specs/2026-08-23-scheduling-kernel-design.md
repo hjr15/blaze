@@ -860,8 +860,9 @@ is small enough to review by hand.
    **ADR-0022, §What the scheduler treats as a node**: a node is a ticket whose type is a declared
    `Precedes` source kind and which is not terminal — read from the same `link_type` entry as the
    edge rule, so the two cannot drift. It is narrower than "the delivery workflow" by exactly
-   `epic`, which is a container whose dates come from spec 4's roll-up rather than from CPM over
-   its own estimate. The two rules differ by exactly `epic` and the board holds zero of them, so they
+   `epic`, which is a container whose dates are a roll-up OF the finished schedule rather than a
+   CPM input (§8.3) — and that roll-up is spec 4's and is not built, so an epic currently has no
+   derived dates at all. The two rules differ by exactly `epic` and the board holds zero of them, so they
    select the same set — verified 2026-08-25 against the live corpus. The
    original text follows.
 

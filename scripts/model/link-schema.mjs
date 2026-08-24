@@ -36,10 +36,11 @@ export const DEFAULT_LINK_TYPES = [
   // INCLUDES epic. A retained epic therefore draws a Gantt bar and is not a Precedes endpoint.
   //
   // BLZ-378 CLOSED, under BLZ-388: that is deliberate and it is not a disagreement. An epic is
-  // a CONTAINER, and a container's dates are rolled up from its children (spec 4's hierarchy
-  // roll-up), not derived by CPM over its own estimate — scheduling one would double-count the
-  // very children the roll-up sums. So a legacy epic is chart-only BY DESIGN: it draws a bar
-  // from rolled-up dates and never appears on the critical path.
+  // a CONTAINER, and BLZ-360 §8.3 states the rule: "a parent's dates are a roll-up OF the finished
+  // schedule, computed afterwards" — so scheduling one computes the same quantity twice by two
+  // methods. So a legacy epic is chart-only BY DESIGN: it never appears on
+  // the critical path, and the bar it draws comes from whatever start/due it carries — the DATE
+  // roll-up that should supply them is spec 4's and is NOT BUILT (BLZ-360 §8.3).
   //
   // The list stays exactly as ADR-0022 declares it, and `scripts/model/schedule.mjs` now takes
   // its NODE set from this same entry rather than asking `workflowFor` — so the two definitions

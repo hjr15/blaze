@@ -127,8 +127,9 @@ the decision. It also closes BLZ-378, because the two turned out to be the same 
 > The node set and the edge set are read from the SAME `link_type` entry, so they cannot drift.**
 
 **This is narrower than "the delivery workflow", by exactly one type: `epic`.** Verified across the
-whole registry: of the nine registered types, `epic` is the **only** one the two rules classify
-differently. `Precedes`' `source_kinds` and `target_kinds` are also identical, so a node set taken
+whole registry: of the **ten** registered types (`goal`, `requirement`, `architecture`, `feature`,
+`risk`, `story`, `task`, `bug`, `subtask`, `epic`), `epic` is the **only** one the two rules
+classify differently. `Precedes`' `source_kinds` and `target_kinds` are also identical, so a node set taken
 from the source set cannot disagree with the target set about what may be an endpoint.
 
 Dropping `epic` is the substance of the decision, and the reason is not that it is retired — it is
@@ -162,6 +163,16 @@ schedule today. It is taken for the structural reason
 rather than the behavioural one — a rule read from one place cannot drift from itself, and the
 alternative left `workflowFor` as a second definition of "schedulable" sitting beside the declared
 endpoint kinds.
+
+**One limitation this rule introduces, stated rather than discovered later.** The old filter read
+`workflowFor`, which resolves through the **override-merged** type registry; this one reads
+`DEFAULT_LINK_TYPES`, a constant. `resolveSchema` merges `schema.types` and `schema.workflows` and
+has **no override path for link types at all** — so an installation that adds its own delivery type
+(`spike`, say) gets a type that is not a `Precedes` endpoint and is therefore **not a node**, where
+the old rule would have scheduled it as an isolated one. That is a real behaviour change beyond
+`epic`, invisible on this board because it has no such override. It is coherent — a type that can
+never carry a dependency edge gains nothing from CPM over its own estimate — but it means a
+custom delivery type cannot currently be made schedulable at all. Tracked as **BLZ-392**.
 
 **The rejected alternative and why it lost.** Adding `epic` to `Precedes`' endpoint kinds would
 have made the two definitions agree the other way, at the cost of amending the declared list above

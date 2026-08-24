@@ -292,8 +292,9 @@ describe("Precedes / Follows (ADR-0022)", () => {
     // sixth, so this list is narrower than gantt.mjs's isDelivery().
     //
     // BLZ-378 CLOSED under BLZ-388, and the answer is that the narrowness is deliberate. An
-    // epic is a container whose dates are rolled up from its children, not derived by CPM over
-    // its own estimate, so it is chart-only by design. schedule.mjs now takes its NODE set from
+    // epic is a container whose dates are a roll-up OF the finished schedule rather than a CPM
+    // input (BLZ-360 §8.3), so it is chart-only by design. That roll-up is spec 4's and is not
+    // built, so an epic currently has no derived dates at all. schedule.mjs now takes its NODE set from
     // this same list, so there is no longer a second definition for it to disagree with.
     const adrKinds = ["bug", "feature", "story", "subtask", "task"];
     assert.deepEqual([...p.source_kinds].sort(), adrKinds);

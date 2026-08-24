@@ -375,7 +375,7 @@ test("BLZ-378/BLZ-383 — an epic is not a node at all, because it is not a Prec
     t("S", { type: "story", estimate_minutes: 60 }),
   ], [edge("E", "S")]);
   assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["undeclared-kind"]);
-  assert.equal(byId(r, "E"), undefined, "an epic gets no CPM dates — its dates come from roll-up");
+  assert.equal(byId(r, "E"), undefined, "an epic gets no CPM dates; the roll-up that should date it is spec 4's and unbuilt");
   assert.deepEqual(r.unscheduled, [], "and it is not marked unscheduled either");
   assert.deepEqual(r.scheduled.map((x) => x.id), ["S"]);
 });
@@ -579,9 +579,9 @@ test("CORPUS — BLZ-253's 4,800 minutes is the board's max EF, so it sets the h
 
 // ---------------------------------------------------------------- the delivery-graph filter
 //
-// This filter is an INFERENCE, flagged as one in schedule.mjs: BLZ-360 §6.2's numbered list
-// names only the edge-kind rule and terminality, while §6.2's heading and §7.1 both call the
-// population "the non-terminal DELIVERY graph". These tests pin the reading.
+// SETTLED under BLZ-388 and recorded in ADR-0022 §What the scheduler treats as a node: a node is
+// a ticket whose type is a declared `Precedes` source kind and which is not terminal. It was an
+// inference when these tests were written (BLZ-383) and is not one now.
 
 test("a non-delivery ticket is not a node, so CPM never hands it a derived date", () => {
   // Measured on the live board 2026-08-25: 203 non-terminal non-delivery tickets — 43 goal,
