@@ -20,6 +20,17 @@ export const DEFAULT_LINK_TYPES = [
     target_kinds: ["architecture"], min_card: 0, max_card: 1 },
   { name: "Derives",    inverse_name: "Derived from",   source_kinds: ["requirement"],
     target_kinds: ["requirement"], min_card: 0, max_card: null },
+  // ADR-0022. The scheduler's dependency edge, and deliberately NOT `Blocks`: 248 of the
+  // 392 live `Blocks` edges sit in 124 mutual pairs and carry no usable direction, because
+  // frontmatter has no way to write the inverse. Enforcing `Blocks` would enforce a
+  // direction the corpus does not contain. `Precedes` is new, has never been advisory, and
+  // therefore reverses nothing — ADR-0001 stands and no superseding ADR is raised.
+  //
+  // Both endpoint sets are the five DELIVERY kinds. That default-deny refuses 58 of the 392
+  // live edges, 36 of them risk<->feature: a risk does not belong in a delivery critical
+  // path, and `gantt.mjs:24` already excludes non-delivery types from bar rows.
+  { name: "Precedes",   inverse_name: "Follows",        source_kinds: ["feature", "story", "task", "bug", "subtask"],
+    target_kinds: ["feature", "story", "task", "bug", "subtask"], min_card: 0, max_card: null },
 ];
 
 
@@ -56,6 +67,13 @@ CREATE TABLE IF NOT EXISTS link (
   -- has re-reviewed since the source changed is exactly the case section 5 wants
   -- surfaced, so "never reviewed" must be representable rather than defaulted away.
   reviewed_at  ${d.ts},
+  -- ADR-0022. A scheduling-specific column on a generic table, and the spec calls it a
+  -- smell in as many words. Taken anyway: a zero-default column costs nothing now and
+  -- retro-fitting one costs a schema-version bump later, and the alternative — a
+  -- link_schedule side table for one integer — is worse. Every non-dependency link type
+  -- ignores it. No CHECK on the sign: a negative lag is a lead, which finish-to-start
+  -- scheduling uses.
+  lag_minutes  ${d.int} NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE (link_type_id, source_id, target_id),
   CHECK (source_id <> target_id)

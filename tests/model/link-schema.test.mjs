@@ -240,3 +240,65 @@ if (process.env.BLAZE_TEST_PG_URL) {
     });
   });
 }
+
+// --- ADR-0022: the Precedes/Follows scheduling edge (BLZ-373) -----------------
+// `Blocks` cannot carry the direction a scheduler needs: 248 of 392 live edges sit in 124
+// mutual pairs, because frontmatter has no way to write the inverse. So the kernel adds a
+// NEW type rather than enforcing `Blocks`, which is why ADR-0001 survives untouched.
+describe("Precedes / Follows (ADR-0022)", () => {
+  const precedes = () => DEFAULT_LINK_TYPES.find((t) => t.name === "Precedes");
+
+  test("Precedes exists, with Follows as its inverse", () => {
+    const p = precedes();
+    assert.ok(p, "DEFAULT_LINK_TYPES must carry Precedes");
+    assert.equal(p.inverse_name, "Follows");
+  });
+
+  test("both endpoints are the five delivery kinds — a risk or a goal is refused by the meta-model", () => {
+    const p = precedes();
+    const delivery = ["bug", "feature", "story", "subtask", "task"];
+    assert.deepEqual([...p.source_kinds].sort(), delivery);
+    assert.deepEqual([...p.target_kinds].sort(), delivery);
+    // 58 of the 392 live Blocks edges are refused by exactly this rule, 36 of them
+    // risk<->feature. A risk does not belong in a delivery critical path.
+    assert.ok(!p.source_kinds.includes("risk") && !p.target_kinds.includes("risk"));
+    assert.ok(!p.source_kinds.includes("goal") && !p.target_kinds.includes("goal"));
+  });
+
+  test("Precedes is unbounded — a ticket may precede many", () => {
+    const p = precedes();
+    assert.equal(p.min_card, 0);
+    assert.equal(p.max_card, null);
+  });
+
+  test("lag_minutes exists on link, NOT NULL, defaulting to 0", () => {
+    const db = open();
+    db.prepare(`INSERT INTO link_type (id, project_key, name, inverse_name, source_kinds, target_kinds)
+                VALUES ('lt1','BLZ','Precedes','Follows','task','task')`).run();
+    db.prepare(`INSERT INTO link (id, link_type_id, source_id, target_id, created_at)
+                VALUES ('l1','lt1','BLZ-1','BLZ-2','2026-08-24')`).run();
+    assert.equal(db.prepare("SELECT lag_minutes m FROM link WHERE id='l1'").get().m, 0,
+      "a zero default is what makes this column free for every non-scheduling link type");
+    assert.throws(() => db.prepare("UPDATE link SET lag_minutes = NULL WHERE id='l1'").run(), /NOT NULL/);
+  });
+
+  test("lag_minutes carries a negative lead as well as a positive lag", () => {
+    const db = open();
+    db.prepare(`INSERT INTO link_type (id, project_key, name, inverse_name, source_kinds, target_kinds)
+                VALUES ('lt1','BLZ','Precedes','Follows','task','task')`).run();
+    db.prepare(`INSERT INTO link (id, link_type_id, source_id, target_id, created_at, lag_minutes)
+                VALUES ('l1','lt1','BLZ-1','BLZ-2','2026-08-24',-120)`).run();
+    assert.equal(db.prepare("SELECT lag_minutes m FROM link WHERE id='l1'").get().m, -120,
+      "no CHECK constrains the sign: a lead is a negative lag and the spec declares none");
+  });
+
+  // ADR-0022 is explicit that this touches ONE of the two tables called link_type. The
+  // frontmatter path seeds from links.mjs's bare Set and would refuse a Precedes until that
+  // is extended too — which is why §5.5's import-deps is an operator tool and not a lint.
+  test("the frontmatter LINK_TYPES deliberately does NOT yet carry Precedes", async () => {
+    const { LINK_TYPES } = await import("../../scripts/model/links.mjs");
+    assert.ok(!LINK_TYPES.has("Precedes"),
+      "if this fails, the frontmatter path now accepts Precedes and ADR-0022 §5.3's asymmetry is gone");
+    assert.ok(LINK_TYPES.has("Blocks"), "Blocks stays, advisory and untouched — ADR-0001");
+  });
+});
