@@ -47,8 +47,14 @@ BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55443/postgres npm run test:co
 docker rm -f v4chk
 ```
 
-Last verified on `8b9f93b`: **1,942 pass / 0 fail**, coverage **97.89 / 85.82 / 96.63 / 97.89**
+Last verified on `6d31e54`: **1,991 pass / 0 fail**, coverage **97.92 / 85.90 / 96.67 / 97.92**
 against gates of 91 / 77 / 93 / 91.
+
+**One thing CI does not check.** `test.yml` runs only `npm run test:coverage`, which is
+`--test-concurrency=1`. **`npm test` runs files concurrently against one Postgres**, so a suite
+that drops a schema another suite owns hangs there while CI stays green — that happened twice in
+BLZ-370 and cost two review rounds. A new Postgres test needs its own uniquely-named schema, or
+its own database when the DDL hardcodes a namespace. Never truncate shared ground.
 
 **One honest note on that baseline.** The session before this one measured branches at **85.83**
 (3968/4623) and this one measured **85.82** (3966/4621) — numerator and denominator both down 2 —
@@ -101,20 +107,44 @@ hits under `scripts/`. So of everything the three merged specs describe, **exact
 buildable today**: spec 2 §4's `sprint-overrun` finding, which needs no scheduler and no view
 config and has **26 live corpus rows** waiting (S2: 2, S3: 13, S5: 11).
 
-Build order, forced by that:
+Build order, forced by that. **Steps 1–3 are DONE, merged as `6d31e54` (PR #110, BLZ-370).
+Start at step 4.**
 
-1. **DB schema version 1 → 2** — ADR-0022 and BLZ-360 §6.4. Installs `linkDdl`, `hierarchyDdl`,
-   `viewDdl` and the five `ticket` columns. `createDbSchema` currently installs **no v4 table at
-   all**, which is the circularity that put the schema event in the scheduling kernel rather than
-   spec 4.
-2. **`Precedes` / `Follows`** in the v4 `link` table's `DEFAULT_LINK_TYPES`, plus
-   `lag_minutes INTEGER NOT NULL DEFAULT 0` on `link`. ADR-0022 §"Why `Precedes`".
-3. **`schedule.*` board config** — `minutes_per_day` (480) and `working_days` (Mon–Fri). One
-   number, one definition; spec 2 §3.2's capacity bar is its second consumer.
-4. **The CPM solve** — forward/backward pass, float, critical path, over the non-terminal delivery
-   graph. BLZ-360 §6.1–§6.2. Determinism is a hard requirement: no `Date.now()`, no
-   `Math.random()`, `now` injected, locale-independent `cmp`, ties broken by id.
+1. ~~**DB schema version 1 → 2**~~ — **done.** `applyCreate` installs `linkDdl` and
+   `hierarchyDdl`; `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` are both **2**. **`viewDdl` is
+   deliberately NOT installed** — see the corrections below.
+2. ~~**`Precedes` / `Follows`**~~ — **done.** Both endpoint sets
+   `["feature","story","task","bug","subtask"]`, plus `lag_minutes INTEGER NOT NULL DEFAULT 0`
+   on `link`. No CHECK on the sign: a negative lag is a lead.
+3. ~~**`schedule.*` board config**~~ — **done.** `minutes_per_day` (480) and `working_days`
+   (`[1,2,3,4,5]`, `getUTCDay()` numbering). A grep test enforces that nothing outside
+   `config.mjs` hardcodes either.
+4. **The CPM solve — START HERE.** Forward/backward pass, float, critical path, over the
+   non-terminal delivery graph. BLZ-360 §6.1–§6.2. Determinism is a hard requirement: no
+   `Date.now()`, no `Math.random()`, `now` injected, locale-independent `cmp`, ties broken by id.
+   **Settle spec 3 §13.1's horizon question first** — it proposes `max(EF)` over the completed
+   forward pass and argues the self-reference is apparent rather than real. That is a proposal
+   into an open question, not a decision.
 5. **`scheduleFindings()`** — one function, so `blaze audit` and the views cannot drift.
+
+**Four corrections implementation forced, all ticketed:**
+
+- **`viewDdl` was never written**, though BLZ-360 §6.4 and BLZ-354 §6.2 both said v2 installs it.
+  It exists now as `scripts/model/view-schema.mjs`.
+- **BLZ-354 §3's DDL cannot be created in SQLite.** The qualified FK
+  `REFERENCES blaze_config.project (key)` is a **syntax error**; the unqualified form resolves to
+  a non-existent `main.project`. `view` must live in `blaze_config`, beside its FK targets. Also
+  `CREATE INDEX` takes the schema qualifier on the **index** name in SQLite and the **table** name
+  in Postgres.
+- **Nothing installs `blaze_config` at all** — `configDdl` is exported and called only from its
+  own test. Spec 1 reasoned `view` "costs one DDL"; it costs a namespace with no install path.
+  **BLZ-377** installs both, and will probably want schema **version 3** since v2 has shipped.
+- **"STRICT stays on every SQLite table" is false** — zero of seven. True of the v4 modules,
+  false of the v3 core. **BLZ-376.**
+
+**One decision the specs were silent on:** `MIN_DB_SCHEMA_VERSION` rose to **2**, so a v1 shadow
+is refused. Safe because the shadow is derived — `blaze db init --force` rebuilds it from the
+corpus — and `docs/schema-versioning.md` now documents it.
 
 **TDD, and the mutation list is already written for you.** BLZ-360 §11 names eight mutations that
 must each break a test; spec 3 §9 names nine more for the view. **If a mutation does not break a
@@ -134,6 +164,9 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 | Ticket | State | Notes |
 |---|---|---|
 | **BLZ-369** | `defined` | **Operator decision 2026-08-24: accept now, remove later.** An old engine's `loadSprints → setActive → saveSprints` destroys `activeByProject`, because `loadSprints` whitelists two keys (`sprints.mjs:14`). It is operator-entered state nothing can reconstruct. Candidates: a `MIN_SCHEMA_VERSION` bump, or a version stamp in `sprints.json` plus a warning. Neither designed. |
+| **BLZ-376** | `defined` | The STRICT claim above. Small, independent. |
+| **BLZ-377** | `defined` | `blaze_config` + `viewDdl`. Blocks spec 1's view table and therefore spec 4's report view. |
+| **BLZ-378** | `defined` | `epic` is a delivery type but **not** a `Precedes` endpoint, so a retained epic draws a Gantt bar and can never be on the critical path. Hypothetical on this board — zero epics — but the two definitions disagree. |
 | **BLZ-362** | `defined` | ADR-0014's three factual errors. Small, independent, no prerequisites. ADR-0021 already records what is wrong. |
 | **BLZ-358** | `defined` | First-run setup. **Operator decided the mechanism:** a one-time token at `<board>/.blaze/setup-token`, mode `0600`, path logged but never the value. |
 | **BLZ-355** | `defined` | Grill the Q6 interface half. **Needs the operator interactively** — do not queue it for an agent session. |
