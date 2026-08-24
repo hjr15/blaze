@@ -3,10 +3,14 @@
 import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 
-const SRC = "scripts/model/schedule.mjs";
-const original = readFileSync(SRC, "utf8");
+const SOLVE = "scripts/model/schedule.mjs";
+const AUDIT = "scripts/model/audit.mjs";
+const SUITES = "tests/model/schedule.test.mjs tests/model/schedule-findings.test.mjs";
 
 const MUTATIONS = [
+  { n: 1, file: AUDIT, name: "EF > deadline flipped to EF >= deadline",
+    from: "if (!row.deadline || !(row.due_date > row.deadline)) continue;",
+    to:   "if (!row.deadline || !(row.due_date >= row.deadline)) continue;" },
   { n: 2, name: "drop the + lag term from the forward pass",
     from: "start = Math.max(start, ef.get(e.src) + e.lag_minutes);",
     to:   "start = Math.max(start, ef.get(e.src));" },
@@ -35,20 +39,22 @@ const MUTATIONS = [
 
 const results = [];
 for (const m of MUTATIONS) {
+  const src = m.file ?? SOLVE;
+  const original = readFileSync(src, "utf8");
   if (!original.includes(m.from)) { results.push({ ...m, status: "PATCH-MISS" }); continue; }
   if (original.split(m.from).length - 1 !== 1) { results.push({ ...m, status: "PATCH-AMBIGUOUS" }); continue; }
-  writeFileSync(SRC, original.replace(m.from, m.to));
+  writeFileSync(src, original.replace(m.from, m.to));
   let killed = false, detail = "";
   try {
-    execSync(`node --test ${process.argv[2] ?? "tests/model/schedule.test.mjs"}`, { stdio: "pipe" });
+    execSync(`node --test ${process.argv[2] ?? SUITES}`, { stdio: "pipe" });
   } catch (e) {
     killed = true;
     const out = String(e.stdout ?? "");
     detail = (out.match(/^ℹ fail \d+$/m) ?? [""])[0];
   }
+  writeFileSync(src, original);
   results.push({ ...m, status: killed ? "KILLED" : "SURVIVED", detail });
 }
-writeFileSync(SRC, original);
 
 console.log("\n=== BLZ-360 §11 mutation results ===");
 for (const r of results) console.log(`  #${r.n}  ${r.status.padEnd(15)} ${r.name}  ${r.detail}`);
