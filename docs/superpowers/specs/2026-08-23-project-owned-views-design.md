@@ -75,7 +75,7 @@ installation**, each with its own column set, rendered as board pills at `page.m
 
 So `board` today means, simultaneously:
 
-1. the **tenancy unit** — ADR-0014: *"One installation is one board"*;
+1. the **tenancy unit** — ADR-0014, as originally written: *"One installation is one board"*;
 2. the **kanban view type** — `VIEW_NAMES[0]`, `views/board.mjs`;
 3. a **workflow-derived column grouping**, of which one installation already has several.
 
@@ -84,9 +84,9 @@ layer on the day it was written.** Meaning (3) is the one that makes "a project 
 boards" unwritable: the installation already owns N boards, derived from workflows, and
 they are a different thing. This is why §2 retires the word rather than redefining it.
 
-### 1.4 What the v4 schema actually contains — ADR-0014's description is wrong in three ways
+### 1.4 What the v4 schema actually contains — ADR-0014's description was wrong in three ways
 
-ADR-0014:12 says *"`board`, `board_config`, `projection_meta` and the two write-rules tables
+ADR-0014:12, as originally written, said *"`board`, `board_config`, `projection_meta` and the two write-rules tables
 are all `id integer PRIMARY KEY CHECK (id = 1)`"*. The ticket says a grep found only
 `projection_meta`. **Both are wrong.** Four distinct singleton tables exist:
 
@@ -132,7 +132,7 @@ The tenancy unit is an **installation**; `install` in identifiers.
 
 **Why `installation` wins:** it is already the word the ADR corpus uses in prose. ADR-0012's
 *title* is "How an installation **selects, verifies and stores** its database"; ADR-0014's own decision
-sentence is "one installation is one board". Adopting it introduces nothing — it **promotes
+sentence, as originally written, was "one installation is one board". Adopting it introduces nothing — it **promotes
 a word already in informal use into the structural slot "board" wrongly occupies**. The
 rename is a deletion, not an addition.
 
@@ -142,7 +142,7 @@ A **board is a kanban view type.** That meaning survives untouched. Everything e
 
 | Today | Means | Becomes |
 |---|---|---|
-| "one installation is one board" (ADR-0014:14) | tenancy unit | installation |
+| "one installation is one board" (ADR-0014, as originally written) | tenancy unit | installation |
 | `blaze_config.board` table | installation config singleton | `blaze_config.installation` |
 | `cfg.boardTitle` (`config.mjs:15`) | display name | `installationTitle`; `boardTitle` retired via `REMOVED_KEYS` |
 | `blaze board` (`cli.mjs:31`) | serve the web UI | `blaze serve`, with `board` kept as a permanent alias |
@@ -802,7 +802,7 @@ of which read differently before 0021 lands. A number is only reserved once the 
 >
 > **Status:** proposed · **Date:** 2026-08-23 · **Goal:** BLZ-354
 >
-> **Context.** `board` names three different things: the tenancy unit (ADR-0014:14), the
+> **Context.** `board` names three different things: the tenancy unit (ADR-0014, as originally written), the
 > kanban view type (`VIEW_NAMES[0]`), and a workflow-derived column grouping of which one
 > installation already has several (`scripts/model/boards.mjs`). The operator's model —
 > a project owns N named views — cannot be written in a vocabulary where the installation is
