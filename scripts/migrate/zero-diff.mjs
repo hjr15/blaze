@@ -93,6 +93,11 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
   // change to an oracle six merged migrations already trust, so it is named in BLZ-385's PR
   // body rather than done as a side effect of this one.
   //
+  // Scope note, because it changes how much this list matters: NOTHING in scripts/ calls
+  // zeroDiff — grepped 2026-08-25, its only reference there is its own definition. It is a
+  // library invoked from migration TEST suites (ac-oracle, transitions-and-oracle,
+  // date-migration-oracle, oracle-field-coverage), not a gate that runs on a live migration.
+  //
   // BLZ-389 widened this from 12 fields to 19. It checked `id/type/title/priority/resolution/
   // parent/assignee/sprint` and the four dates, so destroying `labels`, `components`,
   // `estimate`, `likelihood`, `impact`, `branch` or `pr` reported `ok` — on the oracle BLZ-324
