@@ -33,12 +33,19 @@ export const DEFAULT_LINK_TYPES = [
   // These are NOT "the delivery kinds", and an earlier version of this comment said so while
   // citing gantt.mjs as evidence. There are SIX delivery-workflow types — `epic` is the
   // sixth — and gantt.mjs's isDelivery() is `workflowFor(type) === "delivery"`, so it
-  // INCLUDES epic. A retained epic therefore draws a Gantt bar but can never be a Precedes
-  // endpoint: on the chart, off the critical path. `epic` was retired by BLZ-231 but is
-  // still legally loadable, so the gap is real — though currently HYPOTHETICAL rather than
-  // live: the board holds zero tickets of type epic, and schema.mjs retires it by leaving it
-  // no legal parent, so no new one can be created. The list matches the ADR; whether it
-  // should also carry `epic` is BLZ-378.
+  // INCLUDES epic. A retained epic therefore draws a Gantt bar and is not a Precedes endpoint.
+  //
+  // BLZ-378 CLOSED, under BLZ-388: that is deliberate and it is not a disagreement. An epic is
+  // a CONTAINER, and BLZ-360 §8.3 states the rule: "a parent's dates are a roll-up OF the finished
+  // schedule, computed afterwards" — so scheduling one computes the same quantity twice by two
+  // methods. So a legacy epic is chart-only BY DESIGN: it never appears on
+  // the critical path, and the bar it draws comes from whatever start/due it carries — the DATE
+  // roll-up that should supply them is spec 4's and is NOT BUILT (BLZ-360 §8.3).
+  //
+  // The list stays exactly as ADR-0022 declares it, and `scripts/model/schedule.mjs` now takes
+  // its NODE set from this same entry rather than asking `workflowFor` — so the two definitions
+  // that used to differ by `epic` are now one definition. `epic` was retired by BLZ-231 and the
+  // board holds zero of them; schema.mjs leaves it no legal parent, so no new one can be made.
   { name: "Precedes",   inverse_name: "Follows",        source_kinds: ["feature", "story", "task", "bug", "subtask"],
     target_kinds: ["feature", "story", "task", "bug", "subtask"], min_card: 0, max_card: null },
 ];

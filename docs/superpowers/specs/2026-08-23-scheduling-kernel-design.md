@@ -481,7 +481,7 @@ which is exactly the defect `db-schema-version.mjs` was written for.
 |---|---|---|
 | `linkDdl` (`link-schema.mjs:26`) | `link_type`, `link` | `Precedes` lives here. Without it the scheduler cannot be built at all — this is the circularity that forced the move. |
 | `hierarchyDdl` (`hierarchy-schema.mjs:8`) | `hierarchy`, `hierarchy_membership` | §8.3 chooses `hierarchy-rollup.mjs`, which reads `hierarchy_membership`. A chosen roll-up with no create path is a decision that cannot be executed. |
-| the five `ticket` columns (§2) | `ticket` | `ALTER TABLE ADD COLUMN`, the **9.0 ms metadata-only path** (ADR-0018), never a generated column; `STRICT` stays on every SQLite table that holds them. |
+| the five `ticket` columns (§2) | `ticket` | `ALTER TABLE ADD COLUMN`, the **9.0 ms metadata-only path** (ADR-0018), never a generated column. ~~`STRICT` stays on every SQLite table that holds them.~~ **CORRECTED under BLZ-376: `ticket` is not STRICT and never was.** Measured 2026-08-25, **zero of the seven tables in `SQLITE_DDL`** carry it — the only occurrence of the word in `sqlite-schema.mjs` is `ON DELETE RESTRICT`. The claim is true of the **v4** modules (`link`, `hierarchy`, `view` take ` STRICT` from `sql-dialect.mjs`'s `tbl` token), so this generalised from those to the whole schema. Whether the v3 tables *should* become STRICT is **BLZ-390**, which measured it: of the **25** installed tables only **4** are STRICT (`link_type`, `link`, `hierarchy`, `hierarchy_membership`), and **0 of 21,372 live rows** would be rejected by adding it to the rest. |
 | **`viewDdl`** — spec 1 §3's `view` table | `view`, `view_type` | See below. Spec 1 deferred its installation and had no other home; this is that home. |
 
 **And what version 2 deliberately does NOT install:** `artifactDdl`, `revisionDdl`, `documentDdl`,
@@ -753,7 +753,7 @@ Stated plainly, as ADR-0014's and spec 1's convention requires.
 | **ADR-0011 — no new required runtime dependency** | Nothing is added. `package.json` has zero `dependencies`; `pg` is an optional peer. CPM, Tarjan and the roll-up are pure JS over already-loaded data, in the shape both existing roll-ups already use. |
 | **ADR-0014 — no board or tenant discriminator** | Not one column above discriminates a board. The scheduler's unit of solve is the whole board precisely *because* there is only ever one (§6.2). |
 | **ADR-0016 — Node stays the runtime** | Its CPM benchmark is what makes §6.3's lazy choice affordable, and its event-loop finding is what scopes the `worker_threads` trigger. |
-| **ADR-0018 — hybrid custom fields** | Five typed columns, zero JSON tail, no `STORED` generated columns, `ALTER TABLE ADD COLUMN` + backfill, `STRICT` retained, well inside the **200-filterable-fields-per-install** cap (ADR-0018:71 — per install, not per table; §2.4). |
+| **ADR-0018 — hybrid custom fields** | Five typed columns, zero JSON tail, no `STORED` generated columns, `ALTER TABLE ADD COLUMN` + backfill, ~~`STRICT` retained~~ (**false — see BLZ-376**: zero of the **seven** tables in `SQLITE_DDL` are STRICT; the v4 modules are), well inside the **200-filterable-fields-per-install** cap (ADR-0018:71 — per install, not per table; §2.4). |
 | **ADR-0001 — `Blocks` stays advisory** | Untouched (§5.2). No superseding ADR is raised. |
 
 ---
@@ -855,7 +855,17 @@ is small enough to review by hand.
    self-reference is apparent — the forward pass completes before the backward pass starts. The
    rule, the alternatives it beat, and the proof that it makes `float ≥ 0` unconditional are
    recorded in **ADR-0022, §The backward pass's horizon**.
-4. **Is the delivery-workflow node filter part of §6.2's rule, or the implementation's inference?**
+4. **~~Is the delivery-workflow node filter part of §6.2's rule, or the implementation's
+   inference?~~ Closed by decision under BLZ-388 (BLZ-383 + BLZ-378).** The rule is recorded in
+   **ADR-0022, §What the scheduler treats as a node**: a node is a ticket whose type is a declared
+   `Precedes` source kind and which is not terminal — read from the same `link_type` entry as the
+   edge rule, so the two cannot drift. It is narrower than "the delivery workflow" by exactly
+   `epic`, which is a container whose dates are a roll-up OF the finished schedule rather than a
+   CPM input (§8.3) — and that roll-up is spec 4's and is not built, so an epic currently has no
+   derived dates at all. The two rules differ by exactly `epic` and the board holds zero of them, so they
+   select the same set — verified 2026-08-25 against the live corpus. The
+   original text follows.
+
    **Opened by BLZ-379's implementation, tracked as BLZ-383, and deliberately NOT resolved by
    editing §6.2 above.** §6.2's numbered filter list names the edge-kind rule and `isTerminal` and
    nothing else, while §6.2's cycle row and §7.1 both call the population *"the non-terminal

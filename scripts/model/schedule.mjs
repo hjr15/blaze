@@ -17,15 +17,18 @@
 //
 // The graph is built by filtering IN THIS ORDER, and the order is part of the rule
 // (BLZ-360 §6.2):
-//   1. Edges — keep a `Precedes` edge only if both endpoints are declared delivery kinds.
-//      The meta-model's default-deny, read from DEFAULT_LINK_TYPES rather than restated.
-//   2. Nodes — drop every ticket for which isTerminal(type, status) holds. A terminal
-//      ticket is never a node, never an SCC member, and is NEVER marked `unscheduled`: its
-//      dates are frozen actuals owned by history. If Tarjan ran over the full graph the
-//      "every SCC member is unscheduled" rule would overwrite them.
+//   1. Edges — keep a `Precedes` edge only if both endpoints are DECLARED PRECEDES ENDPOINT
+//      KINDS. Deliberately not "the delivery kinds": there are six delivery-workflow types and
+//      `epic` is the sixth, a conflation link-schema.mjs warns against in as many words. Read
+//      from DEFAULT_LINK_TYPES rather than restated.
+//   2. Nodes — a ticket whose type is a declared Precedes SOURCE kind, and which is not
+//      terminal (ADR-0022 §What the scheduler treats as a node). The same entry as rule 1, so
+//      the node set and the edge set cannot drift. A terminal ticket is never a node, never an
+//      SCC member, and is NEVER marked `unscheduled`: its dates are frozen actuals owned by
+//      history. If Tarjan ran over the full graph the "every SCC member is unscheduled" rule
+//      would overwrite them.
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
-import { isType, workflowFor } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
 export const PRECEDES = "Precedes";
@@ -211,10 +214,27 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);
   }
   const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
-  // Guard with isType FIRST — workflowFor throws on null/unknown (schema.mjs:47, via must at :44) — exactly as
-  // gantt.mjs:23 does, and for the same reason: an unguarded call crashes on a row whose type
-  // did not parse.
-  const isDelivery = (t) => isType(t.type) && workflowFor(t.type) === "delivery";
+  // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same
+  // DEFAULT_LINK_TYPES entry that decides which EDGES are legal. One source, so the node set and
+  // the edge set cannot drift apart.
+  //
+  // This replaced `workflowFor(type) === "delivery"` under BLZ-388, which was a SECOND definition
+  // that merely coincided. The two differ by exactly one type — `epic` — and giving a container
+  // its own CPM dates from its own estimate double-counts the children those dates should be
+  // rolled up FROM. The two rules differ by exactly `epic` and the board holds zero of them, so
+  // they select the same set — verified 2026-08-25 by running both over the live corpus, zero
+  // ids in either difference. That invariant is the claim; the cardinality moves with the board.
+  //
+  // It also closes BLZ-378: `link-schema.mjs` and `gantt.mjs` no longer disagree about `epic`,
+  // because the solve no longer asks the gantt's question. BLZ-360 §8.3 is the argument — "a
+  // parent's dates are a roll-up OF the finished schedule, computed afterwards" — so putting a
+  // container in the CPM graph computes the same quantity twice by two methods.
+  //
+  // That roll-up is spec 4's and is NOT BUILT: both existing roll-ups sum estimate/worklog and
+  // neither touches a date. So an epic gets no derived dates from anywhere today. Inert here
+  // (zero epics), and stated rather than papered over — see ADR-0022 §What the scheduler treats
+  // as a node.
+  const isNodeKind = (t) => SOURCE_KINDS.has(t.type);
 
   // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------
   const dropped = [];
@@ -230,32 +250,26 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     kept.push({ src, target, lag_minutes: Number(l.lag_minutes ?? 0) });
   }
 
-  // --- filter 2: nodes, dropping every terminal ticket ----------------------------------
+  // --- filter 2: nodes — non-terminal, and a declared Precedes SOURCE kind ---------------
   //
-  // A node must ALSO resolve to the delivery workflow, and that half is an INFERENCE this
-  // module is making rather than a rule it is quoting. BLZ-360 §6.2's numbered list names only
-  // the edge-kind rule and terminality — but §6.2's cycle row and §7.1 both call the
-  // population "the non-terminal DELIVERY graph", and without this the solve would hand a
-  // derived start_date and due_date to every non-terminal `goal`, `risk`, `requirement` and
-  // `architecture` ticket. Measured on the live board: 203 of them (43/65/89/6), against 538
-  // delivery tickets. None can carry an edge — Precedes' endpoint kinds refuse them — so each
-  // would be an isolated node given dates CPM never derived.
+  // The node rule is ADR-0022's, §What the scheduler treats as a node, and it is no longer this
+  // module's inference: BLZ-383 asked whether it was §6.2's rule or a reading, and BLZ-388
+  // decided and recorded it. `isNodeKind` above is where it comes from.
   //
-  // Whether this is §6.2's rule or this module's reading is TRACKED AS BLZ-383 rather than
-  // settled here — adding a filter to a merged spec's normative list is a decision, not a fact
-  // correction. Mutation 5b guards it meanwhile.
+  // Two things it excludes, for two different reasons:
+  //
+  //   non-delivery types — a `goal`, `risk`, `requirement` or `architecture` would otherwise be
+  //     an isolated node handed a derived start_date and due_date CPM never meant for it.
+  //     Measured 2026-08-25: 203 of them (43/65/89/6). None can carry an edge anyway, because
+  //     Precedes' endpoint kinds refuse all four.
+  //   `epic` — a container. BLZ-360 §8.3: "a parent's dates are a roll-up OF the finished
+  //     schedule, computed afterwards", so scheduling one computes the same quantity twice.
   //
   // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
   // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
   // another board, which is why the filter is here rather than left to luck.
-  //
-  // `epic` stays a node: it resolves to the delivery workflow even though it is not a Precedes
-  // endpoint. That is BLZ-378's disagreement — HYPOTHETICAL on this
-  // board, which holds zero tickets of type `epic`, and BLZ-378 is explicitly on record
-  // retracting an earlier `link-schema.mjs` comment that called it live. Pinned by a test
-  // rather than silently resolved here.
   const nodeIds = [...rows.keys()]
-    .filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)) && !duplicated.has(id))
+    .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);
   const isNode = new Set(nodeIds);
 

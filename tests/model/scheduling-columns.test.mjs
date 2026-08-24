@@ -44,8 +44,9 @@ describe("scheduling columns (SQLite)", () => {
   // occurrence of the word in that file is `ON DELETE RESTRICT`. The claim describes the v4
   // schema modules (link, hierarchy, view all take ` STRICT` from sql-dialect's `tbl`), not
   // the v3 core. This test pins the ACTUAL state so the discrepancy cannot be discovered
-  // twice; BLZ-376 carries the spec correction and the question of whether v3 should be
-  // migrated to STRICT, which is a separate change with its own blast radius.
+  // twice. BLZ-376 carried the spec correction and is closed; whether the v3 tables should
+  // MOVE to STRICT is BLZ-390, which measured the blocker — 0 of 21,372 live rows violate,
+  // and `projection_meta.config_version` is declared `bigint`, not a STRICT-legal type.
   test("the v3 ticket table is NOT STRICT — pinned so the spec's claim is not mistaken for fact", () => {
     const db = open();
     const sql = db.prepare("SELECT sql FROM sqlite_master WHERE name='ticket'").get().sql;

@@ -116,6 +116,70 @@ not the truth. ADR-0016 measured CPM at 10k tasks / 25k edges = 95.7 ms, and eag
 write fan-out — editing one edge changes an unbounded set of downstream dates, and the filesystem
 write port has no transaction spanning N files.
 
+## What the scheduler treats as a node — amended under BLZ-388
+
+BLZ-360 §6.2's numbered filter list names the edge-kind rule and `isTerminal` and nothing else,
+while §6.2's cycle row and §7.1 both call the population *"the non-terminal **delivery** graph"*.
+The implementation had to pick one, flagged its choice as an inference (BLZ-383), and this records
+the decision. It also closes BLZ-378, because the two turned out to be the same question.
+
+> **A node is a ticket whose type is a declared `Precedes` source kind, and which is not terminal.
+> The node set and the edge set are read from the SAME `link_type` entry, so they cannot drift.**
+
+**This is narrower than "the delivery workflow", by exactly one type: `epic`.** Verified across the
+whole registry: of the **ten** registered types (`goal`, `requirement`, `architecture`, `feature`,
+`risk`, `story`, `task`, `bug`, `subtask`, `epic`), `epic` is the **only** one the two rules
+classify differently. `Precedes`' `source_kinds` and `target_kinds` are also identical, so a node set taken
+from the source set cannot disagree with the target set about what may be an endpoint.
+
+Dropping `epic` is the substance of the decision, and the reason is not that it is retired — it is
+that **an epic is a container, and a container's dates are a roll-up OF the finished schedule
+rather than an input to it.** BLZ-360 §8.3 states exactly this, and it is the argument:
+
+> *"The scheduler itself uses neither roll-up… CPM runs over the dependency graph; a parent's dates
+> are a roll-up **of** the finished schedule, computed afterwards. The two are different operations
+> over different graphs."*
+
+Putting a parent in the CPM graph computes the same quantity twice by two methods, and §3's
+authority rule has no way to arbitrate between two *derived* values that disagree.
+
+**Stated plainly, because it is a real consequence and not a tidy one: the date roll-up does not
+exist yet.** §8.3 is explicit that spec 4 owns it and that *"neither existing roll-up is the right
+one as written"* — `rollup.mjs` and `hierarchy-rollup.mjs` both sum `estimate`/`worklog` numbers,
+neither touches a date. So today an `epic` gets **no derived dates from anywhere**: it is no longer
+given CPM dates it should never have had, and the roll-up that should supply them is unbuilt. That
+is inert on this board — **zero** tickets of type `epic`, measured — and it is the honest position
+rather than leaving a container holding dates computed the wrong way. An earlier draft of this
+section said an epic *"draws a bar from rolled-up dates"*, which asserted machinery that does not
+exist; the bar it draws today comes from whatever `start`/`due` it carries.
+
+**The claim that matters is the invariant, not a count: the two rules differ by exactly `epic`, and
+the board holds zero tickets of type `epic`, so they select the same set.** Verified 2026-08-25 by
+running both against the live corpus — identical node sets, zero ids in either difference. The
+cardinality that day was 538 and it moves whenever a ticket is created or closed, so it is recorded
+here as incidental rather than as the evidence. (An earlier draft of this paragraph said 535, which
+was true when written and stale three tickets later — in the same session.) So this changes no
+schedule today. It is taken for the structural reason
+rather than the behavioural one — a rule read from one place cannot drift from itself, and the
+alternative left `workflowFor` as a second definition of "schedulable" sitting beside the declared
+endpoint kinds.
+
+**One limitation this rule introduces, stated rather than discovered later.** The old filter read
+`workflowFor`, which resolves through the **override-merged** type registry; this one reads
+`DEFAULT_LINK_TYPES`, a constant. `resolveSchema` merges `schema.types` and `schema.workflows` and
+has **no override path for link types at all** — so an installation that adds its own delivery type
+(`spike`, say) gets a type that is not a `Precedes` endpoint and is therefore **not a node**, where
+the old rule would have scheduled it as an isolated one. That is a real behaviour change beyond
+`epic`, invisible on this board because it has no such override. It is coherent — a type that can
+never carry a dependency edge gains nothing from CPM over its own estimate — but it means a
+custom delivery type cannot currently be made schedulable at all. Tracked as **BLZ-392**.
+
+**The rejected alternative and why it lost.** Adding `epic` to `Precedes`' endpoint kinds would
+have made the two definitions agree the other way, at the cost of amending the declared list above
+*and* putting a container on the critical path. The roll-up argument rules it out on its own: an
+epic with a CPM-derived finish and a rolled-up finish would carry two dates that disagree, and
+§3's authority rule has no way to arbitrate between two derived values.
+
 ## The backward pass's horizon — amended under BLZ-380
 
 BLZ-360 §13.3 left this open: *"the latest EF is self-referential; the latest `deadline` is

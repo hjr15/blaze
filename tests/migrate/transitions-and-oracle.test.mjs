@@ -10,6 +10,15 @@ import { loadCorpus } from "../../scripts/migrate/load-corpus.mjs";
 import { importTransitions } from "../../scripts/migrate/import-transitions.mjs";
 import { zeroDiff } from "../../scripts/migrate/zero-diff.mjs";
 
+// What `sqlite-storage.mjs`'s `toRecord` does NOT project back out of the ticket table.
+// Measured 2026-08-25 by round-tripping a ticket carrying all 28 frontmatter keys through
+// `loadCorpus` + `openSqliteRead`: the seam surfaces 12 of them. `loadCorpus` WRITES most of
+// these columns and the read side never selects them, so the oracle is blind to them through
+// this driver — declared here so the blindness is stated rather than silently passed.
+// The driver gap itself is BLZ-391.
+const NOT_PROJECTED = ["labels", "components", "likelihood", "impact", "branch", "pr",
+  "ref", "category", "verification", "derived", "worklog", "links", "not_before", "deadline"];
+
 const doc = (fm, body = "body") =>
   ["---", ...Object.entries(fm).map(([k, v]) => `${k}: ${v}`), "---", "", body, ""].join("\n");
 
@@ -74,7 +83,7 @@ test("coverage is REPORTED, because the trail is known to be partial", () => {
 test("a faithful migration passes the oracle", () => {
   const dir = board([ticket("BLZ-1", "defined"), ticket("BLZ-2", "done")]);
   const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
-  const z = zeroDiff(fsReadStorage, dir, s);
+  const z = zeroDiff(fsReadStorage, dir, s, { unsurfaced: NOT_PROJECTED });
   assert.equal(z.ok, true);
   assert.equal(z.valueDiffs.length, 0);
   assert.equal(z.compared, 2);
@@ -84,7 +93,7 @@ test("the oracle CATCHES a changed value — it is not decorative", () => {
   const dir = board([ticket("BLZ-1", "defined")]);
   const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   s.db.exec("UPDATE ticket SET title = 'tampered' WHERE id = 'BLZ-1'");
-  const z = zeroDiff(fsReadStorage, dir, s);
+  const z = zeroDiff(fsReadStorage, dir, s, { unsurfaced: NOT_PROJECTED });
   assert.equal(z.ok, false);
   assert.deepEqual(z.valueDiffs.map((d) => d.field), ["title"]);
 });
@@ -92,7 +101,7 @@ test("the oracle CATCHES a changed value — it is not decorative", () => {
 test("the oracle catches a missing ticket and an extra one", () => {
   const dir = board([ticket("BLZ-1", "defined")]);
   const s = openSqliteRead(":memory:", { create: true });
-  const z1 = zeroDiff(fsReadStorage, dir, s);
+  const z1 = zeroDiff(fsReadStorage, dir, s, { unsurfaced: NOT_PROJECTED });
   assert.equal(z1.missing.length, 1, "loaded nothing — the ticket is missing");
   assert.equal(z1.ok, false);
 });
@@ -106,9 +115,13 @@ test("an APPLIED DEFAULT is reported separately from a changed value", () => {
   const s = openSqliteRead(":memory:", { create: true });
   const load = loadCorpus(s.db, dir);
   assert.equal(load.defaultsApplied.priority, 1);
-  const z = zeroDiff(fsReadStorage, dir, s);
+  const z = zeroDiff(fsReadStorage, dir, s, { unsurfaced: NOT_PROJECTED });
   assert.equal(z.valueDiffs.length, 0, "an applied default is not a value change");
-  assert.deepEqual(z.defaulted.map((d) => d.field), ["priority", "assignee"]);
+  // `created`/`updated` join the list under BLZ-389: `loadCorpus` stamps `isoDate(fm.created,
+  // now)`, so a ticket that stated no date comes back carrying the migration's own run date.
+  // Same fact as priority/assignee — not lost, never stated — and it is named here rather than
+  // reported as data loss on every undated ticket in the corpus.
+  assert.deepEqual(z.defaulted.map((d) => d.field), ["priority", "assignee", "created", "updated"]);
   assert.equal(z.ok, true);
 });
 
@@ -117,7 +130,7 @@ test("a DIFFERENT value in a defaulted field is still a failure", () => {
   const dir = board([ticket("BLZ-1", "defined", { priority: "high" })]);
   const s = openSqliteRead(":memory:", { create: true }); loadCorpus(s.db, dir);
   s.db.exec("UPDATE ticket SET priority = 'low' WHERE id = 'BLZ-1'");
-  const z = zeroDiff(fsReadStorage, dir, s);
+  const z = zeroDiff(fsReadStorage, dir, s, { unsurfaced: NOT_PROJECTED });
   assert.equal(z.ok, false, "high -> low is a change, not a default");
   assert.equal(z.valueDiffs[0].field, "priority");
 });

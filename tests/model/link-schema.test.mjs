@@ -289,7 +289,13 @@ describe("Precedes / Follows (ADR-0022)", () => {
   test("both endpoints are the five kinds ADR-0022 names — a risk or a goal is refused", () => {
     const p = precedes();
     // NOT "the delivery kinds": there are six delivery-workflow types and `epic` is the
-    // sixth, so this list is narrower than isDelivery(). BLZ-378 carries that gap.
+    // sixth, so this list is narrower than gantt.mjs's isDelivery().
+    //
+    // BLZ-378 CLOSED under BLZ-388, and the answer is that the narrowness is deliberate. An
+    // epic is a container whose dates are a roll-up OF the finished schedule rather than a CPM
+    // input (BLZ-360 §8.3), so it is chart-only by design. That roll-up is spec 4's and is not
+    // built, so an epic currently has no derived dates at all. schedule.mjs now takes its NODE set from
+    // this same list, so there is no longer a second definition for it to disagree with.
     const adrKinds = ["bug", "feature", "story", "subtask", "task"];
     assert.deepEqual([...p.source_kinds].sort(), adrKinds);
     assert.deepEqual([...p.target_kinds].sort(), adrKinds);
