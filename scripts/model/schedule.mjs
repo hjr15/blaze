@@ -165,7 +165,10 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
       + "— board config is their single definition (ADR-0022 §2.3)");
   }
-  if (!Number.isFinite(now)) throw new Error("blaze schedule: `now` must be injected (no Date.now() in the model)");
+  // The message deliberately does not name the forbidden call: the determinism test greps
+  // this file for it, and a mention inside a string would be a false positive that the fix
+  // is to weaken the test.
+  if (!Number.isFinite(now)) throw new Error("blaze schedule: `now` must be injected by the caller — the model reads no clock");
   const cal = new Calendar(schedule.minutes_per_day, schedule.working_days, now);
 
   const rows = new Map();

@@ -10,6 +10,7 @@
 // project_epoch floor rather than a separate clamp.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { scheduleModel } from "../../scripts/model/schedule.mjs";
 
 // 480 and Mon–Fri are the config defaults. Tests may name them; scripts/ may not
@@ -280,4 +281,142 @@ test("lag is subtracted in the backward pass, mirroring the forward pass's addit
   assert.equal(byId(r, "B").ls, 300);
   assert.equal(byId(r, "A").lf, 60, "LS(B) 300 - lag 240");
   assert.equal(byId(r, "A").float_minutes, 0);
+});
+
+// ---------------------------------------------------------------- cycles
+//
+// Measured on the live board: ZERO non-trivial SCCs exist in the non-terminal delivery
+// graph, so this path is defensive and BLZ-360 §6.2 requires it be tested against a
+// SYNTHETIC cycle rather than a corpus one. Every test below builds its own.
+
+test("MUTATION 6 — every SCC member is unscheduled, not scheduled", () => {
+  const r = run([
+    t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 }), t("C", { estimate_minutes: 60 }),
+    t("FREE", { estimate_minutes: 90 }),
+  ], [edge("A", "B"), edge("B", "C"), edge("C", "A")]);
+  assert.deepEqual(r.unscheduled.map((u) => u.id), ["A", "B", "C"]);
+  assert.deepEqual([...new Set(r.unscheduled.map((u) => u.reason))], ["dependency-cycle"]);
+  assert.deepEqual(r.unscheduled[0].scc, ["A", "B", "C"], "each member carries the whole SCC");
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["FREE"], "and nothing in the cycle is scheduled");
+});
+
+test("the rest of the graph still schedules around a cycle", () => {
+  // §6.2: "the rest of the graph still schedules". A scheduler that refuses to produce any
+  // output because one cycle was authored yesterday is a scheduler nobody runs.
+  const r = run([
+    t("X", { estimate_minutes: 60 }), t("Y", { estimate_minutes: 60 }),
+    t("P", { estimate_minutes: 30 }), t("Q", { estimate_minutes: 30 }),
+  ], [edge("X", "Y"), edge("Y", "X"), edge("P", "Q")]);
+  assert.deepEqual(r.unscheduled.map((u) => u.id), ["X", "Y"]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["P", "Q"]);
+  assert.equal(byId(r, "Q").es, 30);
+});
+
+test("an edge OUT of a cycle is treated as unconstrained — the stated approximation", () => {
+  // §6.2 states this as an approximation rather than hiding it: a successor of a cycle gets
+  // an optimistic date. AFTER must schedule at the epoch, not wait for a date that
+  // does not exist.
+  const r = run([
+    t("X", { estimate_minutes: 600 }), t("Y", { estimate_minutes: 600 }), t("AFTER", { estimate_minutes: 60 }),
+  ], [edge("X", "Y"), edge("Y", "X"), edge("Y", "AFTER")]);
+  assert.equal(byId(r, "AFTER").es, 0, "optimistic, and named as an approximation in §6.2");
+  assert.equal(byId(r, "AFTER").is_critical, true);
+});
+
+test("a self-edge is a cycle of one and is refused, though the DB's CHECK forbids it", () => {
+  // link-schema.mjs has CHECK (source_id <> target_id), so this is unreachable from the DB.
+  // The pure model still receives whatever a caller hands it.
+  const r = run([t("A", { estimate_minutes: 60 })], [edge("A", "A")]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["A"], "the node still schedules");
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["self-edge"]);
+});
+
+test("a two-node mutual pair is the smallest real cycle and is caught", () => {
+  const r = run([t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 })],
+    [edge("A", "B"), edge("B", "A")]);
+  assert.deepEqual(r.cycles, [["A", "B"]]);
+});
+
+test("two independent cycles are reported as two components, not merged", () => {
+  const r = run([
+    t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 }),
+    t("C", { estimate_minutes: 60 }), t("D", { estimate_minutes: 60 }),
+  ], [edge("A", "B"), edge("B", "A"), edge("C", "D"), edge("D", "C")]);
+  assert.deepEqual(r.cycles, [["A", "B"], ["C", "D"]]);
+});
+
+// ---------------------------------------------------------------- the edge filter
+
+test("the endpoint default-deny drops an edge whose endpoint is not a declared kind", () => {
+  // BLZ-360 §5.3's source_kinds/target_kinds, read from DEFAULT_LINK_TYPES rather than
+  // restated here. A risk does not belong in a delivery critical path.
+  const r = run([
+    t("R", { type: "risk", status: "identified" }), t("F", { type: "feature", estimate_minutes: 60 }),
+  ], [edge("R", "F")]);
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["undeclared-kind"]);
+  assert.deepEqual(r.edges, []);
+});
+
+test("epic is a delivery type and still not a Precedes endpoint — BLZ-378's disagreement", () => {
+  // gantt.mjs's isDelivery() is workflowFor(type) === "delivery", which INCLUDES epic, so a
+  // retained epic draws a bar and can never be on the critical path. The board holds zero
+  // epics, so this is hypothetical rather than live; the two definitions still disagree and
+  // this test pins which one the solve follows.
+  const r = run([
+    t("E", { type: "epic", status: "defined", estimate_minutes: 60 }),
+    t("S", { type: "story", estimate_minutes: 60 }),
+  ], [edge("E", "S")]);
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["undeclared-kind"]);
+  assert.ok(byId(r, "E"), "the epic is still a NODE — only the edge is refused");
+});
+
+test("a non-Precedes link is ignored, so a caller may hand the solve every link it has", () => {
+  const r = run([t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 })],
+    [{ type: "Blocks", src: "A", target: "B", lag_minutes: 0 }]);
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["not-precedes"]);
+  assert.equal(byId(r, "B").es, 0, "Blocks stays advisory — ADR-0001 is not reversed");
+});
+
+test("an edge to an id that does not resolve is dropped rather than crashing the solve", () => {
+  const r = run([t("A", { estimate_minutes: 60 })], [edge("A", "GHOST-1")]);
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["dangling-endpoint"]);
+  assert.ok(byId(r, "A"));
+});
+
+test("the filters run in order: the edge filter is applied before the node filter", () => {
+  // §6.2: "the order is part of the rule". A risk that is also terminal must be refused by
+  // the KIND rule, and the dropped reason is how you can tell which filter caught it.
+  const r = run([
+    t("R", { type: "risk", status: "closed" }), t("F", { type: "feature", estimate_minutes: 60 }),
+  ], [edge("R", "F")]);
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["undeclared-kind"],
+    "not 'terminal-predecessor' — the kind filter is first");
+});
+
+// ---------------------------------------------------------------- determinism
+
+test("the solve is byte-stable under input reordering", () => {
+  const tickets = [
+    t("C", { estimate_minutes: 30 }), t("A", { estimate_minutes: 60 }),
+    t("D", { estimate_minutes: 15 }), t("B", { estimate_minutes: 120 }),
+  ];
+  const links = [edge("A", "B"), edge("B", "C"), edge("A", "D")];
+  const a = run(tickets, links);
+  const b = run([...tickets].reverse(), [...links].reverse());
+  assert.equal(JSON.stringify(a.scheduled), JSON.stringify(b.scheduled));
+  assert.deepEqual(a.scheduled.map((s) => s.id), ["A", "B", "C", "D"], "ties break on ticket id");
+});
+
+test("the model reads no clock and refuses to invent one", () => {
+  assert.throws(() => scheduleModel({ tickets: [t("A")], schedule: SCHEDULE }), /now.*injected/);
+  const src = readFileSync(new URL("../../scripts/model/schedule.mjs", import.meta.url), "utf8")
+    .replace(/^\s*\/\/.*$/gm, "");
+  assert.ok(!/Date\.now\(\)/.test(src), "Date.now() in the model breaks the golden outputs");
+  assert.ok(!/Math\.random/.test(src), "Math.random in the model breaks the golden outputs");
+  assert.ok(!/localeCompare/.test(src), "localeCompare sorts differently per machine");
+});
+
+test("board config is required, never defaulted inside the model", () => {
+  assert.throws(() => scheduleModel({ tickets: [], now: MON }), /minutes_per_day/);
+  assert.throws(() => scheduleModel({ tickets: [], now: MON, schedule: { minutes_per_day: 480 } }), /working_days/);
 });
