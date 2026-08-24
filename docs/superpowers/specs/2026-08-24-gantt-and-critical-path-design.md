@@ -925,13 +925,13 @@ builtin's default is its own ticket for the same reason.
 
 ## 13. Open questions
 
-1. **What is the backward pass's horizon?** BLZ-360 §13.3 leaves it open — *"the latest EF is
-   self-referential; the latest `deadline` is undefined when no deadline exists."* **Proposed:
-   `horizon = max(EF)` over the completed forward pass, and the self-reference is apparent rather
-   than real** — the forward pass runs to completion before the backward pass starts, so `max(EF)`
-   is an ordinary constant by then. It is measurable today: **4,800 minutes, 10.0 working days**
-   (§5.1). This is a proposal into a question the kernel left open, not a re-opening of one it
-   closed; it belongs to whoever owns the scheduler.
+1. **~~What is the backward pass's horizon?~~ Closed by decision under BLZ-380, and this spec's
+   proposal was adopted.** The horizon is **`max(EF)` over the completed forward pass**, one
+   constant over every scheduled node on the board, falling back to `project_epoch` when no node
+   is scheduled. The rule, the four alternatives it beat, and the proof that it makes
+   `float ≥ 0` unconditional are recorded in **ADR-0022, §The backward pass's horizon**. The
+   *"4,800 minutes, 10.0 working days"* figure is §5.1's own measurement and is not re-asserted
+   here — see BLZ-381's PR body for what the implemented solve measures.
 2. **Should the builtin `gantt` row's `axis` flip to `'schedule'`, and when?** §2.1 says after
    `import-deps` closes. The trigger wants a measurement — plausibly *"once the zero-float set
    contains at least one edge"*, which is exactly the condition §5.1 shows is false today. Not

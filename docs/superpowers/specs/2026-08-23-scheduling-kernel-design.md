@@ -849,11 +849,26 @@ is small enough to review by hand.
 2. **Frontmatter key spelling.** `not_before` vs the column's full
    `constraint_start_no_earlier_than`. §2.1 picks the short form on the existing
    `estimate`/`estimate_minutes` precedent, but the operator named the long one.
-3. **The schedule horizon** that seeds the backward pass. The latest EF is self-referential; the
-   latest `deadline` is undefined when no deadline exists. Needs one rule.
-4. **Whether `schedule_run_id` is a timestamp or a content hash.** A hash makes an unchanged
+3. **~~The schedule horizon that seeds the backward pass.~~ Closed by decision under BLZ-380:**
+   the horizon is **`max(EF)` over the completed forward pass**, one constant over every scheduled
+   node on the board, falling back to `project_epoch` when no node is scheduled. The
+   self-reference is apparent — the forward pass completes before the backward pass starts. The
+   rule, the alternatives it beat, and the proof that it makes `float ≥ 0` unconditional are
+   recorded in **ADR-0022, §The backward pass's horizon**.
+4. **Is the delivery-workflow node filter part of §6.2's rule, or the implementation's inference?**
+   **Opened by BLZ-379's implementation, tracked as BLZ-383, and deliberately NOT resolved by
+   editing §6.2 above.** §6.2's numbered filter list names the edge-kind rule and `isTerminal` and
+   nothing else, while §6.2's cycle row and §7.1 both call the population *"the non-terminal
+   **delivery** graph"*. `scripts/model/schedule.mjs` filters on both and flags the second half as
+   an inference in its own comment. Without it the solve hands derived dates to **203** non-terminal
+   non-delivery tickets (goal 43, risk 65, requirement 89, architecture 6, measured 2026-08-24)
+   against **538** delivery ones — none of which can carry an edge, because `Precedes`' endpoint
+   kinds refuse all four. It does not move the horizon on this board (largest non-delivery estimate
+   `OBA-1` at 830 minutes against `BLZ-253`'s 4,800). Adding a filter to a merged spec's normative
+   list is a decision, not a fact correction, so it gets a ticket rather than an edit.
+5. **Whether `schedule_run_id` is a timestamp or a content hash.** A hash makes an unchanged
    re-solve a no-op — worth it only if re-solves turn out to be frequent.
-5. **~~Whether the 3 open cycles are fixed before or after the scheduler ships.~~ Closed by
+6. **~~Whether the 3 open cycles are fixed before or after the scheduler ships.~~ Closed by
    measurement: there are none** (§5.4 — 0 SCCs over 0 tickets in the non-terminal delivery graph).
    Nothing has to be fixed before the scheduler ships. What replaces it is a *hygiene* question that
    is not the scheduler's: **the 39 SCCs in the raw `Blocks` graph, 15 of which contain an open

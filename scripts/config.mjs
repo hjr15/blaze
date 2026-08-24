@@ -37,7 +37,8 @@ const DEFAULTS = {
     },
   },
   views: { board: true, list: true, live: true, metrics: true, map: true, gantt: true },
-  // ADR-0022 §2.3. The calendar the scheduler converts estimate_minutes through, and the
+  // BLZ-360 §2.3 ("Calendar"); ADR-0022 carries the rule but has no numbered sections. The
+  // calendar the scheduler converts estimate_minutes through, and the
   // SAME number spec 2 §3.2's sprint capacity bar divides by. One number, one definition,
   // two consumers — which is why a test greps scripts/ for a hardcoded 480 rather than
   // trusting the convention. working_days uses JS getUTCDay() numbering: 0 = Sunday.

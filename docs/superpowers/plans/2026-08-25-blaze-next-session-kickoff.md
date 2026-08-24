@@ -93,22 +93,33 @@ kernels, and specs 2/3/4. Missing: **spec 5 (diagrams)** and **spec 6 (configura
 
 ## 3. The lane — operator's choice, 2026-08-24
 
-### Implement the kernel. Nothing else is unblocked.
+### ~~Implement the kernel. Nothing else is unblocked.~~ The kernel is IMPLEMENTED — BLZ-379.
 
-**This is not a preference, it is measured.** Spec 2 §6 records:
+**Steps 1–5 are all done.** Steps 1–3 merged as `6d31e54` (PR #110, BLZ-370); **steps 4 and 5 —
+the CPM solve and `scheduleFindings()` — merged under BLZ-379**, closing BLZ-380/381/382 with it.
+`scripts/model/schedule.mjs` exists, `scheduleFindings()` lives in `scripts/model/audit.mjs`, and
+`blaze audit` consumes it. **A session reading this does not rebuild them.**
+
+**The measurement quoted below was stale twice over and is kept only as the record of what was
+true when spec 2 was written.**
 
 ```
-grep -ric "schedule" scripts/   →  0
+grep -ric "schedule" scripts/   →  0      ← FALSE. It was already 5 files on `main` before
+                                            BLZ-379: PR #110 put schedule.minutes_per_day and
+                                            schedule.working_days in config.mjs. It is 9 now.
+grep -ric "project_epoch" scripts/ → 0    ← FALSE since BLZ-379. It is 2 files.
 ```
 
-`schedule.minutes_per_day`, `schedule.working_days`, `project_epoch` and derived ES/EF **do not
-exist**. Neither does the view-config registry — `columnSet`, `swimlaneBy`, `cardFields` return 0
+`schedule.minutes_per_day`, `schedule.working_days`, `project_epoch` and derived ES/EF ~~**do not
+exist**~~ **all exist**. Neither does the view-config registry — `columnSet`, `swimlaneBy`, `cardFields` return 0
 hits under `scripts/`. So of everything the three merged specs describe, **exactly one thing is
 buildable today**: spec 2 §4's `sprint-overrun` finding, which needs no scheduler and no view
-config and has **26 live corpus rows** waiting (S2: 2, S3: 13, S5: 11).
+config and has **26 live corpus rows** waiting (S2: 2, S3: 13, S5: 11). **That sentence is now
+wrong too**: the scheduler blocker has lifted, so everything spec 2, 3 and 4 gated on `schedule.*`
+is buildable. `sprint-overrun` is still unbuilt and still has its 26 rows.
 
-Build order, forced by that. **Steps 1–3 are DONE, merged as `6d31e54` (PR #110, BLZ-370).
-Start at step 4.**
+Build order. **Every step is DONE. Steps 1–3 merged as `6d31e54` (PR #110, BLZ-370); steps 4–5
+merged under BLZ-379. There is nothing to start here.**
 
 1. ~~**DB schema version 1 → 2**~~ — **done.** `applyCreate` installs `linkDdl` and
    `hierarchyDdl`; `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` are both **2**. **`viewDdl` is
@@ -119,13 +130,18 @@ Start at step 4.**
 3. ~~**`schedule.*` board config**~~ — **done.** `minutes_per_day` (480) and `working_days`
    (`[1,2,3,4,5]`, `getUTCDay()` numbering). A grep test enforces that nothing outside
    `config.mjs` hardcodes either.
-4. **The CPM solve — START HERE.** Forward/backward pass, float, critical path, over the
+4. ~~**The CPM solve**~~ — **done, BLZ-379/BLZ-381.** `scripts/model/schedule.mjs`.
+   Forward/backward pass, float, critical path, over the
    non-terminal delivery graph. BLZ-360 §6.1–§6.2. Determinism is a hard requirement: no
    `Date.now()`, no `Math.random()`, `now` injected, locale-independent `cmp`, ties broken by id.
-   **Settle spec 3 §13.1's horizon question first** — it proposes `max(EF)` over the completed
-   forward pass and argues the self-reference is apparent rather than real. That is a proposal
-   into an open question, not a decision.
-5. **`scheduleFindings()`** — one function, so `blaze audit` and the views cannot drift.
+   **~~Settle spec 3 §13.1's horizon question first.~~ Settled under BLZ-380:** the horizon is
+   `max(EF)` over the completed forward pass, one constant over every scheduled node on the board,
+   falling back to `project_epoch` when no node is scheduled. The rule, the four alternatives it
+   beat and the proof that it makes `float ≥ 0` unconditional are in **ADR-0022, §The backward
+   pass's horizon**. Nothing here is still open.
+5. ~~**`scheduleFindings()`**~~ — **done, BLZ-379/BLZ-382.** In `scripts/model/audit.mjs`, one
+   function, so `blaze audit` and the views cannot drift. `blaze audit` consumes it; the view half
+   waits on spec 3's Gantt, which BLZ-379 deliberately did not build.
 
 **Four corrections implementation forced, all ticketed:**
 
@@ -153,9 +169,9 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 **Two things the specs tell you the kernel needs that its own spec understated:**
 - `hierarchy-rollup.mjs` needs a **`rollupAll` whole-tree entry point**, not only `combine`
   (BLZ-368; measured 842 ms against 5.2 ms for the naive swap).
-- Spec 3 §13.1 proposes the backward pass's horizon is `max(EF)` over the completed forward pass,
-  and that its apparent self-reference is not real. That is a **proposal into an open question**,
-  not a decision — settle it before you code the backward pass.
+- ~~Spec 3 §13.1 proposes the backward pass's horizon.~~ **Decided under BLZ-380 and recorded in
+  ADR-0022, §The backward pass's horizon:** `max(EF)` over the completed forward pass, falling back
+  to `project_epoch` when no node is scheduled. The backward pass is written against it.
 
 ---
 

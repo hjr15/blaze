@@ -6,7 +6,8 @@
 import { readFileSync } from "node:fs";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { auditCorpus, summarise, HARD_KINDS } from "./model/audit.mjs";
+import { auditCorpus, summarise, HARD_KINDS, scheduleFindings } from "./model/audit.mjs";
+import { scheduleModel } from "./model/schedule.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 
 const positional = [];
@@ -140,6 +141,45 @@ for (const [id, fm] of fmById) {
     parent = fmById.get(parent).parent || null;
   }
 }
+
+// BLZ-382 / BLZ-360 §7. The schedule's findings land in the SAME report, through the SAME
+// function the view layer reads, so `blaze audit` and the Gantt cannot drift. All three kinds
+// are soft, so none of them can change `ok`.
+//
+// `now` is read HERE and nowhere deeper: scheduleModel refuses to read a clock, which is what
+// keeps its golden outputs stable. This runner is the boundary where reading one is legitimate.
+//
+// Two inputs are deliberately empty today and both become live without a code change:
+//   * links — `Precedes` lives in the v4 `link` table and `LINK_TYPES` (links.mjs:14) has no
+//     entry for it, so the frontmatter path cannot carry one. `blaze schedule import-deps`
+//     (BLZ-360 §5.5) is what fills this, and it is operator-driven.
+//   * `deadline` / `not_before` — zero tickets carry either key until BLZ-360 §4's migration
+//     runs. Reading `due` as a deadline instead would be wrong: §4 splits on terminality, and
+//     28 of the 40 dated tickets keep their dates as frozen actuals rather than commitments.
+//
+// GUARDED ON `config`, because line 40 above deliberately tolerates a config that will not
+// load (`catch { config = null }`) and auditCorpus handles null. An unguarded `config.schedule`
+// here turned that tolerated case into a crash — `blaze audit` printed a TypeError and no
+// report at all on a corpus origin/main audits cleanly. The schedule is skipped rather than
+// defaulted: minutes_per_day and working_days live in board config and nothing outside
+// config.mjs may invent them (ADR-0022, and tests/config.test.mjs greps scripts/ to enforce
+// it), so a board whose config will not load is a board that cannot be scheduled.
+const schedule = config === null ? null : scheduleModel({
+  tickets: tickets.map((t) => ({
+    id: t.frontmatter.id,
+    type: t.frontmatter.type ?? null,
+    status: t.status,
+    estimate_minutes: Number(t.frontmatter.estimate) || null,
+    constraint_start_no_earlier_than: t.frontmatter.not_before ?? null,
+    deadline: t.frontmatter.deadline ?? null,
+    start_date: t.frontmatter.start ?? null,
+    due_date: t.frontmatter.due ?? null,
+  })),
+  links: [],
+  schedule: config.schedule,
+  now: Date.now(),
+});
+if (schedule) report.findings.push(...scheduleFindings(schedule));
 
 // auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
 // that reports a hard finding and still exits 0 is not a gate.

@@ -141,3 +141,204 @@ export function summarise(findings) {
     kind, count, severity: HARD_KINDS.has(kind) ? "hard" : "soft",
   }));
 }
+
+// ---------------------------------------------------------------------------------------
+// scheduleFindings — BLZ-360 §7 / BLZ-382. ONE function, so `blaze audit` and the view layer
+// cannot drift. A conflict that shows on the Gantt but not in CI is invisible to an agent;
+// one that shows only in CI is invisible to the operator.
+//
+// It lives in this file rather than behind `scripts/audit-runner.mjs` deliberately:
+// `.c8rc.json` excludes `scripts/*-runner.mjs`, so logic put in the runner escapes the
+// coverage gate silently.
+//
+// ALL THREE KINDS ARE SOFT, and none is in HARD_KINDS above. The header of this file sets
+// the test: HARD means the CORPUS is wrong. A missed deadline means the PLAN is wrong, which
+// is a true and useful statement about a correct corpus, and a `Precedes` cycle is two
+// well-formed links whose combination is unschedulable — both rows are valid, both endpoints
+// resolve, and the FK holds.
+//
+// `dependency-cycle`'s FLIP-TO-HARD TRIGGER is a coverage trigger, not a debt trigger,
+// because the debt version was unfireable: BLZ-360 §7.1's original *"becomes HARD when the
+// open-SCC count reaches zero"* was written against the wrong number and against the real one
+// (zero, measured) it fires on day one, which is a condition rather than a trigger. The
+// replacement:
+//
+//   dependency-cycle flips to HARD once `Precedes` is the sole declared input to the
+//   scheduler — that is, once BLZ-360 §5.5's `import-deps` reconciliation is closed and no
+//   scheduled ticket depends on a `Blocks` edge for its ordering.
+//
+// Until then a cycle can be an artefact of a half-migrated graph, which is not the
+// operator's error to be gated on. BLZ-353 is the precedent for tracking a flip by its own
+// ticket, and its lesson is why this zero is not being used to justify shipping hard.
+const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale"];
+const scmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+const projectOf = (id) => String(id ?? "").split("-")[0];
+
+/**
+ * The zero-float predecessor walk from a late ticket — §7.2's payload. "You are 11 days
+ * late" is a complaint; "and here are the three tickets that decide it" is actionable.
+ *
+ * Only the BINDING predecessor is followed: the one whose EF + lag actually equals this
+ * node's ES. A predecessor that finishes earlier decides nothing and does not belong in the
+ * chain. Ties break on ticket id so the chain is byte-stable.
+ */
+function bindingChain(schedule, id) {
+  const preds = new Map();
+  for (const e of schedule.edges) {
+    if (!preds.has(e.target)) preds.set(e.target, []);
+    preds.get(e.target).push(e);
+  }
+  const chain = [id];
+  const seen = new Set([id]);
+  for (let cur = id; ;) {
+    const row = schedule.by_id.get(cur);
+    if (!row) break;
+    const binding = (preds.get(cur) ?? [])
+      .filter((e) => {
+        const p = schedule.by_id.get(e.src);
+        return p && p.ef + e.lag_minutes === row.es;
+      })
+      .map((e) => e.src).sort(scmp);
+    // A cycle cannot appear here — SCC members are not scheduled — but the guard costs
+    // nothing and a walk that could loop forever is not a walk anyone should ship.
+    const next = binding.find((p) => !seen.has(p));
+    if (next === undefined) break;
+    chain.unshift(next); seen.add(next); cur = next;
+  }
+  return chain;
+}
+
+/**
+ * @param schedule   the result of scheduleModel()
+ * @param persisted  [{ id, schedule_run_id }] — the cached derived columns, for staleness
+ * @returns [{ ticket, kind, detail, ... }] in auditCorpus's shape, so `blaze audit` can
+ *          concatenate it and `summarise` needs no change
+ */
+export function scheduleFindings(schedule, { persisted = [] } = {}) {
+  const findings = [];
+
+  // --- deadline-unreachable: derived due_date > deadline ---------------------------------
+  // STRICT. A deadline is a DATE, so finishing at 16:00 on the deadline day is on time, and
+  // `>=` here is mutation 1.
+  for (const row of schedule.scheduled) {
+    if (!row.deadline || !(row.due_date > row.deadline)) continue;
+    const chain = bindingChain(schedule, row.id);
+    const crosses = new Set(chain.map(projectOf)).size > 1;
+    const days = lateWorkingDays(schedule, row);
+    // A chain of one used to say "no predecessors" unconditionally, which was a claim the
+    // result object itself could contradict: a ticket whose ES is driven by its own
+    // `not_before` has predecessors, they just do not bind. Saying so while never naming the
+    // constraint that DOES decide the date is exactly the defect §7.2 forbids.
+    const tail = chain.length > 1
+      ? `binding chain ${chain.join(" → ")}, float ${schedule.by_id.get(chain[0]).float_minutes}`
+        + (crosses ? " (crosses projects)" : "")
+      : hasPredecessor(schedule, row.id)
+        ? `no predecessor binds — the earliest start is set by ${boundBy(schedule, row)}`
+        : "no predecessors — nothing else decides this date";
+    findings.push({
+      ticket: row.id, kind: "deadline-unreachable",
+      detail: `deadline ${row.deadline}; earliest finish ${row.due_date} `
+        + `(${days} working day${days === 1 ? "" : "s"} late); ${tail}`,
+      chain, crosses_projects: crosses, late_working_days: days,
+      deadline: row.deadline, due_date: row.due_date, epoch_date: schedule.epoch_date,
+    });
+  }
+
+  // --- dependency-cycle: an SCC in the non-terminal delivery graph ------------------------
+  for (const u of schedule.unscheduled) {
+    if (u.reason !== "dependency-cycle") continue;
+    const loop = [...u.scc, u.scc[0]].join(" → ");
+    findings.push({
+      ticket: u.id, kind: "dependency-cycle",
+      detail: `Precedes cycle ${loop}; ${u.scc.length} tickets unscheduled`,
+      chain: u.scc,
+    });
+  }
+
+  // --- schedule-stale: a persisted row not stamped with the latest run --------------------
+  // A stale date that looks live is worse than no date, so the finding exists to stop a view
+  // rendering one (BLZ-360 §6.3).
+  for (const row of [...persisted].sort((a, b) => scmp(a.id, b.id))) {
+    if (row.schedule_run_id === schedule.run_id) continue;
+    findings.push({
+      ticket: row.id, kind: "schedule-stale",
+      detail: row.schedule_run_id
+        ? `schedule_run_id ${row.schedule_run_id} is not the latest run ${schedule.run_id} `
+          + "— render as stale, never as a date"
+        : `never stamped with a schedule run (latest is ${schedule.run_id}) `
+          + "— render as stale, never as a date",
+    });
+  }
+
+  return findings;
+}
+
+const hasPredecessor = (schedule, id) => schedule.edges.some((e) => e.target === id);
+
+/**
+ * What actually sets a ticket's ES when no predecessor binds. Naming it is the point: a
+ * finding that reports lateness without naming its cause is the complaint §7.2 rejects.
+ */
+function boundBy(schedule, row) {
+  const src = schedule.by_id.get(row.id);
+  const nb = src && schedule.constraint_of ? schedule.constraint_of.get(row.id) : null;
+  if (nb) return `not_before ${nb}`;
+  return `project_epoch ${schedule.epoch_date}`;
+}
+
+/** Working days between a ticket's deadline and its derived finish. */
+function lateWorkingDays(schedule, row) {
+  let n = 0;
+  const day = 24 * 60 * 60 * 1000;
+  let ms = Date.parse(row.deadline + "T00:00:00Z");
+  const end = Date.parse(row.due_date + "T00:00:00Z");
+  const working = new Set(schedule.working_days);
+  while (ms < end) { ms += day; if (working.has(new Date(ms).getUTCDay())) n++; }
+  return n;
+}
+
+/**
+ * Spec 3 §8's presentation rule: findings are GROUPED BY KIND WITH A COUNT, and a kind whose
+ * every member is a migration artefact says so.
+ *
+ * It exists because of a measurement, not a preference. After BLZ-360 §4's migration, 11 of
+ * the 12 non-terminal deadlines are already in the past, so `deadline-unreachable` fires 11
+ * times on first open — and eleven separate red rows is how a view teaches an operator to
+ * ignore a kind, which costs the hard findings too.
+ *
+ * `migratedDeadlines` is the 12-id NON-TERMINAL cohort, not §4's 40 ids: the 40 are 28
+ * terminal + 12 non-terminal, so membership there identifies a DATED ticket rather than a
+ * MIGRATED DEADLINE. With no set supplied the banner claims nothing rather than guessing.
+ */
+export function groupScheduleFindings(findings, { migratedDeadlines = null, epochDate = null } = {}) {
+  const migrated = migratedDeadlines ? new Set(migratedDeadlines) : null;
+  epochDate = epochDate ?? findings.find((f) => f.epoch_date)?.epoch_date ?? null;
+  const byKind = new Map();
+  for (const f of findings) {
+    if (!byKind.has(f.kind)) byKind.set(f.kind, []);
+    byKind.get(f.kind).push(f);
+  }
+  const order = (k) => { const i = SCHEDULE_KINDS.indexOf(k); return i < 0 ? SCHEDULE_KINDS.length : i; };
+  return [...byKind.entries()]
+    .sort((a, b) => order(a[0]) - order(b[0]) || scmp(a[0], b[0]))
+    .map(([kind, items]) => {
+      const all = kind === "deadline-unreachable" && migrated !== null
+        && items.length > 0 && items.every((f) => migrated.has(f.ticket));
+      // "and already in the past" was conjoined to the banner WITHOUT being checked. It is a
+      // separate claim from cohort membership and it is falsified by the twelfth member:
+      // OMA-4 is in the 12-id cohort and its deadline is 2026-10-20.
+      const past = all && items.every((f) => f.deadline && epochDate && f.deadline < epochDate);
+      const noun = kind === "deadline-unreachable" ? "deadlines unreachable"
+        : kind === "dependency-cycle" ? "tickets in a Precedes cycle"
+        : "tickets carrying a stale schedule";
+      return {
+        kind, count: items.length, severity: HARD_KINDS.has(kind) ? "hard" : "soft",
+        all_migration_artefacts: all,
+        all_already_past: past,
+        summary: `${items.length} ${noun}`
+          + (all ? ` — all ${items.length} are dates migrated from \`due\` by `
+            + "`schedule migrate-dates`" + (past ? " and already in the past" : "") : ""),
+        items,
+      };
+    });
+}
