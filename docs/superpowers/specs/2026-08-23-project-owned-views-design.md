@@ -477,8 +477,21 @@ slug         = <name>
 ord          = <index in VIEW_NAMES>      -- preserves today's switcher order
 is_builtin   = true
 enabled      = <the boolean from views_json, default true>
-config_json  = '{}'
+config_json  = <'{}' for five rows; '{"axis":"sprint"}' for the gantt row — see below>
 ```
+
+**The `gantt` row is the one exception, and spec 3 requires it.** Spec 3 (BLZ-363,
+[`2026-08-24-gantt-and-critical-path-design.md`](2026-08-24-gantt-and-critical-path-design.md))
+§2.1 gives the migrated builtin `axis: 'sprint'` so the row set and axis window are unchanged for
+every existing user, and §9 makes a view's defaults **materialised into `config_json` at create
+time** — no stored row relies on a fall-through default. An empty `'{}'` here breaks both: either
+the row relies on the fall-through that rule forbids, or it takes the *registry* default
+`'schedule'` and flips the builtin to the schedule axis, destroying spec 3's expected-delta
+argument. So the seed emits `'{"axis":"sprint"}'` for `gantt` and `'{}'` for the other five.
+
+**Amended under BLZ-367.** This is a factual correction rather than a re-opening of either kernel
+decision — the seed value contradicted a consumer spec, and spec 3 named the amendment explicitly
+rather than assuming it. Confirmed with the operator on 2026-08-24.
 
 `views: { map: false }` becomes `enabled = false` on the `map` row. Order is preserved from
 `VIEW_NAMES`, so the switcher renders identically.
