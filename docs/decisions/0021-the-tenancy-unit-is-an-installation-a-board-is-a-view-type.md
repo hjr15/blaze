@@ -21,8 +21,9 @@ the installation is already called a board and already owns several of them. Mea
 makes "a project owns N boards" unwritable, and it is why this ADR retires the word rather than
 redefining it.
 
-**ADR-0014's "one installation is one board" was already not literally true in the render layer on
-the day it was written.** `deriveBoards()` returns **4** for the live board — `delivery`,
+**ADR-0014's "one installation is one board", as originally written, was already not literally true
+in the render layer on the day it was written** — BLZ-362 has since amended that Context.
+`deriveBoards()` returns **4** for the live installation — `delivery`,
 `requirement`, `architecture`, `risk`. *(That count is not in BLZ-354's spec, which says only "N
 boards per installation"; it comes from BLZ-362 and was re-measured on 2026-08-24 for this
 transcription.)*
@@ -99,4 +100,4 @@ ADR's *Amendment — 2026-08-25*). As originally written it named `board_config`
 dialect. Four distinct singleton tables exist — `blaze_config.board`,
 `blaze_config.config_version`, `projection_meta` and `migration_mode` — and
 `tests/adr-0014-singletons.test.mjs` now derives that set from the emitted DDL and asserts
-ADR-0014's inventory against it, so the list cannot drift again silently.
+ADR-0014's inventory against it, so the two cannot disagree without a red test.

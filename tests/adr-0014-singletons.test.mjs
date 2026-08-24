@@ -29,7 +29,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, basename, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { configDdl } from "../scripts/model/config-schema.mjs";
 import { projectionDdl } from "../scripts/model/projection-schema.mjs";
@@ -47,21 +47,58 @@ const SINGLETON = /CHECK\s*\(\s*id\s*=\s*1\s*\)/;
 /** The three modules that emit DDL containing a singleton. Asserted complete below. */
 const DDL = { "config-schema.mjs": configDdl, "projection-schema.mjs": projectionDdl, "write-rules.mjs": writeRulesDdl };
 
-const CREATE_TABLE = /CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([A-Za-z_][\w.]*)\s*\(([\s\S]*?)\n\s*\)/g;
+/**
+ * Strip `--` line comments and single-quoted literals, so a `CREATE TABLE` mentioned in a
+ * comment or inside a `DO $$ ... $$` body is not counted as a table. Both produced wrong
+ * answers before this existed: a commented-out CREATE TABLE mis-attributed a real singleton
+ * to a phantom table name.
+ */
+function decommented(sql) {
+  let out = "", i = 0;
+  while (i < sql.length) {
+    if (sql[i] === "-" && sql[i + 1] === "-") { while (i < sql.length && sql[i] !== "\n") i++; continue; }
+    if (sql[i] === "'") {
+      i++;
+      while (i < sql.length) { if (sql[i] === "'" && sql[i + 1] === "'") i += 2; else if (sql[i] === "'") { i++; break; } else i++; }
+      out += "''";
+      continue;
+    }
+    out += sql[i++];
+  }
+  return out;
+}
+
+const CREATE_HEAD = /CREATE TABLE\s+(?:IF NOT EXISTS\s+)?([A-Za-z_][\w.]*)\s*\(/g;
 
 /**
  * Every table in `ddl` whose body carries the singleton CHECK, by fully-qualified name.
- * Returns the parsed/total table count too, so a regex that silently stops early is a
- * failure rather than a short answer.
+ *
+ * The body is delimited by PAREN DEPTH, not by a line that starts with `)`. An adversarial
+ * review broke the line-anchored version with a table whose multi-line CHECK constraint
+ * closes on its own line: the body was truncated before the singleton, the table was
+ * silently dropped from the inventory, and the parsed/total guard still reported a complete
+ * read. That is the exact "understates itself silently" mode this function claims to refuse.
+ *
+ * Returns parsed/total as well, so a scanner that stops early is a failure rather than a
+ * short answer.
  */
 function singletonTables(ddl) {
+  const sql = decommented(ddl);
   const names = new Set();
   let parsed = 0;
-  for (const m of ddl.matchAll(CREATE_TABLE)) {
+  for (const m of sql.matchAll(CREATE_HEAD)) {
+    let depth = 1, i = m.index + m[0].length;
+    const start = i;
+    while (i < sql.length && depth > 0) {
+      if (sql[i] === "(") depth++;
+      else if (sql[i] === ")") depth--;
+      i++;
+    }
+    if (depth !== 0) continue;            // unbalanced: not a table we can read
     parsed++;
-    if (SINGLETON.test(m[2])) names.add(m[1]);
+    if (SINGLETON.test(sql.slice(start, i - 1))) names.add(m[1]);
   }
-  return { names, parsed, total: (ddl.match(/CREATE TABLE/g) || []).length };
+  return { names, parsed, total: (sql.match(/CREATE TABLE/g) || []).length };
 }
 
 /** The singleton inventory the engine actually emits, for one dialect. */
@@ -86,17 +123,26 @@ function documentedInventory(text) {
   const section = /\|\s*Singleton table\s*\|\s*Declared at\s*\|\n\|[-\s|]+\|\n([\s\S]*?)(?:\n\n|\n[^|])/.exec(text);
   if (!section) return null;
   const rows = [];
+  const unparsed = [];
   for (const line of section[1].split("\n")) {
+    if (!line.trim()) continue;
     const m = /^\|\s*`([\w.]+)`\s*\|(.+?)\|\s*$/.exec(line);
+    // Silently skipping a row it cannot read would let the ADR name a table that does not
+    // exist — the ORIGINAL board_config error — and stay green, because an unreadable row is
+    // invisible to set equality. An adversarial review landed exactly that with an unbackticked
+    // name. Every line in the section must parse, or the inventory is not the inventory.
     if (m) rows.push({ table: m[1], citations: [...m[2].matchAll(/`([\w./-]+\.mjs):(\d+)`/g)].map((c) => ({ file: c[1], line: Number(c[2]) })) });
+    else unparsed.push(line);
   }
-  return rows;
+  return { rows, unparsed };
 }
 
 test("BLZ-362: ADR-0014 lists exactly the singleton tables the engine emits", () => {
-  const rows = documentedInventory(readFileSync(ADR, "utf8"));
-  assert.notEqual(rows, null, "ADR-0014 must carry a `| Singleton table | Declared at |` inventory");
-  const documented = [...new Set(rows.map((r) => r.table))].sort();
+  const parsed = documentedInventory(readFileSync(ADR, "utf8"));
+  assert.notEqual(parsed, null, "ADR-0014 must carry a `| Singleton table | Declared at |` inventory");
+  assert.deepEqual(parsed.unparsed, [],
+    `these inventory rows could not be read, so their table names were never checked:\n  ${parsed.unparsed.join("\n  ")}`);
+  const documented = [...new Set(parsed.rows.map((r) => r.table))].sort();
   const derived = [...derivedInventory("sqlite")].sort();
   assert.deepEqual(documented, derived,
     `ADR-0014's singleton inventory disagrees with the DDL.\n` +
@@ -112,10 +158,11 @@ test("BLZ-362: both drivers agree on the singleton inventory", () => {
 });
 
 test("BLZ-362: every file:line ADR-0014 cites lands on the singleton CHECK", () => {
-  const rows = documentedInventory(readFileSync(ADR, "utf8"));
-  assert.notEqual(rows, null, "ADR-0014 must carry a `| Singleton table | Declared at |` inventory");
+  const parsed = documentedInventory(readFileSync(ADR, "utf8"));
+  assert.notEqual(parsed, null, "ADR-0014 must carry a `| Singleton table | Declared at |` inventory");
+  assert.deepEqual(parsed.unparsed, [], "an inventory row could not be read, so its citations were never checked");
   let checked = 0;
-  for (const row of rows) {
+  for (const row of parsed.rows) {
     assert.ok(row.citations.length > 0, `${row.table} is listed with no file:line citation`);
     for (const { file, line } of row.citations) {
       const lines = readFileSync(join(ROOT, file), "utf8").split("\n");
@@ -132,26 +179,54 @@ test("BLZ-362: every file:line ADR-0014 cites lands on the singleton CHECK", () 
   assert.ok(checked >= 4, `only ${checked} citations were checked — the inventory should cite at least one site per singleton`);
 });
 
-test("BLZ-362: no module outside the executed set declares a singleton", () => {
-  // The inventory is only complete if the three modules it executes are the only ones
-  // that can produce a singleton. A fourth grows one, this goes red, and the test is
-  // extended rather than the ADR quietly understating itself again.
-  const dir = join(ROOT, "scripts", "model");
-  const offenders = readdirSync(dir)
-    .filter((f) => f.endsWith(".mjs") && !(f in DDL))
-    .filter((f) => SINGLETON.test(readFileSync(join(dir, f), "utf8")));
+test("BLZ-362: no module anywhere under scripts/ declares a singleton the inventory misses", () => {
+  // The inventory is only complete if the three modules it executes are the only ones that
+  // can produce a singleton. A fourth grows one, this goes red, and the test is extended
+  // rather than the ADR quietly understating itself again.
+  //
+  // RECURSIVE, and over all of scripts/. The first version read `scripts/model/` alone and
+  // non-recursively, which an adversarial review broke twice over: `scripts/init-pg.mjs`
+  // emits DDL and sits outside that directory, and any subdirectory was invisible. A
+  // completeness guard that scans one flat directory is not a completeness guard.
+  const walk = (dir) => readdirSync(dir, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
+  const files = walk(join(ROOT, "scripts")).filter((f) => f.endsWith(".mjs"));
+  assert.ok(files.length > 20, `only ${files.length} .mjs files found under scripts/ — the walk is not finding them`);
+  const offenders = files
+    .filter((f) => !(basename(f) in DDL))
+    .filter((f) => SINGLETON.test(readFileSync(f, "utf8")))
+    .map((f) => relative(ROOT, f));
   assert.deepEqual(offenders, [],
     `these modules declare a singleton the ADR-0014 inventory does not read: ${offenders.join(", ")}`);
 });
 
-test("BLZ-362: ADR-0014 does not claim one installation is one board", () => {
-  // The claim was contradicted by the render layer on the day it was written —
-  // `deriveBoards()` landed 2026-07-09, the ADR 2026-08-22. Guarded on the live count so
-  // this pins the contradiction rather than merely banning a phrase.
+/** ADR-0014's Context section alone — the part that makes claims in the ADR's own voice.
+ *  The Amendment at the foot quotes the retracted sentence deliberately and must not be
+ *  read as an assertion of it. */
+function contextSection(text) {
+  const m = /\n## Context\n([\s\S]*?)\n## /.exec(text);
+  return m ? m[1] : null;
+}
+
+test("BLZ-362: ADR-0014's Context states the corrected claim, not the refuted one", () => {
+  // Scoped to the Context, and PINNED POSITIVELY. Two reasons, both found by adversarial
+  // review of the first version, which banned one literal spelling across the whole file:
+  //
+  //   - As a ban it was trivially evaded. Dropping the full stop, wrapping the sentence over
+  //     a line break, lowercasing it, or paraphrasing it all sailed through while the ADR
+  //     asserted the refuted claim. A ban can only ever enumerate spellings; a positive pin
+  //     fails whenever the sentence stops saying the true thing, however it is rephrased.
+  //   - As a whole-file ban it had a FALSE POSITIVE waiting: the Amendment's own preserved
+  //     quote of the retracted sentence escaped only because it happens to straddle a line
+  //     break. Reflowing that paragraph, without changing a word, would have turned this red.
   const boards = deriveBoards({ types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS });
   assert.ok(boards.length > 1,
     `deriveBoards() returned ${boards.length} — with one board the ADR's original sentence would be true and this test is meaningless`);
-  assert.doesNotMatch(readFileSync(ADR, "utf8"), /^[^>\n]*One installation is one board\./m,
-    `ADR-0014 still asserts "One installation is one board" as its own claim, but deriveBoards() ` +
-    `returns ${boards.length}: ${boards.map((b) => b.name).join(", ")}`);
+  const ctx = contextSection(readFileSync(ADR, "utf8"));
+  assert.notEqual(ctx, null, "ADR-0014 must have a Context section");
+  assert.match(ctx, /One installation is one installation\./,
+    "the Context no longer carries the corrected sentence — if it was rewritten, say what is true now");
+  assert.doesNotMatch(ctx, /one installation is one board/i,
+    `ADR-0014's Context asserts "one installation is one board", but deriveBoards() returns ` +
+    `${boards.length}: ${boards.map((b) => b.name).join(", ")}`);
 });

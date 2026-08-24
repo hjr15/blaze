@@ -126,7 +126,9 @@ would justify reopening it, at the cost this ADR describes. Nothing short of tha
 **The decision is unaltered.** Database-per-tenant stands, row-level shared-schema stays
 permanently ruled out, and no table may assume rows from more than one installation coexist.
 The Decision, *Why row-level is ruled out*, Consequences and *Revisit if* sections are
-untouched. What changed is the Context's inventory of what exists, and one sentence of framing.
+untouched. Three things changed: the Context's inventory of what exists, its framing sentence,
+and — in *What this obliges v4 to do now* — item 1's "more than one **board**" became "more than
+one **installation**", which is the same obligation with the ambiguous word removed.
 
 The Context read: *"`board`, `board_config`, `projection_meta` and the two write-rules tables
 are all `id integer PRIMARY KEY CHECK (id = 1)` — a deliberate singleton. One installation is
@@ -152,10 +154,12 @@ agreed with the operator. This ADR was the only thing that disagreed.
 
 `tests/adr-0014-singletons.test.mjs` now derives the singleton inventory from the DDL the
 engine actually emits and asserts the Context's table against it, together with every
-`file:line` that table cites. **All four errors are now mechanically prevented** — three of
-them by that set equality, which catches a named table that does not exist, a real one left
-out, and one counted twice alike, because it compares sets rather than spell-checking the
-names present; the fourth by a separate assertion that fails whenever `deriveBoards()` returns
-more than one board and the ADR still claims otherwise. BLZ-362 judged only three detectable;
-set equality turned out to catch the omission too. ADR-0021 carries the same correction forward
+`file:line` that table cites. **All four errors are now mechanically prevented.** Three fall to
+that set equality, which catches a named table that does not exist, a real one left out, and one
+counted twice alike, because it compares sets rather than spell-checking the names present —
+and the inventory refuses to parse partially, so a row it cannot read is a failure rather than a
+row it silently skips. BLZ-362 judged only three detectable; set equality catches the omission
+too. The fourth is pinned POSITIVELY: the Context must still say what is true, so rephrasing the
+refuted claim fails the assertion rather than evading a banned spelling. That pin is scoped to
+the Context, which is why the quotation two paragraphs above does not trip it. ADR-0021 carries the same correction forward
 in prose and is the record of the `board` → `installation` rename.
