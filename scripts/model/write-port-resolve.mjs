@@ -46,15 +46,15 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   const { SQLITE_PRAGMAS } = await import("./sqlite-schema.mjs");
   db.exec(SQLITE_PRAGMAS);
   const exec = sqliteExec(db);
-  if (create) {
-    const { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } =
-      await import("./db-schema-version.mjs");
-    if (judgeDbSchema(readSchemaFactsSync(exec)).state === "empty") createDbSchemaSync(exec);
-  } else {
-    const { judgeDbSchema, readSchemaFactsSync } = await import("./db-schema-version.mjs");
-    const state = judgeDbSchema(readSchemaFactsSync(exec));
-    if (!state.ok) { db.close(); throw new Error(`blaze: ${state.error}`); }
-  }
+  const { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } =
+    await import("./db-schema-version.mjs");
+  const state = judgeDbSchema(readSchemaFactsSync(exec));
+  // `create` means "make one if there is none" — it never meant "accept whatever is there".
+  // This branch tested only `state === "empty"` and DISCARDED `ok`, so an out-of-range shadow
+  // was opened silently: exactly the case the version floor exists to refuse, waved through by
+  // the one opener that did not ask. sqlite-storage.mjs and pg-storage.mjs both check `ok`.
+  if (create && state.state === "empty") createDbSchemaSync(exec);
+  else if (!state.ok) { db.close(); throw new Error(`blaze: ${state.error}`); }
   return { db, exec, path };
 }
 

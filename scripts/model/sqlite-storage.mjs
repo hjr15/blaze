@@ -17,14 +17,28 @@ import { SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-schema-version.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
-function toRecord(row, links) {
+// BLZ-391. This projected 15 of a ticket's 28 frontmatter keys: `loadCorpus` WROTE the other
+// thirteen and the read side never selected them, so the data went into the database and did not
+// come back out. Every consumer of the seam saw them as absent, including any migration oracle
+// comparing through it.
+//
+// `labels`, `components` and `worklog` come from child tables, fetched per row exactly as `links`
+// already was — the N+1 shape is the existing precedent here, not a new one.
+function toRecord(row, links, labels, components, worklog) {
   const frontmatter = {
     id: row.id, project: row.project_key, type: row.type, title: row.title,
     priority: row.priority, resolution: row.resolution ?? "",
     parent: row.parent_id ?? "", assignee: row.assignee,
     estimate: row.estimate_minutes ?? "", sprint: row.sprint_id ?? "",
+    labels: labels ?? [], components: components ?? [],
+    likelihood: row.likelihood ?? "", impact: row.impact ?? "",
+    branch: row.branch ?? "", pr: row.pr ?? "",
+    ref: row.ref ?? "", category: row.category ?? "",
+    verification: row.verification ?? "", derived: row.derived ?? "",
     start: row.start_date ?? "", due: row.due_date ?? "",
+    not_before: row.constraint_start_no_earlier_than ?? "", deadline: row.deadline ?? "",
     created: row.created_on, updated: row.updated_on,
+    worklog: worklog ?? [],
     links: links ?? [],
   };
   return {
@@ -71,12 +85,30 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
 
   const linksFor = db.prepare(
     "SELECT link_type, target_id FROM ticket_link WHERE src_id = ? ORDER BY link_type, target_id");
+  // Ordered by `ord` so a round trip preserves the order the operator wrote, which is what the
+  // frontmatter array means. `worklog_entry` has no ord, so it orders by its own date then id.
+  const labelsFor = db.prepare("SELECT label FROM ticket_label WHERE ticket_id = ? ORDER BY ord");
+  const componentsFor = db.prepare("SELECT component FROM ticket_component WHERE ticket_id = ? ORDER BY ord");
+  const worklogFor = db.prepare(
+    "SELECT on_date, minutes, note FROM worklog_entry WHERE ticket_id = ? ORDER BY on_date, id");
   const hydrate = (row) => row && toRecord(row,
-    linksFor.all(row.id).map((l) => ({ type: l.link_type, target: l.target_id })));
+    linksFor.all(row.id).map((l) => ({ type: l.link_type, target: l.target_id })),
+    labelsFor.all(row.id).map((r) => r.label),
+    componentsFor.all(row.id).map((r) => r.component),
+    worklogFor.all(row.id).map((w) => ({
+      date: w.on_date, minutes: w.minutes,
+      // `note` is OMITTED when the column is NULL, never emitted as "". A source entry that
+      //       states no note must round-trip as one that states no note — inventing an empty
+      //       string makes the loaded record differ from the source on 691 of the live corpus's
+      //       1,700 worklog entries. write-port.mjs:326 already had this right.
+      ...(w.note == null ? {} : { note: w.note }),
+    })));
 
   const COLS = `id, project_key, num, type, status, title, priority, resolution,
                 parent_id, parent_type, assignee, estimate_minutes, sprint_id,
-                start_date, due_date, body, created_on, updated_on, version`;
+                likelihood, impact, branch, pr, ref, category, verification, derived,
+                start_date, due_date, constraint_start_no_earlier_than, deadline,
+                body, created_on, updated_on, version`;
   const ALIVE = "deleted_at IS NULL";
 
   const byId       = db.prepare(`SELECT ${COLS} FROM ticket WHERE id = ? AND ${ALIVE}`);

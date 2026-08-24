@@ -9,6 +9,7 @@
 // hands back a tally tells you about all of them, which is what you need before
 // cutover. Nothing is silently dropped — every skip is counted and named.
 import { parseAcBlocks } from "../model/ac-blocks.mjs";
+import { storableEstimate } from "../model/time.mjs";
 import { extraFields } from "../model/write-port.mjs";
 import { fsReadStorage } from "../model/read-storage.mjs";
 
@@ -21,10 +22,9 @@ function isoDate(v, fallback) {
 }
 
 /** estimate is text in frontmatter and an integer here; 242 tickets have none. */
-function estimate(v) {
-  const n = Number(String(v ?? "").trim());
-  return Number.isFinite(n) && n > 0 && n % 5 === 0 ? n : null;
-}
+// `storableEstimate` is time.mjs's one rule, shared with write-port.mjs. These two disagreed
+// three ways about `estimate: 7` until it existed.
+const estimate = storableEstimate;
 
 /**
  * @param db      an open SQLite handle with the schema applied
@@ -43,7 +43,7 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   const report = {
     tickets: 0, links: 0, worklog: 0, criteria: 0, notes: 0, acHeadings: 0,
     labels: 0, components: 0,
-    skipped: { noId: 0, badId: 0, insertFailed: [] },
+    skipped: { worklogDropped: [], noId: 0, badId: 0, insertFailed: [] },
     danglingLinks: 0, danglingParents: 0,
     // A ticket with no title still loads — losing it would be worse — but the id is
     // substituted, and substituting is inventing. Counted so the tally never claims a
@@ -64,10 +64,11 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   const insTicket = db.prepare(
     `INSERT INTO ticket (id, project_key, num, type, status, title, priority, resolution,
                          parent_id, parent_type, assignee, estimate_minutes, sprint_id,
-                         start_date, due_date, body, ac_heading, created_on, updated_on,
+                         start_date, due_date, constraint_start_no_earlier_than, deadline,
+                         body, ac_heading, created_on, updated_on,
                          branch, pr, ref, category, verification, derived,
                          likelihood, impact, extra_json)
-     VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+     VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   // BLZ-295. Without these the migration silently dropped every one of them: 926 of
   // 2,561 tickets (36.2%) carry at least one, and extra_json is what keeps the
   // round-trip promise for keys nobody has thought of yet.
@@ -106,6 +107,9 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
         assignee,
         estimate(fm.estimate), String(fm.sprint ?? "") || null,
         isoDate(fm.start, null), isoDate(fm.due, null),
+        // BLZ-391: ADR-0022's two constraint columns arrived with PR #110 and this loader
+        // predates them, so a migrated ticket lost its `not_before`/`deadline` outright.
+        isoDate(fm.not_before, null), isoDate(fm.deadline, null),
         t.body ?? "", ac.heading,
         isoDate(fm.created, now), isoDate(fm.updated, now),
         nzs(fm.branch), nzs(fm.pr), nzs(fm.ref), nzs(fm.category),
@@ -131,10 +135,24 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
       b.kind === "criterion" ? report.criteria++ : report.notes++;
     }
     for (const w of Array.isArray(fm.worklog) ? fm.worklog : []) {
-      const m = Number(w?.minutes);
-      if (!Number.isFinite(m) || m <= 0) continue;
-      insWork.run(id, isoDate(w.date, now), m, w.note ?? null);
-      report.worklog++;
+      // Math.round for the STRICT reason above; the try/catch because this loop sits OUTSIDE
+      // the one guarding the ticket insert, so a single bad worklog row killed the entire load
+      // with an uncaught throw and left the BEGIN uncommitted — against this file's own promise
+      // to "load what it can and hand back a tally". Now it is a counted skip like any other.
+      // COUNTED, not `continue`d. This file's header promises "nothing is silently dropped —
+      // every skip is counted and named", and `Math.round(0.4)` is 0, so a sub-half-minute
+      // entry vanished from the tally as well as from the database.
+      const m = Math.round(Number(w?.minutes));
+      if (!Number.isFinite(m) || m <= 0) {
+        report.skipped.worklogDropped.push({ id, minutes: w?.minutes ?? null });
+        continue;
+      }
+      try {
+        insWork.run(id, isoDate(w.date, now), m, w.note ?? null);
+        report.worklog++;
+      } catch (e) {
+        report.skipped.insertFailed.push({ id, reason: `worklog: ${String(e.message).slice(0, 100)}` });
+      }
     }
   }
 

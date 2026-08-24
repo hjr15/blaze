@@ -10,14 +10,11 @@ import { loadCorpus } from "../../scripts/migrate/load-corpus.mjs";
 import { importTransitions } from "../../scripts/migrate/import-transitions.mjs";
 import { zeroDiff } from "../../scripts/migrate/zero-diff.mjs";
 
-// What `sqlite-storage.mjs`'s `toRecord` does NOT project back out of the ticket table.
-// Measured 2026-08-25 by round-tripping a ticket carrying all 28 frontmatter keys through
-// `loadCorpus` + `openSqliteRead`: the seam surfaces 12 of them. `loadCorpus` WRITES most of
-// these columns and the read side never selects them, so the oracle is blind to them through
-// this driver — declared here so the blindness is stated rather than silently passed.
-// The driver gap itself is BLZ-391.
-const NOT_PROJECTED = ["labels", "components", "likelihood", "impact", "branch", "pr",
-  "ref", "category", "verification", "derived", "worklog", "links", "not_before", "deadline"];
+// BLZ-391 closed the gap this list existed for: the read seam projected 15 of a ticket's 28
+// frontmatter keys and now projects all of them. The list is kept, EMPTY, rather than deleted —
+// it is the affordance that says "this driver cannot show you X", and a future column that goes
+// unprojected should be named here rather than the mechanism being reinvented.
+const NOT_PROJECTED = [];
 
 const doc = (fm, body = "body") =>
   ["---", ...Object.entries(fm).map(([k, v]) => `${k}: ${v}`), "---", "", body, ""].join("\n");

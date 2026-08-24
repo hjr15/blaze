@@ -37,8 +37,14 @@ if (!id || !toStatus) { console.error("usage: blaze move <id> <status>"); proces
 const today = new Date().toISOString().slice(0, 10);
 // BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the
 // real verbs. Unset means the filesystem, exactly as before.
-const { port: writePort, close: closeWritePort } =
-  await resolveWritePort({ dataRoot, projectsDir });
+// A schema-version refusal is a MESSAGE, not a crash: resolveWritePort throws a named
+// `blaze: …` error when the shadow is out of range, and an unwrapped top-level throw
+// printed it as a stack trace — making the guard read as an engine bug. Same shape as
+// the assertWritable catch this file already uses.
+let __wp;
+try { __wp = await resolveWritePort({ dataRoot, projectsDir }); }
+catch (e) { console.error(e.message); process.exit(1); }
+const { port: writePort, close: closeWritePort } = __wp;
 const r = await applyMove(projectsDir, id, toStatus, { today, writePort });
 closeWritePort();
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }

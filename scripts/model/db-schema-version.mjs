@@ -23,7 +23,12 @@ import { linkDdl } from "./link-schema.mjs";
 import { hierarchyDdl } from "./hierarchy-schema.mjs";
 
 /** Bump when a change makes an OLDER engine unable to read a database this one writes. */
-export const DB_SCHEMA_VERSION = 2;
+// 3 under BLZ-390: the seven v3 SQLite tables gained ` STRICT`, which changes their definitions.
+// An existing v2 shadow has non-STRICT tables and nothing would detect the difference, so the
+// version is what forces a rebuild. Safe for the same reason version 2 was: the shadow is
+// DERIVED, lives under .blaze/, and `blaze db init --force` recreates it from the corpus — there
+// is no upgrade to write and no data to lose.
+export const DB_SCHEMA_VERSION = 3;
 /**
  * The oldest stamp this engine can still read.
  *
@@ -38,7 +43,9 @@ export const DB_SCHEMA_VERSION = 2;
  * the shadow from the corpus. A stranded version-1 shadow is deleted and recreated, not
  * migrated — there is no upgrade path in this module and version 2 does not add one.
  */
-export const MIN_DB_SCHEMA_VERSION = 2;
+// Rises with it, for the same reason: a v2 shadow's tables are not STRICT, so a v3 engine that
+// accepted one would silently lose the guarantee this version exists to add.
+export const MIN_DB_SCHEMA_VERSION = 3;
 
 const DOCS = "https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md";
 
@@ -49,10 +56,21 @@ export function metaDdl(dialect) {
   if (dialect !== "sqlite" && dialect !== "postgres") {
     throw new Error(`unknown dialect ${JSON.stringify(dialect)} — expected 'sqlite' or 'postgres'`);
   }
+  // STRICT under BLZ-390, and this table earns it more than most: it holds `schema_version`,
+  // the value the entire version guard reads. An adversarial review found it was the one
+  // non-STRICT table left after the seven in SQLITE_DDL — the sweep had stopped at that file's
+  // boundary. `sqlite_sequence` stays non-STRICT because SQLite creates it itself.
+  //
+  // THROUGH `sql-dialect.mjs`'s `tbl` TOKEN, never a literal. ` STRICT` is SQLite-only syntax:
+  // hand-writing it here emitted it to Postgres too, which refused the statement — so the meta
+  // table was never created, the stamp never written, and every Postgres path then failed with
+  // "holds tables but no Blaze schema stamp". That is precisely the retyping hazard the
+  // sql-dialect header says the token exists to prevent, and this function was bypassing it.
+  const d = dialect === "sqlite" ? " STRICT" : "";
   return `CREATE TABLE IF NOT EXISTS blaze_meta (
   key   text PRIMARY KEY,
   value text NOT NULL
-);
+)${d};
 `;
 }
 

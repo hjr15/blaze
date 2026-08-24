@@ -19,6 +19,7 @@
 // where it is. Flipping the default then becomes a one-line decision backed by
 // evidence, taken deliberately in Phase 2 (BLZ-254), rather than a leap.
 import { ticketPath, fsStorage } from "./storage.mjs";
+import { storableEstimate } from "./time.mjs";
 import { serializeTicket } from "./ticket.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 
@@ -125,6 +126,10 @@ const ENC = (v, pg) => (typeof v === "boolean" ? (pg ? v : (v ? 1 : 0)) : v);
 export const COLUMN_FIELDS = new Set([
   "id", "project", "type", "title", "priority", "resolution", "parent", "assignee",
   "estimate", "sprint", "start", "due", "created", "updated",
+  // BLZ-391/BLZ-393: ADR-0022's two constraint fields. Missing here, they landed in a dedicated
+  // COLUMN *and* in extra_json — and this file's own comment above says what that costs: "a key
+  // in both is stored twice and the second write wins", which made the two readers disagree.
+  "not_before", "deadline",
   "links", "labels", "components", "worklog",
   "branch", "pr", "ref", "category", "verification", "derived", "likelihood", "impact",
 ]);
@@ -161,7 +166,11 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
   const est = (v) => {
     if (v === "" || v === null || v === undefined) return null;
     const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    // `storableEstimate`, shared with load-corpus.mjs. An earlier pass used `roundEstimate`
+    // here and that was wrong twice over: it INVENTS (roundEstimate(1) is 5) in a path that
+    // only mirrors, and it still disagreed with the other writer — `estimate: 7` gave
+    // filesystem 7, loadCorpus null, write-port 5. Three answers for one input.
+    return storableEstimate(v);
   };
   const nz = (v) => (v === "" || v === undefined ? null : v);
 
@@ -215,12 +224,18 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
     const extra = extraFields(fm);
     const cols = ["id", "project_key", "num", "type", "status", "title", "priority", "resolution",
                   "parent_id", "parent_type", "assignee", "estimate_minutes", "sprint_id",
-                  "start_date", "due_date", "body", "created_on", "updated_on",
+                  "start_date", "due_date",
+                  // BLZ-391: the dual-write port never persisted these two, so a ticket written
+                  // through it read back with empty not_before/deadline — the same defect
+                  // BLZ-391 fixed in load-corpus.mjs, on the other write path.
+                  "constraint_start_no_earlier_than", "deadline",
+                  "body", "created_on", "updated_on",
                   "branch", "pr", "ref", "category", "verification", "derived",
                   "likelihood", "impact", "extra_json"];
     const vals = [id, project, num(id), fm.type, status, fm.title, fm.priority || "medium",
                   nz(fm.resolution), parentId, parentType, fm.assignee || "unassigned",
-                  est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due), body ?? "",
+                  est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due),
+                  nz(fm.not_before), nz(fm.deadline), body ?? "",
                   fm.created, fm.updated,
                   nz(fm.branch), nz(fm.pr) == null ? null : String(fm.pr), nz(fm.ref),
                   nz(fm.category), nz(fm.verification), nz(fm.derived),
@@ -266,7 +281,9 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
     // ticket does not duplicate history.
     await exec.run(`DELETE FROM worklog_entry WHERE ticket_id = ${ph(0)}`, [id]);
     for (const w of fm.worklog ?? []) {
-      const mins = Number(w?.minutes);
+      // Rounded for the same reason as `est` above: `minutes` is INTEGER and STRICT refuses a
+      // REAL. `roundWorklog` already does this on the CLI path.
+      const mins = Math.round(Number(w?.minutes));
       if (!Number.isFinite(mins) || mins <= 0) continue;
       await exec.run(
         `INSERT INTO worklog_entry (ticket_id, on_date, minutes, note)
@@ -294,7 +311,8 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
       const rows = await exec.all(
         `SELECT id, project_key, num, type, status, title, priority, resolution, parent_id,
                 parent_type, assignee, estimate_minutes, sprint_id,
-                ${d("start_date")}, ${d("due_date")}, body,
+                ${d("start_date")}, ${d("due_date")},
+                ${d("constraint_start_no_earlier_than")}, ${d("deadline")}, body,
                 ${d("created_on")}, ${d("updated_on")},
                 branch, pr, ref, category, verification, derived, likelihood, impact,
                 extra_json
@@ -318,6 +336,13 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
           parent: r.parent_id ?? "", assignee: r.assignee,
           estimate: r.estimate_minutes ?? "", sprint: r.sprint_id ?? "",
           start: r.start_date ?? "", due: r.due_date ?? "",
+          // Added with the two columns `persist` writes. Putting them in COLUMN_FIELDS took
+          // them OUT of extra_json — which had been the only path by which this reader ever
+          // returned them — so persist wrote and read could not see, and every dual write
+          // reported loss. Two DB read projections that disagree is exactly what COLUMN_FIELDS'
+          // own comment warns about; `openSqliteRead` had them and this one did not.
+          ...(r.constraint_start_no_earlier_than == null ? {} : { not_before: r.constraint_start_no_earlier_than }),
+          ...(r.deadline == null ? {} : { deadline: r.deadline }),
           created: r.created_on, updated: r.updated_on,
           ...(r.branch       == null ? {} : { branch: r.branch }),
           ...(r.pr           == null ? {} : { pr: r.pr }),

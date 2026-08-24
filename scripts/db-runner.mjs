@@ -29,7 +29,11 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
   }
   if (force && existsSync(path)) rmSync(path, { force: true });
 
-  const { db, exec } = await openShadow(dataRoot, { create: true });
+  // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
+  // must print the refusal rather than a stack trace about it.
+  let db, exec;
+  try { ({ db, exec } = await openShadow(dataRoot, { create: true })); }
+  catch (e) { console.error(e.message); process.exit(1); }
   try {
     const { loadCorpus } = await import("./migrate/load-corpus.mjs");
     // Migration mode: the corpus predates the required-field rule, and 242 tickets have
@@ -83,7 +87,11 @@ async function status({ dataRoot, log }) {
     log("no shadow database. Run 'blaze db init' to create one.");
     return 0;
   }
-  const { db, exec } = await openShadow(dataRoot);
+  // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
+  // must print the refusal rather than a stack trace about it.
+  let db, exec;
+  try { ({ db, exec } = await openShadow(dataRoot)); }
+  catch (e) { console.error(e.message); process.exit(1); }
   try {
     const n = (t) => exec.all(`SELECT count(*) AS n FROM ${t}`)[0].n;
     log(`shadow database ${path}`);
