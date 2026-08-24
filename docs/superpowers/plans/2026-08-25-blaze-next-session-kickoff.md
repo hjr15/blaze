@@ -1,9 +1,20 @@
 # Blaze — next session kickoff (written 2026-08-24)
 
 **If you are a session reading this, your task is §3.** The operator chose the lane on 2026-08-24.
-Supersedes `2026-08-24-blaze-next-session-kickoff.md`, whose §3 sequence (specs 3 → 2 → 4) is
-**complete and merged**. That file lives only on the unmerged local branch
-`docs-kickoff-2026-08-24`; nothing on `main` points at it and it need not be read.
+Supersedes `2026-08-24-blaze-next-session-kickoff.md`, whose sequence (specs 3 → 2 → 4) is
+**complete and merged** — and which is **deleted from `main` by the same commit that added this
+file**, because it had become actively misleading rather than merely stale.
+
+**Worth knowing, because it cost this session a wrong claim.** That filename carried **two
+different documents.** On `main` it held the *2026-08-23* plan — BLZ-349's capability probe and five
+defect tickets, all seven of which are now `done` — under a `2026-08-24` name. The 2026-08-24
+content, the version that actually set the spec 3 → 2 → 4 sequence, was only ever committed to the
+local branch `docs-kickoff-2026-08-24` and never merged. So a session that checked out `main` and
+opened the obvious file got a plan a week out of date whose filename said otherwise. An earlier
+draft of *this* paragraph asserted the file lived "only on the unmerged branch", which was wrong in
+the same way. `git show docs-kickoff-2026-08-24:docs/superpowers/plans/2026-08-24-blaze-next-session-kickoff.md`
+retains the version this session worked from; nothing durable in either is lost, because §5–§7
+below carry it.
 
 ---
 
