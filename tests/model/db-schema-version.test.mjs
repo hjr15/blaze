@@ -20,7 +20,7 @@ import { join } from "node:path";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync, metaDdl,
-         DB_SCHEMA_VERSION } from "../../scripts/model/db-schema-version.mjs";
+         DB_SCHEMA_VERSION, MIN_DB_SCHEMA_VERSION } from "../../scripts/model/db-schema-version.mjs";
 
 const tmpDb = () => join(mkdtempSync(join(tmpdir(), "blaze-ver-")), "b.db");
 
@@ -138,5 +138,85 @@ describe("createDbSchemaSync", () => {
 
   test("an unknown dialect is refused by metaDdl", () => {
     assert.throws(() => metaDdl("mysql"), /unknown dialect "mysql"/);
+  });
+});
+
+// --- ADR-0022: DB schema version 2 (BLZ-374) ---------------------------------
+// Version 2 is the installation event the scheduler cannot be built without: Precedes lives
+// in the v4 `link` table and version 1 installs no v4 table at all.
+describe("DB schema version 2", () => {
+  // Same minimal exec the file's other create tests use.
+  const execFor = (db) => ({
+    run(sql, params = []) { return params.length ? db.prepare(sql).run(...params) : db.exec(sql); },
+    all(sql, params = []) { return db.prepare(sql).all(...params); },
+  });
+  const fresh = () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(SQLITE_PRAGMAS);
+    createDbSchemaSync(execFor(db));
+    return db;
+  };
+  const tables = (db) =>
+    db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
+
+  test("the stamp is 2", () => {
+    assert.equal(DB_SCHEMA_VERSION, 2);
+    const v = fresh().prepare("SELECT value FROM blaze_meta WHERE key='schema_version'").get().value;
+    assert.equal(v, "2");
+  });
+
+  test("a fresh create installs the v4 link tables — this is what Precedes needs", () => {
+    const t = tables(fresh());
+    assert.ok(t.includes("link_type"), "link_type must ship in version 2");
+    assert.ok(t.includes("link"), "link must ship in version 2");
+  });
+
+  test("a fresh create installs the hierarchy tables — hierarchy-rollup reads hierarchy_membership", () => {
+    const t = tables(fresh());
+    assert.ok(t.includes("hierarchy"));
+    assert.ok(t.includes("hierarchy_membership"));
+  });
+
+  // BLZ-360 §6.4 lists viewDdl among version 2's installs and BLZ-354 §6.2 says it "ships in
+  // version 2". Measured while implementing: it CANNOT, because `view` lives in the
+  // `blaze_config` namespace (BLZ-371 — its FKs cannot cross a SQLite database file) and
+  // **nothing in scripts/ ever installs `blaze_config`**. `configDdl` is exported and called
+  // only from its own test. So the cost of adding `view` here is not "one DDL", as spec 1
+  // reasoned, but a whole namespace with no install path. Deferred to BLZ-377, which installs
+  // blaze_config and viewDdl together. Nothing in the scheduler reads `view`.
+  test("view is deliberately NOT in version 2 — it needs a blaze_config nothing installs", () => {
+    const t = tables(fresh());
+    assert.ok(!t.includes("view"), "if view appears here, BLZ-377 landed and this test should invert");
+    assert.ok(!t.includes("view_type"));
+  });
+
+  test("the five scheduling columns are on ticket after a fresh create", () => {
+    const cols = fresh().prepare("SELECT name FROM pragma_table_info('ticket')").all().map((r) => r.name);
+    for (const c of ["constraint_start_no_earlier_than", "deadline", "float_minutes", "is_critical", "schedule_run_id"]) {
+      assert.ok(cols.includes(c), `missing ${c}`);
+    }
+  });
+
+  // A version-1 database has no link table and none of the five columns, so a version-2
+  // engine that accepted it would fail later with a raw SQL error — the exact failure this
+  // module exists to replace with a named refusal. The floor therefore rises with the
+  // version. That is safe because the shadow database is DERIVED: it lives under .blaze/,
+  // `blaze db init` rebuilds it from the filesystem corpus, and the fs write port is the
+  // default, so a stranded v1 shadow is deleted and recreated rather than migrated.
+  test("the floor rises to 2 — a version-1 database is refused, not half-opened", () => {
+    assert.equal(MIN_DB_SCHEMA_VERSION, 2);
+    const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 1 });
+    assert.equal(st.ok, false);
+    assert.equal(st.state, "older");
+    assert.match(st.error, /migrate/i);
+  });
+
+  test("a version-1 ENGINE opening this database still gets the upgrade refusal", () => {
+    // current/min are properties of the SINGLE argument, not a second one — passing them
+    // separately is silently ignored and the assertion then tests the defaults.
+    const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 2, current: 1, min: 1 });
+    assert.equal(st.ok, false);
+    assert.equal(st.state, "newer");
+    assert.match(st.error, /upgrade/i);
   });
 });

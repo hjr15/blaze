@@ -19,11 +19,26 @@
 // two that drift.
 import { SQLITE_DDL } from "./sqlite-schema.mjs";
 import { PG_DDL } from "./pg-schema.mjs";
+import { linkDdl } from "./link-schema.mjs";
+import { hierarchyDdl } from "./hierarchy-schema.mjs";
 
 /** Bump when a change makes an OLDER engine unable to read a database this one writes. */
-export const DB_SCHEMA_VERSION = 1;
-/** The oldest stamp this engine can still read. */
-export const MIN_DB_SCHEMA_VERSION = 1;
+export const DB_SCHEMA_VERSION = 2;
+/**
+ * The oldest stamp this engine can still read.
+ *
+ * ADR-0022 took this to 2 with the version. A version-1 database has no `link` table and
+ * none of the five scheduling columns, so a version-2 engine that ACCEPTED it would fail
+ * later with a raw SQL error — precisely the silent-half-open failure this module exists to
+ * replace with a named refusal. Raising the floor turns that into "migrate", which is the
+ * honest instruction.
+ *
+ * That is affordable because the database is DERIVED, not authoritative: the shadow lives
+ * under `.blaze/`, the filesystem write port is the default, and `blaze db init` rebuilds
+ * the shadow from the corpus. A stranded version-1 shadow is deleted and recreated, not
+ * migrated — there is no upgrade path in this module and version 2 does not add one.
+ */
+export const MIN_DB_SCHEMA_VERSION = 2;
 
 const DOCS = "https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md";
 
@@ -147,14 +162,32 @@ function applyCreate(exec, dialect, state) {
       : `refusing to create: ${state.error}`);
   }
   const ddl = dialect === "postgres" ? PG_DDL : SQLITE_DDL;
-  const r1 = exec.run(ddl, []);
-  const r2 = exec.run(metaDdl(dialect), []);
-  const r3 = exec.run(
-    `INSERT INTO blaze_meta (key, value) VALUES (${ph(dialect, 0)}, ${ph(dialect, 1)})`,
-    ["schema_version", String(DB_SCHEMA_VERSION)]);
+  // ADR-0022 §Consequences: version 2 is ONE bump installing several tables, not one bump
+  // per table. Each shipped separately would mean its own MIN window and its own upgrade
+  // refusal for an operator to sequence.
+  //
+  // `viewDdl` is listed by BLZ-360 §6.4 and BLZ-354 §6.2 and is deliberately NOT here.
+  // Measured while implementing (BLZ-374): `view` lives in the `blaze_config` namespace,
+  // because its FKs to `project` and `view_type` cannot cross a SQLite database file — and
+  // **nothing in scripts/ installs `blaze_config` at all**; `configDdl` is exported and
+  // called only from its own test. Spec 1 reasoned that "given one unavoidable version bump,
+  // adding `view` costs one DDL". It costs a namespace with no install path. BLZ-377 carries
+  // blaze_config + viewDdl together; nothing in the scheduler reads `view`.
+  //
+  // `artifactDdl`, `revisionDdl`, `documentDdl` and `fieldDdl` stay behind the db-primary
+  // Phase 2 cutover, which is what spine :265-267 actually gates — on the document/artifact
+  // model, whose rationale (no status directory, the fs port cannot represent it) is false
+  // of `link` and `hierarchy`.
+  const runs = [
+    exec.run(ddl, []),
+    exec.run(linkDdl(dialect), []),
+    exec.run(hierarchyDdl(dialect), []),
+    exec.run(metaDdl(dialect), []),
+    exec.run(
+      `INSERT INTO blaze_meta (key, value) VALUES (${ph(dialect, 0)}, ${ph(dialect, 1)})`,
+      ["schema_version", String(DB_SCHEMA_VERSION)]),
+  ];
   // Await only if the driver actually returned promises — one body, both drivers.
   const done = { created: true, version: DB_SCHEMA_VERSION };
-  return (r1 instanceof Promise || r2 instanceof Promise || r3 instanceof Promise)
-    ? Promise.all([r1, r2, r3]).then(() => done)
-    : done;
+  return runs.some((r) => r instanceof Promise) ? Promise.all(runs).then(() => done) : done;
 }
