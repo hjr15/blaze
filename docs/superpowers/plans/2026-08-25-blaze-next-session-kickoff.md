@@ -155,7 +155,7 @@ merged under BLZ-379. There is nothing to start here.**
 - **Nothing installs `blaze_config` at all** — `configDdl` is exported and called only from its
   own test. Spec 1 reasoned `view` "costs one DDL"; it costs a namespace with no install path.
   **BLZ-377** installs both, and will probably want schema **version 3** since v2 has shipped.
-- **"STRICT stays on every SQLite table" is false** — zero of seven. True of the v4 modules,
+- ~~**"STRICT stays on every SQLite table" is false**~~ — **corrected in the spec under BLZ-376.** Zero of seven, and that figure was right. True of the v4 modules,
   false of the v3 core. **BLZ-376.**
 
 **One decision the specs were silent on:** `MIN_DB_SCHEMA_VERSION` rose to **2**, so a v1 shadow
@@ -180,9 +180,9 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 | Ticket | State | Notes |
 |---|---|---|
 | **BLZ-369** | `defined` | **Operator decision 2026-08-24: accept now, remove later.** An old engine's `loadSprints → setActive → saveSprints` destroys `activeByProject`, because `loadSprints` whitelists two keys (`sprints.mjs:14`). It is operator-entered state nothing can reconstruct. Candidates: a `MIN_SCHEMA_VERSION` bump, or a version stamp in `sprints.json` plus a warning. Neither designed. |
-| **BLZ-376** | `defined` | The STRICT claim above. Small, independent. |
+| ~~**BLZ-376**~~ | **`done`** | The STRICT claim above, corrected in the spec. Its second half — whether the v3 tables *should* be STRICT — is **BLZ-390**, which measured **0 of 21,372 live rows** violating, plus one structural blocker (`projection_meta.config_version` is declared `bigint`, not a STRICT-legal type). |
 | **BLZ-377** | `defined` | `blaze_config` + `viewDdl`. Blocks spec 1's view table and therefore spec 4's report view. |
-| **BLZ-378** | `defined` | `epic` is a delivery type but **not** a `Precedes` endpoint, so a retained epic draws a Gantt bar and can never be on the critical path. Hypothetical on this board — zero epics — but the two definitions disagree. |
+| ~~**BLZ-378**~~ | **`done`** | Closed with **BLZ-383** under BLZ-388: they were the same question. The solve's node set is now the declared `Precedes` source kinds, read from the same `link_type` entry as the edge rule, so there is no second definition to disagree. An epic is chart-only **by design** — a container's dates are rolled up, not derived by CPM over its own estimate. |
 | **BLZ-362** | `defined` | ADR-0014's three factual errors. Small, independent, no prerequisites. ADR-0021 already records what is wrong. |
 | **BLZ-358** | `defined` | First-run setup. **Operator decided the mechanism:** a one-time token at `<board>/.blaze/setup-token`, mode `0600`, path logged but never the value. |
 | **BLZ-355** | `defined` | Grill the Q6 interface half. **Needs the operator interactively** — do not queue it for an agent session. |
