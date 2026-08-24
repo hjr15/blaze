@@ -502,8 +502,8 @@ feature, added the refuted config entry, and shipped nothing that renders §3.2.
 | `scripts/views/page.mjs` | `renderView`'s `board` case (`:49`) is `board.render(m)` — the model only, no view config and no sprint registry. It gains both, the same way the `gantt` case already receives `sprints` at `:62` |
 | `scripts/views/board.mjs` | renders the capacity bar when the view's config carries a `sprint` (§3.2, §5) |
 | — | **Blocked on spec 1 (BLZ-354).** `columnSet`, `swimlaneBy` and `cardFields` (§5) appear **nowhere** in `scripts/` — the view-config registry is BLZ-354's unshipped deliverable, and a sprint board cannot read a `sprint` key from a config that does not exist yet. §5 is expressible; it is not yet buildable |
-| — | **Blocked on BLZ-360 (the scheduler), and an earlier version of this table flagged only the spec-1 blocker.** `grep -ric "schedule" scripts/` returns **0**: `schedule.minutes_per_day`, `schedule.working_days`, `project_epoch` and derived ES/EF do not exist. So `capacity.mjs` has no source for its two config values, and §4's `sprint-window-missed` has no derived start to compare — which is why §4 measures it at 0 and not merely at 0-because-every-sprint-ended. **So the buildable set is exactly one thing, and it is not the capacity bar**: `sprint-overrun` (the findings row above) needs no scheduler and no view config, and ships 26 live corpus rows today. The **capacity bar is blocked on both** — on BLZ-360 for `schedule.*`, and on BLZ-354 for the view config that carries the `sprint` key it reads. An earlier version of this row named the bar as the only part buildable before the kernel ships, which contradicted the findings row four lines above it *and* the same cell's own statement that `schedule.*` does not exist |
-| `scripts/model/gantt.mjs` | `:33` reads `activeFor(sprints, project)`; `:36` loses its `|| list[0]` tail and gains the `no-active-sprint` return (§6.1) |
+| — | **Blocked on BLZ-360 (the scheduler), and an earlier version of this table flagged only the spec-1 blocker.** `grep -ric "schedule" scripts/` returns **0**: `schedule.minutes_per_day`, `schedule.working_days`, `project_epoch` and derived ES/EF do not exist. So `capacity.mjs` has no source for its two config values, and §4's `sprint-window-missed` has no derived start to compare — which is why §4 measures it at 0 and not merely at 0-because-every-sprint-ended. **Of the rows this blocker touches, only the capacity bar is caught by it — and it is caught twice**: by BLZ-360 for `schedule.*`, and by BLZ-354 for the view config carrying the `sprint` key it reads. **Everything else in this table is unblocked and lands first** — the whole §2 record change (`sprints.mjs`, `sprint-runner.mjs`, `gantt.mjs`) and `sprint-overrun`, which needs neither the scheduler nor a view config and ships 26 live corpus rows today. Two earlier versions of this row got the scope wrong in opposite directions: one named the capacity bar as the only part buildable before the kernel, and its correction said "the buildable set is exactly one thing", which is equally false — four rows here need nothing from either prerequisite |
+| `scripts/model/gantt.mjs` | `:33` reads `activeFor(sprints, project)`; `:36` loses its `\|\| list[0]` tail and gains the `no-active-sprint` return (§6.1) |
 | `scripts/sprint-runner.mjs` | `blaze sprint new --project KEY`; `blaze sprint list [--project KEY]`; **`blaze sprint active <id>` writes the scalar `active`, and `--project KEY <id>` writes `activeByProject[KEY]`** (§2.2) — without that split nothing sets `active` after this spec ships. **New `blaze sprint migrate`**: idempotent; derives `project` per sprint from ticket membership, and **seeds `activeByProject` with a default it names — the latest-*ending* sprint per project, `{ OBA: "S5", INF: "S3" }` on this board — which is a starting point the operator corrects, not a reconstruction of their choice** (§2.2: `activeByProject` is not derivable). **It does not touch `active`**, so §1.2's stale installation-wide pointer survives by design |
 | — | **No `velocity.mjs`.** §3.4 defers it; §9 carries the condition to revisit |
 
@@ -713,8 +713,10 @@ stale `active: "S2"` pointer itself.
 - **Velocity.** §3.4 measures the transitions log unable to support it — 0 of 5 sprints closed
   tagged work after their window as an earlier draft assumed, 43 of 80 sprint-tagged tickets have
   no terminal record at all, and 86% of arrivals are batch writes. **This is the largest honest
-  gap**, and the condition to revisit it is stated rather than left open: a log whose terminal
-  arrivals are not batch-dominated.
+  gap in what this spec cannot yet deliver**, and the condition to revisit it is stated rather
+  than left open: a log whose terminal arrivals are not batch-dominated. (The `activeByProject`
+  loss below is the larger gap **in kind** — it destroys data rather than withholding a feature —
+  and the two are ranked on different axes deliberately.)
 - **Burndown.** Same source, same problem, and worse — a burndown needs a *daily* series from a log
   carrying 62 distinct timestamps across 38 days.
 - **Team size above one.** §3.2's capacity bar assumes one person, because S1's 0.96 is the only
@@ -722,13 +724,13 @@ stale `active: "S2"` pointer itself.
   distinct assignee values, one of which is `unassigned`** (2,531 of 2,613 tickets). A `team_size`
   field is deferred, not refused; it needs a second person first.
 - **An older engine silently destroys `activeByProject`.** §2.2 measures it: `loadSprints`
-  whitelists two keys, so one `blaze sprint active` from an unmodified engine writes the map out of
-  existence, and it is **operator-entered state that nothing can reconstruct** — ticket membership
+  whitelists two keys, so one `blaze sprint new` **or** `blaze sprint active` from an unmodified
+  engine writes the map out of existence, and it is **operator-entered state that nothing can reconstruct** — ticket membership
   gives sprint → project, never project → which sprint is active. `blaze sprint migrate` re-seeds a
   named default; it does not recover the operator's choice. The alternative is a
   `MIN_SCHEMA_VERSION` bump that refuses old engines outright, which this spec does not take. **This
-  is the cost of the additive shape and it is unrecoverable**, which makes it a larger gap than the
-  velocity one above in kind, if not in frequency.
+  is the cost of the additive shape and it is unrecoverable** — the largest gap *in kind*, against
+  velocity's above, which is the largest in what the spec cannot deliver.
 - **Sprint close-out as an event.** No ceremony, no carry-over gesture, no "move unfinished to the
   next sprint" command. §4 reports the 26 overruns; it does not offer to fix them.
 - **Cross-project sprints.** §2.1 refuses them on measurement; a later ruling would reopen it.
