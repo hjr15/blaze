@@ -6,7 +6,8 @@
 //
 // The claim: Blaze can write a valid .xlsx with ZERO dependencies. An .xlsx is a
 // ZIP of XML; `node:zlib` supplies DEFLATE, and the ZIP container, CRC-32 and the
-// six OOXML parts are hand-written. Nothing else is imported.
+// six OOXML parts are hand-written. The SHIPPED writer imports nothing else;
+// `node:url` below is used only by the --bench harness's run-as-main guard.
 //
 // Reproduce every figure below with:
 //   node <this file> --bench /path/to/board/projects

@@ -69,15 +69,28 @@ strings. **No JSON Schema library.**"*
 A working writer — **98 lines of code, importing `node:zlib` and nothing else** — was run against
 the live corpus and at ADR-0016's benchmark scale. All figures are medians, not single runs.
 
-**That count is the *shipped writer alone*, and it has now been wrong three times, so here is every
-measure of the committed file.** It is **234 lines, of which 145 are code**; **46** of those are
-the `--bench` harness, which is evidence and does not ship, and one more is the `node:url` import
-the harness alone needs. So the writer proper is **98 shipped code lines** (99 counting that
-import), out of a 143-line region including its comments. Earlier drafts said "86 lines (77
-non-blank)" — true before the bug fixes; "~140 lines (195 with comments)" — the whole file's code
-count and a figure matching nothing; and "94 lines … (142 including its comments)" — the file as it
-stood one commit *before* `localDayAsUtc` and the `node:url` import were added, i.e. arithmetic
-that was internally consistent and entirely stale.
+**That count is the *shipped writer alone*, and it has now been wrong four times, so here is every
+measure of the committed file with the line ranges that produce it** — the previous attempt was
+wrong because it *transcribed* a reviewer's figures instead of recomputing them, and the same
+commit changed the file:
+
+| Region | Lines | Total | Code |
+|---|---|---|---|
+| header comment | 1–51 | 51 | 0 |
+| **writer proper** | **52–179** | **128** | **99** |
+| `--bench` harness | 181–237 | 57 | 46 |
+| **whole file** | | **237** | **145** |
+
+One of the writer's 99 is the `node:url` import, which only the harness's guard uses (`:193`), so
+the **shipped** writer is **98 code lines**. Every figure above is `wc`-checkable against the
+committed file; if it disagrees, this table is wrong, not the file.
+
+Four earlier counts, each wrong differently: "86 lines (77 non-blank)" — true before the bug fixes,
+and "non-blank" there meant non-blank-non-comment; "~140 lines (195 with comments)" — the whole
+file's code count, and a second figure matching nothing; "94 lines (142 including its comments)" —
+the file one commit before `localDayAsUtc` and the `node:url` import existed; and "234 lines … a
+143-line region" — a total two lines stale, and a region that ran past the writer into the
+harness's own comment block, i.e. the same boundary error in a new place.
 
 **It is committed at
 [`evidence/2026-08-24-xlsx-zero-dependency-proof.mjs`](evidence/2026-08-24-xlsx-zero-dependency-proof.mjs)**
@@ -128,7 +141,9 @@ which was backwards against the table above. The second pass fixed the direction
 edit, replaced two **correct** ratios — 1.93× and 1.96× — with 1.87× and 1.81×, which reproduce
 from no figure anywhere and understate the shipped default's advantage. A third pass then
 misattributed "fewer" to the original, deleting a true account of its provenance. All of it is now
-recomputed from the table's own numbers: 1825/948 and 102/52.)* `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
+recomputed from the table's own numbers: 1825/948 and 102/52.)*
+
+`writeXlsx(rows, sheetName, { level })` takes the compression level as a parameter, so §8's
 mutation 6 has something to mutate — an earlier draft hardcoded the level and specified a
 two-argument signature, which made that mutation unkillable by construction.
 
