@@ -21,7 +21,10 @@ makes "a project owns N boards" unwritable, and it is why this ADR retires the w
 redefining it.
 
 **ADR-0014's "one installation is one board" was already not literally true in the render layer on
-the day it was written.** `deriveBoards()` returns **4** for the live board.
+the day it was written.** `deriveBoards()` returns **4** for the live board — `delivery`,
+`requirement`, `architecture`, `risk`. *(That count is not in BLZ-354's spec, which says only "N
+boards per installation"; it comes from BLZ-362 and was re-measured on 2026-08-24 for this
+transcription.)*
 
 ## Decision
 
