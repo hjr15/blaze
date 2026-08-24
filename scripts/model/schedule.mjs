@@ -1,0 +1,322 @@
+// scripts/model/schedule.mjs — the CPM solve. ADR-0022: dependency edges, effort and date
+// constraints are inputs; start_date, due_date, float and the critical path are outputs
+// computed here and never hand-set.
+//
+// Pure, zero-dep. No Date.now(), no Math.random(): `now` is injected by the caller and a
+// locale-independent `cmp` (never localeCompare) keeps every output array byte-stable.
+// Ties break on ticket id — that last rule is BLZ-360 §6.1's addition, not something
+// gantt.mjs's header says, and it is implemented here because a stable order is worth more
+// than a faithful quotation.
+//
+// TIME IS SIGNED WORKING MINUTES FROM project_epoch. t=0 is the epoch instant, and a date
+// before the epoch is negative rather than clamped on the way in. That is deliberate: it
+// makes `max(0, ...)` in the forward pass BE the project_epoch floor (BLZ-360 §6.1's "a plan
+// that starts in the past is not a plan") instead of a second, separate clamp that could
+// disagree with it. It is also what lets a `done` predecessor whose actual finish is months
+// past supply a boundary value that correctly holds nothing back.
+//
+// The graph is built by filtering IN THIS ORDER, and the order is part of the rule
+// (BLZ-360 §6.2):
+//   1. Edges — keep a `Precedes` edge only if both endpoints are declared delivery kinds.
+//      The meta-model's default-deny, read from DEFAULT_LINK_TYPES rather than restated.
+//   2. Nodes — drop every ticket for which isTerminal(type, status) holds. A terminal
+//      ticket is never a node, never an SCC member, and is NEVER marked `unscheduled`: its
+//      dates are frozen actuals owned by history. If Tarjan ran over the full graph the
+//      "every SCC member is unscheduled" rule would overwrite them.
+//   3. Tarjan over what is left.
+import { isTerminal } from "./workflows.mjs";
+import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
+
+export const PRECEDES = "Precedes";
+const DAY_MS = 24 * 60 * 60 * 1000;
+const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+const PRECEDES_TYPE = DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES);
+const SOURCE_KINDS = new Set(PRECEDES_TYPE.source_kinds);
+const TARGET_KINDS = new Set(PRECEDES_TYPE.target_kinds);
+
+const parseDay = (iso) => Date.parse(iso + "T00:00:00Z");
+const isoOf = (ms) => new Date(ms).toISOString().slice(0, 10);
+const dayOf = (ms) => new Date(ms).getUTCDay();
+
+// ---------------------------------------------------------------- the working calendar
+//
+// A tiny class so the arithmetic has one home and every conversion is reversible. Nothing
+// here reads a default: minutes_per_day and working_days arrive from the caller, because
+// ADR-0022 §2.3 makes board config their single definition and tests/config.test.mjs greps
+// scripts/ to keep it that way.
+class Calendar {
+  constructor(minutesPerDay, workingDays, nowMs) {
+    this.mpd = minutesPerDay;
+    this.working = new Set(workingDays);
+    // project_epoch: the first working day on or after `now`'s UTC date. BLZ-360 §6.1 calls
+    // this "floored to the next working day"; on a working day that is the day itself, and
+    // the reading matters because it decides whether a Monday plan starts on Monday.
+    let ms = Date.UTC(...isoOf(nowMs).split("-").map((n, i) => (i === 1 ? Number(n) - 1 : Number(n))));
+    let guard = 0;
+    while (!this.working.has(dayOf(ms))) {
+      ms += DAY_MS;
+      if (++guard > 7) throw new Error("blaze schedule: schedule.working_days contains no working day");
+    }
+    this.epochMs = ms;
+    this.epochDate = isoOf(ms);
+    this.perWeek = [0, 1, 2, 3, 4, 5, 6].filter((d) => this.working.has(d)).length;
+  }
+
+  /** Signed count of working days in [epoch, iso) — negative when iso precedes the epoch. */
+  workingDaysFromEpoch(iso) {
+    const d = Math.round((parseDay(iso) - this.epochMs) / DAY_MS);
+    if (d === 0) return 0;
+    const sign = d < 0 ? -1 : 1;
+    const [from, span] = sign > 0 ? [this.epochMs, d] : [parseDay(iso), -d];
+    const weeks = Math.floor(span / 7);
+    let n = weeks * this.perWeek;
+    for (let i = weeks * 7; i < span; i++) if (this.working.has(dayOf(from + i * DAY_MS))) n++;
+    return sign * n;
+  }
+
+  /** The calendar date of the k-th working day on or after the epoch (k >= 0). */
+  dateForWorkingDay(k) {
+    const weeks = Math.floor(k / this.perWeek);
+    let rem = k - weeks * this.perWeek;
+    let ms = this.epochMs + weeks * 7 * DAY_MS;
+    let guard = 0;
+    for (;;) {
+      if (this.working.has(dayOf(ms))) { if (rem === 0) return isoOf(ms); rem--; }
+      ms += DAY_MS;
+      if (++guard > 14) throw new Error("blaze schedule: working-day walk did not terminate");
+    }
+  }
+
+  /** Working minutes from the epoch to the START of the first working day >= iso. */
+  minutesAtStartOf(iso) { return this.workingDaysFromEpoch(iso) * this.mpd; }
+
+  /** Working minutes from the epoch to the END of the working day containing iso. */
+  minutesAtEndOf(iso) { return (this.workingDaysFromEpoch(iso) + 1) * this.mpd; }
+
+  /**
+   * The date work is ON at working-minute t, for a span [es, ef). A span of one whole
+   * working day finishes at the END of that day, so the inclusive last day is the one
+   * containing (ef - 1) — not the one containing ef, which is the next day's first instant.
+   * A zero-duration milestone has no last-minute, so it reports the day it starts on.
+   */
+  dayIndexAt(t) { return Math.floor(t / this.mpd); }
+  lastDayIndex(es, ef) { return ef === es ? this.dayIndexAt(es) : this.dayIndexAt(ef - 1); }
+}
+
+// ---------------------------------------------------------------- Tarjan
+//
+// Iterative rather than recursive: the board is 2,630 tickets and a deep chain would blow
+// the stack on a path that is meant to be defensive. Node order and each adjacency list are
+// pre-sorted by id, so the component list and its members are byte-stable.
+function tarjan(ids, succ) {
+  const index = new Map(), low = new Map(), onStack = new Set();
+  const stack = [], out = [];
+  let next = 0;
+  for (const root of ids) {
+    if (index.has(root)) continue;
+    const work = [{ v: root, i: 0 }];
+    index.set(root, next); low.set(root, next); next++;
+    stack.push(root); onStack.add(root);
+    while (work.length) {
+      const frame = work[work.length - 1];
+      const kids = succ.get(frame.v) ?? [];
+      if (frame.i < kids.length) {
+        const w = kids[frame.i++];
+        if (!index.has(w)) {
+          index.set(w, next); low.set(w, next); next++;
+          stack.push(w); onStack.add(w);
+          work.push({ v: w, i: 0 });
+        } else if (onStack.has(w)) {
+          low.set(frame.v, Math.min(low.get(frame.v), index.get(w)));
+        }
+        continue;
+      }
+      work.pop();
+      if (work.length) {
+        const parent = work[work.length - 1].v;
+        low.set(parent, Math.min(low.get(parent), low.get(frame.v)));
+      }
+      if (low.get(frame.v) === index.get(frame.v)) {
+        const comp = [];
+        for (;;) {
+          const w = stack.pop(); onStack.delete(w); comp.push(w);
+          if (w === frame.v) break;
+        }
+        out.push(comp.sort(cmp));
+      }
+    }
+  }
+  return out.sort((a, b) => cmp(a[0], b[0]));
+}
+
+// ---------------------------------------------------------------- the solve
+
+/**
+ * @param tickets  [{ id, type, status, estimate_minutes, constraint_start_no_earlier_than,
+ *                    deadline, start_date, due_date }]
+ * @param links    [{ type, src, target, lag_minutes }] — every link; non-Precedes is ignored
+ * @param schedule { minutes_per_day, working_days } — board config, never defaulted here
+ * @param now      injected epoch-ms; the model never reads the clock
+ * @param runId    stamped onto the result so a persisted row can be told stale
+ */
+export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null } = {}) {
+  if (!schedule || typeof schedule.minutes_per_day !== "number" || !Array.isArray(schedule.working_days)) {
+    throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
+      + "— board config is their single definition (ADR-0022 §2.3)");
+  }
+  if (!Number.isFinite(now)) throw new Error("blaze schedule: `now` must be injected (no Date.now() in the model)");
+  const cal = new Calendar(schedule.minutes_per_day, schedule.working_days, now);
+
+  const rows = new Map();
+  for (const t of tickets) if (t && t.id != null) rows.set(t.id, t);
+  const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
+
+  // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------
+  const dropped = [];
+  const kept = [];
+  for (const l of links) {
+    const src = l.src, target = l.target;
+    const drop = (reason) => dropped.push({ src, target, type: l.type ?? null, reason });
+    if ((l.type ?? PRECEDES) !== PRECEDES) { drop("not-precedes"); continue; }
+    if (src === target) { drop("self-edge"); continue; }
+    const a = rows.get(src), b = rows.get(target);
+    if (!a || !b) { drop("dangling-endpoint"); continue; }
+    if (!SOURCE_KINDS.has(a.type) || !TARGET_KINDS.has(b.type)) { drop("undeclared-kind"); continue; }
+    kept.push({ src, target, lag_minutes: Number(l.lag_minutes ?? 0) });
+  }
+
+  // --- filter 2: nodes, dropping every terminal ticket ----------------------------------
+  const nodeIds = [...rows.keys()].filter((id) => !terminalOf(rows.get(id))).sort(cmp);
+  const isNode = new Set(nodeIds);
+
+  // An edge into or out of a ticket that is not a node cannot exist: the node is not there.
+  // A terminal PREDECESSOR is different — it is not a node either, but §6.2 keeps it as a
+  // boundary condition, so its edge survives as a lower bound rather than as graph structure.
+  const boundary = new Map();   // node id -> earliest start forced by terminal predecessors
+  const edges = [];
+  for (const e of kept) {
+    if (!isNode.has(e.target)) { dropped.push({ ...e, type: PRECEDES, reason: "terminal-endpoint" }); continue; }
+    if (!isNode.has(e.src)) {
+      // EF of a terminal predecessor is its actual due, or project_epoch if it has none.
+      const d = rows.get(e.src).due_date;
+      const ef = d ? cal.minutesAtEndOf(d) : 0;
+      boundary.set(e.target, Math.max(boundary.get(e.target) ?? -Infinity, ef + e.lag_minutes));
+      dropped.push({ ...e, type: PRECEDES, reason: "terminal-predecessor" });
+      continue;
+    }
+    edges.push(e);
+  }
+
+  // --- filter 3: Tarjan over what is left ------------------------------------------------
+  const succ = new Map(nodeIds.map((id) => [id, []]));
+  for (const e of [...edges].sort((a, b) => cmp(a.src, b.src) || cmp(a.target, b.target) || (a.lag_minutes - b.lag_minutes))) {
+    succ.get(e.src).push(e.target);
+  }
+  const comps = tarjan(nodeIds, succ);
+  const cycles = comps.filter((c) => c.length > 1);
+  const inCycle = new Set(cycles.flat());
+
+  const unscheduled = [];
+  for (const c of cycles) for (const id of c) unscheduled.push({ id, reason: "dependency-cycle", scc: c });
+  unscheduled.sort((a, b) => cmp(a.id, b.id));
+
+  // Edges out of a cycle are treated as unconstrained and edges into one have nothing to
+  // constrain — §6.2 states the out-edge relaxation as the approximation it is.
+  const solveIds = nodeIds.filter((id) => !inCycle.has(id));
+  const solveSet = new Set(solveIds);
+  const out = new Map(solveIds.map((id) => [id, []]));
+  const into = new Map(solveIds.map((id) => [id, []]));
+  for (const e of edges) {
+    if (!solveSet.has(e.src) || !solveSet.has(e.target)) continue;
+    out.get(e.src).push(e);
+    into.get(e.target).push(e);
+  }
+  for (const list of out.values()) list.sort((a, b) => cmp(a.target, b.target));
+  for (const list of into.values()) list.sort((a, b) => cmp(a.src, b.src));
+
+  // --- topological order, ties broken by id so the walk is byte-stable -------------------
+  const indeg = new Map(solveIds.map((id) => [id, into.get(id).length]));
+  const ready = solveIds.filter((id) => indeg.get(id) === 0);
+  const order = [];
+  while (ready.length) {
+    ready.sort(cmp);
+    const v = ready.shift();
+    order.push(v);
+    for (const e of out.get(v)) {
+      const n = indeg.get(e.target) - 1;
+      indeg.set(e.target, n);
+      if (n === 0) ready.push(e.target);
+    }
+  }
+  if (order.length !== solveIds.length) throw new Error("blaze schedule: cycle survived Tarjan — this is a bug in the solve");
+
+  // --- forward pass ---------------------------------------------------------------------
+  const dur = new Map(), es = new Map(), ef = new Map();
+  for (const id of solveIds) {
+    const e = rows.get(id).estimate_minutes;
+    dur.set(id, Number.isFinite(e) && e > 0 ? e : 0);   // no estimate => 0 => a milestone
+  }
+  for (const id of order) {
+    const r = rows.get(id);
+    // The project_epoch floor is this `0`, and mutation 8 is dropping it.
+    let start = 0;
+    if (r.constraint_start_no_earlier_than) start = Math.max(start, cal.minutesAtStartOf(r.constraint_start_no_earlier_than));
+    if (boundary.has(id)) start = Math.max(start, boundary.get(id));
+    for (const e of into.get(id)) start = Math.max(start, ef.get(e.src) + e.lag_minutes);
+    es.set(id, start);
+    ef.set(id, start + dur.get(id));
+  }
+
+  // --- the horizon (BLZ-380, ADR-0022 §The backward pass's horizon) ----------------------
+  // max(EF) over the COMPLETED forward pass: one constant over every scheduled node on the
+  // board. The self-reference is apparent — the forward pass is finished by the time this
+  // line runs. When nothing is scheduled, max over an empty set is undefined and the rule
+  // is project_epoch, which is 0 on this axis.
+  let horizon = 0;
+  for (const id of solveIds) horizon = Math.max(horizon, ef.get(id));
+
+  // --- backward pass --------------------------------------------------------------------
+  const lf = new Map(), ls = new Map();
+  for (let i = order.length - 1; i >= 0; i--) {
+    const id = order[i];
+    let late = null;
+    // MIN over successors, not max: mutation 3. A node whose successors were all filtered
+    // out is a sink and seeds from the horizon, which is spec 3 §13.4's terminal-successor
+    // case arriving here rather than as a special rule.
+    for (const e of out.get(id)) late = late === null ? ls.get(e.target) - e.lag_minutes : Math.min(late, ls.get(e.target) - e.lag_minutes);
+    if (late === null) late = horizon;
+    lf.set(id, late);
+    ls.set(id, late - dur.get(id));
+  }
+
+  const scheduled = solveIds.map((id) => {
+    const floatMinutes = ls.get(id) - es.get(id);   // LS - ES: mutation 4 inverts it
+    return {
+      id,
+      es: es.get(id), ef: ef.get(id), ls: ls.get(id), lf: lf.get(id),
+      duration_minutes: dur.get(id),
+      float_minutes: floatMinutes,
+      is_critical: floatMinutes === 0,
+      start_date: cal.dateForWorkingDay(cal.dayIndexAt(es.get(id))),
+      due_date: cal.dateForWorkingDay(cal.lastDayIndex(es.get(id), ef.get(id))),
+      deadline: rows.get(id).deadline ?? null,
+      schedule_run_id: runId,
+    };
+  }).sort((a, b) => cmp(a.id, b.id));
+
+  return {
+    run_id: runId,
+    epoch_date: cal.epochDate,
+    epochDate: cal.epochDate,
+    minutes_per_day: cal.mpd,
+    horizon_minutes: horizon,
+    horizon_date: cal.dateForWorkingDay(cal.lastDayIndex(0, horizon)),
+    scheduled,
+    unscheduled,
+    cycles,
+    edges: edges.slice().sort((a, b) => cmp(a.src, b.src) || cmp(a.target, b.target)),
+    dropped_edges: dropped,
+    by_id: new Map(scheduled.map((s) => [s.id, s])),
+  };
+}
