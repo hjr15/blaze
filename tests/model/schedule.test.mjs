@@ -420,3 +420,128 @@ test("board config is required, never defaulted inside the model", () => {
   assert.throws(() => scheduleModel({ tickets: [], now: MON }), /minutes_per_day/);
   assert.throws(() => scheduleModel({ tickets: [], now: MON, schedule: { minutes_per_day: 480 } }), /working_days/);
 });
+
+// ------------------------------------------------------- fixtures from the real corpus
+//
+// BLZ-360 §11 requires three fixtures be DRAWN FROM the corpus rather than invented, because
+// each already exists. Every id, type, status, estimate and date below was measured against
+// the live board on 2026-08-24 (2,630 tickets, 392 `Blocks` edges) and is transcribed here
+// rather than imagined. The tests are still hermetic: the board is a separate repository and
+// no test may reach outside this one.
+//
+// `Blocks` is read as a PROPOSED `Precedes` direction throughout. It is not one yet —
+// BLZ-360 §5.5's `import-deps` is operator-driven and the tool never guesses — so these
+// fixtures answer "what would the solve do with this shape", which is what they are for.
+
+test("CORPUS — the INF-275 ↔ INF-276 mutual pair is not a cycle, because INF-275 is done", () => {
+  // The pair BLZ-360 §7.2 prints as the `dependency-cycle` example, and the single clearest
+  // reason the live board measures ZERO non-trivial SCCs. Both edges are the same Blocks
+  // pair written from each end. INF-275 is `done` and carries no estimate; INF-276 is
+  // `defined` with estimate 120.
+  const r = run([
+    t("INF-275", { status: "done" }),
+    t("INF-276", { estimate_minutes: 120 }),
+  ], [edge("INF-275", "INF-276"), edge("INF-276", "INF-275")]);
+
+  assert.deepEqual(r.cycles, [], "the node filter runs BEFORE Tarjan, so the cycle never forms");
+  assert.deepEqual(r.unscheduled, [], "and INF-275 is never marked unscheduled — its dates are actuals");
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["INF-276"]);
+  assert.deepEqual(r.dropped_edges.map((e) => `${e.src}->${e.target}:${e.reason}`).sort(),
+    ["INF-275->INF-276:terminal-predecessor", "INF-276->INF-275:terminal-endpoint"]);
+  assert.equal(byId(r, "INF-276").es, 0, "INF-275 has no due date, so it supplies project_epoch");
+});
+
+test("CORPUS — the mutual pair WOULD be a cycle if the terminal filter were removed", () => {
+  // Mutation 5's second face, and the reason the filter ORDER is part of the rule. Reopen
+  // INF-275 and the same two edges become an SCC — which is what would have happened had
+  // Tarjan run over the full graph, marking a `done` ticket `unscheduled` and overwriting
+  // one of §4's 28 frozen actuals.
+  const r = run([
+    t("INF-275", { status: "defined" }),
+    t("INF-276", { estimate_minutes: 120 }),
+  ], [edge("INF-275", "INF-276"), edge("INF-276", "INF-275")]);
+  assert.deepEqual(r.cycles, [["INF-275", "INF-276"]]);
+  assert.deepEqual(r.unscheduled.map((u) => u.id), ["INF-275", "INF-276"]);
+});
+
+test("CORPUS — a cross-project edge is allowed and scheduled: the unit of solve is the board", () => {
+  // Measured: 22 of the 392 `Blocks` edges cross a project. Exactly ONE of the 22 has both
+  // endpoints non-terminal — CRP-8 → SN-5, both `feature/defined` and both without an
+  // estimate. (That is a different statistic from spec 3 §13.3's "1 of 36", which counts
+  // open Precedes-ELIGIBLE edges; the two populations are not the same and are not
+  // reconciled here.) Two features with no estimate are two milestones, so this fixture also
+  // pins that a chain of milestones stays connected.
+  const r = run([
+    t("CRP-8", { type: "feature" }), t("SN-5", { type: "feature" }),
+  ], [edge("CRP-8", "SN-5")]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["CRP-8", "SN-5"], "no project partition");
+  assert.deepEqual(r.edges.map((e) => `${e.src}->${e.target}`), ["CRP-8->SN-5"], "the edge survives");
+  assert.equal(byId(r, "SN-5").es, 0);
+  assert.equal(byId(r, "SN-5").duration_minutes, 0);
+});
+
+test("CORPUS — a cross-project edge with a terminal predecessor still crosses", () => {
+  // BLZ-136 (`task/done`, estimate 240) blocks INF-744 (`task/defined`, estimate 480).
+  const r = run([
+    t("BLZ-136", { status: "done", estimate_minutes: 240, due_date: "2026-07-01" }),
+    t("INF-744", { estimate_minutes: 480 }),
+  ], [edge("BLZ-136", "INF-744")]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["INF-744"]);
+  assert.equal(byId(r, "INF-744").es, 0, "a July finish cannot push an August schedule");
+  assert.equal(byId(r, "INF-744").due_date, "2026-08-24", "480 minutes is one working day");
+});
+
+test("CORPUS — OMA-1 is a goal, and the endpoint default-deny refuses it", () => {
+  // OMA-1 (`goal/defined`) blocks KPA-2 (`feature/done`) — one of the 22. `goal` is not in
+  // Precedes' source_kinds, so the edge is refused by the KIND filter, before terminality
+  // is even consulted.
+  const r = run([
+    t("OMA-1", { type: "goal", status: "defined" }), t("KPA-2", { type: "feature", status: "done" }),
+  ], [edge("OMA-1", "KPA-2")]);
+  assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["undeclared-kind"]);
+});
+
+test("CORPUS — OMA-4 carries a deadline with no start, and it is not unreachable", () => {
+  // The single non-terminal due-only ticket in §4's migration: `task/defined`, estimate 30,
+  // `due: 2026-10-20` becoming `deadline: 2026-10-20`, and NO start constraint. Measured
+  // 2026-08-24: OMA-4 carries zero `Blocks` edges in either direction, so nothing can be
+  // scheduled in front of it and its 30 minutes finish on the epoch day itself.
+  const r = run([t("OMA-4", { estimate_minutes: 30, deadline: "2026-10-20" })]);
+  const o = byId(r, "OMA-4");
+  assert.equal(o.es, 0);
+  assert.equal(o.ef, 30);
+  assert.equal(o.start_date, "2026-08-24");
+  assert.equal(o.due_date, "2026-08-24", "it finishes on the epoch day, 57 calendar days clear");
+  assert.ok(o.due_date < o.deadline, "so it is the one migrated deadline that is NOT unreachable");
+});
+
+test("CORPUS — the 11 migrated deadlines already in the past are unreachable on day one", () => {
+  // The other side of §4's non-terminal cohort. INF-748 is the earliest at 2026-08-07 and
+  // INF-657 the latest at 2026-08-16; every one of the 11 is before the 2026-08-24 epoch, so
+  // project_epoch ALONE already exceeds them and no estimate can rescue any.
+  const r = run([
+    t("INF-748", { type: "bug", estimate_minutes: 20, deadline: "2026-08-07", constraint_start_no_earlier_than: "2026-08-07" }),
+    t("INF-657", { type: "bug", status: "in-progress", estimate_minutes: 240, deadline: "2026-08-16", constraint_start_no_earlier_than: "2026-08-11" }),
+  ]);
+  for (const s of r.scheduled) {
+    assert.equal(s.es, 0, `${s.id}: a not_before in the past is floored at project_epoch`);
+    assert.ok(s.due_date > s.deadline, `${s.id}: derived ${s.due_date} is past deadline ${s.deadline}`);
+  }
+});
+
+test("CORPUS — BLZ-253's 4,800 minutes is the board's max EF, so it sets the horizon", () => {
+  // Measured over the live board: of 538 non-terminal delivery tickets, 398 carry an
+  // estimate, and the largest is BLZ-253 (`feature/in-progress`) at 4,800 minutes = 10.0
+  // working days at 480/day. No Precedes edge and no not_before exists on the board yet, so
+  // every node is isolated and max(EF) is exactly that estimate. Spec 3 §5.1 and §2.3 both
+  // report the same figure; this reproduces it rather than transcribing it.
+  const r = run([
+    t("BLZ-253", { type: "feature", status: "in-progress", estimate_minutes: 4800 }),
+    t("OMA-4", { estimate_minutes: 30, deadline: "2026-10-20" }),
+  ]);
+  assert.equal(r.horizon_minutes, 4800);
+  assert.equal(r.horizon_minutes / 480, 10, "10.0 working days");
+  assert.equal(r.horizon_date, "2026-09-04", "ten working days from Monday 2026-08-24");
+  assert.equal(byId(r, "BLZ-253").is_critical, true, "the ticket that sets the horizon is the critical one");
+  assert.equal(byId(r, "OMA-4").float_minutes, 4770);
+});
