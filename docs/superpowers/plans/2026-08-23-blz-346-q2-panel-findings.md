@@ -233,6 +233,14 @@ feature. The thin slice's "no new dependency, no key storage, no sandbox" must a
 
 ### Terminology, recorded because it caused a real misunderstanding
 
+> **Corrected 2026-08-25 (BLZ-362, ADR-0021).** The paragraph below is left as written because
+> it is the record of the misunderstanding, but two of its claims are false. *"One installation
+> is one board"* was never true: `deriveBoards()` returns **4** for this installation and has
+> done since 2026-07-09, forty-four days before ADR-0014 asserted otherwise. The tenancy unit is
+> an **installation**; `board` names only the kanban view type (ADR-0021), and ADR-0014's Context
+> has been amended accordingly. And *"whether it should is ... NOT settled here"*, below, has
+> since been settled elsewhere — ADR-0021 adopts the operator's model: a project owns N named views.
+
 In Blaze, **a board sits ABOVE projects**: *"One installation is one board"* (ADR-0014:14), and
 one board contains many projects (this operator's board holds 11). `blaze board` renders the
 whole installation.

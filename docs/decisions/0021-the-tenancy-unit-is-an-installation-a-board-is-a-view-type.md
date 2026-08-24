@@ -9,7 +9,8 @@
 
 `board` names three different things at once:
 
-1. the **tenancy unit** — ADR-0014:14, *"One installation is one board"*;
+1. the **tenancy unit** — ADR-0014's Context as originally written, *"One installation is one
+   board"* (amended under BLZ-362; the line no longer reads that way);
 2. the **kanban view type** — `VIEW_NAMES[0]`, `scripts/views/board.mjs`;
 3. a **workflow-derived column grouping**, of which one installation already has several
    (`scripts/model/boards.mjs`, `deriveBoards()`, rendered as board pills at
@@ -69,7 +70,7 @@ Per-meaning, what moves:
 
 | Today | Means | Becomes |
 |---|---|---|
-| "one installation is one board" (ADR-0014:14) | tenancy unit | installation |
+| "one installation is one board" (ADR-0014, as originally written) | tenancy unit | installation |
 | `blaze_config.board` table | installation config singleton | `blaze_config.installation` |
 | `cfg.boardTitle` | display name | `installationTitle`; `boardTitle` retired via `REMOVED_KEYS` |
 | `blaze board` | serve the web UI | `blaze serve`, with `board` kept as a permanent alias |
@@ -91,8 +92,11 @@ three-way collision would stop mattering and `board` could keep all three meanin
 
 ## Correction this ADR carries forward
 
-ADR-0014:12's singleton list is factually wrong and BLZ-362 tracks fixing it: it names
-`board_config`, a table that **has never existed**; omits `blaze_config.config_version`, which
-does; and counts `migration_mode` twice as "the two write-rules tables" when it is one table
-declared once per dialect. Four distinct singleton tables exist —
-`blaze_config.board`, `blaze_config.config_version`, `projection_meta` and `migration_mode`.
+ADR-0014's singleton list was factually wrong; BLZ-362 corrected it on 2026-08-25 (see that
+ADR's *Amendment — 2026-08-25*). As originally written it named `board_config`, a table that
+**has never existed**; omitted `blaze_config.config_version`, which does exist; and counted
+`migration_mode` twice as "the two write-rules tables" when it is one table declared once per
+dialect. Four distinct singleton tables exist — `blaze_config.board`,
+`blaze_config.config_version`, `projection_meta` and `migration_mode` — and
+`tests/adr-0014-singletons.test.mjs` now derives that set from the emitted DDL and asserts
+ADR-0014's inventory against it, so the list cannot drift again silently.
