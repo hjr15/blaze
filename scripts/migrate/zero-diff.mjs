@@ -33,9 +33,30 @@ import { acCriteria } from "./ac-oracle-matcher.mjs";
  *        Without it the criteria are simply not checked, and `report.criteriaChecked`
  *        says so rather than the absence looking like a pass.
  */
-export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null } = {}) {
+export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expectedDelta = null, frozen = null } = {}) {
+  // BLZ-385 / BLZ-360 §4.1 item 3. Under the date migration `start` and `due` change ON PURPOSE,
+  // so the oracle needs a way to say which tickets may differ — EXTENDED, not weakened.
+  //
+  // Two lists, and the asymmetry is the point. §4.1 names "an expected-delta list of exactly
+  // those 40 ids"; measured, only 12 change. The other 28 are §4's terminal cohort, kept
+  // VERBATIM. A ticket whose bytes do not change cannot show up as a diff, so listing it would
+  // not excuse a real change — it would excuse the one accident §4 exists to prevent, a frozen
+  // actual being overwritten with a forecast. So the 12 are EXCUSED and the 28 are ASSERTED
+  // UNCHANGED, which is strictly stronger than excusing them.
+  //
+  // Only `start` and `due` are excused, never the whole ticket: the migration touches two
+  // fields, and a listed id that also lost its title is still data loss.
+  const expected = new Set(expectedDelta ?? []);
+  const frozenSet = new Set(frozen ?? []);
+  for (const id of frozenSet) {
+    if (expected.has(id)) throw new Error(`zero-diff: ${id} is both frozen and expected to change`);
+  }
+  const MIGRATED_FIELDS = new Set(["start", "due"]);
   const report = {
     compared: 0, missing: [], extra: [],
+    expectedDeltas: [],    // excused start/due changes — recorded, because a SILENT excuse is
+                           // indistinguishable from no check at all
+    frozenViolations: [],  // a frozen actual that moved: the migration's worst failure
     valueDiffs: [],      // data loss — the gate
     defaulted: [],       // source carried no value; the schema default applied
     byteDiffs: 0,        // field-order only — informational
@@ -78,6 +99,14 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null } = {}
       const bv = String(b.frontmatter?.[f] ?? "").trim();
       if (av === bv) continue;
       if (av === "" && bv === DEFAULTS[f]) { report.defaulted.push({ id, field: f, applied: bv }); continue; }
+      if (MIGRATED_FIELDS.has(f) && frozenSet.has(id)) {
+        report.frozenViolations.push({ id, field: f, source: av, loaded: bv });
+        continue;
+      }
+      if (MIGRATED_FIELDS.has(f) && expected.has(id)) {
+        report.expectedDeltas.push({ id, field: f, source: av, loaded: bv });
+        continue;
+      }
       report.valueDiffs.push({ id, field: f, source: av, loaded: bv });
     }
     if (a.status !== b.status) report.valueDiffs.push({ id, field: "status", source: a.status, loaded: b.status });
@@ -128,6 +157,7 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null } = {}
   }
 
   report.ok = report.valueDiffs.length === 0 && report.missing.length === 0
-           && report.extra.length === 0 && report.criteriaDiffs.length === 0;
+           && report.extra.length === 0 && report.criteriaDiffs.length === 0
+           && report.frozenViolations.length === 0;
   return report;
 }
