@@ -36,6 +36,18 @@ CREATE TABLE IF NOT EXISTS ticket (
   start_date date,
   due_date   date,
 
+  -- ADR-0022: constraints are INPUTS, dates are DERIVED. start_date/due_date keep their
+  -- names — no rename, so every reader keeps working — and what changes is who may write
+  -- them. The two new date columns take the date type to match their neighbours rather than
+  -- text: this repo's own precedent is 32 conformance assertions that missed a Postgres date
+  -- bug because not one compared a date value. is_critical is a PLAIN column, never a STORED
+  -- generated one — ADR-0018 measured a 2,002 ms rewrite on Postgres for that.
+  constraint_start_no_earlier_than date,
+  deadline         date,
+  float_minutes    integer,
+  is_critical      boolean NOT NULL DEFAULT false,
+  schedule_run_id  text,
+
   -- BLZ-295. Eight fields the live corpus carries that had no column, found by the
   -- dual-write soak: 926 of 2,561 tickets (36.2%) held at least one, and every one of
   -- them would have been dropped at cutover.
@@ -74,6 +86,10 @@ CREATE TABLE IF NOT EXISTS ticket (
 );
 CREATE INDEX IF NOT EXISTS ticket_parent_idx ON ticket (parent_id);
 CREATE INDEX IF NOT EXISTS ticket_board_idx  ON ticket (project_key, status, type);
+-- ADR-0022 §2.4: two of the five new columns are indexed, which is what makes them
+-- filterable within ADR-0018's 200-per-INSTALL budget (not per table).
+CREATE INDEX IF NOT EXISTS ticket_critical_idx ON ticket (is_critical);
+CREATE INDEX IF NOT EXISTS ticket_deadline_idx ON ticket (deadline);
 
 CREATE TABLE IF NOT EXISTS ticket_link (
   src_id    text NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
