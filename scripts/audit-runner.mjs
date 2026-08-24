@@ -107,9 +107,12 @@ for (const [id, files] of filesById) {
 //
 // KNOWN LIMITATION: `parent` is the only association this sees, because the markdown corpus
 // is the only thing on disk. A requirement associated with a goal ONLY through a v4
-// `hierarchy_membership` row would not be found. That is not currently reachable — no v4
-// table ships (`createDbSchema` installs the v3 ticket tables only) — but it must be revisited
-// when they do.
+// `hierarchy_membership` row would not be found. BLZ-374 made the table SHIP —
+// `createDbSchema` now installs `hierarchy` and `hierarchy_membership` at DB schema version
+// 2 — so this limitation is now reachable in principle. It is not reachable in practice yet:
+// nothing WRITES a membership row (BLZ-360 section 8.3's roll-up and spec 4's seed are both
+// unbuilt), and this runner reads the markdown corpus rather than the database. It becomes
+// real the moment either lands, which is what BLZ-377 and spec 4's hierarchy seed do.
 const statusOf = new Map();
 const fmById = new Map();
 for (const t of tickets) {

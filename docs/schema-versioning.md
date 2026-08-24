@@ -68,8 +68,9 @@ ambient data root.
   (`npm i -g @hjr15/blaze-board@latest`) and re-run.
 - **"older than this engine supports"** — the board predates the oldest
   contract this engine reads. The release that raised `MIN_SCHEMA_VERSION`
-  documents its migration path in its release notes. (Today `MIN` is `1`, so
-  this cannot occur.)
+  documents its migration path in its release notes. (For the CONFIG schema
+  `MIN` is `1`, so this cannot occur there. For the DATABASE schema it can and
+  does — see below.)
 - **"no schemaVersion stamp"** — the board carries no stamp at all, which
   means v1, and v1 is below this engine's `MIN_SCHEMA_VERSION`. There is no
   wrong value to correct: follow the migration path in the release notes of the
@@ -99,3 +100,31 @@ ambient data root.
   the external-tracker importer.)
 - Decision record:
   [ADR-0002](decisions/0002-config-schema-versioning.md).
+
+## The DATABASE schema is a different number
+
+Everything above is `blaze.config.json`'s `schemaVersion`, guarded by
+`checkSchemaVersion`. The **database** carries its own stamp in `blaze_meta`,
+guarded by `judgeDbSchema`, and the two move independently — a config bump is
+not an engine-schema bump. `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` both
+live in `scripts/model/db-schema-version.mjs`.
+
+**Both are 2 as of BLZ-370.** Version 2 installs the v4 `link`/`link_type` and
+`hierarchy`/`hierarchy_membership` tables and five new `ticket` columns, none of
+which a version-1 database has.
+
+- **"database schema version N is newer than this engine supports"** — the
+  shadow was written by a newer engine. Upgrade this install.
+- **"database schema version 1 is older than this engine supports"** — **this
+  one does occur**, for every shadow created before BLZ-370. There is no
+  migration and none is needed: the shadow is **derived**, not authoritative.
+  The filesystem is the source of truth, so rebuild it:
+
+      blaze db init --force
+
+  That drops the old shadow and reloads the board into a version-2 one. No board
+  data lives only in the shadow, which is why raising the floor is safe and why
+  a migration path would be machinery for nothing.
+- **"this database holds tables but no Blaze schema stamp"** — it predates
+  database-schema versioning entirely, or is not a Blaze database. Same remedy,
+  and the same reason it is safe.

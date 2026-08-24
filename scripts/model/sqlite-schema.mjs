@@ -45,6 +45,16 @@ CREATE TABLE IF NOT EXISTS ticket (
   due_date   TEXT,
 
 
+
+  -- ADR-0022: constraints are INPUTS, dates are DERIVED. start_date/due_date keep
+  -- their names — no rename, so every reader keeps working — and what changes is who
+  -- is allowed to write them. is_critical is a PLAIN column, never STORED/generated:
+  -- ADR-0018 measured a 2,002 ms rewrite on Postgres and it is impossible on SQLite.
+  constraint_start_no_earlier_than TEXT,
+  deadline         TEXT,
+  float_minutes    INTEGER,
+  is_critical      INTEGER NOT NULL DEFAULT 0 CHECK (is_critical IN (0,1)),
+  schedule_run_id  TEXT,
   -- BLZ-295. Eight fields the live corpus carries that had no column, found by the
   -- dual-write soak: 926 of 2,561 tickets (36.2%) held at least one, and every one of
   -- them would have been dropped at cutover.
@@ -91,6 +101,10 @@ CREATE TABLE IF NOT EXISTS ticket (
 
 CREATE INDEX IF NOT EXISTS ticket_parent_idx ON ticket (parent_id);
 CREATE INDEX IF NOT EXISTS ticket_board_idx  ON ticket (project_key, status, type);
+-- ADR-0022 §2.4: two of the five new columns are indexed, which is what makes them
+-- filterable within ADR-0018's 200-per-INSTALL budget (not per table).
+CREATE INDEX IF NOT EXISTS ticket_critical_idx ON ticket (is_critical);
+CREATE INDEX IF NOT EXISTS ticket_deadline_idx ON ticket (deadline);
 
 CREATE TABLE IF NOT EXISTS ticket_link (
   src_id    TEXT NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,

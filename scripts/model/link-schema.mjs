@@ -20,6 +20,27 @@ export const DEFAULT_LINK_TYPES = [
     target_kinds: ["architecture"], min_card: 0, max_card: 1 },
   { name: "Derives",    inverse_name: "Derived from",   source_kinds: ["requirement"],
     target_kinds: ["requirement"], min_card: 0, max_card: null },
+  // ADR-0022. The scheduler's dependency edge, and deliberately NOT `Blocks`: 248 of the
+  // 392 live `Blocks` edges sit in 124 mutual pairs and carry no usable direction, because
+  // frontmatter has no way to write the inverse. Enforcing `Blocks` would enforce a
+  // direction the corpus does not contain. `Precedes` is new, has never been advisory, and
+  // therefore reverses nothing — ADR-0001 stands and no superseding ADR is raised.
+  //
+  // Both endpoint sets are the five kinds ADR-0022 names. That default-deny refuses 58 of
+  // the 392 live edges, 36 of them risk<->feature: a risk does not belong in a delivery
+  // critical path.
+  //
+  // These are NOT "the delivery kinds", and an earlier version of this comment said so while
+  // citing gantt.mjs as evidence. There are SIX delivery-workflow types — `epic` is the
+  // sixth — and gantt.mjs's isDelivery() is `workflowFor(type) === "delivery"`, so it
+  // INCLUDES epic. A retained epic therefore draws a Gantt bar but can never be a Precedes
+  // endpoint: on the chart, off the critical path. `epic` was retired by BLZ-231 but is
+  // still legally loadable, so the gap is real — though currently HYPOTHETICAL rather than
+  // live: the board holds zero tickets of type epic, and schema.mjs retires it by leaving it
+  // no legal parent, so no new one can be created. The list matches the ADR; whether it
+  // should also carry `epic` is BLZ-378.
+  { name: "Precedes",   inverse_name: "Follows",        source_kinds: ["feature", "story", "task", "bug", "subtask"],
+    target_kinds: ["feature", "story", "task", "bug", "subtask"], min_card: 0, max_card: null },
 ];
 
 
@@ -56,6 +77,19 @@ CREATE TABLE IF NOT EXISTS link (
   -- has re-reviewed since the source changed is exactly the case section 5 wants
   -- surfaced, so "never reviewed" must be representable rather than defaulted away.
   reviewed_at  ${d.ts},
+  -- ADR-0022's link table. The column itself is BLZ-360 section 5.3's, which calls a
+  -- scheduling-specific column on a generic table a smell in as many words.
+  -- Keep this comment free of semicolons: sql-dialect.test.mjs splits statements on a
+  -- non-greedy match to the first one, so a semicolon here truncates the match before the
+  -- table suffix it is checking for. An earlier version of this note also warned against the
+  -- word the suffix uses. That was wrong, measured — the test asserts the CONSTRUCT
+  -- (a closing paren, the suffix, a semicolon) and its own comment says so, noting that
+  -- ON DELETE RESTRICT contains the substring and is a false alarm rather than a finding. Taken anyway: a zero-default column costs nothing now and
+  -- retro-fitting one costs a schema-version bump later, and the alternative — a
+  -- link_schedule side table for one integer — is worse. Every non-dependency link type
+  -- ignores it. No CHECK on the sign: a negative lag is a lead, which finish-to-start
+  -- scheduling uses.
+  lag_minutes  ${d.int} NOT NULL DEFAULT 0,
   PRIMARY KEY (id),
   UNIQUE (link_type_id, source_id, target_id),
   CHECK (source_id <> target_id)

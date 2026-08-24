@@ -9,6 +9,7 @@ import { execFileSync } from "node:child_process";
 import { loadConfig, loadProject, ambientSchemaOverride } from "../scripts/config.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const ROOT = REPO;
 
 function withConfig(json) {
   const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
@@ -273,4 +274,101 @@ test("loadConfig accepts an un-versioned (legacy) config unchanged", () => {
   assert.equal(cfg.key, "OBA");
   assert.equal(cfg.schemaVersion, undefined);
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- ADR-0022 §2.3: the schedule calendar (BLZ-375) --------------------------
+// `minutes_per_day` is the SINGLE conversion between estimate_minutes and calendar
+// arithmetic, and it is also spec 2 §3.2's capacity-bar denominator. One number, one
+// definition, two consumers — so nothing may hardcode 480 or Mon–Fri anywhere else.
+test("schedule defaults to 480 minutes/day and Mon–Fri", () => {
+  const cfg = loadConfig({ root: mkdtempSync(join(tmpdir(), "blaze-cfg-")), env: {} });
+  assert.equal(cfg.schedule.minutes_per_day, 480);
+  assert.deepEqual(cfg.schedule.working_days, [1, 2, 3, 4, 5]);
+});
+
+test("schedule deep-merges, so setting one key keeps the other's default", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ schema_version: 2, schedule: { minutes_per_day: 300 } }));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(cfg.schedule.minutes_per_day, 300);
+  assert.deepEqual(cfg.schedule.working_days, [1, 2, 3, 4, 5],
+    "a partial schedule block must not blank the key it does not mention");
+});
+
+test("a working week may be redefined, including a six-day one", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ schema_version: 2, schedule: { working_days: [0, 1, 2, 3, 4, 5, 6] } }));
+  assert.deepEqual(loadConfig({ root, env: {} }).schedule.working_days, [0, 1, 2, 3, 4, 5, 6]);
+});
+
+test("a wrong-SHAPED schedule block is refused, not silently defaulted", () => {
+  // The operator most likely to be wrong is the one a silent default leaves with no message
+  // and a calendar they did not ask for. Absent is fine; present-and-not-an-object is not.
+  // Deleting the shape guard broke NO test before this one existed.
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  for (const bad of ["8h", [480], 480, null, true]) {
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ schema_version: 2, schedule: bad }));
+    assert.throws(() => loadConfig({ root, env: {} }), /schedule must be an object/,
+      `schedule ${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("an unknown schedule key is refused, naming it and the legal ones", () => {
+  // REMOVED_KEYS' rule, applied at the same altitude: a config key nothing reads is a
+  // promise the software does not keep. `minutesPerDay` is the typo this actually catches.
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ schema_version: 2, schedule: { minutesPerDay: 300 } }));
+  assert.throws(() => loadConfig({ root, env: {} }), /minutesPerDay/);
+  assert.throws(() => loadConfig({ root, env: {} }), /minutes_per_day, working_days/);
+});
+
+test("an ABSENT schedule block is fine — only a present-and-wrong one is refused", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ schema_version: 2 }));
+  assert.equal(loadConfig({ root, env: {} }).schedule.minutes_per_day, 480);
+});
+
+test("a non-positive minutes_per_day is refused, naming the key", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  for (const bad of [0, -1, "480", null]) {
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ schema_version: 2, schedule: { minutes_per_day: bad } }));
+    assert.throws(() => loadConfig({ root, env: {} }), /schedule\.minutes_per_day/,
+      `minutes_per_day ${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("an empty or malformed working_days is refused — a week with no days is not a calendar", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  for (const bad of [[], [7], [-1], ["mon"], "Mon-Fri", {}]) {
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ schema_version: 2, schedule: { working_days: bad } }));
+    assert.throws(() => loadConfig({ root, env: {} }), /schedule\.working_days/,
+      `working_days ${JSON.stringify(bad)} must be refused`);
+  }
+});
+
+test("NOTHING hardcodes the schedule defaults outside config.mjs", async () => {
+  // The second definition ADR-0022 §2.3 forbids. Spec 4's amended §8.3 makes the same point
+  // about the roll-up: a value the software could read and instead hardcodes is a second
+  // source of truth. A grep test, because the rule is a rule rather than a convention.
+  //
+  // Two holes an earlier version of this test had, both planted and both green before the
+  // fix: `.endsWith("config.mjs")` excused ANY file whose basename ends that way — including
+  // `model/schema-config.mjs` — and the title promised to catch a Mon–Fri literal while the
+  // body only looked for 480.
+  const { readdirSync, readFileSync: rf } = await import("node:fs");
+  const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
+    e.isDirectory() ? walk(join(d, e.name)) : (e.name.endsWith(".mjs") ? [join(d, e.name)] : []));
+  const ONLY = join(ROOT, "scripts", "config.mjs");   // exact path, not a suffix
+  const files = walk(join(ROOT, "scripts")).filter((f) => f !== ONLY);
+  const hits = (re) => files.filter((f) => re.test(rf(f, "utf8").replace(/^\s*\/\/.*$/gm, "")));
+  assert.deepEqual(hits(/\b480\b/), [],
+    "these hardcode 480 instead of reading schedule.minutes_per_day");
+  assert.deepEqual(hits(/\[\s*1\s*,\s*2\s*,\s*3\s*,\s*4\s*,\s*5\s*\]/), [],
+    "these hardcode a Mon–Fri literal instead of reading schedule.working_days");
 });

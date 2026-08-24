@@ -37,7 +37,29 @@ const DEFAULTS = {
     },
   },
   views: { board: true, list: true, live: true, metrics: true, map: true, gantt: true },
+  // ADR-0022 §2.3. The calendar the scheduler converts estimate_minutes through, and the
+  // SAME number spec 2 §3.2's sprint capacity bar divides by. One number, one definition,
+  // two consumers — which is why a test greps scripts/ for a hardcoded 480 rather than
+  // trusting the convention. working_days uses JS getUTCDay() numbering: 0 = Sunday.
+  schedule: { minutes_per_day: 480, working_days: [1, 2, 3, 4, 5] },
 };
+
+/** Validate the schedule block. Refusals name the key, per v4 spine §4.2. */
+function checkSchedule(s) {
+  const mpd = s.minutes_per_day;
+  if (!Number.isInteger(mpd) || mpd <= 0) {
+    throw new Error(`blaze: schedule.minutes_per_day must be a positive integer, got `
+      + `${JSON.stringify(mpd)}. It is the only conversion between estimate minutes and `
+      + `calendar time, so a zero or non-numeric value makes every derived date meaningless.`);
+  }
+  const wd = s.working_days;
+  if (!Array.isArray(wd) || wd.length === 0
+      || !wd.every((d) => Number.isInteger(d) && d >= 0 && d <= 6)) {
+    throw new Error(`blaze: schedule.working_days must be a non-empty array of day numbers `
+      + `0-6 (0 = Sunday), got ${JSON.stringify(wd)}. A week with no working days is not a `
+      + `calendar — every schedule over it would never finish.`);
+  }
+}
 
 export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.config.json" } = {}) {
   const path = join(root, fileName);
@@ -63,6 +85,26 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   };
   cfg.views = { ...DEFAULTS.views, ...(file.views && typeof file.views === "object" ? file.views : {}) };
   cfg.views.board = true; // the shell always needs its default view
+  // Deep-merge, like loops: setting one schedule key must not blank the other.
+  // Refuse a wrong-SHAPED block rather than silently falling back to defaults. The operator
+  // most likely to be wrong — `"schedule": "8h"`, or an array, or a `minutesPerDay` typo —
+  // is exactly the one a silent default leaves with no message and a schedule they did not
+  // ask for. Absent is fine; present-and-not-an-object is not.
+  if (file.schedule !== undefined) {
+    if (!file.schedule || typeof file.schedule !== "object" || Array.isArray(file.schedule)) {
+      throw new Error(`blaze: schedule must be an object with minutes_per_day and/or `
+        + `working_days, got ${JSON.stringify(file.schedule)}`);
+    }
+    const known = new Set(["minutes_per_day", "working_days"]);
+    const unknown = Object.keys(file.schedule).filter((k) => !known.has(k));
+    if (unknown.length) {
+      throw new Error(`blaze: schedule has no key ${unknown.map((k) => `'${k}'`).join(", ")}. `
+        + `Known keys: minutes_per_day, working_days. A key nothing reads is a promise the `
+        + `software does not keep.`);
+    }
+  }
+  cfg.schedule = { ...DEFAULTS.schedule, ...(file.schedule || {}) };
+  checkSchedule(cfg.schedule);
 
   // Env overrides (highest precedence).
   if (env.BLAZE_KEY) cfg.key = env.BLAZE_KEY;

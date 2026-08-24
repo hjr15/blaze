@@ -92,8 +92,23 @@ install** cap, and `is_critical` is a plain column, never a `STORED` generated c
 `start`/`due` is refused with a message naming the replacement field — a refusal that does not name
 the replacement is a defect.
 
-**DB schema version goes 1 → 2**, installing `linkDdl`, `hierarchyDdl`, `viewDdl` and the five
-`ticket` columns. This is the installation event the scheduler cannot be built without, because
+**DB schema version goes 1 → 2**, installing `linkDdl`, `hierarchyDdl` and the five `ticket`
+columns.
+
+**`viewDdl` was in this list and is not installed** — amended under BLZ-370 after implementation
+measured why it could not be. `view` must live in the `blaze_config` namespace, because its
+foreign keys to `project` and `view_type` cannot cross a SQLite database file; and **nothing in
+`scripts/` installs `blaze_config` at all** — `configDdl` is exported and called only from its own
+test. The original reasoning was *"given one unavoidable version bump, adding `view` costs one
+DDL"*; it costs a namespace with no install path. Nothing in the scheduler reads `view`, so
+deferring it blocks nothing. **BLZ-377** installs `blaze_config` and `viewDdl` together, and a test
+pins the current absence so it inverts deliberately rather than drifting.
+
+**`MIN_DB_SCHEMA_VERSION` rises to 2 as well**, which this ADR originally left unstated. A
+version-1 database has no `link` table and none of the five columns, so a version-2 engine that
+accepted it would fail later with a raw SQL error rather than a named refusal. That is affordable
+because the database is derived: the shadow lives under `.blaze/` and `blaze db init --force`
+rebuilds it from the corpus. There is no upgrade path and version 2 adds none. This is the installation event the scheduler cannot be built without, because
 `Precedes` lives in the v4 `link` table and `createDbSchema` installs no v4 table at all.
 
 **The schedule is computed lazily** by a pure whole-graph JS pass; the derived columns are a cache,
