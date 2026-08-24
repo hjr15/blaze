@@ -72,7 +72,11 @@ medians, not single runs.
 
 **It is committed at
 [`evidence/2026-08-24-xlsx-zero-dependency-proof.mjs`](evidence/2026-08-24-xlsx-zero-dependency-proof.mjs)**
-so this section is reproducible rather than asserted. It is evidence, not production code —
+and reproduces this table with
+`node <it> --bench /path/to/board/projects`, so this section is reproducible rather than asserted.
+**Run without a projects dir it refuses and exits 2** rather than printing a synthetic table — an
+earlier version printed one under the label "real-shaped", which is precisely the flattered set
+the paragraph below disowns. It is evidence, not production code —
 nothing imports it, and `scripts/model/xlsx.mjs` is where the shipped writer goes (§7).
 
 | Input | Level | Output | Median of 7 |
@@ -105,9 +109,11 @@ formulas, no charts, no styling beyond a date format. The claim it supports is t
 narrow one: **at this scale and for this shape, the library is not buying speed**, so ADR-0011's
 rule costs nothing here. It is not "we beat exceljs".
 
-**Level 6 is the shipped default.** At 50,000 real-shaped rows it is **1.93× faster** than level 9
-for **2.5% more bytes**; on the live board, **1.96× faster for 2.5% fewer bytes** (level 9's extra
-effort buys nothing there). `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
+**Level 6 is the shipped default.** At 50,000 real-shaped rows it is **1.87× faster** than level 9
+for **2.5% more bytes**; on the live board, **1.81× faster for 2.5% more bytes** (220.4 KB against
+215.1 KB). *(An earlier draft wrote "2.5% fewer bytes" for the live row and added that level 9
+"buys nothing there" — both backwards against the table fifteen lines above, which the correction
+pass introduced rather than inherited.)* `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
 mutation 6 has something to mutate — an earlier draft hardcoded the level and specified a
 two-argument signature, which made that mutation unkillable by construction.
 
@@ -148,13 +154,32 @@ mishandled, including one crash:**
 question into a functional ceiling.** The others are the same defect shape as the two the first
 validation pass caught: *plausible output that a strict reader refuses.*
 
+**One more input class was found by the second review, and it produced the worst failure yet
+because every cheap check passed it.** `U+FFFE` and `U+FFFF` are XML 1.0 **non-characters**: they
+survived the C0 strip, and a cell containing one produced a sheet that **both openpyxl modes
+refuse** while `unzip -t` reported *"No errors detected"* and **LibreOffice exited 0 having
+silently dropped the row**. Fixed by adding them to the strip class — and the lesson is recorded in
+§1.4's rule: **LibreOffice's exit code is not a gate.** The round-trip is only evidence because it
+asserts the row count; on every malformed input in this sweep `soffice` returned 0.
+
+**A second `Date` defect survived the first fix and is worse than the one it replaced.** Making the
+`instanceof Date` branch live was not enough: `serial()` used `getTime()`, an absolute instant,
+while the string path forces `T00:00:00Z`. So `new Date(2026, 7, 11)` — local midnight — landed at
+`2026-08-10T14:00Z` in `Australia/Melbourne` and rendered as **2026-08-10**. The date format hides
+the time, so the workbook simply showed the previous day, **on the timezone every figure in this
+spec was measured in**. It now reads the Date's *local calendar day* and treats that as UTC
+midnight; verified identical in `Australia/Melbourne`, `Asia/Tokyo`, `UTC` and `America/New_York`.
+
 **Behaviour that is deliberate and now documented rather than discovered:** C0 control characters
 are **stripped, not escaped** (XML 1.0 forbids them), so a lone CR becomes LF and NUL vanishes —
 real data loss, intentional; a date-shaped string JS can normalise is accepted **as the normalised
 date** (`2026-02-30` → `2026-03-02`), where `sprints.mjs:isIsoDate` would reject it, so **the
 shipped writer should reuse that predicate**; and Excel's own ceilings (1,048,576 rows, 16,384
 columns) are **not enforced** — a 16,385th column emits `XFE1`, one past Excel's last valid
-column. The 1899-12-30 epoch is correct **only for dates on or after 1900-03-01**; it does not
+column — and neither is its **32,767-character cell limit**. Non-string values are coerced rather
+than refused: a `BigInt` and a boolean become text, an object becomes `"[object Object]"`, and a
+`Symbol` throws. A shipped writer should decide which of those to refuse; the proof documents them
+rather than pretending they do not occur. The 1899-12-30 epoch is correct **only for dates on or after 1900-03-01**; it does not
 reproduce Excel's phantom `1900-02-29`, and earlier dates round-trip inconsistently between the
 two validators. An earlier draft of the module comment claimed the leap-year bug was "included".
 
@@ -424,7 +449,7 @@ in the same line.
 
 | File | Change |
 |---|---|
-| new — `scripts/model/xlsx.mjs` | **86 lines**; `node:zlib` only. The committed proof (§1.3) is the starting point. ZIP writer, CRC-32, the six OOXML parts, `writeXlsx(rows, sheetName)` |
+| new — `scripts/model/xlsx.mjs` | **`writeXlsx(rows, sheetName, { level = 6 })`** — the three-argument form, so §8's mutation 6 has something to mutate; a two-argument signature makes it unkillable by construction. **~140 lines** of code (195 with comments); `node:zlib` only. The committed proof (§1.3) is the starting point. ZIP writer, CRC-32, the six OOXML parts, `writeXlsx(rows, sheetName)` |
 | new — `scripts/model/report.mjs` | pure `reportModel(...)`; no `Date.now()` |
 | new — `scripts/views/report.mjs` | `render(rm)` → indented table, per `views/gantt.mjs:1-5`'s contract |
 | `scripts/model/hierarchy-rollup.mjs` | `combine` parameter **and a new `rollupAll` whole-tree entry point** (§5.2); stays pure |

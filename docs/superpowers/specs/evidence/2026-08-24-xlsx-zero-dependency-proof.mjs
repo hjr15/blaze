@@ -99,15 +99,26 @@ function zip(files, level = 6) {
 
 // --- XML escaping + the six parts an xlsx needs ------------------------------
 const xe = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":"&lt;",">":"&gt;",'"':"&quot;","'":"&apos;" }[c]))
-  .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F]/g, "");                    // XML 1.0 forbids these outright
+  // XML 1.0 forbids these outright. U+FFFE/U+FFFF are non-characters: they survive
+  // a naive strip, produce a sheet BOTH openpyxl modes refuse, and LibreOffice drops
+  // the row while still exiting 0 — so its exit code alone is not a gate.
+  .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\uFFFE\uFFFF]/g, "");
 const colName = (n) => { let s = ""; n++; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - r - 1) / 26; } return s; };
-// Excel's serial date: days since 1899-12-30 (its 1900 leap-year bug included).
+// Excel's serial date: days since 1899-12-30. This does NOT reproduce Excel's phantom
+// 1900-02-29 — see the header; it is correct for dates from 1900-03-01 onward only.
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
 // Returns null for anything that is not a real date — a caller that gets null
 // must fall back to a string cell rather than emitting <v>NaN</v>, which is the
 // defect that made openpyxl refuse the whole workbook.
 function serial(v) {
-  const ms = v instanceof Date ? v.getTime() : Date.parse(String(v) + "T00:00:00Z");
+  // A Date is read by its LOCAL calendar day and then treated as UTC midnight.
+  // Using getTime() instead loses a day everywhere east of UTC: in Australia/Melbourne
+  // new Date(2026,7,11) is 2026-08-10T14:00Z, whose serial renders as 2026-08-10. The
+  // date format hides the time, so the workbook simply showed the wrong day — on the
+  // machine this module's own figures were measured on.
+  const ms = v instanceof Date
+    ? (Number.isNaN(v.getTime()) ? NaN : Date.UTC(v.getFullYear(), v.getMonth(), v.getDate()))
+    : Date.parse(String(v) + "T00:00:00Z");
   if (!Number.isFinite(ms)) return null;
   return (ms - EXCEL_EPOCH) / 86400000;
 }
@@ -163,8 +174,9 @@ export function writeXlsx(rows, name = "Sheet1", { level = 6 } = {}) {
 // With a projects dir it uses the live corpus; the 50k row set is built by
 // CYCLING those real rows, because synthetic repeated rows compress far better
 // than real ticket titles and would flatter the result.
-if ((process.argv[1] ?? "").endsWith("2026-08-24-xlsx-zero-dependency-proof.mjs")
-    && process.argv.includes("--bench")) {
+// Guarded on the flag alone: an earlier version also required the filename to be
+// unchanged, so renaming the file silently disabled the reproducibility claim.
+if (process.argv.includes("--bench")) {
   const dir = process.argv[process.argv.indexOf("--bench") + 1];
   const HEAD = ["id","project","type","status","priority","parent","assignee",
                 "estimate","worklog_minutes","sprint","start","due","title"];
@@ -193,7 +205,15 @@ if ((process.argv[1] ?? "").endsWith("2026-08-24-xlsx-zero-dependency-proof.mjs"
   } else {
     console.log("(no projects dir given — skipping the live-corpus rows)");
   }
-  const body = live.length > 1 ? live.slice(1) : [["ID","P","task","done","high","P-1","x",60,45,"S5","2026-08-01","2026-08-05","a title of roughly realistic length"]];
+  if (live.length <= 1) {
+    console.error("Refusing to print a table without a projects dir. Run:");
+    console.error("  node <this file> --bench /path/to/board/projects");
+    console.error("Synthetic rows compress far better than real ticket titles and would");
+    console.error("reproduce the flattered figures this module's header disowns.");
+    process.exitCode = 2;
+    process.exit();
+  }
+  const body = live.slice(1);
   const big = [HEAD];
   for (let i = 0; i < 50000; i++) big.push(body[i % body.length]);
   for (const level of [6, 9]) show(`50,000 real-shaped rows, level ${level}`, med(() => writeXlsx(big, "tickets", { level })));
