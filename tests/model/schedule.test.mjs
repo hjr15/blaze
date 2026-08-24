@@ -527,8 +527,10 @@ test("CORPUS — OMA-4 carries a deadline with no start, and it is not unreachab
 });
 
 test("CORPUS — the 11 migrated deadlines already in the past are unreachable on day one", () => {
-  // The other side of §4's non-terminal cohort. INF-748 is the earliest at 2026-08-07 and
-  // INF-657 the latest at 2026-08-16; every one of the 11 is before the 2026-08-24 epoch, so
+  // The other side of §4's non-terminal cohort. INF-748 is the earliest at 2026-08-07; THREE tie for
+  // the latest at 2026-08-16 (INF-451, INF-642, INF-657) and an earlier version of this comment
+  // called INF-657 "the latest" as though it were alone. Every one of the 11 is before the
+  // 2026-08-24 epoch, so
   // project_epoch ALONE already exceeds them and no estimate can rescue any.
   const r = run([
     t("INF-748", { type: "bug", estimate_minutes: 20, deadline: "2026-08-07", constraint_start_no_earlier_than: "2026-08-07" }),
@@ -591,4 +593,101 @@ test("a row whose type did not parse is skipped, not crashed on", () => {
   // index rows carry `type: fm.type ?? null`.
   const r = run([t("BAD", { type: null }), t("ALSO-BAD", { type: "nonsense" }), t("T", { estimate_minutes: 60 })]);
   assert.deepEqual(r.scheduled.map((s) => s.id), ["T"]);
+});
+
+// ------------------------------------------------- defects found by adversarial review
+//
+// Each of these failed before the fix in the same commit. They are kept as named tests
+// rather than folded into the ones above, so a regression says which defect came back.
+
+test("REVIEW 1 — a sub-minute duration cannot put due_date before start_date", () => {
+  // `lastDayIndex` read the last instant of a span as `ef - 1`, which is one whole MINUTE and
+  // is only the last instant when the duration is an integer. With estimate 0.5 the ticket
+  // finished on 2026-08-21 — a Friday BEFORE the epoch — because dayIndexAt(-0.5) is -1 and
+  // dateForWorkingDay walked backwards past its own documented k >= 0 precondition.
+  //
+  // Reachable from a hand-edited file: `estimate: 0.5` survives coerceScalar (its regex is
+  // /^-?\d+$/, so it stays a string) and audit-runner's Number(...) turns it into 0.5.
+  // `roundEstimate` blocks it on the `blaze new` / `blaze edit` path; the exported model has
+  // no such guard and must not need one.
+  for (const est of [0.25, 0.5, 0.9999]) {
+    const r = run([t("F", { estimate_minutes: est })]);
+    const f = byId(r, "F");
+    assert.ok(f.due_date >= f.start_date, `estimate ${est}: due ${f.due_date} < start ${f.start_date}`);
+    assert.ok(f.start_date >= r.epoch_date, `estimate ${est}: start ${f.start_date} precedes the epoch`);
+    assert.equal(f.due_date, "2026-08-24");
+  }
+  const chained = run([t("A", { estimate_minutes: 960 }), t("B", { estimate_minutes: 0.5 })], [edge("A", "B")]);
+  assert.ok(byId(chained, "B").due_date >= byId(chained, "B").start_date);
+});
+
+test("REVIEW 1 — a terminal predecessor that finished on a weekend does not cost a working day", () => {
+  // minutesAtEndOf ROUNDED UP for a non-working date, so a Saturday finish was treated as if
+  // work ran through the following Monday and the successor started Tuesday. Measured: the
+  // live board carries 10 tickets with a weekend `due` — 5 Saturday, 5 Sunday — and they are
+  // exactly the frozen actuals that feed the boundary once import-deps populates Precedes.
+  const after = (due) => {
+    const r = run([t("P", { status: "done", due_date: due }), t("S", { estimate_minutes: 60 })],
+      [edge("P", "S")]);
+    return byId(r, "S").start_date;
+  };
+  assert.equal(after("2026-08-28"), "2026-08-31", "Friday finish → Monday start");
+  assert.equal(after("2026-08-29"), "2026-08-31", "SATURDAY finish → Monday start, not Tuesday");
+  assert.equal(after("2026-08-30"), "2026-08-31", "SUNDAY finish → Monday start, not Tuesday");
+  assert.equal(after("2026-08-31"), "2026-09-01", "Monday finish → Tuesday start");
+});
+
+test("REVIEW 1 — parallel edges with different lags are ordered, not left to input order", () => {
+  // The dropped_edges sort tie-broke on (src, target, reason) and Array.sort is stable, so two
+  // Precedes edges between the SAME pair carrying different lags came back in whichever order
+  // the caller supplied. `scheduled` was unaffected — the forward pass takes a max — so this
+  // was a byte-stability hole with no wrong dates behind it.
+  const ser = (x) => JSON.stringify(x, (k, v) => (v instanceof Map ? [...v] : v));
+  const tk = [t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 }),
+    t("Z", { status: "done", due_date: "2026-06-01" })];
+  const ls = [edge("A", "B", 60), edge("A", "B", 600), edge("A", "Z", 60), edge("A", "Z", 120)];
+  assert.equal(ser(run(tk, ls)), ser(run(tk, [...ls].reverse())));
+  assert.deepEqual(run(tk, ls).edges.map((e) => e.lag_minutes), [60, 600]);
+});
+
+test("REVIEW 1 — a duplicate ticket id is refused, not resolved by input order", () => {
+  // `rows.set(t.id, t)` was last-wins, so the same two rows in the other order produced a
+  // different schedule AND a different horizon. read-storage.mjs:33 states the principle this
+  // broke: "an id that resolves to two files is ambiguous and a write must not land on a
+  // guess." The solve was guessing silently.
+  //
+  // It is dropped rather than thrown: `blaze audit` already raises `duplicate-status` HARD for
+  // this corpus, and taking the whole audit down to re-report a condition it already reports
+  // would be worse. Dropping is order-independent and guesses nothing.
+  const a = run([t("A", { estimate_minutes: 60 }), t("A", { estimate_minutes: 4800 })]);
+  const b = run([t("A", { estimate_minutes: 4800 }), t("A", { estimate_minutes: 60 })]);
+  assert.deepEqual(a.scheduled, [], "neither reading is chosen");
+  assert.deepEqual(a.unscheduled, [{ id: "A", reason: "duplicate-id", scc: ["A"] }]);
+  assert.equal(JSON.stringify(a.scheduled), JSON.stringify(b.scheduled));
+  assert.equal(a.horizon_minutes, b.horizon_minutes, "and it cannot move the horizon either way");
+});
+
+test("REVIEW 1 — a duplicate id does not take the rest of the board down with it", () => {
+  const r = run([t("A", { estimate_minutes: 60 }), t("A", { estimate_minutes: 90 }),
+    t("B", { estimate_minutes: 120 })]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["B"]);
+  assert.equal(r.horizon_minutes, 120);
+});
+
+test("REVIEW 1 — no estimate, however odd, can produce a date before the epoch", () => {
+  // dateForWorkingDay's `k >= 0` precondition is now ENFORCED rather than merely documented —
+  // that is how defect 1 got past the calendar and into a date. The guard is belt-and-braces:
+  // a negative or non-finite estimate already floors to duration 0, so nothing below reaches
+  // it. This test pins the property the guard protects rather than the guard itself, because
+  // an assertion that can only be made true by breaking the epoch floor would be testing the
+  // mutation, not the rule.
+  for (const est of [-1e9, -1, -0.5, 0, 0.25, 1, NaN, Infinity, -Infinity, null, undefined, "60"]) {
+    const r = run([t("A", { estimate_minutes: est }), t("B", { estimate_minutes: 60 })], [edge("A", "B")]);
+    for (const row of r.scheduled) {
+      assert.ok(row.es >= 0, `estimate ${String(est)}: ES ${row.es} is before the epoch`);
+      assert.ok(row.start_date >= r.epoch_date, `estimate ${String(est)}: ${row.start_date} < epoch`);
+      assert.ok(row.due_date >= row.start_date, `estimate ${String(est)}: due < start`);
+      assert.ok(row.float_minutes >= 0, `estimate ${String(est)}: negative float`);
+    }
+  }
 });

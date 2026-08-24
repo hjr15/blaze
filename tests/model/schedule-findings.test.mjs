@@ -221,3 +221,83 @@ test("one function serves both readers — audit's shape and the view's shape ar
   assert.deepEqual(summarise(f), [{ kind: "deadline-unreachable", count: 1, severity: "soft" }]);
   assert.equal(groupScheduleFindings(f)[0].items[0], f[0], "the view groups the SAME objects");
 });
+
+// ------------------------------------------------- defects found by adversarial review
+
+test("REVIEW — a finding does not say 'no predecessors' about a ticket that has one", () => {
+  // bindingChain returns [id] whenever no predecessor is BINDING, and the tail text read that
+  // as "no predecessors at all". Here A → B exists and B's ES is driven by its not_before, so
+  // the old text asserted something the result object itself contradicts — and never named
+  // the constraint that actually decides the date, which is §7.2's whole rule.
+  const r = solve([
+    t("A", { estimate_minutes: 480 }),
+    t("B", { estimate_minutes: 480, constraint_start_no_earlier_than: "2026-09-14", deadline: "2026-09-01" }),
+  ], [edge("A", "B")]);
+  const f = forId(scheduleFindings(r), "B");
+  assert.ok(r.edges.some((e) => e.target === "B"), "B really does have a predecessor");
+  assert.ok(!/no predecessors/.test(f.detail), `said "no predecessors" but B has one: ${f.detail}`);
+  assert.match(f.detail, /not_before 2026-09-14/, "and it names the constraint that binds instead");
+});
+
+test("REVIEW — a ticket with genuinely no predecessors still says so", () => {
+  const r = solve([t("SOLO", { estimate_minutes: 60, deadline: "2026-08-07" })]);
+  assert.match(forId(scheduleFindings(r), "SOLO").detail, /no predecessors — nothing else decides this date/);
+});
+
+test("REVIEW — the migration banner checks the dates it claims are in the past", () => {
+  // `all_migration_artefacts` was pure cohort membership while the summary string conjoined a
+  // second, unverified claim — "and already in the past". OMA-4 is IN the 12-id cohort and its
+  // deadline is 2026-10-20, so the twelfth member falsifies the banner the moment it fires.
+  const r = solve([
+    t("PAST", { estimate_minutes: 60, deadline: "2026-01-05" }),
+    t("FUTURE", { estimate_minutes: 480 * 40, deadline: "2026-09-30" }),
+  ]);
+  const g = groupScheduleFindings(scheduleFindings(r), { migratedDeadlines: ["PAST", "FUTURE"] });
+  assert.equal(g[0].count, 2);
+  assert.equal(g[0].all_migration_artefacts, true, "both ARE migrated");
+  assert.equal(g[0].all_already_past, false, "but one deadline is after the epoch");
+  assert.ok(!/already in the past/.test(g[0].summary), `banner overclaimed: ${g[0].summary}`);
+  assert.match(g[0].summary, /all 2 are dates migrated/);
+});
+
+test("REVIEW — when every member IS in the past, the banner says both things", () => {
+  const r = solve([
+    t("A", { estimate_minutes: 60, deadline: "2026-08-07" }),
+    t("B", { estimate_minutes: 60, deadline: "2026-08-16" }),
+  ]);
+  const g = groupScheduleFindings(scheduleFindings(r), { migratedDeadlines: ["A", "B"] });
+  assert.equal(g[0].all_already_past, true);
+  assert.match(g[0].summary, /all 2 are dates migrated .* and already in the past/);
+});
+
+test("REVIEW — crosses_projects is false when the chain stays inside one project", () => {
+  // Only the POSITIVE direction was asserted, so forcing crosses_projects always-true survived
+  // mutation. §6.2's rule is that a foreign-derived date must SAY SO — a flag that is always
+  // true says nothing.
+  const r = solve([
+    t("INF-1", { estimate_minutes: 480 }), t("INF-2", { estimate_minutes: 480, deadline: "2026-08-24" }),
+  ], [edge("INF-1", "INF-2")]);
+  const f = forId(scheduleFindings(r), "INF-2");
+  assert.deepEqual(f.chain, ["INF-1", "INF-2"]);
+  assert.equal(f.crosses_projects, false);
+  assert.ok(!/crosses projects/.test(f.detail), `claimed a crossing that is not there: ${f.detail}`);
+});
+
+test("REVIEW — lateness is counted in WORKING days, so a weekend is not two days late", () => {
+  // The only lateness assertion was /1 working day late/, which reads the same whether the
+  // count is working days or calendar days — no test spanned a weekend, so counting calendar
+  // days survived mutation. Deadline Friday 2026-08-28, finish Monday 2026-08-31: three
+  // calendar days, ONE working day.
+  const r = solve([t("A", { estimate_minutes: 480 * 6, deadline: "2026-08-28" })]);
+  const f = forId(scheduleFindings(r), "A");
+  assert.equal(f.due_date ?? r.by_id.get("A").due_date, "2026-08-31");
+  assert.equal(f.late_working_days, 1, "Sat and Sun are not lateness");
+  assert.match(f.detail, /1 working day late/);
+});
+
+test("REVIEW — lateness over a longer span counts only working days", () => {
+  const r = solve([t("A", { estimate_minutes: 480 * 11, deadline: "2026-08-24" })]);
+  const f = forId(scheduleFindings(r), "A");
+  assert.equal(r.by_id.get("A").due_date, "2026-09-07");
+  assert.equal(f.late_working_days, 10, "14 calendar days, 10 working ones");
+});

@@ -156,7 +156,15 @@ for (const [id, fm] of fmById) {
 //   * `deadline` / `not_before` — zero tickets carry either key until BLZ-360 §4's migration
 //     runs. Reading `due` as a deadline instead would be wrong: §4 splits on terminality, and
 //     28 of the 40 dated tickets keep their dates as frozen actuals rather than commitments.
-const schedule = scheduleModel({
+//
+// GUARDED ON `config`, because line 40 above deliberately tolerates a config that will not
+// load (`catch { config = null }`) and auditCorpus handles null. An unguarded `config.schedule`
+// here turned that tolerated case into a crash — `blaze audit` printed a TypeError and no
+// report at all on a corpus origin/main audits cleanly. The schedule is skipped rather than
+// defaulted: minutes_per_day and working_days live in board config and nothing outside
+// config.mjs may invent them (ADR-0022, and tests/config.test.mjs greps scripts/ to enforce
+// it), so a board whose config will not load is a board that cannot be scheduled.
+const schedule = config === null ? null : scheduleModel({
   tickets: tickets.map((t) => ({
     id: t.frontmatter.id,
     type: t.frontmatter.type ?? null,
@@ -171,7 +179,7 @@ const schedule = scheduleModel({
   schedule: config.schedule,
   now: Date.now(),
 });
-report.findings.push(...scheduleFindings(schedule));
+if (schedule) report.findings.push(...scheduleFindings(schedule));
 
 // auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
 // that reports a hard finding and still exits 0 is not a gate.

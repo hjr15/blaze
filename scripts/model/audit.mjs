@@ -225,15 +225,22 @@ export function scheduleFindings(schedule, { persisted = [] } = {}) {
     const chain = bindingChain(schedule, row.id);
     const crosses = new Set(chain.map(projectOf)).size > 1;
     const days = lateWorkingDays(schedule, row);
-    const tail = chain.length === 1
-      ? "no predecessors — nothing else decides this date"
-      : `binding chain ${chain.join(" → ")}, float ${schedule.by_id.get(chain[0]).float_minutes}`
-        + (crosses ? " (crosses projects)" : "");
+    // A chain of one used to say "no predecessors" unconditionally, which was a claim the
+    // result object itself could contradict: a ticket whose ES is driven by its own
+    // `not_before` has predecessors, they just do not bind. Saying so while never naming the
+    // constraint that DOES decide the date is exactly the defect §7.2 forbids.
+    const tail = chain.length > 1
+      ? `binding chain ${chain.join(" → ")}, float ${schedule.by_id.get(chain[0]).float_minutes}`
+        + (crosses ? " (crosses projects)" : "")
+      : hasPredecessor(schedule, row.id)
+        ? `no predecessor binds — the earliest start is set by ${boundBy(schedule, row)}`
+        : "no predecessors — nothing else decides this date";
     findings.push({
       ticket: row.id, kind: "deadline-unreachable",
       detail: `deadline ${row.deadline}; earliest finish ${row.due_date} `
         + `(${days} working day${days === 1 ? "" : "s"} late); ${tail}`,
       chain, crosses_projects: crosses, late_working_days: days,
+      deadline: row.deadline, due_date: row.due_date, epoch_date: schedule.epoch_date,
     });
   }
 
@@ -266,6 +273,19 @@ export function scheduleFindings(schedule, { persisted = [] } = {}) {
   return findings;
 }
 
+const hasPredecessor = (schedule, id) => schedule.edges.some((e) => e.target === id);
+
+/**
+ * What actually sets a ticket's ES when no predecessor binds. Naming it is the point: a
+ * finding that reports lateness without naming its cause is the complaint §7.2 rejects.
+ */
+function boundBy(schedule, row) {
+  const src = schedule.by_id.get(row.id);
+  const nb = src && schedule.constraint_of ? schedule.constraint_of.get(row.id) : null;
+  if (nb) return `not_before ${nb}`;
+  return `project_epoch ${schedule.epoch_date}`;
+}
+
 /** Working days between a ticket's deadline and its derived finish. */
 function lateWorkingDays(schedule, row) {
   let n = 0;
@@ -290,8 +310,9 @@ function lateWorkingDays(schedule, row) {
  * terminal + 12 non-terminal, so membership there identifies a DATED ticket rather than a
  * MIGRATED DEADLINE. With no set supplied the banner claims nothing rather than guessing.
  */
-export function groupScheduleFindings(findings, { migratedDeadlines = null } = {}) {
+export function groupScheduleFindings(findings, { migratedDeadlines = null, epochDate = null } = {}) {
   const migrated = migratedDeadlines ? new Set(migratedDeadlines) : null;
+  epochDate = epochDate ?? findings.find((f) => f.epoch_date)?.epoch_date ?? null;
   const byKind = new Map();
   for (const f of findings) {
     if (!byKind.has(f.kind)) byKind.set(f.kind, []);
@@ -303,15 +324,20 @@ export function groupScheduleFindings(findings, { migratedDeadlines = null } = {
     .map(([kind, items]) => {
       const all = kind === "deadline-unreachable" && migrated !== null
         && items.length > 0 && items.every((f) => migrated.has(f.ticket));
+      // "and already in the past" was conjoined to the banner WITHOUT being checked. It is a
+      // separate claim from cohort membership and it is falsified by the twelfth member:
+      // OMA-4 is in the 12-id cohort and its deadline is 2026-10-20.
+      const past = all && items.every((f) => f.deadline && epochDate && f.deadline < epochDate);
       const noun = kind === "deadline-unreachable" ? "deadlines unreachable"
         : kind === "dependency-cycle" ? "tickets in a Precedes cycle"
         : "tickets carrying a stale schedule";
       return {
         kind, count: items.length, severity: HARD_KINDS.has(kind) ? "hard" : "soft",
         all_migration_artefacts: all,
+        all_already_past: past,
         summary: `${items.length} ${noun}`
           + (all ? ` — all ${items.length} are dates migrated from \`due\` by `
-            + "`schedule migrate-dates` and already in the past" : ""),
+            + "`schedule migrate-dates`" + (past ? " and already in the past" : "") : ""),
         items,
       };
     });

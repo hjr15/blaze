@@ -21,17 +21,40 @@ const MUTATIONS = [
     from: "const floatMinutes = ls.get(id) - es.get(id);",
     to:   "const floatMinutes = es.get(id) - ls.get(id);" },
   { n: 5, name: "remove the terminal-ticket exemption so done tickets are rescheduled",
-    from: ".filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)))",
-    to:   ".filter((id) => isDelivery(rows.get(id)))" },
+    from: ".filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)) && !duplicated.has(id))",
+    to:   ".filter((id) => isDelivery(rows.get(id)) && !duplicated.has(id))" },
   { n: "5b", file: SOLVE, name: "remove the delivery-workflow node filter",
-    from: ".filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)))",
-    to:   ".filter((id) => !terminalOf(rows.get(id)))" },
+    from: ".filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)) && !duplicated.has(id))",
+    to:   ".filter((id) => !terminalOf(rows.get(id)) && !duplicated.has(id))" },
   { n: 6, name: "SCC members are not marked unscheduled",
     from: "for (const c of cycles) for (const id of c) unscheduled.push({ id, reason: \"dependency-cycle\", scc: c });",
     to:   "" },
   { n: "6b", name: "SCC members are returned as scheduled",
     from: "const solveIds = nodeIds.filter((id) => !inCycle.has(id));",
     to:   "const solveIds = nodeIds;" },
+  // Found by adversarial review, not by BLZ-360 §11. All seven SURVIVED when first applied, and
+  // the tests that kill them were added in the same commit that records this.
+  { n: "R1", file: AUDIT, name: "crosses_projects forced always true",
+    from: "const crosses = new Set(chain.map(projectOf)).size > 1;",
+    to:   "const crosses = true;" },
+  { n: "R2", file: AUDIT, name: "lateness counted in calendar days, not working days",
+    from: "while (ms < end) { ms += day; if (working.has(new Date(ms).getUTCDay())) n++; }",
+    to:   "while (ms < end) { ms += day; n++; }" },
+  { n: "R3", name: "lastDayIndex back to ef - 1 with no start-day floor",
+    from: "lastDayIndex(es, ef) { return this.dayIndexAt(Math.max(es, ef - 1)); }",
+    to:   "lastDayIndex(es, ef) { return this.dayIndexAt(ef - 1); }" },
+  { n: "R4", name: "minutesAtEndOf rounds a non-working date up again",
+    from: "return (this.working.has(dayOf(parseDay(iso))) ? n + 1 : n) * this.mpd;",
+    to:   "return (n + 1) * this.mpd;" },
+  { n: "R5", name: "duplicate ids resolved by input order again",
+    from: "if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);",
+    to:   "rows.set(t.id, t);" },
+  { n: "R6", file: AUDIT, name: "no-predecessors claimed whenever no predecessor binds",
+    from: "      : hasPredecessor(schedule, row.id)",
+    to:   "      : false" },
+  { n: "R7", file: AUDIT, name: "the migration banner claims already-in-the-past unchecked",
+    from: "const past = all && items.every((f) => f.deadline && epochDate && f.deadline < epochDate);",
+    to:   "const past = all;" },
   { n: 7, name: "a missing estimate is one day instead of 0",
     from: "dur.set(id, Number.isFinite(e) && e > 0 ? e : 0);",
     to:   "dur.set(id, Number.isFinite(e) && e > 0 ? e : cal.mpd);" },
@@ -63,3 +86,6 @@ console.log("\n=== BLZ-360 §11 mutation results ===");
 for (const r of results) console.log(`  #${r.n}  ${r.status.padEnd(15)} ${r.name}  ${r.detail}`);
 const bad = results.filter((r) => r.status !== "KILLED");
 console.log(bad.length ? `\n${bad.length} mutation(s) NOT killed — these are holes in the suite.` : "\nAll mutations killed.");
+// Exit non-zero on a survivor. Reporting a hole and exiting 0 is a gate that cannot gate — the
+// same defect audit-runner.mjs already calls out for `blaze audit`.
+process.exitCode = bad.length ? 1 : 0;

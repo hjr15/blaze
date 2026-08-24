@@ -18,7 +18,7 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const parseDay = (d) => Date.parse(d + "T00:00:00Z");
 
 // A row is a bar row iff its type resolves to the delivery workflow. Guard with
-// isType FIRST — workflowFor throws on null/unknown (schema.mjs:37), and index
+// isType FIRST — workflowFor throws on null/unknown (schema.mjs:47, via must at :44), and index
 // rows carry `type: fm.type ?? null`, so an unguarded call would crash render.
 function isDelivery(type) {
   return isType(type) && workflowFor(type) === "delivery";

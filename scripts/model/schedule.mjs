@@ -44,8 +44,9 @@ const dayOf = (ms) => new Date(ms).getUTCDay();
 //
 // A tiny class so the arithmetic has one home and every conversion is reversible. Nothing
 // here reads a default: minutes_per_day and working_days arrive from the caller, because
-// ADR-0022 §2.3 makes board config their single definition and tests/config.test.mjs greps
-// scripts/ to keep it that way.
+// BLZ-360 §2.3 ("Calendar") makes board config their single definition. ADR-0022 carries the
+// rule but has NO numbered sections, and an earlier version of this comment cited one that does
+// not exist. tests/config.test.mjs greps scripts/ to keep the rule honest.
 class Calendar {
   constructor(minutesPerDay, workingDays, nowMs) {
     this.mpd = minutesPerDay;
@@ -76,8 +77,18 @@ class Calendar {
     return sign * n;
   }
 
-  /** The calendar date of the k-th working day on or after the epoch (k >= 0). */
+  /**
+   * The calendar date of the k-th working day on or after the epoch.
+   *
+   * The `k >= 0` precondition was documented and UNENFORCED, which is exactly how a
+   * fractional duration turned into a due_date before the epoch: dayIndexAt(-0.5) is -1 and
+   * this walked backwards instead of refusing. A precondition nothing checks is a comment.
+   */
   dateForWorkingDay(k) {
+    if (!Number.isInteger(k) || k < 0) {
+      throw new Error(`blaze schedule: negative working-day index ${k} — the epoch is day 0 `
+        + "and nothing schedules before it");
+    }
     const weeks = Math.floor(k / this.perWeek);
     let rem = k - weeks * this.perWeek;
     let ms = this.epochMs + weeks * 7 * DAY_MS;
@@ -92,8 +103,20 @@ class Calendar {
   /** Working minutes from the epoch to the START of the first working day >= iso. */
   minutesAtStartOf(iso) { return this.workingDaysFromEpoch(iso) * this.mpd; }
 
-  /** Working minutes from the epoch to the END of the working day containing iso. */
-  minutesAtEndOf(iso) { return (this.workingDaysFromEpoch(iso) + 1) * this.mpd; }
+  /**
+   * Working minutes from the epoch to the instant work finishing ON iso is complete.
+   *
+   * For a WORKING day that is the end of that day. For a non-working one there is no "day
+   * containing iso" to end, and this used to round UP — so a terminal predecessor that
+   * finished on a Saturday was treated as if work ran through the following Monday and its
+   * successor lost a working day. The right answer is the START of the next working day,
+   * which workingDaysFromEpoch already returns for a non-working date. Measured: the live
+   * board carries 10 tickets with a weekend `due` (5 Sat, 5 Sun).
+   */
+  minutesAtEndOf(iso) {
+    const n = this.workingDaysFromEpoch(iso);
+    return (this.working.has(dayOf(parseDay(iso))) ? n + 1 : n) * this.mpd;
+  }
 
   /**
    * The date work is ON at working-minute t, for a span [es, ef). A span of one whole
@@ -102,7 +125,10 @@ class Calendar {
    * A zero-duration milestone has no last-minute, so it reports the day it starts on.
    */
   dayIndexAt(t) { return Math.floor(t / this.mpd); }
-  lastDayIndex(es, ef) { return ef === es ? this.dayIndexAt(es) : this.dayIndexAt(ef - 1); }
+  // Math.max(es, ...) rather than a branch on ef === es: `ef - 1` is the last instant only
+  // for an integer-minute duration, and a duration below one minute drove this below the day
+  // the span starts on.
+  lastDayIndex(es, ef) { return this.dayIndexAt(Math.max(es, ef - 1)); }
 }
 
 // ---------------------------------------------------------------- Tarjan
@@ -164,7 +190,7 @@ function tarjan(ids, succ) {
 export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null } = {}) {
   if (!schedule || typeof schedule.minutes_per_day !== "number" || !Array.isArray(schedule.working_days)) {
     throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
-      + "— board config is their single definition (ADR-0022 §2.3)");
+      + "— board config is their single definition (BLZ-360 §2.3)");
   }
   // The message deliberately does not name the forbidden call: the determinism test greps
   // this file for it, and a mention inside a string would be a false positive that the fix
@@ -172,10 +198,20 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   if (!Number.isFinite(now)) throw new Error("blaze schedule: `now` must be injected by the caller — the model reads no clock");
   const cal = new Calendar(schedule.minutes_per_day, schedule.working_days, now);
 
+  // A duplicate id was LAST-WINS, so the same two rows in the other order produced a
+  // different schedule and a different horizon. read-storage.mjs:33 states the principle that
+  // broke — "an id that resolves to two files is ambiguous and a write must not land on a
+  // guess" — and the solve was guessing silently. It is dropped rather than thrown: `blaze
+  // audit` already raises `duplicate-status` HARD for this corpus, and taking the whole audit
+  // down to re-report a condition it already reports would be worse.
   const rows = new Map();
-  for (const t of tickets) if (t && t.id != null) rows.set(t.id, t);
+  const duplicated = new Set();
+  for (const t of tickets) {
+    if (!t || t.id == null) continue;
+    if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);
+  }
   const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
-  // Guard with isType FIRST — workflowFor throws on null/unknown (schema.mjs:37) — exactly as
+  // Guard with isType FIRST — workflowFor throws on null/unknown (schema.mjs:47, via must at :44) — exactly as
   // gantt.mjs:23 does, and for the same reason: an unguarded call crashes on a row whose type
   // did not parse.
   const isDelivery = (t) => isType(t.type) && workflowFor(t.type) === "delivery";
@@ -198,7 +234,7 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   //
   // A node must ALSO resolve to the delivery workflow, and that half is an INFERENCE this
   // module is making rather than a rule it is quoting. BLZ-360 §6.2's numbered list names only
-  // the edge-kind rule and terminality — but §6.2's own heading and §7.1 both call the
+  // the edge-kind rule and terminality — but §6.2's cycle row and §7.1 both call the
   // population "the non-terminal DELIVERY graph", and without this the solve would hand a
   // derived start_date and due_date to every non-terminal `goal`, `risk`, `requirement` and
   // `architecture` ticket. Measured on the live board: 203 of them (43/65/89/6), against 538
@@ -210,10 +246,12 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // another board, which is why the filter is here rather than left to luck.
   //
   // `epic` stays a node: it resolves to the delivery workflow even though it is not a Precedes
-  // endpoint. That is BLZ-378's live disagreement, pinned by a test rather than silently
-  // resolved here.
+  // endpoint. That is BLZ-378's disagreement — HYPOTHETICAL on this
+  // board, which holds zero tickets of type `epic`, and BLZ-378 is explicitly on record
+  // retracting an earlier `link-schema.mjs` comment that called it live. Pinned by a test
+  // rather than silently resolved here.
   const nodeIds = [...rows.keys()]
-    .filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)))
+    .filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);
   const isNode = new Set(nodeIds);
 
@@ -246,6 +284,7 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
 
   const unscheduled = [];
   for (const c of cycles) for (const id of c) unscheduled.push({ id, reason: "dependency-cycle", scc: c });
+  for (const id of [...duplicated].sort(cmp)) unscheduled.push({ id, reason: "duplicate-id", scc: [id] });
   unscheduled.sort((a, b) => cmp(a.id, b.id));
 
   // Edges out of a cycle are treated as unconstrained and edges into one have nothing to
@@ -343,13 +382,22 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     scheduled,
     unscheduled,
     cycles,
-    edges: edges.slice().sort((a, b) => cmp(a.src, b.src) || cmp(a.target, b.target)),
+    edges: edges.slice().sort((a, b) =>
+      cmp(a.src, b.src) || cmp(a.target, b.target) || (a.lag_minutes - b.lag_minutes)),
     // Sorted like every other array here. It is the only one that was not, and its order was
     // input-order dependent across two separate push loops — a real hole in "byte-stable",
     // because a caller that reorders its links would get a different result object. Proved by
     // reverting the sort: the determinism test fails, so it discriminates.
+    // Sorted like every other array here, and the tie-break runs all the way down to the lag:
+    // Array.prototype.sort is stable, so two Precedes edges between the SAME pair carrying
+    // different lags kept the caller's input order until `lag_minutes` joined the key.
     dropped_edges: dropped.slice().sort((a, b) =>
-      cmp(a.src, b.src) || cmp(a.target, b.target) || cmp(a.reason, b.reason)),
+      cmp(a.src, b.src) || cmp(a.target, b.target) || cmp(a.reason, b.reason)
+      || ((a.lag_minutes ?? 0) - (b.lag_minutes ?? 0))),
     by_id: new Map(scheduled.map((s) => [s.id, s])),
+    // So a finding can NAME what bound a start rather than guess at it (audit.mjs's boundBy).
+    constraint_of: new Map(solveIds
+      .filter((id) => rows.get(id).constraint_start_no_earlier_than)
+      .map((id) => [id, rows.get(id).constraint_start_no_earlier_than])),
   };
 }
