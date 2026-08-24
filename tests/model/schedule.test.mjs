@@ -357,17 +357,35 @@ test("the endpoint default-deny drops an edge whose endpoint is not a declared k
   assert.deepEqual(r.edges, []);
 });
 
-test("epic is a delivery type and still not a Precedes endpoint — BLZ-378's disagreement", () => {
-  // gantt.mjs's isDelivery() is workflowFor(type) === "delivery", which INCLUDES epic, so a
-  // retained epic draws a bar and can never be on the critical path. The board holds zero
-  // epics, so this is hypothetical rather than live; the two definitions still disagree and
-  // this test pins which one the solve follows.
+test("BLZ-378/BLZ-383 — an epic is not a node at all, because it is not a Precedes endpoint", () => {
+  // DECIDED under BLZ-388, and it collapses two tickets into one rule. The solve's node set is
+  // exactly `Precedes`' declared endpoint kinds — not "the delivery workflow", which is a
+  // second definition that happens to coincide.
+  //
+  // An earlier version of this test asserted the opposite ("the epic is still a NODE"). That
+  // followed from a node filter of `workflowFor(type) === "delivery"`, which includes `epic`
+  // and therefore gave a container its own CPM-derived dates from its own estimate — double
+  // counting the children those dates should be rolled up FROM (spec 4's hierarchy roll-up).
+  //
+  // Measured 2026-08-25: the two definitions select the SAME 535 tickets, because the board
+  // holds zero epics. So this is a simplification with no behaviour change today, and one rule
+  // where there were two.
   const r = run([
     t("E", { type: "epic", status: "defined", estimate_minutes: 60 }),
     t("S", { type: "story", estimate_minutes: 60 }),
   ], [edge("E", "S")]);
   assert.deepEqual(r.dropped_edges.map((e) => e.reason), ["undeclared-kind"]);
-  assert.ok(byId(r, "E"), "the epic is still a NODE — only the edge is refused");
+  assert.equal(byId(r, "E"), undefined, "an epic gets no CPM dates — its dates come from roll-up");
+  assert.deepEqual(r.unscheduled, [], "and it is not marked unscheduled either");
+  assert.deepEqual(r.scheduled.map((x) => x.id), ["S"]);
+});
+
+test("BLZ-383 — the node rule IS the Precedes endpoint kinds, read from one place", () => {
+  // Not restated here and not inferred: the same DEFAULT_LINK_TYPES entry that decides which
+  // EDGES are legal decides which NODES exist. One source, so they cannot drift.
+  const kinds = ["feature", "story", "task", "bug", "subtask"];
+  const r = run(kinds.map((k, i) => t(`K${i}`, { type: k, estimate_minutes: 60 })));
+  assert.deepEqual(r.scheduled.map((x) => x.id), kinds.map((_, i) => `K${i}`));
 });
 
 test("a non-Precedes link is ignored, so a caller may hand the solve every link it has", () => {
@@ -566,8 +584,8 @@ test("CORPUS — BLZ-253's 4,800 minutes is the board's max EF, so it sets the h
 // population "the non-terminal DELIVERY graph". These tests pin the reading.
 
 test("a non-delivery ticket is not a node, so CPM never hands it a derived date", () => {
-  // Measured on the live board: 203 non-terminal non-delivery tickets — 43 goal, 65 risk,
-  // 89 requirement, 6 architecture — against 538 delivery ones.
+  // Measured on the live board 2026-08-25: 203 non-terminal non-delivery tickets — 43 goal,
+  // 65 risk, 89 requirement, 6 architecture — against 535 Precedes-eligible ones.
   const r = run([
     t("G", { type: "goal", status: "in-progress", estimate_minutes: 830 }),
     t("RQ", { type: "requirement", status: "proposed" }),

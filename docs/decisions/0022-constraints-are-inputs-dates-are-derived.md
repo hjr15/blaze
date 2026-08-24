@@ -116,6 +116,36 @@ not the truth. ADR-0016 measured CPM at 10k tasks / 25k edges = 95.7 ms, and eag
 write fan-out — editing one edge changes an unbounded set of downstream dates, and the filesystem
 write port has no transaction spanning N files.
 
+## What the scheduler treats as a node — amended under BLZ-388
+
+BLZ-360 §6.2's numbered filter list names the edge-kind rule and `isTerminal` and nothing else,
+while §6.2's cycle row and §7.1 both call the population *"the non-terminal **delivery** graph"*.
+The implementation had to pick one, flagged its choice as an inference (BLZ-383), and this records
+the decision. It also closes BLZ-378, because the two turned out to be the same question.
+
+> **A node is a ticket whose type is a declared `Precedes` source kind, and which is not terminal.
+> The node set and the edge set are read from the SAME `link_type` entry, so they cannot drift.**
+
+**This is narrower than "the delivery workflow", by exactly one type: `epic`.** Dropping `epic`
+from the node set is the substance of the decision, and the reason is not that it is retired — it
+is that **an epic is a container**. A container's dates are rolled up from its children (spec 4's
+hierarchy roll-up); deriving them by CPM over the epic's *own* estimate would double-count the very
+children the roll-up sums. So a legacy epic is **chart-only by design**: `gantt.mjs` draws it a bar
+from rolled-up dates and it never appears on the critical path. That is not `link-schema.mjs` and
+`gantt.mjs` disagreeing — it is two mechanisms with two different jobs.
+
+**Measured 2026-08-25: both definitions select the same 535 tickets**, because the board holds zero
+tickets of type `epic`. So this changes no schedule today. It is taken for the structural reason
+rather than the behavioural one — a rule read from one place cannot drift from itself, and the
+alternative left `workflowFor` as a second definition of "schedulable" sitting beside the declared
+endpoint kinds.
+
+**The rejected alternative and why it lost.** Adding `epic` to `Precedes`' endpoint kinds would
+have made the two definitions agree the other way, at the cost of amending the declared list above
+*and* putting a container on the critical path. The roll-up argument rules it out on its own: an
+epic with a CPM-derived finish and a rolled-up finish would carry two dates that disagree, and
+§3's authority rule has no way to arbitrate between two derived values.
+
 ## The backward pass's horizon — amended under BLZ-380
 
 BLZ-360 §13.3 left this open: *"the latest EF is self-referential; the latest `deadline` is

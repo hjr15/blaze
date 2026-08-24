@@ -855,7 +855,15 @@ is small enough to review by hand.
    self-reference is apparent — the forward pass completes before the backward pass starts. The
    rule, the alternatives it beat, and the proof that it makes `float ≥ 0` unconditional are
    recorded in **ADR-0022, §The backward pass's horizon**.
-4. **Is the delivery-workflow node filter part of §6.2's rule, or the implementation's inference?**
+4. **~~Is the delivery-workflow node filter part of §6.2's rule, or the implementation's
+   inference?~~ Closed by decision under BLZ-388 (BLZ-383 + BLZ-378).** The rule is recorded in
+   **ADR-0022, §What the scheduler treats as a node**: a node is a ticket whose type is a declared
+   `Precedes` source kind and which is not terminal — read from the same `link_type` entry as the
+   edge rule, so the two cannot drift. It is narrower than "the delivery workflow" by exactly
+   `epic`, which is a container whose dates come from spec 4's roll-up rather than from CPM over
+   its own estimate. Measured 2026-08-25 the two definitions select the same 535 tickets. The
+   original text follows.
+
    **Opened by BLZ-379's implementation, tracked as BLZ-383, and deliberately NOT resolved by
    editing §6.2 above.** §6.2's numbered filter list names the edge-kind rule and `isTerminal` and
    nothing else, while §6.2's cycle row and §7.1 both call the population *"the non-terminal

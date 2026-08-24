@@ -25,7 +25,6 @@
 //      "every SCC member is unscheduled" rule would overwrite them.
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
-import { isType, workflowFor } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
 export const PRECEDES = "Precedes";
@@ -211,10 +210,20 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);
   }
   const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
-  // Guard with isType FIRST — workflowFor throws on null/unknown (schema.mjs:47, via must at :44) — exactly as
-  // gantt.mjs:23 does, and for the same reason: an unguarded call crashes on a row whose type
-  // did not parse.
-  const isDelivery = (t) => isType(t.type) && workflowFor(t.type) === "delivery";
+  // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same
+  // DEFAULT_LINK_TYPES entry that decides which EDGES are legal. One source, so the node set and
+  // the edge set cannot drift apart.
+  //
+  // This replaced `workflowFor(type) === "delivery"` under BLZ-388, which was a SECOND definition
+  // that merely coincided. The two differ by exactly one type — `epic` — and giving a container
+  // its own CPM dates from its own estimate double-counts the children those dates should be
+  // rolled up FROM. Measured 2026-08-25: both definitions select the same 535 tickets, because
+  // the board holds zero epics, so this is a simplification with no behaviour change today.
+  //
+  // It also closes BLZ-378: `link-schema.mjs` and `gantt.mjs` no longer disagree about `epic`,
+  // because the solve no longer asks the gantt's question. An epic still draws a bar; its dates
+  // come from spec 4's hierarchy roll-up, not from the critical path.
+  const isNodeKind = (t) => SOURCE_KINDS.has(t.type);
 
   // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------
   const dropped = [];
@@ -255,7 +264,7 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // retracting an earlier `link-schema.mjs` comment that called it live. Pinned by a test
   // rather than silently resolved here.
   const nodeIds = [...rows.keys()]
-    .filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)) && !duplicated.has(id))
+    .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);
   const isNode = new Set(nodeIds);
 
