@@ -1,11 +1,11 @@
-# Blaze v4 — spec 2: agile execution — a sprint belongs to a project, and velocity is measured
+# Blaze v4 — spec 2: agile execution — a sprint belongs to a project, and capacity is the number this board can measure
 
 **Status:** draft for review · **Date:** 2026-08-24 · **Consumer spec, BLZ-364**
 
 Spec **2** of the six v4 subsystems and the **fourth written**, after spec 3
 ([`2026-08-24-gantt-and-critical-path-design.md`](2026-08-24-gantt-and-critical-path-design.md),
 BLZ-363). It settles the sprint record, the per-project active pointer **BLZ-354 §8.1 named and
-handed over**, what capacity means on this board, how velocity is computed, how a sprint board is
+handed over**, what capacity means on this board, why velocity is deferred, how a sprint board is
 expressed as a view, and how a sprint that disagrees with the schedule is reported.
 
 **Two different gaps get handed to this spec by the two kernel specs and they are not the same
@@ -145,14 +145,15 @@ keeping `SCHEMA_VERSION` at 1"* — described a state that has not existed since
 reasoning was circular besides: a *deployed older engine* still contains its own `|| list[0]`, and
 no edit in this repository can change what that engine does.
 
-**One write-path consequence the same draft missed.** An older engine's `setActive`
-(`sprints.mjs:76`) returns `{ ...registry, active: id }` — which preserves `activeByProject`
-untouched under this shape, but would have **clobbered the entire map** under the replacement
-shape, silently losing every other project's pointer. The additive shape is what makes an older
-writer safe, not just an older reader.
+**The additive shape protects an older *reader*. It does not protect an older *writer*, and §2.2
+measures exactly what that costs.** An earlier draft of this paragraph claimed `setActive`
+(`sprints.mjs:76`) *"preserves `activeByProject` untouched"* — false, because `loadSprints` drops
+the key one frame earlier, so an old `blaze sprint active` writes it back out of existence. That
+correction landed in §2.2 and this paragraph was left standing, which is the fourth time in this
+spec's review history that a fix stopped one section short of a claim it refutes.
 
-**`project` is required on every sprint and holds exactly one key.** The alternative — a
-multi-valued `projects: []` — is refused, and not on taste: it re-creates the ambiguity this spec
+**`project` is required on every *newly written* sprint, tolerated absent on legacy ones (§2.2),
+and holds exactly one key.** The alternative — a multi-valued `projects: []` — is refused, and not on taste: it re-creates the ambiguity this spec
 exists to remove. If two sprints both list `OBA`, *"the active sprint for OBA"* has two candidate
 rows again and `active` needs a tie-break rule, which is the same defect one indirection later.
 
@@ -218,12 +219,29 @@ per-sprint project survives: OBA
 ```
 
 **One `blaze sprint new` or `blaze sprint active` from an unmodified engine silently deletes every
-project's pointer.** What makes that recoverable rather than fatal is the last line: the
-per-sprint `project` fields **do** survive, because `sprints:` is passed through wholesale. So
-`blaze sprint migrate` is **idempotent and re-runnable**, and rebuilding `activeByProject` after
-an old engine has trampled it costs one command. That is the honest guarantee — not that an old
-writer is safe, but that its damage is confined to one derived key and is repairable without the
-index.
+project's pointer**, and an earlier draft called that *"repairable without the index"*. **It is
+not, and the reason is this spec's own §1.2.** `activeByProject` is **not derivable from
+anything**: ticket membership yields sprint → project, never project → *which* sprint is active,
+and §1.2 already proves dates cannot supply it — *"S4 and S5 are both OBA and both live … an
+explicit pointer is still required."* The scalar `active` names at most one project's. So it is
+**operator-entered state**, and an old writer destroys it permanently.
+
+What survives is narrower and still worth having: the per-sprint `project` fields, because
+`sprints:` passes through wholesale. So `blaze sprint migrate` is idempotent for `project`, and on
+a re-run it **re-seeds `activeByProject` with a stated default rather than reconstructing the
+operator's choice** — the latest-*ending* sprint per project, which on this board gives
+`{ OBA: "S5", INF: "S3" }`. That is a starting point the operator corrects, not a repair.
+
+**Two consequences, both stated because an earlier draft left them implicit:**
+
+- **The cost of the additive shape is real.** It buys an older reader that works and an older
+  writer that loses one key of operator-entered state. §9 carries it as a gap; the alternative —
+  refusing old engines outright — is a `MIN_SCHEMA_VERSION` bump this spec does not take.
+- **Something must still write the scalar `active`, or it becomes dead.** `blaze sprint active
+  <id>` **without** `--project` writes `active`; **with** `--project KEY` writes
+  `activeByProject[KEY]`. Without that split nothing sets `active` after this spec ships, and
+  §6.1's `project="all"` landing page would read `null` on a new board and the stale `"S2"` on
+  this one, forever.
 
 **`project` is required on *new* sprints and tolerated absent on old ones**, which keeps this on
 the additive side of ADR-0004. That ADR's bump list includes *"making any currently-optional field
@@ -478,11 +496,13 @@ feature, added the refuted config entry, and shipped nothing that renders §3.2.
 | File | Change |
 |---|---|
 | `scripts/model/sprints.mjs` | **`loadSprints` passes `activeByProject` through** — it is a whitelist today and would otherwise drop it (§2.2); it still does **not** normalise. New `activeFor(registry, project)` (§6.1). `addSprint` requires `project` on new sprints and auto-activates **per project** — `activeByProject[project] ?? id`, not today's global `registry.active ?? id` (`:67`), or a new project's first sprint is born inactive. `setActive(registry, project, id)` writes `activeByProject`. `validateSprintFields`'s bag becomes `{ sprints }` for §2.3 rule 2. `formatSprintList` (`:79-85`) prints the project and marks active per project |
-| new — `scripts/model/capacity.mjs` | pure; `(sprint, rows, minutesPerDay) → { committed, workingDays, capacity, ratio }`. Working days are Mon–Fri inside `[start, end]`; `now` is not an input, so it needs no injection |
+| new — `scripts/model/capacity.mjs` | pure; `(sprint, rows, { minutesPerDay, workingDays }) → { committed, workingDays, capacity, ratio }`. **Both come from board config, not from constants** — BLZ-360 §2.3 defines `schedule.minutes_per_day` **and** `schedule.working_days`, and hardcoding Mon–Fri would be the second definition §8 claims not to create. `now` is not an input, so it needs no injection |
+| new — findings, in `scripts/model/audit.mjs`'s shape | `sprint-overrun` and `sprint-window-missed` (§4). **Neither exists** — `grep -rn "sprint-overrun\|sprint-window-missed" scripts/ tests/` returns nothing — and an earlier version of this table had no row for them at all, while §4 specifies 26 live corpus findings. `sprint-overrun` needs no scheduler and is buildable today |
 | `scripts/views/data.mjs` | `boardModel` (`:24`) takes `{ project, focus, flat, index }` and has **no sprint parameter and no sprint filter**. It gains one, plus the sprint-scoped rows and `minutes_per_day` that `capacity.mjs` needs |
 | `scripts/views/page.mjs` | `renderView`'s `board` case (`:49`) is `board.render(m)` — the model only, no view config and no sprint registry. It gains both, the same way the `gantt` case already receives `sprints` at `:62` |
 | `scripts/views/board.mjs` | renders the capacity bar when the view's config carries a `sprint` (§3.2, §5) |
-| — | **Blocked on spec 1.** `columnSet`, `swimlaneBy` and `cardFields` (§5) appear **nowhere** in `scripts/` — the view-config registry is BLZ-354's unshipped deliverable, and a sprint board cannot read a `sprint` key from a config that does not exist yet. This spec's §5 is expressible; it is not yet buildable |
+| — | **Blocked on spec 1 (BLZ-354).** `columnSet`, `swimlaneBy` and `cardFields` (§5) appear **nowhere** in `scripts/` — the view-config registry is BLZ-354's unshipped deliverable, and a sprint board cannot read a `sprint` key from a config that does not exist yet. §5 is expressible; it is not yet buildable |
+| — | **Blocked on BLZ-360 (the scheduler), and an earlier version of this table flagged only the spec-1 blocker.** `grep -ric "schedule" scripts/` returns **0**: `schedule.minutes_per_day`, `schedule.working_days`, `project_epoch` and derived ES/EF do not exist. So `capacity.mjs` has no source for its two config values, and §4's `sprint-window-missed` has no derived start to compare — which is why §4 measures it at 0 and not merely at 0-because-every-sprint-ended. **§3.2's capacity bar is the only part of this spec buildable before the kernel ships**, and then only once `schedule.*` exists |
 | `scripts/model/gantt.mjs` | `:33` reads `activeFor(sprints, project)`; `:36` loses its `|| list[0]` tail and gains the `no-active-sprint` return (§6.1) |
 | `scripts/sprint-runner.mjs` | `blaze sprint new --project KEY`; `blaze sprint active --project KEY <id>`; `blaze sprint list [--project KEY]`; **new `blaze sprint migrate`** — idempotent, adds `project` to each sprint and rebuilds `activeByProject` (§2.2). **It does not touch `active`**, so §1.2's stale installation-wide pointer survives the migration by design: repointing it is an operator decision, not something a migration should guess |
 | — | **No `velocity.mjs`.** §3.4 defers it; §9 carries the condition to revisit |
@@ -550,11 +570,12 @@ than the stale `S2` the board picks today — the accessor **reintroduced the ex
 written to prevent, and made the symptom worse**. Keeping `active` as a scalar (§2.1) removes the
 question: there is always an installation-wide answer.
 
-Its earlier legacy branch was wrong too, for a smaller reason: `if (typeof a === "string") return a`
-ignored `project` entirely, so `activeFor(legacyRegistry, "INF")` returned `S2`, an **OBA** sprint —
-which §2.3 rule 3 exists to forbid. Under the table above a legacy board has no per-project
-pointers at all, so the installation-wide answer is the only one available and it is the one today's
-engine already gives.
+**The shipped accessor returns the same thing the earlier one did for a legacy registry** —
+`activeFor(legacy, "INF")` is `S2`, an OBA sprint — and only the justification changed, which is
+worth being honest about rather than calling the earlier branch "wrong". A legacy board has **no
+per-project pointers to return**, so the installation-wide answer is the only one available and it
+is what today's engine already gives. §2.3 rule 3 forbids a *migrated* registry pointing `INF` at
+an OBA sprint; it has nothing to say about a registry with no map at all.
 
 **`gantt.mjs:36`'s `|| list[0]` tail is deleted, and the deletion is not safe on its own.**
 Measured: applying it verbatim and calling `ganttModel` with no selectable sprint **throws**
@@ -589,9 +610,11 @@ for the no-selection state.
 Of its **28** tests, classified by opening the file rather than by inference:
 
 **This table was byte-identical to the pre-reversal draft until the third review caught it — the
-same defect §6's own opener describes, one section further along.** Two of its rows described the
-replaced-map shape that §2.1 abandoned, and one of them is quoted in §2.2 as an *earlier draft's*
-defect while still sitting here as live guidance. Corrected:
+same defect §6's own opener describes, one section further along.** **One** of its rows described
+the replaced-map shape §2.1 abandoned (`:13`/`:19`, *"`active` becomes `{}`"*); the other
+(`:26`/`:34`) described the additive shape correctly and was wrong only about *why* those tests
+change. An earlier correction said "two rows" — itself the fourth retrospective in this spec to
+misdescribe an earlier draft. Corrected:
 
 | Tests | Why they change |
 |---|---|
@@ -602,10 +625,11 @@ defect while still sitting here as live guidance. Corrected:
 | `:209`, `:223` — `formatSprintList` ×2 | output gains the project and per-project active markers |
 | `:59`, `:62`, `:67`, `:70`, `:74`, `:79`, `:82` — `validateSprintFields` ×**7** | the options bag gains the registry (below) |
 
-**12 of 28 change outright** — 0 + 2 + 6 + 2 + 2. Two earlier counts were wrong: one said 16,
-which its own table never summed to and which counted the `validateSprintFields` block as 8 tests
-when it is 7; the correction said 14, which still counted `:13`/`:19` as changing when they do
-not.
+**11 of 28 change outright** — 0 + 2 + 6 + 2 + **1**. This number has now been wrong three times
+(16, then 14, then 12), so here is the arithmetic: `:13`/`:19` **0** (unchanged under the additive
+shape); `:26`/`:34` **2**; `addSprint` **6**; `setActive` **2**; `formatSprintList` **1**, not 2 —
+`:223` asserts `formatSprintList({active:null,sprints:[]}) === "(no sprints)"`, which no
+project-or-marker change touches.
 
 **The `validateSprintFields` 7 change too, and its 2 production callers with them.** An earlier
 draft kept its `{ sprintIds }` bag "additional optional" so those 9 sites stayed untouched — but
@@ -615,7 +639,8 @@ so keeping the signature means the registry never arrives and **rule 2 — "the 
 never fires in production.** The bag becomes `{ sprints }` and the two callers pass the registry
 they already loaded.
 
-**Final count: 19 of 28 rewritten in `sprints.test.mjs`, plus 2 production call sites; 0 tests
+**Final count: 18 of 28 rewritten in `sprints.test.mjs`** (11 above plus the 7
+`validateSprintFields` tests whose options bag changes), **plus 2 production call sites; 0 tests
 elsewhere, 0 deleted**, and one new test for §6.1's no-selection state. Any test outside that file that breaks is a defect in `activeFor` rather
 than an expected cost — a check, not a budget.
 
@@ -634,9 +659,9 @@ TDD throughout. Mutations, each of which must break at least one test:
 4. Let `activeByProject[K]` name a sprint owned by a project other than `K`.
 5. Count a sprint's capacity over **calendar** days rather than working days (§3.2 — S3's
    capacity moves from 2,880 to 4,800 and its ratio from 0.57 to 0.34).
-6. Derive the capacity denominator from **assignees** rather than `minutes_per_day` (§3.3 — 521 of
-   533 schedulable tickets are unassigned, so it computes ≈0 and every sprint reads as infinitely
-   over-committed).
+6. Derive the capacity denominator from **assignees** rather than `minutes_per_day` (§9 — 2,531 of
+   2,613 tickets are unassigned, and 80 of 80 sprint-tagged ones are, so it computes ≈0 and every
+   sprint reads as infinitely over-committed).
 7. Ship a **velocity** number computed from `.blaze/transitions.json` (§3.4 — deferred precisely
    because that log records reconcile cadence rather than when work happened).
 8. Raise `sprint-window-missed` for a sprint that has already ended (§4 — collapses the 26/0
