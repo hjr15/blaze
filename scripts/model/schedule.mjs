@@ -221,8 +221,14 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // the board holds zero epics, so this is a simplification with no behaviour change today.
   //
   // It also closes BLZ-378: `link-schema.mjs` and `gantt.mjs` no longer disagree about `epic`,
-  // because the solve no longer asks the gantt's question. An epic still draws a bar; its dates
-  // come from spec 4's hierarchy roll-up, not from the critical path.
+  // because the solve no longer asks the gantt's question. BLZ-360 §8.3 is the argument — "a
+  // parent's dates are a roll-up OF the finished schedule, computed afterwards" — so putting a
+  // container in the CPM graph computes the same quantity twice by two methods.
+  //
+  // That roll-up is spec 4's and is NOT BUILT: both existing roll-ups sum estimate/worklog and
+  // neither touches a date. So an epic gets no derived dates from anywhere today. Inert here
+  // (zero epics), and stated rather than papered over — see ADR-0022 §What the scheduler treats
+  // as a node.
   const isNodeKind = (t) => SOURCE_KINDS.has(t.type);
 
   // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------

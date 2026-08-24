@@ -126,13 +126,31 @@ the decision. It also closes BLZ-378, because the two turned out to be the same 
 > **A node is a ticket whose type is a declared `Precedes` source kind, and which is not terminal.
 > The node set and the edge set are read from the SAME `link_type` entry, so they cannot drift.**
 
-**This is narrower than "the delivery workflow", by exactly one type: `epic`.** Dropping `epic`
-from the node set is the substance of the decision, and the reason is not that it is retired — it
-is that **an epic is a container**. A container's dates are rolled up from its children (spec 4's
-hierarchy roll-up); deriving them by CPM over the epic's *own* estimate would double-count the very
-children the roll-up sums. So a legacy epic is **chart-only by design**: `gantt.mjs` draws it a bar
-from rolled-up dates and it never appears on the critical path. That is not `link-schema.mjs` and
-`gantt.mjs` disagreeing — it is two mechanisms with two different jobs.
+**This is narrower than "the delivery workflow", by exactly one type: `epic`.** Verified across the
+whole registry: of the nine registered types, `epic` is the **only** one the two rules classify
+differently. `Precedes`' `source_kinds` and `target_kinds` are also identical, so a node set taken
+from the source set cannot disagree with the target set about what may be an endpoint.
+
+Dropping `epic` is the substance of the decision, and the reason is not that it is retired — it is
+that **an epic is a container, and a container's dates are a roll-up OF the finished schedule
+rather than an input to it.** BLZ-360 §8.3 states exactly this, and it is the argument:
+
+> *"The scheduler itself uses neither roll-up… CPM runs over the dependency graph; a parent's dates
+> are a roll-up **of** the finished schedule, computed afterwards. The two are different operations
+> over different graphs."*
+
+Putting a parent in the CPM graph computes the same quantity twice by two methods, and §3's
+authority rule has no way to arbitrate between two *derived* values that disagree.
+
+**Stated plainly, because it is a real consequence and not a tidy one: the date roll-up does not
+exist yet.** §8.3 is explicit that spec 4 owns it and that *"neither existing roll-up is the right
+one as written"* — `rollup.mjs` and `hierarchy-rollup.mjs` both sum `estimate`/`worklog` numbers,
+neither touches a date. So today an `epic` gets **no derived dates from anywhere**: it is no longer
+given CPM dates it should never have had, and the roll-up that should supply them is unbuilt. That
+is inert on this board — **zero** tickets of type `epic`, measured — and it is the honest position
+rather than leaving a container holding dates computed the wrong way. An earlier draft of this
+section said an epic *"draws a bar from rolled-up dates"*, which asserted machinery that does not
+exist; the bar it draws today comes from whatever `start`/`due` it carries.
 
 **Measured 2026-08-25: both definitions select the same 535 tickets**, because the board holds zero
 tickets of type `epic`. So this changes no schedule today. It is taken for the structural reason
