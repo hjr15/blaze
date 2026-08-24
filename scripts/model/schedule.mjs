@@ -217,8 +217,9 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // This replaced `workflowFor(type) === "delivery"` under BLZ-388, which was a SECOND definition
   // that merely coincided. The two differ by exactly one type — `epic` — and giving a container
   // its own CPM dates from its own estimate double-counts the children those dates should be
-  // rolled up FROM. Measured 2026-08-25: both definitions select the same 535 tickets, because
-  // the board holds zero epics, so this is a simplification with no behaviour change today.
+  // rolled up FROM. The two rules differ by exactly `epic` and the board holds zero of them, so
+  // they select the same set — verified 2026-08-25 by running both over the live corpus, zero
+  // ids in either difference. That invariant is the claim; the cardinality moves with the board.
   //
   // It also closes BLZ-378: `link-schema.mjs` and `gantt.mjs` no longer disagree about `epic`,
   // because the solve no longer asks the gantt's question. BLZ-360 §8.3 is the argument — "a
@@ -255,8 +256,8 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   //
   //   non-delivery types — a `goal`, `risk`, `requirement` or `architecture` would otherwise be
   //     an isolated node handed a derived start_date and due_date CPM never meant for it.
-  //     Measured 2026-08-25: 203 of them (43/65/89/6) against 535 nodes. None can carry an edge
-  //     anyway, because Precedes' endpoint kinds refuse all four.
+  //     Measured 2026-08-25: 203 of them (43/65/89/6). None can carry an edge anyway, because
+  //     Precedes' endpoint kinds refuse all four.
   //   `epic` — a container. BLZ-360 §8.3: "a parent's dates are a roll-up OF the finished
   //     schedule, computed afterwards", so scheduling one computes the same quantity twice.
   //

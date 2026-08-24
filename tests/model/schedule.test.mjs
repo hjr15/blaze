@@ -367,9 +367,9 @@ test("BLZ-378/BLZ-383 — an epic is not a node at all, because it is not a Prec
   // and therefore gave a container its own CPM-derived dates from its own estimate — double
   // counting the children those dates should be rolled up FROM (spec 4's hierarchy roll-up).
   //
-  // Measured 2026-08-25: the two definitions select the SAME 535 tickets, because the board
-  // holds zero epics. So this is a simplification with no behaviour change today, and one rule
-  // where there were two.
+  // The two definitions differ by exactly `epic` and the board holds zero of them, so they
+  // select the same set — verified 2026-08-25 against the live corpus, zero ids in either
+  // difference. A simplification with no behaviour change, and one rule where there were two.
   const r = run([
     t("E", { type: "epic", status: "defined", estimate_minutes: 60 }),
     t("S", { type: "story", estimate_minutes: 60 }),
@@ -585,7 +585,7 @@ test("CORPUS — BLZ-253's 4,800 minutes is the board's max EF, so it sets the h
 
 test("a non-delivery ticket is not a node, so CPM never hands it a derived date", () => {
   // Measured on the live board 2026-08-25: 203 non-terminal non-delivery tickets — 43 goal,
-  // 65 risk, 89 requirement, 6 architecture — against 535 Precedes-eligible ones.
+  // 65 risk, 89 requirement, 6 architecture — none of which can carry a Precedes edge either.
   const r = run([
     t("G", { type: "goal", status: "in-progress", estimate_minutes: 830 }),
     t("RQ", { type: "requirement", status: "proposed" }),

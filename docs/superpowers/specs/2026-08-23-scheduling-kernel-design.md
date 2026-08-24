@@ -861,7 +861,8 @@ is small enough to review by hand.
    `Precedes` source kind and which is not terminal — read from the same `link_type` entry as the
    edge rule, so the two cannot drift. It is narrower than "the delivery workflow" by exactly
    `epic`, which is a container whose dates come from spec 4's roll-up rather than from CPM over
-   its own estimate. Measured 2026-08-25 the two definitions select the same 535 tickets. The
+   its own estimate. The two rules differ by exactly `epic` and the board holds zero of them, so they
+   select the same set — verified 2026-08-25 against the live corpus. The
    original text follows.
 
    **Opened by BLZ-379's implementation, tracked as BLZ-383, and deliberately NOT resolved by

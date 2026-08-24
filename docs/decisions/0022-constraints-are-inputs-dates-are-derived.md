@@ -152,8 +152,13 @@ rather than leaving a container holding dates computed the wrong way. An earlier
 section said an epic *"draws a bar from rolled-up dates"*, which asserted machinery that does not
 exist; the bar it draws today comes from whatever `start`/`due` it carries.
 
-**Measured 2026-08-25: both definitions select the same 535 tickets**, because the board holds zero
-tickets of type `epic`. So this changes no schedule today. It is taken for the structural reason
+**The claim that matters is the invariant, not a count: the two rules differ by exactly `epic`, and
+the board holds zero tickets of type `epic`, so they select the same set.** Verified 2026-08-25 by
+running both against the live corpus — identical node sets, zero ids in either difference. The
+cardinality that day was 538 and it moves whenever a ticket is created or closed, so it is recorded
+here as incidental rather than as the evidence. (An earlier draft of this paragraph said 535, which
+was true when written and stale three tickets later — in the same session.) So this changes no
+schedule today. It is taken for the structural reason
 rather than the behavioural one — a rule read from one place cannot drift from itself, and the
 alternative left `workflowFor` as a second definition of "schedulable" sitting beside the declared
 endpoint kinds.
