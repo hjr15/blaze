@@ -86,9 +86,24 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   cfg.views = { ...DEFAULTS.views, ...(file.views && typeof file.views === "object" ? file.views : {}) };
   cfg.views.board = true; // the shell always needs its default view
   // Deep-merge, like loops: setting one schedule key must not blank the other.
-  cfg.schedule = { ...DEFAULTS.schedule,
-    ...(file.schedule && typeof file.schedule === "object" && !Array.isArray(file.schedule)
-        ? file.schedule : {}) };
+  // Refuse a wrong-SHAPED block rather than silently falling back to defaults. The operator
+  // most likely to be wrong — `"schedule": "8h"`, or an array, or a `minutesPerDay` typo —
+  // is exactly the one a silent default leaves with no message and a schedule they did not
+  // ask for. Absent is fine; present-and-not-an-object is not.
+  if (file.schedule !== undefined) {
+    if (!file.schedule || typeof file.schedule !== "object" || Array.isArray(file.schedule)) {
+      throw new Error(`blaze: schedule must be an object with minutes_per_day and/or `
+        + `working_days, got ${JSON.stringify(file.schedule)}`);
+    }
+    const known = new Set(["minutes_per_day", "working_days"]);
+    const unknown = Object.keys(file.schedule).filter((k) => !known.has(k));
+    if (unknown.length) {
+      throw new Error(`blaze: schedule has no key ${unknown.map((k) => `'${k}'`).join(", ")}. `
+        + `Known keys: minutes_per_day, working_days. A key nothing reads is a promise the `
+        + `software does not keep.`);
+    }
+  }
+  cfg.schedule = { ...DEFAULTS.schedule, ...(file.schedule || {}) };
   checkSchedule(cfg.schedule);
 
   // Env overrides (highest precedence).

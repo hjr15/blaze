@@ -29,6 +29,16 @@ describe("the default link types encode the standards document's table", () => {
     const cols = (sql) => [...sql.matchAll(/^\s{2}([a-z_]+)\s+/gm)].map(m => m[1]);
     assert.deepEqual(cols(linkDdl("sqlite")).sort(), cols(linkDdl("postgres")).sort());
   });
+
+  test("lag_minutes is an integer in BOTH dialects, not just present in both", () => {
+    // The guard above compares column NAMES only, so an INTEGER -> text divergence passes it.
+    // lag_minutes is arithmetic the scheduler adds to a finish time; a text column would
+    // concatenate instead and the error would surface as a wrong date, not a type error.
+    for (const d of ["sqlite", "postgres"]) {
+      assert.match(linkDdl(d), /lag_minutes\s+(INTEGER|integer)\s+NOT NULL DEFAULT 0/,
+        `${d} must declare lag_minutes as an integer`);
+    }
+  });
 });
 
 function open() {
@@ -224,6 +234,41 @@ if (process.env.BLAZE_TEST_PG_URL) {
         await db.end();
       }
     });
+
+    test("lag_minutes round-trips through Postgres, including a negative lead", async () => {
+
+      const db = await openPg();
+
+      try {
+
+        await db.query(`INSERT INTO link_type (id, project_key, name, inverse_name, source_kinds, target_kinds)
+
+                        VALUES ('lt1','BLZ','Precedes','Follows','task','task')`);
+
+        await db.query(`INSERT INTO link (id, link_type_id, source_id, target_id, created_at)
+
+                        VALUES ('l1','lt1','BLZ-1','BLZ-2', now())`);
+
+        const d = await db.query("SELECT lag_minutes FROM link WHERE id='l1'");
+
+        assert.equal(d.rows[0].lag_minutes, 0, "the zero default must hold in Postgres too");
+
+        await db.query(`INSERT INTO link (id, link_type_id, source_id, target_id, created_at, lag_minutes)
+
+                        VALUES ('l2','lt1','BLZ-3','BLZ-4', now(), -120)`);
+
+        const n = await db.query("SELECT lag_minutes FROM link WHERE id='l2'");
+
+        assert.equal(n.rows[0].lag_minutes, -120, "a negative lag is a lead and no CHECK forbids it");
+
+        await assert.rejects(() => db.query("UPDATE link SET lag_minutes = NULL WHERE id='l1'"), /null/i);
+
+      } finally {
+        await db.end();
+      }
+
+    });
+
 
     test("deleting a link type that still has links is REFUSED (ON DELETE RESTRICT)", async () => {
       const db = await openPg();

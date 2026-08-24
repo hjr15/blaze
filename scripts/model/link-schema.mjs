@@ -26,9 +26,17 @@ export const DEFAULT_LINK_TYPES = [
   // direction the corpus does not contain. `Precedes` is new, has never been advisory, and
   // therefore reverses nothing — ADR-0001 stands and no superseding ADR is raised.
   //
-  // Both endpoint sets are the five DELIVERY kinds. That default-deny refuses 58 of the 392
-  // live edges, 36 of them risk<->feature: a risk does not belong in a delivery critical
-  // path, and `gantt.mjs:24` already excludes non-delivery types from bar rows.
+  // Both endpoint sets are the five kinds ADR-0022 names. That default-deny refuses 58 of
+  // the 392 live edges, 36 of them risk<->feature: a risk does not belong in a delivery
+  // critical path.
+  //
+  // These are NOT "the delivery kinds", and an earlier version of this comment said so while
+  // citing gantt.mjs as evidence. There are SIX delivery-workflow types — `epic` is the
+  // sixth — and gantt.mjs's isDelivery() is `workflowFor(type) === "delivery"`, so it
+  // INCLUDES epic. A retained epic therefore draws a Gantt bar but can never be a Precedes
+  // endpoint: on the chart, off the critical path. `epic` was retired by BLZ-231 and is
+  // legacy-but-loadable data, so that gap is live rather than hypothetical. The list matches
+  // the ADR; whether it should also carry `epic` is BLZ-378's question, not this module's.
   { name: "Precedes",   inverse_name: "Follows",        source_kinds: ["feature", "story", "task", "bug", "subtask"],
     target_kinds: ["feature", "story", "task", "bug", "subtask"], min_card: 0, max_card: null },
 ];
@@ -67,8 +75,11 @@ CREATE TABLE IF NOT EXISTS link (
   -- has re-reviewed since the source changed is exactly the case section 5 wants
   -- surfaced, so "never reviewed" must be representable rather than defaulted away.
   reviewed_at  ${d.ts},
-  -- ADR-0022. A scheduling-specific column on a generic table, and the spec calls it a
-  -- smell in as many words. Taken anyway: a zero-default column costs nothing now and
+  -- ADR-0022's link table. The column itself is BLZ-360 section 5.3's, which calls a
+  -- scheduling-specific column on a generic table a smell in as many words.
+  -- Keep this comment free of semicolons and of the word S-T-R-I-C-T: sql-dialect.test.mjs
+  -- splits statements on a non-greedy match to the first semicolon, and separately asserts
+  -- the Postgres form contains no such token anywhere. Both fire on comment text. Taken anyway: a zero-default column costs nothing now and
   -- retro-fitting one costs a schema-version bump later, and the alternative — a
   -- link_schedule side table for one integer — is worse. Every non-dependency link type
   -- ignores it. No CHECK on the sign: a negative lag is a lead, which finish-to-start

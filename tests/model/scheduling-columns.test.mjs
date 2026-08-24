@@ -40,7 +40,7 @@ describe("scheduling columns (SQLite)", () => {
   });
 
   // BLZ-360 §6.4 and §10 both say "STRICT stays on every SQLite table that holds them" /
-  // "STRICT retained". Measured: ZERO of the eight tables in SQLITE_DDL is STRICT — the only
+  // "STRICT retained". Measured: ZERO of the seven tables in SQLITE_DDL is STRICT — the only
   // occurrence of the word in that file is `ON DELETE RESTRICT`. The claim describes the v4
   // schema modules (link, hierarchy, view all take ` STRICT` from sql-dialect's `tbl`), not
   // the v3 core. This test pins the ACTUAL state so the discrepancy cannot be discovered

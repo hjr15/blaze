@@ -97,8 +97,12 @@ describe("view (SQLite)", () => {
     assert.throws(() => ins(db, { id: "v2", scope: "installation", slug: "h", config_json: "nonsense" }), /CHECK/);
   });
 
-  test("VIEW_TYPES seeds the six builtins, in VIEW_NAMES order", () => {
-    assert.deepEqual(VIEW_TYPES.map((t) => t.name), ["board", "list", "live", "metrics", "map", "gantt"]);
+  test("VIEW_TYPES seeds exactly VIEW_NAMES, in VIEW_NAMES order", async () => {
+    // Imported, not hardcoded: an earlier version asserted the literal, so adding a seventh
+    // entry to VIEW_NAMES left this green while the seed silently lost a type. §6.2's
+    // migration depends on this order — it is what makes the switcher render identically.
+    const { VIEW_NAMES } = await import("../../scripts/views/page.mjs");
+    assert.deepEqual(VIEW_TYPES.map((t) => t.name), [...VIEW_NAMES]);
   });
 });
 
@@ -106,10 +110,26 @@ describe("view (SQLite)", () => {
 // SQLite result was measured, the Postgres one was not, and this repo's own precedent is
 // 32 conformance assertions that missed a Postgres date bug because not one compared a date.
 if (process.env.BLAZE_TEST_PG_URL) {
+  // Its OWN DATABASE, not its own schema. `viewDdl` emits literal `blaze_config.` names, so
+  // a search_path alias cannot isolate it — and `config-schema.test.mjs` owns that namespace.
+  // An earlier version of this helper dropped `blaze_config` outright: `node --test` runs
+  // files concurrently against one Postgres, so it tore that suite's tables out mid-run and
+  // hung both files. A separate database is the only isolation that works for a module whose
+  // DDL hardcodes the namespace.
+  const PGDB = "blz371_view_schema";
   async function openPg() {
-    const db = new pg.Client(process.env.BLAZE_TEST_PG_URL);
+    const admin = new pg.Client(process.env.BLAZE_TEST_PG_URL);
+    await admin.connect();
+    try {
+      await admin.query(`DROP DATABASE IF EXISTS ${PGDB}`);
+      await admin.query(`CREATE DATABASE ${PGDB}`);
+    } finally { await admin.end(); }
+    // URL.origin is "null" for a non-special protocol like postgres:, so rewrite the
+    // pathname instead of reassembling from origin.
+    const url = new URL(process.env.BLAZE_TEST_PG_URL);
+    url.pathname = `/${PGDB}`;
+    const db = new pg.Client(url.toString());
     await db.connect();
-    await db.query("DROP SCHEMA IF EXISTS blaze_config CASCADE");
     await db.query("CREATE SCHEMA blaze_config");
     await db.query("CREATE TABLE blaze_config.project (key text PRIMARY KEY)");
     await db.query("INSERT INTO blaze_config.project (key) VALUES ('BLZ'), ('OBA')");
@@ -118,6 +138,12 @@ if (process.env.BLAZE_TEST_PG_URL) {
       await db.query("INSERT INTO blaze_config.view_type (name, label) VALUES ($1,$2)", [t.name, t.label]);
     }
     return db;
+  }
+  async function closePg(db) {
+    await db.end();
+    const admin = new pg.Client(process.env.BLAZE_TEST_PG_URL);
+    await admin.connect();
+    try { await admin.query(`DROP DATABASE IF EXISTS ${PGDB}`); } finally { await admin.end(); }
   }
   const insPg = (db, o) => db.query(
     `INSERT INTO blaze_config.view (id, scope, project_key, type, name, slug, ord, is_builtin, enabled, config_json, created_at, updated_at)
@@ -132,7 +158,7 @@ if (process.env.BLAZE_TEST_PG_URL) {
         await insPg(db, { id: "v1", scope: "installation", slug: "gantt" });
         await assert.rejects(() => insPg(db, { id: "v2", scope: "installation", slug: "gantt" }),
           /duplicate key|unique/i);
-      } finally { await db.end(); }
+      } finally { await closePg(db); }
     });
 
     test("the same slug under two different projects is accepted", async () => {
@@ -142,7 +168,7 @@ if (process.env.BLAZE_TEST_PG_URL) {
         await insPg(db, { id: "v2", scope: "project", project_key: "OBA", slug: "gantt" });
         const r = await db.query("SELECT count(*)::int n FROM blaze_config.view");
         assert.equal(r.rows[0].n, 2);
-      } finally { await db.end(); }
+      } finally { await closePg(db); }
     });
 
     test("the scope/project_key CHECK holds in both directions", async () => {
@@ -150,7 +176,7 @@ if (process.env.BLAZE_TEST_PG_URL) {
       try {
         await assert.rejects(() => insPg(db, { id: "v1", scope: "installation", project_key: "BLZ", slug: "g" }), /check/i);
         await assert.rejects(() => insPg(db, { id: "v2", scope: "project", project_key: null, slug: "h" }), /check/i);
-      } finally { await db.end(); }
+      } finally { await closePg(db); }
     });
 
     test("both foreign keys enforce", async () => {
@@ -158,14 +184,14 @@ if (process.env.BLAZE_TEST_PG_URL) {
       try {
         await assert.rejects(() => insPg(db, { id: "v1", scope: "project", project_key: "NOPE", slug: "g" }), /foreign key/i);
         await assert.rejects(() => insPg(db, { id: "v2", scope: "installation", type: "nope", slug: "h" }), /foreign key/i);
-      } finally { await db.end(); }
+      } finally { await closePg(db); }
     });
 
     test("config_json must be a JSON object", async () => {
       const db = await openPg();
       try {
         await assert.rejects(() => insPg(db, { id: "v1", scope: "installation", slug: "g", config_json: "[]" }), /check/i);
-      } finally { await db.end(); }
+      } finally { await closePg(db); }
     });
   });
 }

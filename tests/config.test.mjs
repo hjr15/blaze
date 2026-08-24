@@ -323,15 +323,23 @@ test("an empty or malformed working_days is refused — a week with no days is n
   }
 });
 
-test("NOTHING hardcodes 480 or a Mon–Fri literal outside config.mjs", async () => {
+test("NOTHING hardcodes the schedule defaults outside config.mjs", async () => {
   // The second definition ADR-0022 §2.3 forbids. Spec 4's amended §8.3 makes the same point
   // about the roll-up: a value the software could read and instead hardcodes is a second
-  // source of truth. This is a grep test because the rule is a rule, not a convention.
+  // source of truth. A grep test, because the rule is a rule rather than a convention.
+  //
+  // Two holes an earlier version of this test had, both planted and both green before the
+  // fix: `.endsWith("config.mjs")` excused ANY file whose basename ends that way — including
+  // `model/schema-config.mjs` — and the title promised to catch a Mon–Fri literal while the
+  // body only looked for 480.
   const { readdirSync, readFileSync: rf } = await import("node:fs");
   const walk = (d) => readdirSync(d, { withFileTypes: true }).flatMap((e) =>
     e.isDirectory() ? walk(join(d, e.name)) : (e.name.endsWith(".mjs") ? [join(d, e.name)] : []));
-  const offenders = walk(join(ROOT, "scripts"))
-    .filter((f) => !f.endsWith("config.mjs"))
-    .filter((f) => /\b480\b/.test(rf(f, "utf8")));
-  assert.deepEqual(offenders, [], `these hardcode 480 instead of reading schedule.minutes_per_day`);
+  const ONLY = join(ROOT, "scripts", "config.mjs");   // exact path, not a suffix
+  const files = walk(join(ROOT, "scripts")).filter((f) => f !== ONLY);
+  const hits = (re) => files.filter((f) => re.test(rf(f, "utf8").replace(/^\s*\/\/.*$/gm, "")));
+  assert.deepEqual(hits(/\b480\b/), [],
+    "these hardcode 480 instead of reading schedule.minutes_per_day");
+  assert.deepEqual(hits(/\[\s*1\s*,\s*2\s*,\s*3\s*,\s*4\s*,\s*5\s*\]/), [],
+    "these hardcode a Mon–Fri literal instead of reading schedule.working_days");
 });

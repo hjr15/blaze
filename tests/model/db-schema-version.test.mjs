@@ -61,7 +61,10 @@ describe("judgeDbSchema — the policy, with no database in sight", () => {
     // the same reason schema-version.mjs makes its bounds injectable.
     const r = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 1, min: 2, current: 3 });
     assert.equal(r.state, "older");
-    assert.match(r.error, /blaze db migrate/);
+    // BLZ-374 replaced 'blaze db migrate' — a command that has never existed — with the one
+    // that does. This assertion was the pre-existing half and was missed when the message
+    // and its sibling test were updated together.
+    assert.match(r.error, /blaze db init --force/);
   });
 
   test("a garbage stamp is treated as unstamped, not as version NaN", () => {
@@ -185,9 +188,17 @@ describe("DB schema version 2", () => {
   // reasoned, but a whole namespace with no install path. Deferred to BLZ-377, which installs
   // blaze_config and viewDdl together. Nothing in the scheduler reads `view`.
   test("view is deliberately NOT in version 2 — it needs a blaze_config nothing installs", () => {
-    const t = tables(fresh());
-    assert.ok(!t.includes("view"), "if view appears here, BLZ-377 landed and this test should invert");
-    assert.ok(!t.includes("view_type"));
+    const db = fresh();
+    // `view` can only ever exist in the ATTACHed blaze_config namespace, so reading
+    // sqlite_master (which is `main`) could never see it — an earlier version of this test
+    // promised to invert when BLZ-377 lands and would have stayed green instead. Ask every
+    // attached database, and assert blaze_config is not attached at all, which is the
+    // actual precondition BLZ-377 changes.
+    const dbs = db.prepare("PRAGMA database_list").all().map((r) => r.name);
+    assert.deepEqual(dbs, ["main"],
+      "if blaze_config is attached here, BLZ-377 landed and this test should invert");
+    assert.ok(!tables(db).includes("view"));
+    assert.ok(!tables(db).includes("view_type"));
   });
 
   test("the five scheduling columns are on ticket after a fresh create", () => {
@@ -208,7 +219,10 @@ describe("DB schema version 2", () => {
     const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 1 });
     assert.equal(st.ok, false);
     assert.equal(st.state, "older");
-    assert.match(st.error, /migrate/i);
+    // Names the command that EXISTS. `blaze db migrate` does not — db-runner declares only
+    // init and status — and this branch was unreachable while MIN was 1, so nothing caught it.
+    assert.match(st.error, /blaze db init --force/);
+    assert.doesNotMatch(st.error, /blaze db migrate/);
   });
 
   test("a version-1 ENGINE opening this database still gets the upgrade refusal", () => {

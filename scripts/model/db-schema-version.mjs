@@ -97,8 +97,15 @@ export function judgeDbSchema({ hasTicket, hasMeta, version,
   if (version < min) {
     return {
       ok: false, state: "older", version,
+      // There is NO migrate command and version 2 adds none — `blaze db migrate` does not
+      // exist (`db-runner.mjs` declares only init and status). The shadow database is
+      // DERIVED: `blaze db init --force` rebuilds it from the corpus, which is the real
+      // instruction. This branch was structurally unreachable while MIN was 1, so the wrong
+      // message shipped harmlessly; BLZ-374 made it reachable for every existing v1 shadow.
       error: `database schema version ${version} is older than this engine supports `
-           + `(supported: ${min}..${current}); run 'blaze db migrate' — see ${DOCS}`,
+           + `(supported: ${min}..${current}). The shadow database is derived from the `
+           + `corpus, so rebuild it rather than migrating: run 'blaze db init --force' `
+           + `— see ${DOCS}`,
     };
   }
   return { ok: true, error: null, state: "current", version };
