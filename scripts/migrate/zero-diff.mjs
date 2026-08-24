@@ -92,8 +92,26 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
   // and `pr` are unchecked, so destroying one of those still reports ok. Widening it is a
   // change to an oracle six merged migrations already trust, so it is named in BLZ-385's PR
   // body rather than done as a side effect of this one.
+  //
+  // BLZ-389 widened this from 12 fields to 19. It checked `id/type/title/priority/resolution/
+  // parent/assignee/sprint` and the four dates, so destroying `labels`, `components`,
+  // `estimate`, `likelihood`, `impact`, `branch` or `pr` reported `ok` — on the oracle BLZ-324
+  // calls "the same method that caught six data-loss defects in already-merged v3 code".
+  //
+  // Still deliberately a LIST rather than a wildcard, for the reason above. Two fields are
+  // excluded ON PURPOSE and are named here rather than silently absent:
+  //
+  //   worklog — an array of objects, compared below by its own rule rather than by String(),
+  //             which would collapse every entry to "[object Object]" and match anything.
+  //   links   — the same shape, and the same treatment.
+  //
+  // Both are checked immediately after this loop, by length and by serialized entry, so the
+  // "explicit list" contract holds for them too.
   const FIELDS = ["id", "type", "title", "priority", "resolution", "parent",
-                  "assignee", "sprint", "start", "due", "not_before", "deadline"];
+                  "assignee", "sprint", "labels", "components", "estimate",
+                  "likelihood", "impact", "branch", "pr",
+                  "start", "due", "not_before", "deadline"];
+  const ARRAY_FIELDS = ["worklog", "links"];
   // Fields the schema declares NOT NULL with a default. If the source carried nothing
   // and the database holds exactly that default, the value was not lost — it was
   // never stated. That is a different fact from "the value changed", and collapsing
@@ -120,6 +138,19 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
         continue;
       }
       report.valueDiffs.push({ id, field: f, source: av, loaded: bv });
+    }
+    // The two array-of-object fields, compared entry-by-entry. String(v) on these yields
+    // "[object Object]" for every element, so the scalar loop above would call any two
+    // non-empty worklogs equal — which is how a lost worklog entry would still read as clean.
+    for (const f of ARRAY_FIELDS) {
+      report.fieldsChecked++;
+      const av = Array.isArray(a.frontmatter?.[f]) ? a.frontmatter[f] : [];
+      const bv = Array.isArray(b.frontmatter?.[f]) ? b.frontmatter[f] : [];
+      const key = (x) => JSON.stringify(x, Object.keys(x ?? {}).sort());
+      if (av.length !== bv.length || av.map(key).join("|") !== bv.map(key).join("|")) {
+        report.valueDiffs.push({ id, field: f, source: `${av.length} entr${av.length === 1 ? "y" : "ies"}`,
+          loaded: `${bv.length}` });
+      }
     }
     if (a.status !== b.status) report.valueDiffs.push({ id, field: "status", source: a.status, loaded: b.status });
     if ((a.body ?? "") !== (b.body ?? "")) report.valueDiffs.push({ id, field: "body" });
