@@ -97,7 +97,7 @@ CREATE TABLE IF NOT EXISTS ticket (
   -- CHECK (key ~ '^[A-Z][A-Z0-9]*$'); SQLite has no regex, so GLOB.
   CONSTRAINT ticket_project_key_shape CHECK (
     project_key GLOB '[A-Z]*' AND project_key NOT GLOB '*[^A-Z0-9]*')
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS ticket_parent_idx ON ticket (parent_id);
 CREATE INDEX IF NOT EXISTS ticket_board_idx  ON ticket (project_key, status, type);
@@ -111,7 +111,7 @@ CREATE TABLE IF NOT EXISTS ticket_link (
   link_type TEXT NOT NULL,
   target_id TEXT NOT NULL,
   PRIMARY KEY (src_id, link_type, target_id)
-);
+) STRICT;
 
 -- blockersOf() is "inbound links by type", so the index is on the TARGET. The design
 -- calls this out: the reverse direction would otherwise seq-scan.
@@ -154,7 +154,7 @@ CREATE TABLE IF NOT EXISTS ticket_event (
   -- a transition event without both statuses is not a transition
   CONSTRAINT event_transition_shape CHECK (
     (kind = 'transition') = (from_status IS NOT NULL AND to_status IS NOT NULL))
-);
+) STRICT;
 
 CREATE INDEX IF NOT EXISTS event_ticket_at_idx  ON ticket_event (ticket_id, at);
 CREATE INDEX IF NOT EXISTS event_at_idx         ON ticket_event (at);
@@ -195,7 +195,7 @@ CREATE TABLE IF NOT EXISTS acceptance_criterion (
   -- a note is not checkable; the design makes this a constraint rather than a
   -- convention because the toggle path is where the old ordinal bug lived
   CONSTRAINT ac_note_not_checked CHECK (kind = 'criterion' OR checked = 0)
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS ac_ticket_idx ON acceptance_criterion (ticket_id, ord);
 
 -- Worklog entries. Kept as rows rather than a JSON blob on the ticket (design D4:
@@ -217,7 +217,7 @@ CREATE TABLE IF NOT EXISTS ticket_label (
   -- cutover — not data loss, but a diff on every ticket for no reason.
   ord         integer NOT NULL DEFAULT 0,
   PRIMARY KEY (ticket_id, label)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS ticket_component (
   ticket_id   TEXT NOT NULL REFERENCES ticket (id) ON DELETE CASCADE,
@@ -228,7 +228,7 @@ CREATE TABLE IF NOT EXISTS ticket_component (
   -- cutover — not data loss, but a diff on every ticket for no reason.
   ord         integer NOT NULL DEFAULT 0,
   PRIMARY KEY (ticket_id, component)
-);
+) STRICT;
 
 CREATE TABLE IF NOT EXISTS worklog_entry (
   id        INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -236,7 +236,7 @@ CREATE TABLE IF NOT EXISTS worklog_entry (
   on_date   TEXT NOT NULL,
   minutes   INTEGER NOT NULL CHECK (minutes > 0),
   note      TEXT
-);
+) STRICT;
 CREATE INDEX IF NOT EXISTS worklog_ticket_idx ON worklog_entry (ticket_id);
 
 -- The heading is preserved verbatim so the section round-trips byte-exactly. 245

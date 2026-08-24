@@ -47,11 +47,26 @@ describe("scheduling columns (SQLite)", () => {
   // twice. BLZ-376 carried the spec correction and is closed; whether the v3 tables should
   // MOVE to STRICT is BLZ-390, which measured the blocker — 0 of 21,372 live rows violate,
   // and `projection_meta.config_version` is declared `bigint`, not a STRICT-legal type.
-  test("the v3 ticket table is NOT STRICT — pinned so the spec's claim is not mistaken for fact", () => {
+  test("the v3 ticket table IS STRICT — inverted under BLZ-390, as this test asked to be", () => {
+    // This pinned the ABSENCE of STRICT and said in as many words that it "should be inverted"
+    // when ticket became STRICT. BLZ-390 did that, on the measurement BLZ-376 asked for: 0 of
+    // 21,372 live rows violate a STRICT declaration. So BLZ-360 §6.4's claim is now true of the
+    // v3 core, and the spec's correction under BLZ-376 records that it was not before.
     const db = open();
     const sql = db.prepare("SELECT sql FROM sqlite_master WHERE name='ticket'").get().sql;
-    assert.doesNotMatch(sql, /\)\s*STRICT\s*$/i,
-      "if ticket becomes STRICT, BLZ-360 §6.4's claim becomes true and this test should be inverted");
+    assert.match(sql, /\)\s*STRICT\s*$/i);
+  });
+
+  test("STRICT actually bites — a type mismatch is refused, not silently coerced", () => {
+    // A guard that is present but toothless is worse than none. SQLite's STRICT still performs
+    // LOSSLESS conversion (an integer into a TEXT column is fine and stays fine), so the case
+    // that must fail is one that cannot round-trip.
+    const db = open();
+    insTicket(db);
+    assert.throws(() => db.exec("UPDATE ticket SET num = 'not-a-number' WHERE id='BLZ-1'"),
+      /cannot store TEXT value in INTEGER column/);
+    assert.throws(() => db.exec("UPDATE ticket SET num = 1.5 WHERE id='BLZ-1'"),
+      /cannot store REAL value in INTEGER column/);
   });
 
   test("is_critical is 0/1 and defaults to 0", () => {

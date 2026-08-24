@@ -162,10 +162,11 @@ describe("DB schema version 2", () => {
   const tables = (db) =>
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
 
-  test("the stamp is 2", () => {
-    assert.equal(DB_SCHEMA_VERSION, 2);
+  test("the stamp is 3", () => {
+    // 2 -> 3 under BLZ-390, when the seven v3 tables gained STRICT.
+    assert.equal(DB_SCHEMA_VERSION, 3);
     const v = fresh().prepare("SELECT value FROM blaze_meta WHERE key='schema_version'").get().value;
-    assert.equal(v, "2");
+    assert.equal(v, "3");
   });
 
   test("a fresh create installs the v4 link tables — this is what Precedes needs", () => {
@@ -214,8 +215,12 @@ describe("DB schema version 2", () => {
   // version. That is safe because the shadow database is DERIVED: it lives under .blaze/,
   // `blaze db init` rebuilds it from the filesystem corpus, and the fs write port is the
   // default, so a stranded v1 shadow is deleted and recreated rather than migrated.
-  test("the floor rises to 2 — a version-1 database is refused, not half-opened", () => {
-    assert.equal(MIN_DB_SCHEMA_VERSION, 2);
+  test("the floor rises to 3 — an older database is refused, not half-opened", () => {
+    // 2 -> 3 under BLZ-390. A v2 shadow's tables are NOT STRICT, so accepting one would silently
+    // drop the guarantee the version exists to add.
+    assert.equal(MIN_DB_SCHEMA_VERSION, 3);
+    assert.equal(judgeDbSchema({ hasTicket: true, hasMeta: true, version: 2 }).ok, false,
+      "a v2 shadow must be refused too, not just v1");
     const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 1 });
     assert.equal(st.ok, false);
     assert.equal(st.state, "older");
