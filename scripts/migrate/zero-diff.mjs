@@ -183,7 +183,16 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
       // driver that returns worklog rows in a different order has not lost anything, and an
       // oracle that failed on it would be crying wolf — which is the other way this check can
       // be wrong. Loss and mutation are still caught, because both change the multiset.
-      const key = (x) => JSON.stringify(x, Object.keys(x ?? {}).sort());
+      // Null-valued keys are dropped before comparing, because the two sides represent "no
+      // value" differently and BOTH are correct: `parseTicket` turns a bare `note:` into
+      // `null`, while the driver OMITS the key for a NULL column. Treating those as a
+      // difference is the oracle crying wolf about equivalent representations — the same
+      // normalisation `String(a ?? "")` already does for scalars. An empty STRING is left
+      // alone: `note: ""` is a stated empty note and round-trips as one.
+      const key = (x) => {
+        const kept = Object.fromEntries(Object.entries(x ?? {}).filter(([, v]) => v != null));
+        return JSON.stringify(kept, Object.keys(kept).sort());
+      };
       if (av.length !== bv.length
           || av.map(key).sort().join("|") !== bv.map(key).sort().join("|")) {
         report.valueDiffs.push({ id, field: f, source: `${av.length} entr${av.length === 1 ? "y" : "ies"}`,

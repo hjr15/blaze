@@ -164,3 +164,32 @@ test("a field the caller declares unsurfaced is SKIPPED and NAMED, never silentl
   assert.equal(r.ok, true, "declared-blind, so not counted as loss");
   assert.deepEqual(r.unsurfaced, ["worklog"], "and the blindness is reported");
 });
+
+test("ARRAY — a null-valued key equals an absent one, but an EMPTY STRING does not", () => {
+  // Found by attacking my own D1 fix. The two sides represent "no value" differently and both
+  // are correct: `parseTicket` turns a bare `note:` into `null`, while the driver OMITS the key
+  // for a NULL column. Comparing those as different is the oracle crying wolf about equivalent
+  // representations — the same normalisation `String(a ?? "")` already does for scalars.
+  //
+  // The SOURCE must carry the null for this to mean anything. An earlier version of this test
+  // built the null side with `w.note ?? null` over a fixture whose entries all HAD notes, so it
+  // was vacuous and stayed green with the normalisation reverted — the exact defect this file
+  // exists to catch, in this file.
+  const dir = board("worklog:\n  - { date: 2026-08-01, minutes: 30, note: }\n"
+    + "  - { date: 2026-08-02, minutes: 60, note: stated }\n");
+  const src = [...fsReadStorage.listTickets(dir)][0].frontmatter.worklog;
+  assert.equal(src[0].note, null, "the fixture must really parse a bare note: to null");
+
+  // The driver's shape: the null key is absent.
+  const asDriver = src.map(({ note, ...rest }) => (note == null ? rest : { ...rest, note }));
+  assert.equal(zeroDiff(fsReadStorage, dir, withArray(dir, "worklog", asDriver)).ok, true,
+    "note: null must equal a note-less entry");
+
+  // …and it still bites where it should.
+  assert.equal(zeroDiff(fsReadStorage, dir,
+    withArray(dir, "worklog", src.map(({ note, ...rest }) => rest))).ok, false,
+    "dropping a STATED note is data loss, normalisation or not");
+  assert.equal(zeroDiff(fsReadStorage, dir,
+    withArray(dir, "worklog", src.map((w) => ({ ...w, note: "" })))).ok, false,
+    "replacing a stated note with an empty string is a CHANGE, not an equivalent form");
+});
