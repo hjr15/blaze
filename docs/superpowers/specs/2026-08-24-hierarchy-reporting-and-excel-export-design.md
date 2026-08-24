@@ -2,11 +2,13 @@
 
 **Status:** draft for review · **Date:** 2026-08-24 · **Consumer spec, BLZ-365**
 
-The fifth of the six v4 subsystem specs and the last of the three this session writes. It goes
-last because it is the heaviest consumer of the schema BLZ-360 §6.4 installs.
+Spec **4** of the six v4 subsystems and the **fifth written** — last of the three this session
+writes, because it is the heaviest consumer of the schema BLZ-360 §6.4 installs.
 
-**Its inputs are merged and are not reopened:** the two kernel specs (BLZ-354, BLZ-360), spec 3
-(BLZ-363) and spec 2 (BLZ-364).
+**Its inputs are not reopened here:** the two kernel specs (BLZ-354, BLZ-360), spec 3 (BLZ-363)
+and spec 2 (BLZ-364). The kernel specs merged on 2026-08-23 and spec 3 as `9beb7e8`; **spec 2 is
+still open in PR #105.** Nothing below depends on spec 2's content — it is named because it was
+written first, not because anything here consumes it.
 
 BLZ-354 §8.3 handed this spec two problems and was explicit that it could not solve either:
 
