@@ -116,6 +116,48 @@ not the truth. ADR-0016 measured CPM at 10k tasks / 25k edges = 95.7 ms, and eag
 write fan-out — editing one edge changes an unbounded set of downstream dates, and the filesystem
 write port has no transaction spanning N files.
 
+## The backward pass's horizon — amended under BLZ-380
+
+BLZ-360 §13.3 left this open: *"the latest EF is self-referential; the latest `deadline` is
+undefined when no deadline exists."* Spec 3 §13 item 1 proposed `max(EF)` and argued the
+self-reference is apparent. That was a proposal into an open question; this is the decision, taken
+before the backward pass was written because a backward pass cannot be tested against an unstated
+seed. It follows the `viewDdl` precedent above — an implementation-forced closure recorded here
+rather than only in a spec.
+
+> **The horizon is `max(EF)` over the completed forward pass: one constant, computed once, over
+> every scheduled node on the board. When the schedulable graph is empty, the horizon is
+> `project_epoch`.**
+
+**The self-reference is apparent, not real.** The forward pass runs to completion before the
+backward pass starts, so by the time the horizon is read it is an ordinary number, not a value
+being defined in terms of itself. `max` over an empty set is the one genuinely undefined case, and
+the `project_epoch` fallback closes it rather than leaving it to `-Infinity`.
+
+**What it buys: float is never negative, so `is_critical` is total.** For a sink `s`,
+`LF(s) = H ≥ EF(s)`, hence `LS(s) ≥ ES(s)`. Inductively, `LF(n) = min over successors s of
+(LS(s) − lag)`, and the forward pass guarantees `ES(s) ≥ EF(n) + lag`, so `LF(n) ≥ EF(n)` and
+`float(n) = LS(n) − ES(n) ≥ 0`. A `constraint_start_no_earlier_than` only raises `ES(s)`, which
+strengthens the inequality rather than breaking it. So `float ≥ 0` holds unconditionally,
+`is_critical = (float_minutes === 0)` needs no separate meaning for a negative float, and the
+invariant is directly testable.
+
+### The alternatives, and why each lost
+
+| Rejected | Why |
+|---|---|
+| **`max(deadline)`** | Undefined for 2,618 of 2,630 tickets, which is the case BLZ-360 §13.3 named. Worse when it *is* defined: measured 2026-08-24, **11 of the 12** non-terminal deadlines are already in the past, so this horizon lands *earlier* than `max(EF)` and drives float negative board-wide — and `is_critical = (float === 0)` would then be **false for the most over-committed tickets in the corpus**, which inverts the field's meaning. |
+| **`max(max(EF), max(deadline))`** | When a deadline is the maximum it makes `deadline` bound `float_minutes` and `is_critical`; when it is not, it is `max(EF)` exactly. So it buys nothing except in the one case this ADR forbids. |
+| **Per-sink horizon — `LF(sink) = its own EF`** | Every sink then has zero float, so every path back from every sink is critical and `is_critical` stops discriminating. It is not a horizon; it is the absence of one. |
+| **Per-connected-component horizon** | Gives every island its own critical path. §6.2 fixes the unit of solve as **the board, not the project**, and ADR-0014 forbids a board discriminator; this reintroduces the partition through the back door. It also makes `is_critical` mean *"critical within my island"*, so the consumers that read the column board-wide — the SQL view, spec 4's Excel export, spec 2's capacity query — get hundreds of trivially-critical rows. |
+| **An operator-configured horizon** | An input that moves a derived output, which is the same objection as `max(deadline)` one step further out, plus a second number that has to be kept true by hand. |
+
+**The decisive argument is the one already in §Decision.** `deadline` bounds nothing in the CPM
+passes and is read only by `scheduleFindings`. A `deadline` in the forward pass would move
+`due_date`; a `deadline` in the backward pass's seed would move `float_minutes` and `is_critical`.
+Both are the overwrite the operator ruled out, one indirection later, and the same rule refuses
+both.
+
 ## What this does NOT solve
 
 **Resource levelling is the largest honest gap** — one person on two zero-float tasks schedules both
@@ -125,7 +167,8 @@ estimates; sprint-vs-dependency conflict resolution; and automatic `Blocks → P
 
 ## What would reverse this
 
-A ruling that a `deadline` should act as a late-finish constraint would change the forward pass —
+A ruling that a `deadline` should act as a late-finish constraint would change the forward pass
+and the backward pass's horizon —
 this ADR deliberately has `deadline` bound nothing, read only by `scheduleFindings`, and that
 escalation beyond BLZ-360's own wording is flagged in the spec as the spec's inference. And if
 `Blocks` were later made a hard gate, ADR-0001 §Consequences already documents the mechanical

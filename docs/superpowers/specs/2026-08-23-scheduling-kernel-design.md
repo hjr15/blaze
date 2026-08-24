@@ -849,8 +849,12 @@ is small enough to review by hand.
 2. **Frontmatter key spelling.** `not_before` vs the column's full
    `constraint_start_no_earlier_than`. §2.1 picks the short form on the existing
    `estimate`/`estimate_minutes` precedent, but the operator named the long one.
-3. **The schedule horizon** that seeds the backward pass. The latest EF is self-referential; the
-   latest `deadline` is undefined when no deadline exists. Needs one rule.
+3. **~~The schedule horizon that seeds the backward pass.~~ Closed by decision under BLZ-380:**
+   the horizon is **`max(EF)` over the completed forward pass**, one constant over every scheduled
+   node on the board, falling back to `project_epoch` when the schedulable graph is empty. The
+   self-reference is apparent — the forward pass completes before the backward pass starts. The
+   rule, the alternatives it beat, and the proof that it makes `float ≥ 0` unconditional are
+   recorded in **ADR-0022, §The backward pass's horizon**.
 4. **Whether `schedule_run_id` is a timestamp or a content hash.** A hash makes an unchanged
    re-solve a no-op — worth it only if re-solves turn out to be frequent.
 5. **~~Whether the 3 open cycles are fixed before or after the scheduler ships.~~ Closed by
