@@ -851,7 +851,7 @@ is small enough to review by hand.
    `estimate`/`estimate_minutes` precedent, but the operator named the long one.
 3. **~~The schedule horizon that seeds the backward pass.~~ Closed by decision under BLZ-380:**
    the horizon is **`max(EF)` over the completed forward pass**, one constant over every scheduled
-   node on the board, falling back to `project_epoch` when the schedulable graph is empty. The
+   node on the board, falling back to `project_epoch` when no node is scheduled. The
    self-reference is apparent — the forward pass completes before the backward pass starts. The
    rule, the alternatives it beat, and the proof that it makes `float ≥ 0` unconditional are
    recorded in **ADR-0022, §The backward pass's horizon**.

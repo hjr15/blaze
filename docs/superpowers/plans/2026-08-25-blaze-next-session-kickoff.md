@@ -122,9 +122,11 @@ Start at step 4.**
 4. **The CPM solve — START HERE.** Forward/backward pass, float, critical path, over the
    non-terminal delivery graph. BLZ-360 §6.1–§6.2. Determinism is a hard requirement: no
    `Date.now()`, no `Math.random()`, `now` injected, locale-independent `cmp`, ties broken by id.
-   **Settle spec 3 §13.1's horizon question first** — it proposes `max(EF)` over the completed
-   forward pass and argues the self-reference is apparent rather than real. That is a proposal
-   into an open question, not a decision.
+   **~~Settle spec 3 §13.1's horizon question first.~~ Settled under BLZ-380:** the horizon is
+   `max(EF)` over the completed forward pass, one constant over every scheduled node on the board,
+   falling back to `project_epoch` when no node is scheduled. The rule, the four alternatives it
+   beat and the proof that it makes `float ≥ 0` unconditional are in **ADR-0022, §The backward
+   pass's horizon**. Nothing here is still open.
 5. **`scheduleFindings()`** — one function, so `blaze audit` and the views cannot drift.
 
 **Four corrections implementation forced, all ticketed:**
@@ -153,9 +155,9 @@ test, say so plainly in the PR body** — do not quietly add a test that happens
 **Two things the specs tell you the kernel needs that its own spec understated:**
 - `hierarchy-rollup.mjs` needs a **`rollupAll` whole-tree entry point**, not only `combine`
   (BLZ-368; measured 842 ms against 5.2 ms for the naive swap).
-- Spec 3 §13.1 proposes the backward pass's horizon is `max(EF)` over the completed forward pass,
-  and that its apparent self-reference is not real. That is a **proposal into an open question**,
-  not a decision — settle it before you code the backward pass.
+- ~~Spec 3 §13.1 proposes the backward pass's horizon.~~ **Decided under BLZ-380 and recorded in
+  ADR-0022, §The backward pass's horizon:** `max(EF)` over the completed forward pass, falling back
+  to `project_epoch` when no node is scheduled. The backward pass is written against it.
 
 ---
 

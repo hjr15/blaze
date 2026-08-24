@@ -927,10 +927,10 @@ builtin's default is its own ticket for the same reason.
 
 1. **~~What is the backward pass's horizon?~~ Closed by decision under BLZ-380, and this spec's
    proposal was adopted.** The horizon is **`max(EF)` over the completed forward pass**, one
-   constant over every scheduled node on the board, falling back to `project_epoch` when the
-   schedulable graph is empty. The rule, the four alternatives it beat, and the proof that it makes
+   constant over every scheduled node on the board, falling back to `project_epoch` when no node
+   is scheduled. The rule, the four alternatives it beat, and the proof that it makes
    `float ≥ 0` unconditional are recorded in **ADR-0022, §The backward pass's horizon**. The
-   *"4,800 minutes, 10.0 working days"* figure below is §5.1's own measurement and is not re-asserted
+   *"4,800 minutes, 10.0 working days"* figure is §5.1's own measurement and is not re-asserted
    here — see BLZ-381's PR body for what the implemented solve measures.
 2. **Should the builtin `gantt` row's `axis` flip to `'schedule'`, and when?** §2.1 says after
    `import-deps` closes. The trigger wants a measurement — plausibly *"once the zero-float set
