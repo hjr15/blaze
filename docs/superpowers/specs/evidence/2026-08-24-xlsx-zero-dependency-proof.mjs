@@ -49,6 +49,7 @@
 // Both shipped green under a naive "does it open" check.
 
 import { deflateRawSync } from "node:zlib";
+import { pathToFileURL } from "node:url";
 
 // --- CRC-32 (ZIP's checksum; not in node:zlib's public API) ------------------
 const CRC_TABLE = (() => {
@@ -110,15 +111,22 @@ const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
 // Returns null for anything that is not a real date — a caller that gets null
 // must fall back to a string cell rather than emitting <v>NaN</v>, which is the
 // defect that made openpyxl refuse the whole workbook.
+// Date.UTC maps years 0-99 into 1900-1999, so a year-50 date would emit 1950.
+// setUTCFullYear does not. (Out of the epoch's correct range either way, but a
+// silent 1900-year shift is not the failure anyone wants to debug.)
+function localDayAsUtc(v) {
+  if (Number.isNaN(v.getTime())) return NaN;
+  const d = new Date(Date.UTC(2000, v.getMonth(), v.getDate()));
+  d.setUTCFullYear(v.getFullYear());
+  return d.getTime();
+}
 function serial(v) {
   // A Date is read by its LOCAL calendar day and then treated as UTC midnight.
   // Using getTime() instead loses a day everywhere east of UTC: in Australia/Melbourne
   // new Date(2026,7,11) is 2026-08-10T14:00Z, whose serial renders as 2026-08-10. The
   // date format hides the time, so the workbook simply showed the wrong day — on the
   // machine this module's own figures were measured on.
-  const ms = v instanceof Date
-    ? (Number.isNaN(v.getTime()) ? NaN : Date.UTC(v.getFullYear(), v.getMonth(), v.getDate()))
-    : Date.parse(String(v) + "T00:00:00Z");
+  const ms = v instanceof Date ? localDayAsUtc(v) : Date.parse(String(v) + "T00:00:00Z");
   if (!Number.isFinite(ms)) return null;
   return (ms - EXCEL_EPOCH) / 86400000;
 }
@@ -174,9 +182,13 @@ export function writeXlsx(rows, name = "Sheet1", { level = 6 } = {}) {
 // With a projects dir it uses the live corpus; the 50k row set is built by
 // CYCLING those real rows, because synthetic repeated rows compress far better
 // than real ticket titles and would flatter the result.
-// Guarded on the flag alone: an earlier version also required the filename to be
-// unchanged, so renaming the file silently disabled the reproducibility claim.
-if (process.argv.includes("--bench")) {
+// Run-as-main only. An earlier version required the filename to be unchanged
+// (renaming silently disabled the claim); the version after that guarded on the
+// flag alone, so ANY importer invoked with --bench ran the harness and was killed
+// by its process.exit(). This is the standard test and it is neither.
+const RUN_AS_MAIN = process.argv[1]
+  && import.meta.url === pathToFileURL(process.argv[1]).href;
+if (RUN_AS_MAIN && process.argv.includes("--bench")) {
   const dir = process.argv[process.argv.indexOf("--bench") + 1];
   const HEAD = ["id","project","type","status","priority","parent","assignee",
                 "estimate","worklog_minutes","sprint","start","due","title"];
@@ -202,8 +214,6 @@ if (process.argv.includes("--bench")) {
     console.log(`${label.padEnd(34)} ${r.ms.toFixed(0).padStart(5)} ms  (${r.lo.toFixed(0)}-${r.hi.toFixed(0)})  ${(r.bytes / 1024).toFixed(1).padStart(8)} KB`);
   if (live.length > 1) {
     for (const level of [6, 9]) show(`live ${live.length - 1} rows, level ${level}`, med(() => writeXlsx(live, "tickets", { level })));
-  } else {
-    console.log("(no projects dir given — skipping the live-corpus rows)");
   }
   if (live.length <= 1) {
     console.error("Refusing to print a table without a projects dir. Run:");

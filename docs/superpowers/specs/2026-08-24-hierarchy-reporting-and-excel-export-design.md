@@ -66,9 +66,16 @@ strings. **No JSON Schema library.**"*
 
 ### 1.3 It was built and measured, and the numbers are the argument
 
-A working writer — **86 lines (77 non-blank, non-comment), importing `node:zlib` and nothing
-else** — was run against the live corpus and at ADR-0016's benchmark scale. All figures are
-medians, not single runs.
+A working writer — **94 lines of code, importing `node:zlib` and `node:url` and nothing else** —
+was run against the live corpus and at ADR-0016's benchmark scale. All figures are medians, not
+single runs.
+
+**That count is the *shipped writer alone*, and it needs saying because two earlier drafts counted
+different things.** The committed file is 224 lines, of which 140 are code — but ~46 of those are
+the `--bench` harness, which is evidence and does not ship. The writer proper is **94 code lines
+(142 including its comments)**. One draft said "86 lines (77 non-blank)", true before the bug
+fixes; another said "~140 lines (195 with comments)", which counts the harness and matches no
+measure of anything.
 
 **It is committed at
 [`evidence/2026-08-24-xlsx-zero-dependency-proof.mjs`](evidence/2026-08-24-xlsx-zero-dependency-proof.mjs)**
@@ -109,11 +116,15 @@ formulas, no charts, no styling beyond a date format. The claim it supports is t
 narrow one: **at this scale and for this shape, the library is not buying speed**, so ADR-0011's
 rule costs nothing here. It is not "we beat exceljs".
 
-**Level 6 is the shipped default.** At 50,000 real-shaped rows it is **1.87× faster** than level 9
-for **2.5% more bytes**; on the live board, **1.81× faster for 2.5% more bytes** (220.4 KB against
-215.1 KB). *(An earlier draft wrote "2.5% fewer bytes" for the live row and added that level 9
-"buys nothing there" — both backwards against the table fifteen lines above, which the correction
-pass introduced rather than inherited.)* `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
+**Level 6 is the shipped default.** At 50,000 real-shaped rows it is **1.93× faster** than level 9
+for **2.5% more bytes**; on the live board, **1.96× faster for 2.5% more bytes** (220.4 KB against
+215.1 KB).
+
+*(Two corrections collided in this sentence and the second broke the first. The original said
+"2.5% fewer bytes" for the live row — backwards against the table above. The pass that fixed the
+byte direction also replaced two **correct** ratios, 1.93× and 1.96×, with 1.87× and 1.81×, which
+reproduce from no figure anywhere and understate the shipped default's advantage. Both are now
+recomputed from the table's own numbers: 1825/948 and 102/52.)* `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
 mutation 6 has something to mutate — an earlier draft hardcoded the level and specified a
 two-argument signature, which made that mutation unkillable by construction.
 
@@ -153,6 +164,15 @@ mishandled, including one crash:**
 **The crash is the one that matters, and it changes §11's open question 3 from a performance
 question into a functional ceiling.** The others are the same defect shape as the two the first
 validation pass caught: *plausible output that a strict reader refuses.*
+
+**Two more defects were found by the third review, both introduced by the second review's own
+fixes, and both in code rather than prose.** Dropping the `--bench` filename guard in favour of
+`process.argv.includes("--bench")` meant **any importer invoked with `--bench` ran the harness and
+was killed by its `process.exit()`** — the guard is now the standard `import.meta.url ===
+pathToFileURL(process.argv[1]).href`. And the `Date` fix's `Date.UTC(v.getFullYear(), …)` maps
+years 0–99 into 1900–1999, so a year-50 date emitted **1950**; `setUTCFullYear` does not. Neither
+is reachable from the live corpus, and both are the same shape as everything else here: a fix that
+introduced a smaller version of the bug it fixed.
 
 **One more input class was found by the second review, and it produced the worst failure yet
 because every cheap check passed it.** `U+FFFE` and `U+FFFF` are XML 1.0 **non-characters**: they
@@ -449,7 +469,7 @@ in the same line.
 
 | File | Change |
 |---|---|
-| new — `scripts/model/xlsx.mjs` | **`writeXlsx(rows, sheetName, { level = 6 })`** — the three-argument form, so §8's mutation 6 has something to mutate; a two-argument signature makes it unkillable by construction. **~140 lines** of code (195 with comments); `node:zlib` only. The committed proof (§1.3) is the starting point. ZIP writer, CRC-32, the six OOXML parts, `writeXlsx(rows, sheetName)` |
+| new — `scripts/model/xlsx.mjs` | **`writeXlsx(rows, sheetName, { level = 6 })`** — the three-argument form, so §8's mutation 6 has something to mutate; a two-argument signature makes it unkillable by construction. **94 lines of code** (§1.3); imports `node:zlib` and `node:url`. The committed proof is the starting point, minus its `--bench` harness. | ZIP writer, CRC-32, the six OOXML parts, `writeXlsx(rows, sheetName)` |
 | new — `scripts/model/report.mjs` | pure `reportModel(...)`; no `Date.now()` |
 | new — `scripts/views/report.mjs` | `render(rm)` → indented table, per `views/gantt.mjs:1-5`'s contract |
 | `scripts/model/hierarchy-rollup.mjs` | `combine` parameter **and a new `rollupAll` whole-tree entry point** (§5.2); stays pure |
