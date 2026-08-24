@@ -159,7 +159,10 @@ that set equality, which catches a named table that does not exist, a real one l
 counted twice alike, because it compares sets rather than spell-checking the names present —
 and the inventory refuses to parse partially, so a row it cannot read is a failure rather than a
 row it silently skips. BLZ-362 judged only three detectable; set equality catches the omission
-too. The fourth is pinned POSITIVELY: the Context must still say what is true, so rephrasing the
-refuted claim fails the assertion rather than evading a banned spelling. That pin is scoped to
-the Context, which is why the quotation two paragraphs above does not trip it. ADR-0021 carries the same correction forward
+too. The fourth is pinned POSITIVELY — the Context must still say what is true, so REPLACING the
+corrected sentence with a rephrasing fails the assertion rather than evading a banned spelling —
+and the refuted sentence is additionally banned across every section but this one, which quotes
+it deliberately. The honest limit: a paraphrase ADDED beside the true sentence, rather than
+replacing it, still passes. No text check bounds paraphrase, and claiming otherwise would be the
+same kind of overstatement this amendment exists to correct. ADR-0021 carries the same correction forward
 in prose and is the record of the `board` → `installation` rename.

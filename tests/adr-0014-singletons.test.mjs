@@ -49,9 +49,14 @@ const DDL = { "config-schema.mjs": configDdl, "projection-schema.mjs": projectio
 
 /**
  * Strip `--` line comments and single-quoted literals, so a `CREATE TABLE` mentioned in a
- * comment or inside a `DO $$ ... $$` body is not counted as a table. Both produced wrong
- * answers before this existed: a commented-out CREATE TABLE mis-attributed a real singleton
- * to a phantom table name.
+ * comment or in a string literal is not counted as a table. Both produced wrong answers
+ * before this existed: a commented-out CREATE TABLE mis-attributed a real singleton to a
+ * phantom table name.
+ *
+ * It does NOT understand dollar-quoted (`$$ ... $$`) bodies, and does not pretend to. No DDL
+ * this repo emits contains one. If that changes, an odd quote inside such a body over-strips —
+ * and because `total` is counted on the RAW input, that surfaces as a loud `parsed !== total`
+ * failure rather than a silently short inventory.
  */
 function decommented(sql) {
   let out = "", i = 0;
@@ -98,7 +103,12 @@ function singletonTables(ddl) {
     parsed++;
     if (SINGLETON.test(sql.slice(start, i - 1))) names.add(m[1]);
   }
-  return { names, parsed, total: (sql.match(/CREATE TABLE/g) || []).length };
+  // `total` counts the RAW input, never the decommented copy. Counting the stripped text let
+  // anything `decommented()` over-removed vanish from `parsed` AND `total` together, so
+  // `parsed === total` still held and the guard could not see its own blindness — the exact
+  // "understates itself silently" mode this function claims to refuse. Round 2 of review
+  // reproduced it with an odd quote in a `$$` body swallowing the next real table.
+  return { names, parsed, total: (ddl.match(/CREATE TABLE/g) || []).length };
 }
 
 /** The singleton inventory the engine actually emits, for one dialect. */
@@ -192,8 +202,12 @@ test("BLZ-362: no module anywhere under scripts/ declares a singleton the invent
     e.isDirectory() ? walk(join(dir, e.name)) : [join(dir, e.name)]);
   const files = walk(join(ROOT, "scripts")).filter((f) => f.endsWith(".mjs"));
   assert.ok(files.length > 20, `only ${files.length} .mjs files found under scripts/ — the walk is not finding them`);
+  // Exempt by PATH, not basename. Making the walk recursive turned a path-exact exemption
+  // into a wildcard: `scripts/legacy/config-schema.mjs` would have been silently exempt
+  // across all 140 files under scripts/ merely for sharing a name.
+  const EXECUTED = new Set(Object.keys(DDL).map((f) => join("scripts", "model", f)));
   const offenders = files
-    .filter((f) => !(basename(f) in DDL))
+    .filter((f) => !EXECUTED.has(relative(ROOT, f)))
     .filter((f) => SINGLETON.test(readFileSync(f, "utf8")))
     .map((f) => relative(ROOT, f));
   assert.deepEqual(offenders, [],
@@ -229,4 +243,13 @@ test("BLZ-362: ADR-0014's Context states the corrected claim, not the refuted on
   assert.doesNotMatch(ctx, /one installation is one board/i,
     `ADR-0014's Context asserts "one installation is one board", but deriveBoards() returns ` +
     `${boards.length}: ${boards.map((b) => b.name).join(", ")}`);
+
+  // Scoping the ban to the Context lost every OTHER section: the sentence reasserted verbatim
+  // under Consequences was invisible. The whole-file ban is therefore restored, exempting only
+  // the Amendment — the one section that quotes the retracted sentence on purpose.
+  const text = readFileSync(ADR, "utf8");
+  const outsideAmendment = text.slice(0, text.indexOf("\n## Amendment"));
+  assert.ok(text.includes("\n## Amendment"), "the Amendment section must exist to be exempted");
+  assert.doesNotMatch(outsideAmendment, /one installation is one board/i,
+    "ADR-0014 asserts the refuted sentence outside its Amendment, where it is not a quotation");
 });

@@ -84,7 +84,7 @@ layer on the day it was written.** Meaning (3) is the one that makes "a project 
 boards" unwritable: the installation already owns N boards, derived from workflows, and
 they are a different thing. This is why §2 retires the word rather than redefining it.
 
-### 1.4 What the v4 schema actually contains — ADR-0014's description is wrong in three ways
+### 1.4 What the v4 schema actually contains — ADR-0014's description was wrong in three ways
 
 ADR-0014:12, as originally written, said *"`board`, `board_config`, `projection_meta` and the two write-rules tables
 are all `id integer PRIMARY KEY CHECK (id = 1)`"*. The ticket says a grep found only
