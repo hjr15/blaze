@@ -122,7 +122,11 @@ export async function openPostgresRead(connection, { create = false } = {}) {
     return [
       labels.rows.map((r) => r.label),
       components.rows.map((r) => r.component),
-      worklog.rows.map((w) => ({ date: w.on_date, minutes: w.minutes, note: w.note ?? "" })),
+      worklog.rows.map((w) => ({
+        date: w.on_date, minutes: w.minutes,
+        // Same rule as sqlite-storage.mjs: omit `note` when NULL rather than inventing "".
+        ...(w.note == null ? {} : { note: w.note }),
+      })),
     ];
   };
 

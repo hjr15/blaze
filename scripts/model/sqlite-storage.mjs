@@ -95,7 +95,14 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
     linksFor.all(row.id).map((l) => ({ type: l.link_type, target: l.target_id })),
     labelsFor.all(row.id).map((r) => r.label),
     componentsFor.all(row.id).map((r) => r.component),
-    worklogFor.all(row.id).map((w) => ({ date: w.on_date, minutes: w.minutes, note: w.note ?? "" })));
+    worklogFor.all(row.id).map((w) => ({
+      date: w.on_date, minutes: w.minutes,
+      // `note` is OMITTED when the column is NULL, never emitted as "". A source entry that
+      //       states no note must round-trip as one that states no note — inventing an empty
+      //       string makes the loaded record differ from the source on 691 of the live corpus's
+      //       1,700 worklog entries. write-port.mjs:326 already had this right.
+      ...(w.note == null ? {} : { note: w.note }),
+    })));
 
   const COLS = `id, project_key, num, type, status, title, priority, resolution,
                 parent_id, parent_type, assignee, estimate_minutes, sprint_id,

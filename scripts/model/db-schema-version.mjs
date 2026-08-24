@@ -56,10 +56,21 @@ export function metaDdl(dialect) {
   if (dialect !== "sqlite" && dialect !== "postgres") {
     throw new Error(`unknown dialect ${JSON.stringify(dialect)} — expected 'sqlite' or 'postgres'`);
   }
+  // STRICT under BLZ-390, and this table earns it more than most: it holds `schema_version`,
+  // the value the entire version guard reads. An adversarial review found it was the one
+  // non-STRICT table left after the seven in SQLITE_DDL — the sweep had stopped at that file's
+  // boundary. `sqlite_sequence` stays non-STRICT because SQLite creates it itself.
+  //
+  // THROUGH `sql-dialect.mjs`'s `tbl` TOKEN, never a literal. ` STRICT` is SQLite-only syntax:
+  // hand-writing it here emitted it to Postgres too, which refused the statement — so the meta
+  // table was never created, the stamp never written, and every Postgres path then failed with
+  // "holds tables but no Blaze schema stamp". That is precisely the retyping hazard the
+  // sql-dialect header says the token exists to prevent, and this function was bypassing it.
+  const d = dialect === "sqlite" ? " STRICT" : "";
   return `CREATE TABLE IF NOT EXISTS blaze_meta (
   key   text PRIMARY KEY,
   value text NOT NULL
-);
+)${d};
 `;
 }
 

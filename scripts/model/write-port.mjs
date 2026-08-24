@@ -19,6 +19,7 @@
 // where it is. Flipping the default then becomes a one-line decision backed by
 // evidence, taken deliberately in Phase 2 (BLZ-254), rather than a leap.
 import { ticketPath, fsStorage } from "./storage.mjs";
+import { roundEstimate } from "./time.mjs";
 import { serializeTicket } from "./ticket.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 
@@ -125,6 +126,10 @@ const ENC = (v, pg) => (typeof v === "boolean" ? (pg ? v : (v ? 1 : 0)) : v);
 export const COLUMN_FIELDS = new Set([
   "id", "project", "type", "title", "priority", "resolution", "parent", "assignee",
   "estimate", "sprint", "start", "due", "created", "updated",
+  // BLZ-391/BLZ-393: ADR-0022's two constraint fields. Missing here, they landed in a dedicated
+  // COLUMN *and* in extra_json — and this file's own comment above says what that costs: "a key
+  // in both is stored twice and the second write wins", which made the two readers disagree.
+  "not_before", "deadline",
   "links", "labels", "components", "worklog",
   "branch", "pr", "ref", "category", "verification", "derived", "likelihood", "impact",
 ]);
@@ -161,7 +166,16 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
   const est = (v) => {
     if (v === "" || v === null || v === undefined) return null;
     const n = Number(v);
-    return Number.isFinite(n) && n > 0 ? n : null;
+    // Through `roundEstimate`, which is time.mjs's SINGLE definition of the 5-minute policy —
+    // not a second rounding rule here. Two reasons it has to round at all:
+    //
+    //   the column is INTEGER, and under STRICT (BLZ-390) a hand-edited `estimate: 10.5` is
+    //     refused outright rather than silently stored as REAL, which is what used to happen;
+    //   the column also CHECKs `% 5 = 0`, so rounding merely to an INTEGER is not enough —
+    //     Math.round(10.5) is 11 and would fail the CHECK instead.
+    //
+    // SQLite's `%` casts to integer first, which is why 10.5 passed that CHECK before.
+    return Number.isFinite(n) && n > 0 ? roundEstimate(n) : null;
   };
   const nz = (v) => (v === "" || v === undefined ? null : v);
 
@@ -215,12 +229,18 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
     const extra = extraFields(fm);
     const cols = ["id", "project_key", "num", "type", "status", "title", "priority", "resolution",
                   "parent_id", "parent_type", "assignee", "estimate_minutes", "sprint_id",
-                  "start_date", "due_date", "body", "created_on", "updated_on",
+                  "start_date", "due_date",
+                  // BLZ-391: the dual-write port never persisted these two, so a ticket written
+                  // through it read back with empty not_before/deadline — the same defect
+                  // BLZ-391 fixed in load-corpus.mjs, on the other write path.
+                  "constraint_start_no_earlier_than", "deadline",
+                  "body", "created_on", "updated_on",
                   "branch", "pr", "ref", "category", "verification", "derived",
                   "likelihood", "impact", "extra_json"];
     const vals = [id, project, num(id), fm.type, status, fm.title, fm.priority || "medium",
                   nz(fm.resolution), parentId, parentType, fm.assignee || "unassigned",
-                  est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due), body ?? "",
+                  est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due),
+                  nz(fm.not_before), nz(fm.deadline), body ?? "",
                   fm.created, fm.updated,
                   nz(fm.branch), nz(fm.pr) == null ? null : String(fm.pr), nz(fm.ref),
                   nz(fm.category), nz(fm.verification), nz(fm.derived),
@@ -266,7 +286,9 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
     // ticket does not duplicate history.
     await exec.run(`DELETE FROM worklog_entry WHERE ticket_id = ${ph(0)}`, [id]);
     for (const w of fm.worklog ?? []) {
-      const mins = Number(w?.minutes);
+      // Rounded for the same reason as `est` above: `minutes` is INTEGER and STRICT refuses a
+      // REAL. `roundWorklog` already does this on the CLI path.
+      const mins = Math.round(Number(w?.minutes));
       if (!Number.isFinite(mins) || mins <= 0) continue;
       await exec.run(
         `INSERT INTO worklog_entry (ticket_id, on_date, minutes, note)

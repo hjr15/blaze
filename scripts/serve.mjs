@@ -251,8 +251,19 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // board edited in the browser bypassed the dual-write soak entirely — the week's
       // evidence would have been silently partial. Resolved per request, and closed
       // after, so a long-lived server does not hold the shadow open.
-      const { port: writePort, close: closeWritePort } =
-        await resolveWritePort({ dataRoot: root, projectsDir });
+      // Wrapped, and the file states the rule twice already: "an uncaught throw here ends the
+      // process for every connected session rather than refusing one request". `resolveWritePort`
+      // THROWS when the shadow's schema version is out of range — a named, correct refusal — and
+      // it was outside the try, so one ordinary POST against a stale shadow killed the server for
+      // everyone. 503 for the same reason the identity gate uses it: the caller is not at fault
+      // and the condition is fixable (`blaze db init --force`).
+      let writePort, closeWritePort;
+      try {
+        ({ port: writePort, close: closeWritePort } =
+          await resolveWritePort({ dataRoot: root, projectsDir }));
+      } catch (e) {
+        return json(503, { errors: [String(e?.message ?? e)] });
+      }
       try {
       if (u.pathname === "/api/move") {
         const r = await applyMove(projectsDir, payload.id, payload.to, { today, writePort, actor, source: "api" });

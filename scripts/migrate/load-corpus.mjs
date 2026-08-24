@@ -23,7 +23,13 @@ function isoDate(v, fallback) {
 /** estimate is text in frontmatter and an integer here; 242 tickets have none. */
 function estimate(v) {
   const n = Number(String(v ?? "").trim());
-  return Number.isFinite(n) && n > 0 && n % 5 === 0 ? n : null;
+  // Rounded BEFORE the %5 test, so this agrees with write-port.mjs's `est`. They disagreed:
+  // JS `%` gives `10.5 % 5 === 0.5` so this dropped the value to null, while SQLite's `%` casts
+  // to integer so the other writer stored 10.5 as a REAL in an INTEGER column. Two writers, two
+  // answers for one input — and under STRICT (BLZ-390) the second one now throws.
+  if (!Number.isFinite(n) || n <= 0) return null;
+  const r = Math.round(n);
+  return r > 0 && r % 5 === 0 ? r : null;
 }
 
 /**
@@ -135,10 +141,18 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
       b.kind === "criterion" ? report.criteria++ : report.notes++;
     }
     for (const w of Array.isArray(fm.worklog) ? fm.worklog : []) {
-      const m = Number(w?.minutes);
+      // Math.round for the STRICT reason above; the try/catch because this loop sits OUTSIDE
+      // the one guarding the ticket insert, so a single bad worklog row killed the entire load
+      // with an uncaught throw and left the BEGIN uncommitted — against this file's own promise
+      // to "load what it can and hand back a tally". Now it is a counted skip like any other.
+      const m = Math.round(Number(w?.minutes));
       if (!Number.isFinite(m) || m <= 0) continue;
-      insWork.run(id, isoDate(w.date, now), m, w.note ?? null);
-      report.worklog++;
+      try {
+        insWork.run(id, isoDate(w.date, now), m, w.note ?? null);
+        report.worklog++;
+      } catch (e) {
+        report.skipped.insertFailed.push({ id, reason: `worklog: ${String(e.message).slice(0, 100)}` });
+      }
     }
   }
 
