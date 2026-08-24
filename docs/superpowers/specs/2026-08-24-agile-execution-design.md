@@ -13,9 +13,8 @@ one:** BLZ-354 §8.1 hands over the **single global `active` pointer** (§1, §2
 hands over **sprint-membership-versus-schedule** (§4). Conflating them would lose one.
 
 **Its inputs are the two kernel specs (BLZ-354, BLZ-360) and spec 3, and none is reopened here.**
-The operator settled both kernel decisions on 2026-08-23. **The kernel specs are merged; spec 3 is
-not** — it lands in PR #104 and the link above resolves only once it does, which is why the merge
-order is 3 → 2 → 4.
+The operator settled both kernel decisions on 2026-08-23. All three are merged: the kernel specs on 2026-08-23 and
+spec 3 as `9beb7e8` (PR #104).
 
 Every number was measured against the live board on 2026-08-24 — **2,613 tickets, 11 projects, 5
 sprints, 499 transitions** — by running the measurement, not by citing one.
@@ -120,12 +119,37 @@ one. `loadSprints` already returns `{ active: null, sprints: [] }` for a board w
 
 ```jsonc
 {
-  "active": { "OBA": "S5", "INF": "S3" },        // per project; a project may be absent
+  "active": "S5",                                  // KEPT — installation-wide, legacy readers use it
+  "activeByProject": { "OBA": "S5", "INF": "S3" }, // NEW — per project; a project may be absent
   "sprints": [
     { "id": "S5", "project": "OBA", "name": "…", "start": "2026-08-11", "end": "2026-08-22" }
   ]
 }
 ```
+
+**`active` is kept as a scalar and `activeByProject` is added beside it. An earlier draft replaced
+`active` with the map, and that fails ADR-0004's own test.** ADR-0004 asks *"would an older engine
+**silently misread** a board written by a newer one"* — and it would: `gantt.mjs:36`'s
+`list.find(s => s.id === active)` cannot match an object, so it falls to `list[0]` and renders the
+wrong sprint with no error. Adding a key instead is invisible to an older engine. Verified by
+running the **unchanged** engine against the new shape:
+
+```
+unchanged ganttModel, registry carrying active:"S2" + activeByProject + per-sprint project
+  → selected S2, 11 rows          — byte-identical to today
+```
+
+So `SCHEMA_VERSION` stays where it is, which matters more than an earlier draft realised: **it is
+already 2** (`schema-version.mjs:17`), not 1, so that draft's conclusion — *"a prerequisite for
+keeping `SCHEMA_VERSION` at 1"* — described a state that has not existed since BLZ-298. Its
+reasoning was circular besides: a *deployed older engine* still contains its own `|| list[0]`, and
+no edit in this repository can change what that engine does.
+
+**One write-path consequence the same draft missed.** An older engine's `setActive`
+(`sprints.mjs:76`) returns `{ ...registry, active: id }` — which preserves `activeByProject`
+untouched under this shape, but would have **clobbered the entire map** under the replacement
+shape, silently losing every other project's pointer. The additive shape is what makes an older
+writer safe, not just an older reader.
 
 **`project` is required on every sprint and holds exactly one key.** The alternative — a
 multi-valued `projects: []` — is refused, and not on taste: it re-creates the ambiguity this spec
@@ -159,12 +183,20 @@ branch is defensive; it is specified because the migration is a one-time write a
 guesses a project is wrong silently. This is the same rule BLZ-360 §5.5 applies to the 124
 undecidable mutual pairs, for the same reason.
 
-**The legacy scalar `active` is migrated, not dropped.** `"active": "S2"` becomes
-`{ "OBA": "S2" }`, taking the key from S2's own derived project. `loadSprints` accepts both shapes
-for one config-schema version and normalises the scalar on read, so a board that never re-saves
-its registry keeps working — the guarantee BLZ-354 §6.1 gives `blaze.config.json` and the same
-one applies here. **It is NOT retired through `REMOVED_KEYS`, and an earlier draft of this paragraph specified
-exactly that.** Three things rule it out, all checkable:
+**`loadSprints` does NOT normalise, and an earlier draft said it would.** Normalising
+`active: "S2"` into `{ OBA: "S2" }` requires knowing S2's project — and **a legacy registry does
+not carry one**: `sprints.json` today is `{id,name,start,end}` and nothing else, which is also the
+shape `tests/model/sprints.test.mjs:125` writes. The key is derivable only from ticket membership,
+which is a corpus query `loadSprints` has no index to run. So the normalisation that draft
+specified was not implementable, and its §6.2 row asking the tests to *"assert the scalar survives
+`loadSprints`"* was the direct negation of it — one section specifying two opposite behaviours.
+
+**The real split:** `loadSprints` returns the file as-is; `activeFor` reads whichever shape is
+present; and **`blaze sprint migrate` — a one-time command, not a read path — writes `project` onto
+each sprint and populates `activeByProject`**, deriving each project from ticket membership because
+a command *does* have the index. A board that never runs it keeps working forever on the scalar. **`active` is never retired at all, and an earlier draft specified retiring it through
+`REMOVED_KEYS`.** It is kept permanently as the installation-wide pointer (§2.1). Even had it been
+retired, that mechanism could not have carried it: Three things rule it out, all checkable:
 
 1. **It reads the wrong file.** `REMOVED_KEYS` (`schema-version.mjs:30`) is consumed only by
    `checkSchemaVersion`, whose only caller is `config.mjs:56` on the parsed **`blaze.config.json`**,
@@ -174,21 +206,12 @@ exactly that.** Three things rule it out, all checkable:
    accepted by `loadConfig` and **read by NOTHING** — verified by grep."* `active` is read at
    `gantt.mjs:33`, `sprints.mjs:67` and `sprints.mjs:83`. `REMOVED_KEYS` is for promises the
    software does not keep; `active` is a promise it does keep.
-3. **`sprints.json` carries no version stamp at all**, so "for one config-schema version" is not
-   expressible in it.
+3. **`sprints.json` carries no version stamp at all**, so a windowed retirement is not
+   expressible in it even in principle.
 
-**The mechanism is `loadSprints`'s own normalisation, and it is permanent rather than windowed.**
-`activeFor` (§6.1) accepts both shapes forever; `saveSprints` only ever writes the map. A scalar
-survives being read and never survives being written, which needs no version gate.
-
-**And ADR-0004's bump test has to be run rather than asserted.** Its decision is *"sprints are an
-additive change — `SCHEMA_VERSION` stays 1"*, and its test is whether an older engine would
-**silently misread** a board written by a newer one. It would: an engine without `activeFor` reads
-`active: { OBA: "S5" }`, finds no `s.id` matching an object, and falls to `list[0]` — quietly the
-wrong sprint, which is the bump condition, not the additive one. **So this change is not additive
-under ADR-0004's own rule.** Deleting `gantt.mjs:36`'s `|| list[0]` tail (§6.1) is what converts
-the silent misread into a named no-selection state, and it is therefore a prerequisite for keeping
-`SCHEMA_VERSION` at 1 rather than an incidental tidy-up.
+**ADR-0004's bump test is satisfied by §2.1's additive shape rather than argued around**, and it
+was run rather than asserted: the unchanged engine reads the new registry and selects the same
+sprint it selects today.
 
 ### 2.3 Validation
 
@@ -227,9 +250,10 @@ and the number that actually answers the question was in the same measurement ru
 > two consumers, no second definition."* — BLZ-360 §2.3
 
 BLZ-360 §8.1 is titled *"Spec 2 — sprint capacity: **served**"*. This spec agrees, and §3.2 is
-why. **`minutes_per_day`'s second consumer is §3.2's capacity bar** — an earlier draft removed that
-consumer entirely and then claimed in §8 to have honoured *"one number, two consumers"* literally,
-which it had not.
+why. **`minutes_per_day`'s second consumer is §3.2's capacity bar.** An earlier draft removed that
+consumer and its §8 row then read *"Honoured literally … §3 declines to also call it capacity,
+which is not a second definition — it is one fewer"* — which disclosed the loss rather than hiding
+it, but left BLZ-360 §8.1's *"sprint capacity: served"* unserved.
 
 ### 3.2 Sprint commitment against a one-person capacity — the measurement that decides it
 
@@ -408,13 +432,19 @@ sprint board a degenerate layout on this corpus. Measured, not assumed.
 
 ## 6. What changes
 
+**This table was byte-identical to the pre-reversal draft until review caught it.** It still
+listed a `velocity.mjs` §3.4 defers, a `REMOVED_KEYS` entry §2.2 refutes, and **no row for the
+capacity bar §3 actually ships** — so an implementer working from §6 would have built the deferred
+feature, added the refuted config entry, and shipped nothing that renders §3.2. Corrected:
+
 | File | Change |
 |---|---|
-| `scripts/model/sprints.mjs` | `loadSprints` normalises a scalar `active` → per-project map; new `activeFor(registry, project)`; `addSprint` requires `project`; `setActive(registry, project, id)`; `validateSprintFields` gains §2.3's rules; `formatSprintList` (`:79-85`) prints the project and marks active per project |
-| `scripts/sprint-runner.mjs` | `blaze sprint new --project KEY`; `blaze sprint active --project KEY <id>`; `blaze sprint list [--project KEY]` |
-| `scripts/model/gantt.mjs` | `:33` reads `activeFor(sprints, project)` rather than `sprints.active` |
-| `scripts/model/schema-version.mjs` | `REMOVED_KEYS` entry for the scalar `active` (§2.2) |
-| new — `scripts/model/velocity.mjs` | pure; `(sprints, index, transitions, now) → per-sprint velocity + its caveats`. `now` injected, no `Date.now()`, following `metrics.mjs:9-10` |
+| `scripts/model/sprints.mjs` | new `activeFor(registry, project)` (§6.1); `addSprint` requires `project`; `setActive(registry, project, id)` writes `activeByProject` and leaves `active` alone; `validateSprintFields`'s bag becomes `{ sprints }` for §2.3 rule 2; `formatSprintList` (`:79-85`) prints the project and marks active per project. **`loadSprints` is unchanged** — it does not normalise (§2.2) |
+| new — `scripts/model/capacity.mjs` | pure; `(sprint, rows, minutesPerDay) → { committed, workingDays, capacity, ratio }`. Working days are Mon–Fri inside `[start, end]`; `now` is not an input, so it needs no injection |
+| `scripts/views/board.mjs` | renders the capacity bar when the view's config carries a `sprint` (§3.2, §5) |
+| `scripts/model/gantt.mjs` | `:33` reads `activeFor(sprints, project)`; `:36` loses its `|| list[0]` tail and gains the `no-active-sprint` return (§6.1) |
+| `scripts/sprint-runner.mjs` | `blaze sprint new --project KEY`; `blaze sprint active --project KEY <id>`; `blaze sprint list [--project KEY]`; **new `blaze sprint migrate`** — the one-time write adding `project` and `activeByProject` (§2.2) |
+| — | **No `velocity.mjs`.** §3.4 defers it; §9 carries the condition to revisit |
 
 ### 6.1 The blast radius, measured — and it changed a design decision
 
@@ -457,13 +487,33 @@ must not be misread:
 
 ```js
 export function activeFor(registry, project) {
-  const a = registry.active;
-  if (a == null) return null;
-  if (typeof a === "string") return a;              // legacy scalar
-  if (project && project !== "all") return a[project] ?? null;
-  return soleValue(a);                              // see below — NEVER a silent list[0]
+  const byProject = registry.activeByProject;
+  if (byProject && project && project !== "all") return byProject[project] ?? null;
+  return registry.active ?? null;                   // installation-wide, and the legacy answer
 }
 ```
+
+**Three cases, and each is the behaviour a reader already expects:**
+
+| Registry | `project` | Returns |
+|---|---|---|
+| legacy (scalar `active` only) | anything | the scalar — **exactly today's behaviour**, which is what a board that never migrated should get |
+| migrated | a real key | that project's pointer, or `null` |
+| migrated | `"all"` | the installation-wide `active` — **not `null`** |
+
+**That last row is the one an earlier draft got wrong, in the most embarrassing possible way.** It
+defined `activeFor(map, "all")` as `a[project] ?? null` → `null`, and `"all"` is the **landing
+page**: `ganttModel` defaults `project = "all"` (`gantt.mjs:29`) and so does `viewEnvelope`
+(`page.mjs:108`). With the `|| list[0]` tail still present that selected **`S1`**, a sprint older
+than the stale `S2` the board picks today — the accessor **reintroduced the exact defect it was
+written to prevent, and made the symptom worse**. Keeping `active` as a scalar (§2.1) removes the
+question: there is always an installation-wide answer.
+
+Its earlier legacy branch was wrong too, for a smaller reason: `if (typeof a === "string") return a`
+ignored `project` entirely, so `activeFor(legacyRegistry, "INF")` returned `S2`, an **OBA** sprint —
+which §2.3 rule 3 exists to forbid. Under the table above a legacy board has no per-project
+pointers at all, so the installation-wide answer is the only one available and it is the one today's
+engine already gives.
 
 **`project === "all"` is the case that matters, and an earlier draft of this accessor got it
 wrong in the most embarrassing possible way.** `ganttModel`'s signature defaults `project = "all"`
@@ -473,8 +523,8 @@ naive `a[project] ?? null` returns `null` there, and `gantt.mjs:36`'s
 than the stale `S2` the board picks today. Reproduced by execution:
 
 ```
-today (scalar "S2")                  → selected S2, 16 → 11 bars
-per-project map, project="all"       → selected S1
+today (scalar "S2"),        project="all"  → selected S2, 11 rows
+naive map + null fallback,  project="all"  → selected S1, 16 rows
 ```
 
 So the accessor **reintroduced the exact `list[0]` fallback it was written to prevent**, and made
@@ -483,11 +533,27 @@ the symptom worse. Two rules close it:
 1. **`activeFor` with `project === "all"` returns the sole entry if the map has exactly one, and
    `null` otherwise.** An installation-wide Gantt has no single active sprint once sprints are
    per-project, and pretending otherwise is what produced S1.
-2. **`gantt.mjs:36`'s `|| list[0]` tail is deleted.** No active sprint is a **named state** —
-   §2.1's read-time reason — not a silent pick. That tail is the mechanism behind both this defect
-   and §1.2's stale pointer, and nothing this spec does is safe while it survives.
+2. **`gantt.mjs:36`'s `|| list[0]` tail is deleted — and the deletion is not safe on its own.**
+   Measured: applying it verbatim and calling `ganttModel` with no selectable sprint **throws**
+   `TypeError: Cannot read properties of undefined (reading 'start')` at `gantt.mjs:39`, because
+   `sel` is `undefined` and the axis block dereferences it immediately. The full suite still passes
+   98/98, which means **nothing covers that path at all** — the deletion converts a
+   wrong-sprint bug into a **render crash on the default view**, silently.
 
-With those, **only `tests/model/sprints.test.mjs` changes** among fixture files.
+   So the deletion ships with the state it implies, specified rather than asserted:
+
+   ```js
+   if (!sel) return { ...EMPTY, sprints: list, reason: "no-active-sprint" };
+   ```
+
+   `EMPTY` already carries `empty: true` (`gantt.mjs:27`) and `views/gantt.mjs:40-44` already
+   renders that branch as the create-a-sprint prompt, so the renderer needs no new case — only the
+   reason string, which follows spec 3 §2.1's read-time-reason rule. **A named no-selection state
+   was asserted twice in an earlier draft and specified nowhere**, which is how the crash survived
+   review once.
+
+With those, **only `tests/model/sprints.test.mjs` changes** among fixture files — plus one new test
+for the no-selection state, which today has none.
 
 ### 6.2 What must be rewritten in `sprints.test.mjs`
 
@@ -528,12 +594,17 @@ TDD throughout. Mutations, each of which must break at least one test:
 2. Migrate a sprint whose tagged tickets span two projects instead of reporting it.
 3. Drop the scalar-`active` normalisation so a legacy registry loads with `active: null`.
 4. Let `active[K]` name a sprint owned by a project other than `K`.
-5. Compute velocity over all closed tickets rather than only those tagged to the sprint.
-6. Compute velocity without the in-window restriction (S3 goes from 0 to non-zero).
-7. Report velocity as a bare number without its caveat line (§3.4).
+5. Count a sprint's capacity over **calendar** days rather than working days (§3.2 — S3's
+   capacity moves from 2,880 to 4,800 and its ratio from 0.57 to 0.34).
+6. Derive the capacity denominator from **assignees** rather than `minutes_per_day` (§3.3 — 521 of
+   533 schedulable tickets are unassigned, so it computes ≈0 and every sprint reads as infinitely
+   over-committed).
+7. Ship a **velocity** number computed from `.blaze/transitions.json` (§3.4 — deferred precisely
+   because that log records reconcile cadence rather than when work happened).
 8. Raise `sprint-window-missed` for a sprint that has already ended (§4 — collapses the 26/0
    split).
-9. Draw a capacity bar at `working_days × minutes_per_day` (§3.3).
+9. Replace the scalar `active` with the map instead of adding `activeByProject` beside it (§2.1 —
+   an older engine then falls to `list[0]`, which is ADR-0004's bump condition).
 10. Default `swimlaneBy` to `'assignee'` (§5).
 11. Make `activeFor` reject a legacy scalar `active` instead of accepting both shapes (§6.1 — this
     is the mutation that catches the silent `list[0]` fallback, and it must break a test that
@@ -543,9 +614,14 @@ TDD throughout. Mutations, each of which must break at least one test:
     (§4 — the row with zero corpus members).
 
 **Any mutation that survives is named in the PR body as a hole in the suite**, not quietly fixed.
-**Mutations 11 and 12 have no corpus row behind them** — 12 because every sprint has ended, 11
-because the legacy scalar is what exists today and the map does not yet. Both need synthetic
-fixtures, and that is a weaker guarantee than the other ten get.
+13. Delete `gantt.mjs:36`'s `|| list[0]` tail **without** adding the `no-active-sprint` return
+    (§6.1 — the mutation that catches the render crash; today the suite passes **98/98** with the
+    tail simply removed, so nothing covers that path at all).
+
+**Mutations 11, 12 and 13 have no corpus row behind them** — 12 because every sprint has ended, 11
+because the legacy scalar is what exists today and the map does not yet, and 13 because no test
+reaches the no-selection path. All three need synthetic fixtures, which is a weaker guarantee than
+the other ten get.
 
 Fixtures from the corpus: the S3/S4/S5 three-way overlap; `S2`'s name (`"OBA-1 re-baseline…"`,
 the one that defeats name-parsing); S3's 27 tagged tickets with zero in-window closures; and the
@@ -558,7 +634,7 @@ stale `active: "S2"` pointer itself.
 | Constraint | How |
 |---|---|
 | **ADR-0004 — sprints are data, re-read per render** | Unchanged. `sprints.json` stays at the data root and stays read per render (`sprints.mjs:1-3`). The shape changes; the seam does not. |
-| **ADR-0011 — no new required runtime dependency** | Nothing added. Velocity is a pure reduce over two arrays. |
+| **ADR-0011 — no new required runtime dependency** | Nothing added. `capacity.mjs` is arithmetic over rows already loaded. |
 | **ADR-0014 — no board or tenant discriminator** | `project` is not one: it names a project inside one installation, the same way `ticket.project` already does. |
 | **ADR-0018 — hybrid custom fields** | No new ticket column. `sprint` stays the existing frontmatter field. |
 | **BLZ-360 §2.3 — one `minutes_per_day`** | Honoured with both consumers intact: the scheduler's arithmetic, and §3.2's sprint capacity bar. One number, one definition, two readers — which is what §2.3 asks and what BLZ-360 §8.1 means by *"sprint capacity: served"*. |
@@ -594,13 +670,18 @@ stale `active: "S2"` pointer itself.
    on a Sunday, and S5 ends on a Saturday**, and the registry has no opinion. It makes
    `working_days` (4, 3, 6, 5, 9 for S1–S5) differ from calendar span (6, 4, 10, 7, 12) by up to
    4 days. Whether to warn, refuse, or stay silent is not decided.
-2. **Does velocity count `estimate` or `worklog`?** §3.4 uses `estimate`, because 73.7% of
-   schedulable tickets carry one and it is what a commitment is denominated in. But **worklog is
-   the better-calibrated series** — measured over 1,244 terminal tickets carrying both, the median
-   `worklog / estimate` ratio is **1.00** and the mean **0.97**, with only 21.4% over estimate.
-   That calibration is good enough that the choice may not matter; it has not been tested.
-3. **What is N in "the last N sprints"?** §3.4 says median-of-last-N without fixing N. Five
-   sprints exist in total, so any N ≥ 5 is the whole history and any N ≤ 2 is noise.
+2. **Does "committed" mean tagged *now* or tagged *at sprint start*?** §3.2 uses tagged-now,
+   which is all the corpus can answer — `.blaze/transitions.json` records status changes, not
+   `sprint` reassignments, so membership history does not exist. It matters: **8 of S3's tagged
+   tickets reached a terminal status before its window opened**, carrying 375 estimate-minutes, so
+   S3's 0.57 is **0.44** net of work already finished when it was tagged. The ratio stays under 1
+   either way; the column label is doing more work than the data supports.
+3. **Is a capacity bar worth drawing at 0.23–0.45?** §3.2's case leans on S1's 0.96; the other four
+   sit between 0.23 and 0.57 (mean of five, **0.53**). A bar never near full may be no more useful
+   than the permanently-red one the earlier draft refused — that argument was **deleted with the
+   reversal rather than answered**. Relatedly, §3.2's *"strongest evidence available that this is
+   the operator's own implicit model"* rests on **one** of five points; §9 states the same fact
+   more carefully.
 4. **Should `sprint-overrun` auto-clear?** A ticket closed after its sprint ended is still an
    overrun by §4's definition, forever. Whether the finding is about the ticket's *current* state
    or a permanent historical fact is unresolved, and it decides whether the count ever goes down.
