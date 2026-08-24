@@ -182,3 +182,102 @@ test("an edge whose target is terminal is dropped silently and raises nothing", 
   assert.deepEqual(r.unscheduled, []);
   assert.deepEqual(r.dropped_edges.map((e) => `${e.src}->${e.target}`), ["A->DONE"]);
 });
+
+// ---------------------------------------------------------- the backward pass and float
+//
+// The horizon is BLZ-380's decision, recorded in ADR-0022 §The backward pass's horizon:
+// max(EF) over the COMPLETED forward pass, one constant over every scheduled node, falling
+// back to project_epoch when nothing is scheduled.
+
+test("the horizon is max(EF) over the whole board, not per chain and not per component", () => {
+  // Two disconnected islands. The horizon is the LATER island's finish, so the earlier
+  // island gets real float rather than a critical path of its own.
+  const r = run([
+    t("LONG", { estimate_minutes: 960 }), t("SHORT", { estimate_minutes: 120 }),
+  ]);
+  assert.equal(r.horizon_minutes, 960);
+  assert.equal(byId(r, "LONG").float_minutes, 0, "the island that sets the horizon is critical");
+  assert.equal(byId(r, "SHORT").float_minutes, 840, "the other island is not");
+  assert.equal(byId(r, "SHORT").is_critical, false);
+});
+
+test("an empty schedulable graph falls back to project_epoch rather than -Infinity", () => {
+  const r = run([t("DONE", { status: "done" })]);
+  assert.deepEqual(r.scheduled, []);
+  assert.equal(r.horizon_minutes, 0);
+  assert.equal(r.horizon_date, "2026-08-24");
+});
+
+test("the fallback also covers a non-empty graph in which every node is in a cycle", () => {
+  // "schedulable" is not "non-empty": every node here is an SCC member, so the scheduled
+  // set is empty even though the graph is not.
+  const r = run([t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 })],
+    [edge("A", "B"), edge("B", "A")]);
+  assert.deepEqual(r.scheduled, []);
+  assert.equal(r.horizon_minutes, 0, "max over an empty set is project_epoch, never -Infinity");
+});
+
+test("MUTATION 3 — the backward pass takes the MIN over successors, not the max", () => {
+  // A feeds a short successor and a long one. LF(A) must be bounded by the TIGHTER of the
+  // two, which is the short chain: taking max would let A start late enough to sink it.
+  const r = run([
+    t("A", { estimate_minutes: 60 }),
+    t("TIGHT", { estimate_minutes: 60 }),
+    t("SLACK", { estimate_minutes: 60 }),
+    t("SETS_HORIZON", { estimate_minutes: 6000 }),
+  ], [edge("A", "TIGHT"), edge("A", "SLACK"), edge("TIGHT", "SETS_HORIZON")]);
+  // Horizon 6120 (A 60 -> TIGHT 60 -> SETS_HORIZON 6000).
+  assert.equal(r.horizon_minutes, 6120);
+  assert.equal(byId(r, "SETS_HORIZON").ls, 120);
+  assert.equal(byId(r, "TIGHT").ls, 60, "TIGHT is bound by SETS_HORIZON");
+  assert.equal(byId(r, "SLACK").ls, 6060, "SLACK is a sink and is bound only by the horizon");
+  assert.equal(byId(r, "A").lf, 60,
+    "min(LS(TIGHT)=60, LS(SLACK)=6060) = 60 — max would give 6060 and lose the chain");
+  assert.equal(byId(r, "A").float_minutes, 0);
+});
+
+test("MUTATION 4 — float is LS - ES, not ES - LS", () => {
+  const r = run([t("LONG", { estimate_minutes: 960 }), t("SHORT", { estimate_minutes: 120 })]);
+  const s = byId(r, "SHORT");
+  assert.equal(s.ls - s.es, 840);
+  assert.equal(s.float_minutes, 840, "positive slack, not -840");
+  assert.ok(s.float_minutes > 0, "ES - LS would make every non-critical float negative");
+});
+
+test("float is never negative, on a graph that stresses every way it could go", () => {
+  // The invariant ADR-0022 proves: LF(n) >= EF(n) for every n, so float >= 0 always. A
+  // negative lag, a future not_before, a terminal boundary and a milestone all at once.
+  const r = run([
+    t("P", { status: "done", due_date: "2026-08-25" }),
+    t("A", { estimate_minutes: 300 }),
+    t("B", { estimate_minutes: 60, constraint_start_no_earlier_than: "2026-09-10" }),
+    t("M"),
+    t("C", { estimate_minutes: 45 }),
+    t("D", { estimate_minutes: 2000 }),
+  ], [edge("P", "B"), edge("A", "M", -120), edge("M", "C"), edge("B", "C", 30), edge("A", "D")]);
+  for (const s of r.scheduled) {
+    assert.ok(s.float_minutes >= 0, `${s.id} has float ${s.float_minutes}, which the horizon rule forbids`);
+    assert.ok(s.lf >= s.ef, `${s.id}: LF ${s.lf} < EF ${s.ef}`);
+  }
+  assert.ok(r.scheduled.some((s) => s.is_critical), "and at least one node is always critical");
+});
+
+test("is_critical is exactly float === 0, and the critical chain is contiguous", () => {
+  const r = run([
+    t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 120 }), t("C", { estimate_minutes: 30 }),
+    t("SIDE", { estimate_minutes: 15 }),
+  ], [edge("A", "B"), edge("B", "C"), edge("A", "SIDE")]);
+  assert.deepEqual(r.scheduled.filter((s) => s.is_critical).map((s) => s.id), ["A", "B", "C"]);
+  assert.equal(byId(r, "SIDE").is_critical, false);
+  assert.equal(byId(r, "SIDE").float_minutes, 135,
+    "LS 195 (horizon 210 - duration 15) - ES 60 (SIDE starts when A finishes)");
+});
+
+test("lag is subtracted in the backward pass, mirroring the forward pass's addition", () => {
+  const r = run([t("A", { estimate_minutes: 60 }), t("B", { estimate_minutes: 60 })],
+    [edge("A", "B", 240)]);
+  assert.equal(r.horizon_minutes, 360);
+  assert.equal(byId(r, "B").ls, 300);
+  assert.equal(byId(r, "A").lf, 60, "LS(B) 300 - lag 240");
+  assert.equal(byId(r, "A").float_minutes, 0);
+});
