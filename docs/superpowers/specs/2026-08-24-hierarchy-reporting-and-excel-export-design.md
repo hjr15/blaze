@@ -27,9 +27,9 @@ by running the measurement.
 ## 0. The three decisions
 
 > **1. Blaze writes `.xlsx` itself, with zero dependencies. Proven by building it, not asserted:
-> an 86-line writer over `node:zlib` produces files that `unzip -t`, openpyxl and LibreOffice Calc
-> all accept — and at 50,000 rows it is *faster* than the `exceljs` figure ADR-0016 benchmarked.
-> The working proof is committed beside this spec.**
+> a writer over `node:zlib` produces files that `unzip -t`, openpyxl and LibreOffice Calc all
+> accept — and at 50,000 rows it is *faster* than the `exceljs` figure ADR-0016 benchmarked. The
+> working proof is committed beside this spec and reproduces its own table with `--bench`.**
 >
 > **2. `export` is a route suffix, not a view-config key.**
 >
@@ -75,19 +75,28 @@ medians, not single runs.
 so this section is reproducible rather than asserted. It is evidence, not production code —
 nothing imports it, and `scripts/model/xlsx.mjs` is where the shipped writer goes (§7).
 
-| Input | Level | Output | Median time |
+| Input | Level | Output | Median of 7 |
 |---|---|---|---|
-| **Live board: 2,613 rows × 13 columns**, real data | 6 | 220.4 KB | **55 ms** |
-| Live board, same rows | 9 | 215.1 KB | 97 ms |
-| **50,000 rows × 13 columns** | 6 | 2.36 MB | **775 ms** (7 runs, 757–911) |
-| 50,000 rows × 13 columns | 9 | 2.16 MB | 1,876 ms (7 runs, 1,790–1,975) |
+| **Live board: 2,613 rows × 13 columns** | 6 | 220.4 KB | **52 ms** (45–62) |
+| Live board, same rows | 9 | 215.1 KB | 102 ms (94–122) |
+| **50,000 real-shaped rows × 13** | 6 | 4.09 MB | **948 ms** (892–994) |
+| 50,000 real-shaped rows × 13 | 9 | 3.99 MB | 1,825 ms (1,788–1,850) |
 
-It scales close to linearly at level 6 — 2,613 → 55 ms, 10,000 → 162 ms, 20,000 → 300 ms,
-50,000 → 775 ms.
+It scales close to linearly at level 6 — 2,613 → 52 ms, 10,000 → 176 ms, 20,000 → 351 ms,
+30,000 → 531 ms, 50,000 → 948 ms.
+
+**"Real-shaped" is doing real work in that table, and an earlier draft's figures did not have
+it.** That draft built its 50,000 rows synthetically — `"row 0"`, `"row 1"`, … — and reported
+**2.36 MB in 775 ms**. Cycling the board's actual rows instead gives **4.09 MB in 948 ms**: the
+synthetic set was **1.73× smaller and 1.22× faster**, because repeated near-identical strings
+compress far better than real ticket titles. The spec had already noted that effect in one
+sentence and then quoted the flattered number anyway. **The generator is now committed with the
+writer**, which is what makes the difference checkable.
 
 **Against ADR-0016's own benchmark of the same 50k-row workload — `exceljs`, 2,026.2 ms total, of
 which 1,540.8 ms (76%) inside the library — the zero-dependency writer is faster at both
-compression levels: 1.08× at level 9 and 2.61× at level 6.**
+compression levels: 1.11× at level 9 and 2.14× at level 6.** *(An earlier draft claimed 2.61×,
+from the synthetic row set.)*
 
 **Stated honestly, because the comparison is not controlled:** different machine, different day,
 a 13-column shape rather than whatever the benchmark used, and this writer does **less** than
@@ -96,17 +105,18 @@ formulas, no charts, no styling beyond a date format. The claim it supports is t
 narrow one: **at this scale and for this shape, the library is not buying speed**, so ADR-0011's
 rule costs nothing here. It is not "we beat exceljs".
 
-**Level 6 is the shipped default.** At 50,000 rows it is **2.42× faster** than level 9 for 9.4%
-more bytes; on the live board's real data it is **1.76× faster for 2.5% more bytes**. Both
-measured end-to-end — and the two ratios differ because synthetic repeated rows compress far
-better than real ticket titles, which is why the real-data row is the one that governs.
+**Level 6 is the shipped default.** At 50,000 real-shaped rows it is **1.93× faster** than level 9
+for **2.5% more bytes**; on the live board, **1.96× faster for 2.5% fewer bytes** (level 9's extra
+effort buys nothing there). `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
+mutation 6 has something to mutate — an earlier draft hardcoded the level and specified a
+two-argument signature, which made that mutation unkillable by construction.
 
 ### 1.4 It was validated three ways, and two real defects were caught doing it
 
 | Validator | Result |
 |---|---|
 | `unzip -t` | *"No errors detected in compressed data"* |
-| **openpyxl 3.1.5, `warnings.simplefilter('error')`** | reads back 2,614 × 13; `2026-08-11` returns as `datetime.datetime(2026, 8, 11)`, estimates as numbers; **1,694 numeric cells summing to 282,030**, matching the corpus |
+| **openpyxl 3.1.5, `warnings.simplefilter('error')`** | reads back 2,614 × 13; `2026-08-11` returns as `datetime.datetime(2026, 8, 11)`, estimates as numbers; **1,694 numeric cells in the `estimate` column summing to 282,030**, matching the corpus (the workbook also carries 2,613 numeric `worklog` cells) |
 | **LibreOffice Calc** (headless `--convert-to csv`) | exit 0; 2,614 rows; dates render as `2026-08-11`, so the number format round-tripped, not just the serial |
 
 **The first draft passed a naive check and was still wrong twice**, which is why the bar above is
@@ -119,8 +129,34 @@ three validators and not one:
    the non-streaming reader was fine.
 
 Both shipped green under "it opens". **So the acceptance test is: openpyxl with warnings as
-errors, in `read_only=True` mode, plus a LibreOffice round-trip** — and that is a project rule
+errors, in `read_only=True` **and** default mode, plus a LibreOffice round-trip** — a project rule
 here, not a suggestion.
+
+**And that test set was still not enough. Adversarial review found a whole input class the proof
+mishandled, including one crash:**
+
+| Input | First proof | Now |
+|---|---|---|
+| `NaN`, `Infinity`, `-Infinity` | emitted `<v>NaN</v>` → **openpyxl refused the workbook** | text cell |
+| a `Date` object | `Date.parse(dateObj + "T00:00:00Z")` → `NaN` — **the `instanceof Date` branch was dead on arrival** | real date cell |
+| a date-shaped non-date (`9999-99-99`) | `<v>NaN</v>` → refused | text cell |
+| **130,000 rows** | **`RangeError: Maximum call stack size exceeded`** — `Math.max(...rows.map(…))` spreads the whole array | 200,000 rows write fine |
+| one empty row `[[]]` | `<dimension ref="A1:1"/>` → **broke the streaming reader** | `A1` |
+| sheet name with `: \ / ? * [ ]`, or > 31 chars | passed through → rejected | sanitised |
+
+**The crash is the one that matters, and it changes §11's open question 3 from a performance
+question into a functional ceiling.** The others are the same defect shape as the two the first
+validation pass caught: *plausible output that a strict reader refuses.*
+
+**Behaviour that is deliberate and now documented rather than discovered:** C0 control characters
+are **stripped, not escaped** (XML 1.0 forbids them), so a lone CR becomes LF and NUL vanishes —
+real data loss, intentional; a date-shaped string JS can normalise is accepted **as the normalised
+date** (`2026-02-30` → `2026-03-02`), where `sprints.mjs:isIsoDate` would reject it, so **the
+shipped writer should reuse that predicate**; and Excel's own ceilings (1,048,576 rows, 16,384
+columns) are **not enforced** — a 16,385th column emits `XFE1`, one past Excel's last valid
+column. The 1899-12-30 epoch is correct **only for dates on or after 1900-03-01**; it does not
+reproduce Excel's phantom `1900-02-29`, and earlier dates round-trip inconsistently between the
+two validators. An earlier draft of the module comment claimed the leap-year bug was "included".
 
 ### 1.5 What this does to the event-loop hazard
 
@@ -130,15 +166,15 @@ Excel export both qualify."*
 **Measured, export crosses the line before CPM does — but only just, and the margin is worth
 stating rather than dramatising.** BLZ-360 §6.3 sets the scheduler's `worker_threads` trigger at
 *"a solve exceeding 50 ms, or a board exceeding 10k schedulable tickets"*, and the live solve is
-nowhere near it. **The live export is 55 ms at level 6** — over that 50 ms mark, on today's board,
-but by 10%.
+nowhere near it. **The live export is 52 ms at level 6** — over that 50 ms mark, on today's board,
+but by 4%.
 
-**v1 ships synchronous, with the trigger named and the number on record.** 55 ms is one stalled
-frame on an operator-initiated action with no concurrent readers; 775 ms at 50k would not be. The
+**v1 ships synchronous, with the trigger named and the number on record.** 52 ms is one stalled
+frame on an operator-initiated action with no concurrent readers; 948 ms at 50k would not be. The
 trigger to move it off-thread: **an export exceeding 500 ms**, which at level 6 this shape reaches
-at roughly **32,000 rows** (interpolating 20,000 → 300 ms and 50,000 → 775 ms). An earlier draft
-said 12,000 rows, extrapolating from a level-9 figure; the shipped level is 6 and the correct
-number is ~2.7× larger. That is a measurement, not a guess, and the streaming
+at roughly **28,000 rows** — measured, not extrapolated: 20,000 → 351 ms and 30,000 → 531 ms. Two
+earlier drafts put it at 12,000 and then 32,000 rows, the first from a level-9 figure and the
+second from the synthetic row set. That is a measurement, not a guess, and the streaming
 alternative ADR-0016 also offers — *"large responses stream or chunk"* — is harder here than it
 looks, because a ZIP entry's header carries the CRC and the compressed length of data that has not
 been produced yet.
@@ -204,8 +240,8 @@ nothing writes a row today** — spec 3 §6 deferred `groupBy: 'hierarchy'` for 
 | Parent pairs where the child's `hierarchyLevel` exceeds the parent's | **0** | the seed introduces no illegal pair |
 | Parent pairs at the same level | **4** | legal, and they survive the seed unchanged |
 
-`hierarchy_membership`'s `UNIQUE (hierarchy_id, item_id, parent_id)` and its partial root index
-(`hierarchy-schema.mjs:41-42`) both hold trivially, because a tree cannot produce a duplicate edge
+`hierarchy_membership`'s `UNIQUE (hierarchy_id, item_id, parent_id)` (`hierarchy-schema.mjs:31`)
+and its partial root index (`:41-42`) both hold trivially, because a tree cannot produce a duplicate edge
 or a second root for one item.
 
 **A second named hierarchy is created by the operator and never inferred.** The seed exists to
@@ -231,7 +267,17 @@ three largest roots:
 | `OBA-1` | 27,805 min | 27,805 min | **yes** |
 | `OBA-2` | 22,055 min | 22,055 min | **yes** |
 
-**That is a narrower claim than "the two roll-ups agree", and the narrowness is the point.**
+**And even the narrowed claim needs one more qualifier, which review supplied.** The two
+implementations coerce differently: `rollup.mjs:15` does `Number(r.estimate) || 0`, so a
+non-numeric estimate contributes **0**; `hierarchy-rollup.mjs:24` does `Number(values[id] ?? 0)`,
+so it propagates **`NaN`** and poisons the whole total. A two-node tree with `estimate: "3h"`
+gives 5 from one and `NaN` from the other. **The live corpus holds 0 non-numeric estimates, so the
+zero-diff-today claim survives untouched** — but "identical over any graph both can express" is
+false, and the swap must either restrict `values` to numeric-or-null or coerce with `|| 0` at the
+seam.
+
+**That aside, this is a narrower claim than "the two roll-ups agree", and the narrowness is the
+point.**
 `audit-runner.mjs:100-106` records them as unreconciled because *"their parent models and dedup
 policies differ"*, and that remains true: they differ in **which graphs they can express**, not in
 their arithmetic over a graph both can express. A tree is such a graph. So the swap is a zero-diff
@@ -243,7 +289,8 @@ consistent with ADR-0016's 762.7 ms at 100k.
 
 ### 5.2 `combine` alone is not enough — the retirement needs a whole-tree entry point
 
-BLZ-360 §8.3 describes the change as *"a small change to an **18-line** pure function"* — it gains
+BLZ-360 §8.3 describes the change as *"a small change to an **18-line** pure function"* (it is
+19 — `hierarchy-rollup.mjs:10-28`; quoted as written) — it gains
 `combine`, and `rollup.mjs` retires. **The `combine` half is right. The retirement half is not a
 drop-in, and measuring it is how that surfaced.**
 
@@ -256,9 +303,18 @@ The two functions have different shapes, not just different graphs:
 | Calls needed for a whole board | 1 | one per id, per field |
 
 **And `rollUp` is not a leaf consumer.** Measured, it has two production callers —
-`rollup-runner.mjs:61` and **`views/data.mjs:63`, which is inside `boardModel`**. Per BLZ-354
-§2.1, `boardModel` is *"the read model behind board, list, map **and** metrics"*, so
-`rollup.mjs` sits under **four of the six views**, not beside a CLI verb.
+`rollup-runner.mjs:61` and **`views/data.mjs:63`, which is inside `boardModel`**.
+
+**Two different numbers describe that, and an earlier draft gave one wrong number instead of
+both.** It said `rollup.mjs` *"sits under four of the six views"*. Measured:
+
+- **Computed under six of six.** `page.mjs:115` and `:151` call `boardModel` unconditionally for
+  every view, so `rollUp` runs on every render — that is the **regression exposure**.
+- **Read by one of six.** Only `views/board.mjs` reads `model.rollup` — that is the **data**
+  dependency.
+
+Four is neither. The retirement's blast radius is the first number; its behavioural surface is the
+second.
 
 **The naive swap was measured rather than argued about:**
 
@@ -372,7 +428,7 @@ in the same line.
 | new — `scripts/model/report.mjs` | pure `reportModel(...)`; no `Date.now()` |
 | new — `scripts/views/report.mjs` | `render(rm)` → indented table, per `views/gantt.mjs:1-5`'s contract |
 | `scripts/model/hierarchy-rollup.mjs` | `combine` parameter **and a new `rollupAll` whole-tree entry point** (§5.2); stays pure |
-| `scripts/model/rollup.mjs` | **retired** once the seed lands and `rollupAll` exists (§5.1, §5.2). **Two production callers move: `rollup-runner.mjs:61` and `views/data.mjs:63` — the latter is inside `boardModel`, the read model behind board, list, map and metrics.** Test cost, measured: `tests/model/rollup.test.mjs` (5), `tests/rollup-runner.test.mjs` (5) and the `rollUp` assertions in `tests/serve.test.mjs`; `tests/model/hierarchy-rollup.test.mjs` has 6 tests inside a `describe` and gains `rollupAll`'s |
+| `scripts/model/rollup.mjs` | **retired** once the seed lands and `rollupAll` exists (§5.1, §5.2). **Two production callers move: `rollup-runner.mjs:61` and `views/data.mjs:63`, the latter inside `boardModel` — computed under all six views, read by `views/board.mjs` alone (§5.2).** Test cost, measured by grep rather than inferred: `tests/model/rollup.test.mjs` (5), `tests/rollup-runner.test.mjs` (5), `tests/serve.test.mjs` (**2** tests asserting `m.rollup` via `boardModel`, at `:69` and `:78`, **plus a now-dead `import { rollUp }` at `:52` that must be deleted or the file will not load**), `tests/runner-flag-guard.test.mjs` (2), `tests/readonly.test.mjs:128` (1), and field-shape stubs in `tests/views/board.test.mjs` and `tests/model/metrics.test.mjs`. `tests/model/hierarchy-rollup.test.mjs` has 6 tests inside a `describe` and gains `rollupAll`'s |
 | `scripts/serve.mjs` | `.xlsx` / `.csv` route suffixes (§2) |
 | migration | seed the `default` hierarchy — 2,539 memberships, 74 roots (§4) |
 
@@ -454,9 +510,13 @@ Fixtures from the corpus: `OBA-4` (253 descendants, the largest subtree); the 25
    `default` unlike every other hierarchy, which is its own cost.
 2. **Should `rollupDuplicates` exist?** §5.3 argues itself close to "no" and keeps it on one use
    case. It is inert on every hierarchy that exists today.
-3. **What is the export's row cap, if any?** 50k rows is 2.16 MB and ~775 ms. 500k is untested and
-   would exceed the 500 ms trigger by a lot. No cap is specified, and an uncapped synchronous
-   export is a denial-of-service on one's own event loop.
+3. **What is the export's row cap?** It is now a **functional** question, not only a performance
+   one. 50,000 real-shaped rows is 4.09 MB and ~948 ms; **200,000 write fine** since the crash
+   §1.4 records was fixed, but **Excel itself stops at 1,048,576 rows and 16,384 columns and the
+   writer enforces neither** — past those it emits a file Excel will reject, and a 16,385th column
+   is written as `XFE1`, one past the last valid column. So there are two caps to choose: a
+   **hard** one at Excel's limits, and a **soft** one where the synchronous write becomes a
+   denial-of-service on one's own event loop (~28,000 rows, §1.5). Neither is specified.
 4. **Does the `.xlsx` route respect `BLAZE_READONLY`?** It writes no board state, but BLZ-354 §7.3
    records that `mutates` is per-verb and `cli.mjs:89` refuses to spawn before parsing — so the
    CLI half of this has the same problem `blaze view list` has, and the same unresolved answer.

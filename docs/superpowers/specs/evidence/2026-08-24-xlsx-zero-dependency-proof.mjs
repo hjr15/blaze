@@ -8,13 +8,34 @@
 // ZIP of XML; `node:zlib` supplies DEFLATE, and the ZIP container, CRC-32 and the
 // six OOXML parts are hand-written. Nothing else is imported.
 //
-// Measured 2026-08-24 (Node v24.19.0), medians not single runs:
-//   live board, 2,613 rows x 13 cols, level 6 ->  220.4 KB in   55 ms
-//   live board, same rows,            level 9 ->  215.1 KB in   97 ms
-//   50,000 rows x 13 cols,            level 6 ->  2.36 MB in  775 ms
-//   50,000 rows x 13 cols,            level 9 ->  2.16 MB in 1876 ms
+// Reproduce every figure below with:
+//   node <this file> --bench /path/to/board/projects
+//
+// Measured 2026-08-24 (Node v24.19.0), medians of 7 runs. The 50k row set is
+// built by CYCLING real board rows: an earlier run used synthetic repeated rows,
+// which compress far better than real ticket titles and flattered the result by
+// ~1.8x on size and ~1.2x on time.
+//   live board, 2,613 rows x 13 cols, level 6 ->  220.4 KB in   52 ms
+//   live board, same rows,            level 9 ->  215.1 KB in  102 ms
+//   50,000 real-shaped rows,          level 6 ->  4.09 MB in  948 ms
+//   50,000 real-shaped rows,          level 9 ->  3.99 MB in 1825 ms
 // ADR-0016 benchmarked the same 50k-row workload at 2,026.2 ms using `exceljs`,
-// 76% of it inside the library. Level 6 here is 2.61x faster than that total.
+// 76% of it inside the library. Level 6 here is 2.14x faster than that total.
+//
+// KNOWN AND DELIBERATE BEHAVIOUR, none of it silent in the spec:
+//   * NaN / Infinity / -Infinity have no OOXML numeric form and become TEXT cells.
+//     Emitting <v>NaN</v> makes openpyxl refuse the whole workbook.
+//   * XML 1.0 forbids most C0 control characters outright, so they are STRIPPED,
+//     not escaped. A lone CR becomes LF. That is data loss and it is intentional.
+//   * A date-shaped string JS can normalise is accepted as the normalised date
+//     (2026-02-30 -> 2026-03-02). `sprints.mjs:isIsoDate` rejects those instead;
+//     a shipped writer should reuse that predicate rather than this laxer test.
+//   * The 1899-12-30 epoch is correct for dates on or after 1900-03-01 only. It
+//     does NOT reproduce Excel's phantom 1900-02-29, and dates before 1900-03-01
+//     round-trip inconsistently between openpyxl and LibreOffice. Out of scope.
+//   * Excel's own ceilings (1,048,576 rows / 16,384 columns) are NOT enforced.
+//     200,000 rows write fine here; a 16,385th column emits ref XFE1, one past
+//     Excel's last valid column.
 //
 // Validated three ways, and the second and third each caught a defect the first
 // missed (spec 4 §1.4):
@@ -42,13 +63,13 @@ function crc32(buf) {
 }
 
 // --- minimal ZIP writer (store-or-deflate, no ZIP64) --------------------------
-function zip(files) {
+function zip(files, level = 6) {
   const chunks = [], central = [];
   let offset = 0;
   for (const { name, data } of files) {
     const nameBuf = Buffer.from(name, "utf8");
     const raw = Buffer.isBuffer(data) ? data : Buffer.from(data, "utf8");
-    const comp = deflateRawSync(raw, { level: 6 });
+    const comp = deflateRawSync(raw, { level });
     const useDeflate = comp.length < raw.length;
     const body = useDeflate ? comp : raw;
     const method = useDeflate ? 8 : 0;
@@ -82,10 +103,21 @@ const xe = (s) => String(s ?? "").replace(/[&<>"']/g, (c) => ({ "&":"&amp;","<":
 const colName = (n) => { let s = ""; n++; while (n > 0) { const r = (n - 1) % 26; s = String.fromCharCode(65 + r) + s; n = (n - r - 1) / 26; } return s; };
 // Excel's serial date: days since 1899-12-30 (its 1900 leap-year bug included).
 const EXCEL_EPOCH = Date.UTC(1899, 11, 30);
-const serial = (iso) => (Date.parse(iso + "T00:00:00Z") - EXCEL_EPOCH) / 86400000;
+// Returns null for anything that is not a real date — a caller that gets null
+// must fall back to a string cell rather than emitting <v>NaN</v>, which is the
+// defect that made openpyxl refuse the whole workbook.
+function serial(v) {
+  const ms = v instanceof Date ? v.getTime() : Date.parse(String(v) + "T00:00:00Z");
+  if (!Number.isFinite(ms)) return null;
+  return (ms - EXCEL_EPOCH) / 86400000;
+}
+// Excel forbids : \ / ? * [ ] in a sheet name and caps it at 31 chars.
+const sheetName = (n) => (String(n ?? "Sheet1").replace(/[:\\/?*[\]]/g, "_").slice(0, 31)) || "Sheet1";
 
 function sheetXml(rows) {
-  const lastRef = rows.length ? colName(Math.max(...rows.map(r => r.length)) - 1) + rows.length : "A1";
+  // reduce(), never Math.max(...spread) — spreading 130k rows overflows the stack.
+  const widest = rows.reduce((m, r) => (r.length > m ? r.length : m), 0);
+  const lastRef = rows.length && widest ? colName(widest - 1) + rows.length : "A1";
   const out = ['<?xml version="1.0" encoding="UTF-8" standalone="yes"?>',
     '<worksheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main">',
     `<dimension ref="A1:${lastRef}"/><sheetData>`];
@@ -93,8 +125,19 @@ function sheetXml(rows) {
     const cells = row.map((v, ci) => {
       const ref = colName(ci) + (ri + 1);
       if (v == null || v === "") return "";
-      if (typeof v === "number") return `<c r="${ref}"><v>${v}</v></c>`;
-      if (v instanceof Date || /^\d{4}-\d{2}-\d{2}$/.test(v)) return `<c r="${ref}" s="1"><v>${serial(v)}</v></c>`;
+      // NaN / Infinity have no OOXML numeric representation. Emitting them
+      // produces <v>NaN</v>, which openpyxl refuses outright — so they become text.
+      if (typeof v === "number") {
+        return Number.isFinite(v)
+          ? `<c r="${ref}"><v>${v}</v></c>`
+          : `<c r="${ref}" t="inlineStr"><is><t>${xe(String(v))}</t></is></c>`;
+      }
+      if (v instanceof Date || /^\d{4}-\d{2}-\d{2}$/.test(v)) {
+        const sv = serial(v);
+        if (sv !== null) return `<c r="${ref}" s="1"><v>${sv}</v></c>`;
+        // date-shaped but not a date (e.g. 9999-99-99) — keep it as text
+        return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xe(String(v))}</t></is></c>`;
+      }
       return `<c r="${ref}" t="inlineStr"><is><t xml:space="preserve">${xe(v)}</t></is></c>`;
     }).join("");
     out.push(`<row r="${ri + 1}">${cells}</row>`);
@@ -103,13 +146,59 @@ function sheetXml(rows) {
   return out.join("");
 }
 
-export function writeXlsx(rows, sheetName = "Sheet1") {
+export function writeXlsx(rows, name = "Sheet1", { level = 6 } = {}) {
+  const sn = sheetName(name);
   return zip([
     { name: "[Content_Types].xml", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Types xmlns="http://schemas.openxmlformats.org/package/2006/content-types"><Default Extension="rels" ContentType="application/vnd.openxmlformats-package.relationships+xml"/><Default Extension="xml" ContentType="application/xml"/><Override PartName="/xl/workbook.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet.main+xml"/><Override PartName="/xl/worksheets/sheet1.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.worksheet+xml"/><Override PartName="/xl/styles.xml" ContentType="application/vnd.openxmlformats-officedocument.spreadsheetml.styles+xml"/></Types>' },
     { name: "_rels/.rels", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/officeDocument" Target="xl/workbook.xml"/></Relationships>' },
-    { name: "xl/workbook.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xe(sheetName)}" sheetId="1" r:id="rId1"/></sheets></workbook>` },
+    { name: "xl/workbook.xml", data: `<?xml version="1.0" encoding="UTF-8" standalone="yes"?><workbook xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main" xmlns:r="http://schemas.openxmlformats.org/officeDocument/2006/relationships"><sheets><sheet name="${xe(sn)}" sheetId="1" r:id="rId1"/></sheets></workbook>` },
     { name: "xl/_rels/workbook.xml.rels", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships"><Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/worksheet" Target="worksheets/sheet1.xml"/><Relationship Id="rId2" Type="http://schemas.openxmlformats.org/officeDocument/2006/relationships/styles" Target="styles.xml"/></Relationships>' },
     { name: "xl/styles.xml", data: '<?xml version="1.0" encoding="UTF-8" standalone="yes"?><styleSheet xmlns="http://schemas.openxmlformats.org/spreadsheetml/2006/main"><numFmts count="1"><numFmt numFmtId="164" formatCode="yyyy\\-mm\\-dd"/></numFmts><fonts count="1"><font><sz val="11"/><name val="Calibri"/></font></fonts><fills count="1"><fill><patternFill patternType="none"/></fill></fills><borders count="1"><border/></borders><cellStyleXfs count="1"><xf numFmtId="0" fontId="0" fillId="0" borderId="0"/></cellStyleXfs><cellXfs count="2"><xf numFmtId="0" fontId="0" fillId="0" borderId="0" xfId="0"/><xf numFmtId="164" fontId="0" fillId="0" borderId="0" xfId="0" applyNumberFormat="1"/></cellXfs><cellStyles count="1"><cellStyle name="Normal" xfId="0" builtinId="0"/></cellStyles></styleSheet>' },
     { name: "xl/worksheets/sheet1.xml", data: sheetXml(rows) },
-  ]);
+  ], level);
+}
+
+// --- reproducing §1.3's table -------------------------------------------------
+// `node <this file> --bench [projectsDir]` prints every figure §1.3 quotes.
+// With a projects dir it uses the live corpus; the 50k row set is built by
+// CYCLING those real rows, because synthetic repeated rows compress far better
+// than real ticket titles and would flatter the result.
+if ((process.argv[1] ?? "").endsWith("2026-08-24-xlsx-zero-dependency-proof.mjs")
+    && process.argv.includes("--bench")) {
+  const dir = process.argv[process.argv.indexOf("--bench") + 1];
+  const HEAD = ["id","project","type","status","priority","parent","assignee",
+                "estimate","worklog_minutes","sprint","start","due","title"];
+  let live = [HEAD];
+  if (dir && !dir.startsWith("--")) {
+    const { buildIndex } = await import(new URL("../../../../scripts/model/index.mjs", import.meta.url));
+    for (const r of buildIndex(dir).rows) {
+      live.push(HEAD.map((h) => (h === "estimate" || h === "worklog_minutes")
+        ? (r[h] == null ? "" : Number(r[h])) : r[h]));
+    }
+  }
+  const med = (fn, runs = 7) => {
+    const t = [];
+    let out;
+    for (let i = 0; i < runs; i++) {
+      const a = process.hrtime.bigint(); out = fn(); const b = process.hrtime.bigint();
+      t.push(Number(b - a) / 1e6);
+    }
+    t.sort((x, y) => x - y);
+    return { ms: t[Math.floor(runs / 2)], lo: t[0], hi: t[runs - 1], bytes: out.length };
+  };
+  const show = (label, r) =>
+    console.log(`${label.padEnd(34)} ${r.ms.toFixed(0).padStart(5)} ms  (${r.lo.toFixed(0)}-${r.hi.toFixed(0)})  ${(r.bytes / 1024).toFixed(1).padStart(8)} KB`);
+  if (live.length > 1) {
+    for (const level of [6, 9]) show(`live ${live.length - 1} rows, level ${level}`, med(() => writeXlsx(live, "tickets", { level })));
+  } else {
+    console.log("(no projects dir given — skipping the live-corpus rows)");
+  }
+  const body = live.length > 1 ? live.slice(1) : [["ID","P","task","done","high","P-1","x",60,45,"S5","2026-08-01","2026-08-05","a title of roughly realistic length"]];
+  const big = [HEAD];
+  for (let i = 0; i < 50000; i++) big.push(body[i % body.length]);
+  for (const level of [6, 9]) show(`50,000 real-shaped rows, level ${level}`, med(() => writeXlsx(big, "tickets", { level })));
+  for (const n of [10000, 20000, 30000]) {
+    const r = [HEAD]; for (let i = 0; i < n; i++) r.push(body[i % body.length]);
+    show(`${n} real-shaped rows, level 6`, med(() => writeXlsx(r, "tickets", { level: 6 })));
+  }
 }
