@@ -9,7 +9,7 @@ import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { validateTicket } from "./model/rules.mjs";
 import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
-import { EDITABLE_FIELDS } from "./model/fields.mjs";
+import { EDITABLE_FIELDS, derivedFieldRefusal } from "./model/fields.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
 import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
@@ -24,7 +24,13 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
   const { today = null, storage = fsStorage, readStorage = fsReadStorage,
           writePort = fsWritePort(projectsDir, storage) } = opts;
   const bad = Object.keys(patch).filter((k) => !EDITABLE_FIELDS.has(k));
-  if (bad.length) return { ok: false, errors: [`field(s) not editable: ${bad.join(", ")}`] };
+  if (bad.length) {
+    // A refusal that does not name the replacement field is a defect (BLZ-360 §4.2). Every
+    // refused field gets its own line so a patch touching both `start` and `due` is told about
+    // both, rather than about whichever sorted first.
+    return { ok: false, errors: bad.map((k) => derivedFieldRefusal(k)
+      ?? `field(s) not editable: ${k}`) };
+  }
 
   const { found, duplicates } = locateTicket(projectsDir, id);
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };

@@ -5,6 +5,15 @@ import { PRIORITIES, allTypes } from "./schema.mjs";
 // The ONE source of truth for what /api/edit accepts and what the panel offers.
 // status/resolution stay move/resolve-only; id/project/dates are read-only.
 //
+// THAT LAST CLAUSE IS TRUE FOR THE FIRST TIME (BLZ-386 / BLZ-360 §4.2). Until the date
+// migration this comment said "dates are read-only" while the set below contained `start` and
+// `due` — ADR-0022's own Context cites that contradiction as the reason the ADR exists. Under
+// ADR-0022 those two are SCHEDULER OUTPUTS, so the operator loses them and gains the two
+// constraints that drive them: `not_before` and `deadline`.
+//
+// `sprint` stays. It is not a date, and `blaze sprint new --start` is the sprint WINDOW's
+// start — a different flag on a different runner, found by grepping rather than reasoning.
+//
 // `type` IS editable (BLZ-230). A model migration is a re-typing exercise, and excluding
 // `type` meant the migration's central operation had to be a raw file rewrite with no
 // validation at all. `applyEdit` validates a retype in BOTH directions — the ticket's own
@@ -12,8 +21,20 @@ import { PRIORITIES, allTypes } from "./schema.mjs";
 // invalidate a ticket other than the one being edited.
 export const EDITABLE_FIELDS = new Set([
   "title", "type", "assignee", "priority", "labels", "components", "estimate", "parent",
-  "likelihood", "impact", "due", "sprint", "start",
+  "likelihood", "impact", "sprint", "not_before", "deadline",
 ]);
+
+// The two fields the scheduler took over, and what to set instead. Spec 1 §4.2's rule is that
+// every refusal names the rule and lists every failing item; §4.2 applies it here in as many
+// words — "A refusal that does not name the replacement field is a defect."
+const DERIVED_REPLACEMENT = { start: "not_before", due: "deadline" };
+
+/** The refusal for a field the scheduler now owns, or null if this is not one of them. */
+export function derivedFieldRefusal(field) {
+  const replacement = DERIVED_REPLACEMENT[field];
+  if (!replacement) return null;
+  return `${field} is derived by the scheduler; set '${replacement}' to constrain it`;
+}
 
 const SURFACED = new Set(["title", "pr", "links"]);
 

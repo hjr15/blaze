@@ -42,8 +42,14 @@ export async function applyNew(projectsDir, opts = {}) {
     likelihood: extra.likelihood ?? undefined,
     impact: extra.impact ?? undefined,
     sprint: extra.sprint ?? undefined,
-    start: extra.start ?? undefined,
-    due: extra.due ?? undefined,
+    // BLZ-386. `start`/`due` are the scheduler's outputs under ADR-0022, so `applyNew` no
+    // longer accepts them either. Closing only the runner left the library verb open, and
+    // left `--not-before`/`--deadline` parsed by the runner, documented in its usage line,
+    // and then SILENTLY DISCARDED here — accepted with exit 0 and no field on disk. Found by
+    // adversarial review. Because the value never reached `frontmatter`, `validateSprintFields`
+    // below never saw it either, so `blaze new --deadline garbage` was accepted too.
+    not_before: extra.not_before ?? undefined,
+    deadline: extra.deadline ?? undefined,
     created: today, updated: today,
   };
   // Drop undefined risk-only keys so they don't serialize for non-risk types.
@@ -51,8 +57,8 @@ export async function applyNew(projectsDir, opts = {}) {
   if (frontmatter.impact === undefined) delete frontmatter.impact;
   // Drop undefined sprint fields so they don't serialize on every ticket (M2).
   if (frontmatter.sprint === undefined) delete frontmatter.sprint;
-  if (frontmatter.start === undefined) delete frontmatter.start;
-  if (frontmatter.due === undefined) delete frontmatter.due;
+  if (frontmatter.not_before === undefined) delete frontmatter.not_before;
+  if (frontmatter.deadline === undefined) delete frontmatter.deadline;
 
   const body = "## Context\n\n## Acceptance Criteria\n\n- [ ] \n\n## Notes\n";
   // INF-791: validate the parent for real. This previously passed NO lookup and

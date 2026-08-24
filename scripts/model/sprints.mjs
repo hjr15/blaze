@@ -47,6 +47,23 @@ export function validateSprintFields(fm, { sprintIds }) {
   if (isIsoDate(fm.start) && isIsoDate(fm.due) && fm.start > fm.due) {
     errors.push(`start (${fm.start}) is after due (${fm.due})`);
   }
+  // BLZ-386. `start`/`due` became scheduler OUTPUTS under ADR-0022, so the checks above now
+  // guard fields the scheduler writes correctly by construction — while the two fields an
+  // operator actually types had no validation at all. That hole is this migration's to close,
+  // not to open.
+  //
+  // A `not_before` after its `deadline` is NOT the same thing as `deadline-unreachable`, and
+  // the difference is ADR-0022's own split: a missed deadline is a true statement about a
+  // CORRECT corpus and ships soft, whereas "start no earlier than the 16th, finish by the
+  // 11th" is two constraints that cannot both hold — the corpus being wrong.
+  for (const f of ["not_before", "deadline"]) {
+    if (fm[f] != null && fm[f] !== "" && !isIsoDate(fm[f])) {
+      errors.push(`${f} '${fm[f]}' must be a YYYY-MM-DD date`);
+    }
+  }
+  if (isIsoDate(fm.not_before) && isIsoDate(fm.deadline) && fm.not_before > fm.deadline) {
+    errors.push(`not_before (${fm.not_before}) is after deadline (${fm.deadline})`);
+  }
   return errors;
 }
 

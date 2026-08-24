@@ -213,6 +213,15 @@ export function buildIndex(projectsDir, { tickets, sprints } = {}) {
       status: t.status, priority: fm.priority ?? null, resolution: fm.resolution ?? null,
       parent: fm.parent ?? null, assignee: fm.assignee ?? null, estimate: fm.estimate ?? null,
       sprint: fm.sprint ?? null, start: fm.start ?? null, due: fm.due ?? null,
+      // BLZ-386. Carried so the migrated constraints do not vanish from every reader the
+      // moment the migration runs: `start`/`due` are cleared on the 12 non-terminal dated
+      // tickets, and without these two the index would show them as carrying no date at all.
+      // Found by adversarial review, which measured the consequence — gantt.mjs reads
+      // `r.start`/`r.due` and would render all 12 as `unplanned` bars.
+      //
+      // This does NOT make the Gantt draw them: that is spec 3's schedule axis, which is
+      // deliberately out of BLZ-384's scope. It stops the data disappearing in the meantime.
+      not_before: fm.not_before ?? null, deadline: fm.deadline ?? null,
       worklog_minutes, file: t.file,
     });
     for (const link of fm.links ?? []) links.push({ src: fm.id, type: link.type, target: link.target });

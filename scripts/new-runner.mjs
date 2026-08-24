@@ -1,6 +1,7 @@
 // scripts/new-runner.mjs — CLI entry for `blaze new`. Parses flags, calls
 // applyNew against the resolved data tree, then commits (or queues) the ticket.
 import { applyNew } from "./new.mjs";
+import { derivedFieldRefusal } from "./model/fields.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
@@ -44,9 +45,24 @@ for (let i = 0; i < argv.length; i++) {
     case "--impact":   opts.extra.impact = argv[++i]; break;
     case "--reason":   opts.extra.reason = argv[++i]; break;
     case "--sprint":   opts.extra.sprint = argv[++i]; break;
-    case "--start":    opts.extra.start = argv[++i]; break;
-    case "--due":      opts.extra.due = argv[++i]; break;
+    // BLZ-386 / BLZ-360 §4.2: `start` and `due` are the scheduler's outputs under ADR-0022, so
+    // they leave the create path with the edit path. The two constraints that drive them take
+    // their place, and the refusal below names the replacement rather than just rejecting.
+    case "--not-before": opts.extra.not_before = argv[++i]; break;
+    case "--deadline":   opts.extra.deadline = argv[++i]; break;
     default:
+      // `--start`/`--due` are refused HERE rather than in their own switch branch, and the
+      // placement is load-bearing: tests/new-usage-risk-flags.test.mjs greps this file for
+      // switch branches on a flag literal and requires every one to appear in the usage line.
+      // A refused flag must not be documented as supported, so it belongs with unknown-flag
+      // handling — which is what it now is.
+      //
+      // The comment above deliberately does NOT spell that pattern out: an earlier version did,
+      // and the grep matched the COMMENT, reporting a flag named "--flag" that does not exist.
+      if (a === "--start" || a === "--due") {
+        console.error(`blaze new: ${derivedFieldRefusal(a.slice(2))}`);
+        process.exit(1);
+      }
       if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
       positional.push(a);
   }
@@ -59,8 +75,9 @@ if (!opts.project || !opts.type || !opts.title) {
   // REQUIRES them could not be created from the documented invocation.
   console.error('usage: blaze new --project <KEY> --type <type> "<title>"');
   console.error('  [--parent ID] [--priority p] [--assignee who] [--labels a,b] [--components a,b]');
-  console.error('  [--estimate m] [--likelihood l] [--impact i] [--sprint s] [--start YYYY-MM-DD]');
-  console.error('  [--due YYYY-MM-DD] [--reason "<why a required field is blank>"]');
+  console.error('  [--estimate m] [--likelihood l] [--impact i] [--sprint s]');
+  console.error('  [--not-before YYYY-MM-DD] [--deadline YYYY-MM-DD]');
+  console.error('  [--reason "<why a required field is blank>"]');
   console.error('  --likelihood and --impact are REQUIRED for --type risk; --estimate for story/task/bug.');
   process.exit(1);
 }
