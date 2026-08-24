@@ -545,3 +545,39 @@ test("CORPUS — BLZ-253's 4,800 minutes is the board's max EF, so it sets the h
   assert.equal(byId(r, "BLZ-253").is_critical, true, "the ticket that sets the horizon is the critical one");
   assert.equal(byId(r, "OMA-4").float_minutes, 4770);
 });
+
+// ---------------------------------------------------------------- the delivery-graph filter
+//
+// This filter is an INFERENCE, flagged as one in schedule.mjs: BLZ-360 §6.2's numbered list
+// names only the edge-kind rule and terminality, while §6.2's heading and §7.1 both call the
+// population "the non-terminal DELIVERY graph". These tests pin the reading.
+
+test("a non-delivery ticket is not a node, so CPM never hands it a derived date", () => {
+  // Measured on the live board: 203 non-terminal non-delivery tickets — 43 goal, 65 risk,
+  // 89 requirement, 6 architecture — against 538 delivery ones.
+  const r = run([
+    t("G", { type: "goal", status: "in-progress", estimate_minutes: 830 }),
+    t("RQ", { type: "requirement", status: "proposed" }),
+    t("RK", { type: "risk", status: "identified" }),
+    t("T", { estimate_minutes: 60 }),
+  ]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["T"]);
+  assert.deepEqual(r.unscheduled, [], "and none of them is marked unscheduled either");
+});
+
+test("a non-delivery ticket cannot set the board's horizon", () => {
+  // OBA-1 is a `goal/in-progress` carrying 830 minutes — the largest estimate on any
+  // non-terminal non-delivery ticket on the live board. It must not move the horizon.
+  const r = run([
+    t("OBA-1", { type: "goal", status: "in-progress", estimate_minutes: 830 }),
+    t("T", { estimate_minutes: 120 }),
+  ]);
+  assert.equal(r.horizon_minutes, 120, "the goal's 830 minutes are not in the solve at all");
+});
+
+test("a row whose type did not parse is skipped, not crashed on", () => {
+  // gantt.mjs:23 guards with isType FIRST because workflowFor throws on null/unknown, and
+  // index rows carry `type: fm.type ?? null`.
+  const r = run([t("BAD", { type: null }), t("ALSO-BAD", { type: "nonsense" }), t("T", { estimate_minutes: 60 })]);
+  assert.deepEqual(r.scheduled.map((s) => s.id), ["T"]);
+});

@@ -25,6 +25,7 @@
 //      "every SCC member is unscheduled" rule would overwrite them.
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
+import { isType, workflowFor } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
 export const PRECEDES = "Precedes";
@@ -174,6 +175,10 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   const rows = new Map();
   for (const t of tickets) if (t && t.id != null) rows.set(t.id, t);
   const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
+  // Guard with isType FIRST — workflowFor throws on null/unknown (schema.mjs:37) — exactly as
+  // gantt.mjs:23 does, and for the same reason: an unguarded call crashes on a row whose type
+  // did not parse.
+  const isDelivery = (t) => isType(t.type) && workflowFor(t.type) === "delivery";
 
   // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------
   const dropped = [];
@@ -190,7 +195,26 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   }
 
   // --- filter 2: nodes, dropping every terminal ticket ----------------------------------
-  const nodeIds = [...rows.keys()].filter((id) => !terminalOf(rows.get(id))).sort(cmp);
+  //
+  // A node must ALSO resolve to the delivery workflow, and that half is an INFERENCE this
+  // module is making rather than a rule it is quoting. BLZ-360 §6.2's numbered list names only
+  // the edge-kind rule and terminality — but §6.2's own heading and §7.1 both call the
+  // population "the non-terminal DELIVERY graph", and without this the solve would hand a
+  // derived start_date and due_date to every non-terminal `goal`, `risk`, `requirement` and
+  // `architecture` ticket. Measured on the live board: 203 of them (43/65/89/6), against 538
+  // delivery tickets. None can carry an edge — Precedes' endpoint kinds refuse them — so each
+  // would be an isolated node given dates CPM never derived.
+  //
+  // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
+  // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
+  // another board, which is why the filter is here rather than left to luck.
+  //
+  // `epic` stays a node: it resolves to the delivery workflow even though it is not a Precedes
+  // endpoint. That is BLZ-378's live disagreement, pinned by a test rather than silently
+  // resolved here.
+  const nodeIds = [...rows.keys()]
+    .filter((id) => !terminalOf(rows.get(id)) && isDelivery(rows.get(id)))
+    .sort(cmp);
   const isNode = new Set(nodeIds);
 
   // An edge into or out of a ticket that is not a node cannot exist: the node is not there.
