@@ -34,6 +34,11 @@ const SUBCOMMANDS = {
   new: { file: "new-runner.mjs", desc: "create a ticket", mutates: true },
   sprint: { file: "sprint-runner.mjs", desc: "create/list/activate sprints", mutates: true },
   audit: { file: "audit-runner.mjs", desc: "report corpus hygiene (read-only; non-zero on a hard finding)", mutates: false },
+  // `mutates: true` because `migrate-dates --write` rewrites tickets. Dry-run is the default
+  // for both subcommands and `import-deps` has no --write at all, but the CLI gate is per-verb
+  // and BLZ-121 refuses to even SPAWN a mutating runner under BLAZE_READONLY — declaring this
+  // read-only because the common path is a dry run would defeat that.
+  schedule: { file: "schedule-runner.mjs", desc: "migrate dates to constraints, or propose Precedes edges from Blocks", mutates: true },
   reindex: { file: "reindex.mjs", desc: "rebuild the derived index + transitions cache", mutates: true },
   move: { file: "move-runner.mjs", desc: "move a ticket to a new status", mutates: true },
   edit: { file: "edit-runner.mjs", desc: "edit a ticket field", mutates: true },
