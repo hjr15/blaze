@@ -117,7 +117,7 @@ test("applyNew warns (does not block) on empty required components", async () =>
   rmSync(r, { recursive: true, force: true });
 });
 
-test("applyNew accepts sprint/start/due when the sprint id is in the registry", async () => {
+test("applyNew accepts sprint/not_before/deadline, and REFUSES start/due", async () => {
   const r = root();
   const projects = join(r, "projects");
   writeFileSync(join(r, "sprints.json"), JSON.stringify({
@@ -125,13 +125,29 @@ test("applyNew accepts sprint/start/due when the sprint id is in the registry", 
   }));
   const res = await applyNew(projects, {
     project: "OBA", type: "task", title: "sprint task", today: "2026-07-15",
-    extra: { estimate: 30, sprint: "S1", start: "2026-07-20", due: "2026-07-24" },
+    extra: { estimate: 30, sprint: "S1", not_before: "2026-07-20", deadline: "2026-07-24" },
   });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   const txt = readFileSync(res.file, "utf8");
   assert.match(txt, /sprint: S1/);
-  assert.match(txt, /start: 2026-07-20/);
-  assert.match(txt, /due: 2026-07-24/);
+  assert.match(txt, /not_before: 2026-07-20/);
+  assert.match(txt, /deadline: 2026-07-24/);
+
+  // Inverted by BLZ-386 rather than deleted: this test locked in `start`/`due` on the create
+  // path, which is the contract ADR-0022 removes. Closing only the runner left this library
+  // verb open, and an adversarial review found the flags that replaced them were parsed,
+  // documented and then dropped on the floor.
+  assert.ok(!/^start:/m.test(txt), "start is the scheduler's output, not a create-time input");
+  assert.ok(!/^due:/m.test(txt));
+
+  // And the validator now actually sees them, which it could not while the value never
+  // reached frontmatter.
+  const bad = await applyNew(projects, {
+    project: "OBA", type: "task", title: "bad deadline", today: "2026-07-15",
+    extra: { estimate: 30, deadline: "garbage" },
+  });
+  assert.equal(bad.ok, false);
+  assert.ok(bad.errors.some((e) => /deadline .*YYYY-MM-DD/.test(e)), JSON.stringify(bad.errors));
   rmSync(r, { recursive: true, force: true });
 });
 

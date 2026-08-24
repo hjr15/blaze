@@ -94,3 +94,23 @@ test("the start/due checks are KEPT, because the migration and the scheduler sti
   assert.match(validateDates({ start: "nonsense" })[0], /start.*YYYY-MM-DD/);
   assert.match(validateDates({ start: "2026-07-25", due: "2026-07-20" })[0], /start.*is after due/);
 });
+
+test("REVIEW — the index carries the migrated fields, so they do not vanish from readers", async () => {
+  // The migration clears `start`/`due` on the 12 non-terminal dated tickets. The index mapped
+  // neither replacement, so every reader — gantt.mjs reads r.start/r.due — would have seen
+  // those tickets as carrying no date at all the moment the migration ran.
+  const { buildIndex } = await import("../../scripts/model/index.mjs");
+  const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
+  const { tmpdir } = await import("node:os");
+  const { join } = await import("node:path");
+  const root = mkdtempSync(join(tmpdir(), "idx-"));
+  mkdirSync(join(root, "TST", "defined"), { recursive: true });
+  writeFileSync(join(root, "TST", "defined", "TST-1-x.md"),
+    "---\nid: TST-1\ntitle: t\ntype: task\nproject: TST\nnot_before: 2026-08-11\ndeadline: 2026-08-16\n---\nb\n");
+  const idx = await buildIndex(root);
+  const row = idx.rows.find((r) => r.id === "TST-1");
+  assert.equal(row.not_before, "2026-08-11");
+  assert.equal(row.deadline, "2026-08-16");
+  assert.equal(row.start, null, "and the derived fields are honestly empty");
+  assert.equal(row.due, null);
+});

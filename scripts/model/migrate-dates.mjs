@@ -17,7 +17,7 @@
 // raise `deadline-unreachable` on day one — the exact "gate people learn to skip" failure
 // audit.mjs's header warns about. Discarding everything throws away `OMA-4`, the clearest
 // evidence in the corpus that `deadline` has the right shape.
-import { isTerminal } from "./workflows.mjs";
+import { isTerminal, statusesFor } from "./workflows.mjs";
 
 export const COHORT = {
   TERMINAL_BOTH: "terminal-actuals-both",
@@ -51,10 +51,11 @@ const val = (x) => { const s = String(x ?? "").trim(); return s === "" ? null : 
  */
 export function planDateMigration({ tickets = [] } = {}) {
   const changes = [], frozen = [], unresolved = [], dated = [], migratedDeadlines = [];
+  const conflicted = [];
   const counts = {
     terminalBoth: 0, terminalDueOnly: 0, terminalStartOnly: 0,
     openBoth: 0, openDueOnly: 0, openStartOnly: 0,
-    undated: 0, alreadyMigrated: 0, unresolved: 0, dated: 0,
+    undated: 0, alreadyMigrated: 0, unresolved: 0, conflicted: 0, dated: 0,
   };
 
   for (const t of tickets) {
@@ -67,8 +68,31 @@ export function planDateMigration({ tickets = [] } = {}) {
     if (!start && !due) { counts.undated++; continue; }
 
     let terminal;
-    try { terminal = isTerminal(t.type, t.status); }
-    catch { unresolved.push(t.id); counts.unresolved++; continue; }
+    try {
+      // isTerminal is `terminal.includes(status)`, which returns FALSE rather than throwing
+      // for a status the workflow never declares — so a `goal` sitting in `done/` (a goal is
+      // terminal at `achieved`) would be migrated as though it were open, overwriting an
+      // actual. Only an unknown TYPE was caught. The status has to be checked separately.
+      if (!statusesFor(t.type).includes(t.status)) throw new Error("undeclared status");
+      terminal = isTerminal(t.type, t.status);
+    } catch { unresolved.push(t.id); counts.unresolved++; continue; }
+
+    // A ticket carrying BOTH legacy dates and operator constraints is REFUSED, never merged.
+    // The guard above only catches the fully-migrated case; this is the half-migrated one, and
+    // it is reachable today — `not_before`/`deadline` became editable in BLZ-386 while every
+    // ticket still carries legacy `start`/`due`, so one `blaze edit` sets it up. Silently
+    // letting the legacy value win would destroy the more recent, deliberate one.
+    if (val(t.deadline) || val(t.not_before)) {
+      const would = {};
+      if (start) would.not_before = start;
+      if (due) would.deadline = due;
+      conflicted.push({
+        id: t.id, would_set: would,
+        already_has: { not_before: val(t.not_before), deadline: val(t.deadline) },
+      });
+      counts.conflicted++;
+      continue;
+    }
 
     dated.push(t.id);
     counts.dated++;
@@ -92,8 +116,9 @@ export function planDateMigration({ tickets = [] } = {}) {
 
   changes.sort((a, b) => cmp(a.id, b.id));
   frozen.sort((a, b) => cmp(a.id, b.id));
+  conflicted.sort((a, b) => cmp(a.id, b.id));
   return {
-    changes, frozen,
+    changes, frozen, conflicted,
     dated: dated.slice().sort(cmp),
     expectedDelta: changes.map((c) => c.id),
     migratedDeadlines: migratedDeadlines.slice().sort(cmp),

@@ -157,3 +157,17 @@ test("THE CRITERION, over a mixed population: no mutually-linked ticket pair is 
   }
   assert.deepEqual(by(p, DISPOSITION.PROPOSED).map(pairKey), ["B->C", "C->D"]);
 });
+
+test("REVIEW — a duplicated identical Blocks edge is reported once, not twice", () => {
+  // Reported and counted twice before, which inflated every total and would have had the
+  // operator resolve the same edge two times.
+  const p = plan([t("A"), t("B")], [b("A", "B"), b("A", "B")]);
+  assert.deepEqual(p.edges.map(pairKey), ["A->B"]);
+  assert.equal(p.counts.total, 1);
+});
+
+test("REVIEW — a duplicate does not turn a one-way edge into a false mutual pair", () => {
+  const p = plan([t("A"), t("B")], [b("A", "B"), b("A", "B"), b("B", "A")]);
+  assert.equal(p.counts.mutualPairs, 1);
+  assert.equal(p.counts.undecidable, 2, "one report per direction, not three");
+});

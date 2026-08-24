@@ -131,3 +131,67 @@ test("the migration is idempotent — a ticket already carrying deadline is not 
   assert.deepEqual(p.changes, []);
   assert.equal(p.counts.alreadyMigrated, 1);
 });
+
+// ------------------------------------------------- defects found by adversarial review
+
+test("REVIEW — a ticket carrying BOTH legacy dates and operator constraints is REFUSED", () => {
+  // The idempotence guard fired only when start and due were both absent, so a ticket that
+  // had legacy dates AND a hand-set constraint got the constraint silently overwritten by the
+  // legacy value — with no warning and no mention in the dry-run's MIGRATED list.
+  //
+  // Reachable TODAY, not hypothetically: `not_before` and `deadline` became editable in
+  // BLZ-386 while all 2,635 tickets still carry legacy `start`/`due`, so one `blaze edit`
+  // before the migration runs is enough to set it up.
+  const p = plan([t("C", {
+    start: "2026-03-01", due: "2026-03-10", not_before: "2026-02-01", deadline: "2026-02-28",
+  })]);
+  assert.deepEqual(p.changes, [], "nothing is written for a conflicted ticket");
+  assert.deepEqual(p.conflicted.map((c) => c.id), ["C"]);
+  assert.equal(p.counts.conflicted, 1);
+  const c = p.conflicted[0];
+  assert.deepEqual(c.would_set, { not_before: "2026-03-01", deadline: "2026-03-10" });
+  assert.deepEqual(c.already_has, { not_before: "2026-02-01", deadline: "2026-02-28" });
+});
+
+test("REVIEW — a conflict on only ONE of the two fields is still refused", () => {
+  const p = plan([t("C", { start: "2026-03-01", due: "2026-03-10", deadline: "2026-02-28" })]);
+  assert.deepEqual(p.changes, []);
+  assert.deepEqual(p.conflicted.map((c) => c.id), ["C"]);
+});
+
+test("REVIEW — a conflicted ticket is not counted as migrated, and the counts still reconcile", () => {
+  const p = plan([
+    t("C", { start: "2026-03-01", due: "2026-03-10", deadline: "2026-02-28" }),
+    t("OK", { start: "2026-08-11", due: "2026-08-16" }),
+    t("U"),
+  ]);
+  assert.deepEqual(p.expectedDelta, ["OK"], "a refused ticket must not be excused by the oracle");
+  assert.ok(!p.migratedDeadlines.includes("C"));
+  const n = p.counts;
+  assert.equal(n.terminalBoth + n.terminalDueOnly + n.terminalStartOnly + n.openBoth
+    + n.openDueOnly + n.openStartOnly + n.undated + n.alreadyMigrated + n.conflicted + n.unresolved, 3);
+});
+
+test("REVIEW — an unrecognised STATUS is reported, not silently treated as non-terminal", () => {
+  // isTerminal is `terminal.includes(status)`, which returns false rather than throwing for a
+  // status the workflow never declares — so a `goal` sitting in `done/` (a goal is terminal at
+  // `achieved`) was written as though it were open. Only an unknown TYPE was reported.
+  // Measured: 0 such tickets on the live board, so this is a latent hole, not a live one.
+  const p = plan([
+    t("G", { type: "goal", status: "done", start: "2026-01-01", due: "2026-02-01" }),
+    t("W", { status: "wontfix", due: "2026-02-01" }),
+  ]);
+  assert.deepEqual(p.changes, [], "neither is written");
+  assert.deepEqual(p.unresolved.sort(), ["G", "W"]);
+  assert.equal(p.counts.unresolved, 2);
+});
+
+test("REVIEW — a legal status is of course still migrated", () => {
+  const p = plan([
+    t("G", { type: "goal", status: "achieved", start: "2026-01-01", due: "2026-02-01" }),
+    t("O", { status: "in-progress", due: "2026-02-01" }),
+  ]);
+  assert.deepEqual(p.frozen.map((f) => f.id), ["G"], "achieved IS a goal's terminal status");
+  assert.deepEqual(p.changes.map((c) => c.id), ["O"]);
+  assert.deepEqual(p.unresolved, []);
+});

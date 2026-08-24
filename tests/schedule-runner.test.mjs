@@ -128,3 +128,36 @@ test("an unknown subcommand and an unknown flag both fail loudly", () => {
   assert.notEqual(run(root, ["nonsense"]).status, 0);
   assert.notEqual(run(root, ["migrate-dates", "--nonsense"]).status, 0);
 });
+
+test("REVIEW — a ticket whose frontmatter does not round-trip is REFUSED, not silently mangled", () => {
+  // parseTicket models a subset of YAML: a block scalar's content lines, a hyphenated key and
+  // a frontmatter comment are DROPPED. Rewriting such a ticket would destroy content the
+  // migration never meant to touch, and the pre-guard version did exactly that.
+  // Measured: 0 tickets on the live board carry any of these, so this is latent — but a
+  // migration that writes blind because today's corpus is tidy is one bad ticket from data loss.
+  const root = board([{ id: "TST-1", status: "defined", start: "2026-08-11", due: "2026-08-16" }]);
+  const file = join(root, "projects", "TST", "defined", "TST-1-x.md");
+  const raw = readFileSync(file, "utf8");
+  // A block scalar and a hyphenated key — neither survives parse/serialize.
+  writeFileSync(file, raw.replace("---\nbody text",
+    "some-hyphen-key: kept\ndescription: |\n  line one\n  line two\n---\nbody text"));
+  const before = readFileSync(file, "utf8");
+
+  const r = run(root, ["migrate-dates", "--write"]);
+  assert.notEqual(r.status, 0, "a refusal must be visible in the exit code");
+  assert.match(r.stdout, /REFUSED 1: TST-1/);
+  assert.match(r.stdout, /does not survive a\s*\n?\s*parse\/serialize round trip/);
+  assert.equal(readFileSync(file, "utf8"), before, "and the file is untouched, byte for byte");
+});
+
+test("REVIEW — a ticket already carrying a constraint is refused rather than overwritten", () => {
+  const root = board([{ id: "TST-1", status: "defined", start: "2026-03-01", due: "2026-03-10" }]);
+  const file = join(root, "projects", "TST", "defined", "TST-1-x.md");
+  writeFileSync(file, readFileSync(file, "utf8")
+    .replace("start: 2026-03-01", "not_before: 2026-02-01\ndeadline: 2026-02-28\nstart: 2026-03-01"));
+  const before = readFileSync(file, "utf8");
+  const r = run(root, ["migrate-dates", "--write"]);
+  assert.match(r.stdout, /REFUSED — already carries a constraint/);
+  assert.match(r.stdout, /TST-1\s+has not_before=2026-02-01 deadline=2026-02-28/);
+  assert.equal(readFileSync(file, "utf8"), before, "the operator's constraint survives");
+});

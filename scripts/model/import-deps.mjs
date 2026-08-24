@@ -41,7 +41,17 @@ export function planDependencyImport({ tickets = [], links = [] } = {}) {
   const rows = new Map();
   for (const t of tickets) if (t && t.id != null) rows.set(t.id, t);
 
-  const blocks = links.filter((l) => l.type === BLOCKS);
+  // Deduplicated: the same `Blocks A -> B` written twice was reported twice and counted twice,
+  // which inflated every total and would have had the operator resolve one edge two times.
+  const blocks = [];
+  const seenEdge = new Set();
+  for (const l of links) {
+    if (l.type !== BLOCKS) continue;
+    const k = `${l.src} ${l.target}`;
+    if (seenEdge.has(k)) continue;
+    seenEdge.add(k);
+    blocks.push(l);
+  }
   const seen = new Set(blocks.map((l) => `${l.src} ${l.target}`));
   const isMutual = (a, z) => seen.has(`${z} ${a}`);
 

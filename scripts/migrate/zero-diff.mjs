@@ -51,7 +51,7 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
   for (const id of frozenSet) {
     if (expected.has(id)) throw new Error(`zero-diff: ${id} is both frozen and expected to change`);
   }
-  const MIGRATED_FIELDS = new Set(["start", "due"]);
+  const MIGRATED_FIELDS = new Set(["start", "due", "not_before", "deadline"]);
   const report = {
     compared: 0, missing: [], extra: [],
     expectedDeltas: [],    // excused start/due changes — recorded, because a SILENT excuse is
@@ -80,8 +80,20 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
   // The fields the database actually round-trips. Deliberately explicit: a wildcard
   // over frontmatter keys would silently stop checking a field the day someone adds
   // one the loader ignores, which is the failure this oracle exists to catch.
+  //
+  // `not_before`/`deadline` were added by BLZ-385 after an adversarial review found two holes
+  // their absence left: a FROZEN terminal ticket that GAINED bogus constraints was not a
+  // frozenViolation, so "the 28 are asserted unchanged" was really only "their start/due are";
+  // and the migration's own output was never verified at all — clearing `start`/`due` and
+  // never writing the `deadline` passed green.
+  //
+  // The list is still not exhaustive, and that is PRE-EXISTING rather than introduced here:
+  // `labels`, `components`, `estimate`, `worklog`, `links`, `likelihood`, `impact`, `branch`
+  // and `pr` are unchecked, so destroying one of those still reports ok. Widening it is a
+  // change to an oracle six merged migrations already trust, so it is named in BLZ-385's PR
+  // body rather than done as a side effect of this one.
   const FIELDS = ["id", "type", "title", "priority", "resolution", "parent",
-                  "assignee", "sprint", "start", "due"];
+                  "assignee", "sprint", "start", "due", "not_before", "deadline"];
   // Fields the schema declares NOT NULL with a default. If the source carried nothing
   // and the database holds exactly that default, the value was not lost — it was
   // never stated. That is a different fact from "the value changed", and collapsing

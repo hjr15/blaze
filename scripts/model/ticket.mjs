@@ -111,7 +111,10 @@ export function parseTicket(text) {
 
 const FIELD_ORDER = [
   "id", "title", "type", "project", "priority", "resolution", "parent",
-  "assignee", "labels", "components", "estimate", "sprint", "start", "due",
+  // `start`/`due` stay in the order (the scheduler and the migration still read and clear
+  // them); `not_before`/`deadline` sit beside them rather than being appended after `updated`,
+  // which is where an unlisted key lands.
+  "assignee", "labels", "components", "estimate", "sprint", "not_before", "deadline", "start", "due",
   "worklog", "links", "likelihood", "impact", "branch", "pr", "created", "updated",
 ];
 
@@ -119,9 +122,23 @@ function dumpScalar(v) {
   if (v === null || v === undefined) return "";
   if (typeof v === "number" || typeof v === "boolean") return String(v);
   const s = String(v);
-  // Quote strings containing a comma — an unquoted comma would break re-parse of a
-  // flow array [a, b] or an inline object { k: v, ... }. Colons in values are fine.
-  return s.includes(",") ? JSON.stringify(s) : s;
+  // Quote when leaving the value bare would let it be re-parsed as something OTHER than a
+  // value. Three cases, and the second is a security fix rather than a formatting one:
+  //
+  //   comma      — an unquoted comma breaks re-parse of a flow array [a, b] or an inline
+  //                object { k: v, ... }. This was the original and only rule.
+  //   newline/CR — FRONTMATTER INJECTION. `serializeTicket` emits `${key}: ${value}`, so a
+  //                newline in ANY value opened a new frontmatter line that `parseTicket` read
+  //                back as a genuine key. `EDITABLE_FIELDS` is checked on patch KEYS only, so
+  //                a title could write `start:`, `due:`, `resolution:` or `parent:` — a full
+  //                bypass of the write path's allowlist, reachable from `/api/edit`. Found by
+  //                adversarial review of BLZ-386, whose claim it refuted directly.
+  //   leading
+  //   quote      — a value that merely looks quoted would be unwrapped on the way back in.
+  //
+  // Colons in values remain fine: a key is only read before the FIRST colon on a line.
+  // Ordinary values stay unquoted, so no existing ticket churns on the next write.
+  return /[,\n\r]/.test(s) || /^["']/.test(s) ? JSON.stringify(s) : s;
 }
 
 function dumpInlineObject(obj) {
