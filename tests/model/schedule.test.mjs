@@ -405,6 +405,17 @@ test("the solve is byte-stable under input reordering", () => {
   const b = run([...tickets].reverse(), [...links].reverse());
   assert.equal(JSON.stringify(a.scheduled), JSON.stringify(b.scheduled));
   assert.deepEqual(a.scheduled.map((s) => s.id), ["A", "B", "C", "D"], "ties break on ticket id");
+
+  // The WHOLE result, not just the scheduled rows. dropped_edges was the one array not sorted
+  // and its order came from two separate push loops, so a caller that reordered its links got
+  // a different object back — which is exactly what "byte-stable" is supposed to forbid.
+  const full = [t("R", { type: "risk", status: "identified" }), t("DONE", { status: "done" }), ...tickets];
+  const fullLinks = [edge("R", "A"), edge("DONE", "A"), edge("A", "DONE"), ...links,
+    { type: "Blocks", src: "A", target: "C" }, edge("A", "GHOST-9")];
+  assert.equal(
+    JSON.stringify(run(full, fullLinks), (k, v) => (v instanceof Map ? [...v] : v)),
+    JSON.stringify(run([...full].reverse(), [...fullLinks].reverse()), (k, v) => (v instanceof Map ? [...v] : v)),
+    "every array in the result is order-independent, dropped_edges included");
 });
 
 test("the model reads no clock and refuses to invent one", () => {

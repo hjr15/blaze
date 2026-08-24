@@ -344,7 +344,12 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     unscheduled,
     cycles,
     edges: edges.slice().sort((a, b) => cmp(a.src, b.src) || cmp(a.target, b.target)),
-    dropped_edges: dropped,
+    // Sorted like every other array here. It is the only one that was not, and its order was
+    // input-order dependent across two separate push loops — a real hole in "byte-stable",
+    // because a caller that reorders its links would get a different result object. Proved by
+    // reverting the sort: the determinism test fails, so it discriminates.
+    dropped_edges: dropped.slice().sort((a, b) =>
+      cmp(a.src, b.src) || cmp(a.target, b.target) || cmp(a.reason, b.reason)),
     by_id: new Map(scheduled.map((s) => [s.id, s])),
   };
 }
