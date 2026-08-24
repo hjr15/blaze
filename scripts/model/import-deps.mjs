@@ -27,9 +27,26 @@ export const DISPOSITION = {
 
 const BLOCKS = "Blocks";
 const PRECEDES = "Precedes";
-const P = DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES);
-const SOURCE_KINDS = new Set(P.source_kinds);
-const TARGET_KINDS = new Set(P.target_kinds);
+/**
+ * The declared `Precedes` endpoint kinds, from ONE link-type list (BLZ-392).
+ *
+ * Was a pair of module constants. `schedule.mjs` had the identical pair and BLZ-392 made THOSE
+ * overridable — and left these, which half-shipped the capability: an operator could make
+ * `spike` a node and watch the solve schedule it, then find `blaze schedule import-deps`
+ * REFUSING every edge into it with "Precedes declares no such endpoint". The planner that
+ * CREATES the edges the solve consumes was still gated on the unoverridable constant, so the
+ * feature worked right up to the point of being usable.
+ *
+ * Same shape as `schedule.mjs`'s `endpointKinds`, deliberately: these two are the readers that
+ * must agree, and they now agree by reading the same passed list.
+ */
+function endpointKinds(linkTypes) {
+  const precedes = linkTypes.find((l) => l && l.name === PRECEDES);
+  return {
+    source: new Set(precedes?.source_kinds ?? []),
+    target: new Set(precedes?.target_kinds ?? []),
+  };
+}
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
 /**
@@ -37,7 +54,9 @@ const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
  * @param links   [{ type, src, target }] — every link; only `Blocks` is an input here
  * @returns { edges: [{ src, target, disposition, proposed, reason, note, terminal_target }], counts }
  */
-export function planDependencyImport({ tickets = [], links = [] } = {}) {
+export function planDependencyImport({ tickets = [], links = [],
+                                       linkTypes = DEFAULT_LINK_TYPES } = {}) {
+  const { source: SOURCE_KINDS, target: TARGET_KINDS } = endpointKinds(linkTypes);
   const rows = new Map();
   for (const t of tickets) if (t && t.id != null) rows.set(t.id, t);
 
@@ -72,7 +91,7 @@ export function planDependencyImport({ tickets = [], links = [] } = {}) {
       out.reason = `${!a ? src : target} does not resolve to a ticket`;
       edges.push(out); continue;
     }
-    // The endpoint default-deny, read from DEFAULT_LINK_TYPES rather than restated. §5.4: this
+    // The endpoint default-deny, read from the RESOLVED link types rather than restated. §5.4: this
     // does most of the cleanup for free — 58 of the 392, 36 of them risk/feature. A risk does
     // not belong in a delivery critical path.
     if (!SOURCE_KINDS.has(a.type) || !TARGET_KINDS.has(z.type)) {

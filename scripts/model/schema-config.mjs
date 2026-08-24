@@ -63,7 +63,19 @@ export function validateSchema({ types = {}, workflows = {}, linkTypes = null } 
   if (Array.isArray(linkTypes)) {
     for (const lt of linkTypes) {
       for (const side of ["source_kinds", "target_kinds"]) {
-        for (const kind of lt?.[side] ?? []) {
+        const kinds = lt?.[side];
+        // REPORTED, never thrown — this function's contract, and the comment below used to
+        // claim it while `for...of` threw on a number and iterated a STRING PER CHARACTER,
+        // turning `source_kinds: "spike"` into five bogus errors instead of one clear one.
+        // `mergeLinkTypes` refuses these shapes outright now; this stays because
+        // `validateSchema` is a pure function anyone may call with anything.
+        if (kinds !== undefined && !Array.isArray(kinds)) {
+          errors.push(`link type "${lt?.name}" has a ${side} that is not an array `
+            + `(${kinds === null ? "null" : typeof kinds}) — it declares no endpoints, so `
+            + "nothing can be schedulable through it");
+          continue;
+        }
+        for (const kind of kinds ?? []) {
           if (!Object.prototype.hasOwnProperty.call(types, kind)) {
             errors.push(`link type "${lt.name}" names "${kind}" in ${side}, which is not a `
               + "declared type — it can never match, so any type it was meant to cover stays "

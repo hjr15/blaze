@@ -13,7 +13,8 @@ import { fsStorage } from "./model/storage.mjs";
 import { parseTicket, serializeTicket } from "./model/ticket.mjs";
 import { planDateMigration } from "./model/migrate-dates.mjs";
 import { planDependencyImport, DISPOSITION } from "./model/import-deps.mjs";
-import { resolveRoots } from "./config.mjs";
+import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveSchema } from "./model/schema-config.mjs";
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -47,7 +48,13 @@ function frontmatterOf(text) {
 const sameLines = (a, b) =>
   a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 
-const { projectsDir } = resolveRoots();
+const { projectsDir, dataRoot } = resolveRoots();
+// BLZ-392. Tolerated the way audit-runner tolerates it: a config that will not load leaves the
+// shipped endpoint kinds in force rather than taking the command down, because import-deps is a
+// read-only planner and refusing to plan would be the worse failure.
+let scheduleConfig = null;
+try { scheduleConfig = loadConfig({ root: dataRoot }); } catch { scheduleConfig = null; }
+const RESOLVED_LINK_TYPES = resolveSchema({ config: scheduleConfig }).linkTypes;
 const tickets = [];
 // A file whose frontmatter will not parse yields no id — a CRLF ticket does exactly this,
 // because `parseTicket`'s line regex has no `m` flag and cannot match before a `\r`. Such a
@@ -157,7 +164,10 @@ if (sub === "migrate-dates") {
   const links = tickets.flatMap((t) => t.links
     .filter((l) => l && l.type === "Blocks")
     .map((l) => ({ type: "Blocks", src: t.id, target: String(l.target) })));
-  const plan = planDependencyImport({ tickets, links });
+  // BLZ-392: the RESOLVED endpoint kinds. The planner that creates `Precedes` edges and the
+  // solve that consumes them must agree about what may be an endpoint, and an override that
+  // reached only one of them would let a type be schedulable but undependable.
+  const plan = planDependencyImport({ tickets, links, linkTypes: RESOLVED_LINK_TYPES });
   const c = plan.counts;
   console.log("=== blaze schedule import-deps --dry-run ===");
   console.log(`  ${c.total} Blocks edges considered`);

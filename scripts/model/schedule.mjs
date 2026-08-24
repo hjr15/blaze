@@ -232,9 +232,9 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);
   }
   const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
-  // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same
-  // DEFAULT_LINK_TYPES entry that decides which EDGES are legal. One source, so the node set and
-  // the edge set cannot drift apart.
+  // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same RESOLVED
+  // link-type entry that decides which EDGES are legal. One source, so the node set and the edge
+  // set cannot drift apart.
   //
   // This replaced `workflowFor(type) === "delivery"` under BLZ-388, which was a SECOND definition
   // that merely coincided. The two differ by exactly one type — `epic` — and giving a container

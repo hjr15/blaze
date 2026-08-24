@@ -179,11 +179,32 @@ own "Engine limits" section:
   triggering event, and return-visit obligations measure far below fields
   captured at creation, on the board this model was developed against.
 - **The five `engineering`-specific link types** (`Implements`, `Addresses`,
-  `Verifies`, `Supersedes`, `Derives`) can't be installed this way at all —
-  the `schema` block exposes `types` and `workflows` only, there is no
-  `links` path. `blaze link` hard-rejects an unknown type outright;
-  `work-item-types.md` documents these five as vocabulary/convention, not an
-  installable schema.
+  `Verifies`, `Supersedes`, `Derives`) still can't be installed for use by
+  `blaze link`, which hard-rejects an unknown type outright — `LINK_TYPES` in
+  `model/links.mjs` is a fixed `Set` and is a different registry.
+  `work-item-types.md` documents these five as vocabulary/convention.
+
+  **`schema.linkTypes` is a separate thing and does exist (BLZ-392).** It layers
+  the SCHEDULER's link-type declarations — `source_kinds`/`target_kinds`, which
+  decide what may be a `Precedes` endpoint and therefore what the critical path
+  can schedule — the same way `types` and `workflows` layer. It does not teach
+  `blaze link` a new type. Keyed by link-type name, and the key is the identity:
+
+      "schema": {
+        "types": { "spike": { "workflow": "delivery", "level": 5, "parentTypes": ["feature"], "required": ["title"] } },
+        "linkTypes": {
+          "Precedes": {
+            "source_kinds": ["feature", "story", "task", "bug", "subtask", "spike"],
+            "target_kinds": ["feature", "story", "task", "bug", "subtask", "spike"],
+            "inverse_name": "Follows", "min_card": 0, "max_card": null
+          }
+        }
+      }
+
+  Without the `linkTypes` half, a custom delivery type is **not** a `Precedes`
+  endpoint, so the scheduler treats it as no node at all. Replacement is
+  wholesale per link type — restate every kind you want, not just the new one —
+  and a malformed entry is a hard, named error rather than a silent drop.
 
 ## Gotchas
 

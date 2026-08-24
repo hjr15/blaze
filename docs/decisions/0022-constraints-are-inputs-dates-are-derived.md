@@ -129,8 +129,13 @@ the decision. It also closes BLZ-378, because the two turned out to be the same 
 **This is narrower than "the delivery workflow", by exactly one type: `epic`.** Verified across the
 whole registry: of the **ten** registered types (`goal`, `requirement`, `architecture`, `feature`,
 `risk`, `story`, `task`, `bug`, `subtask`, `epic`), `epic` is the **only** one the two rules
-classify differently. `Precedes`' `source_kinds` and `target_kinds` are also identical, so a node set taken
-from the source set cannot disagree with the target set about what may be an endpoint.
+classify differently. `Precedes`' `source_kinds` and `target_kinds` are identical **as shipped**, so a node set taken
+from the source set does not disagree with the target set about what may be an endpoint. That is a
+property of the declared default, not a structural guarantee: once BLZ-392 made the lists
+overridable, an installation may declare them differently, and a type that is a legal TARGET but
+not a legal SOURCE is then not a node — so an edge into it is dropped as a terminal endpoint. The
+node set is taken from the SOURCE set, deliberately, because a node is something that can begin a
+chain.
 
 Dropping `epic` is the substance of the decision, and the reason is not that it is retired — it is
 that **an epic is a container, and a container's dates are a roll-up OF the finished schedule
@@ -173,7 +178,15 @@ the old rule would have scheduled it as an isolated one, and it could not be *ma
 
 **The decision: endpoint kinds ARE overridable.** `resolveSchema` now layers `schema.linkTypes`
 exactly as it layers `schema.types` and `schema.workflows` — default → top-level → project, later
-wins — and `scheduleModel` takes the resolved list. The alternative, declaring a custom delivery
+wins — and `scheduleModel` and `planDependencyImport` both take the resolved list.
+
+**The per-project layer is accepted by the resolver and does not reach the scheduler, which is a
+statement about the scheduler rather than an oversight.** `resolveSchema` takes a `project` because
+every other registry it layers is per-project; the two production callers pass only `config`,
+because a CPM solve runs over the WHOLE corpus at once and there is no single project whose
+declaration could apply. Per-project endpoint kinds would mean one graph with two incompatible
+node rules. Recorded rather than quietly supported: a `schema.linkTypes` block in a `project.json`
+resolves correctly if something asks for it and changes no schedule today. The alternative, declaring a custom delivery
 type deliberately unschedulable, was rejected: the engine already lets an installation add a
 delivery type, and a capability that cannot be completed is worse than one that was never offered.
 The coherence argument for the old behaviour — *a type that can never carry a dependency edge
@@ -189,12 +202,27 @@ Three consequences, stated because none is free:
   lesson about wholesale replacement silently dropping what it does not restate is answered by
   `validateSchema` reporting an endpoint kind that names no declared type — a typo'd kind matches
   nothing, which would leave the type it was meant to schedule silently unschedulable again.
-- **`scheduleModel` defaults `linkTypes` to the constant**, so the pure model stays usable
-  standalone. That default is a trap for exactly one caller, the production one, because
-  forgetting to pass the resolved value reinstates the old bug with no visible symptom.
-  `tests/model/link-type-overrides.test.mjs` greps `audit-runner.mjs` to keep it passing them.
+- **Both model functions default `linkTypes` to the constant**, so they stay usable standalone.
+  That default is a trap for exactly the production callers, because forgetting to pass the
+  resolved value reinstates the old bug with **no visible symptom**. The guard is a grep over
+  `audit-runner.mjs` and `schedule-runner.mjs`, and its real force is not the presence of a
+  `linkTypes:` key — a first version checked only that and was defeated seven ways out of eight,
+  passing even when the file passed the constant. It is that **neither runner may name
+  `DEFAULT_LINK_TYPES` at all**: with the constant out of scope, passing it is not expressible.
+  Stated plainly, because greps invite over-trust: no scan of source text proves runtime
+  behaviour, and the assertions that do are the ones calling both functions directly.
 - **A list declaring no `Precedes` schedules nothing**, rather than falling back to the default
-  behind the operator's back. That is the honest reading of the declaration.
+  behind the operator's back. That is the honest reading of the declaration — and it is now
+  unreachable through config, because the merge can only replace or append, never remove.
+
+- **A malformed entry is a hard, named error at merge time**, following ADR-0002's precedent for
+  a breaking config shape. This is not tidiness: adversarial review found that `{}`, `null`, a
+  string, an array, or a mistyped `name` field each collapsed a working board to nothing
+  scheduled, with no error, no finding, and a `scheduleFindings()` result identical to a healthy
+  board. The `name` field is now taken from the KEY, so an entry cannot be filed under one
+  identity and looked up under another. **The safety argument does NOT rest on `validateSchema`,
+  which nothing in the engine calls** — ADR-0002 already warns that leaning on it buys "a
+  well-tested no-op: green in CI, absent in production". It reports; the merge refuses.
 
 Still invisible on this board, which has no `schema.linkTypes` override — so this changes no
 schedule today either.
