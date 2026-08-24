@@ -8,6 +8,7 @@ import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { auditCorpus, summarise, HARD_KINDS, scheduleFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
+import { resolveSchema } from "./model/schema-config.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 
 const positional = [];
@@ -177,6 +178,11 @@ const schedule = config === null ? null : scheduleModel({
   })),
   links: [],
   schedule: config.schedule,
+  // BLZ-392: the RESOLVED endpoint kinds, not the module constant. `resolveSchema` layers
+  // `schema.linkTypes` the way it already layers `schema.types` and `schema.workflows`, so a
+  // board that declares its own delivery type can declare it schedulable too. Passing the
+  // default here instead would silently ignore that override on the only path an operator runs.
+  linkTypes: resolveSchema({ config }).linkTypes,
   now: Date.now(),
 });
 if (schedule) report.findings.push(...scheduleFindings(schedule));

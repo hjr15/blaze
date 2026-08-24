@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows } from "./workflows.mjs";
+import { DEFAULT_LINK_TYPES, mergeLinkTypes } from "./link-schema.mjs";
 import { GOAL_SATISFYING_REQUIREMENT } from "./gates.mjs";
 
 export function resolveSchema({ config = null, project = null } = {}) {
@@ -13,15 +14,21 @@ export function resolveSchema({ config = null, project = null } = {}) {
   const projTypes = project?.schema?.types;
   const topWorkflows = config?.schema?.workflows;
   const projWorkflows = project?.schema?.workflows;
+  // BLZ-392: link types layer here too. Before this, `resolveSchema` had no link-type branch
+  // at all, so the solve's node rule — "a declared `Precedes` source kind" — read a module
+  // constant while the old rule it replaced read the override-merged type registry. An
+  // installation could add its own delivery type and had NO WAY to make it schedulable.
   return {
     types: mergeTypes(mergeTypes(DEFAULT_TYPES, topTypes), projTypes),
     workflows: mergeWorkflows(mergeWorkflows(DEFAULT_WORKFLOWS, topWorkflows), projWorkflows),
+    linkTypes: mergeLinkTypes(
+      mergeLinkTypes(DEFAULT_LINK_TYPES, config?.schema?.linkTypes), project?.schema?.linkTypes),
   };
 }
 
 /** Pure structural check: every type's workflow must be a declared workflow.
  *  Returns a list of human-readable errors ([] when valid). */
-export function validateSchema({ types = {}, workflows = {} } = {}) {
+export function validateSchema({ types = {}, workflows = {}, linkTypes = null } = {}) {
   const errors = [];
   for (const [name, def] of Object.entries(types)) {
     const wf = def && def.workflow;
@@ -48,6 +55,22 @@ export function validateSchema({ types = {}, workflows = {} } = {}) {
         + "goal:achieved gate requires — a goal cannot be achieved while a requirement beneath "
         + "it has not reached one of them, so with these absent no such goal can ever close. "
         + "Add them, or drop the gate deliberately (BLZ-353, ruling R48).");
+    }
+  }
+  // BLZ-392. An endpoint kind that names no declared type matches nothing, so the type it was
+  // meant to schedule stays silently unschedulable — which is the failure this ticket exists to
+  // end, reintroduced by a typo. Reported rather than thrown, matching this function's contract.
+  if (Array.isArray(linkTypes)) {
+    for (const lt of linkTypes) {
+      for (const side of ["source_kinds", "target_kinds"]) {
+        for (const kind of lt?.[side] ?? []) {
+          if (!Object.prototype.hasOwnProperty.call(types, kind)) {
+            errors.push(`link type "${lt.name}" names "${kind}" in ${side}, which is not a `
+              + "declared type — it can never match, so any type it was meant to cover stays "
+              + "unschedulable");
+          }
+        }
+      }
     }
   }
   return errors;

@@ -35,9 +35,26 @@ export const PRECEDES = "Precedes";
 const DAY_MS = 24 * 60 * 60 * 1000;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-const PRECEDES_TYPE = DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES);
-const SOURCE_KINDS = new Set(PRECEDES_TYPE.source_kinds);
-const TARGET_KINDS = new Set(PRECEDES_TYPE.target_kinds);
+/**
+ * The declared `Precedes` endpoint kinds, from ONE link-type list (BLZ-392).
+ *
+ * Was a pair of module constants read straight from `DEFAULT_LINK_TYPES`. That made the node
+ * rule unoverridable while the type registry it replaced was overridable, so an installation
+ * could add a delivery type and had no way to make it schedulable. Taking them from the passed
+ * list keeps the property BLZ-388 wanted — the node set and the edge set come from the SAME
+ * entry, so they cannot drift — while letting that entry be the resolved one.
+ *
+ * A list with no `Precedes` entry yields two empty sets: nothing is a node and every edge is
+ * dropped as an undeclared kind. That is the honest reading of "this installation declares no
+ * Precedes", not a reason to fall back to the default behind the operator's back.
+ */
+function endpointKinds(linkTypes) {
+  const precedes = linkTypes.find((l) => l && l.name === PRECEDES);
+  return {
+    source: new Set(precedes?.source_kinds ?? []),
+    target: new Set(precedes?.target_kinds ?? []),
+  };
+}
 
 const parseDay = (iso) => Date.parse(iso + "T00:00:00Z");
 const isoOf = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -190,7 +207,8 @@ function tarjan(ids, succ) {
  * @param now      injected epoch-ms; the model never reads the clock
  * @param runId    stamped onto the result so a persisted row can be told stale
  */
-export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null } = {}) {
+export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null,
+                                linkTypes = DEFAULT_LINK_TYPES } = {}) {
   if (!schedule || typeof schedule.minutes_per_day !== "number" || !Array.isArray(schedule.working_days)) {
     throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
       + "— board config is their single definition (BLZ-360 §2.3)");
@@ -234,6 +252,12 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // neither touches a date. So an epic gets no derived dates from anywhere today. Inert here
   // (zero epics), and stated rather than papered over — see ADR-0022 §What the scheduler treats
   // as a node.
+  //
+  // BLZ-392: the kinds come from the RESOLVED list the caller passes, not from the constant.
+  // The default keeps the pure model usable standalone; the production caller resolves and
+  // passes, and `tests/model/link-type-overrides.test.mjs` greps audit-runner.mjs to keep it
+  // doing so — a caller that forgets reinstates the old bug with no visible symptom.
+  const { source: SOURCE_KINDS, target: TARGET_KINDS } = endpointKinds(linkTypes);
   const isNodeKind = (t) => SOURCE_KINDS.has(t.type);
 
   // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------

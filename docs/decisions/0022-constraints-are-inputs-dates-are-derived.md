@@ -164,15 +164,40 @@ rather than the behavioural one — a rule read from one place cannot drift from
 alternative left `workflowFor` as a second definition of "schedulable" sitting beside the declared
 endpoint kinds.
 
-**One limitation this rule introduces, stated rather than discovered later.** The old filter read
-`workflowFor`, which resolves through the **override-merged** type registry; this one reads
-`DEFAULT_LINK_TYPES`, a constant. `resolveSchema` merges `schema.types` and `schema.workflows` and
-has **no override path for link types at all** — so an installation that adds its own delivery type
-(`spike`, say) gets a type that is not a `Precedes` endpoint and is therefore **not a node**, where
-the old rule would have scheduled it as an isolated one. That is a real behaviour change beyond
-`epic`, invisible on this board because it has no such override. It is coherent — a type that can
-never carry a dependency edge gains nothing from CPM over its own estimate — but it means a
-custom delivery type cannot currently be made schedulable at all. Tracked as **BLZ-392**.
+**The limitation this rule introduced, and how it was closed — BLZ-392.** The old filter read
+`workflowFor`, which resolves through the **override-merged** type registry; this one read
+`DEFAULT_LINK_TYPES`, a constant. `resolveSchema` merged `schema.types` and `schema.workflows` and
+had **no override path for link types at all** — so an installation that added its own delivery
+type (`spike`, say) got a type that is not a `Precedes` endpoint and therefore **not a node**, where
+the old rule would have scheduled it as an isolated one, and it could not be *made* one.
+
+**The decision: endpoint kinds ARE overridable.** `resolveSchema` now layers `schema.linkTypes`
+exactly as it layers `schema.types` and `schema.workflows` — default → top-level → project, later
+wins — and `scheduleModel` takes the resolved list. The alternative, declaring a custom delivery
+type deliberately unschedulable, was rejected: the engine already lets an installation add a
+delivery type, and a capability that cannot be completed is worse than one that was never offered.
+The coherence argument for the old behaviour — *a type that can never carry a dependency edge
+gains nothing from CPM over its own estimate* — is exactly right, and it is the reason the fix is
+an override of **which types may carry an edge** rather than a second definition of "schedulable"
+sitting beside the endpoint kinds. **The invariant BLZ-388 took the constant for is preserved: the
+node set and the edge set still come from one `Precedes` entry, now the resolved one.**
+
+Three consequences, stated because none is free:
+
+- **Replacement is wholesale at the link-type name**, as `mergeWorkflows` already replaces a
+  workflow. Deep-merging `source_kinds` would make *removing* a kind unexpressible. BLZ-361's
+  lesson about wholesale replacement silently dropping what it does not restate is answered by
+  `validateSchema` reporting an endpoint kind that names no declared type — a typo'd kind matches
+  nothing, which would leave the type it was meant to schedule silently unschedulable again.
+- **`scheduleModel` defaults `linkTypes` to the constant**, so the pure model stays usable
+  standalone. That default is a trap for exactly one caller, the production one, because
+  forgetting to pass the resolved value reinstates the old bug with no visible symptom.
+  `tests/model/link-type-overrides.test.mjs` greps `audit-runner.mjs` to keep it passing them.
+- **A list declaring no `Precedes` schedules nothing**, rather than falling back to the default
+  behind the operator's back. That is the honest reading of the declaration.
+
+Still invisible on this board, which has no `schema.linkTypes` override — so this changes no
+schedule today either.
 
 **The rejected alternative and why it lost.** Adding `epic` to `Precedes`' endpoint kinds would
 have made the two definitions agree the other way, at the cost of amending the declared list above

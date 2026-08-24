@@ -9,6 +9,32 @@
 // type, because Postgres has arrays and SQLite does not, and the read path must be
 // identical in both.
 import { dialect } from "./sql-dialect.mjs";
+/**
+ * Layer an override onto the declared link types (BLZ-392).
+ *
+ * `types` and `workflows` are keyed objects and merge with a shallow spread; this list is an
+ * ARRAY, so the override is a keyed object too — `{ Precedes: {...} }` — and the result stays
+ * an array. Same layering, same config shape, no third convention.
+ *
+ * Replacement is WHOLESALE at the link-type name, exactly as `mergeWorkflows` replaces a
+ * workflow. That is the deliberate choice: deep-merging `source_kinds` would make "remove a
+ * kind" unexpressible, and BLZ-361's lesson about wholesale replacement — that it silently
+ * drops what it does not restate — is answered here by `validateSchema` reporting an endpoint
+ * kind that names no declared type, rather than by making the merge cleverer.
+ *
+ * A non-object override is ignored rather than half-applied, the guard `mergeTypes` and
+ * `mergeWorkflows` already make.
+ */
+export function mergeLinkTypes(defaults, override) {
+  if (!override || typeof override !== "object" || Array.isArray(override)) return defaults;
+  const out = defaults.map((d) => (
+    Object.prototype.hasOwnProperty.call(override, d.name) ? override[d.name] : d));
+  for (const [name, def] of Object.entries(override)) {
+    if (!defaults.some((d) => d.name === name)) out.push(def);
+  }
+  return out;
+}
+
 export const DEFAULT_LINK_TYPES = [
   { name: "Implements", inverse_name: "Implemented by", source_kinds: ["feature"],
     target_kinds: ["requirement"], min_card: 0, max_card: null },
