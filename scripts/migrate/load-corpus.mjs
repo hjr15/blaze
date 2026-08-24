@@ -64,10 +64,11 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   const insTicket = db.prepare(
     `INSERT INTO ticket (id, project_key, num, type, status, title, priority, resolution,
                          parent_id, parent_type, assignee, estimate_minutes, sprint_id,
-                         start_date, due_date, body, ac_heading, created_on, updated_on,
+                         start_date, due_date, constraint_start_no_earlier_than, deadline,
+                         body, ac_heading, created_on, updated_on,
                          branch, pr, ref, category, verification, derived,
                          likelihood, impact, extra_json)
-     VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
+     VALUES (?,?,?,?,?,?,?,?,NULL,NULL,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?,?)`);
   // BLZ-295. Without these the migration silently dropped every one of them: 926 of
   // 2,561 tickets (36.2%) carry at least one, and extra_json is what keeps the
   // round-trip promise for keys nobody has thought of yet.
@@ -106,6 +107,9 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
         assignee,
         estimate(fm.estimate), String(fm.sprint ?? "") || null,
         isoDate(fm.start, null), isoDate(fm.due, null),
+        // BLZ-391: ADR-0022's two constraint columns arrived with PR #110 and this loader
+        // predates them, so a migrated ticket lost its `not_before`/`deadline` outright.
+        isoDate(fm.not_before, null), isoDate(fm.deadline, null),
         t.body ?? "", ac.heading,
         isoDate(fm.created, now), isoDate(fm.updated, now),
         nzs(fm.branch), nzs(fm.pr), nzs(fm.ref), nzs(fm.category),

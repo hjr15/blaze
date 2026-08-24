@@ -14,7 +14,9 @@
 // npx + SQLite path installs nothing.
 import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
 
-function toRecord(row, links) {
+// BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
+// one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
+function toRecord(row, links, labels, components, worklog) {
   const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
   return {
     frontmatter: {
@@ -22,8 +24,15 @@ function toRecord(row, links) {
       priority: row.priority, resolution: row.resolution ?? "",
       parent: row.parent_id ?? "", assignee: row.assignee,
       estimate: row.estimate_minutes ?? "", sprint: row.sprint_id ?? "",
+      labels: labels ?? [], components: components ?? [],
+      likelihood: row.likelihood ?? "", impact: row.impact ?? "",
+      branch: row.branch ?? "", pr: row.pr ?? "",
+      ref: row.ref ?? "", category: row.category ?? "",
+      verification: row.verification ?? "", derived: row.derived ?? "",
       start: iso(row.start_date), due: iso(row.due_date),
+      not_before: iso(row.constraint_start_no_earlier_than), deadline: iso(row.deadline),
       created: iso(row.created_on), updated: iso(row.updated_on),
+      worklog: worklog ?? [],
       links: links ?? [],
     },
     body: row.body ?? "",
@@ -42,7 +51,10 @@ function toRecord(row, links) {
 // into every other consumer of the `pg` module in the process.
 const COLS = `id, project_key, num, type, status, title, priority, resolution,
               parent_id, parent_type, assignee, estimate_minutes, sprint_id,
-              start_date::text AS start_date, due_date::text AS due_date, body,
+              likelihood, impact, branch, pr, ref, category, verification, derived,
+              start_date::text AS start_date, due_date::text AS due_date,
+              constraint_start_no_earlier_than::text AS constraint_start_no_earlier_than,
+              deadline::text AS deadline, body,
               created_on::text AS created_on, updated_on::text AS updated_on, version`;
 const ALIVE = "deleted_at IS NULL";
 
@@ -99,7 +111,26 @@ export async function openPostgresRead(connection, { create = false } = {}) {
       "SELECT link_type, target_id FROM ticket_link WHERE src_id = $1 ORDER BY link_type, target_id", [id]
     )).rows.map((l) => ({ type: l.link_type, target: l.target_id }));
 
-  const hydrate = async (row) => (row ? toRecord(row, await linksFor(row.id)) : null);
+  // Same child-table fetches as sqlite-storage.mjs, in the same order, for the same reason:
+  // `ord` preserves what the operator wrote, and `worklog_entry` has no ord so it uses on_date.
+  const childrenFor = async (id) => {
+    const [labels, components, worklog] = await Promise.all([
+      client.query("SELECT label FROM ticket_label WHERE ticket_id = $1 ORDER BY ord", [id]),
+      client.query("SELECT component FROM ticket_component WHERE ticket_id = $1 ORDER BY ord", [id]),
+      client.query("SELECT on_date::text AS on_date, minutes, note FROM worklog_entry WHERE ticket_id = $1 ORDER BY on_date, id", [id]),
+    ]);
+    return [
+      labels.rows.map((r) => r.label),
+      components.rows.map((r) => r.component),
+      worklog.rows.map((w) => ({ date: w.on_date, minutes: w.minutes, note: w.note ?? "" })),
+    ];
+  };
+
+  const hydrate = async (row) => {
+    if (!row) return null;
+    const [links, [labels, components, worklog]] = await Promise.all([linksFor(row.id), childrenFor(row.id)]);
+    return toRecord(row, links, labels, components, worklog);
+  };
   const hydrateAll = async (rows) => Promise.all(rows.map(hydrate));
 
   return {

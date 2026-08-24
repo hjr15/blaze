@@ -117,21 +117,16 @@ export function zeroDiff(source, sourceRoot, loaded, { criteriaFor = null, expec
   //
   // Both are checked immediately after this loop, by length and by serialized entry, so the
   // "explicit list" contract holds for them too.
-  // WHAT THE LOADED DRIVER CANNOT SURFACE, THIS ORACLE CANNOT CHECK — and it now SAYS so
-  // rather than passing in silence. Measured 2026-08-25 by round-tripping a ticket carrying all
-  // 28 frontmatter keys through `loadCorpus` + `openSqliteRead`: the seam surfaces **12** of
-  // them. `sqlite-storage.mjs`'s `toRecord` simply does not project `labels`, `components`,
-  // `likelihood`, `impact`, `branch`, `pr`, `ref`, `category`, `verification`, `derived`,
-  // `worklog`, `not_before` or `deadline` — `loadCorpus` WRITES most of those columns and the
-  // read side never selects them back. That gap is **BLZ-391**, not this file's to fix.
+  // WHAT THE LOADED DRIVER CANNOT SURFACE, THIS ORACLE CANNOT CHECK — and it SAYS so rather
+  // than passing in silence. That was written when the SQLite read seam projected 15 of a
+  // ticket's 28 frontmatter keys; **BLZ-391 closed that gap and it now projects all 28**, so the
+  // `unsurfaced` list is empty in practice. The mechanism stays: it is the honest third option
+  // between failing on a field a driver cannot show (which makes the oracle unusable) and
+  // passing over it silently (which is the defect BLZ-389 was raised for).
   //
-  // So a field stays in FIELDS whether or not a given driver surfaces it, and a field the
-  // LOADED corpus carries nowhere is reported in `report.unsurfaced` instead of counted as
-  // data loss. Failing on it would make the oracle unusable against the real driver; passing
-  // silently is the exact defect BLZ-389 was raised for. The third option is to say it.
-  //
-  // This also corrects BLZ-385: `not_before`/`deadline` were added there and are not surfaced
-  // either, so those checks were live only for the stub drivers the date-migration suite uses.
+  // BLZ-385's `not_before`/`deadline` checks were live only for stub drivers until BLZ-391 —
+  // `loadCorpus` did not even write those two columns, so the two fields the date migration
+  // writes were exactly the two the oracle could not see.
   const FIELDS = ["id", "type", "title", "project", "priority", "resolution", "parent",
                   "assignee", "sprint", "labels", "components", "estimate",
                   "likelihood", "impact", "branch", "pr",
