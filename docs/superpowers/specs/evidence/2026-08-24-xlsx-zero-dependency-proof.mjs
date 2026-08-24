@@ -185,7 +185,9 @@ export function writeXlsx(rows, name = "Sheet1", { level = 6 } = {}) {
 // Run-as-main only. An earlier version required the filename to be unchanged
 // (renaming silently disabled the claim); the version after that guarded on the
 // flag alone, so ANY importer invoked with --bench ran the harness and was killed
-// by its process.exit(). This is the standard test and it is neither.
+// by its process.exit(). This is the standard idiom and avoids both. Known limit:
+// invoked through a SYMLINK it does not fire — argv[1] is the link, import.meta.url
+// the realpath. Rename works; symlink does not.
 const RUN_AS_MAIN = process.argv[1]
   && import.meta.url === pathToFileURL(process.argv[1]).href;
 if (RUN_AS_MAIN && process.argv.includes("--bench")) {

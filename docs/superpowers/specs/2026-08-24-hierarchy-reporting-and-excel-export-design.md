@@ -66,16 +66,18 @@ strings. **No JSON Schema library.**"*
 
 ### 1.3 It was built and measured, and the numbers are the argument
 
-A working writer — **94 lines of code, importing `node:zlib` and `node:url` and nothing else** —
-was run against the live corpus and at ADR-0016's benchmark scale. All figures are medians, not
-single runs.
+A working writer — **98 lines of code, importing `node:zlib` and nothing else** — was run against
+the live corpus and at ADR-0016's benchmark scale. All figures are medians, not single runs.
 
-**That count is the *shipped writer alone*, and it needs saying because two earlier drafts counted
-different things.** The committed file is 224 lines, of which 140 are code — but ~46 of those are
-the `--bench` harness, which is evidence and does not ship. The writer proper is **94 code lines
-(142 including its comments)**. One draft said "86 lines (77 non-blank)", true before the bug
-fixes; another said "~140 lines (195 with comments)", which counts the harness and matches no
-measure of anything.
+**That count is the *shipped writer alone*, and it has now been wrong three times, so here is every
+measure of the committed file.** It is **234 lines, of which 145 are code**; **46** of those are
+the `--bench` harness, which is evidence and does not ship, and one more is the `node:url` import
+the harness alone needs. So the writer proper is **98 shipped code lines** (99 counting that
+import), out of a 143-line region including its comments. Earlier drafts said "86 lines (77
+non-blank)" — true before the bug fixes; "~140 lines (195 with comments)" — the whole file's code
+count and a figure matching nothing; and "94 lines … (142 including its comments)" — the file as it
+stood one commit *before* `localDayAsUtc` and the `node:url` import were added, i.e. arithmetic
+that was internally consistent and entirely stale.
 
 **It is committed at
 [`evidence/2026-08-24-xlsx-zero-dependency-proof.mjs`](evidence/2026-08-24-xlsx-zero-dependency-proof.mjs)**
@@ -120,10 +122,12 @@ rule costs nothing here. It is not "we beat exceljs".
 for **2.5% more bytes**; on the live board, **1.96× faster for 2.5% more bytes** (220.4 KB against
 215.1 KB).
 
-*(Two corrections collided in this sentence and the second broke the first. The original said
-"2.5% fewer bytes" for the live row — backwards against the table above. The pass that fixed the
-byte direction also replaced two **correct** ratios, 1.93× and 1.96×, with 1.87× and 1.81×, which
-reproduce from no figure anywhere and understate the shipped default's advantage. Both are now
+*(Two corrections collided in this sentence and the second broke the first. The **original** draft
+said "2.5% **more** bytes" and was right; the **first correction pass** changed it to "fewer",
+which was backwards against the table above. The second pass fixed the direction and, in the same
+edit, replaced two **correct** ratios — 1.93× and 1.96× — with 1.87× and 1.81×, which reproduce
+from no figure anywhere and understate the shipped default's advantage. A third pass then
+misattributed "fewer" to the original, deleting a true account of its provenance. All of it is now
 recomputed from the table's own numbers: 1825/948 and 102/52.)* `writeXlsx(rows, name, { level })` takes it as a parameter, so §8's
 mutation 6 has something to mutate — an earlier draft hardcoded the level and specified a
 two-argument signature, which made that mutation unkillable by construction.
@@ -469,7 +473,7 @@ in the same line.
 
 | File | Change |
 |---|---|
-| new — `scripts/model/xlsx.mjs` | **`writeXlsx(rows, sheetName, { level = 6 })`** — the three-argument form, so §8's mutation 6 has something to mutate; a two-argument signature makes it unkillable by construction. **94 lines of code** (§1.3); imports `node:zlib` and `node:url`. The committed proof is the starting point, minus its `--bench` harness. | ZIP writer, CRC-32, the six OOXML parts, `writeXlsx(rows, sheetName)` |
+| new — `scripts/model/xlsx.mjs` | **`writeXlsx(rows, sheetName, { level = 6 })`** — the three-argument form, so §8's mutation 6 has something to mutate; a two-argument signature makes it unkillable by construction. The ZIP writer, CRC-32 and the six OOXML parts: **98 lines of code**, importing **`node:zlib` only**. The committed proof is the starting point, minus its `--bench` harness (§1.3). |
 | new — `scripts/model/report.mjs` | pure `reportModel(...)`; no `Date.now()` |
 | new — `scripts/views/report.mjs` | `render(rm)` → indented table, per `views/gantt.mjs:1-5`'s contract |
 | `scripts/model/hierarchy-rollup.mjs` | `combine` parameter **and a new `rollupAll` whole-tree entry point** (§5.2); stays pure |
