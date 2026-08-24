@@ -34,8 +34,8 @@ persist and their delta is the output.
 
 ## Why `Precedes` and not `Blocks` — and why ADR-0001 survives
 
-Measured over the live corpus: **392 directed `Blocks` edges, of which 248 (63.3%) sit in 124
-mutual pairs.** The majority of the corpus carries **no usable direction**, because frontmatter has
+Measured 2026-08-23 over the same 2,610-ticket corpus as the migration cohorts below: **392
+directed `Blocks` edges, of which 248 (63.3%) sit in 124 mutual pairs.** The majority of the corpus carries **no usable direction**, because frontmatter has
 no way to write the inverse — `LINK_TYPES` (`links.mjs:14`) is a bare Set and `lintLinks` refuses
 anything outside it, so `Blocked by` is a display string the database knows and the authoring path
 cannot emit. "Is blocked by" gets written as a second `Blocks` from the other end.
