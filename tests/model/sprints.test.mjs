@@ -347,3 +347,38 @@ describe("BLZ-369: the stamp, for engines already released", () => {
     assert.equal(unstampedRegistryWarning({ active: null, sprints: [] }), null);
   });
 });
+
+describe("BLZ-369: the stamp is never downgraded, and must be a number", () => {
+  const withRoot = (fn) => {
+    const root = mkdtempSync(join(tmpdir(), "blz369v-"));
+    try { return fn(root); } finally { rmSync(root, { recursive: true, force: true }); }
+  };
+  const S = [{ id: "S1", name: "one", start: "2026-08-01", end: "2026-08-14" }];
+
+  test("a FUTURE stamp survives a save by this engine", () => {
+    // Writing our own version unconditionally would turn a v2 file into a v1 while preserving
+    // the v2 keys beside it — the file would then under-claim its own shape.
+    withRoot((root) => {
+      saveSprints({ root }, { active: "S1", sprints: S, registryVersion: 2, futureKey: "keep" });
+      const after = JSON.parse(readFileSync(join(root, "sprints.json"), "utf8"));
+      assert.equal(after.registryVersion, 2, "this engine downgraded a newer registry's stamp");
+      assert.equal(after.futureKey, "keep");
+    });
+  });
+
+  test("an OLDER stamp is brought up to this engine's version", () => {
+    withRoot((root) => {
+      saveSprints({ root }, { active: "S1", sprints: S, registryVersion: 0 });
+      assert.equal(
+        JSON.parse(readFileSync(join(root, "sprints.json"), "utf8")).registryVersion,
+        SPRINT_REGISTRY_VERSION);
+    });
+  });
+
+  for (const bad of [null, 0, "1", {}, true]) {
+    test(`a non-number stamp (${JSON.stringify(bad)}) does not count as stamped`, () => {
+      assert.notEqual(unstampedRegistryWarning({ active: "S1", sprints: S, registryVersion: bad }), null,
+        "a stamp that is not a version silenced the warning");
+    });
+  }
+});

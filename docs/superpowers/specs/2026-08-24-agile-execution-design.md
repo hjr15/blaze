@@ -192,8 +192,14 @@ project, and **a legacy registry does not carry one** — `sprints.json` today i
 `{id,name,start,end}` and nothing else, the shape `tests/model/sprints.test.mjs:125` writes. The
 key is derivable only from ticket membership, a corpus query `loadSprints` has no index to run.
 
+> **Amended by BLZ-369 (2026-08-25).** Everything below described `loadSprints` as it stood when
+> this spec was written. It **no longer whitelists** — it spreads `...parsed`, so any additive key
+> survives without being named. The measurement, the reasoning and the prescription are left as
+> written because they are why the change happened; what they describe is now history. BLZ-369
+> also solved it more widely than this section asks: see the note after the prescription.
+
 **It must still change, because it is a whitelist rather than a passthrough.**
-`sprints.mjs:14` is `return { active: parsed.active ?? null, sprints: parsed.sprints }` — a
+`sprints.mjs:14` was `return { active: parsed.active ?? null, sprints: parsed.sprints }` — a
 *reconstruction*. Measured against a migrated file:
 
 ```
@@ -207,9 +213,15 @@ path to `ganttModel`, it gets its registry from `loadSprints`, and `activeFor` w
 to the scalar on every board forever. The change is one key wide — `activeByProject:
 parsed.activeByProject ?? null` — and it is not optional.
 
+> **BLZ-369 did it wider, and deliberately.** A one-key passthrough fixes `activeByProject` and
+> leaves the next additive key to be destroyed the same way. The spread fixes the *class*, and it
+> does not normalise an absent key to `null` — an absent key stays absent, which is what lets
+> `unstampedRegistryWarning` tell "never had it" from "had it and lost it". An implementer
+> following the line above verbatim would reintroduce the narrower shape.
+
 **And the additive shape protects readers, not writers. That has to be said plainly because an
 earlier draft claimed the opposite.** It argued an older `setActive` *"preserves `activeByProject`
-untouched"*. It does not, and the reason is the same whitelist one frame earlier — `sprint-runner`
+untouched"*. It did not, and the reason was the same whitelist one frame earlier — `sprint-runner`
 is `loadSprints → setActive → saveSprints`, so the key is dropped on read and never written back:
 
 ```
@@ -495,7 +507,7 @@ feature, added the refuted config entry, and shipped nothing that renders §3.2.
 
 | File | Change |
 |---|---|
-| `scripts/model/sprints.mjs` | **`loadSprints` passes `activeByProject` through** — it is a whitelist today and would otherwise drop it (§2.2); it still does **not** normalise. New `activeFor(registry, project)` (§6.1). `addSprint` requires `project` on new sprints and auto-activates **per project** — `activeByProject[project] ?? id`, not today's global `registry.active ?? id` (`:67`), or a new project's first sprint is born inactive. `setActive(registry, project, id)` writes `activeByProject[project]` when `project` is a key and the scalar `active` when it is `null` — the two-target split §2.2 requires; a signature that always writes the map leaves `active` unwritable. `validateSprintFields`'s bag becomes `{ sprints }` for §2.3 rule 2. `formatSprintList` (`:79-85`) prints the project and marks active per project |
+| `scripts/model/sprints.mjs` | **`loadSprints` passes `activeByProject` through** — *done by BLZ-369, and as a spread rather than a named key, so this row is already satisfied for any additive key*; it still does **not** normalise. New `activeFor(registry, project)` (§6.1). `addSprint` requires `project` on new sprints and auto-activates **per project** — `activeByProject[project] ?? id`, not today's global `registry.active ?? id` (`:67`), or a new project's first sprint is born inactive. `setActive(registry, project, id)` writes `activeByProject[project]` when `project` is a key and the scalar `active` when it is `null` — the two-target split §2.2 requires; a signature that always writes the map leaves `active` unwritable. `validateSprintFields`'s bag becomes `{ sprints }` for §2.3 rule 2. `formatSprintList` (`:79-85`) prints the project and marks active per project |
 | new — `scripts/model/capacity.mjs` | pure; `(sprint, rows, { minutesPerDay, workingDays }) → { committed, workingDays, capacity, ratio }`. **Both come from board config, not from constants** — BLZ-360 §2.3 defines `schedule.minutes_per_day` **and** `schedule.working_days`, and hardcoding Mon–Fri would be the second definition §8 claims not to create. `now` is not an input, so it needs no injection |
 | new — findings, in `scripts/model/audit.mjs`'s shape | `sprint-overrun` and `sprint-window-missed` (§4). **Neither exists** — `grep -rn "sprint-overrun\|sprint-window-missed" scripts/ tests/` returns nothing — and an earlier version of this table had no row for them at all, while §4 specifies 26 live corpus findings. `sprint-overrun` needs no scheduler and is buildable today |
 | `scripts/views/data.mjs` | `boardModel` (`:24`) takes `{ project, focus, flat, index }` and has **no sprint parameter and no sprint filter**. It gains one, plus the sprint-scoped rows and **both** config values `capacity.mjs` needs — `schedule.minutes_per_day` **and** `schedule.working_days`. An earlier version named only the first, one row after the `capacity.mjs` row had gained the second |
@@ -619,7 +631,7 @@ misdescribe an earlier draft. Corrected:
 | Tests | Why they change |
 |---|---|
 | `:13`, `:19` — `loadSprints` degrades to empty | **unchanged.** They assert `{ active: null, sprints: [] }`, which stays correct under the additive shape — an earlier row claimed `active` becomes `{}` |
-| `:26`, `:34` — reads a registry / round-trips | **changed, but not as an earlier row said.** It asked them to *"assert the scalar survives `loadSprints`"* — which is now the correct behaviour, so that is not why they change. They change because `loadSprints` gains the `activeByProject` passthrough (§2.2) and its return shape grows a key |
+| `:26`, `:34` — reads a registry / round-trips | **changed, but not as an earlier row said.** It asked them to *"assert the scalar survives `loadSprints`"* — which is now the correct behaviour, so that is not why they change. They change because `loadSprints`'s return shape grows a key. *BLZ-369 already changed the round-trip test, for a different reason again: `saveSprints` now stamps `registryVersion`, so the round trip returns what was written plus the stamp* |
 | `:151`, `:159`, `:167`, `:172`, `:183`, `:190` — `addSprint` ×6 | `project` becomes required |
 | `:195`, `:202` — `setActive` ×2 | the signature gains `project` |
 | `:209` — `formatSprintList` ×**1** | output gains the project and per-project active markers |
@@ -723,13 +735,14 @@ stale `active: "S2"` pointer itself.
   evidence the corpus offers and nothing in it supplies a larger integer — the board has **2
   distinct assignee values, one of which is `unassigned`** (2,531 of 2,613 tickets). A `team_size`
   field is deferred, not refused; it needs a second person first.
-- **An older engine silently destroys `activeByProject`.** §2.2 measures it: `loadSprints`
-  whitelists two keys, so one `blaze sprint new` **or** `blaze sprint active` from an unmodified
-  engine writes the map out of existence, and it is **operator-entered state that nothing can reconstruct** — ticket membership
+- **An older engine silently destroys `activeByProject`.** §2.2 measured it: `loadSprints`
+  whitelisted two keys, so one `blaze sprint new` **or** `blaze sprint active` from an engine
+  predating BLZ-369 writes the map out of existence, and it is **operator-entered state that nothing can reconstruct** — ticket membership
   gives sprint → project, never project → which sprint is active. `blaze sprint migrate` re-seeds a
   named default; it does not recover the operator's choice. The alternative is a
   `MIN_SCHEMA_VERSION` bump that refuses old engines outright, which this spec does not take. **This
-  is the cost of the additive shape, and **a loss that has already happened is unrecoverable** —
+  is the cost of the additive shape, and **a loss that has already happened would be
+  unrecoverable** — none has, because the key has not shipped yet —
   the largest gap *in kind*, against velocity's above, which is the largest in what the spec cannot
   deliver. **The window that allows it is a different thing and is closable**, which is the
   distinction the next paragraph turns on.

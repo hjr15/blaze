@@ -16,6 +16,9 @@ const EMPTY = { active: null, sprints: [] };
  */
 export const SPRINT_REGISTRY_VERSION = 1;
 
+/** Stamps are integers from 1 up. `0`, a negative, a string or an object are all hand-edits. */
+const isRegistryVersion = (v) => Number.isInteger(v) && v >= 1;
+
 /**
  * Load the registry WITHOUT discarding what this engine does not understand (BLZ-369).
  *
@@ -48,8 +51,17 @@ export function loadSprints({ root }) {
 }
 
 export function saveSprints({ root }, registry) {
-  const stamped = { ...registry, registryVersion: SPRINT_REGISTRY_VERSION };
-  writeFileSync(join(root, "sprints.json"), JSON.stringify(stamped, null, 2) + "\n");
+  // NEVER DOWNGRADE THE STAMP. Writing our own version unconditionally would turn a
+  // `registryVersion: 2` file into a `1` while faithfully preserving the v2 keys beside it — the
+  // file would then under-claim its own shape, which is a worse lie than no stamp at all and
+  // exactly the overconfidence this ticket exists to remove. Unreachable until a version 2
+  // exists; written now because the moment it does, this is where the bug would be.
+  const existing = registry?.registryVersion;
+  const version = isRegistryVersion(existing) && existing > SPRINT_REGISTRY_VERSION
+    ? existing
+    : SPRINT_REGISTRY_VERSION;
+  writeFileSync(join(root, "sprints.json"),
+    JSON.stringify({ ...registry, registryVersion: version }, null, 2) + "\n");
 }
 
 /**
@@ -61,11 +73,23 @@ export function saveSprints({ root }, registry) {
  *
  * A board with NO sprints is silent — there is nothing it could have lost, and every fresh board
  * would otherwise warn on its first `blaze sprint new`.
+ *
+ * WHAT THIS CANNOT REACH, recorded because the ticket's whole subject is silent destruction. A
+ * `sprints.json` that is corrupt JSON, or whose `sprints` is not an array, loads as EMPTY and is
+ * then overwritten wholesale by the next write — operator keys and all — and this detector sees
+ * the already-emptied registry, so it stays silent. It is not a regression (the same clobber
+ * predates BLZ-369) and it is not an OLD-ENGINE window, which is what this ticket scopes, but it
+ * is the same failure mode by a different route. Closing it needs `loadSprints` to distinguish
+ * "no file" from "unreadable file", which changes the shape every caller receives.
  */
 export function unstampedRegistryWarning(registry) {
   const sprints = registry?.sprints;
   if (!Array.isArray(sprints) || sprints.length === 0) return null;
-  if (registry.registryVersion !== undefined) return null;
+  // A VERSION, not merely "present" and not merely a number. `null`, `"1"` and `{}` all silenced
+  // this, and so did `0` — which is version-shaped but names no version, since stamps start at 1.
+  // Only a hand-edit produces any of them, because an older engine drops the key entirely; a
+  // stamp that is not a version is still not a stamp.
+  if (isRegistryVersion(registry.registryVersion)) return null;
   return "sprints.json carries no version stamp. Either it predates this engine's stamp, or an "
     + "engine older than it rewrote the file and dropped every key it did not recognise — "
     + "per-project state among them, which nothing can reconstruct. Saving now stamps it.";
