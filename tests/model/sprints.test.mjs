@@ -1,9 +1,10 @@
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, writeFileSync, readFileSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadSprints, saveSprints, nextSprintId, validateSprintFields, isIsoDate, addSprint, setActive, formatSprintList } from "../../scripts/model/sprints.mjs";
+import { loadSprints, saveSprints, nextSprintId, validateSprintFields, isIsoDate, addSprint, setActive, formatSprintList,
+         SPRINT_REGISTRY_VERSION, unstampedRegistryWarning } from "../../scripts/model/sprints.mjs";
 import { parseTicket, serializeTicket } from "../../scripts/model/ticket.mjs";
 import { EDITABLE_FIELDS } from "../../scripts/model/fields.mjs";
 import { buildIndex } from "../../scripts/model/index.mjs";
@@ -35,7 +36,9 @@ test("saveSprints round-trips through loadSprints and writes trailing newline", 
   const root = tmp();
   const reg = { active: "S2", sprints: [{ id: "S2", name: "x", start: "2026-08-01", end: "2026-08-14" }] };
   saveSprints({ root }, reg);
-  assert.deepEqual(loadSprints({ root }), reg);
+  // BLZ-369: the round trip now also STAMPS. Everything written still comes back — that is what
+  // this test was for and it still holds — plus `registryVersion`, which is the point.
+  assert.deepEqual(loadSprints({ root }), { ...reg, registryVersion: SPRINT_REGISTRY_VERSION });
   assert.ok(readFileSync(join(root, "sprints.json"), "utf8").endsWith("\n"));
   rmSync(root, { recursive: true, force: true });
 });
@@ -227,4 +230,155 @@ test("formatSprintList renders 'id · name · start..end' with an active marker 
 
 test("formatSprintList on an empty registry", () => {
   assert.equal(formatSprintList({ active: null, sprints: [] }), "(no sprints)");
+});
+
+// --- BLZ-369: the registry round-trip must not be lossy -----------------------------------
+//
+// `loadSprints` whitelisted two keys, so `loadSprints -> setActive -> saveSprints` wrote every
+// other key out of existence. Spec 2's §9 measured it directly:
+//
+//     file keys BEFORE : [ active, activeByProject, sprints ]
+//     loadSprints keys : [ active, sprints ]        <- never reaches a reader
+//
+// `addSprint` and `setActive` were never the problem — both already spread `...registry`. The
+// loader was the whole of it.
+//
+// This matters BEFORE `activeByProject` ships, not after: whichever engine version is current
+// when it lands becomes "the old engine" for every board that migrates. An engine that
+// preserves what it does not understand can never be that engine. It cannot help against
+// versions already released — nothing can, they are shipped — which is what the stamp is for.
+describe("BLZ-369: an additive key survives a round trip", () => {
+  const withRegistry = (obj, fn) => {
+    const root = mkdtempSync(join(tmpdir(), "blz369-"));
+    try {
+      writeFileSync(join(root, "sprints.json"), JSON.stringify(obj, null, 2) + "\n");
+      return fn(root);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  };
+  const onDisk = (root) => JSON.parse(readFileSync(join(root, "sprints.json"), "utf8"));
+  const REGISTRY = {
+    active: "S1",
+    activeByProject: { OBA: "S5", INF: "S3" },
+    sprints: [{ id: "S1", name: "one", start: "2026-08-01", end: "2026-08-14" },
+              { id: "S2", name: "two", start: "2026-08-15", end: "2026-08-28" }],
+  };
+
+  test("loadSprints does not drop a key it does not know", () => {
+    withRegistry(REGISTRY, (root) => {
+      const loaded = loadSprints({ root });
+      assert.deepEqual(loaded.activeByProject, { OBA: "S5", INF: "S3" },
+        "the loader dropped an additive key — every writer downstream then persists the loss");
+    });
+  });
+
+  test("THE DESTRUCTION PATH: load -> setActive -> save keeps it", () => {
+    withRegistry(REGISTRY, (root) => {
+      saveSprints({ root }, setActive(loadSprints({ root }), "S2"));
+      const after = onDisk(root);
+      assert.deepEqual(after.activeByProject, { OBA: "S5", INF: "S3" },
+        "the exact round trip spec 2 §9 measured still destroys operator-entered state");
+      assert.equal(after.active, "S2", "the round trip did not do its actual job");
+    });
+  });
+
+  test("load -> addSprint -> save keeps it too", () => {
+    withRegistry(REGISTRY, (root) => {
+      saveSprints({ root }, addSprint(loadSprints({ root }),
+        { name: "three", start: "2026-08-29", end: "2026-09-11" }).registry);
+      assert.deepEqual(onDisk(root).activeByProject, { OBA: "S5", INF: "S3" });
+      assert.equal(onDisk(root).sprints.length, 3);
+    });
+  });
+
+  test("a malformed registry is still EMPTY, and carries nothing forward", () => {
+    // The contract that made the whitelist look safe. Preserving unknown keys must not turn a
+    // junk file into a half-trusted one.
+    for (const bad of [{ sprints: "not an array", activeByProject: { X: "S1" } }, null, 42, []]) {
+      withRegistry(bad, (root) => {
+        const loaded = loadSprints({ root });
+        assert.deepEqual(loaded.sprints, [], `${JSON.stringify(bad)} produced sprints`);
+        assert.equal(loaded.activeByProject, undefined,
+          "a malformed registry leaked an unknown key into a caller that trusts the shape");
+      });
+    }
+  });
+
+  test("a missing `active` still normalises to null, not undefined", () => {
+    withRegistry({ sprints: [], other: 1 }, (root) => {
+      assert.equal(loadSprints({ root }).active, null);
+    });
+  });
+});
+
+describe("BLZ-369: the stamp, for engines already released", () => {
+  const withRegistry = (obj, fn) => {
+    const root = mkdtempSync(join(tmpdir(), "blz369s-"));
+    try {
+      writeFileSync(join(root, "sprints.json"), JSON.stringify(obj, null, 2) + "\n");
+      return fn(root);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  };
+  const onDisk = (root) => JSON.parse(readFileSync(join(root, "sprints.json"), "utf8"));
+  const S = [{ id: "S1", name: "one", start: "2026-08-01", end: "2026-08-14" }];
+
+  test("saveSprints stamps the registry", () => {
+    withRegistry({ active: "S1", sprints: S }, (root) => {
+      saveSprints({ root }, loadSprints({ root }));
+      assert.equal(onDisk(root).registryVersion, SPRINT_REGISTRY_VERSION);
+    });
+  });
+
+  test("a stamped registry that comes back unstamped is REPORTED", () => {
+    // The only signal available against an engine that shipped before the stamp existed: it
+    // rewrites the file and drops every key it does not know, the stamp included.
+    assert.notEqual(unstampedRegistryWarning({ active: "S1", sprints: S }), null,
+      "a registry with sprints and no stamp raised nothing");
+    assert.match(unstampedRegistryWarning({ active: "S1", sprints: S }), /older engine|version stamp/i);
+  });
+
+  test("a stamped registry is quiet", () => {
+    assert.equal(
+      unstampedRegistryWarning({ active: "S1", sprints: S, registryVersion: SPRINT_REGISTRY_VERSION }),
+      null, "a correctly stamped registry warned anyway");
+  });
+
+  test("a board with no sprints is quiet — there is nothing to have lost", () => {
+    // Otherwise every fresh board warns on its first `blaze sprint new`.
+    assert.equal(unstampedRegistryWarning({ active: null, sprints: [] }), null);
+  });
+});
+
+describe("BLZ-369: the stamp is never downgraded, and must be a number", () => {
+  const withRoot = (fn) => {
+    const root = mkdtempSync(join(tmpdir(), "blz369v-"));
+    try { return fn(root); } finally { rmSync(root, { recursive: true, force: true }); }
+  };
+  const S = [{ id: "S1", name: "one", start: "2026-08-01", end: "2026-08-14" }];
+
+  test("a FUTURE stamp survives a save by this engine", () => {
+    // Writing our own version unconditionally would turn a v2 file into a v1 while preserving
+    // the v2 keys beside it — the file would then under-claim its own shape.
+    withRoot((root) => {
+      saveSprints({ root }, { active: "S1", sprints: S, registryVersion: 2, futureKey: "keep" });
+      const after = JSON.parse(readFileSync(join(root, "sprints.json"), "utf8"));
+      assert.equal(after.registryVersion, 2, "this engine downgraded a newer registry's stamp");
+      assert.equal(after.futureKey, "keep");
+    });
+  });
+
+  test("an OLDER stamp is brought up to this engine's version", () => {
+    withRoot((root) => {
+      saveSprints({ root }, { active: "S1", sprints: S, registryVersion: 0 });
+      assert.equal(
+        JSON.parse(readFileSync(join(root, "sprints.json"), "utf8")).registryVersion,
+        SPRINT_REGISTRY_VERSION);
+    });
+  });
+
+  for (const bad of [null, 0, "1", {}, true]) {
+    test(`a non-number stamp (${JSON.stringify(bad)}) does not count as stamped`, () => {
+      assert.notEqual(unstampedRegistryWarning({ active: "S1", sprints: S, registryVersion: bad }), null,
+        "a stamp that is not a version silenced the warning");
+    });
+  }
 });

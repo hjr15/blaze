@@ -4,7 +4,16 @@
 // is coverage-excluded (*-runner.mjs), matching new-runner.mjs's pattern.
 import { loadConfig, resolveRoots } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
-import { loadSprints, saveSprints, addSprint, setActive, formatSprintList } from "./model/sprints.mjs";
+import { loadSprints, saveSprints, addSprint, setActive, formatSprintList,
+         unstampedRegistryWarning } from "./model/sprints.mjs";
+
+/** BLZ-369: surfaced on the WRITE paths, because that is where the loss would occur — a read
+ *  that never saves cannot destroy anything, and warning there would be noise on every render. */
+function warnIfUnstamped(registry) {
+  const w = unstampedRegistryWarning(registry);
+  if (w) console.error(`blaze sprint: ${w}`);
+}
+
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot } = resolveRoots();
@@ -40,6 +49,7 @@ try {
       process.exit(1);
     }
     const before = loadSprints({ root: dataRoot });
+    warnIfUnstamped(before);
     const { registry, id } = addSprint(before, { name: opts.name, start: opts.start, end: opts.end });
     saveSprints({ root: dataRoot }, registry);
     const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "sprint", id, message: `sprint: create ${id}`, files: ["sprints.json"] });
@@ -60,6 +70,7 @@ try {
     const [id] = positional;
     if (!id) { console.error("usage: blaze sprint active <id>"); process.exit(1); }
     const before = loadSprints({ root: dataRoot });
+    warnIfUnstamped(before);
     const registry = setActive(before, id);
     saveSprints({ root: dataRoot }, registry);
     const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "sprint", id, message: `sprint: set active ${id}`, files: ["sprints.json"] });
