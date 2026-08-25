@@ -109,8 +109,10 @@ last PR carrying its key closes.
 > there. The veto narrows that window to the time when both PRs are visible at once;
 > it does not close it. Tracked as BLZ-395.
 >
-> A terminal ticket's `branch` and `pr` are treated as history and are never rewritten,
-> so a later open PR cannot silently replace the record of what actually delivered it.
+> A terminal ticket's `branch` and `pr` record only a **merged** PR, so a later open one
+> cannot replace the record of what actually delivered it — while a `done` ticket that
+> has no record yet can still acquire one, since reconcile is the only thing that writes
+> those fields.
 
 ### A squash merge's body is read, not just its subject (BLZ-131)
 
@@ -124,19 +126,22 @@ branch mentions.
 **Two conditions must both hold, and each one is load-bearing.**
 
 1. The marker is `* ` — what GitHub writes, and what nothing else here writes.
-2. The commit's own subject must itself name a ticket (`<KEY>-<n>: …`). A bundled
-   child lives inside a *feature's* PR, and a feature PR is titled that way by
-   convention; a commit whose subject names no ticket is not a bundle manifest,
-   whatever its body happens to list.
+2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …`, or the
+   multi-ticket forms `<KEY>-a/b/c:` and `<KEY>-a + <KEY>-b:`. A bundled child lives
+   inside a *feature's* PR, titled that way by convention; a commit whose subject names
+   no ticket is not a bundle manifest, whatever its body lists. Every id in the leading
+   list counts, and the list ends at the colon — `BLZ-1: fixes BLZ-4` claims only BLZ-1.
 
 The reason both are needed is measured, on the board repo, where the board itself is a
 configured code repo for its own project:
 
+Measured on the board repo's `origin/main` (156 commits):
+
 | Rule | Ids harvested that shipped nothing |
 |---|---|
-| Any bullet, any subject | **299** |
-| Any bullet, ticket subject only | **41** |
-| `* ` bullet, ticket subject only | **2** — and both are genuine bundled children |
+| Any bullet, any subject | **426** |
+| Any bullet, ticket subject only | **49** |
+| `* ` bullet, ticket subject only | **2** — both genuine bundled children |
 
 `blaze`'s own batch commits write their ledger as `- <KEY>-<n>: <board op>`, so
 "moved a ticket" and "edited its labels" read as delivery under the loosest rule. That

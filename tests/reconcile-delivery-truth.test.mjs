@@ -360,6 +360,36 @@ describe("BLZ-130: a terminal ticket's delivery record is history, not a live fi
 // Round 3 — defects round 2's own fixes introduced
 // =============================================================================
 
+// FINDING 1. The terminal clamp stopped the OVERWRITE and stopped the WRITE with it.
+// `branchVal`/`prVal` were nulled for every terminal ticket, and the caller only writes
+// on a truthy value — so a done ticket that never had its PR recorded could never
+// acquire one. Reconcile is the sole producer of those fields, so that is permanent:
+// on the live board 945 of 1,479 done tickets carry no `pr:` at all. The corruption
+// this was written to stop is an OPEN PR replacing the record of the MERGED one that
+// delivered the work; withholding the merged record too was over-correction, and the
+// fix's own rationale — "the branch and PR are what delivered it" — argues against it.
+describe("BLZ-130: a terminal ticket records what delivered it, and nothing else", () => {
+  test("a done ticket with no record yet still gets the MERGED PR that delivered it", () => {
+    const d = decide({ pr: PR_80_MERGED }, "done", "epic");
+    assert.equal(d.target, "done");
+    assert.equal(d.moved, false);
+    assert.equal(d.branchVal, "INF-645-descope-dead-mans-switch",
+      "reconcile is the only producer of this field — withholding it strands the ticket forever");
+    assert.equal(d.prVal, "#80 — u80");
+  });
+
+  test("but a later OPEN PR still cannot replace it", () => {
+    const d = decide({ pr: PR_81_OPEN }, "done", "epic");
+    assert.equal(d.branchVal, null, "an open PR has not delivered anything");
+    assert.equal(d.prVal, null);
+  });
+
+  test("a bare branch is not a delivery record for a terminal ticket either", () => {
+    const d = decide({ branch: "INF-645-stale-leftover" }, "done", "epic");
+    assert.equal(d.branchVal, null);
+  });
+});
+
 // FINDING 2. The subject gate rejected the house's own multi-ticket feature titles.
 // `BLZ-286/287/288: config projection … (#71)` is a real squashed feature PR on this
 // repo's default branch carrying three genuine `* BLZ-…:` bullets, and the gate threw

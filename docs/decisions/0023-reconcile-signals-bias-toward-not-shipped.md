@@ -52,11 +52,19 @@ delivery type does, because ranking never sees the type. Scoping the veto to
 `epic` would have left the identical bug in the four types that also legitimately
 span more than one PR.
 
-A terminal ticket's `branch` and `pr` are clamped along with its status. The first
-cut clamped `target` alone, which suppressed the move and rewrote the record anyway:
-a `done` epic delivered by merged PR #80 had its frontmatter repointed at the later
-OPEN #81 that now wins the rank, reported as `moved: false`. Those fields are the
-history of what delivered the ticket, not live state.
+A terminal ticket's `branch` and `pr` record **only a merged PR**. The first cut
+clamped `target` alone, which suppressed the move and rewrote the record anyway: a
+`done` epic delivered by merged PR #80 had its frontmatter repointed at the later OPEN
+#81 that now wins the rank, reported as `moved: false`. Those fields are the history of
+what delivered the ticket, not live state.
+
+The correction to that then over-corrected, recorded here because the shape recurs:
+nulling both fields for *every* terminal ticket stopped the overwrite and stopped the
+first write with it. Reconcile is the only producer of `branch`/`pr`, so a `done` ticket
+that never had them recorded could never acquire them — on the live board, 945 of 1,479
+`done` tickets, permanently. Turning a corruption into a silent omission is not a fix.
+The rule is therefore conditional on the winning PR being MERGED: an open or closed PR
+cannot have delivered anything, so it may not write the record; a merged one may.
 
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
@@ -78,36 +86,52 @@ whose claim INF-735's gate drops is not visible to the veto at all.
 ### 2. The shipped signal reads a squash commit's body, under two conditions
 
 GitHub's default squash message concatenates the collapsed commits' messages, each
-subject as a `* ` bullet. On this repo, **22** of 312 commits on `origin/main` carry
-such a bullet under a ticket subject — **99** bullet lines in total — and reading them
+subject as a `* ` bullet. On this repo, **23** of 312 commits on `origin/main` carry
+such a bullet under a ticket subject — **102** bullet lines in total — and reading them
 recovers **28** ticket ids that no subject on the default branch mentions. That is the
 blind spot, measured rather than argued.
 
 **Two conditions must both hold, and each is load-bearing.**
 
 1. The marker is `* `, which is what GitHub writes and what nothing else here writes.
-2. The commit's own subject must parse as `<KEY>-<n>:` — it must itself be a squashed
-   *ticket* PR. This is BLZ-131's own premise: a bundled child lives inside a feature's
-   PR, and a feature PR is titled `<KEY>-<n>: …` by house convention.
+2. The commit's own subject must **open with a ticket-id list** — `<KEY>-<n>:`, and
+   the multi-ticket forms the house also writes, `<KEY>-a/b/c:` and
+   `<KEY>-a + <KEY>-b:`. It must itself be a squashed *ticket* PR. This is BLZ-131's
+   own premise: a bundled child lives inside a feature's PR, titled that way by
+   convention. Every id in the leading list counts, and the list ends at the colon, so
+   `BLZ-1: fixes BLZ-4` still claims only BLZ-1.
+
+   The multi-ticket forms were missed on the first attempt, which read only the leading
+   id. `BLZ-286/287/288: config projection … (#71)` is a real squashed feature PR on
+   this repo's default branch and two of its three tickets were discarded; the PR that
+   introduced this rule was itself titled `BLZ-130 + BLZ-131: …` and would have
+   stranded BLZ-131. A gate resting on "a feature PR is titled that way by convention"
+   has to accept the conventions actually in use.
 
 Condition 2 was not in the first cut, and an adversarial review is why it exists.
 `scripts/commit-runner.mjs` writes every batch board commit's body as
 `- <KEY>-<n>: <board op> [session]`, and the board repo is itself a configured
 `codeRepo` for its own project — the hazard INF-735's comment already names. Honouring
 any bullet under any subject therefore turned the board's own ledger into a delivery
-signal. Measured on the live board, and reproduced end-to-end by the review: **299**
-ids harvested that had shipped nothing, and `decide()` moving **137** tickets
-`defined → done` off lines reading `edit labels` and `defined → in-progress`. That is
+signal. Measured on the board repo's `origin/main`, and reproduced end-to-end by the review:
+**426** ids harvested that had shipped nothing, and `decide()` moving on the order of
+130 tickets `defined → done` off lines reading `edit labels`. That is
 this ADR's own §1 failure at a hundred times the scale, re-introduced inside the fix
 for its sibling.
 
 Narrowing the marker alone was not sufficient, and neither was the subject gate alone:
 
+Measured on `blaze-pm` `origin/main` (156 commits) with the shipped rule:
+
 | Rule | Ids harvested on the board repo that shipped nothing |
 |---|---|
-| Any bullet, any subject | 299 |
-| Any bullet, ticket subject only | 41 |
-| `* ` bullet, ticket subject only | **2** — and both are genuine bundled children |
+| Any bullet, any subject | 426 |
+| Any bullet, ticket subject only | 49 |
+| `* ` bullet, ticket subject only | **2** — INF-701 and INF-672, both genuine bundled children |
+
+The figure is ref-sensitive, and an earlier draft of this ADR did not say which ref it
+used: the same table on that repo's local `HEAD` reads 299 / 41 / 2. The **2** is stable
+across both, which is the part the argument rests on.
 
 **A claim this ADR made in an earlier draft, withdrawn.** It argued that the bullet
 requirement was load-bearing because unbulleted body lines beginning `<KEY>-<n>:`
@@ -115,7 +139,7 @@ would otherwise mark "sixteen untouched tickets" done. Re-measured under the shi
 rule, unbulleted lines inside gated commits add **zero** ids — the sixteen lived in
 commits the subject gate now excludes anyway, and the figure had also counted lines
 where it said tickets. The bullet requirement earns its place on the ledger evidence
-above (41 → 2), not on that argument.
+above (49 → 2 on `origin/main`), not on that argument.
 
 **What this deliberately does not claim:** a bullet is not proof of work. A squashed
 ticket PR whose body lists a ticket it did not implement will be believed. The two

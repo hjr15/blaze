@@ -113,8 +113,20 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   // repointing them at work that has not landed destroys the only record there is.
   if (isTerminal(type, currentStatus)) {
     target = currentStatus;
-    branchVal = null;
-    prVal = null;
+    // Record only what could have DELIVERED it. An open or closed PR could not, so it
+    // must never replace the record of the merged one that did — that was the defect:
+    // a done epic delivered by merged #80, silently repointed at open #81.
+    //
+    // A merged PR still writes, and the distinction matters more than it looks. The
+    // first attempt at this nulled both fields for EVERY terminal ticket, which stopped
+    // the overwrite and stopped the first write with it: reconcile is the only producer
+    // of `branch`/`pr`, so a done ticket that never had them recorded could never
+    // acquire them. On the live board that is 945 of 1,479 done tickets, permanently.
+    // Over-correcting a corruption into a silent omission is not an improvement.
+    if (!pr || pr.state !== "MERGED") {
+      branchVal = null;
+      prVal = null;
+    }
   }
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
