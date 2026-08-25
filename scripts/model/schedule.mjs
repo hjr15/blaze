@@ -28,7 +28,7 @@
 //      history. If Tarjan ran over the full graph the "every SCC member is unscheduled" rule
 //      would overwrite them.
 //   3. Tarjan over what is left.
-import { isTerminal } from "./workflows.mjs";
+import { DEFAULT_WORKFLOWS } from "./workflows.mjs";
 import { DEFAULT_TYPES } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
@@ -219,7 +219,8 @@ function tarjan(ids, succ) {
  * @param runId    stamped onto the result so a persisted row can be told stale
  */
 export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null,
-                                linkTypes = DEFAULT_LINK_TYPES, types = DEFAULT_TYPES } = {}) {
+                                linkTypes = DEFAULT_LINK_TYPES, types = DEFAULT_TYPES,
+                                workflows = DEFAULT_WORKFLOWS } = {}) {
   if (!schedule || typeof schedule.minutes_per_day !== "number" || !Array.isArray(schedule.working_days)) {
     throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
       + "— board config is their single definition (BLZ-360 §2.3)");
@@ -242,7 +243,24 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     if (!t || t.id == null) continue;
     if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);
   }
-  const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
+  // FROM THE PASSED REGISTRIES, for the same reason `candidates` is (BLZ-392). This read
+  // `isTerminal`, which resolves through `schema.mjs`'s ambient TYPES and `workflows.mjs`'s
+  // ambient WORKFLOWS — and for a type the ambient registry does not know it THREW, the catch
+  // swallowed it, and the ticket was declared non-terminal.
+  //
+  // That was unreachable until this ticket: the node rule read a module constant, so a custom
+  // type could never be a node and its terminality never mattered. Resolved `linkTypes` made it
+  // reachable, and the consequence was the state ADR-0022 forbids outright — a `done` ticket of
+  // a custom delivery type became a CPM node, had its frozen actuals overwritten with dates
+  // months in the future, and was put on the critical path. `mutate-schedule.mjs`'s mutation #5
+  // exists to kill exactly that and did not, because every terminal-exemption test uses a
+  // SHIPPED type, where `isTerminal` happens to answer.
+  //
+  // An unknown type is still non-terminal, which is the previous behaviour of the catch.
+  const terminalOf = (t) => {
+    const wf = workflows[types[t?.type]?.workflow];
+    return wf ? wf.terminal.includes(t.status) : false;
+  };
   // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same RESOLVED
   // link-type entry that decides which EDGES are legal. One source, so the node set and the edge
   // set cannot drift apart.

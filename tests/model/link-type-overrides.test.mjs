@@ -664,12 +664,19 @@ describe("BLZ-392: the schedule model reads no ambient state", () => {
     const src = readFileSync(new URL("../../scripts/model/schedule.mjs", import.meta.url), "utf8");
     const imports = [...src.matchAll(/^import\s+\{([^}]*)\}\s+from\s+"([^"]+)"/gm)]
       .flatMap((m) => m[1].split(",").map((x) => x.trim()));
-    for (const helper of ["workflowFor", "requiredFields", "hierarchyLevel", "allTypes"]) {
+    // `isTerminal` and `workflowDef` reach the same ambient state THROUGH `workflows.mjs`, which
+    // is how the terminal-ticket defect got in after `workflowFor` itself was removed. `TYPES`
+    // and `WORKFLOWS` are the ambient objects; importing either is the same mistake by value.
+    for (const helper of ["workflowFor", "requiredFields", "hierarchyLevel", "allTypes",
+                          "isTerminal", "workflowDef", "statusesFor", "initialStatus",
+                          "TYPES", "WORKFLOWS"]) {
       assert.ok(!imports.includes(helper),
         `schedule.mjs imports ${helper}, which reads the ambient registry — pass the value instead`);
     }
-    assert.ok(imports.includes("DEFAULT_TYPES"),
-      "the model should take the shipped registry as a value");
+    for (const constant of ["DEFAULT_TYPES", "DEFAULT_WORKFLOWS"]) {
+      assert.ok(imports.includes(constant),
+        `the model should take ${constant} as a value`);
+    }
   });
 });
 
@@ -726,5 +733,50 @@ describe("BLZ-392: the endpoint-kind union reaches the PROJECT layer too", () =>
     const bogus = findings.filter((f) => f.kind === "schema-invalid" && /spike/.test(f.detail));
     assert.deepEqual(bogus, [],
       `a type declared by a sibling project was called undeclared: ${bogus.map((f) => `${f.ticket}: ${f.detail}`).join(" | ")}`);
+  });
+});
+
+describe("BLZ-392: a terminal ticket of a CUSTOM type is still terminal", () => {
+  // The state ADR-0022 forbids outright, reachable only once resolved `linkTypes` let a custom
+  // type be a node: `terminalOf` read `isTerminal`, which resolves through the ambient
+  // registries and THREW for a type they do not know — the catch swallowed it and the ticket
+  // was declared non-terminal. A `done` spike therefore became a CPM node, had its frozen
+  // actuals overwritten with dates months in the future, and was put on the critical path.
+  //
+  // `mutate-schedule.mjs` mutation #5 exists to kill exactly that and did not, because every
+  // terminal-exemption test uses a SHIPPED type, where `isTerminal` happens to answer.
+  const SPIKE = { spike: { level: 0, workflow: "delivery", parentTypes: [], required: [] } };
+  const wide = [{ name: "Precedes", source_kinds: ["spike"], target_kinds: ["spike"], min_card: 0, max_card: null }];
+  const run = (status) => scheduleModel({
+    tickets: [{ id: "S", type: "spike", status, estimate_minutes: 4800,
+                constraint_start_no_earlier_than: null, deadline: "2026-08-26",
+                start_date: "2026-01-02", due_date: "2026-01-05" }],
+    links: [], schedule: SCHEDULE, now: MON,
+    linkTypes: wide, types: { ...DEFAULT_TYPES, ...SPIKE } });
+
+  test("a done custom-type ticket is NOT a node and keeps its actuals", () => {
+    const r = run("done");
+    assert.equal(r.node_count, 0,
+      "a finished ticket became a CPM node — its frozen actuals are being replanned");
+    assert.deepEqual(r.scheduled, [], `a terminal ticket was scheduled: ${JSON.stringify(r.scheduled)}`);
+    assert.deepEqual(scheduleFindings(r).map((f) => f.kind), [],
+      "a finished board produced schedule findings");
+  });
+
+  test("a non-terminal one of the same type still IS a node — the control", () => {
+    const r = run("defined");
+    assert.equal(r.node_count, 1, "the custom type stopped being schedulable altogether");
+  });
+
+  test("terminality comes from the PASSED workflows, not an ambient lookup", () => {
+    // Same ticket, same status, a registry that calls `done` non-terminal.
+    const r = scheduleModel({
+      tickets: [{ id: "S", type: "spike", status: "done", estimate_minutes: 480,
+                  constraint_start_no_earlier_than: null, deadline: null,
+                  start_date: null, due_date: null }],
+      links: [], schedule: SCHEDULE, now: MON, linkTypes: wide,
+      types: { ...DEFAULT_TYPES, ...SPIKE },
+      workflows: { delivery: { statuses: ["defined", "done"], terminal: [] } } });
+    assert.equal(r.node_count, 1, "the passed workflow registry was ignored");
   });
 });

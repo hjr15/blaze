@@ -191,6 +191,11 @@ const schedule = config === null ? null : scheduleModel({
   types: Object.keys(projects).reduce(
     (acc, k) => Object.assign(acc, resolveSchema({ config, project: projects[k] ?? null }).types),
     { ...resolveSchema({ config }).types }),
+  // The workflow registry too, and for the same reason: terminality decides whether a ticket is
+  // a node at all, and reading it ambiently replanned finished work onto the critical path.
+  workflows: Object.keys(projects).reduce(
+    (acc, k) => Object.assign(acc, resolveSchema({ config, project: projects[k] ?? null }).workflows),
+    { ...resolveSchema({ config }).workflows }),
   now: Date.now(),
 });
 if (schedule) report.findings.push(...scheduleFindings(schedule));

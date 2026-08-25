@@ -190,3 +190,63 @@ describe("BLZ-392: the override actually reaches both production paths", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+
+describe("BLZ-392: the runner passes BOTH registries, not just the type one", () => {
+  // The union of types has no unit test that fails without it (the mutation survived a full
+  // suite), and the workflows union is what keeps a finished custom-typed board out of the
+  // critical path. Both are asserted here by running the real runner against a board whose
+  // custom delivery type is declared ONLY in project.json — the layer the ambient registry
+  // never merges, so this fails outright if either union is dropped.
+  function projectLayerBoard(status) {
+    const root = mkdtempSync(join(tmpdir(), "blz392-proj-"));
+    mkdirSync(join(root, "projects", "ENG", status), { recursive: true });
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({
+      key: "ENG", projects: ["ENG"],
+      schema: { linkTypes: { Precedes: {
+        source_kinds: ["spike"], target_kinds: ["spike"], min_card: 0, max_card: null } } },
+    }, null, 2));
+    // A custom WORKFLOW as well as a custom type. Using the shipped `delivery` workflow made
+    // the workflows union untestable: `DEFAULT_WORKFLOWS` already knows `delivery`, so dropping
+    // the union changed nothing and the mutation survived. Terminality here can only be decided
+    // from the registry the runner passes.
+    writeFileSync(join(root, "projects", "ENG", "project.json"), JSON.stringify({
+      schema: {
+        workflows: { spikeflow: {
+          statuses: ["defined", "done"], terminal: ["done"],
+          transitions: [["defined", "done"]], resolutionOnTerminal: { done: "done" } } },
+        types: { spike: {
+          level: 0, workflow: "spikeflow", parentTypes: ["feature"], required: ["title"] } },
+      },
+    }, null, 2));
+    for (const n of [1, 2]) {
+      writeFileSync(join(root, "projects", "ENG", status, `ENG-${n}-s.md`),
+        ["---", `id: ENG-${n}`, 'title: "s"', "type: spike", "project: ENG", "estimate: 4800",
+         "deadline: 2026-08-26", "start: 2026-01-02", "due: 2026-01-05",
+         ...(status === "done" ? ["resolution: done"] : []), "---", ""].join("\n"));
+    }
+    return root;
+  }
+
+  test("a project-declared delivery type is scheduled — the types union reaches it", () => {
+    const root = projectLayerBoard("defined");
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /deadline-unreachable/,
+        `a type declared only in project.json was never scheduled — the types union is not `
+        + `reaching the model:\n${r.stdout}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("the same board FINISHED produces no schedule finding — the workflows union reaches it", () => {
+    // Without it, `terminalOf` falls back to an ambient lookup that cannot see a
+    // project-declared type, calls every done ticket non-terminal, and replans finished work.
+    const root = projectLayerBoard("done");
+    try {
+      const r = audit(root);
+      assert.doesNotMatch(r.stdout, /deadline-unreachable/,
+        `finished work was replanned onto the critical path:\n${r.stdout}`);
+      assert.doesNotMatch(r.stdout, /schedule-empty/,
+        `a board whose delivery work is all done was called unschedulable:\n${r.stdout}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
