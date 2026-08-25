@@ -139,59 +139,93 @@ export function idFromSubject(subject, key) {
 //
 // What survives is the BODY. GitHub's default squash message concatenates the
 // collapsed commits' messages, each subject as a `* ` bullet — verified on this
-// repo's own history, where 22 of 312 commits carry such a bullet under a ticket
-// subject (99 bullet lines), recovering 28 ids no subject on the default branch names.
+// repo's own history, where 23 of 312 commits on origin/main carry such a bullet
+// under a ticket subject (102 bullet lines), recovering 28 ids no subject names.
 //
-// TWO CONDITIONS, AND THE SECOND ONE IS LOAD-BEARING.
+// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING.
 //
 //   1. The marker is `* `, which is what GitHub writes and nothing else here does.
-//   2. The commit's OWN SUBJECT must parse as `KEY-n:` — it must itself be a squashed
-//      ticket PR, which is precisely BLZ-131's premise: per-ticket commits inside a
-//      FEATURE's PR, and a feature PR is titled `KEY-n: …` by house convention.
+//   2. The subject must OPEN with a ticket-id list — `KEY-n:`, and the multi-ticket
+//      forms the house also writes, `KEY-a/b/c:` and `KEY-a + KEY-b:`. The commit must
+//      itself be a squashed ticket PR, which is BLZ-131's premise: per-ticket commits
+//      inside a FEATURE's PR. Every id in that leading list counts, and the list ends
+//      at the colon, so `KEY-1: fixes KEY-4` still claims only KEY-1.
 //
-// Condition 2 exists because the first cut of this change, which honoured any
-// `[*+-]` bullet under any subject, turned the board's own ledger into a delivery
-// signal. `commit-runner.mjs` writes every batch board commit's body as
-// `- <KEY>-<n>: <board op> [session]`, and the board repo is itself a configured
-// codeRepo for its own project — the hazard INF-735's comment already names. Measured
-// on the live board: 299 ids harvested that had shipped nothing, and `decide()` moved
-// 137 tickets `defined → done` off lines reading `edit labels` and
-// `defined → in-progress`. That is BLZ-130's failure at a hundred times the scale,
-// re-introduced inside the fix for its sibling, and an adversarial review caught it.
+// Condition 2 exists because the first cut, which honoured any `[*+-]` bullet under any
+// subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
+// writes every batch board commit's body as `- <KEY>-<n>: <board op> [session]`, and
+// the board repo is itself a configured codeRepo for its own project — the hazard
+// INF-735's comment already names. Measured on the board repo's origin/main: 426 ids
+// harvested that had shipped nothing, and a review reproduced `decide()` moving on the
+// order of 130 tickets `defined → done` off lines reading `edit labels`. That is
+// BLZ-130's failure at a hundred times the scale, inside the fix for its sibling.
 //
-// Narrowing the marker alone was not enough. The board repo also carries squashed PRs
-// of ticket-BODY edits whose subject is `blaze: … board + ticket work (#60)` and whose
-// bullets are real `KEY-n:` subjects describing an edit, not a delivery. Requiring the
-// parent subject to name a ticket drops those too: on the board repo the harvest falls
-// from 299 ids to 2, and both survivors are genuine bundled children of a `KEY-n:`
-// epic PR. On the code repo it recovers 28 ids that no subject on the default branch
-// mentions — the blind spot this ticket is about.
+// Neither condition alone suffices. The board also carries squashed PRs of ticket-BODY
+// edits, subject `blaze: … board + ticket work (#60)`, whose bullets are real `KEY-n:`
+// subjects describing an edit rather than a delivery — the subject gate drops those.
+// And ledger lines swept into a PR that IS titled for a ticket are what the marker
+// drops. On the board repo, origin/main: 426 ids ungated, 49 with the subject gate
+// alone, 2 with both — and both survivors (INF-701, INF-672) are genuine bundled
+// children of a `KEY-n:` epic PR. On the code repo the rule recovers 28 ids.
 //
-// What it deliberately does NOT claim: a bullet is not proof of work. A squashed
-// ticket PR whose body happens to list a ticket it did not implement will be believed.
-// The bullet plus the parent-subject gate makes that a narrow case rather than the
-// common one, and the safe direction is preserved everywhere else — the commit must
-// still be reachable from the default branch, so an open PR strands nothing.
+// The multi-ticket forms in condition 2 were themselves missed once: reading only the
+// leading id discarded two of the three tickets that `BLZ-286/287/288: … (#71)`
+// delivered, and would have stranded BLZ-131 on the PR that introduced this function.
 //
-// This reads git and nothing else. A PR BODY listing its bundled tickets was the
-// other candidate and was rejected: it widens trust to the forge for a claim that
-// moves a ticket to DONE, and a PR body naming a ticket is weaker evidence than a
-// commit that is demonstrably on the default branch. The cost is a configuration
-// dependency, recorded in docs/guide/how-it-works.md — a repo whose squash message is
-// set to "Pull request title" alone destroys the bullets too, and its bundled children
-// go back to needing a manual move.
+// What this deliberately does NOT claim: a bullet is not proof of work. A squashed
+// ticket PR whose body lists a ticket it did not implement will be believed. The two
+// conditions make that narrow rather than common, and the safe direction holds
+// elsewhere — the commit must be reachable from the default branch, so an open PR
+// strands nothing.
+//
+// This reads git and nothing else. A PR BODY listing its bundled tickets was the other
+// candidate and was rejected: it widens trust to the forge for a claim that moves a
+// ticket to DONE, and a PR body naming a ticket is weaker evidence than a commit
+// demonstrably on the default branch. The cost is a configuration dependency, recorded
+// in docs/guide/how-it-works.md — a repo whose squash message is set to "Pull request
+// title" alone destroys the bullets, and its bundled children need a manual move.
 export function idsFromCommitMessage(message, key) {
   const lines = String(message || "").split("\n");
-  const subject = idFromSubject(lines[0], key);
   // No ticket in the subject means this is not a squashed ticket PR, so its body is
   // not a bundle manifest — whatever it happens to list. Returning early is the whole
   // of condition 2.
-  if (!subject) return [];
-  const ids = [subject];
+  const ids = idsFromSubject(lines[0], key);
+  if (!ids.length) return [];
   const bullet = new RegExp("^\\s*\\*\\s+" + key + "-(\\d+):", "i");
   for (let i = 1; i < lines.length; i += 1) {
     const m = bullet.exec(lines[i]);
-    if (m) ids.push(`${key}-${m[1]}`);
+    if (!m) continue;
+    const id = `${key}-${m[1]}`;
+    // A child listed in the body of the PR that also names it in the subject is one
+    // ticket, not two.
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+// --- every ticket a commit SUBJECT claims, not merely the first ---------------
+// The house titles a feature PR for the ticket it delivers, and sometimes for several:
+// `BLZ-286/287/288: config projection … (#71)` and `BLZ-96/97: close batch-mode commit
+// bypasses` are both real squashed feature PRs on this repo's default branch.
+//
+// `idFromSubject` returns only the leading id, which is right for its own callers and
+// wrong as a gate: reading only the first id threw away two of the three tickets that
+// PR delivered, and would have stranded BLZ-131 on the very PR that introduced this
+// function.
+//
+// The list must be CONTIGUOUS and end at the colon, which is what preserves
+// `idFromSubject`'s rule that a downstream mention is never a claim — `BLZ-1: fixes
+// BLZ-4` still yields only BLZ-1. Separators are the ones the house actually uses.
+export function idsFromSubject(subject, key) {
+  const head = new RegExp(
+    "^" + key + "-\\d+(?:\\s*[+/,&]\\s*(?:" + key + "-)?\\d+)*(?=\\s*:)", "i",
+  ).exec(String(subject || "").trim());
+  if (!head) return [];
+  const ids = [];
+  const each = new RegExp("(?:" + key + "-)?(\\d+)", "gi");
+  for (const m of head[0].matchAll(each)) {
+    const id = `${key}-${m[1]}`;
+    if (!ids.includes(id)) ids.push(id);
   }
   return ids;
 }

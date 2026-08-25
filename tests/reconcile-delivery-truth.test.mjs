@@ -355,3 +355,51 @@ describe("BLZ-130: a terminal ticket's delivery record is history, not a live fi
     assert.equal(d.prVal, "#81 — u81");
   });
 });
+
+// =============================================================================
+// Round 3 — defects round 2's own fixes introduced
+// =============================================================================
+
+// FINDING 2. The subject gate rejected the house's own multi-ticket feature titles.
+// `BLZ-286/287/288: config projection … (#71)` is a real squashed feature PR on this
+// repo's default branch carrying three genuine `* BLZ-…:` bullets, and the gate threw
+// all three away. Worse, THIS PR is titled `BLZ-130 + BLZ-131: …`, so merging it would
+// have stranded BLZ-131 — the gate rests on "a feature PR is titled that way by
+// convention", and both multi-ticket PRs in this repo's history use a shape it rejected.
+describe("BLZ-131: a feature PR may name more than one ticket", () => {
+  test("a `/`-joined title is a ticket subject, and every id in it counts", () => {
+    const msg = [
+      "BLZ-286/287/288: config projection — resolved_* tables (#71)",
+      "",
+      "* BLZ-286: the blaze_config namespace",
+      "* BLZ-287: the resolved_* projection tables",
+    ].join("\n");
+    assert.deepEqual(idsFromCommitMessage(msg, "BLZ"), ["BLZ-286", "BLZ-287", "BLZ-288"]);
+  });
+
+  test("a `+`-joined title too — the shape this very PR uses", () => {
+    const msg = [
+      "BLZ-130 + BLZ-131: reconcile stops saying shipped when it is not (#123)",
+      "",
+      "* BLZ-130: an open pull request vetoes done",
+      "* BLZ-131: a bullet only counts inside a squashed ticket PR",
+    ].join("\n");
+    assert.deepEqual(idsFromCommitMessage(msg, "BLZ"), ["BLZ-130", "BLZ-131"]);
+  });
+
+  test("an id mentioned AFTER the colon is still only a mention", () => {
+    // The anchored-leading-id rule this file has always had must survive the widening.
+    assert.deepEqual(idsFromCommitMessage("BLZ-1: fixes BLZ-4 and relates to BLZ-5", "BLZ"),
+      ["BLZ-1"]);
+  });
+
+  test("the widening does not re-admit the board ledger", () => {
+    const msg = "blaze: 2026-08-08 board update (3 moves)\n\n- INF-15: edit labels [s1]";
+    assert.deepEqual(idsFromCommitMessage(msg, "INF"), []);
+  });
+
+  test("nor a board-content PR whose subject names no ticket", () => {
+    const msg = "blaze: 2026-08-08 board + ticket work (#60)\n\n* INF-805: record the stuck Application";
+    assert.deepEqual(idsFromCommitMessage(msg, "INF"), []);
+  });
+});
