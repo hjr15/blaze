@@ -68,8 +68,14 @@ not do it quietly.
 
 **Narrowing `Precedes` narrows what can be scheduled.** `source_kinds` decides what the critical
 path treats as a node, so an empty list or a single typo'd type name makes the whole board
-unschedulable. That is reported too, as `schedule-empty` — an outcome check, because the two
+unschedulable. `blaze audit` reports that as `schedule-empty` — an outcome check, because the two
 likeliest mistakes are well-formed and no validation of the block's shape would catch them.
+
+It fires when nothing is a node *and* the board holds tickets that ought to be: a type the engine
+ships as a `Precedes` source kind, or a type you added yourself. It stays quiet on a board with
+nothing schedulable to begin with — a requirements-first project, or one whose delivery work is
+all done — because `goal`, `risk`, `requirement`, `architecture` and `epic` are excluded from the
+critical path by design, not by misconfiguration.
 
 - A **type** entry: `level` (2=goal … 0=leaf … -1=subtask), `workflow` (the name
   of a workflow — built-in or one you define), `parentTypes` (which parent types

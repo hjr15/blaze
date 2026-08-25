@@ -14,11 +14,10 @@
 // cover it from both ends: the merge, and the solve actually honouring the merged value.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { resolveSchema, validateSchema } from "../../scripts/model/schema-config.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes } from "../../scripts/model/link-schema.mjs";
 import { scheduleModel } from "../../scripts/model/schedule.mjs";
-import { scheduleFindings } from "../../scripts/model/audit.mjs";
+import { scheduleFindings, auditCorpus } from "../../scripts/model/audit.mjs";
 import { planDependencyImport, DISPOSITION } from "../../scripts/model/import-deps.mjs";
 
 const SCHEDULE = { minutes_per_day: 480, working_days: [1, 2, 3, 4, 5] };
@@ -295,73 +294,25 @@ describe("BLZ-392: the solve honours the resolved endpoint kinds", () => {
   });
 });
 
-/**
- * Source with comments and string CONTENTS removed, so neither can satisfy a grep.
- *
- * A single-pass scanner, not two regex sweeps. The regex version stripped `/* ... *\/` FIRST,
- * and `schedule-runner.mjs` line 3 is a `//` comment mentioning a glob — the `/*` inside it
- * opened a block comment that closed at the next JSDoc terminator, silently deleting 39 lines
- * of REAL CODE including the whole import block. The guard's strongest assertion, that neither
- * runner may name `DEFAULT_LINK_TYPES`, was therefore blind to the natural place an import
- * goes, and adversarial review reinstated the original defect with all 2,257 tests green.
- *
- * Order cannot fix that on its own: stripping `//` first breaks a block comment containing a
- * URL. The states are genuinely interleaved, so they are scanned as states.
- */
-function uncommented(url) {
-  const src = readFileSync(new URL(url, import.meta.url), "utf8");
-  let out = "", i = 0;
-  while (i < src.length) {
-    const c = src[i], d = src[i + 1];
-    if (c === "/" && d === "/") { while (i < src.length && src[i] !== "\n") i++; continue; }
-    if (c === "/" && d === "*") {
-      i += 2;
-      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
-      i += 2; continue;
-    }
-    if (c === '"' || c === "'" || c === "`") {
-      // Kept as an empty literal: a `linkTypes:` written inside a string is not a call site.
-      const q = c; i++;
-      while (i < src.length) {
-        if (src[i] === "\\") { i += 2; continue; }
-        if (src[i] === q) { i++; break; }
-        i++;
-      }
-      out += q + q; continue;
-    }
-    out += src[i++];
-  }
-  return out;
-}
-
-describe("BLZ-392: both production paths pass the resolved kinds, not the constant", () => {
-  // Both model functions default `linkTypes` to DEFAULT_LINK_TYPES so they stay usable
-  // standalone. That default is a trap for exactly the production callers, because forgetting
-  // to pass the resolved value reinstates the bug with NO visible symptom.
-  //
-  // The first version of this guard was `/scheduleModel\(\{[\s\S]*?linkTypes:/` and adversarial
-  // review defeated it seven ways out of eight — most damningly, it passed when the file
-  // passed `linkTypes: DEFAULT_LINK_TYPES`, which is the exact original bug the guard names in
-  // its own failure message. Two changes fix that: comments are stripped first, and the guard
-  // requires the resolved EXPRESSION rather than the mere presence of the key.
-  //
-  // Stated plainly: no grep over source text proves runtime behaviour. What makes this one
-  // load-bearing is the companion assertion that the runner does not import the constant at
-  // all — with it out of scope, passing it is not expressible.
-  for (const [file, fn] of [["../../scripts/audit-runner.mjs", "scheduleModel"],
-                            ["../../scripts/schedule-runner.mjs", "planDependencyImport"]]) {
-    test(`${file.split("/").pop()} passes ${fn} a resolved link-type list`, () => {
-      const src = uncommented(file);
-      assert.match(src, /linkTypes:\s*(RESOLVED_LINK_TYPES|resolveSchema\()/,
-        `${file} does not pass a RESOLVED linkTypes value — a custom endpoint-kind override `
-        + "would be silently ignored on a path an operator actually runs");
-      assert.match(src, /resolveSchema/, `${file} must resolve the schema`);
-      assert.doesNotMatch(src, /DEFAULT_LINK_TYPES/,
-        `${file} imports or names DEFAULT_LINK_TYPES — while the constant is in scope, passing `
-        + "it instead of the resolved list stays expressible, and that is the original bug");
-    });
-  }
-});
+// The source-grep guard that used to live here has been DELETED, and the reasoning is worth
+// keeping because it took four review rounds to reach.
+//
+// It tried to prove, by scanning `audit-runner.mjs` and `schedule-runner.mjs`, that each passes
+// scheduleModel/planDependencyImport a RESOLVED link-type list. Every version leaked:
+//
+//   round 1  a bare `linkTypes:` match passed even when the file passed the constant
+//   round 2  a `//` comment satisfied it; the fix's own claim was that banning the identifier
+//            made the bug "not expressible"
+//   round 3  a `/*` inside a `//` comment swallowed 39 lines including the import block
+//   round 4  `resolveSchema({})` reinstates the bug WITHOUT naming the constant, and one
+//            ordinary regex literal collapsed the scanned file from 217 lines to 14
+//
+// Each fix was a better scanner. The mistake was scanning at all: the property is about what
+// the runner DOES, and no amount of lexing a source file establishes that. The replacement is
+// in `tests/audit-malformed-linktypes.test.mjs` — the real runners, on real boards, asserting
+// that a custom type declared schedulable actually gets scheduled and that a broken override
+// actually gets reported. Those cannot be satisfied by a comment, a regex literal, or an
+// argument-less call.
 
 describe("BLZ-392: the import planner honours the same resolved kinds as the solve", () => {
   // The capability was half-shipped: BLZ-392 made the SOLVE's endpoint kinds overridable and
@@ -521,5 +472,66 @@ describe("BLZ-392: validateSchema reports malformed kinds rather than throwing",
       linkTypes: [{ name: "Precedes", source_kinds: "spike", target_kinds: ["task"] }] });
     assert.ok(!errors.some((e) => /"s"|"p"|"i"|"k"|"e"/.test(e)),
       `the string was iterated per character: ${errors.join(" | ")}`);
+  });
+});
+
+describe("BLZ-392: auditCorpus surfaces schema findings per layer", () => {
+  // The restructure that reports the top layer once and each project separately shipped with
+  // NO test: dropping the top-layer suppression AND making the per-project loop never run both
+  // left the full suite green. Only a subprocess test touched `schema-invalid`, and only via
+  // the top-level config.
+  const ticket = (key, n) => ({
+    frontmatter: { id: `${key}-${n}`, type: "task", project: key, estimate: 480 },
+    status: "defined",
+  });
+  const badBlock = { schema: { linkTypes: { Precedes: {} } } };
+  const kinds = (f) => f.filter((x) => x.kind === "schema-invalid");
+
+  test("a top-level block is reported ONCE, not once per project", () => {
+    const { findings } = auditCorpus({
+      tickets: [ticket("AAA", 1), ticket("BBB", 1)],
+      projects: { AAA: {}, BBB: {} },
+      config: { ...badBlock, projects: ["AAA", "BBB"] },
+    });
+    const got = kinds(findings);
+    assert.ok(got.length > 0, "the malformed top-level block was not reported at all");
+    assert.deepEqual([...new Set(got.map((f) => f.ticket))], ["-"],
+      `the top layer must be attributed to "-", got: ${got.map((f) => f.ticket).join(",")}`);
+    // Two projects, one block: two copies would be noise that hides the signal.
+    assert.equal(new Set(got.map((f) => f.detail)).size, got.length,
+      `duplicate findings for one block: ${got.map((f) => f.detail).join(" | ")}`);
+  });
+
+  test("two projects with their OWN broken block are reported separately", () => {
+    // Deduping by message collapsed these to one, attributed to whichever sorted first — an
+    // operator fixes it, re-runs, and discovers the next.
+    const { findings } = auditCorpus({
+      tickets: [ticket("AAA", 1), ticket("BBB", 1)],
+      projects: { AAA: badBlock, BBB: badBlock },
+      config: { projects: ["AAA", "BBB"] },
+    });
+    const owners = kinds(findings).map((f) => f.ticket).sort();
+    assert.deepEqual(owners, ["AAA", "BBB"],
+      `both projects must be named, got: ${owners.join(",") || "(none)"}`);
+  });
+
+  test("a project inherits no finding from a clean top layer", () => {
+    const { findings } = auditCorpus({
+      tickets: [ticket("AAA", 1)], projects: { AAA: {} }, config: { projects: ["AAA"] },
+    });
+    assert.deepEqual(kinds(findings), [],
+      `schema-invalid fired on an entirely clean board: ${JSON.stringify(kinds(findings))}`);
+  });
+
+  test("one per-project block yields ONE finding, not a contradictory pair", () => {
+    // It used to produce both "fix the kind" and "this can never reach the scheduler".
+    const { findings } = auditCorpus({
+      tickets: [ticket("AAA", 1)],
+      projects: { AAA: { schema: { linkTypes: { Precedes: { source_kinds: ["spke"], target_kinds: ["spke"] } } } } },
+      config: { projects: ["AAA"] },
+    });
+    const got = kinds(findings);
+    assert.equal(got.length, 1, `expected one finding, got: ${got.map((f) => f.detail).join(" | ")}`);
+    assert.match(got[0].detail, /does not reach the scheduler/);
   });
 });

@@ -86,14 +86,21 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
   // separately and deduplicated per PROJECT, not by message: two projects with the same broken
   // block are two things to fix, and collapsing them to one attributed to whichever sorted
   // first would have an operator fix one, re-run, and discover the next — up to eleven rounds.
-  for (const e of validateSchema({ ...resolveSchema({ config }), config })) {
-    add("-", "schema-invalid", e);
-  }
-  const topLevel = new Set(validateSchema({ ...resolveSchema({ config }), config }));
+  // Computed ONCE: this ran twice, identically, back to back — two full merges and validations
+  // for one result. Deduplicated within the layer too, which the restructure had dropped: a
+  // repeated bad kind produced two byte-identical findings.
+  const topResolved = resolveSchema({ config });
+  const topLevel = new Set(validateSchema({ ...topResolved, config }));
+  for (const e of topLevel) add("-", "schema-invalid", e);
   for (const key of Object.keys(projects)) {
     const project = projects[key] ?? null;
     const seen = new Set();
-    for (const e of validateSchema({ ...resolveSchema({ config, project }), config, project })) {
+    // Judged against the EFFECTIVE link types — the top layer's — not the project-merged ones.
+    // A project block never reaches the scheduler, so reporting its endpoint kinds as "stays
+    // unschedulable, fix the kind" alongside "does not reach the scheduler" gave the operator
+    // two findings that contradict each other, one proposing a repair that cannot work.
+    const resolved = { ...resolveSchema({ config, project }), linkTypes: topResolved.linkTypes };
+    for (const e of validateSchema({ ...resolved, config, project })) {
       if (topLevel.has(e) || seen.has(e)) continue;   // already reported against the top layer
       seen.add(e);
       add(key, "schema-invalid", e);
@@ -175,7 +182,7 @@ export function summarise(findings) {
 // `.c8rc.json` excludes `scripts/*-runner.mjs`, so logic put in the runner escapes the
 // coverage gate silently.
 //
-// ALL THREE KINDS ARE SOFT, and none is in HARD_KINDS above. The header of this file sets
+// ALL FOUR KINDS ARE SOFT, and none is in HARD_KINDS above. The header of this file sets
 // the test: HARD means the CORPUS is wrong. A missed deadline means the PLAN is wrong, which
 // is a true and useful statement about a correct corpus, and a `Precedes` cycle is two
 // well-formed links whose combination is unschedulable — both rows are valid, both endpoints
@@ -194,7 +201,11 @@ export function summarise(findings) {
 // Until then a cycle can be an artefact of a half-migrated graph, which is not the
 // operator's error to be gated on. BLZ-353 is the precedent for tracking a flip by its own
 // ticket, and its lesson is why this zero is not being used to justify shipping hard.
-const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale"];
+// `schedule-empty` (BLZ-392) joins them. Adding a kind to `scheduleFindings` without adding it
+// here made the grouper fall through its noun ternary and label it "tickets carrying a stale
+// schedule" — a wrong sentence about a real finding, in the function whose own header says it
+// exists so `blaze audit` and the view layer cannot drift.
+const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty"];
 const scmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const projectOf = (id) => String(id ?? "").split("-")[0];
 
@@ -380,6 +391,9 @@ export function groupScheduleFindings(findings, { migratedDeadlines = null, epoc
       const past = all && items.every((f) => f.deadline && epochDate && f.deadline < epochDate);
       const noun = kind === "deadline-unreachable" ? "deadlines unreachable"
         : kind === "dependency-cycle" ? "tickets in a Precedes cycle"
+        // Not a per-ticket count: one finding for the whole installation, so "1 tickets ..."
+        // would be wrong twice over.
+        : kind === "schedule-empty" ? "schedule with no schedulable tickets"
         : "tickets carrying a stale schedule";
       return {
         kind, count: items.length, severity: HARD_KINDS.has(kind) ? "hard" : "soft",

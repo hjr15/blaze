@@ -93,6 +93,9 @@ export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
   for (const e of linkTypeOverrideErrors(config?.schema?.linkTypes)) {
     errors.push(`blaze.config.json: ${e}`);
   }
+  // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"
+  // with "…does not reach the scheduler at all" for the same block — two findings that
+  // contradict each other, one of them implying a repair that cannot work.
   // A per-project block is INERT, well-formed or not: a CPM solve runs over the whole corpus at
   // once, so both production callers resolve with `config` alone and no project layer reaches
   // the scheduler. Reporting a malformed one as "the override was ignored" implied that fixing

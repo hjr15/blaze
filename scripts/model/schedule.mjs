@@ -30,11 +30,17 @@
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
+import { DEFAULT_TYPES } from "./schema.mjs";
 
 export const PRECEDES = "Precedes";
 
 /** The endpoint kinds as SHIPPED — the denominator for "should anything have been schedulable?",
  *  which must not move when an installation narrows its own declaration. */
+/** The types the ENGINE declares. Anything outside this set was added by the installation.
+ *  Already transitively loaded — `isTerminal` reaches `schema.mjs` through `workflows.mjs` —
+ *  so this adds no coupling the model did not already have. */
+const DECLARED_TYPES = new Set(Object.keys(DEFAULT_TYPES));
+
 const SHIPPED_SOURCE_KINDS = new Set(
   DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES)?.source_kinds ?? []);
 const DAY_MS = 24 * 60 * 60 * 1000;
@@ -308,7 +314,13 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // is anything that OUGHT to be schedulable failing to be?
   const candidates = [...rows.keys()].filter((id) => {
     const r = rows.get(id);
-    return !terminalOf(r) && !duplicated.has(id) && SHIPPED_SOURCE_KINDS.has(r.type);
+    if (terminalOf(r) || duplicated.has(id)) return false;
+    // A type the installation ADDED counts too. Restricting the denominator to the shipped
+    // kinds alone was a false negative in exactly the case this ticket exists for: a board of
+    // only custom-typed tickets whose endpoint override breaks has no shipped-kind ticket to
+    // count, so it got NO finding while being completely unschedulable. A type the engine does
+    // not declare is one the operator added, and they added it to do something with.
+    return SHIPPED_SOURCE_KINDS.has(r.type) || !DECLARED_TYPES.has(r.type);
   }).length;
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))

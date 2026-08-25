@@ -22,6 +22,17 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const runner = fileURLToPath(new URL("../scripts/audit-runner.mjs", import.meta.url));
+const scheduleRunner = fileURLToPath(new URL("../scripts/schedule-runner.mjs", import.meta.url));
+
+/** The widening an installation writes to make its own delivery type schedulable. */
+const SPIKE_SCHEMA = {
+  types: { spike: { level: 0, workflow: "delivery", parentTypes: ["feature"],
+                    required: ["title", "description", "estimate"] } },
+  linkTypes: { Precedes: {
+    source_kinds: ["feature", "story", "task", "bug", "subtask", "spike"],
+    target_kinds: ["feature", "story", "task", "bug", "subtask", "spike"],
+    inverse_name: "Follows", min_card: 0, max_card: null } },
+};
 
 /** A one-ticket board whose config carries the given `schema` block. */
 function board(schema) {
@@ -37,6 +48,24 @@ function board(schema) {
 
 const audit = (root) => spawnSync(process.execPath, [runner],
   { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+
+const importDeps = (root) => spawnSync(process.execPath, [scheduleRunner, "import-deps"],
+  { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+
+/** A board of two `spike` tickets, the second blocked by the first. */
+function spikeBoard(schema) {
+  const root = mkdtempSync(join(tmpdir(), "blz392-spike-"));
+  mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ENG", projects: ["ENG"], ...(schema ? { schema } : {}) }, null, 2));
+  const t = (id, extra = []) => writeFileSync(
+    join(root, "projects", "ENG", "defined", `ENG-${id}-s.md`),
+    ["---", `id: ENG-${id}`, 'title: "s"', "type: spike", "project: ENG", "status: defined",
+     "estimate: 4800", "deadline: 2026-08-26", ...extra, "---", ""].join("\n"));
+  t(1);
+  t(2, ["links:", "  - type: Blocks", "    target: ENG-1"]);
+  return root;
+}
 
 describe("BLZ-392: a malformed schema.linkTypes never takes `blaze audit` down", () => {
   const MALFORMED = {
@@ -86,6 +115,57 @@ describe("BLZ-392: a malformed schema.linkTypes never takes `blaze audit` down",
       writeFileSync(join(root, "blaze.config.json"), "{ this is not json");
       const r = audit(root);
       assert.match(r.stdout, /ok=true/, `an unparseable config took the audit down:\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// This replaces a source-grep guard that leaked in all four review rounds — most damningly,
+// `resolveSchema({})` reinstated the defect without naming the banned constant, and one regex
+// literal hid 94% of a runner from the scan. The property is about what the runner DOES, so it
+// is asserted by running it.
+describe("BLZ-392: the override actually reaches both production paths", () => {
+  test("blaze audit schedules a custom delivery type the config declares schedulable", () => {
+    const root = spikeBoard(SPIKE_SCHEMA);
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /deadline-unreachable/,
+        "the spikes were not scheduled, so the config's linkTypes never reached scheduleModel — "
+        + `passing the shipped constant, or resolveSchema({}), looks exactly like this.\n${r.stdout}`);
+      assert.doesNotMatch(r.stdout, /schedule-empty/, `unexpected schedule-empty:\n${r.stdout}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("without the linkTypes half the same board is NOT scheduled — the control", () => {
+    // Proves the assertion above is about the override and not about the board.
+    const root = spikeBoard({ types: SPIKE_SCHEMA.types });
+    try {
+      const r = audit(root);
+      assert.doesNotMatch(r.stdout, /deadline-unreachable/,
+        "a spike was scheduled without being a declared Precedes endpoint");
+      assert.match(r.stdout, /schedule-empty/,
+        `an entirely unschedulable board reported nothing:\n${r.stdout}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("blaze schedule import-deps PROPOSES an edge between two custom-typed tickets", () => {
+    // The other production path. It was a third reader of the constant for a whole round: the
+    // type was schedulable and undependable at the same time.
+    const root = spikeBoard(SPIKE_SCHEMA);
+    try {
+      const r = importDeps(root);
+      assert.match(r.stdout, /PROPOSED/,
+        `the planner refused the edge, so the override did not reach it:\n${r.stdout}`);
+      assert.doesNotMatch(r.stdout, /declares no such endpoint/,
+        `the planner is still reading the shipped kinds:\n${r.stdout}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("without the override import-deps REFUSES it — the control", () => {
+    const root = spikeBoard({ types: SPIKE_SCHEMA.types });
+    try {
+      const r = importDeps(root);
+      assert.match(r.stdout, /declares no such endpoint/,
+        `the planner accepted a spike edge with no override:\n${r.stdout}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
