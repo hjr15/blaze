@@ -90,8 +90,17 @@ export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
   // because that took `blaze audit` down with a stack trace from inside `auditCorpus`. Ignoring
   // it silently would be the other half of the same failure, so the raw blocks are inspected
   // here and reported. The operator wrote the block; they need to know it did nothing.
-  for (const [layer, src] of [["blaze.config.json", config], ["project.json", project]]) {
-    for (const e of linkTypeOverrideErrors(src?.schema?.linkTypes)) errors.push(`${layer}: ${e}`);
+  for (const e of linkTypeOverrideErrors(config?.schema?.linkTypes)) {
+    errors.push(`blaze.config.json: ${e}`);
+  }
+  // A per-project block is INERT, well-formed or not: a CPM solve runs over the whole corpus at
+  // once, so both production callers resolve with `config` alone and no project layer reaches
+  // the scheduler. Reporting a malformed one as "the override was ignored" implied that fixing
+  // the shape would make it work. It would not, so the block itself is what gets reported.
+  if (project?.schema?.linkTypes !== undefined) {
+    errors.push("project.json: schema.linkTypes does not reach the scheduler — a critical path "
+      + "is solved over the whole installation at once, so endpoint kinds are read from "
+      + "blaze.config.json only. Move it there, or remove it.");
   }
   return errors;
 }

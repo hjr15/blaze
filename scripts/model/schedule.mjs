@@ -32,6 +32,11 @@ import { isTerminal } from "./workflows.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
 export const PRECEDES = "Precedes";
+
+/** The endpoint kinds as SHIPPED — the denominator for "should anything have been schedulable?",
+ *  which must not move when an installation narrows its own declaration. */
+const SHIPPED_SOURCE_KINDS = new Set(
+  DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES)?.source_kinds ?? []);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
@@ -292,11 +297,19 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
   // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
   // another board, which is why the filter is here rather than left to luck.
-  // BLZ-392: how many tickets COULD have been scheduled, regardless of endpoint kinds. The
-  // `schedule-empty` finding needs a denominator — "nothing scheduled" is only a problem when
-  // there was something to schedule, and an empty board must not raise it.
-  const candidates = [...rows.keys()]
-    .filter((id) => !terminalOf(rows.get(id)) && !duplicated.has(id)).length;
+  // BLZ-392: how many tickets the SHIPPED declaration would have made nodes. The
+  // `schedule-empty` finding needs a denominator, and this is the only one that means anything.
+  //
+  // Counting every non-terminal ticket was wrong and adversarially reproduced: `goal`, `risk`,
+  // `requirement`, `architecture` and `epic` are excluded from the schedule BY DESIGN, so a
+  // requirements-first board, or a board whose only open item is a goal, had candidates > 0 and
+  // nodes = 0 under a DEFAULT, untouched schema — and got told to "check schema.linkTypes" when
+  // it had none. Measuring against the shipped kinds asks the question that was actually meant:
+  // is anything that OUGHT to be schedulable failing to be?
+  const candidates = [...rows.keys()].filter((id) => {
+    const r = rows.get(id);
+    return !terminalOf(r) && !duplicated.has(id) && SHIPPED_SOURCE_KINDS.has(r.type);
+  }).length;
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);

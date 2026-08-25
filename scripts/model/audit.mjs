@@ -81,16 +81,22 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
   // well-tested no-op: green in CI, absent in production" — which is exactly what happened when
   // this ticket first named it as the mitigation for a malformed link-type block.
   //
-  // Reported per LAYER, not per project, and deduplicated: the top-level block is the same block
-  // for all eleven projects, and eleven copies of one finding is noise that hides the signal.
-  const schemaSeen = new Set();
-  for (const key of new Set([null, ...Object.keys(projects)])) {
-    const project = key === null ? null : projects[key] ?? null;
-    const resolved = resolveSchema({ config, project });
-    for (const e of validateSchema({ ...resolved, config, project: key === null ? null : project })) {
-      if (schemaSeen.has(e)) continue;
-      schemaSeen.add(e);
-      add(key === null ? "-" : key, "schema-invalid", e);
+  // The top-level layer is judged ONCE — it is the same block for every project, and eleven
+  // copies of one finding is noise that hides the signal. Each project's own layer is judged
+  // separately and deduplicated per PROJECT, not by message: two projects with the same broken
+  // block are two things to fix, and collapsing them to one attributed to whichever sorted
+  // first would have an operator fix one, re-run, and discover the next — up to eleven rounds.
+  for (const e of validateSchema({ ...resolveSchema({ config }), config })) {
+    add("-", "schema-invalid", e);
+  }
+  const topLevel = new Set(validateSchema({ ...resolveSchema({ config }), config }));
+  for (const key of Object.keys(projects)) {
+    const project = projects[key] ?? null;
+    const seen = new Set();
+    for (const e of validateSchema({ ...resolveSchema({ config, project }), config, project })) {
+      if (topLevel.has(e) || seen.has(e)) continue;   // already reported against the top layer
+      seen.add(e);
+      add(key, "schema-invalid", e);
     }
   }
 

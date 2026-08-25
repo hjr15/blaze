@@ -217,7 +217,8 @@ own "Engine limits" section:
   Without the `linkTypes` half, a custom delivery type is **not** a `Precedes`
   endpoint, so the scheduler treats it as no node at all. Replacement is
   wholesale per link type — restate every kind you want, not just the new one —
-  and a malformed entry is a hard, named error rather than a silent drop.
+  and a malformed entry is ignored, leaving the shipped declaration in force, and
+  reported by `blaze audit` as a soft `schema-invalid` finding.
 
 ## Gotchas
 

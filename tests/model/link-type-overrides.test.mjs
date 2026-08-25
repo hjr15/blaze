@@ -154,6 +154,32 @@ describe("BLZ-392: a malformed override is ignored AND reported, never silently 
       "two entries named Precedes — .find would silently pick one of them");
   });
 
+  for (const [label, block] of [["an array", ["Precedes"]], ["a string", "Precedes"], ["a number", 7]]) {
+    test(`a BLOCK that is ${label} is reported, not silently dropped`, () => {
+      // The merge ignores these, and the error function returned [] for exactly them — so the
+      // silent drop this pair exists to end survived one level up, at the block rather than
+      // the entry. Round 2's own test used a non-empty array as "the discriminating case" for
+      // the merge and never checked that it was reported.
+      const cfg = { schema: { linkTypes: block } };
+      assert.deepEqual(resolveSchema({ config: cfg }).linkTypes, DEFAULT_LINK_TYPES,
+        "a malformed block must leave the shipped declaration in force");
+      const errors = validateSchema({ ...resolveSchema({ config: cfg }), config: cfg });
+      assert.ok(errors.some((e) => /schema\.linkTypes must be an object/.test(e)),
+        `a ${label} block was accepted in silence: ${errors.join(" | ") || "(no errors)"}`);
+    });
+  }
+
+  test("a well-formed PER-PROJECT block is reported as inert, not as working", () => {
+    // It resolves correctly and reaches nothing: both production callers pass `config` alone,
+    // because a CPM solve spans the installation. Saying "the override was ignored" implied a
+    // shape fix would make it work.
+    const project = { schema: { linkTypes: { Precedes: {
+      source_kinds: ["task"], target_kinds: ["task"], min_card: 0, max_card: null } } } };
+    const errors = validateSchema({ ...resolveSchema({ config: null, project }), project });
+    assert.ok(errors.some((e) => /does not reach the scheduler/.test(e)),
+      `an inert per-project block was not reported: ${errors.join(" | ") || "(none)"}`);
+  });
+
   test("a key that is not a default appends under the KEY, shadowing nothing", () => {
     // `{ Foo: { name: "Precedes" } }` used to append a SECOND entry named Precedes that `.find`
     // never reached, silently discarding the override.
@@ -270,15 +296,42 @@ describe("BLZ-392: the solve honours the resolved endpoint kinds", () => {
 });
 
 /**
- * Source with comments removed, so commenting a line out cannot satisfy a grep.
+ * Source with comments and string CONTENTS removed, so neither can satisfy a grep.
  *
- * BOTH forms. A first version stripped only `//` lines, and adversarial review defeated it by
- * reinstating the original bug and appending the resolved call inside a block comment.
+ * A single-pass scanner, not two regex sweeps. The regex version stripped `/* ... *\/` FIRST,
+ * and `schedule-runner.mjs` line 3 is a `//` comment mentioning a glob — the `/*` inside it
+ * opened a block comment that closed at the next JSDoc terminator, silently deleting 39 lines
+ * of REAL CODE including the whole import block. The guard's strongest assertion, that neither
+ * runner may name `DEFAULT_LINK_TYPES`, was therefore blind to the natural place an import
+ * goes, and adversarial review reinstated the original defect with all 2,257 tests green.
+ *
+ * Order cannot fix that on its own: stripping `//` first breaks a block comment containing a
+ * URL. The states are genuinely interleaved, so they are scanned as states.
  */
 function uncommented(url) {
-  return readFileSync(new URL(url, import.meta.url), "utf8")
-    .replace(/\/\*[\s\S]*?\*\//g, "")
-    .split("\n").map((l) => l.replace(/(^|[^:])\/\/.*$/g, "$1")).join("\n");
+  const src = readFileSync(new URL(url, import.meta.url), "utf8");
+  let out = "", i = 0;
+  while (i < src.length) {
+    const c = src[i], d = src[i + 1];
+    if (c === "/" && d === "/") { while (i < src.length && src[i] !== "\n") i++; continue; }
+    if (c === "/" && d === "*") {
+      i += 2;
+      while (i < src.length && !(src[i] === "*" && src[i + 1] === "/")) i++;
+      i += 2; continue;
+    }
+    if (c === '"' || c === "'" || c === "`") {
+      // Kept as an empty literal: a `linkTypes:` written inside a string is not a call site.
+      const q = c; i++;
+      while (i < src.length) {
+        if (src[i] === "\\") { i += 2; continue; }
+        if (src[i] === q) { i++; break; }
+        i++;
+      }
+      out += q + q; continue;
+    }
+    out += src[i++];
+  }
+  return out;
 }
 
 describe("BLZ-392: both production paths pass the resolved kinds, not the constant", () => {
@@ -414,6 +467,24 @@ describe("BLZ-392: nothing-is-schedulable is a FINDING, not a silent board-wide 
     assert.ok(!kinds.includes("schedule-empty"),
       "schedule-empty fired on a cyclic board, where dependency-cycle is the real answer");
   });
+
+  // R3-2: the denominator. Counting EVERY non-terminal ticket fired this on ordinary boards
+  // under a DEFAULT schema, because goal/risk/requirement/architecture/epic are excluded from
+  // the schedule by design — a requirements-first board was told to "check schema.linkTypes"
+  // when it had none.
+  for (const [label, tickets] of [
+    ["a goal and a requirement", [t("G", { type: "goal" }), t("R", { type: "requirement", status: "proposed" })]],
+    ["an open goal beside a finished task", [t("G", { type: "goal" }), t("T", { status: "done" })]],
+    ["a lone epic", [t("E", { type: "epic" })]],
+  ]) {
+    test(`${label} does NOT raise it — nothing there was ever schedulable`, () => {
+      const r = scheduleModel({ tickets, links: [], schedule: SCHEDULE, now: MON });
+      assert.equal(r.candidates, 0,
+        `the denominator counted ${r.candidates} — it must count only what the SHIPPED kinds would schedule`);
+      assert.ok(!scheduleFindings(r).map((f) => f.kind).includes("schedule-empty"),
+        `schedule-empty fired on ${label} under a default schema`);
+    });
+  }
 
   test("a board of only TERMINAL tickets does not raise it either", () => {
     const r = scheduleModel({

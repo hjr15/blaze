@@ -215,14 +215,32 @@ Three consequences, stated because none is free:
   behind the operator's back. That is the honest reading of the declaration — and it is now
   unreachable through config, because the merge can only replace or append, never remove.
 
-- **A malformed entry is a hard, named error at merge time**, following ADR-0002's precedent for
-  a breaking config shape. This is not tidiness: adversarial review found that `{}`, `null`, a
-  string, an array, or a mistyped `name` field each collapsed a working board to nothing
-  scheduled, with no error, no finding, and a `scheduleFindings()` result identical to a healthy
-  board. The `name` field is now taken from the KEY, so an entry cannot be filed under one
-  identity and looked up under another. **The safety argument does NOT rest on `validateSchema`,
-  which nothing in the engine calls** — ADR-0002 already warns that leaning on it buys "a
-  well-tested no-op: green in CI, absent in production". It reports; the merge refuses.
+- **A malformed entry is IGNORED and REPORTED, never a throw.** Adversarial review found that
+  `{}`, `null`, a string, an array, or a mistyped `name` field each collapsed a working board to
+  nothing scheduled, with no error and no finding. The first fix made them throw — and that was
+  worse than the bug: the throw escaped `audit-runner.mjs`'s deliberate config tolerance and
+  `blaze audit` died with a raw stack trace and NO REPORT, from inside `auditCorpus`, so the
+  whole hygiene report was lost. The tolerance was inverted too, since a totally unparseable
+  config still audited while a valid one with one bad field was fatal.
+
+  So the merge keeps the shipped declaration and `blaze audit` reports the block as a soft
+  `schema-invalid` finding. **That required `validateSchema` to actually run: `auditCorpus` is
+  its first production caller since it was written.** ADR-0002 warned that leaning on it bought
+  "a well-tested no-op: green in CI, absent in production", and an earlier draft of this section
+  named it as the mitigation while it still had no caller at all — which was exactly that.
+
+  The `name` field is taken from the KEY, so an entry cannot be filed under one identity and
+  looked up under another.
+
+- **A second finding, `schedule-empty`, catches what no shape check can.** The two likeliest
+  operator mistakes — `source_kinds: []` and one mistyped type name — are WELL-FORMED, so
+  validating the block's shape misses both while they silently zero the board. It is therefore
+  an outcome check: no nodes at all, while tickets the SHIPPED kinds would have scheduled exist.
+  The denominator matters as much as the test — counting every non-terminal ticket fired it on
+  requirements-first boards and on finished boards under a default schema, because `goal`,
+  `risk`, `requirement`, `architecture` and `epic` are excluded by design. It keys on the node
+  count rather than the scheduled count, because a board that is one dependency cycle schedules
+  nothing while being perfectly schedulable, and `dependency-cycle` already says so.
 
 Still invisible on this board, which has no `schema.linkTypes` override — so this changes no
 schedule today either.

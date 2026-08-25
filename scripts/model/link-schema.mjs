@@ -76,7 +76,15 @@ export function mergeLinkTypes(defaults, override) {
  * throws.
  */
 export function linkTypeOverrideErrors(override) {
-  if (!override || typeof override !== "object" || Array.isArray(override)) return [];
+  if (override === undefined || override === null) return [];
+  // The BLOCK itself, not just its entries. `mergeLinkTypes` ignores an array/string/number
+  // block, and this returned [] for exactly those — so the silent drop this function exists to
+  // end survived one level up. Round 2's own test used a non-empty array as "the discriminating
+  // case" for the merge and never checked that it was reported.
+  if (typeof override !== "object" || Array.isArray(override)) {
+    return [`schema.linkTypes must be an object keyed by link-type name, got `
+      + `${Array.isArray(override) ? "an array" : typeof override} — the whole block was IGNORED`];
+  }
   const errors = [];
   for (const [name, def] of Object.entries(override)) {
     if (!def || typeof def !== "object" || Array.isArray(def)) {
