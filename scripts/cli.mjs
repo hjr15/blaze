@@ -96,5 +96,42 @@ if (isReadonly() && sub.mutates) {
   process.exit(1);
 }
 
+// BLZ-56: a malformed schema override fails LOUD, here, before the verb runs.
+//
+// Every verb dispatches through this file, so it is the one place a load-path check can
+// live without being added to a dozen runners and forgotten in the thirteenth.
+//
+// TWO EXEMPTIONS, BOTH DELIBERATE, AND THIS IS AC-4's RECORDED DECISION:
+//
+//   audit — reporting exactly this class IS its job. `auditCorpus` calls `validateSchema`
+//           and emits `schema-invalid` as a soft finding, so refusing to start it would
+//           delete the report that tells the operator what to fix. BLZ-392 closed that
+//           defect (a throw from inside `auditCorpus` killed `blaze audit` outright,
+//           losing the whole hygiene report) and it stays closed.
+//   init  — runs BEFORE a board exists, so there is no config to validate.
+//
+// The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
+// `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
+// there would kill every verb before it ran, `audit` included, with a raw stack trace.
+// See ADR-0002 and the note on `assertSchemaValid`.
+const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init"]);
+if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
+  try {
+    const { resolveRoots, loadConfig } = await import("./config.mjs");
+    const { resolveSchema, assertSchemaValid } = await import("./model/schema-config.mjs");
+    assertSchemaValid(resolveSchema({ config: loadConfig({ root: resolveRoots().dataRoot }) }));
+  } catch (e) {
+    // ONLY this error stops the verb. Everything else reaching here — no board, an
+    // unreadable or unparseable config, a packaged install with no data dir — is not
+    // this check's business, and swallowing it preserves exactly the behaviour those
+    // cases had before. A preflight that turned "no board" into a hard failure would be
+    // a far bigger regression than the one it was written to close.
+    if (e && e.name === "SchemaOverrideError") {
+      console.error(e.message);
+      process.exit(1);
+    }
+  }
+}
+
 const r = node(sub.file, sub.noArgs ? [] : rest);
 process.exit(r.status ?? 0);

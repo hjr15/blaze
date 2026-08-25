@@ -5,7 +5,7 @@
 import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
-import { DEFAULT_WORKFLOWS, mergeWorkflows } from "./workflows.mjs";
+import { DEFAULT_WORKFLOWS, mergeWorkflows, RESOLUTIONS } from "./workflows.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes, linkTypeOverrideErrors } from "./link-schema.mjs";
 import { GOAL_SATISFYING_REQUIREMENT } from "./gates.mjs";
 
@@ -28,8 +28,15 @@ export function resolveSchema({ config = null, project = null } = {}) {
 
 /** Pure structural check: every type's workflow must be a declared workflow.
  *  Returns a list of human-readable errors ([] when valid). */
-export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
+export function validateSchema({ types: rawTypes = {}, workflows: rawWorkflows = {}, linkTypes = null,
                                  config = null, project = null, endpointTypes = null } = {}) {
+  // A default only fires for `undefined`, and this function is pure and public — anyone
+  // may call it with anything, `auditCorpus` included, on a config that parsed to null.
+  // `Object.entries(null)` throws, and a throw here is the exact regression BLZ-392
+  // closed: it would take `blaze audit` down instead of reporting.
+  const isRecord = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+  const types = isRecord(rawTypes) ? rawTypes : {};
+  const workflows = isRecord(rawWorkflows) ? rawWorkflows : {};
   // `endpointTypes` exists because the two checks below ask different questions. A type's
   // workflow is judged against the layer that declares it; an ENDPOINT KIND is judged against
   // every type that exists anywhere, because the top-level `Precedes` list legitimately names
@@ -42,6 +49,117 @@ export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
     const wf = def && def.workflow;
     if (wf && !Object.prototype.hasOwnProperty.call(workflows, wf)) {
       errors.push(`type "${name}" maps to undeclared workflow "${wf}"`);
+    }
+  }
+
+  // --- BLZ-56: shape, then referential integrity -----------------------------
+  // A well-formed-JSON override with the wrong SHAPE used to be accepted in silence, so
+  // the resolved schema could be internally inconsistent and only say so much later —
+  // `workflowDef` throwing deep in a verb, or a validation rule quietly ceasing to fire.
+  //
+  // REPORTED, never thrown, exactly like everything else in this function. The loud half
+  // lives in `assertSchemaValid` below, and the separation is the point: this function's
+  // production caller is `auditCorpus`, where a throw loses the whole hygiene report.
+  const isStr = (v) => typeof v === "string" && v.trim() !== "";
+  for (const [name, def] of Object.entries(types)) {
+    if (!def || typeof def !== "object" || Array.isArray(def)) {
+      errors.push(`type "${name}" is not an object — a type is a { level, workflow, parentTypes, required } record`);
+      continue;
+    }
+    if (typeof def.level !== "number" || !Number.isFinite(def.level)) {
+      errors.push(`type "${name}" has a level that is not a number (${def.level === null ? "null" : typeof def.level})`
+        + " — level orders the hierarchy, and a non-number cannot be compared");
+    }
+    if (!isStr(def.workflow)) {
+      errors.push(`type "${name}" has a workflow that is not a name `
+        + `(${def.workflow === null ? "null" : typeof def.workflow}) — every type must map to a declared workflow`);
+    }
+    if (!Array.isArray(def.parentTypes)) {
+      errors.push(`type "${name}" has parentTypes that is not an array `
+        + `(${def.parentTypes === null ? "null" : typeof def.parentTypes}) — use [] for a root type`);
+    } else {
+      for (const parent of def.parentTypes) {
+        if (!Object.prototype.hasOwnProperty.call(types, parent)) {
+          errors.push(`type "${name}" lists parentTypes "${parent}", which is not a declared type — `
+            + "nothing could ever be created under it");
+        }
+      }
+    }
+    if (!Array.isArray(def.required)) {
+      errors.push(`type "${name}" has required that is not an array `
+        + `(${def.required === null ? "null" : typeof def.required}) — use [] for no required fields`);
+    } else if (!def.required.every(isStr)) {
+      errors.push(`type "${name}" has a required entry that is not a field name — `
+        + "every entry must be a non-empty string");
+    }
+  }
+
+  for (const [name, wf] of Object.entries(workflows)) {
+    if (!wf || typeof wf !== "object" || Array.isArray(wf)) {
+      errors.push(`workflow "${name}" is not an object — a workflow is a { statuses, terminal, transitions, reopenTo } record`);
+      continue;
+    }
+    const statuses = wf.statuses;
+    if (!Array.isArray(statuses) || statuses.length === 0 || !statuses.every(isStr)) {
+      errors.push(`workflow "${name}" has statuses that is not a non-empty array of names — `
+        + "a workflow with no statuses can hold no ticket");
+      continue; // every check below is relative to `statuses`; without it they are noise.
+    }
+    const declared = new Set(statuses);
+    const terminal = wf.terminal;
+    if (terminal !== undefined) {
+      if (!Array.isArray(terminal)) {
+        errors.push(`workflow "${name}" has terminal that is not an array `
+          + `(${terminal === null ? "null" : typeof terminal})`);
+      } else {
+        for (const t of terminal) {
+          if (!declared.has(t)) {
+            errors.push(`workflow "${name}" marks "${t}" terminal, but it is not one of its statuses — `
+              + "nothing can ever reach it");
+          }
+        }
+      }
+    }
+    if (wf.transitions !== undefined) {
+      if (!Array.isArray(wf.transitions)) {
+        errors.push(`workflow "${name}" has transitions that is not an array`);
+      } else {
+        for (const pair of wf.transitions) {
+          if (!Array.isArray(pair) || pair.length !== 2) {
+            errors.push(`workflow "${name}" has a transition that is not a [from, to] pair — `
+              + `got ${JSON.stringify(pair)}`);
+            continue;
+          }
+          for (const st of pair) {
+            if (!declared.has(st)) {
+              errors.push(`workflow "${name}" has a transition naming "${st}", which is not one of `
+                + "its statuses — that move can never be made");
+            }
+          }
+        }
+      }
+    }
+    if (wf.reopenTo !== undefined && !declared.has(wf.reopenTo)) {
+      errors.push(`workflow "${name}" sets reopenTo "${wf.reopenTo}", which is not one of its `
+        + "statuses — reopening would write a status the workflow does not have");
+    }
+    const rot = wf.resolutionOnTerminal;
+    if (rot !== undefined) {
+      if (!rot || typeof rot !== "object" || Array.isArray(rot)) {
+        errors.push(`workflow "${name}" has resolutionOnTerminal that is not an object`);
+      } else {
+        const term = new Set(Array.isArray(terminal) ? terminal : []);
+        for (const [status, resolution] of Object.entries(rot)) {
+          if (!term.has(status)) {
+            errors.push(`workflow "${name}" maps a resolution onto "${status}", which is not one of its `
+              + "terminal statuses — the mapping can never fire");
+          }
+          if (!RESOLUTIONS.includes(resolution)) {
+            errors.push(`workflow "${name}" maps "${status}" to resolution "${resolution}", which is not a `
+              + `known resolution (${RESOLUTIONS.join(", ")})`);
+          }
+        }
+      }
     }
   }
 
@@ -129,4 +247,43 @@ export function loadProjectSchema(projectsDir, key, { config = null } = {}) {
   try { project = JSON.parse(readFileSync(join(projectsDir, key, "project.json"), "utf8")); }
   catch { project = null; }
   return resolveSchema({ config, project });
+}
+
+
+/**
+ * The LOAD path. Resolve-and-check, and refuse to continue on a bad override.
+ *
+ * BLZ-56's acceptance criteria say a malformed override must FAIL LOUD. BLZ-392
+ * deliberately made `validateSchema` REPORT rather than throw, because throwing killed
+ * `blaze audit` outright — a stack trace and no report at all, from inside
+ * `auditCorpus`, losing the whole hygiene report for one bad field. Those are not in
+ * conflict, but only while the paths stay separate, and this function is the separation:
+ *
+ *   `validateSchema`    the REPORTING path. Returns errors. Never throws. `auditCorpus`
+ *                       calls it, and `schema-invalid` is a soft finding.
+ *   `assertSchemaValid` the LOAD path. Throws a named, actionable error listing every
+ *                       problem at once, so one run fixes the config rather than three.
+ *
+ * It is NOT called from `ambientSchemaOverride`, and must never be. `TYPES` and
+ * `WORKFLOWS` are module-scope constants resolved through that function at IMPORT time
+ * (`schema.mjs`, `workflows.mjs`), so a throw inside it would make merely importing the
+ * model kill every verb before it ran — `blaze audit` included, with a raw stack trace.
+ * That is BLZ-392's defect one level worse, and the guarded catch there stays exactly as
+ * it is. See ADR-0002.
+ */
+export function assertSchemaValid(resolved, { source = "blaze.config.json" } = {}) {
+  const errors = validateSchema(resolved ?? {});
+  if (!errors.length) return;
+  const err = new Error(
+    `blaze: the schema override in ${source} is not valid, so the resolved schema would be `
+    + `internally inconsistent:\n\n`
+    + errors.map((e) => `  - ${e}`).join("\n")
+    + `\n\nFix ${source}, or remove its "schema" block to fall back to the built-in defaults.\n`,
+  );
+  err.name = "SchemaOverrideError";
+  // The message IS the report. A stack trace here points at this function, never at the
+  // line of config that is wrong, so it is noise in front of the part that helps.
+  err.stack = err.message;
+  err.errors = errors;
+  throw err;
 }

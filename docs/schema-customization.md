@@ -284,3 +284,53 @@ affect another.
 > A project that overrides a type's `workflow` will therefore see its tickets validated by its own
 > rules but rendered in the ambient board's columns. That is a real gap, not a design choice —
 > narrowing it means threading the project through the view layer.
+
+## A malformed override fails loud (BLZ-56)
+
+A **valid-JSON but wrong-shape** override used to be accepted in silence. `level` as a
+string, `parentTypes` as a bare string, a type whose `workflow` names a workflow that
+does not exist, a workflow whose `terminal`/`reopenTo`/`transitions` name a status not
+in its own `statuses` — all resolved, and the board only found out much later, when
+`workflowDef` threw deep inside a verb or a validation rule quietly stopped firing.
+
+The resolved schema is now checked on load: every type has a numeric `level`, a
+`workflow` naming a declared workflow, `parentTypes` that are declared types, and
+`required` as an array of field names; every workflow has a non-empty `statuses`, and
+its `terminal`, `transitions`, `reopenTo` and `resolutionOnTerminal` reference only
+statuses it declares and resolutions the engine knows.
+
+> **A partial type entry is invalid, and this is the trap worth knowing.** `mergeTypes`
+> is a **per-entry replace**, not a deep merge — so `"task": { "workflow": "delivery" }`
+> does not "adjust task's workflow", it *replaces the whole record* and `task` loses its
+> `level`, `parentTypes` and `required`. Write the complete record.
+
+### Two paths, deliberately separate
+
+This is the decision BLZ-56's AC-4 asks to be recorded, and it exists because the two
+halves genuinely pull in opposite directions.
+
+| Path | Function | Behaviour |
+|---|---|---|
+| **Reporting** | `validateSchema(resolved)` | Returns a list of errors. **Never throws.** |
+| **Load** | `assertSchemaValid(resolved)` | **Throws** a named `SchemaOverrideError` listing every problem at once. |
+
+`blaze audit` calls the reporting path and surfaces each problem as a `schema-invalid`
+finding. It is **exempt from the loud path on purpose**: reporting this class is its
+entire job, so refusing to start it would delete the report that tells you what to fix.
+BLZ-392 closed exactly that defect — a throw from inside `auditCorpus` killed `blaze
+audit` outright, losing the whole hygiene report for one bad field — and
+`tests/audit-malformed-linktypes.test.mjs` exists to keep it closed.
+
+Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is the one
+place every verb dispatches through. `blaze init` is the second exemption: it runs
+before a board exists, so there is nothing to validate.
+
+The check is **not** inside `ambientSchemaOverride`, and must never be. `TYPES` and
+`WORKFLOWS` are module-scope constants resolved through it at **import time**, so a
+throw there would make merely importing the model kill every verb before it ran — `blaze
+audit` included, with a raw stack trace. That is BLZ-392's defect one level worse, and
+the guarded catch there stays exactly as it is (ADR-0002).
+
+Anything else the preflight meets — no board, an unreadable or unparseable config, a
+packaged install with no data dir — is not its business and does not stop the verb.
+Those cases behave exactly as they did before.

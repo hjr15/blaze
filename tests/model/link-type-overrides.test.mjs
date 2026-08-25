@@ -102,7 +102,15 @@ describe("BLZ-392: link types resolve through the same layering as types and wor
 
   test("validateSchema is quiet when every endpoint kind is declared", () => {
     const errors = validateSchema({
-      types: { task: { workflow: "delivery" }, spike: { workflow: "delivery" } },
+      // BLZ-56 added shape checks, so these fixtures carry COMPLETE type records now.
+      // They were minimal because this file is about link types — but a partial record is
+      // genuinely invalid on a real board: `mergeTypes` replaces a whole entry, so an
+      // override naming only `workflow` silently drops `level` and the hierarchy stops
+      // comparing. Completing them keeps this file testing what it is about.
+      types: {
+        task: { level: 0, workflow: "delivery", parentTypes: [], required: [] },
+        spike: { level: 0, workflow: "delivery", parentTypes: [], required: [] },
+      },
       workflows: { delivery: { statuses: ["defined"], terminal: [] } },
       linkTypes: [{ name: "Precedes", source_kinds: ["task", "spike"], target_kinds: ["task", "spike"] }],
     });
@@ -471,7 +479,10 @@ describe("BLZ-392: validateSchema reports malformed kinds rather than throwing",
   // contract stated in the comment beside it) and five bogus errors for `"spike"`, one per
   // character, because `for...of` iterates a string.
   const base = {
-    types: { task: { workflow: "delivery" } },
+    // Complete type record — see the BLZ-56 note above. These tests assert an error
+    // COUNT, so a fixture that is itself invalid would add errors and hide the one they
+    // are actually about.
+    types: { task: { level: 0, workflow: "delivery", parentTypes: [], required: [] } },
     workflows: { delivery: { statuses: ["defined"], terminal: [] } },
   };
   for (const [label, kinds] of [["a number", 5], ["an object", {}], ["a string", "spike"], ["null", null]]) {
