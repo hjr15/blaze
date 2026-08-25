@@ -14,11 +14,11 @@
 // stranded by the squash of #81.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { reconcile, buildPrMap, decide, idsFromCommitMessage } from "../scripts/reconcile.mjs";
+import { reconcile, buildPrMap, decide, idsFromCommitMessage, idsFromSubject } from "../scripts/reconcile.mjs";
 
 const idFromRef = (ref) => {
   const m = /\bINF-(\d+)/i.exec(ref || "");
@@ -50,11 +50,11 @@ function board(tmp, codeRepo, tickets) {
   const root = join(tmp, "board");
   const projectsDir = join(root, "projects");
   mkdirSync(projectsDir, { recursive: true });
-  for (const [id, type, status] of tickets) {
+  for (const [id, type, status, extra] of tickets) {
     const dir = join(projectsDir, "INF", status);
     mkdirSync(dir, { recursive: true });
     writeFileSync(join(dir, `${id}-t.md`),
-      `---\nid: ${id}\ntype: ${type}\nproject: INF\nestimate: 30\n---\n\nbody\n`);
+      `---\nid: ${id}\ntype: ${type}\nproject: INF\nestimate: 30\n${extra || ""}---\n\nbody\n`);
   }
   writeFileSync(join(root, "blaze.config.json"),
     JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [codeRepo] }));
@@ -431,5 +431,32 @@ describe("BLZ-131: a feature PR may name more than one ticket", () => {
   test("nor a board-content PR whose subject names no ticket", () => {
     const msg = "blaze: 2026-08-08 board + ticket work (#60)\n\n* INF-805: record the stuck Application";
     assert.deepEqual(idsFromCommitMessage(msg, "INF"), []);
+  });
+});
+
+// =============================================================================
+// Round 4 — defects round 3's own fixes introduced
+// =============================================================================
+
+// FINDING 2. The colon anchor in `idsFromSubject` was entirely unpinned: deleting the
+// `(?=\s*:)` lookahead killed no test in any of the eleven reconcile test files, while
+// it is the whole of condition 2 for a colon-less subject. Round 3's commit message
+// claimed "the list must be contiguous and end at the colon, and a test pins that" —
+// what the existing test pinned was the separator class, not the colon.
+describe("BLZ-131: the subject's id list must END at a colon", () => {
+  test("a subject with no colon claims nothing, and its bullets go with it", () => {
+    assert.deepEqual(idsFromCommitMessage("BLZ-36 dep bump\n\n* BLZ-99: never shipped", "BLZ"), []);
+  });
+
+  test("idsFromSubject: the leading list, and only the leading list", () => {
+    assert.deepEqual(idsFromSubject("BLZ-286/287/288: config projection (#71)", "BLZ"),
+      ["BLZ-286", "BLZ-287", "BLZ-288"]);
+    assert.deepEqual(idsFromSubject("BLZ-130 + BLZ-131: reconcile (#123)", "BLZ"),
+      ["BLZ-130", "BLZ-131"]);
+    assert.deepEqual(idsFromSubject("BLZ-1: fixes BLZ-4", "BLZ"), ["BLZ-1"]);
+    assert.deepEqual(idsFromSubject("BLZ-36 dep bump", "BLZ"), [], "no colon, no claim");
+    assert.deepEqual(idsFromSubject("docs: mentions BLZ-9", "BLZ"), [], "not leading, no claim");
+    assert.deepEqual(idsFromSubject("blaze: 2026-08-08 board update (3 moves)", "INF"), []);
+    assert.deepEqual(idsFromSubject("", "BLZ"), []);
   });
 });

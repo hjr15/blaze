@@ -81,7 +81,8 @@ function sh(cmd, args, opts = {}) {
 export function decide({ pr, branch, shipped }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
-    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
+    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
+             resolution: undefined };
   }
   let target, branchVal = null, prVal = null;
   if (pr) {
@@ -101,7 +102,8 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     // an existing `resolution` on a ticket that's already in a terminal status.
     target = "done";
   } else {
-    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
+    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
+             resolution: undefined };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
   //
