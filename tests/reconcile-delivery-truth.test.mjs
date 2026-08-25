@@ -527,6 +527,32 @@ describe("BLZ-130: the record is written once — the rule, not just the comment
     } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
   });
 
+  // THE OTHER HALF OF THE SAME RULE, AND THE ONE NO TEST REACHED. `keep()` is
+  // `recordIfAbsentOnly && Boolean(current)`; every assertion above seeds the ticket
+  // WITH a record, so all of them survive dropping `&& Boolean(current)` — which turns
+  // "fill a blank, never overwrite" into "never write at all". That is direction 2, the
+  // over-correction round 2 already made once: reconcile is the sole producer of these
+  // fields, so a terminal ticket that never acquired one could never acquire it again.
+  // 1,141 of 1,679 `done` tickets on the board carry neither field today.
+  test("a done ticket with NO record still acquires one — write-once fills a blank", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz130-backfill-"));
+    const codeRepo = join(tmp, "svc");
+    mkdirSync(codeRepo, { recursive: true });
+    gitInit(codeRepo);
+    execFileSync("git", ["-C", codeRepo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    const root = board(tmp, codeRepo, [["INF-645", "epic", "done", ""]]);
+    const restore = stubGh(tmp, [PR_80_MERGED]);
+    try {
+      await reconcile({ root, dryRun: false });
+      const body = readFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"), "utf8");
+      assert.match(body, /branch: INF-645-descope-dead-mans-switch/,
+        "a blank branch on a terminal ticket must be filled, not kept blank");
+      assert.match(body, /pr: '?#80/,
+        "a blank pr on a terminal ticket must be filled, not kept blank");
+    } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+
   test("a non-terminal ticket's record still UPDATES — write-once is terminal-only", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz130-nonterm-"));
     const codeRepo = join(tmp, "svc");
