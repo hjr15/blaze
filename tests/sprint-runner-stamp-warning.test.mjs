@@ -2,12 +2,20 @@
 //
 // A SUBPROCESS test, because `scripts/*-runner.mjs` is c8-excluded and the unit tests reach the
 // warning function but not its DELIVERY. Three mutations survived the whole suite without this:
-// deleting both `warnIfUnstamped` calls, moving the call after `saveSprints`, and switching
-// `console.error` to `console.log`.
+// deleting both `warnIfUnstamped` calls, switching `console.error` to `console.log`, and warning
+// unconditionally.
 //
-// The last one has teeth. stdout is a machine-parsed channel here —
+// The `console.log` one has teeth. stdout is a machine-parsed channel here —
 // `tests/runner-flag-guard.test.mjs` does `created.stdout.match(/created (\S+)/)` — so a warning
 // leaking into it would break a parser with nothing red anywhere.
+//
+// WHAT THESE DO NOT KILL, stated because an earlier version of this header claimed otherwise.
+// Moving `warnIfUnstamped(before)` below `saveSprints` is an EQUIVALENT MUTANT: it is fed the
+// pre-write registry, so its output is identical wherever the call sits, and no test can or
+// should distinguish it. The regression that actually matters is re-reading the registry after
+// the write — `warnIfUnstamped(loadSprints(...))` — which is silent, because by then the file is
+// stamped. That one IS killed, by the tests below asserting the warning fires AND the file ends
+// up stamped in the same run.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -68,20 +76,28 @@ describe("BLZ-369: the stamp warning reaches the operator, on stderr", () => {
     const root = board({ active: "S1", sprints: SPRINTS, registryVersion: 1 });
     try {
       const r = run(root, "active", "S2");
+      assert.equal(r.status, 0, `the command failed, so the assertion below is vacuous:\n${r.stderr}`);
       assert.doesNotMatch(r.stderr ?? "", /version stamp/,
         `a correctly stamped registry warned:\n${r.stderr}`);
       assert.equal(onDisk(root).active, "S2", "the command did not do its job");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("the warning comes BEFORE the write, so it describes what is about to happen", () => {
-    // Moving the call after `saveSprints` leaves it true but useless — by then the file is
-    // already stamped and the sentence "saving now stamps it" is a lie about the past.
+  test("the warning describes the PRE-write registry, not the file it leaves behind", () => {
+    // The discriminator for the regression that matters. After the run the file IS stamped, so a
+    // warning derived from the post-write registry would be silent. Seeing the warning and a
+    // stamped file in the same run is what proves it read the state that was there before.
+    //
+    // It does NOT prove the call sits above `saveSprints` in the source, and does not try to —
+    // that is an equivalent mutant. See the header.
     const root = board({ active: "S1", sprints: SPRINTS });
     try {
       const r = run(root, "active", "S2");
+      assert.equal(r.status, 0, `the command failed:\n${r.stderr}`);
       assert.match(r.stderr ?? "", /Saving now stamps it/,
         "the message no longer describes a pending write");
+      assert.equal(onDisk(root).registryVersion, 1,
+        "the file was not stamped, so the warning could have come from the post-write state");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -89,8 +105,13 @@ describe("BLZ-369: the stamp warning reaches the operator, on stderr", () => {
     const root = board({ active: null, sprints: [] });
     try {
       const r = run(root, "new", "first", "--start", "2026-08-01", "--end", "2026-08-14");
+      // Without this the test passes when the command CRASHES — a `doesNotMatch` on the stderr of
+      // a run that never got as far as the warning proves nothing. Tests 1-2 guard it this way;
+      // this one did not, and an injected throw sailed through.
+      assert.equal(r.status, 0, `the command failed, so the assertion below is vacuous:\n${r.stderr}`);
       assert.doesNotMatch(r.stderr ?? "", /version stamp/,
         `a fresh board warned on its first sprint:\n${r.stderr}`);
+      assert.equal(onDisk(root).sprints.length, 1, "the sprint was not actually created");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

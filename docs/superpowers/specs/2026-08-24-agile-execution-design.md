@@ -147,7 +147,7 @@ no edit in this repository can change what that engine does.
 
 **The additive shape protects an older *reader*. It does not protect an older *writer*, and §2.2
 measures exactly what that costs.** An earlier draft of this paragraph claimed `setActive`
-(`sprints.mjs:76`) *"preserves `activeByProject` untouched"* — false, because `loadSprints` drops
+(`sprints.mjs`, `setActive`) *"preserves `activeByProject` untouched"* — false, because `loadSprints` dropped
 the key one frame earlier, so an old `blaze sprint active` writes it back out of existence. That
 correction landed in §2.2 and this paragraph was left standing, which is the fourth time in this
 spec's review history that a fix stopped one section short of a claim it refutes.
@@ -193,7 +193,13 @@ project, and **a legacy registry does not carry one** — `sprints.json` today i
 key is derivable only from ticket membership, a corpus query `loadSprints` has no index to run.
 
 > **Amended by BLZ-369 (2026-08-25).** Everything below described `loadSprints` as it stood when
-> this spec was written. It **no longer whitelists** — it spreads `...parsed`, so any additive key
+> this spec was written.
+>
+> **A note on the `sprints.mjs:NN` citations throughout this document: they are not maintained.**
+> They were correct when written and BLZ-386 shifted the file by about thirteen lines. BLZ-369
+> corrected only the two it edited (`:158`, `:170`); the rest are left, because chasing line
+> numbers through a design record nothing tests is unbounded and goes stale on the next edit.
+> Only `docs/decisions/0014-*.md`'s table is line-pinned by a test. Cite by SYMBOL here. It **no longer whitelists** — it spreads `...parsed`, so any additive key
 > survives without being named. The measurement, the reasoning and the prescription are left as
 > written because they are why the change happened; what they describe is now history. BLZ-369
 > also solved it more widely than this section asks: see the note after the prescription.
@@ -215,9 +221,14 @@ parsed.activeByProject ?? null` — and it is not optional.
 
 > **BLZ-369 did it wider, and deliberately.** A one-key passthrough fixes `activeByProject` and
 > leaves the next additive key to be destroyed the same way. The spread fixes the *class*, and it
-> does not normalise an absent key to `null` — an absent key stays absent, which is what lets
-> `unstampedRegistryWarning` tell "never had it" from "had it and lost it". An implementer
-> following the line above verbatim would reintroduce the narrower shape.
+> does not normalise an absent key to `null` — an absent key stays absent, so the file says what
+> it holds rather than what a reader expected. An implementer following the line above verbatim
+> would reintroduce the narrower shape.
+>
+> It does NOT let anything tell "never had it" from "had it and lost it": an earlier draft of this
+> note claimed that, and `unstampedRegistryWarning` treats absent and `null` identically. Nothing
+> can make that distinction from the file alone, which is the whole reason the warning names both
+> possibilities instead of picking one.
 
 **And the additive shape protects readers, not writers. That has to be said plainly because an
 earlier draft claimed the opposite.** It argued an older `setActive` *"preserves `activeByProject`
@@ -507,7 +518,7 @@ feature, added the refuted config entry, and shipped nothing that renders §3.2.
 
 | File | Change |
 |---|---|
-| `scripts/model/sprints.mjs` | **`loadSprints` passes `activeByProject` through** — *done by BLZ-369, and as a spread rather than a named key, so this row is already satisfied for any additive key*; it still does **not** normalise. New `activeFor(registry, project)` (§6.1). `addSprint` requires `project` on new sprints and auto-activates **per project** — `activeByProject[project] ?? id`, not today's global `registry.active ?? id` (`:67`), or a new project's first sprint is born inactive. `setActive(registry, project, id)` writes `activeByProject[project]` when `project` is a key and the scalar `active` when it is `null` — the two-target split §2.2 requires; a signature that always writes the map leaves `active` unwritable. `validateSprintFields`'s bag becomes `{ sprints }` for §2.3 rule 2. `formatSprintList` (`:79-85`) prints the project and marks active per project |
+| `scripts/model/sprints.mjs` | **`loadSprints` passes `activeByProject` through** — *done by BLZ-369, and as a spread rather than a named key, so this row is already satisfied for any additive key*; it still does **not** normalise. New `activeFor(registry, project)` (§6.1). `addSprint` requires `project` on new sprints and auto-activates **per project** — `activeByProject[project] ?? id`, not today's global `registry.active ?? id` (`:158`), or a new project's first sprint is born inactive. `setActive(registry, project, id)` writes `activeByProject[project]` when `project` is a key and the scalar `active` when it is `null` — the two-target split §2.2 requires; a signature that always writes the map leaves `active` unwritable. `validateSprintFields`'s bag becomes `{ sprints }` for §2.3 rule 2. `formatSprintList` (`:170`) prints the project and marks active per project |
 | new — `scripts/model/capacity.mjs` | pure; `(sprint, rows, { minutesPerDay, workingDays }) → { committed, workingDays, capacity, ratio }`. **Both come from board config, not from constants** — BLZ-360 §2.3 defines `schedule.minutes_per_day` **and** `schedule.working_days`, and hardcoding Mon–Fri would be the second definition §8 claims not to create. `now` is not an input, so it needs no injection |
 | new — findings, in `scripts/model/audit.mjs`'s shape | `sprint-overrun` and `sprint-window-missed` (§4). **Neither exists** — `grep -rn "sprint-overrun\|sprint-window-missed" scripts/ tests/` returns nothing — and an earlier version of this table had no row for them at all, while §4 specifies 26 live corpus findings. `sprint-overrun` needs no scheduler and is buildable today |
 | `scripts/views/data.mjs` | `boardModel` (`:24`) takes `{ project, focus, flat, index }` and has **no sprint parameter and no sprint filter**. It gains one, plus the sprint-scoped rows and **both** config values `capacity.mjs` needs — `schedule.minutes_per_day` **and** `schedule.working_days`. An earlier version named only the first, one row after the `capacity.mjs` row had gained the second |
