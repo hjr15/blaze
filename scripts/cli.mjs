@@ -114,12 +114,42 @@ if (isReadonly() && sub.mutates) {
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
 // there would kill every verb before it ran, `audit` included, with a raw stack trace.
 // See ADR-0002 and the note on `assertSchemaValid`.
-const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init"]);
+//   commit — a git flush of the pending ledger. `commit-runner.mjs` imports nothing from
+//           the model, and refusing it would strand ticket files that other verbs have
+//           ALREADY relocated but not committed — the same hazard the read-only gate
+//           above cites for gating too late.
+const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init", "commit"]);
 if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
   try {
-    const { resolveRoots, loadConfig } = await import("./config.mjs");
+    const { resolveRoots, loadConfig, listProjects, loadProject } = await import("./config.mjs");
     const { resolveSchema, assertSchemaValid } = await import("./model/schema-config.mjs");
-    assertSchemaValid(resolveSchema({ config: loadConfig({ root: resolveRoots().dataRoot }) }));
+    const root = resolveRoots().dataRoot;
+    const config = loadConfig({ root });
+
+    // JUDGED THE WAY `auditCorpus` JUDGES IT, and this is not a detail. A top-level
+    // `Precedes` list may legitimately name a type that only ONE PROJECT declares, which
+    // is why BLZ-392 added `endpointTypes` — every type that exists anywhere. The first
+    // cut of this preflight dropped it and validated the top layer alone, so every
+    // non-exempt verb refused to run on a board `blaze audit` calls clean. A check that
+    // disagrees with audit on the same board is worse than no check at all.
+    const projects = {};
+    for (const k of listProjects(config)) {
+      try { projects[k] = loadProject(k, { root }); } catch { projects[k] = null; }
+    }
+    const top = resolveSchema({ config });
+    const endpointTypes = { ...top.types };
+    for (const k of Object.keys(projects)) {
+      Object.assign(endpointTypes, resolveSchema({ config, project: projects[k] }).types);
+    }
+    assertSchemaValid({ ...top, config, endpointTypes });
+    // And each project layer, which `new`/`edit` resolve through `loadProjectSchema` and
+    // the first cut never looked at — so a malformed project.json passed every verb while
+    // audit reported it. The mirror of the same asymmetry.
+    for (const k of Object.keys(projects)) {
+      const resolved = { ...resolveSchema({ config, project: projects[k] }), linkTypes: top.linkTypes };
+      assertSchemaValid({ ...resolved, config, project: projects[k], endpointTypes },
+        { source: `projects/${k}/project.json` });
+    }
   } catch (e) {
     // ONLY this error stops the verb. Everything else reaching here — no board, an
     // unreadable or unparseable config, a packaged install with no data dir — is not
@@ -127,7 +157,13 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     // cases had before. A preflight that turned "no board" into a hard failure would be
     // a far bigger regression than the one it was written to close.
     if (e && e.name === "SchemaOverrideError") {
-      console.error(e.message);
+      // writeSync, not console.error: `process.exit` after a large write TRUNCATES a
+      // piped stream at 64 KiB, because pipe writes are async. The whole value of this
+      // error is "every problem at once", and a board with enough bad entries lost the
+      // tail — including the line telling the operator which file to fix.
+      const { writeSync } = await import("node:fs");
+      const buf = Buffer.from(e.message.endsWith("\n") ? e.message : `${e.message}\n`, "utf8");
+      for (let off = 0; off < buf.length;) off += writeSync(2, buf, off, buf.length - off);
       process.exit(1);
     }
   }

@@ -19,13 +19,15 @@ import { fileURLToPath } from "node:url";
 
 const CLI = fileURLToPath(new URL("../scripts/cli.mjs", import.meta.url));
 
-/** A one-ticket board whose config carries the given `schema` block. */
-function board(schema) {
+/** A one-ticket board whose config carries the given `schema` block, and optionally a
+ *  per-project `schema` block on ENG. */
+function board(schema, projectSchema = null) {
   const root = mkdtempSync(join(tmpdir(), "blz56-"));
   mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
   writeFileSync(join(root, "blaze.config.json"),
     JSON.stringify({ key: "ENG", projects: ["ENG"], ...(schema ? { schema } : {}) }, null, 2));
-  writeFileSync(join(root, "projects", "ENG", "project.json"), JSON.stringify({ key: "ENG", name: "Eng" }));
+  writeFileSync(join(root, "projects", "ENG", "project.json"),
+    JSON.stringify({ key: "ENG", name: "Eng", ...(projectSchema ? { schema: projectSchema } : {}) }));
   writeFileSync(join(root, "projects", "ENG", "defined", "ENG-1-t.md"),
     ["---", "id: ENG-1", "title: t", "type: task", "project: ENG", "priority: medium",
      "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
@@ -99,6 +101,97 @@ describe("BLZ-56: `blaze audit` still REPORTS — the BLZ-392 regression stays c
       const r = run(root, ["audit", "--json"]);
       const parsed = JSON.parse(r.stdout);
       assert.ok(parsed, "audit --json must still emit JSON when the override is malformed");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// Round 2 — what an adversarial review broke
+// =============================================================================
+
+/** A complete, legal type record. */
+const SPIKE = { level: 0, workflow: "delivery", parentTypes: ["feature"], required: ["title"] };
+
+describe("BLZ-56: the preflight must judge a board the way audit does", () => {
+  test("a top-level Precedes naming a PROJECT-declared type does not brick the board", () => {
+    // THE FALSE POSITIVE THAT MATTERED. BLZ-392 added `endpointTypes` precisely because a
+    // top-level `Precedes` list legitimately names a type only one project declares —
+    // judging it against the top layer alone produced a finding its own report
+    // contradicted. The first cut of this preflight dropped `endpointTypes`, so every
+    // non-exempt verb exited 1 on a board that `origin/main` runs fine and that this
+    // branch's own `blaze audit` calls ok=true. A check that disagrees with audit in
+    // either direction on the same board is worse than no check.
+    const root = board(
+      { linkTypes: { Precedes: {
+        source_kinds: ["task", "spike"], target_kinds: ["task", "spike"],
+        inverse_name: "Follows", min_card: 0, max_card: null } } },
+      { types: { spike: SPIKE } },
+    );
+    try {
+      const audit = run(root, ["audit"]);
+      const verb = run(root, ["rollup"]);
+      assert.equal(audit.status, 0, `audit: ${audit.stdout}${audit.stderr}`);
+      assert.equal(verb.status, 0,
+        `a verb must not refuse a board audit calls clean\n${verb.stdout}${verb.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a NON-EXEMPT verb runs clean on an ordinary good board", () => {
+    // Every "non-breaking" test in the first cut ran `blaze audit`, which is EXEMPT — so
+    // nothing exercised the preflight on a board that should pass it.
+    const root = board(GOOD);
+    try {
+      const r = run(root, ["rollup"]);
+      assert.equal(r.status, 0, `${r.stdout}${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a malformed PER-PROJECT override fails loud too", () => {
+    // The mirror of the false positive: the first cut validated only the top layer, so a
+    // project.json carrying the partial record the docs call "the trap worth knowing"
+    // passed every verb while audit reported it.
+    const root = board(null, { types: { task: { workflow: "delivery" } } });
+    try {
+      const r = run(root, ["rollup"]);
+      assert.notEqual(r.status, 0, `expected a refusal\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr + r.stdout, /task/);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("`blaze commit` is exempt — it flushes git and reads no schema", () => {
+    // commit-runner.mjs imports nothing from the model: it is a git flush of the pending
+    // ledger. Refusing it strands ticket files that verbs have ALREADY relocated but not
+    // committed, which is the hazard cli.mjs's own read-only gate cites.
+    const root = board(MALFORMED);
+    try {
+      const r = run(root, ["commit"]);
+      assert.doesNotMatch(r.stderr, /is not valid/,
+        "refusing commit would strand relocated-but-uncommitted ticket files");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-56: the loud error survives the pipe it is written to", () => {
+  test("a very large error is not truncated at 64 KiB", () => {
+    // `console.error` before `process.exit(1)` cuts at exactly 65,536 bytes on a pipe —
+    // the repo's own documented class. The design's stated value is "every problem at
+    // once", and truncation is precisely what destroys it.
+    const types = {};
+    for (let i = 0; i < 500; i += 1) types[`bad${i}`] = { level: "0", workflow: "ghost", parentTypes: [], required: [] };
+    const root = board({ types });
+    try {
+      // THROUGH A REAL SHELL PIPE. `spawnSync` does not reproduce this — measured, the
+      // first version of this test passed with `console.error` too, which made it no
+      // control at all. Piped through `cat`, console.error cuts at exactly 65,536 bytes
+      // and a synchronous fd write delivers all 90,992.
+      const r = spawnSync("sh", ["-c", `exec node ${JSON.stringify(CLI)} rollup 2>&1 >/dev/null | cat`],
+        { cwd: root, encoding: "utf8", maxBuffer: 64 * 1024 * 1024,
+          env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") } });
+      assert.ok(r.stdout.length > 65536, `expected >64KiB, got ${r.stdout.length}`);
+      assert.notEqual(r.stdout.length, 65536, "exactly 64KiB is the truncation signature");
+      assert.match(r.stdout, /Fix blaze\.config\.json/,
+        "the tail must survive — truncation loses the instruction, which is the point");
+      assert.match(r.stdout, /bad499/, "and the last problem, not just the first");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

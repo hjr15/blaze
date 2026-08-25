@@ -322,8 +322,18 @@ audit` outright, losing the whole hygiene report for one bad field — and
 `tests/audit-malformed-linktypes.test.mjs` exists to keep it closed.
 
 Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is the one
-place every verb dispatches through. `blaze init` is the second exemption: it runs
-before a board exists, so there is nothing to validate.
+place every verb dispatches through. Two more exemptions: **`blaze init`**, which runs
+before a board exists; and **`blaze commit`**, a git flush of the pending ledger that
+imports nothing from the model — refusing it would strand ticket files other verbs have
+already relocated but not committed.
+
+**The preflight judges the board exactly the way `blaze audit` does**, and that is not a
+detail. It builds `endpointTypes` — every type declared anywhere, across all projects —
+because a top-level `Precedes` list may legitimately name a type only one project
+declares, and it validates each project layer as well as the top one. An earlier cut did
+neither: it refused every non-exempt verb on a board `blaze audit` called clean, and let a
+malformed `project.json` through while audit reported it. A check that disagrees with
+audit in either direction on the same board is worse than no check.
 
 The check is **not** inside `ambientSchemaOverride`, and must never be. `TYPES` and
 `WORKFLOWS` are module-scope constants resolved through it at **import time**, so a

@@ -28,8 +28,13 @@ export function resolveSchema({ config = null, project = null } = {}) {
 
 /** Pure structural check: every type's workflow must be a declared workflow.
  *  Returns a list of human-readable errors ([] when valid). */
-export function validateSchema({ types: rawTypes = {}, workflows: rawWorkflows = {}, linkTypes = null,
-                                 config = null, project = null, endpointTypes = null } = {}) {
+export function validateSchema(input = {}) {
+  // Destructuring `null` throws, and a parameter default only fires for `undefined`. This
+  // function is pure and public and `auditCorpus` may call it with a config that parsed to
+  // null — a throw here is the BLZ-392 regression by another route, so it takes ANYTHING.
+  const src = input && typeof input === "object" && !Array.isArray(input) ? input : {};
+  const { types: rawTypes = {}, workflows: rawWorkflows = {}, linkTypes = null,
+          config = null, project = null, endpointTypes = null } = src;
   // A default only fires for `undefined`, and this function is pure and public — anyone
   // may call it with anything, `auditCorpus` included, on a config that parsed to null.
   // `Object.entries(null)` throws, and a throw here is the exact regression BLZ-392

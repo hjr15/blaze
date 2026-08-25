@@ -28,6 +28,14 @@ describe("BLZ-56: the built-in default must pass, or the check is unusable", () 
     assert.deepEqual(validateSchema({ types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS }), []);
   });
 
+  test("validateSchema survives being handed nothing at all", () => {
+    // It is pure and public, and `auditCorpus` may call it with a config that parsed to
+    // null. A throw here is the BLZ-392 regression by another route.
+    for (const v of [null, undefined, 0, "", [], "nope"]) {
+      assert.doesNotThrow(() => validateSchema(v), `threw on ${JSON.stringify(v)}`);
+    }
+  });
+
   test("resolveSchema of an empty config is valid — a board with no override is legal", () => {
     assert.deepEqual(validateSchema(resolveSchema({ config: null, project: null })), []);
   });
@@ -46,12 +54,18 @@ describe("BLZ-56: a type's shape", () => {
 
   test("workflow must be a string", () => {
     const e = validateSchema(withTypes({ spike: { level: 0, workflow: 7, parentTypes: [], required: [] } }));
-    assert.ok(has(e, /type "spike".*workflow/i), e.join(" | "));
+    assert.ok(has(e, /type "spike" has a workflow that is not a name/i), e.join(" | "));
   });
 
-  test("parentTypes must be an array", () => {
+  test("parentTypes must be an array, and a string is ONE error not seven", () => {
+    // BLZ-392's documented failure mode, and this assertion had it: `for...of` iterates a
+    // STRING PER CHARACTER, so without the array check `parentTypes: "feature"` produces
+    // seven "not a declared type" errors — each of which also matched the loose regex this
+    // test used, so dropping the real check killed nothing.
     const e = validateSchema(withTypes({ spike: { level: 0, workflow: "delivery", parentTypes: "feature", required: [] } }));
-    assert.ok(has(e, /type "spike".*parentTypes/i), e.join(" | "));
+    assert.ok(has(e, /type "spike" has parentTypes that is not an array/i), e.join(" | "));
+    assert.equal(e.filter((x) => /"spike"/.test(x)).length, 1,
+      `one clear error, not one per character: ${e.join(" | ")}`);
   });
 
   test("parentTypes must name declared types", () => {
@@ -73,7 +87,7 @@ describe("BLZ-56: a type's shape", () => {
 describe("BLZ-56: a workflow's shape and its referential integrity", () => {
   test("statuses must be a non-empty array", () => {
     const e = validateSchema(withWorkflows({ tiny: { statuses: [], terminal: [], transitions: [], reopenTo: "x" } }));
-    assert.ok(has(e, /workflow "tiny".*statuses/i), e.join(" | "));
+    assert.ok(has(e, /workflow "tiny" has statuses that is not a non-empty array/i), e.join(" | "));
   });
 
   test("terminal must name declared statuses", () => {
