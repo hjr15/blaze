@@ -118,6 +118,48 @@ export function idFromSubject(subject, key) {
   return m ? `${key}-${m[1]}` : null;
 }
 
+// --- BLZ-131: what ONE commit message says shipped ---------------------------
+// The shipped signal used to read commit SUBJECTS only. These repos are squash-only
+// — blaze-pm by deliberate design (INF-556/INF-557), service-platform by convention
+// — and a squash collapses a branch into one commit whose subject is the PR TITLE.
+// Every bundled child's `KEY-n:` subject is destroyed by the merge, so six children
+// of epic INF-645 sat in `defined/` with their work live in production. Reconcile
+// said nothing: the failure is silent and biased toward under-reporting.
+//
+// What survives is the BODY. GitHub's default squash message concatenates the
+// collapsed commits' messages, each subject as a `* ` bullet — verified on this
+// repo's own history, where 104 commits carry bulleted `KEY-n:` body lines and 30
+// ticket ids appear ONLY there.
+//
+// The bullet is required, and that is the whole safety argument. Measured over the
+// same history, unbulleted body lines beginning `KEY-n:` are real and are NOT
+// evidence of delivery — they are plan listings ("BLZ-103: config-schema versioning
+// + migration guard") and ordinary prose that happened to wrap onto a ticket id.
+// Honouring them would have marked sixteen untouched tickets done, which is exactly
+// BLZ-130's failure re-introduced through the other door. Line 1 is the subject and
+// needs no bullet; every later line does.
+//
+// This reads git and nothing else. A PR BODY listing its bundled tickets was the
+// other candidate and was rejected: it widens trust to the forge for a claim that
+// moves a ticket to DONE, and a PR body naming a ticket is weaker evidence than a
+// commit that is demonstrably on the default branch. The cost is a configuration
+// dependency, recorded in docs/guide/how-it-works.md — a repo whose squash message is
+// set to
+// "Pull request title" alone destroys the bullets too, and its bundled children go
+// back to needing a manual move.
+export function idsFromCommitMessage(message, key) {
+  const lines = String(message || "").split("\n");
+  const ids = [];
+  const subject = idFromSubject(lines[0], key);
+  if (subject) ids.push(subject);
+  const bullet = new RegExp("^\\s*[*+-]\\s+" + key + "-(\\d+):", "i");
+  for (let i = 1; i < lines.length; i += 1) {
+    const m = bullet.exec(lines[i]);
+    if (m) ids.push(`${key}-${m[1]}`);
+  }
+  return ids;
+}
+
 // --- INF-735: a ref-derived claim needs a SECOND signal to count --------------
 // `idFromRef` is an unanchored `\bKEY-(\d+)` run over every branch/PR head ref in
 // every one of a project's codeRepos. When a repo that carries board or docs work
@@ -351,10 +393,14 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // buildPrMap corroborates against it (INF-735).
   const shippedSet = new Set();
   const ref = defaultBranchRef(repoPath);
-  const subs = sh("git", ["-C", repoPath, "log", ref, "--format=%s"]) || "";
-  for (const line of subs.split("\n")) {
-    const id = idFromSubject(line, key);
-    if (id) shippedSet.add(id);
+  // BLZ-131: read whole messages, not subjects. `%x00%B` prefixes each commit with
+  // a NUL, which is the one byte a commit message cannot contain — so splitting on
+  // it recovers exact commit boundaries, and boundaries are what make line 1 (the
+  // subject, unbulleted) distinguishable from a body line (bullet required).
+  const log = sh("git", ["-C", repoPath, "log", ref, "--format=%x00%B"]) || "";
+  for (const record of log.split("\u0000")) {
+    if (!record.trim()) continue;
+    for (const id of idsFromCommitMessage(record, key)) shippedSet.add(id);
   }
 
   // BLZ-350: `gh` is the only forge call in the tree, and it is the one call whose

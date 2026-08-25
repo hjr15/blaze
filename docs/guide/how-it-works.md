@@ -66,7 +66,7 @@ status from three independent signals, and only one of them needs a forge:
 | Signal | Read via | Drives |
 |---|---|---|
 | Branch named `<KEY>-<n>-…` | `git for-each-ref` | `in-progress` |
-| `<KEY>-<n>: …` commit on the default branch | `git log` | `done` (bundled children) |
+| `<KEY>-<n>: …` commit on the default branch, **or a `* <KEY>-<n>: …` bullet in one's body** | `git log` | `done` (bundled children) |
 | Pull request for `<KEY>-<n>` | `gh pr list` | `in-review` (any OPEN), `done` (MERGED, and only when none is OPEN), `in-progress` (CLOSED) |
 
 So the reachable statuses depend on where the code repo's remotes point. Note
@@ -80,7 +80,13 @@ GitHub remote, so a repo whose only GitHub remote is named `upstream` — or one
 | At least one remote on GitHub Enterprise Server (`gh auth login --hostname …`, or `GH_HOST`) | yes | yes | yes |
 | At least one remote on a host Blaze cannot classify | yes | yes, if `gh` can read it | yes |
 | **Every** remote on GitLab, Bitbucket, Gitea, Forgejo/Codeberg, Azure DevOps or sourcehut | yes | **no** | yes, only via a `<KEY>-<n>:` commit on the default branch — never via a merged PR |
+
 | No remotes, or only local-path remotes | yes | **no** | same as above |
+
+## Two rules that keep the board honest
+
+Both were bugs before they were rules, and both are about the same thing: the board
+must not say shipped when it is not, and must not say untouched when it is.
 
 **An open pull request vetoes `done` (BLZ-130).** A ticket reaches `done` from a
 merged PR only while **no** PR carrying its key is still open. A feature accumulates
@@ -89,6 +95,24 @@ docs-only precursor — used to satisfy "a merged PR carrying this key ⇒ done"
 report the whole feature complete while its actual work sat unmerged. Terminal status
 is sticky, so nothing re-opened it afterwards. The cost of the veto is a delayed
 `done`: the ticket waits in `in-review` until the last PR carrying its key closes.
+
+**A squash merge's body is read, not just its subject (BLZ-131).** These repos are
+squash-only, and a squash collapses a branch into one commit whose *subject* is the PR
+title — so a bundled child's `<KEY>-<n>:` subject does not survive the merge, and the
+child was never moved at all. GitHub's default squash message keeps each collapsed
+commit's subject as a `* ` bullet in the body, and reconcile reads those bullets.
+
+The bullet is **required**. Unbulleted body lines beginning `<KEY>-<n>:` are common
+and are not evidence of delivery — they are plan listings and prose that wrapped onto
+a ticket id — so honouring them would mark untouched tickets `done`, which is BLZ-130's
+failure through the other door.
+
+> **This depends on one repository setting.** GitHub's *Default commit message for
+> squash merges* must be **"Default message"** or **"Pull request title and commit
+> details"**. Set to "Pull request title" (or "title and description"), the bullets
+> are never written, and a bundled child needs a manual `blaze move` as before.
+> Reconcile cannot detect the difference — an absent bullet and an unshipped child
+> look identical — so it fails the safe way and says nothing.
 
 An unclassifiable host is handed to `gh` rather than pre-rejected, because GitHub
 Enterprise Server is self-hosted under an arbitrary hostname and guessing

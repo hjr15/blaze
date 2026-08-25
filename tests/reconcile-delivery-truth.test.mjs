@@ -1,18 +1,24 @@
-// reconcile-delivery-truth.test.mjs — BLZ-130.
+// reconcile-delivery-truth.test.mjs — BLZ-130 + BLZ-131.
 //
-// Reconcile drove a ticket to done off ANY merged PR carrying its key, even while a
-// later PR carrying the same key was still OPEN. It over-reports, and it does so
-// silently and stickily.
+// Two bugs, one failure: reconcile's reading of git/PR state diverges from
+// delivery truth, in opposite directions.
 //
-// Guarded against the real recorded evidence: hjr15/service-platform epic INF-645,
-// its merged docs-only PR #80, and its open PR #81.
+//   BLZ-130 — ANY merged PR carrying a key drove the ticket to done, even while a
+//             later PR carrying the same key was still OPEN. Over-reports.
+//   BLZ-131 — a squash merge collapses a branch's commits into one whose SUBJECT is
+//             the PR title, so per-ticket `KEY-n:` subjects do not survive and
+//             bundled children never reconcile at all. Under-reports.
+//
+// Both are guarded here against the real recorded evidence: hjr15/service-platform
+// epic INF-645, its merged docs-only PR #80, its open PR #81, and the six children
+// stranded by the squash of #81.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { reconcile, buildPrMap, decide } from "../scripts/reconcile.mjs";
+import { reconcile, buildPrMap, decide, idsFromCommitMessage } from "../scripts/reconcile.mjs";
 
 const idFromRef = (ref) => {
   const m = /\bINF-(\d+)/i.exec(ref || "");
@@ -131,6 +137,110 @@ test("BLZ-130 regression, end-to-end: an epic with one merged and one open PR st
       "it belongs in in-review, the status its open PR actually describes");
   } finally {
     restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// =============================================================================
+// BLZ-131 — a squash body's bulleted subjects are the shipped signal
+// =============================================================================
+
+test("BLZ-131: a squashed epic PR's bulleted body subjects count as shipped", () => {
+  // Verbatim shape of GitHub's default squash message: PR title as the subject,
+  // each collapsed commit's subject as a `* ` bullet in the body.
+  const msg = [
+    "INF-645: close the Tier-1 alert gaps (#81)",
+    "",
+    "* INF-646: guard the blackhole receiver",
+    "",
+    "Some prose about the receiver.",
+    "",
+    "* INF-647: centralise observability docs",
+  ].join("\n");
+  assert.deepEqual(idsFromCommitMessage(msg, "INF"), ["INF-645", "INF-646", "INF-647"]);
+});
+
+test("BLZ-131: the subject alone is still read, so a solo ticket's commit is unaffected", () => {
+  assert.deepEqual(idsFromCommitMessage("INF-9: do the thing", "INF"), ["INF-9"]);
+});
+
+test("BLZ-131: prose that merely NAMES a ticket is not evidence it shipped", () => {
+  // Measured on blaze's own history: unbulleted body lines really do begin with
+  // `KEY-n:` — plan listings and wrapped prose. Honouring them would mark
+  // untouched tickets done, which is BLZ-130's failure re-introduced.
+  const msg = [
+    "INF-1: the real work",
+    "",
+    "INF-103: config-schema versioning + migration guard",
+    "INF-376: ticket is not STRICT and never was\" immediately followed by \"and under",
+    "fixes INF-4 and relates to INF-5",
+  ].join("\n");
+  assert.deepEqual(idsFromCommitMessage(msg, "INF"), ["INF-1"]);
+});
+
+test("BLZ-131: a bullet naming another project's key is not this project's signal", () => {
+  assert.deepEqual(idsFromCommitMessage("INF-1: x\n\n* OBA-2: not ours", "INF"), ["INF-1"]);
+});
+
+test("BLZ-131: a bullet without the `KEY-n:` subject form is not a collapsed commit", () => {
+  assert.deepEqual(idsFromCommitMessage("INF-1: x\n\n* see INF-2 for context", "INF"), ["INF-1"]);
+});
+
+test("BLZ-131 regression, end-to-end: six children of one squashed epic PR all reach done/", async () => {
+  // The recorded INF-645 shape: one squash commit on main whose subject is the PR
+  // title, and ZERO surviving per-ticket subjects — every child's subject exists
+  // only as a bullet in the body.
+  const tmp = mkdtempSync(join(tmpdir(), "blz131-e2e-"));
+  const codeRepo = join(tmp, "svc");
+  mkdirSync(codeRepo, { recursive: true });
+  gitInit(codeRepo);
+  const children = ["INF-646", "INF-647", "INF-648", "INF-649", "INF-650", "INF-652"];
+  const squashMsg = "INF-645: close the Tier-1 alert gaps, guard the blackhole receiver (#81)\n\n"
+    + children.map((c) => `* ${c}: work for ${c}`).join("\n\n");
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", squashMsg]);
+
+  // Prove the premise before asserting the fix: no child's subject survived.
+  const subjects = execFileSync("git", ["-C", codeRepo, "log", "main", "--format=%s"], { encoding: "utf8" });
+  for (const c of children) {
+    assert.doesNotMatch(subjects, new RegExp(`^${c}:`, "m"), `${c} must have no surviving commit subject`);
+  }
+
+  const root = board(tmp, codeRepo, children.map((c) => [c, "task", "defined"]));
+  try {
+    const r = await reconcile({ root, dryRun: false });
+    assert.equal(r.ok, true);
+    for (const c of children) {
+      assert.ok(existsSync(join(root, "projects", "INF", "done", `${c}-t.md`)),
+        `${c} shipped inside the squashed epic PR and must reach done/`);
+      assert.ok(!existsSync(join(root, "projects", "INF", "defined", `${c}-t.md`)),
+        `${c} must not be stranded in defined/`);
+    }
+    const again = await reconcile({ root, dryRun: false });
+    assert.deepEqual(again.changes.filter((c) => children.includes(c.id)), [],
+      "a second run must be a no-op — the shipped signal is not a repeating write");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-131: a child whose bullet is only on an unmerged branch does NOT move", async () => {
+  // The safe direction, kept: the squash body counts only once it is ON the
+  // default branch. A still-open epic PR strands nothing to done.
+  const tmp = mkdtempSync(join(tmpdir(), "blz131-open-"));
+  const codeRepo = join(tmp, "svc");
+  mkdirSync(codeRepo, { recursive: true });
+  gitInit(codeRepo);
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "-b", "INF-700-bundle"]);
+  execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m",
+    "INF-700: the bundle (#99)\n\n* INF-701: unmerged child work"]);
+  execFileSync("git", ["-C", codeRepo, "checkout", "-q", "main"]);
+  const root = board(tmp, codeRepo, [["INF-701", "task", "defined"]]);
+  try {
+    await reconcile({ root, dryRun: false });
+    assert.ok(existsSync(join(root, "projects", "INF", "defined", "INF-701-t.md")),
+      "a child whose bundle has not merged must stay put");
+    assert.ok(!existsSync(join(root, "projects", "INF", "done", "INF-701-t.md")));
+  } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
 });

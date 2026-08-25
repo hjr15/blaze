@@ -99,7 +99,11 @@ ticket id is still the identity.
    branch/PR of its own, only a `<KEY>-<n>:` commit inside its feature's PR — to
    `done` once that commit is reachable from the code repo's default branch, so
    children bundled into a feature PR move themselves when that PR merges; no
-   manual `blaze move` needed. This is terminal-sticky and idempotent like the
+   manual `blaze move` needed. Under a **squash** merge the child's own subject does
+   not survive, so reconcile also reads the `* <KEY>-<n>: …` bullets GitHub writes
+   into the squash body (BLZ-131) — see
+   [how-it-works](docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest)
+   for the repository setting that has to be right. This is terminal-sticky and idempotent like the
    branch/PR paths, and it does not fire while the feature PR is still open (the
    child's commit then lives only on the feature branch, not the default branch).
    Reconcile mirrors **delivery** state, not deploy state — see
