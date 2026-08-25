@@ -332,3 +332,26 @@ describe("BLZ-131: a bullet is only delivery inside a squashed TICKET PR", () =>
     } finally { rmSync(tmp, { recursive: true, force: true }); }
   });
 });
+
+// FINDING 2. Terminal-sticky clamped `target` and nothing else, so the branch/pr
+// frontmatter of an ALREADY-DONE ticket was rewritten to point at whichever PR now won
+// the rank — which, after BLZ-130, is a later OPEN one. The move was correctly
+// suppressed and the delivery record was silently replaced anyway: `#80 — u80` became
+// `#81 — u81` on a ticket #80 actually delivered. One-time corruption, not per-run
+// churn (a second run reports no change), and it destroys the only record of what
+// shipped the work.
+describe("BLZ-130: a terminal ticket's delivery record is history, not a live field", () => {
+  test("a later OPEN PR does not rewrite a done ticket's branch and pr", () => {
+    const d = decide({ pr: PR_81_OPEN }, "done", "epic");
+    assert.equal(d.target, "done");
+    assert.equal(d.moved, false);
+    assert.equal(d.branchVal, null, "the branch that delivered it must not be overwritten");
+    assert.equal(d.prVal, null, "nor the PR that delivered it");
+  });
+
+  test("a non-terminal ticket still records its branch and pr", () => {
+    const d = decide({ pr: PR_81_OPEN }, "defined", "epic");
+    assert.equal(d.branchVal, "INF-645-tier1-alert-gaps");
+    assert.equal(d.prVal, "#81 — u81");
+  });
+});

@@ -52,23 +52,83 @@ delivery type does, because ranking never sees the type. Scoping the veto to
 `epic` would have left the identical bug in the four types that also legitimately
 span more than one PR.
 
+A terminal ticket's `branch` and `pr` are clamped along with its status. The first
+cut clamped `target` alone, which suppressed the move and rewrote the record anyway:
+a `done` epic delivered by merged PR #80 had its frontmatter repointed at the later
+OPEN #81 that now wins the rank, reported as `moved: false`. Those fields are the
+history of what delivered the ticket, not live state.
+
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
 progress is recoverable by looking; overstating it is not.
 
-### 2. The shipped signal reads a squash commit's body, and requires a bullet
+**Scope, stated precisely because an earlier draft of this ADR overstated it.** The
+veto applies to a ticket that is *not yet terminal*. It does **not** re-open one that
+already reached `done`: terminal status is sticky by design, so if reconcile runs in
+the window between an early PR merging and the next one opening, the ticket goes to
+`done` and stays there. The veto narrows that window to the time both PRs are visible
+at once; it does not close it, and BLZ-130's own report of the failure as
+"self-reinforcing" therefore remains partly open. Tracked as BLZ-395 rather than
+resolved here, because closing it means revisiting terminal-stickiness itself — a
+deliberate, separate design decision with its own blast radius.
+
+Second qualifier: "no PR is open" is really "no *corroborated* PR is open". An open PR
+whose claim INF-735's gate drops is not visible to the veto at all.
+
+### 2. The shipped signal reads a squash commit's body, under two conditions
 
 GitHub's default squash message concatenates the collapsed commits' messages, each
-subject as a `* ` bullet. Verified on this repo's own history: 104 commits carry
-bulleted `<KEY>-<n>:` body lines, and **30 ticket ids appear only there** — the
+subject as a `* ` bullet. On this repo, **22** of 312 commits on `origin/main` carry
+such a bullet under a ticket subject — **99** bullet lines in total — and reading them
+recovers **28** ticket ids that no subject on the default branch mentions. That is the
 blind spot, measured rather than argued.
 
-The bullet is required, and that is the entire safety argument. Over the same
-history, unbulleted body lines beginning `<KEY>-<n>:` are common and are *not*
-evidence of delivery — plan listings (`BLZ-103: config-schema versioning +
-migration guard`) and ordinary prose that wrapped onto a ticket id. Accepting them
-would have marked sixteen untouched tickets `done`: BLZ-130's failure reintroduced
-through the other door, inside the fix for its sibling.
+**Two conditions must both hold, and each is load-bearing.**
+
+1. The marker is `* `, which is what GitHub writes and what nothing else here writes.
+2. The commit's own subject must parse as `<KEY>-<n>:` — it must itself be a squashed
+   *ticket* PR. This is BLZ-131's own premise: a bundled child lives inside a feature's
+   PR, and a feature PR is titled `<KEY>-<n>: …` by house convention.
+
+Condition 2 was not in the first cut, and an adversarial review is why it exists.
+`scripts/commit-runner.mjs` writes every batch board commit's body as
+`- <KEY>-<n>: <board op> [session]`, and the board repo is itself a configured
+`codeRepo` for its own project — the hazard INF-735's comment already names. Honouring
+any bullet under any subject therefore turned the board's own ledger into a delivery
+signal. Measured on the live board, and reproduced end-to-end by the review: **299**
+ids harvested that had shipped nothing, and `decide()` moving **137** tickets
+`defined → done` off lines reading `edit labels` and `defined → in-progress`. That is
+this ADR's own §1 failure at a hundred times the scale, re-introduced inside the fix
+for its sibling.
+
+Narrowing the marker alone was not sufficient, and neither was the subject gate alone:
+
+| Rule | Ids harvested on the board repo that shipped nothing |
+|---|---|
+| Any bullet, any subject | 299 |
+| Any bullet, ticket subject only | 41 |
+| `* ` bullet, ticket subject only | **2** — and both are genuine bundled children |
+
+**A claim this ADR made in an earlier draft, withdrawn.** It argued that the bullet
+requirement was load-bearing because unbulleted body lines beginning `<KEY>-<n>:`
+would otherwise mark "sixteen untouched tickets" done. Re-measured under the shipped
+rule, unbulleted lines inside gated commits add **zero** ids — the sixteen lived in
+commits the subject gate now excludes anyway, and the figure had also counted lines
+where it said tickets. The bullet requirement earns its place on the ledger evidence
+above (41 → 2), not on that argument.
+
+**What this deliberately does not claim:** a bullet is not proof of work. A squashed
+ticket PR whose body lists a ticket it did not implement will be believed. The two
+conditions make that a narrow case rather than the common one, and the safe direction
+holds elsewhere — the commit must be reachable from the default branch, so an open PR
+strands nothing.
+
+**Consequence for INF-735, which an earlier draft said was untouched.** The
+corroboration *gate* is unchanged, but its *input* is not: `shippedSet` corroborates
+both PR and branch ref-claims, and widening it widens what the gate admits. A ref-name
+claim whose PR title never names the ticket can now be corroborated by a bullet. That
+is a real widening, it is the price of the fix, and the two conditions above are what
+keep it narrow.
 
 **Rejected: matching on the merged PR's body.** BLZ-131 lists it first and calls it
 cheapest, and it was still declined. It widens trust to the forge for a claim that
@@ -96,11 +156,20 @@ queueing session-scoped ops, so a dry run proposing 22 changes included ~15 `OBA
 tickets belonging to concurrent sister sessions.
 
 **Decided: it stays direct-write.** The session-queue machinery exists to serialise
-*divergent intents* — two sessions each asserting something different about the
-same ticket. Reconcile has no intent. It is a deterministic, idempotent function of
-git state, so two sessions running it converge on the same answer rather than
-racing; scoping it to a session would add a merge step to reach a result both
-sessions already agree on.
+*divergent intents* — two sessions each asserting something different about the same
+ticket. Reconcile has no intent: it derives its answer from git rather than from
+anything the session wants, so scoping it to a session would add a merge step to reach
+a result neither session authored.
+
+**A stronger claim, made in an earlier draft and withdrawn as false.** That draft said
+reconcile is "a deterministic, idempotent function of git state, so two sessions
+running it converge". It is not. Terminal status is sticky, so the board's answer
+depends on *when* reconcile sampled git, not only on what git holds: a run that sees
+only the early merged PR writes `done` and sticks, while a later run seeing both PRs
+would have written `in-review`. Same end state, two different answers, decided by run
+history. That is the same residual as §1's window (BLZ-395) and it is an argument for
+fixing stickiness, not for session queues — which would not help, since both sessions
+read the same git and neither is wrong about it.
 
 What the observation actually reports is **blast radius, not correctness**: a
 session that owns three tickets should not author a commit that moves fifteen it

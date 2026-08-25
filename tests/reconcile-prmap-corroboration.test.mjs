@@ -59,21 +59,27 @@ test("buildPrMap: an OPEN PR beats a MERGED one — work outstanding is not work
   assert.equal(map.get("ZZZ-500").state, "OPEN");
 });
 
-test("buildPrMap: an uncorroborated MERGED PR cannot outrank a corroborated OPEN one", () => {
-  // The ranking half of the bug: the bogus MERGED claim beat the real repo's OPEN
-  // one. Dropping the bogus claim must leave the real one standing. This still
-  // proves the GATE rather than the rank — BLZ-130 has since reversed the rank
-  // (OPEN 3, MERGED 2), so keep the uncorroborated PR MERGED: it is the state that
-  // would otherwise be most dangerous, and the assertion must hold on the gate alone.
+test("buildPrMap: an uncorroborated claim cannot outrank a corroborated one", () => {
+  // THE STATES ARE DELIBERATELY THIS WAY ROUND, and an adversarial review is why.
+  //
+  // This test used to put the bogus claim on MERGED and the real one on OPEN. That
+  // was the original bug's shape, and under BLZ-130's reversed rank (OPEN 3, MERGED 2)
+  // it became VACUOUS: deleting the corroboration gate outright left it green, because
+  // the rank alone now picks OPEN. A control that passes with the control removed is
+  // not a control.
+  //
+  // Inverted, it discriminates again. The bogus claim is OPEN, so rank alone would
+  // hand it the ticket; only the gate can drop it and leave the corroborated MERGED
+  // one standing. Delete the `claimCorroborated` line in buildPrMap and this goes red.
   const prs = [
-    { number: 37, state: "MERGED", url: "u37", headRefName: "ZZZ-28-docs-kickoff-brief",
+    { number: 37, state: "OPEN", url: "u37", headRefName: "ZZZ-28-docs-kickoff-brief",
       title: "docs: kickoff brief for the closeout" },
-    { number: 40, state: "OPEN", url: "u40", headRefName: "ZZZ-28-real-work",
+    { number: 40, state: "MERGED", url: "u40", headRefName: "ZZZ-28-real-work",
       title: "ZZZ-28: the work this ticket actually describes" },
   ];
   const map = buildPrMap(prs, idFromRef, new Set());
   assert.equal(map.get("ZZZ-28").number, 40);
-  assert.equal(map.get("ZZZ-28").state, "OPEN");
+  assert.equal(map.get("ZZZ-28").state, "MERGED");
 });
 
 test("buildPrMap: a ref with no id is still ignored", () => {

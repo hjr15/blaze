@@ -90,9 +90,12 @@ ticket id is still the identity.
 3. If the project has a `codeRepos` entry, `blaze reconcile` takes over for
    **delivery-workflow tickets only** (feature/story/task/bug/subtask): a branch
    embedding the ticket's key moves it to `in-progress`; opening its PR moves it to
-   `in-review`; merging moves it to `done` — but only once **no** PR carrying that
-   key is still open, so an early docs-only PR cannot report the whole feature
-   shipped (BLZ-130). Goals and risks are always manual.
+   `in-review`; merging moves it to `done` — but a ticket that is not yet terminal
+   only reaches `done` while **no** PR carrying its key is still open, so an early
+   docs-only PR cannot report the whole feature shipped (BLZ-130). This does not
+   re-open a ticket that already reached `done` — terminal status is sticky — see
+   [how-it-works](docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest).
+   Goals and risks are always manual.
    Never hand-move a delivery ticket through the reconcile-owned statuses once a
    branch/PR exists for it — let reconcile own it.
    Reconcile also moves a **bundled feature-child** — a delivery ticket with no

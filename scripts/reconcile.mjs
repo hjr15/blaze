@@ -104,7 +104,18 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
-  if (isTerminal(type, currentStatus)) target = currentStatus;
+  //
+  // The branch and PR are clamped WITH the status, which the first cut of BLZ-130 did
+  // not do. Clamping `target` alone suppressed the move and rewrote the record anyway:
+  // a done epic delivered by merged PR #80 had its frontmatter replaced with the later
+  // OPEN #81 that now wins the rank, reported as `moved: false`. A terminal ticket's
+  // branch and PR are the HISTORY of what delivered it, not live fields, and silently
+  // repointing them at work that has not landed destroys the only record there is.
+  if (isTerminal(type, currentStatus)) {
+    target = currentStatus;
+    branchVal = null;
+    prVal = null;
+  }
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
   return { target, branchVal, prVal, moved, skip: false, resolution };
