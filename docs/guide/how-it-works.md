@@ -86,80 +86,6 @@ An unclassifiable host is handed to `gh` rather than pre-rejected, because GitHu
 Enterprise Server is self-hosted under an arbitrary hostname and guessing
 "unsupported" would break a working board.
 
-## Two rules that keep the board honest
-
-Both were bugs before they were rules, and both are about the same thing: the board
-must not say shipped when it is not, and must not say untouched when it is.
-
-### An open pull request vetoes `done` (BLZ-130)
-
-A ticket that is **not yet terminal** reaches `done` from a merged PR only while no
-corroborated PR carrying its key is still open. A feature accumulates more than one PR
-over its life, and any early one — a spike, a decision record, a docs-only precursor —
-used to satisfy "a merged PR carrying this key ⇒ done" and report the whole feature
-complete while its actual work sat unmerged.
-
-The cost of the veto is a delayed `done`: the ticket waits in `in-review` until the
-last PR carrying its key closes.
-
-> **What the veto does not do is re-open a ticket that already reached `done`.**
-> Terminal status is sticky by design — reconcile never pulls a ticket out of a
-> terminal status automatically — so if reconcile happens to run in the window between
-> an early PR merging and the next one opening, the ticket goes to `done` and stays
-> there. The veto narrows that window to the time when both PRs are visible at once;
-> it does not close it. Tracked as BLZ-395.
->
-> A terminal ticket's `branch` and `pr` record only a **merged** PR, so a later open one
-> cannot replace the record of what actually delivered it — while a `done` ticket that
-> has no record yet can still acquire one, since reconcile is the only thing that writes
-> those fields.
-
-### A squash merge's body is read, not just its subject (BLZ-131)
-
-These repos are squash-only, and a squash collapses a branch into one commit whose
-*subject* is the PR title — so a bundled child's `<KEY>-<n>:` subject does not survive
-the merge, and the child was never moved at all. GitHub's default squash message keeps
-each collapsed commit's subject as a `* ` bullet in the body, and reconcile reads those
-bullets. On this repo that recovers **28** ticket ids that no subject on the default
-branch mentions.
-
-**Two conditions must both hold, and each one is load-bearing.**
-
-1. The marker is `* ` — what GitHub writes, and what nothing else here writes.
-2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …`, or the
-   multi-ticket forms `<KEY>-a/b/c:` and `<KEY>-a + <KEY>-b:`. A bundled child lives
-   inside a *feature's* PR, titled that way by convention; a commit whose subject names
-   no ticket is not a bundle manifest, whatever its body lists. Every id in the leading
-   list counts, and the list ends at the colon — `BLZ-1: fixes BLZ-4` claims only BLZ-1.
-
-The reason both are needed is measured, on the board repo, where the board itself is a
-configured code repo for its own project:
-
-Measured on the board repo's `origin/main` (156 commits):
-
-| Rule | Ids harvested that shipped nothing |
-|---|---|
-| Any bullet, any subject | **426** |
-| Any bullet, ticket subject only | **49** |
-| `* ` bullet, ticket subject only | **2** — both genuine bundled children |
-
-`blaze`'s own batch commits write their ledger as `- <KEY>-<n>: <board op>`, so
-"moved a ticket" and "edited its labels" read as delivery under the loosest rule. That
-is BLZ-130's failure — the board saying shipped when it is not — arriving through the
-other door, and it is why neither condition was dropped as redundant.
-
-**What this deliberately does not claim:** a bullet is not proof of work. A squashed
-ticket PR whose body lists a ticket it did not implement will be believed. The two
-conditions make that a narrow case rather than the common one; the commit must still be
-reachable from the default branch, so an open PR strands nothing.
-
-> **This depends on one repository setting.** GitHub's *Default commit message for
-> squash merges* must be **"Default message"** or **"Pull request title and commit
-> details"**. Set to "Pull request title" (or "title and description"), the bullets
-> are never written, and a bundled child needs a manual `blaze move` as before.
-> Reconcile cannot detect the difference — an absent bullet and an unshipped child
-> look identical — so it fails the safe way and says nothing.
-
 `in-review` is reachable **only** through a pull request, so when no remote is
 readable that status cannot be reached at all. Until BLZ-350 that happened in
 silence: the failed `gh` call was turned into an empty pull-request list and
@@ -188,6 +114,83 @@ information. Exit 1 stays reserved for "nothing was scanned at all".
 legitimate setup, but `in-review` is just as unreachable there, so it is reported
 on the same terms rather than being treated as a special quiet case. If that is
 your deliberate configuration, the line is expected and harmless.
+
+## Two rules that keep the board honest
+
+Both were bugs before they were rules, and both are about the same thing: the board
+must not say shipped when it is not, and must not say untouched when it is.
+
+### An open pull request vetoes `done` (BLZ-130)
+
+A ticket that is **not yet terminal** reaches `done` from a merged PR only while no
+corroborated PR carrying its key is still open. A feature accumulates more than one PR
+over its life, and any early one — a spike, a decision record, a docs-only precursor —
+used to satisfy "a merged PR carrying this key ⇒ done" and report the whole feature
+complete while its actual work sat unmerged.
+
+The cost of the veto is a delayed `done`: the ticket waits in `in-review` until the
+last PR carrying its key closes.
+
+> **What the veto does not do is re-open a ticket that already reached `done`.**
+> Terminal status is sticky by design — reconcile never pulls a ticket out of a
+> terminal status automatically — so if reconcile happens to run in the window between
+> an early PR merging and the next one opening, the ticket goes to `done` and stays
+> there. The veto narrows that window to the time when both PRs are visible at once;
+> it does not close it. Tracked as BLZ-395.
+>
+> A terminal ticket's `branch` and `pr` are **written once and never replaced**. A
+> `done` ticket with no record yet can still acquire one — reconcile is the only thing
+> that writes those fields — but nothing later overwrites it, so neither a still-open PR
+> nor a follow-up docs PR merged under the same key can claim to have delivered the work.
+
+### A squash merge's body is read, not just its subject (BLZ-131)
+
+These repos are squash-only, and a squash collapses a branch into one commit whose
+*subject* is the PR title — so a bundled child's `<KEY>-<n>:` subject does not survive
+the merge, and the child was never moved at all. GitHub's default squash message keeps
+each collapsed commit's subject as a `* ` bullet in the body, and reconcile reads those
+bullets. On this repo that recovers **28** ticket ids that no subject on the default
+branch mentions.
+
+**Two conditions must both hold, and each one is load-bearing.**
+
+1. The marker is `* ` — what GitHub writes, and what nothing else here writes.
+2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …`, or the
+   multi-ticket forms `<KEY>-a/b/c:` and `<KEY>-a + <KEY>-b:`. A bundled child lives
+   inside a *feature's* PR, titled that way by convention; a commit whose subject names
+   no ticket is not a bundle manifest, whatever its body lists. Every id in the leading
+   list counts, and the list ends at the colon — `BLZ-1: fixes BLZ-4` claims only BLZ-1.
+
+The reason both are needed is measured, on the board repo, where the board itself is a
+configured code repo for its own project:
+
+Measured on the board repo's `origin/main` (156 commits):
+
+| Rule | Ids harvested beyond the subjects | Of those, delivered nothing |
+|---|---|---|
+| Any bullet, any subject | **426** | 426 |
+| Any bullet, ticket subject only | **49** | 49 |
+| `* ` bullet, ticket subject only | **2** | **0** — `INF-701` and `INF-672` both really shipped |
+
+Each row drops one condition from the shipped rule: the first two use the wide `[*+-]`
+marker, and only the third is what actually runs.
+
+`blaze`'s own batch commits write their ledger as `- <KEY>-<n>: <board op>`, so
+"moved a ticket" and "edited its labels" read as delivery under the loosest rule. That
+is BLZ-130's failure — the board saying shipped when it is not — arriving through the
+other door, and it is why neither condition was dropped as redundant.
+
+**What this deliberately does not claim:** a bullet is not proof of work. A squashed
+ticket PR whose body lists a ticket it did not implement will be believed. The two
+conditions make that a narrow case rather than the common one; the commit must still be
+reachable from the default branch, so an open PR strands nothing.
+
+> **This depends on one repository setting.** GitHub's *Default commit message for
+> squash merges* must be **"Default message"** or **"Pull request title and commit
+> details"**. Set to "Pull request title" (or "title and description"), the bullets
+> are never written, and a bundled child needs a manual `blaze move` as before.
+> Reconcile cannot detect the difference — an absent bullet and an unshipped child
+> look identical — so it fails the safe way and says nothing.
 
 ## The loops behind `blaze start`
 

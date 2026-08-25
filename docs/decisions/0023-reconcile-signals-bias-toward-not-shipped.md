@@ -1,10 +1,9 @@
-# ADR-0023: Reconcile's signals bias toward not-shipped
+# ADR-0023 — Reconcile's signals bias toward not-shipped
 
-| Field | Value |
-|---|---|
-| **Status** | Accepted |
-| **Date** | 2026-08-25 |
-| **Deciders** | Ryan Howman |
+- **Status:** Accepted
+- **Date:** 2026-08-25
+- **Deciders:** Ryan Howman
+- **Ticket:** BLZ-130, BLZ-131
 
 ## Context
 
@@ -61,10 +60,24 @@ what delivered the ticket, not live state.
 The correction to that then over-corrected, recorded here because the shape recurs:
 nulling both fields for *every* terminal ticket stopped the overwrite and stopped the
 first write with it. Reconcile is the only producer of `branch`/`pr`, so a `done` ticket
-that never had them recorded could never acquire them — on the live board, 945 of 1,479
-`done` tickets, permanently. Turning a corruption into a silent omission is not a fix.
-The rule is therefore conditional on the winning PR being MERGED: an open or closed PR
-cannot have delivered anything, so it may not write the record; a merged one may.
+that never had them recorded could never acquire them — on the board repo's `origin/main`,
+1,064 of 1,594 `done` tickets, permanently. Turning a corruption into a silent omission is not a fix.
+That correction then under-corrected, which is recorded too. Gating on "the winning PR
+is MERGED" stopped an open PR overwriting the record and left a merged one free to —
+and ranking breaks ties on the higher PR number, so the *latest* merged PR always wins.
+A follow-up docs PR titled `INF-645: follow-up docs tidy`, merged under the same key,
+therefore repointed the epic away from the PR that delivered it, once again reported as
+`moved: false`.
+
+**The rule that holds all three cases is write-once.** A terminal ticket may ACQUIRE a
+delivery record it never had — reconcile is the only thing that writes those fields — and
+may never have one replaced. The MERGED gate is kept as well, so an open PR cannot even
+fill a blank. `decide` reports that the rule applies (`recordIfAbsentOnly`); the caller,
+which holds the current frontmatter, enforces it.
+
+Three attempts, three shapes of wrong: overwrite anything, write nothing, overwrite with
+the latest merge. It is recorded at this length because the same shape keeps recurring
+across this ADR's own history.
 
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
@@ -114,8 +127,10 @@ Condition 2 was not in the first cut, and an adversarial review is why it exists
 `codeRepo` for its own project — the hazard INF-735's comment already names. Honouring
 any bullet under any subject therefore turned the board's own ledger into a delivery
 signal. Measured on the board repo's `origin/main`, and reproduced end-to-end by the review:
-**426** ids harvested that had shipped nothing, and `decide()` moving on the order of
-130 tickets `defined → done` off lines reading `edit labels`. That is
+**426** ids harvested that had shipped nothing. The review reproduced `decide()` moving
+**137** tickets `defined → done` off lines reading `edit labels` — that count was taken
+against the board's local `HEAD`, the 299-id tree, and is quoted with its own ref rather
+than attached to the 426 figure. That is
 this ADR's own §1 failure at a hundred times the scale, re-introduced inside the fix
 for its sibling.
 
@@ -123,11 +138,15 @@ Narrowing the marker alone was not sufficient, and neither was the subject gate 
 
 Measured on `blaze-pm` `origin/main` (156 commits) with the shipped rule:
 
-| Rule | Ids harvested on the board repo that shipped nothing |
-|---|---|
-| Any bullet, any subject | 426 |
-| Any bullet, ticket subject only | 49 |
-| `* ` bullet, ticket subject only | **2** — INF-701 and INF-672, both genuine bundled children |
+| Rule | Ids harvested beyond the subjects | Of those, delivered nothing |
+|---|---|---|
+| Any bullet, any subject | 426 | 426 |
+| Any bullet, ticket subject only | 49 | 49 |
+| `* ` bullet, ticket subject only | **2** | **0** — `INF-701` and `INF-672` both really shipped |
+
+The first two rows are measured with the wide `[*+-]` marker and the third with `* `,
+which is the point of the comparison — each row drops one condition from the shipped
+rule.
 
 The figure is ref-sensitive, and an earlier draft of this ADR did not say which ref it
 used: the same table on that repo's local `HEAD` reads 299 / 41 / 2. The **2** is stable

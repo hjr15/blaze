@@ -116,15 +116,18 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   if (isTerminal(type, currentStatus)) {
     target = currentStatus;
     // Record only what could have DELIVERED it. An open or closed PR could not, so it
-    // must never replace the record of the merged one that did — that was the defect:
-    // a done epic delivered by merged #80, silently repointed at open #81.
+    // may not write the record at all — that was the defect: a done epic delivered by
+    // merged #80, silently repointed at open #81.
     //
-    // A merged PR still writes, and the distinction matters more than it looks. The
-    // first attempt at this nulled both fields for EVERY terminal ticket, which stopped
-    // the overwrite and stopped the first write with it: reconcile is the only producer
-    // of `branch`/`pr`, so a done ticket that never had them recorded could never
-    // acquire them. On the live board that is 945 of 1,479 done tickets, permanently.
-    // Over-correcting a corruption into a silent omission is not an improvement.
+    // Three attempts, three shapes of wrong, which is why both halves of the rule are
+    // spelled out. Overwrite-anything was the original bug. Nulling both fields for
+    // EVERY terminal ticket then stopped the first write too — reconcile is the only
+    // producer of `branch`/`pr` (nothing else in scripts/ originates them, and they are
+    // not in EDITABLE_FIELDS), so a done ticket that never had them recorded could never
+    // acquire them: 1,064 of 1,594 done tickets on the board repo's origin/main,
+    // permanently. Gating on MERGED alone then let the LATEST merge win the rank
+    // tie-break, so a follow-up docs PR repointed the record again. Hence also the
+    // write-once rule below.
     if (!pr || pr.state !== "MERGED") {
       branchVal = null;
       prVal = null;
@@ -170,9 +173,10 @@ export function idFromSubject(subject, key) {
 // writes every batch board commit's body as `- <KEY>-<n>: <board op> [session]`, and
 // the board repo is itself a configured codeRepo for its own project — the hazard
 // INF-735's comment already names. Measured on the board repo's origin/main: 426 ids
-// harvested that had shipped nothing, and a review reproduced `decide()` moving on the
-// order of 130 tickets `defined → done` off lines reading `edit labels`. That is
-// BLZ-130's failure at a hundred times the scale, inside the fix for its sibling.
+// harvested that had shipped nothing. A review reproduced `decide()` moving 137 tickets
+// `defined → done` off lines reading `edit labels` — that count taken against the board's
+// local HEAD, the 299-id tree, so it is quoted with its own ref. That is BLZ-130's
+// failure at a hundred times the scale, inside the fix for its sibling.
 //
 // Neither condition alone suffices. The board also carries squashed PRs of ticket-BODY
 // edits, subject `blaze: … board + ticket work (#60)`, whose bullets are real `KEY-n:`
