@@ -72,12 +72,27 @@ test("BLZ-377: the doc's DB schema version matches the constant", () => {
     + `they are ${DB_SCHEMA_VERSION} and ${MIN_DB_SCHEMA_VERSION}`);
 });
 
+/** The "The DATABASE schema is a different number" section alone. Everything above it is the
+ *  CONFIG schema's, whose own version numbers are different numbers that happen to look alike. */
+function dbSection(text) {
+  const i = text.indexOf("## The DATABASE schema is a different number");
+  if (i < 0) return null;
+  const j = text.indexOf("\n## ", i + 1);
+  return text.slice(i, j < 0 ? text.length : j);
+}
+
 test("BLZ-377: the doc names every version an operator can actually be refused for", () => {
-  // The refusal message enumerates the stranded versions by number. A doc that stops naming
-  // one leaves the operator who hit it with no entry to look up.
-  const text = readFileSync(DOC, "utf8");
+  // The refusal message enumerates the stranded versions by number. A doc that stops naming one
+  // leaves the operator who hit it with no entry to look up.
+  //
+  // SCOPED TO THE DB SECTION. Searching the whole document was near-vacuous: adversarial review
+  // deleted every mention of version 1 from this section and the test stayed green, because
+  // `\b1\b` matched the config-schema table's `| MIN_SCHEMA_VERSION | 1 |` one heading above.
+  const section = dbSection(readFileSync(DOC, "utf8"));
+  assert.notEqual(section, null, "the DATABASE-schema section must exist");
   for (let v = 1; v < MIN_DB_SCHEMA_VERSION; v++) {
-    assert.ok(new RegExp(`\\b${v}\\b`).test(text),
-      `version ${v} is below the floor and can be refused, but the doc never names it`);
+    assert.ok(new RegExp(`\\b${v}\\b`).test(section),
+      `version ${v} is below the floor and can be refused, but the DATABASE-schema section `
+      + "never names it — an operator who hits that refusal has no entry to look up");
   }
 });

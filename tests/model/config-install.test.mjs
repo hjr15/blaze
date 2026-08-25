@@ -20,6 +20,14 @@ import { createDbSchemaSync, DB_SCHEMA_VERSION, MIN_DB_SCHEMA_VERSION }
 import { sqliteAttachConfig, configDbPathFor } from "../../scripts/model/config-schema.mjs";
 import { VIEW_TYPES } from "../../scripts/model/view-schema.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
+import * as configSchema from "../../scripts/model/config-schema.mjs";
+import * as viewSchema from "../../scripts/model/view-schema.mjs";
+
+/** Static imports, addressed by path so the idempotency tests read naturally. */
+const MODULES = {
+  "../../scripts/model/config-schema.mjs": configSchema,
+  "../../scripts/model/view-schema.mjs": viewSchema,
+};
 
 const execFor = (db) => ({
   run(sql, params = []) { return params.length ? db.prepare(sql).run(...params) : db.exec(sql); },
@@ -165,7 +173,14 @@ describe("BLZ-377: Postgres installs the same namespace through the same create"
     await admin.query(`CREATE DATABASE ${dbName}`);
     await admin.end();
 
-    const c = new pg.Client(PG.replace(/\/[^/?]*(\?|$)/, `/${dbName}$1`));
+    // `new URL().pathname`, not a regex over the whole string. The regex form rewrote the FIRST
+    // `/…` that reached a `?` or the end, so `postgres://u:p@host:5432` — no database component,
+    // which pg accepts and defaults — became `postgres://blz377_install_123`, destroying the
+    // credentials and the host. A `?` in a password broke it too. `view-schema.test.mjs` already
+    // does it this way.
+    const dbUrl = new URL(PG);
+    dbUrl.pathname = `/${dbName}`;
+    const c = new pg.Client(dbUrl.toString());
     await c.connect();
     try {
       const exec = {
@@ -215,3 +230,68 @@ function attached2() {
   createDbSchemaSync(execFor(db));
   return db;
 }
+
+describe("BLZ-377: the config install is idempotent, because the namespace outlives the data", () => {
+  // THE DEFECT THIS EXISTS FOR, and it took the CI gate down rather than failing a test.
+  //
+  // `blaze_config` is a Postgres SCHEMA, not a table, so it survives when the `public` tables
+  // are dropped — and the create guard only inspects those. A second create therefore re-ran
+  // the whole config DDL against a namespace that already existed. Every statement tolerated
+  // that except one: `ALTER TABLE ... ADD CONSTRAINT workflow_reopen_to_fk` had no
+  // `IF NOT EXISTS` (Postgres has none), so it failed with `constraint ... already exists`.
+  // The seeds then collided on their primary keys.
+  //
+  // It was invisible locally because a WARM server already has the namespace, so the second
+  // create never runs. CI provisions a FRESH Postgres every run, which is the cold path — the
+  // gate hung there for 59 minutes and could not even be cancelled.
+
+  test("the SQLite seed can be applied twice without collapsing", () => {
+    const db = attached();
+    createDbSchemaSync(execFor(db));
+    const before = db.prepare("SELECT count(*) AS c FROM blaze_config.view_type").get().c;
+    // Re-apply exactly what a second create would.
+    const { configSeedSql } = require0("../../scripts/model/config-schema.mjs");
+    const { viewTypeSeedSql } = require0("../../scripts/model/view-schema.mjs");
+    // BOTH seeds. Covering only the config half left the view_type mutation alive — the seed
+    // that actually caused `UNIQUE constraint failed: view_type.name` under `blaze db init`.
+    assert.doesNotThrow(() => {
+      db.exec("BEGIN");
+      for (const { sql, params } of configSeedSql("sqlite")) db.prepare(sql).run(...params);
+      for (const { sql, params } of viewTypeSeedSql("sqlite")) db.prepare(sql).run(...params);
+      db.exec("COMMIT");
+    }, "re-applying a seed threw — the install is not idempotent");
+    assert.equal(db.prepare("SELECT count(*) AS c FROM blaze_config.view_type").get().c, before,
+      "re-applying the seed duplicated rows");
+  });
+
+  test("the SQLite DDL can be applied twice", () => {
+    const db = attached();
+    createDbSchemaSync(execFor(db));
+    const { configDdl } = require0("../../scripts/model/config-schema.mjs");
+    const { viewDdl } = require0("../../scripts/model/view-schema.mjs");
+    assert.doesNotThrow(() => { db.exec(configDdl("sqlite")); db.exec(viewDdl("sqlite")); },
+      "re-applying the config DDL threw");
+  });
+});
+
+describe("BLZ-377: a read never CREATES the config namespace", () => {
+  test("a missing config.db beside an existing database is a named refusal", () => {
+    // ATTACH creates the file if absent, which on a read path is both a write side effect and a
+    // disguise: `blaze db status` reported a healthy v4 while every `blaze_config.view` query
+    // failed with "no such table", because the stamp lives in the OTHER file.
+    const dir = mkdtempSync(join(tmpdir(), "blz377-ro-"));
+    try {
+      const main = join(dir, "blaze.db");
+      openSqliteRead(main, { create: true }).close?.();
+      rmSync(join(dir, "config.db"), { force: true });
+      assert.throws(() => openSqliteRead(main, { create: false }),
+        /config namespace is missing/,
+        "a board with no config namespace opened as if it were healthy");
+      assert.ok(!existsSync(join(dir, "config.db")),
+        "the refused read CREATED the file it was refusing over");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});
+
+/** `import` is static; these two tests need the modules by value inside the assertion. */
+function require0(rel) { return MODULES[rel]; }

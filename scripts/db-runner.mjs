@@ -31,11 +31,16 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
   // Removing only `blaze.db` left a stale `config.db` beside a fresh one — the create then
   // re-seeded a `view_type` that already had its six rows and died on the UNIQUE constraint.
   // A half-replaced pair is exactly the state `--force` exists to avoid, so both go together.
+  // Both files go together, on EVERY create rather than only under --force. Reaching here means
+  // a fresh shadow is being built (init refuses an existing one without --force), and a
+  // `config.db` left behind by an older engine would then be silently REUSED: its tables are
+  // all `CREATE TABLE IF NOT EXISTS`, so a column added since would never appear, and the
+  // version stamp that would catch it lives in `blaze_meta`, in the OTHER file, which was just
+  // recreated at the current version. That is precisely the silent-stale-schema defect BLZ-297
+  // exists to prevent, and the namespace is derived, so rebuilding costs nothing.
   const cfgPath = configDbPath(dataRoot);
-  if (force) {
-    if (existsSync(path)) rmSync(path, { force: true });
-    if (existsSync(cfgPath)) rmSync(cfgPath, { force: true });
-  }
+  if (force && existsSync(path)) rmSync(path, { force: true });
+  if (existsSync(cfgPath)) rmSync(cfgPath, { force: true });
 
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.

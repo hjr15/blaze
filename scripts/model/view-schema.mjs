@@ -126,8 +126,13 @@ export function viewTypeSeedSql(name) {
     throw new Error(`unknown dialect ${JSON.stringify(name)} — expected 'sqlite' or 'postgres'`);
   }
   const ph = (i) => (name === "postgres" ? `$${i + 1}` : "?");
+  // Re-runnable: `blaze_config` outlives the data tables, so a create against a database that
+  // already holds it re-applies this. `blaze db init` without `--force` hit exactly that and
+  // died on `UNIQUE constraint failed: view_type.name`, leaving a half-built database behind.
+  const tail = name === "postgres" ? " ON CONFLICT DO NOTHING" : "";
+  const verb = name === "postgres" ? "INSERT INTO" : "INSERT OR IGNORE INTO";
   return VIEW_TYPES.map(({ name: n, label }) => ({
-    sql: `INSERT INTO blaze_config.view_type (name, label) VALUES (${ph(0)}, ${ph(1)})`,
+    sql: `${verb} blaze_config.view_type (name, label) VALUES (${ph(0)}, ${ph(1)})${tail}`,
     params: [n, label],
   }));
 }

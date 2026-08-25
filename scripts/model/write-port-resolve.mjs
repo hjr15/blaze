@@ -51,7 +51,7 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   // BLZ-377: same contract as openSqliteRead — the config namespace is attached on every
   // open, because the opener is the only thing that knows where its file lives.
   const { sqliteAttachConfig, configDbPathFor } = await import("./config-schema.mjs");
-  db.exec(sqliteAttachConfig(configDbPathFor(path)));
+  const cfgPath = configDbPathFor(path);
   const exec = sqliteExec(db);
   const { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } =
     await import("./db-schema-version.mjs");
@@ -60,8 +60,22 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   // This branch tested only `state === "empty"` and DISCARDED `ok`, so an out-of-range shadow
   // was opened silently: exactly the case the version floor exists to refuse, waved through by
   // the one opener that did not ask. sqlite-storage.mjs and pg-storage.mjs both check `ok`.
+  if (!state.ok && !(create && state.state === "empty")) {
+    db.close(); throw new Error(`blaze: ${state.error}`);
+  }
+  // Same contract and same ORDER as openSqliteRead: the version judgement speaks first, so a
+  // stale shadow still names itself, and only a database that is otherwise fine is required to
+  // have its namespace already. Attaching a missing file would CREATE it and let a
+  // half-deleted pair look healthy.
+  if (cfgPath !== ":memory:" && state.state !== "empty" && !existsSync(cfgPath)) {
+    db.close();
+    throw new Error(
+      `blaze: the config namespace is missing at ${cfgPath}, but the shadow database beside it `
+      + "exists. The namespace is derived, so rebuild rather than repair it: run "
+      + "'blaze db init --force'.");
+  }
+  db.exec(sqliteAttachConfig(cfgPath));
   if (create && state.state === "empty") createDbSchemaSync(exec);
-  else if (!state.ok) { db.close(); throw new Error(`blaze: ${state.error}`); }
   return { db, exec, path };
 }
 

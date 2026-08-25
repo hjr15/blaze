@@ -13,6 +13,7 @@
 // caller that did path arithmetic on it, and ticketPath.relocate() now REFUSES an
 // unrecognised handle rather than guessing, so a bogus destination fails loudly.
 import { DatabaseSync } from "node:sqlite";
+import { existsSync } from "node:fs";
 import { SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
@@ -67,8 +68,6 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   // EVERY open, not only on create — `blaze_config.view` has to be readable too. The attach
   // itself creates nothing but an empty file; the DDL is still the explicit, named operation
   // `createDbSchemaSync` performs, which is what BLZ-297 requires.
-  db.exec(sqliteAttachConfig(configDbPathFor(path)));
-
   const exec = {
     run(sql, params = []) { return params.length ? db.prepare(sql).run(...params) : db.exec(sql); },
     all(sql, params = []) { return db.prepare(sql).all(...params); },
@@ -76,18 +75,38 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   // The JUDGEMENT is pure and shared with the Postgres driver; only the fetch differs.
   // An async guard cannot serve a sync driver at all — `.then` always defers to a
   // microtask — so the split is structural, not stylistic.
+  //
+  // IT RUNS FIRST, before the config namespace is looked at. Checking the namespace ahead of it
+  // masked three more specific refusals — stale, unstamped and empty each got "the config
+  // namespace is missing" instead of the message that names what is actually wrong, because a
+  // database this engine will refuse anyway has no config file beside it either.
   const state = judgeDbSchema(readSchemaFactsSync(exec));
   if (!state.ok) { db.close(); throw new Error(`blaze: ${state.error}`); }
-  if (state.state === "empty") {
-    if (!create) {
-      db.close();
-      throw new Error(
-        "blaze: this database has no Blaze schema. Create one explicitly rather than "
-        + "having a read open silently write DDL — pass { create: true }, or run "
-        + "'blaze db init'.");
-    }
-    createDbSchemaSync(exec);
+  if (state.state === "empty" && !create) {
+    db.close();
+    throw new Error(
+      "blaze: this database has no Blaze schema. Create one explicitly rather than "
+      + "having a read open silently write DDL — pass { create: true }, or run "
+      + "'blaze db init'.");
   }
+
+  // BLZ-377: the config namespace is a SECOND file beside this one, attached on EVERY open
+  // rather than only on create, because `blaze_config.view` has to be readable too.
+  //
+  // ATTACH CREATES the file when it is missing, which on a read path is a write side effect
+  // and, worse, a disguise: a board whose `config.db` was deleted got a fresh 0-byte one, so
+  // `blaze db status` reported a healthy v4 while every `blaze_config.view` query failed with
+  // "no such table". The stamp cannot catch that — it lives in `blaze_meta`, in the other file.
+  // So a database that IS current must already have its namespace; only a create may make one.
+  const cfgPath = configDbPathFor(path);
+  if (cfgPath !== ":memory:" && state.state !== "empty" && !existsSync(cfgPath)) {
+    db.close();
+    throw new Error(
+      `blaze: the config namespace is missing at ${cfgPath}, but the database beside it exists. `
+      + "The namespace is derived, so rebuild rather than repair it: run 'blaze db init --force'.");
+  }
+  db.exec(sqliteAttachConfig(cfgPath));
+  if (state.state === "empty") createDbSchemaSync(exec);
 
   const linksFor = db.prepare(
     "SELECT link_type, target_id FROM ticket_link WHERE src_id = ? ORDER BY link_type, target_id");
