@@ -6,19 +6,69 @@ import { join } from "node:path";
 
 const EMPTY = { active: null, sprints: [] };
 
+/**
+ * The registry shape this engine writes (BLZ-369).
+ *
+ * Not a compatibility gate — it is a MARK. An engine released before this stamp existed rewrites
+ * `sprints.json` through its own two-key whitelist and drops every key it does not recognise, the
+ * stamp included. Its absence on a registry that holds sprints is therefore the only evidence
+ * available that such an engine has been through the file.
+ */
+export const SPRINT_REGISTRY_VERSION = 1;
+
+/**
+ * Load the registry WITHOUT discarding what this engine does not understand (BLZ-369).
+ *
+ * This whitelisted `active` and `sprints`, so `loadSprints -> setActive -> saveSprints` wrote
+ * every other key out of existence. Spec 2 §9 measured it:
+ *
+ *     file keys BEFORE : [ active, activeByProject, sprints ]
+ *     loadSprints keys : [ active, sprints ]        <- never reaches a reader
+ *
+ * `addSprint` and `setActive` were never at fault; both already spread `...registry`. The loader
+ * was the whole mechanism, which is why the fix is one spread.
+ *
+ * WHY NOW, BEFORE `activeByProject` EXISTS. Whichever engine version is current when that key
+ * ships becomes "the old engine" for every board that migrates. An engine that preserves what it
+ * does not understand can never be that engine. This does nothing for versions already released
+ * — they are shipped and cannot be changed — which is what the stamp is for.
+ *
+ * A MALFORMED registry still yields EMPTY and carries nothing forward. Preserving unknown keys
+ * must not promote a junk file into a half-trusted one.
+ */
 export function loadSprints({ root }) {
   try {
     const raw = readFileSync(join(root, "sprints.json"), "utf8");
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.sprints)) return { ...EMPTY };
-    return { active: parsed.active ?? null, sprints: parsed.sprints };
+    return { ...parsed, active: parsed.active ?? null, sprints: parsed.sprints };
   } catch {
     return { ...EMPTY };
   }
 }
 
 export function saveSprints({ root }, registry) {
-  writeFileSync(join(root, "sprints.json"), JSON.stringify(registry, null, 2) + "\n");
+  const stamped = { ...registry, registryVersion: SPRINT_REGISTRY_VERSION };
+  writeFileSync(join(root, "sprints.json"), JSON.stringify(stamped, null, 2) + "\n");
+}
+
+/**
+ * A registry holding sprints but no version stamp — or `null` when there is nothing to say.
+ *
+ * Two things produce it and the file alone cannot tell them apart: a board written before the
+ * stamp existed, and a board an older engine has rewritten since. The message says both rather
+ * than picking one, because guessing would be the same overconfidence this whole ticket is about.
+ *
+ * A board with NO sprints is silent — there is nothing it could have lost, and every fresh board
+ * would otherwise warn on its first `blaze sprint new`.
+ */
+export function unstampedRegistryWarning(registry) {
+  const sprints = registry?.sprints;
+  if (!Array.isArray(sprints) || sprints.length === 0) return null;
+  if (registry.registryVersion !== undefined) return null;
+  return "sprints.json carries no version stamp. Either it predates this engine's stamp, or an "
+    + "engine older than it rewrote the file and dropped every key it did not recognise — "
+    + "per-project state among them, which nothing can reconstruct. Saving now stamps it.";
 }
 
 export function nextSprintId(registry) {

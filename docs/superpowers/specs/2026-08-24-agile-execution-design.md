@@ -734,11 +734,27 @@ stale `active: "S2"` pointer itself.
   deliver. **The window that allows it is a different thing and is closable**, which is the
   distinction the next paragraph turns on.
 
-  **Accepted now, tracked for removal: BLZ-369.** The operator's ruling on 2026-08-24 was to take
-  the additive shape *and* close this window later, so this is not a gap the spec settles for. The
-  two candidate mechanisms are the `MIN_SCHEMA_VERSION` bump above and a version stamp in
-  `sprints.json` plus a warning on a trampled registry; neither is designed here, and BLZ-369 owns
-  the choice.
+  **CLOSED for every engine from BLZ-369 onward; still open against versions already released.**
+  The operator's ruling on 2026-08-24 was to take the additive shape *and* close this window later,
+  and BLZ-369 did. It took neither candidate whole. The `MIN_SCHEMA_VERSION` bump was declined —
+  it is breaking under ADR-0002 and would have been spent protecting a key that, when BLZ-369 was
+  picked up, **did not yet exist**: `8b9f93b` merged this spec and nothing more, so `activeByProject`
+  appears in no code and on no board, and the window this paragraph describes was never actually
+  open.
+
+  What shipped instead is the half neither candidate named. `loadSprints` no longer whitelists —
+  it preserves what it does not understand — so **the mechanism itself is gone**, and the engine
+  current when `activeByProject` finally lands cannot be the one that destroys it. That is the
+  ordering that matters: the guard has to precede the migration, or the migration opens a window
+  the guard was meant to prevent.
+
+  The stamp is the second candidate, kept for what the first half cannot reach. An engine already
+  released rewrites `sprints.json` through its own whitelist and drops `registryVersion` with
+  everything else, so its absence on a registry holding sprints is the only available evidence one
+  has been through the file. `blaze sprint new` and `blaze sprint active` report it on the write
+  paths, where the loss would occur. It is **detection, not prevention** — nothing can prevent an
+  engine that is already shipped — and the message says both of the two things its absence can
+  mean rather than guessing between them.
 - **Sprint close-out as an event.** No ceremony, no carry-over gesture, no "move unfinished to the
   next sprint" command. §4 reports the 26 overruns; it does not offer to fix them.
 - **Cross-project sprints.** §2.1 refuses them on measurement; a later ruling would reopen it.
