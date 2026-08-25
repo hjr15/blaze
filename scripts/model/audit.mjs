@@ -289,7 +289,8 @@ export function scheduleFindings(schedule, { persisted = [] } = {}) {
   if ((schedule.node_count ?? 0) === 0 && (schedule.candidates ?? 0) > 0) {
     findings.push({
       ticket: "-", kind: "schedule-empty",
-      detail: `nothing is schedulable: ${schedule.candidates} non-terminal ticket(s) exist but `
+      detail: `nothing is schedulable: ${schedule.candidates} ticket(s) that ought to be `
+        + "schedulable exist, but "
         + "the declared Precedes endpoint kinds match none of them "
         + `(source kinds: ${(schedule.source_kinds ?? []).join(", ") || "none"}). `
         + "Check schema.linkTypes — every schedule finding is suppressed while this holds",

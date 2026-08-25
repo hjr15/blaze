@@ -185,6 +185,12 @@ const schedule = config === null ? null : scheduleModel({
   // board that declares its own delivery type can declare it schedulable too. Passing the
   // default here instead would silently ignore that override on the only path an operator runs.
   linkTypes: resolveSchema({ config }).linkTypes,
+  // The type registry the solve judges "is this a custom DELIVERY type?" against — the UNION of
+  // every layer, because one CPM graph spans the whole corpus and a project may declare its own
+  // delivery type. Passed rather than read: the model must not consult ambient CWD state.
+  types: Object.keys(projects).reduce(
+    (acc, k) => Object.assign(acc, resolveSchema({ config, project: projects[k] ?? null }).types),
+    { ...resolveSchema({ config }).types }),
   now: Date.now(),
 });
 if (schedule) report.findings.push(...scheduleFindings(schedule));

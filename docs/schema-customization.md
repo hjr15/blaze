@@ -72,7 +72,8 @@ unschedulable. `blaze audit` reports that as `schedule-empty` — an outcome che
 likeliest mistakes are well-formed and no validation of the block's shape would catch them.
 
 It fires when nothing is a node *and* the board holds tickets that ought to be: a type the engine
-ships as a `Precedes` source kind, or a type you added **on the `delivery` workflow**. It stays
+ships as a `Precedes` source kind, or a type you added **on the `delivery` workflow**, in
+`blaze.config.json` or in any `project.json`. It stays
 quiet on a board with nothing schedulable to begin with — a requirements-first project, one whose
 delivery work is all done, or one whose custom types are non-delivery — because `goal`, `risk`,
 `requirement`, `architecture` and `epic` are excluded from the critical path by design, not by
@@ -260,6 +261,7 @@ each one has actually broken a board running this mechanism.
 | **Default → top-level** | Board columns, transition legality, and every read that goes through the ambient registry. |
 | **Default → top-level → per-project** | **Ticket validation on the write path** — `blaze new` and `blaze edit` (BLZ-238) — and **corpus hygiene**, `blaze audit` (BLZ-137). |
 | **Default → top-level only** | **`linkTypes`, and therefore the scheduler** — `blaze audit`'s critical path and `blaze schedule import-deps` (BLZ-392). A CPM solve runs over the whole corpus at once, so there is no single project whose endpoint kinds could apply; a per-project `linkTypes` block resolves correctly but reaches nothing. |
+| **The union of every layer** | **Which type names an endpoint kind may legitimately mention** (BLZ-392). One `Precedes` list serves the whole installation, so it may name a type that only one project declares — judging it against the top layer alone reported a real type as undeclared. The same union decides whether a custom type counts as schedulable. |
 
 `blaze new` validates a create against the **target project's** registry, and `blaze edit`
 validates against the **edited ticket's** project. A retype's child sweep judges each child by

@@ -16,6 +16,8 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { resolveSchema, validateSchema } from "../../scripts/model/schema-config.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes } from "../../scripts/model/link-schema.mjs";
+import { DEFAULT_TYPES } from "../../scripts/model/schema.mjs";
+import { readFileSync } from "node:fs";
 import { scheduleModel } from "../../scripts/model/schedule.mjs";
 import { scheduleFindings, auditCorpus, groupScheduleFindings, SCHEDULE_KINDS, SOFT_KINDS, HARD_KINDS }
   from "../../scripts/model/audit.mjs";
@@ -624,5 +626,105 @@ describe("BLZ-392: an endpoint kind declared by a PROJECT is not called undeclar
     });
     assert.ok(findings.some((f) => f.kind === "schema-invalid" && /spke/.test(f.detail)),
       "a genuinely undeclared endpoint kind was not reported");
+  });
+});
+
+describe("BLZ-392: the schedule model reads no ambient state", () => {
+  // `candidates` briefly asked `workflowFor`, which reads `schema.mjs`'s ambient TYPES — built
+  // at import time from whatever blaze.config.json the CWD resolves to. The model then gave
+  // different answers in different directories: `blaze audit <dir>` positionally lost the
+  // finding, an unrelated board's config could conjure one, and a test in this very file failed
+  // when run from a board directory. The registry is a parameter now, like `linkTypes`.
+  test("a custom delivery type counts only when the PASSED registry declares it", () => {
+    const t0 = t("S", { type: "spike", deadline: "2026-08-01" });
+    const bare = scheduleModel({ tickets: [t0], links: [], schedule: SCHEDULE, now: MON });
+    assert.equal(bare.candidates, 0,
+      "an unknown type counted with no registry saying it is a delivery type");
+    const withReg = scheduleModel({
+      tickets: [t0], links: [], schedule: SCHEDULE, now: MON,
+      types: { ...DEFAULT_TYPES, spike: { level: 0, workflow: "delivery", parentTypes: [], required: [] } } });
+    assert.equal(withReg.candidates, 1, "the passed registry was ignored");
+  });
+
+  test("a custom NON-delivery type still does not count, even when passed", () => {
+    const withReg = scheduleModel({
+      tickets: [t("D", { type: "decision" })], links: [], schedule: SCHEDULE, now: MON,
+      types: { ...DEFAULT_TYPES, decision: { level: 2, workflow: "architecture", parentTypes: [], required: [] } } });
+    assert.equal(withReg.candidates, 0, "a non-delivery custom type counted as schedulable");
+  });
+
+  test("the model does not IMPORT the ambient registry helpers", () => {
+    // The determinism grep next door bans Date.now/Math.random; ambient FILESYSTEM reads were
+    // invisible to it, which is how this shipped. `workflowFor`, `requiredFields`,
+    // `hierarchyLevel` and `allTypes` all resolve through `TYPES`, which is CWD-dependent.
+    //
+    // Checks the IMPORT LIST, not the whole file: the comments explaining this defect name
+    // `workflowFor` on purpose, and a test that cannot survive its own subject's documentation
+    // is a test that will be deleted the first time someone edits a comment.
+    const src = readFileSync(new URL("../../scripts/model/schedule.mjs", import.meta.url), "utf8");
+    const imports = [...src.matchAll(/^import\s+\{([^}]*)\}\s+from\s+"([^"]+)"/gm)]
+      .flatMap((m) => m[1].split(",").map((x) => x.trim()));
+    for (const helper of ["workflowFor", "requiredFields", "hierarchyLevel", "allTypes"]) {
+      assert.ok(!imports.includes(helper),
+        `schedule.mjs imports ${helper}, which reads the ambient registry — pass the value instead`);
+    }
+    assert.ok(imports.includes("DEFAULT_TYPES"),
+      "the model should take the shipped registry as a value");
+  });
+});
+
+describe("BLZ-392: the finding registries are complete, not just consistent", () => {
+  // SOFT_KINDS exists because `--help`'s list went stale twice. It shipped guarded only by
+  // `SCHEDULE_KINDS ⊆ SOFT_KINDS`, which covers 4 of its 9 entries — so dropping
+  // `schema-invalid` or `empty-labels`, or adding a phantom, all survived the full suite.
+  const KIND_LITERAL = /(?:add\([^,]+,\s*|kind:\s*)"([a-z][a-z0-9-]+)"/g;
+  const EMITTERS = ["../../scripts/model/audit.mjs", "../../scripts/audit-runner.mjs"];
+
+  test("every kind the audit emits is registered as hard or soft", () => {
+    const emitted = [...new Set(EMITTERS.flatMap((f) =>
+      [...readFileSync(new URL(f, import.meta.url), "utf8").matchAll(KIND_LITERAL)].map((m) => m[1])))];
+    assert.ok(emitted.length > 8, `only ${emitted.length} kinds found — the scan is not working`);
+    const known = new Set([...SOFT_KINDS, ...HARD_KINDS]);
+    const missing = emitted.filter((k) => !known.has(k));
+    assert.deepEqual(missing, [],
+      `emitted but registered nowhere, so \`blaze audit --help\` will not list them: ${missing.join(", ")}`);
+  });
+
+  test("SOFT_KINDS carries no phantom", () => {
+    // BOTH emitters. `terminal-goal-unverified-requirement` is pushed from `audit-runner.mjs`,
+    // not `audit.mjs`, so scanning the model alone reported a real kind as a phantom.
+    const emitted = new Set(EMITTERS.flatMap((f) =>
+      [...readFileSync(new URL(f, import.meta.url), "utf8").matchAll(KIND_LITERAL)].map((m) => m[1])));
+    const phantom = SOFT_KINDS.filter((k) => !emitted.has(k));
+    assert.deepEqual(phantom, [], `declared soft but never emitted: ${phantom.join(", ")}`);
+  });
+
+  test("hard and soft are disjoint", () => {
+    const both = SOFT_KINDS.filter((k) => HARD_KINDS.has(k));
+    assert.deepEqual(both, [], `declared both hard and soft: ${both.join(", ")}`);
+  });
+});
+
+describe("BLZ-392: the endpoint-kind union reaches the PROJECT layer too", () => {
+  test("two projects — one declaring the type — produce no bogus finding for either", () => {
+    // The one-project test could not see this: `topLevel.has(e)` masked the project layer
+    // entirely, so dropping `endpointTypes` from the per-project call survived the full suite.
+    const config = { projects: ["AAA", "BBB"], schema: { linkTypes: { Precedes: {
+      source_kinds: ["task", "spike"], target_kinds: ["task", "spike"],
+      min_card: 0, max_card: null } } } };
+    const projects = {
+      AAA: { schema: { types: {
+        spike: { level: 0, workflow: "delivery", parentTypes: ["feature"], required: ["title"] } } } },
+      BBB: {},
+    };
+    const { findings } = auditCorpus({
+      tickets: [
+        { frontmatter: { id: "AAA-1", type: "task", project: "AAA", estimate: 480 }, status: "defined" },
+        { frontmatter: { id: "BBB-1", type: "task", project: "BBB", estimate: 480 }, status: "defined" },
+      ], projects, config,
+    });
+    const bogus = findings.filter((f) => f.kind === "schema-invalid" && /spike/.test(f.detail));
+    assert.deepEqual(bogus, [],
+      `a type declared by a sibling project was called undeclared: ${bogus.map((f) => `${f.ticket}: ${f.detail}`).join(" | ")}`);
   });
 });

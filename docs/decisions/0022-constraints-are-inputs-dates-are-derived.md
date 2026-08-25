@@ -244,7 +244,16 @@ Three consequences, stated because none is free:
   `requirement`, `architecture` and `epic` are excluded by design. Counting only the shipped
   kinds went blind to this ticket's OWN case, a board of custom-typed tickets. Counting every
   undeclared type reopened the first fault, because `terminalOf` swallows `workflowFor`'s throw
-  so a typo'd type, a missing `type:` key and a custom NON-delivery type all qualified. It keys on the node
+  so a typo'd type, a missing `type:` key and a custom NON-delivery type all qualified. What
+  settled it is a custom type **on the delivery workflow** — read from the type registry the
+  caller PASSES, never from `workflowFor`. That helper resolves through `schema.mjs`'s ambient
+  `TYPES`, built at import time from whatever `blaze.config.json` the working directory resolves
+  to, so consulting it made the solve answer differently in different directories:
+  `blaze audit <dir>` given a path positionally silently lost the finding, an unrelated board's
+  config could conjure one, and a test in this ticket failed when run from a board directory.
+  The registry is threaded in exactly as `linkTypes` is, and `audit-runner.mjs` passes the union
+  of every layer's types, because one CPM graph spans the whole corpus and a project may declare
+  its own delivery type. It keys on the node
   count rather than the scheduled count, because a board that is one dependency cycle schedules
   nothing while being perfectly schedulable, and `dependency-cycle` already says so.
 

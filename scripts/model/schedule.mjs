@@ -29,7 +29,7 @@
 //      would overwrite them.
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
-import { workflowFor, DEFAULT_TYPES } from "./schema.mjs";
+import { DEFAULT_TYPES } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
 export const PRECEDES = "Precedes";
@@ -219,7 +219,7 @@ function tarjan(ids, succ) {
  * @param runId    stamped onto the result so a persisted row can be told stale
  */
 export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null,
-                                linkTypes = DEFAULT_LINK_TYPES } = {}) {
+                                linkTypes = DEFAULT_LINK_TYPES, types = DEFAULT_TYPES } = {}) {
   if (!schedule || typeof schedule.minutes_per_day !== "number" || !Array.isArray(schedule.working_days)) {
     throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
       + "— board config is their single definition (BLZ-360 §2.3)");
@@ -325,12 +325,17 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     if (SHIPPED_SOURCE_KINDS.has(r.type)) return true;
     if (DECLARED_TYPES.has(r.type)) return false;   // declared, but excluded by design
     // A type the ENGINE does not declare is one the installation added — but only a DELIVERY
-    // one belongs in this denominator. Counting every undeclared type reopened exactly the
-    // false positive the shipped-kinds narrowing had just closed: `terminalOf` swallows
-    // `workflowFor`'s throw, so a typo'd type, a missing `type:` key, an empty string, and a
-    // legitimate custom NON-delivery type (a decision record on the architecture workflow) all
-    // counted — and each was told to "check schema.linkTypes" on a board that has none.
-    try { return workflowFor(r.type) === "delivery"; } catch { return false; }
+    // one belongs in this denominator, or a typo, a missing `type:` key and a custom
+    // non-delivery type all count and the board is told to check a `schema.linkTypes` it does
+    // not have.
+    //
+    // FROM THE PASSED REGISTRY, never `workflowFor`. That helper reads `schema.mjs`'s ambient
+    // `TYPES`, built at import time from whatever `blaze.config.json` the CWD resolves to — so
+    // this function stopped being pure and started giving different answers in different
+    // directories. `blaze audit <dir>` positionally silently lost the finding, an unrelated
+    // board's config could conjure one, and a test in this very ticket failed when run from a
+    // board directory. `linkTypes` is threaded in for exactly this reason; so is this.
+    return types[r.type]?.workflow === "delivery";
   }).length;
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
