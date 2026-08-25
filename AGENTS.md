@@ -53,8 +53,10 @@ transition legality remain board-wide. With no override the table above applies
 unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 `validateSchema` (also in `scripts/model/schema-config.mjs`) is a pure structural
 check — every type's `workflow` must name a declared workflow — returning a list
-of human-readable errors (`[]` when valid); nothing in the engine calls it
-automatically yet.
+of human-readable errors (`[]` when valid). `auditCorpus` calls it and reports its
+output as soft `schema-invalid` findings (BLZ-392) — for years nothing did, which is
+why ADR-0002 warns that relying on it buys "a well-tested no-op: green in CI, absent
+in production".
 
 The model above is what earlier docs called the **`engineering` preset**. Since
 BLZ-231 it is no longer a preset a board opts into — it is what the engine

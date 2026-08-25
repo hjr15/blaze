@@ -29,7 +29,14 @@ export function resolveSchema({ config = null, project = null } = {}) {
 /** Pure structural check: every type's workflow must be a declared workflow.
  *  Returns a list of human-readable errors ([] when valid). */
 export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
-                                 config = null, project = null } = {}) {
+                                 config = null, project = null, endpointTypes = null } = {}) {
+  // `endpointTypes` exists because the two checks below ask different questions. A type's
+  // workflow is judged against the layer that declares it; an ENDPOINT KIND is judged against
+  // every type that exists anywhere, because the top-level `Precedes` list legitimately names
+  // types some project declares. Judging both against one registry produced a finding that its
+  // own report contradicted: "spike is not a declared type, so it stays unschedulable", printed
+  // beside a `deadline-unreachable` proving a spike had just been scheduled.
+  const known = endpointTypes ?? types;
   const errors = [];
   for (const [name, def] of Object.entries(types)) {
     const wf = def && def.workflow;
@@ -77,7 +84,7 @@ export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
           continue;
         }
         for (const kind of kinds ?? []) {
-          if (!Object.prototype.hasOwnProperty.call(types, kind)) {
+          if (!Object.prototype.hasOwnProperty.call(known, kind)) {
             errors.push(`link type "${lt.name}" names "${kind}" in ${side}, which is not a `
               + "declared type — it can never match, so any type it was meant to cover stays "
               + "unschedulable");

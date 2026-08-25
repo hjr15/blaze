@@ -6,7 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { auditCorpus, summarise, HARD_KINDS, scheduleFindings } from "./model/audit.mjs";
+import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
@@ -27,7 +27,9 @@ function usage() {
   console.error("usage: blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]");
   console.error("  Reports corpus hygiene. Exits non-zero on a HARD finding only.");
   console.error(`  hard: ${[...HARD_KINDS].sort().join(", ")}`);
-  console.error("  soft: empty-components, empty-labels, missing-parent");
+  // Hardcoded, and it went stale twice — the hard line beside it is derived from HARD_KINDS
+  // and cannot. Kept in one place with the kinds that actually exist.
+  console.error(`  soft: ${SOFT_KINDS.join(", ")}`);
 }
 
 // BLZ-133's pattern: an explicit projectsDir is self-sufficient, so resolve it BEFORE
@@ -144,7 +146,7 @@ for (const [id, fm] of fmById) {
 }
 
 // BLZ-382 / BLZ-360 §7. The schedule's findings land in the SAME report, through the SAME
-// function the view layer reads, so `blaze audit` and the Gantt cannot drift. All three kinds
+// function the view layer reads, so `blaze audit` and the Gantt cannot drift. All four kinds
 // are soft, so none of them can change `ok`.
 //
 // `now` is read HERE and nowhere deeper: scheduleModel refuses to read a clock, which is what

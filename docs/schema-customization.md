@@ -72,10 +72,11 @@ unschedulable. `blaze audit` reports that as `schedule-empty` — an outcome che
 likeliest mistakes are well-formed and no validation of the block's shape would catch them.
 
 It fires when nothing is a node *and* the board holds tickets that ought to be: a type the engine
-ships as a `Precedes` source kind, or a type you added yourself. It stays quiet on a board with
-nothing schedulable to begin with — a requirements-first project, or one whose delivery work is
-all done — because `goal`, `risk`, `requirement`, `architecture` and `epic` are excluded from the
-critical path by design, not by misconfiguration.
+ships as a `Precedes` source kind, or a type you added **on the `delivery` workflow**. It stays
+quiet on a board with nothing schedulable to begin with — a requirements-first project, one whose
+delivery work is all done, or one whose custom types are non-delivery — because `goal`, `risk`,
+`requirement`, `architecture` and `epic` are excluded from the critical path by design, not by
+misconfiguration.
 
 - A **type** entry: `level` (2=goal … 0=leaf … -1=subtask), `workflow` (the name
   of a workflow — built-in or one you define), `parentTypes` (which parent types

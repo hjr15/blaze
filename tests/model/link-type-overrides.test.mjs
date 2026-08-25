@@ -17,7 +17,8 @@ import assert from "node:assert/strict";
 import { resolveSchema, validateSchema } from "../../scripts/model/schema-config.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes } from "../../scripts/model/link-schema.mjs";
 import { scheduleModel } from "../../scripts/model/schedule.mjs";
-import { scheduleFindings, auditCorpus } from "../../scripts/model/audit.mjs";
+import { scheduleFindings, auditCorpus, groupScheduleFindings, SCHEDULE_KINDS, SOFT_KINDS, HARD_KINDS }
+  from "../../scripts/model/audit.mjs";
 import { planDependencyImport, DISPOSITION } from "../../scripts/model/import-deps.mjs";
 
 const SCHEDULE = { minutes_per_day: 480, working_days: [1, 2, 3, 4, 5] };
@@ -437,6 +438,23 @@ describe("BLZ-392: nothing-is-schedulable is a FINDING, not a silent board-wide 
     });
   }
 
+  // R5: the denominator's third attempt. Counting every UNDECLARED type reopened the first
+  // fault, because `terminalOf` swallows `workflowFor`'s throw — so a typo, a missing `type:`
+  // key and an empty string all counted as "a type the operator added", and each board was
+  // told to check a `schema.linkTypes` it does not have.
+  for (const [label, type] of [["a typo'd type", "taks"], ["an empty type", ""],
+                               ["a missing type", null], ["an unknown type", "widget"]]) {
+    test(`${label} is not a schedulable candidate`, () => {
+      const r = scheduleModel({
+        tickets: [t("X", { type, deadline: "2026-08-01" })], links: [],
+        schedule: SCHEDULE, now: MON });
+      assert.equal(r.candidates, 0,
+        `${label} counted as a candidate — schedule-empty will fire on a board with no override`);
+      assert.ok(!scheduleFindings(r).map((f) => f.kind).includes("schedule-empty"),
+        `schedule-empty fired for ${label}`);
+    });
+  }
+
   test("a board of only TERMINAL tickets does not raise it either", () => {
     const r = scheduleModel({
       tickets: [t("D", { status: "done" })], links: [], schedule: SCHEDULE, now: MON });
@@ -533,5 +551,78 @@ describe("BLZ-392: auditCorpus surfaces schema findings per layer", () => {
     const got = kinds(findings);
     assert.equal(got.length, 1, `expected one finding, got: ${got.map((f) => f.detail).join(" | ")}`);
     assert.match(got[0].detail, /does not reach the scheduler/);
+  });
+});
+
+describe("BLZ-392: the finding registries stay in step with what the code emits", () => {
+  // Both of these shipped with ZERO coverage in the round that added them: deleting
+  // `schedule-empty` from SCHEDULE_KINDS survived the targeted suite, and deleting its arm of
+  // the `noun` ternary survived the FULL suite. So the grouper could go back to labelling it
+  // "tickets carrying a stale schedule" — a wrong sentence in the function whose own header
+  // says it exists so `blaze audit` and the view layer cannot drift.
+  test("groupScheduleFindings gives schedule-empty its own noun", () => {
+    const [group] = groupScheduleFindings([
+      { ticket: "-", kind: "schedule-empty", detail: "nothing is schedulable" },
+    ]);
+    assert.equal(group.kind, "schedule-empty");
+    assert.doesNotMatch(group.summary, /stale schedule/,
+      `schedule-empty fell through to another kind's noun: ${group.summary}`);
+    assert.match(group.summary, /schedulable/, `unexpected summary: ${group.summary}`);
+  });
+
+  test("every schedule kind is a declared soft kind", () => {
+    // Adding a kind to scheduleFindings without registering it is how both defects happened.
+    for (const k of SCHEDULE_KINDS) {
+      assert.ok(SOFT_KINDS.includes(k), `${k} is emitted but not declared soft`);
+      assert.ok(!HARD_KINDS.has(k), `${k} is both hard and a schedule kind`);
+    }
+    assert.ok(SCHEDULE_KINDS.includes("schedule-empty"),
+      "schedule-empty is emitted by scheduleFindings but not registered as a schedule kind, "
+      + "so the grouper mislabels it");
+  });
+
+  test("a repeated bad endpoint kind is ONE finding, not two identical ones", () => {
+    // The top-layer dedup: `["taks","taks"]` produces the same error string twice.
+    const cfg = { projects: ["AAA"], schema: { linkTypes: { Precedes: {
+      source_kinds: ["taks", "taks"], target_kinds: ["task"], min_card: 0, max_card: null } } } };
+    const { findings } = auditCorpus({
+      tickets: [{ frontmatter: { id: "AAA-1", type: "task", project: "AAA", estimate: 480 }, status: "defined" }],
+      projects: { AAA: {} }, config: cfg,
+    });
+    const got = findings.filter((f) => f.kind === "schema-invalid" && /taks/.test(f.detail));
+    assert.equal(got.length, 1,
+      `the same error was reported ${got.length} times: ${got.map((f) => f.detail).join(" | ")}`);
+  });
+});
+
+describe("BLZ-392: an endpoint kind declared by a PROJECT is not called undeclared", () => {
+  test("a top-level Precedes may name a type only one project declares", () => {
+    // This produced a finding its own report contradicted: "spike is not a declared type, so it
+    // stays unschedulable", printed in the same audit as a `deadline-unreachable` proving a
+    // spike had just been scheduled. A type's WORKFLOW is judged against the layer that
+    // declares it; an ENDPOINT KIND has to be judged against every type that exists.
+    const config = { projects: ["AAA"], schema: { linkTypes: { Precedes: {
+      source_kinds: ["task", "spike"], target_kinds: ["task", "spike"],
+      min_card: 0, max_card: null } } } };
+    const projects = { AAA: { schema: { types: {
+      spike: { level: 0, workflow: "delivery", parentTypes: ["feature"], required: ["title"] } } } } };
+    const { findings } = auditCorpus({
+      tickets: [{ frontmatter: { id: "AAA-1", type: "task", project: "AAA", estimate: 480 }, status: "defined" }],
+      projects, config,
+    });
+    const bogus = findings.filter((f) => f.kind === "schema-invalid" && /spike/.test(f.detail));
+    assert.deepEqual(bogus, [],
+      `a project-declared type was reported as undeclared: ${bogus.map((f) => f.detail).join(" | ")}`);
+  });
+
+  test("a kind no layer declares is still reported — the control", () => {
+    const config = { projects: ["AAA"], schema: { linkTypes: { Precedes: {
+      source_kinds: ["task", "spke"], target_kinds: ["task"], min_card: 0, max_card: null } } } };
+    const { findings } = auditCorpus({
+      tickets: [{ frontmatter: { id: "AAA-1", type: "task", project: "AAA", estimate: 480 }, status: "defined" }],
+      projects: { AAA: {} }, config,
+    });
+    assert.ok(findings.some((f) => f.kind === "schema-invalid" && /spke/.test(f.detail)),
+      "a genuinely undeclared endpoint kind was not reported");
   });
 });

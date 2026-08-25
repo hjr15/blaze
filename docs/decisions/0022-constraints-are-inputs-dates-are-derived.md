@@ -204,13 +204,15 @@ Three consequences, stated because none is free:
   nothing, which would leave the type it was meant to schedule silently unschedulable again.
 - **Both model functions default `linkTypes` to the constant**, so they stay usable standalone.
   That default is a trap for exactly the production callers, because forgetting to pass the
-  resolved value reinstates the old bug with **no visible symptom**. The guard is a grep over
-  `audit-runner.mjs` and `schedule-runner.mjs`, and its real force is not the presence of a
-  `linkTypes:` key — a first version checked only that and was defeated seven ways out of eight,
-  passing even when the file passed the constant. It is that **neither runner may name
-  `DEFAULT_LINK_TYPES` at all**: with the constant out of scope, passing it is not expressible.
-  Stated plainly, because greps invite over-trust: no scan of source text proves runtime
-  behaviour, and the assertions that do are the ones calling both functions directly.
+  resolved value reinstates the old bug with **no visible symptom**. A source grep was tried for
+  four review rounds and leaked in every one — a bare key match, then a `//` comment, then a
+  `/*` inside a `//` comment that hid 39 lines of real code, and finally `resolveSchema({})`,
+  which reinstates the defect without naming anything a grep could ban. Each fix was a better
+  lexer; the mistake was lexing at all, because the property is about what the runner DOES. It
+  is now asserted by RUNNING both runners against fixture boards
+  (`tests/audit-malformed-linktypes.test.mjs`): a custom type declared schedulable must actually
+  be scheduled, and `import-deps` must actually propose an edge between two of them — each with
+  a control proving the assertion is about the override and not about the board.
 - **A list declaring no `Precedes` schedules nothing**, rather than falling back to the default
   behind the operator's back. That is the honest reading of the declaration — and it is now
   unreachable through config, because the merge can only replace or append, never remove.
@@ -235,10 +237,14 @@ Three consequences, stated because none is free:
 - **A second finding, `schedule-empty`, catches what no shape check can.** The two likeliest
   operator mistakes — `source_kinds: []` and one mistyped type name — are WELL-FORMED, so
   validating the block's shape misses both while they silently zero the board. It is therefore
-  an outcome check: no nodes at all, while tickets the SHIPPED kinds would have scheduled exist.
-  The denominator matters as much as the test — counting every non-terminal ticket fired it on
-  requirements-first boards and on finished boards under a default schema, because `goal`,
-  `risk`, `requirement`, `architecture` and `epic` are excluded by design. It keys on the node
+  an outcome check: no nodes at all, while tickets that OUGHT to be schedulable exist — a type
+  the engine ships as a `Precedes` source kind, or one the installation added on the delivery
+  workflow. The denominator took three attempts and each failure is instructive. Counting every
+  non-terminal ticket fired on requirements-first and finished boards, because `goal`, `risk`,
+  `requirement`, `architecture` and `epic` are excluded by design. Counting only the shipped
+  kinds went blind to this ticket's OWN case, a board of custom-typed tickets. Counting every
+  undeclared type reopened the first fault, because `terminalOf` swallows `workflowFor`'s throw
+  so a typo'd type, a missing `type:` key and a custom NON-delivery type all qualified. It keys on the node
   count rather than the scheduled count, because a board that is one dependency cycle schedules
   nothing while being perfectly schedulable, and `dependency-cycle` already says so.
 

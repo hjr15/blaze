@@ -29,8 +29,8 @@
 //      would overwrite them.
 //   3. Tarjan over what is left.
 import { isTerminal } from "./workflows.mjs";
+import { workflowFor, DEFAULT_TYPES } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
-import { DEFAULT_TYPES } from "./schema.mjs";
 
 export const PRECEDES = "Precedes";
 
@@ -265,9 +265,11 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // as a node.
   //
   // BLZ-392: the kinds come from the RESOLVED list the caller passes, not from the constant.
-  // The default keeps the pure model usable standalone; the production caller resolves and
-  // passes, and `tests/model/link-type-overrides.test.mjs` greps audit-runner.mjs to keep it
-  // doing so — a caller that forgets reinstates the old bug with no visible symptom.
+  // The default keeps the pure model usable standalone; the production callers resolve and
+  // pass. A caller that forgets reinstates the old bug with NO visible symptom, so what keeps
+  // them honest is `tests/audit-malformed-linktypes.test.mjs`, which runs both real runners
+  // against fixture boards — a source grep was tried for four review rounds and leaked in
+  // every one.
   const { source: SOURCE_KINDS, target: TARGET_KINDS } = endpointKinds(linkTypes);
   const isNodeKind = (t) => SOURCE_KINDS.has(t.type);
 
@@ -320,7 +322,15 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     // only custom-typed tickets whose endpoint override breaks has no shipped-kind ticket to
     // count, so it got NO finding while being completely unschedulable. A type the engine does
     // not declare is one the operator added, and they added it to do something with.
-    return SHIPPED_SOURCE_KINDS.has(r.type) || !DECLARED_TYPES.has(r.type);
+    if (SHIPPED_SOURCE_KINDS.has(r.type)) return true;
+    if (DECLARED_TYPES.has(r.type)) return false;   // declared, but excluded by design
+    // A type the ENGINE does not declare is one the installation added — but only a DELIVERY
+    // one belongs in this denominator. Counting every undeclared type reopened exactly the
+    // false positive the shipped-kinds narrowing had just closed: `terminalOf` swallows
+    // `workflowFor`'s throw, so a typo'd type, a missing `type:` key, an empty string, and a
+    // legitimate custom NON-delivery type (a decision record on the architecture workflow) all
+    // counted — and each was told to "check schema.linkTypes" on a board that has none.
+    try { return workflowFor(r.type) === "delivery"; } catch { return false; }
   }).length;
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))

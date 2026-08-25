@@ -160,6 +160,27 @@ describe("BLZ-392: the override actually reaches both production paths", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  test("a custom NON-delivery type does not raise schedule-empty", () => {
+    // A decision record modelled on `architecture`, with no linkTypes block — a legitimate use
+    // of the documented feature. Counting every undeclared type told this board to "check
+    // schema.linkTypes" when it has none. Needs the real runner, because deciding it requires
+    // the config's own type registry.
+    const root = mkdtempSync(join(tmpdir(), "blz392-dec-"));
+    try {
+      mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
+      writeFileSync(join(root, "blaze.config.json"), JSON.stringify({
+        key: "ENG", projects: ["ENG"],
+        schema: { types: { decision: { level: 2, workflow: "architecture", parentTypes: ["goal"] } } },
+      }, null, 2));
+      writeFileSync(join(root, "projects", "ENG", "defined", "ENG-1-d.md"),
+        ["---", "id: ENG-1", 'title: "d"', "type: decision", "project: ENG", "status: proposed",
+         "---", ""].join("\n"));
+      const r = audit(root);
+      assert.doesNotMatch(r.stdout, /schedule-empty/,
+        `a custom non-delivery type was reported as an unschedulable board:\n${r.stdout}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("without the override import-deps REFUSES it — the control", () => {
     const root = spikeBoard({ types: SPIKE_SCHEMA.types });
     try {

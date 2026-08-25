@@ -15,6 +15,15 @@
 import { resolveSchema, validateSchema } from "./schema-config.mjs";
 import { LINK_TYPES } from "./links.mjs";
 
+/** Every soft kind this module can emit. Exported so `blaze audit --help` prints what exists
+ *  rather than a hand-kept list, which went stale twice — once for `schema-invalid` and
+ *  `schedule-empty`, and once before that for `terminal-goal-unverified-requirement`. */
+export const SOFT_KINDS = [
+  "empty-components", "empty-labels", "missing-parent",
+  "terminal-goal-unverified-requirement", "schema-invalid",
+  "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
+];
+
 export const HARD_KINDS = new Set([
   "off-taxonomy-component", "off-taxonomy-label", "bad-link-key", "unknown-link-type",
   "dangling-target", "dangling-parent", "invalid-parent-type", "parse-error",
@@ -90,19 +99,28 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
   // for one result. Deduplicated within the layer too, which the restructure had dropped: a
   // repeated bad kind produced two byte-identical findings.
   const topResolved = resolveSchema({ config });
-  const topLevel = new Set(validateSchema({ ...topResolved, config }));
+  // Every type that exists ANYWHERE, for the endpoint-kind check only. A top-level `Precedes`
+  // list may legitimately name a type that only one project declares — judging it against the
+  // top layer alone produced a finding its own report contradicted: "not a declared type, so it
+  // stays unschedulable", printed beside a `deadline-unreachable` proving it HAD been scheduled.
+  const endpointTypes = { ...topResolved.types };
+  for (const key of Object.keys(projects)) {
+    Object.assign(endpointTypes, resolveSchema({ config, project: projects[key] ?? null }).types);
+  }
+  const topLevel = new Set(validateSchema({ ...topResolved, config, endpointTypes }));
   for (const e of topLevel) add("-", "schema-invalid", e);
   for (const key of Object.keys(projects)) {
     const project = projects[key] ?? null;
-    const seen = new Set();
     // Judged against the EFFECTIVE link types — the top layer's — not the project-merged ones.
     // A project block never reaches the scheduler, so reporting its endpoint kinds as "stays
     // unschedulable, fix the kind" alongside "does not reach the scheduler" gave the operator
     // two findings that contradict each other, one proposing a repair that cannot work.
     const resolved = { ...resolveSchema({ config, project }), linkTypes: topResolved.linkTypes };
-    for (const e of validateSchema({ ...resolved, config, project })) {
-      if (topLevel.has(e) || seen.has(e)) continue;   // already reported against the top layer
-      seen.add(e);
+    // No per-project dedup Set: `validateSchema` returns entries distinct by construction for
+    // one layer, so the one that used to sit here was unreachable — a mutation removing it
+    // survived the whole suite, which is how it was found.
+    for (const e of validateSchema({ ...resolved, config, project, endpointTypes })) {
+      if (topLevel.has(e)) continue;   // already reported against the top layer
       add(key, "schema-invalid", e);
     }
   }
@@ -205,7 +223,7 @@ export function summarise(findings) {
 // here made the grouper fall through its noun ternary and label it "tickets carrying a stale
 // schedule" — a wrong sentence about a real finding, in the function whose own header says it
 // exists so `blaze audit` and the view layer cannot drift.
-const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty"];
+export const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty"];
 const scmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const projectOf = (id) => String(id ?? "").split("-")[0];
 
