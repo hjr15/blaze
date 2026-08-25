@@ -128,31 +128,56 @@ export function idFromSubject(subject, key) {
 //
 // What survives is the BODY. GitHub's default squash message concatenates the
 // collapsed commits' messages, each subject as a `* ` bullet — verified on this
-// repo's own history, where 104 commits carry bulleted `KEY-n:` body lines and 30
-// ticket ids appear ONLY there.
+// repo's own history, where 22 of 312 commits carry such a bullet under a ticket
+// subject (99 bullet lines), recovering 28 ids no subject on the default branch names.
 //
-// The bullet is required, and that is the whole safety argument. Measured over the
-// same history, unbulleted body lines beginning `KEY-n:` are real and are NOT
-// evidence of delivery — they are plan listings ("BLZ-103: config-schema versioning
-// + migration guard") and ordinary prose that happened to wrap onto a ticket id.
-// Honouring them would have marked sixteen untouched tickets done, which is exactly
-// BLZ-130's failure re-introduced through the other door. Line 1 is the subject and
-// needs no bullet; every later line does.
+// TWO CONDITIONS, AND THE SECOND ONE IS LOAD-BEARING.
+//
+//   1. The marker is `* `, which is what GitHub writes and nothing else here does.
+//   2. The commit's OWN SUBJECT must parse as `KEY-n:` — it must itself be a squashed
+//      ticket PR, which is precisely BLZ-131's premise: per-ticket commits inside a
+//      FEATURE's PR, and a feature PR is titled `KEY-n: …` by house convention.
+//
+// Condition 2 exists because the first cut of this change, which honoured any
+// `[*+-]` bullet under any subject, turned the board's own ledger into a delivery
+// signal. `commit-runner.mjs` writes every batch board commit's body as
+// `- <KEY>-<n>: <board op> [session]`, and the board repo is itself a configured
+// codeRepo for its own project — the hazard INF-735's comment already names. Measured
+// on the live board: 299 ids harvested that had shipped nothing, and `decide()` moved
+// 137 tickets `defined → done` off lines reading `edit labels` and
+// `defined → in-progress`. That is BLZ-130's failure at a hundred times the scale,
+// re-introduced inside the fix for its sibling, and an adversarial review caught it.
+//
+// Narrowing the marker alone was not enough. The board repo also carries squashed PRs
+// of ticket-BODY edits whose subject is `blaze: … board + ticket work (#60)` and whose
+// bullets are real `KEY-n:` subjects describing an edit, not a delivery. Requiring the
+// parent subject to name a ticket drops those too: on the board repo the harvest falls
+// from 299 ids to 2, and both survivors are genuine bundled children of a `KEY-n:`
+// epic PR. On the code repo it recovers 28 ids that no subject on the default branch
+// mentions — the blind spot this ticket is about.
+//
+// What it deliberately does NOT claim: a bullet is not proof of work. A squashed
+// ticket PR whose body happens to list a ticket it did not implement will be believed.
+// The bullet plus the parent-subject gate makes that a narrow case rather than the
+// common one, and the safe direction is preserved everywhere else — the commit must
+// still be reachable from the default branch, so an open PR strands nothing.
 //
 // This reads git and nothing else. A PR BODY listing its bundled tickets was the
 // other candidate and was rejected: it widens trust to the forge for a claim that
 // moves a ticket to DONE, and a PR body naming a ticket is weaker evidence than a
 // commit that is demonstrably on the default branch. The cost is a configuration
 // dependency, recorded in docs/guide/how-it-works.md — a repo whose squash message is
-// set to
-// "Pull request title" alone destroys the bullets too, and its bundled children go
-// back to needing a manual move.
+// set to "Pull request title" alone destroys the bullets too, and its bundled children
+// go back to needing a manual move.
 export function idsFromCommitMessage(message, key) {
   const lines = String(message || "").split("\n");
-  const ids = [];
   const subject = idFromSubject(lines[0], key);
-  if (subject) ids.push(subject);
-  const bullet = new RegExp("^\\s*[*+-]\\s+" + key + "-(\\d+):", "i");
+  // No ticket in the subject means this is not a squashed ticket PR, so its body is
+  // not a bundle manifest — whatever it happens to list. Returning early is the whole
+  // of condition 2.
+  if (!subject) return [];
+  const ids = [subject];
+  const bullet = new RegExp("^\\s*\\*\\s+" + key + "-(\\d+):", "i");
   for (let i = 1; i < lines.length; i += 1) {
     const m = bullet.exec(lines[i]);
     if (m) ids.push(`${key}-${m[1]}`);

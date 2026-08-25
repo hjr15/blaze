@@ -12,7 +12,7 @@
 // Both are guarded here against the real recorded evidence: hjr15/service-platform
 // epic INF-645, its merged docs-only PR #80, its open PR #81, and the six children
 // stranded by the squash of #81.
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -243,4 +243,92 @@ test("BLZ-131: a child whose bullet is only on an unmerged branch does NOT move"
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// =============================================================================
+// Round 2 — defects an adversarial review found before merge
+// =============================================================================
+
+// FINDING 1, the critical one. `scripts/commit-runner.mjs` writes every batch board
+// commit's body as `- <message> [<session>]`, and those messages are `KEY-n: <board
+// op>`. The board repo is itself a configured codeRepo for its own project, which is
+// the hazard INF-735's comment already names. So a first cut that honoured any
+// `[*+-]` bullet turned the board's OWN LEDGER into a delivery signal: measured on the
+// live board, 299 ids were harvested where the shipped set should have gained none,
+// and `decide()` moved 137 INF tickets `defined → done` off `edit labels` and
+// `defined → in-progress` lines. BLZ-130's failure, at a hundred times the scale,
+// re-introduced by the fix for its sibling.
+describe("BLZ-131: a bullet is only delivery inside a squashed TICKET PR", () => {
+  test("a board-ledger commit's `- KEY-n:` lines are not delivery", () => {
+    const msg = [
+      "blaze: 2026-08-08 board update (3 moves, 1 edit)",
+      "",
+      "- INF-15: edit labels [inf-truth-20260802]",
+      "- INF-350: defined → in-progress [inf-truth-20260802]",
+      "- INF-909: in-progress → in-review [inf907-epic-closeout]",
+    ].join("\n");
+    assert.deepEqual(idsFromCommitMessage(msg, "INF"), [],
+      "moving a ticket on the board is not shipping it");
+  });
+
+  test("`* KEY-n:` bullets under a non-ticket subject are not delivery either", () => {
+    // Real shape from the board repo: a squashed PR of board CONTENT edits. The
+    // bullets are genuine `KEY-n:` commit subjects; what they describe is editing a
+    // ticket's body, not delivering it.
+    const msg = [
+      "blaze: 2026-08-08 board + ticket work (#60)",
+      "",
+      "* INF-805: record that the stuck Application blocks ALL new infra deploys",
+    ].join("\n");
+    assert.deepEqual(idsFromCommitMessage(msg, "INF"), [],
+      "a squash whose own subject names no ticket is not a bundled feature PR");
+  });
+
+  test("a `- KEY-n:` ledger line inside a squashed TICKET PR is still not delivery", () => {
+    // ISOLATES THE MARKER, and it exists because a mutation sweep caught the gap: with
+    // only the non-ticket-subject case covered, widening the marker back to `[*+-]`
+    // killed nothing, because the subject gate was already rejecting that fixture. The
+    // marker earns its place on exactly this shape — the board's ledger lines swept into
+    // a PR that IS titled for a ticket, which on the board repo is the difference
+    // between 41 false ids and 2 true ones.
+    const msg = [
+      "INF-693: deploy-path observability epic (board) (#24)",
+      "",
+      "* INF-701: file the two follow-ups from INF-693's final review",
+      "- INF-15: edit labels [inf-truth-20260802]",
+      "- INF-350: defined → in-progress [inf-truth-20260802]",
+    ].join("\n");
+    assert.deepEqual(idsFromCommitMessage(msg, "INF"), ["INF-693", "INF-701"],
+      "the starred child ships; the dashed ledger lines do not");
+  });
+
+  test("...but bullets under a squashed TICKET PR are exactly what BLZ-131 is for", () => {
+    // The real INF-693 shape from the board repo: an epic PR titled `KEY-n: …`
+    // carrying a child's commit. This one MUST still be honoured.
+    const msg = [
+      "INF-693: deploy-path observability epic (board) (#24)",
+      "",
+      "* INF-701: file the two follow-ups from INF-693's final review",
+    ].join("\n");
+    assert.deepEqual(idsFromCommitMessage(msg, "INF"), ["INF-693", "INF-701"]);
+  });
+
+  test("regression, end-to-end: a board ledger on the default branch ships nothing", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz131-ledger-"));
+    const codeRepo = join(tmp, "board");
+    mkdirSync(codeRepo, { recursive: true });
+    gitInit(codeRepo);
+    execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m",
+      "blaze: 2026-08-08 board update (2 moves)\n\n"
+      + "- INF-15: edit labels [s1]\n- INF-16: defined → in-progress [s1]"]);
+    const root = board(tmp, codeRepo, [["INF-15", "task", "defined"], ["INF-16", "task", "defined"]]);
+    try {
+      await reconcile({ root, dryRun: false });
+      for (const id of ["INF-15", "INF-16"]) {
+        assert.ok(existsSync(join(root, "projects", "INF", "defined", `${id}-t.md`)),
+          `${id} was only EDITED on the board — it must not be reported as shipped`);
+        assert.ok(!existsSync(join(root, "projects", "INF", "done", `${id}-t.md`)));
+      }
+    } finally { rmSync(tmp, { recursive: true, force: true }); }
+  });
 });
