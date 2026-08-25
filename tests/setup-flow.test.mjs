@@ -14,12 +14,14 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, statSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { connect } from "node:net";
+import { execFileSync, spawnSync } from "node:child_process";
 import { startServer, CSRF } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { loadIdentity } from "../scripts/model/identity-db.mjs";
 import {
   setupTokenPath, issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches,
+  ensureSetupTokenIgnored,
 } from "../scripts/model/setup-token.mjs";
 
 function board() {
@@ -336,6 +338,158 @@ describe("BLZ-358: the path is surfaced, the value never is", () => {
       const body = await (await postSetup(base, { token: "blz_setup_wrong", email: "a@b.c" })).text();
       assert.equal(body.includes(token), false, "an error message must not leak the real token");
       assert.equal(body.includes("blz_setup_wrong"), false, "nor reflect what was presented");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// Round 2 — what an adversarial review broke
+// =============================================================================
+
+describe("BLZ-358: one unauthenticated request must not be able to kill the board", () => {
+  test("a token that cannot be stringified is refused, not fatal", () => {
+    // `String(presented ?? "")` throws on an object with a poisoned toString, and the
+    // setup branch was the ONE place in serve.mjs without a try — the file states the
+    // rule against itself three times. A pre-auth 401-able request took the process down
+    // for every connected session.
+    for (const poison of [{ toString: null }, { valueOf: 1, toString: 1 }, Object.create(null)]) {
+      assert.doesNotThrow(() => setupTokenMatches(poison, "blz_setup_aaa"));
+      assert.equal(setupTokenMatches(poison, "blz_setup_aaa"), false);
+    }
+  });
+
+  test("a non-string token is never a match, whatever it is", () => {
+    for (const v of [null, undefined, 0, 1, true, false, [], {}, ["blz_setup_aaa"]]) {
+      assert.equal(setupTokenMatches(v, "blz_setup_aaa"), false);
+    }
+  });
+
+  test("a prefix and a superstring are both refused", () => {
+    assert.equal(setupTokenMatches("blz_setup_aa", "blz_setup_aaa"), false);
+    assert.equal(setupTokenMatches("blz_setup_aaajunk", "blz_setup_aaa"), false);
+  });
+
+  test("end-to-end: the poisoned token gets a refusal and the server survives", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await fetch(`${base}/setup`, {
+        method: "POST", headers: { "content-type": "application/json" },
+        body: JSON.stringify({ token: { toString: null }, email: "a@b.c" }),
+      });
+      assert.ok(r.status === 400 || r.status === 401, `expected a refusal, got ${r.status}`);
+      // The proof is the NEXT request: a dead process cannot answer it.
+      assert.equal((await fetch(`${base}/setup`)).status, 200, "the server must still be alive");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a request line that is not a parseable URL is refused, not fatal", async () => {
+    // `new URL("//", "http://localhost")` throws. The line predates this ticket, but on
+    // origin/main a board in this configuration refused to start at all — serving setup
+    // is what makes it reachable pre-auth on a public interface, so it is this ticket's
+    // problem now.
+    const { root, projects } = board();
+    const { server } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    const port = server.address().port;
+    const raw = (line) => new Promise((res) => {
+      const sock = connect(port, "127.0.0.1", () => sock.write(`GET ${line} HTTP/1.1\r\nHost: x\r\n\r\n`));
+      let buf = ""; sock.on("data", (d) => { buf += d; });
+      sock.on("close", () => res(buf)); sock.on("error", () => res(buf));
+      setTimeout(() => sock.destroy(), 2000);
+    });
+    try {
+      await raw("//");
+      const alive = await fetch(`http://127.0.0.1:${port}/setup`);
+      assert.equal(alive.status, 200, "a malformed request line must not take the server down");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-358: the token value reaches no output channel at all", () => {
+  test("nothing written to stdout at startup contains it", async () => {
+    // The design rejects Jira's printed token BECAUSE `docker logs` ships it off-box, so
+    // "the value is never logged" is the headline invariant — and nothing tested the
+    // channel it is about. A mutant that logged the value survived the whole suite.
+    const { root, projects } = board();
+    const real = console.log;
+    let out = "";
+    console.log = (...a) => { out += a.join(" ") + "\n"; };
+    let server;
+    try {
+      server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+      await new Promise((res) => server.once("listening", res));
+    } finally { console.log = real; }
+    try {
+      const token = readSetupToken(root);
+      assert.ok(token && token.length > 20);
+      assert.equal(out.includes(token), false, "the token value must never be logged");
+      assert.match(out, /\.blaze\/setup-token/, "but the path must be");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("the 503 that every other route gets does not carry it", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const token = readSetupToken(root);
+      for (const path of ["/", "/api/live", "/view/board"]) {
+        assert.equal((await (await fetch(`${base}${path}`)).text()).includes(token), false,
+          `${path}'s 503 body leaked the token`);
+      }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-358: the token file is git-ignored even by a narrow .gitignore", () => {
+  test("a .gitignore naming only identity.db still hides the setup token", async () => {
+    // `ensureIdentityIgnored` asks git whether `.blaze/identity.db` is ignored. A board
+    // whose rule is exactly that path answers yes, so `.blaze/` was never added and
+    // `.blaze/setup-token` — a LIVE credential — was committable. The comment claiming
+    // "the rule that hides one hides the other" was simply false.
+    const { root } = board();
+    try {
+      writeFileSync(join(root, ".gitignore"), ".blaze/identity.db\n");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "narrow ignore"]);
+      // THROUGH THE REAL SERVER, not by calling the helper. A mutation sweep found that
+      // deleting the call from startServer killed no test, because this fixture invoked
+      // the helper itself — the guard was proven and its WIRING was not.
+      const projects = join(root, "projects");
+      const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+      await new Promise((res) => server.once("listening", res));
+      server.close();
+      assert.ok(existsSync(setupTokenPath(root)), "the fixture must really have a token");
+      const r = spawnSync("git", ["-C", root, "check-ignore", "--no-index", "-q", ".blaze/setup-token"]);
+      assert.equal(r.status, 0, "the setup token must be ignored, not merely assumed to be");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      const staged = execFileSync("git", ["-C", root, "diff", "--cached", "--name-only"], { encoding: "utf8" });
+      assert.doesNotMatch(staged, /setup-token/, "and `git add -A` must not stage a live credential");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-358: only one setup can be in flight", () => {
+  test("ten concurrent correct-token requests create exactly one admin", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const token = readSetupToken(root);
+      const results = await Promise.all(Array.from({ length: 10 }, (_, i) =>
+        postSetup(base, { token, email: `a${i}@b.c` }).then((r) => r.status)));
+      assert.equal(results.filter((s) => s === 200).length, 1,
+        `exactly one request may succeed, got ${JSON.stringify(results)}`);
+      const id = loadIdentity(root);
+      try { assert.equal(id.state, "healthy"); } finally { id.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a rejected email leaves setup completable", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      assert.equal((await postSetup(base, { token: readSetupToken(root), email: { bad: 1 } })).status, 400);
+      assert.equal((await postSetup(base, { token: readSetupToken(root), email: "a@b.c" })).status, 200,
+        "an in-flight flag must not latch on a rejected attempt");
     } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
   });
 });

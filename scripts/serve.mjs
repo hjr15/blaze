@@ -28,8 +28,8 @@ import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { addUser, ensureIdentityIgnored } from "./model/user-admin.mjs";
-import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath }
-  from "./model/setup-token.mjs";
+import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
+         ensureSetupTokenIgnored } from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
@@ -170,6 +170,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   // on a public interface — the exact hole the refusal closed — so setup mode serves
   // the setup flow and nothing else at all.
   let setupPending = false;
+  // One attempt at a time. `setupPending` is only cleared AFTER `addUser` awaits, so with
+  // an identity store that yields to the event loop two concurrent correct-token requests
+  // could both pass the check and both create an admin. Today's SQLite store happens not
+  // to yield, which closes the window by accident rather than by design — and 'accident'
+  // is not a property a Postgres-backed store would preserve.
+  let setupInFlight = false;
   if (!bind.ok) {
     let issued;
     try {
@@ -187,7 +193,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     setupPending = true;
     // The token file lives beside identity.db, so the rule that hides one hides the
     // other. Reused rather than re-derived — BLZ-348 wrote this for exactly this case.
+    // BOTH, and not one on the assumption that it covers the other: a .gitignore naming
+    // exactly `.blaze/identity.db` satisfies the first check while leaving the token
+    // file committable.
     try { ensureIdentityIgnored(root); } catch { /* not a repo, or not ours to edit */ }
+    try { ensureSetupTokenIgnored(root); } catch { /* same */ }
     // THE PATH, NEVER THE VALUE. A token that reaches a log stream is a token that has
     // to be rotated, and `docker logs` is shipped off-box by any log aggregator.
     console.log(`blaze: no users configured — serving first-run setup at /setup`);
@@ -201,8 +211,14 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   let store = identity?.hasIdentity ? identity.store : null;
 
   return createServer(async (req, res) => {
-    const u = new URL(req.url, "http://localhost");
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
+    // `new URL` THROWS on a request line it cannot parse — `GET // HTTP/1.1` is enough —
+    // and this handler has no wrapping try, so that ended the process for every
+    // connected session. The line predates BLZ-358; serving setup is what made it
+    // reachable pre-auth on a public interface, which makes it this ticket's problem.
+    let u;
+    try { u = new URL(req.url, "http://localhost"); }
+    catch { return send(req, res, 400, "text/plain; charset=utf-8", "bad request\n"); }
 
     // Every /api/* request, classified and decided in ONE place. An unclassified route
     // is a 404 here rather than falling through to whichever handler happens to match
@@ -214,6 +230,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // the gate. It exists ONLY while `setupPending`, so once an identity exists there is
     // no route here to reach: not hidden, absent.
     if (setupPending) {
+      // WRAPPED, because this branch runs BEFORE any credential is checked and the rest
+      // of this file states the rule three times: an uncaught throw in an async handler
+      // ends the process for every connected session rather than refusing one request.
+      // It was the one place here without a try, and one unauthenticated request with a
+      // poisoned `toString` was enough to take the board down.
+      try {
       if (req.method === "GET" && u.pathname === "/setup") {
         return send(req, res, 200, "text/html; charset=utf-8", setupPageHtml(setupTokenPath(root)));
       }
@@ -227,8 +249,10 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           // guess; the other would hand over the credential outright.
           return json(401, { errors: ["invalid setup token"] });
         }
-        const email = String(body?.email ?? "").trim();
+        const email = typeof body?.email === "string" ? body.email.trim() : "";
         if (!email) return json(400, { errors: ["a user needs an email address"] });
+        if (setupInFlight) return json(409, { errors: ["setup is already in progress"] });
+        setupInFlight = true;
         let created;
         try {
           // ADR-0013 section 5: the first admin is a user, not an exception. This is the
@@ -238,6 +262,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         } catch (e) {
           // A failed creation must leave setup COMPLETABLE — the token is not consumed
           // by a mistake the operator can correct and retry.
+          setupInFlight = false;
           return json(400, { errors: [String(e?.message ?? e)] });
         }
         // Close the door in this order: the credential first, then the route.
@@ -254,9 +279,14 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       }
       // Everything else waits. 503 rather than 404: the board is really there, it is
       // simply not safe to serve it yet, and a 404 would suggest the operator had the
-      // wrong address.
+      // wrong address. The body is a fixed string and carries nothing from the request
+      // or from the token.
       return send(req, res, 503, "text/plain; charset=utf-8",
         "blaze: first-run setup required — no users are configured. Open /setup\n");
+      } catch {
+        // Deliberately says nothing about what failed: this is the pre-auth surface.
+        return json(500, { errors: ["setup could not be completed"] });
+      }
     }
 
     let principal = null;

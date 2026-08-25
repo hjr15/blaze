@@ -32,7 +32,8 @@
 // The VALUE is never logged, echoed, or rendered. The PATH is — that is the thing the
 // operator needs, and it discloses nothing.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
 /** Distinct from an API token's `blz_` on purpose: the two are not interchangeable, and
@@ -78,11 +79,42 @@ export function clearSetupToken(dataRoot) {
 /** Constant-time. An absent token on either side is never a match — "no token
  *  presented" and "no token on disk" must not authenticate each other. */
 export function setupTokenMatches(presented, stored) {
-  const a = Buffer.from(String(presented ?? ""), "utf8");
-  const b = Buffer.from(String(stored ?? ""), "utf8");
+  // TYPE-CHECKED BEFORE ANYTHING ELSE, and an adversarial review is why. This used to
+  // call `String(presented ?? "")`, and JSON can carry an object whose stringification
+  // THROWS — `{"token":{"toString":null}}` raises "Cannot convert object to primitive
+  // value". The setup branch is reached before any credential is checked and was the one
+  // place in the request handler without a try, so a single unauthenticated request took
+  // the whole board down for every connected session. A token is a string; anything else
+  // is not a wrong token, it is not a token.
+  if (typeof presented !== "string" || typeof stored !== "string") return false;
+  const a = Buffer.from(presented, "utf8");
+  const b = Buffer.from(stored, "utf8");
   if (a.length === 0 || b.length === 0) return false;
+  // Length first: `timingSafeEqual` THROWS on a length mismatch, so this is a guard, not
+  // an optimisation. A prefix and a superstring are both rejected here.
   if (a.length !== b.length) return false;
   return timingSafeEqual(a, b);
+}
+
+/** Make sure the token file is git-ignored, asking git about the TOKEN rather than
+ *  assuming a rule written for something else covers it.
+ *
+ *  `ensureIdentityIgnored` asks whether `.blaze/identity.db` is ignored, and a board
+ *  whose `.gitignore` says exactly that path answers yes — so `.blaze/` was never added
+ *  and `.blaze/setup-token`, a LIVE credential, was left committable by `git add -A`.
+ *  "The rule that hides one hides the other" was an assumption, and it was wrong. */
+export function ensureSetupTokenIgnored(dataRoot) {
+  const rel = ".blaze/setup-token";
+  const git = (...args) => spawnSync("git", ["-C", dataRoot, ...args], { encoding: "utf8" });
+  const inside = git("rev-parse", "--is-inside-work-tree");
+  if (inside.error) return { state: "unavailable", path: rel };
+  if (inside.status !== 0 || inside.stdout.trim() !== "true") return { state: "not-a-repo", path: rel };
+  if (git("check-ignore", "--no-index", "-q", rel).status === 0) return { state: "already", path: rel };
+  const gitignore = join(dataRoot, ".gitignore");
+  const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
+  appendFileSync(gitignore,
+    `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+  return { state: "added", path: rel };
 }
 
 export { existsSync as _existsSync };
