@@ -92,8 +92,8 @@ are all `id integer PRIMARY KEY CHECK (id = 1)`"*. The ticket says a grep found 
 
 | Table | Declared at |
 |---|---|
-| `blaze_config.board` | `scripts/model/config-schema.mjs:87` |
-| `blaze_config.config_version` | `scripts/model/config-schema.mjs:99` |
+| `blaze_config.board` | `scripts/model/config-schema.mjs:102` |
+| `blaze_config.config_version` | `scripts/model/config-schema.mjs:114` |
 | `projection_meta` | `scripts/model/projection-schema.mjs:28` |
 | `migration_mode` | `scripts/model/write-rules.mjs:69` (sqlite) and `:119` (postgres) — **one table, declared once per dialect** |
 

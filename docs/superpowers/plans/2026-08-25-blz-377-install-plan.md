@@ -48,10 +48,21 @@ only consistent at COMMIT and the transaction is load-bearing, not tidiness.
 **D5 — `view_type` seeds from `VIEW_TYPES`** via a `viewTypeSeedSql(name)` beside the DDL that
 declares the table, so the registry stays the one source.
 
-## Known limitation, recorded rather than papered over
+## Limitations, recorded rather than papered over
 
-The version stamp lives in `blaze_meta`, in the **main** database. If `config.db` is deleted
-while `blaze.db` survives, the attach silently creates an empty file and `blaze_config.view`
-fails with "no such table" instead of a named refusal. Re-running the config DDL on every open
-would mask it — and that is precisely the BLZ-297 anti-pattern this module exists to end, so it
-is not the fix. Rebuilding with `blaze db init --force` is the honest instruction.
+**The deleted-`config.db` case is CLOSED.** This section originally said the attach would
+silently create an empty file and `blaze_config.view` would fail with "no such table". That was
+true of the first implementation and adversarial review showed it was worse than described —
+`blaze db status` reported a healthy v4 over it. A read now refuses by name when the namespace is
+missing, and refuses again when it is present but empty, which `existsSync` alone cannot tell
+apart. Only a create may make one.
+
+**What remains: the seeds are idempotent, so the database out-ranks the registry.**
+`INSERT OR IGNORE` / `ON CONFLICT DO NOTHING` are what make a second create survive — the fix for
+the defect that wedged CI — but they also mean a `config.db` that survives a rebuild keeps its OLD
+rows if a code registry has since changed. `blaze db init` removes both files on every create, so
+the supported path never hits this; it is reachable only by calling `openSqliteRead(…, { create:
+true })` directly over a surviving namespace, which is a library and test path. Making the seed
+authoritative needs `ON CONFLICT (pk) DO UPDATE`, and that needs a per-table primary-key map this
+ticket does not build. Recorded as a known limit with a named remedy — `blaze db init --force` —
+rather than left for someone to discover.

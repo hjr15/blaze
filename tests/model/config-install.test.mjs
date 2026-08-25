@@ -11,7 +11,9 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
-import { mkdtempSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, rmSync, existsSync, mkdirSync, writeFileSync, statSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mjs";
@@ -208,6 +210,36 @@ describe("BLZ-377: Postgres installs the same namespace through the same create"
       const v = (await c.query("SELECT value FROM blaze_meta WHERE key='schema_version'")).rows[0].value;
       assert.equal(Number(v), 4);
 
+      // THE REGRESSION TEST FOR THE DEFECT THAT WEDGED CI (BLZ-377).
+      //
+      // `blaze_config` is a Postgres SCHEMA, so it outlives the `public` tables the create
+      // guard inspects. A second create therefore re-ran the whole config DDL against a
+      // namespace that already existed, and the one statement without `IF NOT EXISTS` — the
+      // circular FK, because Postgres has no such syntax — failed with
+      // `constraint "workflow_reopen_to_fk" for relation "workflow" already exists`. The seeds
+      // then collided on their primary keys.
+      //
+      // Nothing asserted this. It surfaced only as an emergent collision between two unrelated
+      // test FILES on a cold server, and it surfaced as a HANG rather than a failure, because
+      // the conformance suite leaks its client when the open throws. On a warm server it does
+      // not reproduce at all, which is why every local run was green while CI sat wedged for
+      // 59 minutes. This is the assertion that should have existed.
+      await c.query("DROP TABLE IF EXISTS ticket CASCADE");
+      await c.query("DROP TABLE IF EXISTS blaze_meta CASCADE");
+      const again = await c.query(
+        "SELECT count(*)::int AS n FROM information_schema.tables WHERE table_schema = 'blaze_config'");
+      assert.ok(again.rows[0].n > 0, "the namespace should have survived dropping the data tables");
+      await assert.doesNotReject(
+        () => createDbSchema(exec, { dialect: "postgres" }),
+        "a second create over a surviving blaze_config threw — the install is not idempotent, "
+        + "which is what hung the CI gate");
+      const dup = await c.query(
+        "SELECT count(*)::int AS n FROM pg_constraint WHERE conname = 'workflow_reopen_to_fk'");
+      assert.equal(dup.rows[0].n, 1, "the circular FK was duplicated");
+      const reseeded = await c.query("SELECT count(*)::int AS n FROM blaze_config.view_type");
+      assert.equal(reseeded.rows[0].n, VIEW_TYPES.length,
+        "the re-run duplicated or dropped view_type rows");
+
       // Both partial indexes: the whole point of BLZ-371's design, and Postgres-specific
       // syntax for them was one of the two traps this ticket had to avoid.
       const idx = (await c.query(
@@ -295,3 +327,66 @@ describe("BLZ-377: a read never CREATES the config namespace", () => {
 
 /** `import` is static; these two tests need the modules by value inside the assertion. */
 function require0(rel) { return MODULES[rel]; }
+
+describe("BLZ-377: init rebuilds both files, and never wedges trying", () => {
+  const board = () => {
+    const root = mkdtempSync(join(tmpdir(), "blz377-init-"));
+    mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "ENG", projects: ["ENG"] }));
+    writeFileSync(join(root, "projects", "ENG", "defined", "ENG-1-x.md"),
+      ["---", "id: ENG-1", 'title: "x"', "type: task", "project: ENG", "status: defined",
+       "estimate: 480", "---", ""].join("\n"));
+    return root;
+  };
+  const init = (root, ...args) => spawnSync(process.execPath,
+    [fileURLToPath(new URL("../../scripts/db-runner.mjs", import.meta.url)), "init", ...args],
+    { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+
+  test("a stale config.db is REBUILT, not reused, even without --force", () => {
+    // A config.db from an older engine would otherwise be silently reused: its tables are all
+    // CREATE TABLE IF NOT EXISTS, so a column added since would never appear, and the stamp
+    // that would catch it lives in blaze_meta — in the other file, just recreated. That is the
+    // silent-stale-schema defect BLZ-297 exists to prevent.
+    const root = board();
+    try {
+      assert.equal(init(root).status, 0, "first init failed");
+      const cfg = join(root, ".blaze", "config.db");
+      writeFileSync(cfg, "not a database at all");
+      rmSync(join(root, ".blaze", "blaze.db"), { force: true });
+      const r = init(root);
+      assert.equal(r.status, 0, `init did not recover from a stale config.db:\n${r.stderr}`);
+      assert.ok(statSync(cfg).size > 1000, "config.db was reused rather than rebuilt");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a config.db that is a DIRECTORY does not throw an uncaught error", () => {
+    // `rmSync(..., { force: true })` is not recursive, so this threw EISDIR — AFTER blaze.db had
+    // been deleted, leaving no shadow, no message, and the same throw on every retry.
+    const root = board();
+    try {
+      assert.equal(init(root).status, 0);
+      rmSync(join(root, ".blaze", "config.db"), { force: true });
+      mkdirSync(join(root, ".blaze", "config.db", "sub"), { recursive: true });
+      const r = init(root, "--force");
+      assert.doesNotMatch(r.stderr ?? "", /SystemError|EISDIR|^\s+at /m,
+        `an uncaught error escaped:\n${r.stderr}`);
+      assert.ok(r.status === 0 || /cannot remove/.test(r.stderr),
+        `neither a clean rebuild nor a named refusal:\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-377: a present-but-EMPTY namespace is refused like a missing one", () => {
+  test("a 0-byte config.db does not read as a healthy board", () => {
+    // existsSync cannot tell a truncated namespace from a real one, so `blaze db status`
+    // reported a healthy v4 while every blaze_config.view query failed with "no such table".
+    const dir = mkdtempSync(join(tmpdir(), "blz377-zero-"));
+    try {
+      const main = join(dir, "blaze.db");
+      openSqliteRead(main, { create: true }).close?.();
+      writeFileSync(join(dir, "config.db"), "");
+      assert.throws(() => openSqliteRead(main, { create: false }), /namespace .* is empty|no Blaze tables/,
+        "a truncated config.db opened as if the board were healthy");
+    } finally { rmSync(dir, { recursive: true, force: true }); }
+  });
+});

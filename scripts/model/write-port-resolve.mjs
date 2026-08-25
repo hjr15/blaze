@@ -67,7 +67,12 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   // stale shadow still names itself, and only a database that is otherwise fine is required to
   // have its namespace already. Attaching a missing file would CREATE it and let a
   // half-deleted pair look healthy.
-  if (cfgPath !== ":memory:" && state.state !== "empty" && !existsSync(cfgPath)) {
+  const makingOne = create && state.state === "empty";
+  // ATTACH CREATES the file, so it is only reached when a namespace is being made or one is
+  // already there. The `empty` branch skipped this check and attached anyway, so a read open
+  // over an empty shadow WROTE a 0-byte config.db — the very disguise this guard exists to
+  // stop, on the branch `blaze db status` actually uses.
+  if (cfgPath !== ":memory:" && !makingOne && !existsSync(cfgPath)) {
     db.close();
     throw new Error(
       `blaze: the config namespace is missing at ${cfgPath}, but the shadow database beside it `
@@ -75,7 +80,8 @@ export async function openShadow(dataRoot, { create = false } = {}) {
       + "'blaze db init --force'.");
   }
   db.exec(sqliteAttachConfig(cfgPath));
-  if (create && state.state === "empty") createDbSchemaSync(exec);
+  if (makingOne) createDbSchemaSync(exec);
+  else assertConfigNamespace(db, cfgPath);
   return { db, exec, path };
 }
 
@@ -159,4 +165,23 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
     move(t, ctx) { recordSoakOp(dataRoot); return port.move(t, ctx); },
   };
   return { port: counted, mode, close };
+}
+
+/**
+ * A namespace that is present but EMPTY is the same failure as a missing one, and `existsSync`
+ * cannot tell them apart (BLZ-377).
+ *
+ * A 0-byte `config.db` — left by an interrupted init, or by an older engine's read open before
+ * the guard above existed — attaches happily, so `blaze db status` reported a healthy v4 while
+ * every `blaze_config.view` query failed with "no such table". The stamp cannot catch it: it
+ * lives in `blaze_meta`, in the other file.
+ */
+export function assertConfigNamespace(db, cfgPath) {
+  const rows = db.prepare(
+    "SELECT name FROM blaze_config.sqlite_master WHERE type = 'table' AND name = 'view_type'").all();
+  if (rows.length) return;
+  db.close();
+  throw new Error(
+    `blaze: the config namespace at ${cfgPath} is empty — it holds no Blaze tables. It is `
+    + "derived, so rebuild rather than repair it: run 'blaze db init --force'.");
 }

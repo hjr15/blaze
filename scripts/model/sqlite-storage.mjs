@@ -17,6 +17,7 @@ import { existsSync } from "node:fs";
 import { SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
+import { assertConfigNamespace } from "./write-port-resolve.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
 // BLZ-391. This projected 15 of a ticket's 28 frontmatter keys: `loadCorpus` WROTE the other
@@ -99,14 +100,16 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   // "no such table". The stamp cannot catch that — it lives in `blaze_meta`, in the other file.
   // So a database that IS current must already have its namespace; only a create may make one.
   const cfgPath = configDbPathFor(path);
-  if (cfgPath !== ":memory:" && state.state !== "empty" && !existsSync(cfgPath)) {
+  const makingOne = state.state === "empty";   // reached only when `create` is true
+  if (cfgPath !== ":memory:" && !makingOne && !existsSync(cfgPath)) {
     db.close();
     throw new Error(
       `blaze: the config namespace is missing at ${cfgPath}, but the database beside it exists. `
       + "The namespace is derived, so rebuild rather than repair it: run 'blaze db init --force'.");
   }
   db.exec(sqliteAttachConfig(cfgPath));
-  if (state.state === "empty") createDbSchemaSync(exec);
+  if (makingOne) createDbSchemaSync(exec);
+  else assertConfigNamespace(db, cfgPath);   // present-but-empty is the same failure as missing
 
   const linksFor = db.prepare(
     "SELECT link_type, target_id FROM ticket_link WHERE src_id = ? ORDER BY link_type, target_id");

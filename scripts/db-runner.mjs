@@ -39,8 +39,23 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
   // recreated at the current version. That is precisely the silent-stale-schema defect BLZ-297
   // exists to prevent, and the namespace is derived, so rebuilding costs nothing.
   const cfgPath = configDbPath(dataRoot);
-  if (force && existsSync(path)) rmSync(path, { force: true });
-  if (existsSync(cfgPath)) rmSync(cfgPath, { force: true });
+  // BOTH removals happen BEFORE either is attempted destructively, and each is a named refusal
+  // rather than an escaping exception. `rmSync(..., { force: true })` is NOT recursive, so a
+  // `config.db` that is a DIRECTORY threw an uncaught EISDIR — after `blaze.db` had already
+  // been deleted, leaving no shadow, no message, and the same throw on every retry. A
+  // read-only `.blaze` did the same with EACCES. Both printed a caught message before this
+  // ticket touched them; `runDb`'s try/catch sits further out than this code runs.
+  for (const [label, target] of [["shadow database", force ? path : null], ["config namespace", cfgPath]]) {
+    if (!target || !existsSync(target)) continue;
+    try { rmSync(target, { recursive: true, force: true }); }
+    catch (e) {
+      err(`blaze db init: cannot remove the ${label} at ${target}.\n`);
+      err(`  ${e.message}\n`);
+      err("Remove it by hand and run 'blaze db init' again — both files are derived, so");
+      err("deleting them loses nothing the corpus does not already hold.");
+      return 1;
+    }
+  }
 
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.

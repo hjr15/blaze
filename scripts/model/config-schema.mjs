@@ -315,6 +315,11 @@ export function configSeedSql(name, seed = configSeed()) {
       const cols = Object.keys(row);
       const ph = cols.map((_, i) => (pg ? `$${i + 1}` : "?"));
       // Re-runnable, for the same reason the DDL is: `blaze_config` outlives the data tables,
+      // KNOWN LIMIT, stated where someone would hit it: this makes the DATABASE out-rank the
+      // registry. A namespace that survives a rebuild keeps its old rows if a code registry has
+      // since changed. `blaze db init` removes both files on every create so the supported path
+      // never reaches it; making the seed authoritative needs `ON CONFLICT (pk) DO UPDATE` and a
+      // per-table primary-key map. See docs/superpowers/plans/2026-08-25-blz-377-install-plan.md.
       // so a create against a database that already carries it re-applies this seed. Without
       // the guard the second run dies on a primary-key collision. `write-rules.mjs` next door
       // already seeds `migration_mode` exactly this way in both dialects.
