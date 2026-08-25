@@ -77,6 +77,13 @@ test("no module outside the write seam writes or renames a ticket file", () => {
     // config, never a ticket — and it runs BEFORE a board exists, so there is no
     // storage driver to route through. Listed for the same reason config.mjs is.
     "init-runner.mjs",
+    // BLZ-358. The first-run setup token is a CREDENTIAL, not a ticket: one file under
+    // .blaze/, written at mode 0600 and deleted the moment setup completes. Routing it
+    // through the storage driver would be wrong on its own terms — the driver exists to
+    // put TICKETS where the board keeps tickets, and this must land on local disk at a
+    // known path even when the board's storage is Postgres, because the operator reads
+    // it with `cat` before any identity exists.
+    "model/setup-token.mjs",
   ]);
   const offenders = [];
   for (const file of mjsFiles(SCRIPTS)) {

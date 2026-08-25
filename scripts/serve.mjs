@@ -27,6 +27,9 @@ import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
+import { addUser, ensureIdentityIgnored } from "./model/user-admin.mjs";
+import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath }
+  from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
@@ -79,6 +82,54 @@ function send(req, res, code, type, body) {
   res.end(buf);
 }
 
+// ---- first-run setup page (BLZ-358) -----------------------------------------
+// Deliberately self-contained and ugly: it is shown once, before any identity
+// exists, and it must not depend on the board renderer — which is precisely the
+// thing that is not safe to serve yet.
+//
+// It renders the token's PATH and never its VALUE. A page that printed the token
+// would defeat the file it is meant to be read from: the whole point of writing it
+// to disk is that reaching it requires filesystem access, and anything rendered
+// over HTTP is available to whoever reached the port.
+function setupPageHtml(tokenPath) {
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  return `<!doctype html><meta charset="utf-8"><title>blaze — first-run setup</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
+label{display:block;margin:1rem 0 .25rem;font-weight:600}input{width:100%;padding:.5rem;font:inherit}
+code{background:#eee;padding:.15rem .35rem}button{margin-top:1.5rem;padding:.6rem 1.2rem;font:inherit}
+#out{margin-top:1.5rem;white-space:pre-wrap}</style>
+<h1>Set up blaze</h1>
+<p>This board has no users yet, so nothing is being served until you create the first
+administrator.</p>
+<p>Read the one-time setup token from this file on the machine hosting the board — it is
+not shown here, and it is not in any log:</p>
+<p><code>${esc(tokenPath)}</code></p>
+<form id="f">
+  <label for="token">Setup token</label>
+  <input id="token" name="token" autocomplete="off" required>
+  <label for="email">Your email address</label>
+  <input id="email" name="email" type="email" required>
+  <label for="displayName">Display name (optional)</label>
+  <input id="displayName" name="displayName" autocomplete="off">
+  <button type="submit">Create administrator</button>
+</form>
+<div id="out"></div>
+<script>
+document.getElementById("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = { token: token.value, email: email.value, displayName: displayName.value || null };
+  const r = await fetch("/setup", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  out.textContent = r.ok
+    ? "Administrator created.\n\nYour API token is shown ONCE and is not recoverable:\n\n"
+      + j.token + "\n\nStore it now, then reload this page."
+    : "Setup failed: " + ((j.errors || ["unknown error"]).join(", "));
+});
+</script>`;
+}
+
 // ---- server factory ---------------------------------------------------------
 
 // PORT=0 is a REQUEST, not an absence: it means "bind any free port", which is how tests get
@@ -106,10 +157,48 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   // 0.0.0.0, killed the container with the false message "no users configured".
   if (identity?.state === "broken") throw new Error(identity.error);
   const bind = checkBindSafety({ host, hasIdentity: Boolean(identity?.hasIdentity) });
-  if (!bind.ok) throw new Error(bind.error);
+  // BLZ-358: the refusal is REPLACED here, not removed. `checkBindSafety` is unchanged
+  // and still returns exactly the refusal it always did — what changes is that
+  // serve.mjs now has somewhere better to go with it. The supervisor still throws on
+  // the same verdict (it is loopback-by-construction, so the setup flow must not be
+  // reachable through that second server), which is why the decision lives at this
+  // call site rather than inside the check.
+  //
+  // Refusing was right GIVEN NO ALTERNATIVE. A container has no TTY, so
+  // `scripts/init.mjs`'s wizard cannot reach it, and HTTP is the only channel the
+  // deployment has. What it must NOT become is a way to serve the board unauthenticated
+  // on a public interface — the exact hole the refusal closed — so setup mode serves
+  // the setup flow and nothing else at all.
+  let setupPending = false;
+  if (!bind.ok) {
+    let issued;
+    try {
+      issued = issueSetupToken(root);
+    } catch (e) {
+      // A read-only data mount (`-v <data>:/data:ro`, a supported and encouraged mode)
+      // cannot hold a token, and neither can a board whose .blaze/ is not writable.
+      // There is no setup flow to offer, so the original refusal stands — with the
+      // reason appended, because "refusing to serve" without saying why the alternative
+      // was unavailable sends the operator hunting the wrong problem.
+      throw new Error(`${bind.error}\nA first-run setup flow could not be started either: `
+        + `${String(e?.message ?? e)}\nOn a read-only data mount, create the first user `
+        + `against a writable copy of the board with \`blaze user add\`.\n`);
+    }
+    setupPending = true;
+    // The token file lives beside identity.db, so the rule that hides one hides the
+    // other. Reused rather than re-derived — BLZ-348 wrote this for exactly this case.
+    try { ensureIdentityIgnored(root); } catch { /* not a repo, or not ours to edit */ }
+    // THE PATH, NEVER THE VALUE. A token that reaches a log stream is a token that has
+    // to be rotated, and `docker logs` is shipped off-box by any log aggregator.
+    console.log(`blaze: no users configured — serving first-run setup at /setup`);
+    console.log(`blaze: read the one-time setup token from ${issued.path} (mode 0600)`);
+  }
   // null when no identity is configured — which gate() reads as the loopback case that
   // the check above has just vouched for, and serves without auth exactly as always.
-  const store = identity?.hasIdentity ? identity.store : null;
+  // `let`, because completing setup adopts the identity it just created WITHOUT a
+  // restart: leaving this null after setup would serve the new board with no credential
+  // required, which is the refusal's own hole re-opened by the fix for it.
+  let store = identity?.hasIdentity ? identity.store : null;
 
   return createServer(async (req, res) => {
     const u = new URL(req.url, "http://localhost");
@@ -118,6 +207,58 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // Every /api/* request, classified and decided in ONE place. An unclassified route
     // is a 404 here rather than falling through to whichever handler happens to match
     // later — a route added without a scope must not inherit the last one's.
+    // BLZ-358: first-run setup, decided BEFORE the gate. `gate()` is fail-closed and
+    // 404s any route it does not classify, and a caller completing setup has no
+    // credential to present yet — by definition, since creating one is what it is for.
+    // So this branch carries its own authentication (the token file) and never reaches
+    // the gate. It exists ONLY while `setupPending`, so once an identity exists there is
+    // no route here to reach: not hidden, absent.
+    if (setupPending) {
+      if (req.method === "GET" && u.pathname === "/setup") {
+        return send(req, res, 200, "text/html; charset=utf-8", setupPageHtml(setupTokenPath(root)));
+      }
+      if (req.method === "POST" && u.pathname === "/setup") {
+        let body;
+        try { body = await readJson(req); } catch { return json(400, { errors: ["malformed request"] }); }
+        // The token first, so a caller who cannot authenticate learns nothing about
+        // whether their email would have been acceptable.
+        if (!setupTokenMatches(body?.token, readSetupToken(root))) {
+          // Neither the presented value nor the real one is echoed. One would confirm a
+          // guess; the other would hand over the credential outright.
+          return json(401, { errors: ["invalid setup token"] });
+        }
+        const email = String(body?.email ?? "").trim();
+        if (!email) return json(400, { errors: ["a user needs an email address"] });
+        let created;
+        try {
+          // ADR-0013 section 5: the first admin is a user, not an exception. This is the
+          // same `addUser` that `blaze user add` calls — there is no bootstrap branch.
+          created = await addUser(root, { email, role: "admin",
+                                          displayName: body?.displayName ?? null });
+        } catch (e) {
+          // A failed creation must leave setup COMPLETABLE — the token is not consumed
+          // by a mistake the operator can correct and retry.
+          return json(400, { errors: [String(e?.message ?? e)] });
+        }
+        // Close the door in this order: the credential first, then the route.
+        clearSetupToken(root);
+        setupPending = false;
+        // Adopt the identity just created, so the board this process goes on to serve is
+        // authenticated rather than open. Without this the running server keeps
+        // `store = null` and serves everything to anyone until it is restarted.
+        const adopted = loadIdentity(root);
+        if (adopted?.state === "healthy") store = adopted.store;
+        // The API token is returned ONCE. ADR-0013 stores only its SHA-256, so this is
+        // the only moment it exists; it is not logged, for the same reason.
+        return json(200, { ok: true, user: created.user, token: created.token.token });
+      }
+      // Everything else waits. 503 rather than 404: the board is really there, it is
+      // simply not safe to serve it yet, and a 404 would suggest the operator had the
+      // wrong address.
+      return send(req, res, 503, "text/plain; charset=utf-8",
+        "blaze: first-run setup required — no users are configured. Open /setup\n");
+    }
+
     let principal = null;
     // Board CONTENT is gated too, at `read`. `/` is rendered SERVER-SIDE and carries
     // every ticket, so leaving it open made `viewer` a role that protected nothing: a

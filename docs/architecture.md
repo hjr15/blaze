@@ -140,12 +140,42 @@ both servers, because the page is rendered server-side and carries every ticket.
 | Identities | Bind address | Behaviour |
 |---|---|---|
 | none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary. This is `blaze start`'s only case, since it binds nothing else |
-| none | anything else | **`blaze board` refuses to start**, naming both fixes. `checkBindSafety` is called before `.listen()`, so nothing is ever served. This is the behaviour *until a first-run setup flow exists*, not a permanent design choice |
+| none | anything else | **`blaze board` serves the first-run setup flow, and nothing else** (BLZ-358). Every other route answers `503` — the board is never served unauthenticated on an interface something else can reach, which is what the earlier refusal bought. `blaze start` still refuses, because it binds loopback by construction and has no setup flow of its own |
 | one or more | any | Every `/api/*` and `/control/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
 | **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **Both servers refuse to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
 
+### First-run setup (BLZ-358)
+
+A container has no TTY, so `scripts/init.mjs`'s wizard cannot reach `docker run -p
+4321:4321`, and HTTP is the only channel that deployment has. On a non-loopback bind
+with no identities the server therefore starts and serves a setup flow instead of
+exiting.
+
+**The setup route is protected by a one-time token written to
+`<board>/.blaze/setup-token` at mode `0600`.** The server logs the *path*; the value is
+never logged, rendered, or echoed back — not in the setup page, not in an error. The
+operator reads it off disk and enters it. Completing setup creates the admin through
+`addUser`, the same function `blaze user add` calls (ADR-0013 §5 — the first admin is a
+user, not an exception), deletes the token file, and adopts the new identity in-process,
+so the board it goes on to serve is authenticated rather than open. The route is then
+gone, not hidden: it exists only while setup is pending, so afterwards it `404`s.
+
+**What the token protects against, and what it does not.** It reaches only someone with
+filesystem access — the same privilege that could edit `identity.db` directly — and,
+decisively, it never enters a log stream, which a printed token would (`docker logs` is
+shipped off-box by any aggregator). It is **not** transport security: the token crosses
+the network in the POST body, so on a plain-HTTP LAN bind it is observable in transit,
+and putting the flow behind a TLS-terminating proxy is the operator's job. It does not
+survive a world-readable bind mount or a container running as root. And it does not stop
+a race for an unconfigured board — whoever presents it first becomes the admin; the
+window runs from first start to completed setup, and the mitigation is to finish setup.
+
+On a **read-only data mount** (`-v <data>:/data:ro`, a supported mode) no token can be
+written, so there is no setup flow to offer and the original refusal stands, saying why.
+
 Create the first identity — which turns authentication on — with
-[`blaze user add`](guide/commands.md#user).
+[`blaze user add`](guide/commands.md#user), with `blaze init --admin-email=…`, or through
+the setup flow above. All three go through `addUser`.
 
 **Both servers read the roster once, at boot.** `startServer()` and `createApp()` each
 resolve `loadIdentity()` a single time, so adding the first user to a board that is
