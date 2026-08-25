@@ -247,9 +247,13 @@ undone the migration on merge.
 
 ### 3. The link registry is not schema-driven
 
-`LINK_TYPES` is a fixed `Set` in `model/links.mjs`. The ambient schema
-override exposes `types` and `workflows` only — there is no `links` path. So
-the five link types above cannot be installed, and:
+`LINK_TYPES` is a fixed `Set` in `model/links.mjs`, and the ambient schema
+override has no path to it. So the five link types above cannot be installed for
+use by `blaze link`, and:
+
+(`schema.linkTypes`, added by BLZ-392, is a **different** registry — it layers the
+scheduler's `source_kinds`/`target_kinds` declarations, not the set of link types
+`blaze link` accepts. See `docs/schema-customization.md`.)
 
 - **`blaze link` refuses outright.** `applyLink` returns
   `unknown link type '<X>'` and never touches the ticket. This is a hard

@@ -9,6 +9,101 @@
 // type, because Postgres has arrays and SQLite does not, and the read path must be
 // identical in both.
 import { dialect } from "./sql-dialect.mjs";
+/**
+ * One override entry, normalised — or `null` when it is malformed (BLZ-392).
+ *
+ * The KEY is the identity. The entry also carries a `name`, so identity was expressible twice
+ * and the two could disagree. Adversarial review landed both halves: `{ Foo: { name: "Precedes" } }`
+ * appended a SECOND entry named `Precedes` that `.find` never reached, silently discarding the
+ * override; and `{ Precedes: { name: "Preceeds" } }` replaced the real entry with one nothing
+ * could look up, which zeroed the whole schedule with no signal at all. Taking the name from the
+ * key makes both unrepresentable rather than validated.
+ *
+ * A malformed entry RETURNS NULL and the default is kept. It used to throw, and that was worse
+ * than the bug it fixed: the throw escaped `audit-runner.mjs`'s deliberate config tolerance and
+ * `blaze audit` died with a raw stack trace and NO REPORT — from inside `auditCorpus`, so the
+ * whole hygiene report was lost, not just the schedule. The tolerance was inverted too: a
+ * totally unparseable config still audited, while a valid one with a single bad field was fatal.
+ * `audit-runner.mjs`'s own comment records that exact regression class from an earlier ticket.
+ *
+ * Refusing loudly is still right — it just belongs where the operator can see it. `auditCorpus`
+ * now runs `validateSchema` and reports these as findings, which is also what finally gives that
+ * function a production caller: ADR-0002 warned that leaning on it bought "a well-tested no-op,
+ * green in CI, absent in production", and until now it had none.
+ */
+function normalizeLinkType(name, def) {
+  if (!def || typeof def !== "object" || Array.isArray(def)) return null;
+  for (const side of ["source_kinds", "target_kinds"]) {
+    if (!Array.isArray(def[side])) return null;
+  }
+  // The key wins. A `name` field that disagrees is overwritten rather than honoured.
+  return { ...def, name };
+}
+
+/**
+ * Layer an override onto the declared link types (BLZ-392).
+ *
+ * `types` and `workflows` are keyed objects and merge with a shallow spread; this list is an
+ * ARRAY, so the override is a keyed object too — `{ Precedes: {...} }` — and the result stays
+ * an array. Same layering, same config shape, no third convention.
+ *
+ * Replacement is WHOLESALE at the link-type name, exactly as `mergeWorkflows` replaces a
+ * workflow. Deep-merging `source_kinds` would make "remove a kind" unexpressible.
+ *
+ * Returns a COPY, entries included. `mergeTypes` and `mergeWorkflows` return `{ ...defaults }`
+ * precisely so a caller cannot corrupt the module constant for every later caller. A first fix
+ * copied only the ARRAY and left the entry objects shared, so
+ * `resolveSchema({}).linkTypes.find(...).source_kinds.push(x)` still corrupted the constant
+ * process-wide — the copy has to reach the array a caller would actually reach for.
+ */
+export function mergeLinkTypes(defaults, override) {
+  const copy = (d) => ({ ...d, source_kinds: [...d.source_kinds], target_kinds: [...d.target_kinds] });
+  if (!override || typeof override !== "object" || Array.isArray(override)) return defaults.map(copy);
+  const byName = new Map();
+  for (const [name, def] of Object.entries(override)) {
+    const norm = normalizeLinkType(name, def);
+    if (norm) byName.set(name, norm);   // malformed: keep the default, and let audit report it
+  }
+  const out = defaults.map((d) => (byName.has(d.name) ? byName.get(d.name) : copy(d)));
+  for (const [name, def] of byName) if (!defaults.some((d) => d.name === name)) out.push(def);
+  return out;
+}
+
+/**
+ * The malformed entries in a `schema.linkTypes` block, as human-readable strings (BLZ-392).
+ *
+ * Separate from the merge so the merge can stay total. `validateSchema` reports these; nothing
+ * throws.
+ */
+export function linkTypeOverrideErrors(override) {
+  if (override === undefined || override === null) return [];
+  // The BLOCK itself, not just its entries. `mergeLinkTypes` ignores an array/string/number
+  // block, and this returned [] for exactly those — so the silent drop this function exists to
+  // end survived one level up. Round 2's own test used a non-empty array as "the discriminating
+  // case" for the merge and never checked that it was reported.
+  if (typeof override !== "object" || Array.isArray(override)) {
+    return [`schema.linkTypes must be an object keyed by link-type name, got `
+      + `${Array.isArray(override) ? "an array" : typeof override} — the whole block was IGNORED`];
+  }
+  const errors = [];
+  for (const [name, def] of Object.entries(override)) {
+    if (!def || typeof def !== "object" || Array.isArray(def)) {
+      errors.push(`schema.linkTypes["${name}"] must be an object, got `
+        + `${Array.isArray(def) ? "an array" : def === null ? "null" : typeof def}`
+        + " — the override was IGNORED and the shipped declaration is still in force");
+      continue;
+    }
+    for (const side of ["source_kinds", "target_kinds"]) {
+      if (!Array.isArray(def[side])) {
+        errors.push(`schema.linkTypes["${name}"].${side} must be an array of type names, got `
+          + `${def[side] === undefined ? "nothing" : typeof def[side]} — the override was `
+          + "IGNORED and the shipped declaration is still in force");
+      }
+    }
+  }
+  return errors;
+}
+
 export const DEFAULT_LINK_TYPES = [
   { name: "Implements", inverse_name: "Implemented by", source_kinds: ["feature"],
     target_kinds: ["requirement"], min_card: 0, max_card: null },
@@ -42,9 +137,11 @@ export const DEFAULT_LINK_TYPES = [
   // the critical path, and the bar it draws comes from whatever start/due it carries — the DATE
   // roll-up that should supply them is spec 4's and is NOT BUILT (BLZ-360 §8.3).
   //
-  // The list stays exactly as ADR-0022 declares it, and `scripts/model/schedule.mjs` now takes
-  // its NODE set from this same entry rather than asking `workflowFor` — so the two definitions
-  // that used to differ by `epic` are now one definition. `epic` was retired by BLZ-231 and the
+  // This list is the DEFAULT, not the last word: BLZ-392 made it overridable through
+  // `schema.linkTypes`, so `resolveSchema` layers it the way it layers types and workflows.
+  // `schedule.mjs` and `import-deps.mjs` both take their endpoint kinds from the RESOLVED list —
+  // so the two definitions that used to differ by `epic` are one definition, and it is now the
+  // one the installation actually declares. `epic` was retired by BLZ-231 and the
   // board holds zero of them; schema.mjs leaves it no legal parent, so no new one can be made.
   { name: "Precedes",   inverse_name: "Follows",        source_kinds: ["feature", "story", "task", "bug", "subtask"],
     target_kinds: ["feature", "story", "task", "bug", "subtask"], min_card: 0, max_card: null },

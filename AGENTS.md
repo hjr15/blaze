@@ -41,7 +41,8 @@ A terminal move auto-sets `resolution` (`done` for `achieved`/`done`/`mitigated`
 non-default resolution (`wont-do`, `duplicate`, `cannot-reproduce`) without moving
 the file. These are the engine's **defaults**, defined once in `scripts/model/schema.mjs`
 (`DEFAULT_TYPES`) and `scripts/model/workflows.mjs` (`DEFAULT_WORKFLOWS`). A data
-repo can override or extend them — add or modify types and workflows — via a
+repo can override or extend them — add or modify types, workflows and the
+scheduler's link-type endpoint kinds (`linkTypes`, BLZ-392) — via a
 `schema` block in `blaze.config.json` (all projects); the engine applies this
 **top-level** override at load, so `blaze new`/`move`, validation, and the board
 all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
@@ -52,8 +53,10 @@ transition legality remain board-wide. With no override the table above applies
 unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 `validateSchema` (also in `scripts/model/schema-config.mjs`) is a pure structural
 check — every type's `workflow` must name a declared workflow — returning a list
-of human-readable errors (`[]` when valid); nothing in the engine calls it
-automatically yet.
+of human-readable errors (`[]` when valid). `auditCorpus` calls it and reports its
+output as soft `schema-invalid` findings (BLZ-392) — for years nothing did, which is
+why ADR-0002 warns that relying on it buys "a well-tested no-op: green in CI, absent
+in production".
 
 The model above is what earlier docs called the **`engineering` preset**. Since
 BLZ-231 it is no longer a preset a board opts into — it is what the engine

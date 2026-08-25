@@ -12,8 +12,17 @@
 //
 // That split is blaze-pm ADR-0011's soft gate, and it is load-bearing: a gate that fails on
 // the fill queue is a gate people learn to skip, which costs the hard findings too.
-import { resolveSchema } from "./schema-config.mjs";
+import { resolveSchema, validateSchema } from "./schema-config.mjs";
 import { LINK_TYPES } from "./links.mjs";
+
+/** Every soft kind this module can emit. Exported so `blaze audit --help` prints what exists
+ *  rather than a hand-kept list, which went stale twice — once for `schema-invalid` and
+ *  `schedule-empty`, and once before that for `terminal-goal-unverified-requirement`. */
+export const SOFT_KINDS = [
+  "empty-components", "empty-labels", "missing-parent",
+  "terminal-goal-unverified-requirement", "schema-invalid",
+  "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
+];
 
 export const HARD_KINDS = new Set([
   "off-taxonomy-component", "off-taxonomy-label", "bad-link-key", "unknown-link-type",
@@ -75,6 +84,46 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
     }
     return registryFor.get(key);
   };
+
+  // BLZ-392: `validateSchema`'s FIRST production caller. It has existed since ADR-0002 with
+  // nothing calling it, and ADR-0002 says in as many words that leaning on it buys "a
+  // well-tested no-op: green in CI, absent in production" — which is exactly what happened when
+  // this ticket first named it as the mitigation for a malformed link-type block.
+  //
+  // The top-level layer is judged ONCE — it is the same block for every project, and eleven
+  // copies of one finding is noise that hides the signal. Each project's own layer is judged
+  // separately and deduplicated per PROJECT, not by message: two projects with the same broken
+  // block are two things to fix, and collapsing them to one attributed to whichever sorted
+  // first would have an operator fix one, re-run, and discover the next — up to eleven rounds.
+  // Computed ONCE: this ran twice, identically, back to back — two full merges and validations
+  // for one result. Deduplicated within the layer too, which the restructure had dropped: a
+  // repeated bad kind produced two byte-identical findings.
+  const topResolved = resolveSchema({ config });
+  // Every type that exists ANYWHERE, for the endpoint-kind check only. A top-level `Precedes`
+  // list may legitimately name a type that only one project declares — judging it against the
+  // top layer alone produced a finding its own report contradicted: "not a declared type, so it
+  // stays unschedulable", printed beside a `deadline-unreachable` proving it HAD been scheduled.
+  const endpointTypes = { ...topResolved.types };
+  for (const key of Object.keys(projects)) {
+    Object.assign(endpointTypes, resolveSchema({ config, project: projects[key] ?? null }).types);
+  }
+  const topLevel = new Set(validateSchema({ ...topResolved, config, endpointTypes }));
+  for (const e of topLevel) add("-", "schema-invalid", e);
+  for (const key of Object.keys(projects)) {
+    const project = projects[key] ?? null;
+    // Judged against the EFFECTIVE link types — the top layer's — not the project-merged ones.
+    // A project block never reaches the scheduler, so reporting its endpoint kinds as "stays
+    // unschedulable, fix the kind" alongside "does not reach the scheduler" gave the operator
+    // two findings that contradict each other, one proposing a repair that cannot work.
+    const resolved = { ...resolveSchema({ config, project }), linkTypes: topResolved.linkTypes };
+    // No per-project dedup Set: `validateSchema` returns entries distinct by construction for
+    // one layer, so the one that used to sit here was unreachable — a mutation removing it
+    // survived the whole suite, which is how it was found.
+    for (const e of validateSchema({ ...resolved, config, project, endpointTypes })) {
+      if (topLevel.has(e)) continue;   // already reported against the top layer
+      add(key, "schema-invalid", e);
+    }
+  }
 
   for (const t of tickets) {
     const fm = t?.frontmatter ?? {};
@@ -151,7 +200,7 @@ export function summarise(findings) {
 // `.c8rc.json` excludes `scripts/*-runner.mjs`, so logic put in the runner escapes the
 // coverage gate silently.
 //
-// ALL THREE KINDS ARE SOFT, and none is in HARD_KINDS above. The header of this file sets
+// ALL FOUR KINDS ARE SOFT, and none is in HARD_KINDS above. The header of this file sets
 // the test: HARD means the CORPUS is wrong. A missed deadline means the PLAN is wrong, which
 // is a true and useful statement about a correct corpus, and a `Precedes` cycle is two
 // well-formed links whose combination is unschedulable — both rows are valid, both endpoints
@@ -170,7 +219,11 @@ export function summarise(findings) {
 // Until then a cycle can be an artefact of a half-migrated graph, which is not the
 // operator's error to be gated on. BLZ-353 is the precedent for tracking a flip by its own
 // ticket, and its lesson is why this zero is not being used to justify shipping hard.
-const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale"];
+// `schedule-empty` (BLZ-392) joins them. Adding a kind to `scheduleFindings` without adding it
+// here made the grouper fall through its noun ternary and label it "tickets carrying a stale
+// schedule" — a wrong sentence about a real finding, in the function whose own header says it
+// exists so `blaze audit` and the view layer cannot drift.
+export const SCHEDULE_KINDS = ["deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty"];
 const scmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 const projectOf = (id) => String(id ?? "").split("-")[0];
 
@@ -216,6 +269,33 @@ function bindingChain(schedule, id) {
  */
 export function scheduleFindings(schedule, { persisted = [] } = {}) {
   const findings = [];
+
+  // --- schedule-empty: the endpoint kinds select nothing ----------------------------------
+  // BLZ-392. The override that makes a custom type schedulable can equally make EVERYTHING
+  // unschedulable, and every way of doing it is silent: `source_kinds: []`, a single typo'd
+  // kind (`"taks"`), or a link-type list carrying no `Precedes` at all. The node set empties,
+  // every schedule finding disappears with it, and the report is byte-identical to a healthy
+  // board — a `deadline-unreachable` that was firing yesterday simply stops.
+  //
+  // This is deliberately an OUTCOME check, not a catalogue of the causes. Enumerating the
+  // malformed shapes is what the first attempt did, and it missed the two most plausible
+  // operator typos precisely because they are well-formed. Asking "did anything get scheduled,
+  // and was there anything to schedule?" catches all of them, including the ones nobody has
+  // thought of yet.
+  // Keyed on the NODE count, not on `scheduled.length`. Those differ, and the difference is the
+  // whole point: a board whose every ticket sits in a dependency cycle schedules nothing while
+  // being perfectly schedulable, and `dependency-cycle` already says so. Conflating the two made
+  // this fire there — caught by the existing SCC test, which is exactly what it is for.
+  if ((schedule.node_count ?? 0) === 0 && (schedule.candidates ?? 0) > 0) {
+    findings.push({
+      ticket: "-", kind: "schedule-empty",
+      detail: `nothing is schedulable: ${schedule.candidates} ticket(s) that ought to be `
+        + "schedulable exist, but "
+        + "the declared Precedes endpoint kinds match none of them "
+        + `(source kinds: ${(schedule.source_kinds ?? []).join(", ") || "none"}). `
+        + "Check schema.linkTypes — every schedule finding is suppressed while this holds",
+    });
+  }
 
   // --- deadline-unreachable: derived due_date > deadline ---------------------------------
   // STRICT. A deadline is a DATE, so finishing at 16:00 on the deadline day is on time, and
@@ -330,6 +410,9 @@ export function groupScheduleFindings(findings, { migratedDeadlines = null, epoc
       const past = all && items.every((f) => f.deadline && epochDate && f.deadline < epochDate);
       const noun = kind === "deadline-unreachable" ? "deadlines unreachable"
         : kind === "dependency-cycle" ? "tickets in a Precedes cycle"
+        // Not a per-ticket count: one finding for the whole installation, so "1 tickets ..."
+        // would be wrong twice over.
+        : kind === "schedule-empty" ? "schedule with no schedulable tickets"
         : "tickets carrying a stale schedule";
       return {
         kind, count: items.length, severity: HARD_KINDS.has(kind) ? "hard" : "soft",

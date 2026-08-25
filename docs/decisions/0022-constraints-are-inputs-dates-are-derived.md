@@ -129,8 +129,13 @@ the decision. It also closes BLZ-378, because the two turned out to be the same 
 **This is narrower than "the delivery workflow", by exactly one type: `epic`.** Verified across the
 whole registry: of the **ten** registered types (`goal`, `requirement`, `architecture`, `feature`,
 `risk`, `story`, `task`, `bug`, `subtask`, `epic`), `epic` is the **only** one the two rules
-classify differently. `Precedes`' `source_kinds` and `target_kinds` are also identical, so a node set taken
-from the source set cannot disagree with the target set about what may be an endpoint.
+classify differently. `Precedes`' `source_kinds` and `target_kinds` are identical **as shipped**, so a node set taken
+from the source set does not disagree with the target set about what may be an endpoint. That is a
+property of the declared default, not a structural guarantee: once BLZ-392 made the lists
+overridable, an installation may declare them differently, and a type that is a legal TARGET but
+not a legal SOURCE is then not a node — so an edge into it is dropped as a terminal endpoint. The
+node set is taken from the SOURCE set, deliberately, because a node is something that can begin a
+chain.
 
 Dropping `epic` is the substance of the decision, and the reason is not that it is retired — it is
 that **an epic is a container, and a container's dates are a roll-up OF the finished schedule
@@ -164,15 +169,96 @@ rather than the behavioural one — a rule read from one place cannot drift from
 alternative left `workflowFor` as a second definition of "schedulable" sitting beside the declared
 endpoint kinds.
 
-**One limitation this rule introduces, stated rather than discovered later.** The old filter read
-`workflowFor`, which resolves through the **override-merged** type registry; this one reads
-`DEFAULT_LINK_TYPES`, a constant. `resolveSchema` merges `schema.types` and `schema.workflows` and
-has **no override path for link types at all** — so an installation that adds its own delivery type
-(`spike`, say) gets a type that is not a `Precedes` endpoint and is therefore **not a node**, where
-the old rule would have scheduled it as an isolated one. That is a real behaviour change beyond
-`epic`, invisible on this board because it has no such override. It is coherent — a type that can
-never carry a dependency edge gains nothing from CPM over its own estimate — but it means a
-custom delivery type cannot currently be made schedulable at all. Tracked as **BLZ-392**.
+**The limitation this rule introduced, and how it was closed — BLZ-392.** The old filter read
+`workflowFor`, which resolves through the **override-merged** type registry; this one read
+`DEFAULT_LINK_TYPES`, a constant. `resolveSchema` merged `schema.types` and `schema.workflows` and
+had **no override path for link types at all** — so an installation that added its own delivery
+type (`spike`, say) got a type that is not a `Precedes` endpoint and therefore **not a node**, where
+the old rule would have scheduled it as an isolated one, and it could not be *made* one.
+
+**The decision: endpoint kinds ARE overridable.** `resolveSchema` now layers `schema.linkTypes`
+exactly as it layers `schema.types` and `schema.workflows` — default → top-level → project, later
+wins — and `scheduleModel` and `planDependencyImport` both take the resolved list.
+
+**The per-project layer is accepted by the resolver and does not reach the scheduler, which is a
+statement about the scheduler rather than an oversight.** `resolveSchema` takes a `project` because
+every other registry it layers is per-project; the two production callers pass only `config`,
+because a CPM solve runs over the WHOLE corpus at once and there is no single project whose
+declaration could apply. Per-project endpoint kinds would mean one graph with two incompatible
+node rules. Recorded rather than quietly supported: a `schema.linkTypes` block in a `project.json`
+resolves correctly if something asks for it and changes no schedule today. The alternative, declaring a custom delivery
+type deliberately unschedulable, was rejected: the engine already lets an installation add a
+delivery type, and a capability that cannot be completed is worse than one that was never offered.
+The coherence argument for the old behaviour — *a type that can never carry a dependency edge
+gains nothing from CPM over its own estimate* — is exactly right, and it is the reason the fix is
+an override of **which types may carry an edge** rather than a second definition of "schedulable"
+sitting beside the endpoint kinds. **The invariant BLZ-388 took the constant for is preserved: the
+node set and the edge set still come from one `Precedes` entry, now the resolved one.**
+
+Three consequences, stated because none is free:
+
+- **Replacement is wholesale at the link-type name**, as `mergeWorkflows` already replaces a
+  workflow. Deep-merging `source_kinds` would make *removing* a kind unexpressible. BLZ-361's
+  lesson about wholesale replacement silently dropping what it does not restate is answered by
+  `validateSchema` reporting an endpoint kind that names no declared type — a typo'd kind matches
+  nothing, which would leave the type it was meant to schedule silently unschedulable again.
+- **Both model functions default `linkTypes` to the constant**, so they stay usable standalone.
+  That default is a trap for exactly the production callers, because forgetting to pass the
+  resolved value reinstates the old bug with **no visible symptom**. A source grep was tried for
+  four review rounds and leaked in every one — a bare key match, then a `//` comment, then a
+  `/*` inside a `//` comment that hid 39 lines of real code, and finally `resolveSchema({})`,
+  which reinstates the defect without naming anything a grep could ban. Each fix was a better
+  lexer; the mistake was lexing at all, because the property is about what the runner DOES. It
+  is now asserted by RUNNING both runners against fixture boards
+  (`tests/audit-malformed-linktypes.test.mjs`): a custom type declared schedulable must actually
+  be scheduled, and `import-deps` must actually propose an edge between two of them — each with
+  a control proving the assertion is about the override and not about the board.
+- **A list declaring no `Precedes` schedules nothing**, rather than falling back to the default
+  behind the operator's back. That is the honest reading of the declaration — and it is now
+  unreachable through config, because the merge can only replace or append, never remove.
+
+- **A malformed entry is IGNORED and REPORTED, never a throw.** Adversarial review found that
+  `{}`, `null`, a string, an array, or a mistyped `name` field each collapsed a working board to
+  nothing scheduled, with no error and no finding. The first fix made them throw — and that was
+  worse than the bug: the throw escaped `audit-runner.mjs`'s deliberate config tolerance and
+  `blaze audit` died with a raw stack trace and NO REPORT, from inside `auditCorpus`, so the
+  whole hygiene report was lost. The tolerance was inverted too, since a totally unparseable
+  config still audited while a valid one with one bad field was fatal.
+
+  So the merge keeps the shipped declaration and `blaze audit` reports the block as a soft
+  `schema-invalid` finding. **That required `validateSchema` to actually run: `auditCorpus` is
+  its first production caller since it was written.** ADR-0002 warned that leaning on it bought
+  "a well-tested no-op: green in CI, absent in production", and an earlier draft of this section
+  named it as the mitigation while it still had no caller at all — which was exactly that.
+
+  The `name` field is taken from the KEY, so an entry cannot be filed under one identity and
+  looked up under another.
+
+- **A second finding, `schedule-empty`, catches what no shape check can.** The two likeliest
+  operator mistakes — `source_kinds: []` and one mistyped type name — are WELL-FORMED, so
+  validating the block's shape misses both while they silently zero the board. It is therefore
+  an outcome check: no nodes at all, while tickets that OUGHT to be schedulable exist — a type
+  the engine ships as a `Precedes` source kind, or one the installation added on the delivery
+  workflow. The denominator took three attempts and each failure is instructive. Counting every
+  non-terminal ticket fired on requirements-first and finished boards, because `goal`, `risk`,
+  `requirement`, `architecture` and `epic` are excluded by design. Counting only the shipped
+  kinds went blind to this ticket's OWN case, a board of custom-typed tickets. Counting every
+  undeclared type reopened the first fault, because `terminalOf` swallows `workflowFor`'s throw
+  so a typo'd type, a missing `type:` key and a custom NON-delivery type all qualified. What
+  settled it is a custom type **on the delivery workflow** — read from the type registry the
+  caller PASSES, never from `workflowFor`. That helper resolves through `schema.mjs`'s ambient
+  `TYPES`, built at import time from whatever `blaze.config.json` the working directory resolves
+  to, so consulting it made the solve answer differently in different directories:
+  `blaze audit <dir>` given a path positionally silently lost the finding, an unrelated board's
+  config could conjure one, and a test in this ticket failed when run from a board directory.
+  The registry is threaded in exactly as `linkTypes` is, and `audit-runner.mjs` passes the union
+  of every layer's types, because one CPM graph spans the whole corpus and a project may declare
+  its own delivery type. It keys on the node
+  count rather than the scheduled count, because a board that is one dependency cycle schedules
+  nothing while being perfectly schedulable, and `dependency-cycle` already says so.
+
+Still invisible on this board, which has no `schema.linkTypes` override — so this changes no
+schedule today either.
 
 **The rejected alternative and why it lost.** Adding `epic` to `Precedes`' endpoint kinds would
 have made the two definitions agree the other way, at the cost of amending the declared list above

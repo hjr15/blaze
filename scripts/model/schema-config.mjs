@@ -6,6 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows } from "./workflows.mjs";
+import { DEFAULT_LINK_TYPES, mergeLinkTypes, linkTypeOverrideErrors } from "./link-schema.mjs";
 import { GOAL_SATISFYING_REQUIREMENT } from "./gates.mjs";
 
 export function resolveSchema({ config = null, project = null } = {}) {
@@ -13,15 +14,29 @@ export function resolveSchema({ config = null, project = null } = {}) {
   const projTypes = project?.schema?.types;
   const topWorkflows = config?.schema?.workflows;
   const projWorkflows = project?.schema?.workflows;
+  // BLZ-392: link types layer here too. Before this, `resolveSchema` had no link-type branch
+  // at all, so the solve's node rule — "a declared `Precedes` source kind" — read a module
+  // constant while the old rule it replaced read the override-merged type registry. An
+  // installation could add its own delivery type and had NO WAY to make it schedulable.
   return {
     types: mergeTypes(mergeTypes(DEFAULT_TYPES, topTypes), projTypes),
     workflows: mergeWorkflows(mergeWorkflows(DEFAULT_WORKFLOWS, topWorkflows), projWorkflows),
+    linkTypes: mergeLinkTypes(
+      mergeLinkTypes(DEFAULT_LINK_TYPES, config?.schema?.linkTypes), project?.schema?.linkTypes),
   };
 }
 
 /** Pure structural check: every type's workflow must be a declared workflow.
  *  Returns a list of human-readable errors ([] when valid). */
-export function validateSchema({ types = {}, workflows = {} } = {}) {
+export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
+                                 config = null, project = null, endpointTypes = null } = {}) {
+  // `endpointTypes` exists because the two checks below ask different questions. A type's
+  // workflow is judged against the layer that declares it; an ENDPOINT KIND is judged against
+  // every type that exists anywhere, because the top-level `Precedes` list legitimately names
+  // types some project declares. Judging both against one registry produced a finding that its
+  // own report contradicted: "spike is not a declared type, so it stays unschedulable", printed
+  // beside a `deadline-unreachable` proving a spike had just been scheduled.
+  const known = endpointTypes ?? types;
   const errors = [];
   for (const [name, def] of Object.entries(types)) {
     const wf = def && def.workflow;
@@ -49,6 +64,53 @@ export function validateSchema({ types = {}, workflows = {} } = {}) {
         + "it has not reached one of them, so with these absent no such goal can ever close. "
         + "Add them, or drop the gate deliberately (BLZ-353, ruling R48).");
     }
+  }
+  // BLZ-392. An endpoint kind that names no declared type matches nothing, so the type it was
+  // meant to schedule stays silently unschedulable — which is the failure this ticket exists to
+  // end, reintroduced by a typo. Reported rather than thrown, matching this function's contract.
+  if (Array.isArray(linkTypes)) {
+    for (const lt of linkTypes) {
+      for (const side of ["source_kinds", "target_kinds"]) {
+        const kinds = lt?.[side];
+        // REPORTED, never thrown — this function's contract, and the comment below used to
+        // claim it while `for...of` threw on a number and iterated a STRING PER CHARACTER,
+        // turning `source_kinds: "spike"` into five bogus errors instead of one clear one.
+        // `mergeLinkTypes` refuses these shapes outright now; this stays because
+        // `validateSchema` is a pure function anyone may call with anything.
+        if (kinds !== undefined && !Array.isArray(kinds)) {
+          errors.push(`link type "${lt?.name}" has a ${side} that is not an array `
+            + `(${kinds === null ? "null" : typeof kinds}) — it declares no endpoints, so `
+            + "nothing can be schedulable through it");
+          continue;
+        }
+        for (const kind of kinds ?? []) {
+          if (!Object.prototype.hasOwnProperty.call(known, kind)) {
+            errors.push(`link type "${lt.name}" names "${kind}" in ${side}, which is not a `
+              + "declared type — it can never match, so any type it was meant to cover stays "
+              + "unschedulable");
+          }
+        }
+      }
+    }
+  }
+  // BLZ-392. A malformed `schema.linkTypes` entry is IGNORED by the merge — it cannot throw,
+  // because that took `blaze audit` down with a stack trace from inside `auditCorpus`. Ignoring
+  // it silently would be the other half of the same failure, so the raw blocks are inspected
+  // here and reported. The operator wrote the block; they need to know it did nothing.
+  for (const e of linkTypeOverrideErrors(config?.schema?.linkTypes)) {
+    errors.push(`blaze.config.json: ${e}`);
+  }
+  // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"
+  // with "…does not reach the scheduler at all" for the same block — two findings that
+  // contradict each other, one of them implying a repair that cannot work.
+  // A per-project block is INERT, well-formed or not: a CPM solve runs over the whole corpus at
+  // once, so both production callers resolve with `config` alone and no project layer reaches
+  // the scheduler. Reporting a malformed one as "the override was ignored" implied that fixing
+  // the shape would make it work. It would not, so the block itself is what gets reported.
+  if (project?.schema?.linkTypes !== undefined) {
+    errors.push("project.json: schema.linkTypes does not reach the scheduler — a critical path "
+      + "is solved over the whole installation at once, so endpoint kinds are read from "
+      + "blaze.config.json only. Move it there, or remove it.");
   }
   return errors;
 }

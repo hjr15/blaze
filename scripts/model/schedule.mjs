@@ -28,16 +28,44 @@
 //      history. If Tarjan ran over the full graph the "every SCC member is unscheduled" rule
 //      would overwrite them.
 //   3. Tarjan over what is left.
-import { isTerminal } from "./workflows.mjs";
+import { DEFAULT_WORKFLOWS } from "./workflows.mjs";
+import { DEFAULT_TYPES } from "./schema.mjs";
 import { DEFAULT_LINK_TYPES } from "./link-schema.mjs";
 
 export const PRECEDES = "Precedes";
+
+/** The endpoint kinds as SHIPPED — the denominator for "should anything have been schedulable?",
+ *  which must not move when an installation narrows its own declaration. */
+/** The types the ENGINE declares. Anything outside this set was added by the installation.
+ *  Already transitively loaded — `isTerminal` reaches `schema.mjs` through `workflows.mjs` —
+ *  so this adds no coupling the model did not already have. */
+const DECLARED_TYPES = new Set(Object.keys(DEFAULT_TYPES));
+
+const SHIPPED_SOURCE_KINDS = new Set(
+  DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES)?.source_kinds ?? []);
 const DAY_MS = 24 * 60 * 60 * 1000;
 const cmp = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
 
-const PRECEDES_TYPE = DEFAULT_LINK_TYPES.find((l) => l.name === PRECEDES);
-const SOURCE_KINDS = new Set(PRECEDES_TYPE.source_kinds);
-const TARGET_KINDS = new Set(PRECEDES_TYPE.target_kinds);
+/**
+ * The declared `Precedes` endpoint kinds, from ONE link-type list (BLZ-392).
+ *
+ * Was a pair of module constants read straight from `DEFAULT_LINK_TYPES`. That made the node
+ * rule unoverridable while the type registry it replaced was overridable, so an installation
+ * could add a delivery type and had no way to make it schedulable. Taking them from the passed
+ * list keeps the property BLZ-388 wanted — the node set and the edge set come from the SAME
+ * entry, so they cannot drift — while letting that entry be the resolved one.
+ *
+ * A list with no `Precedes` entry yields two empty sets: nothing is a node and every edge is
+ * dropped as an undeclared kind. That is the honest reading of "this installation declares no
+ * Precedes", not a reason to fall back to the default behind the operator's back.
+ */
+function endpointKinds(linkTypes) {
+  const precedes = linkTypes.find((l) => l && l.name === PRECEDES);
+  return {
+    source: new Set(precedes?.source_kinds ?? []),
+    target: new Set(precedes?.target_kinds ?? []),
+  };
+}
 
 const parseDay = (iso) => Date.parse(iso + "T00:00:00Z");
 const isoOf = (ms) => new Date(ms).toISOString().slice(0, 10);
@@ -190,7 +218,9 @@ function tarjan(ids, succ) {
  * @param now      injected epoch-ms; the model never reads the clock
  * @param runId    stamped onto the result so a persisted row can be told stale
  */
-export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null } = {}) {
+export function scheduleModel({ tickets = [], links = [], schedule = null, now, runId = null,
+                                linkTypes = DEFAULT_LINK_TYPES, types = DEFAULT_TYPES,
+                                workflows = DEFAULT_WORKFLOWS } = {}) {
   if (!schedule || typeof schedule.minutes_per_day !== "number" || !Array.isArray(schedule.working_days)) {
     throw new Error("blaze schedule: schedule.minutes_per_day and schedule.working_days are required "
       + "— board config is their single definition (BLZ-360 §2.3)");
@@ -213,10 +243,33 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     if (!t || t.id == null) continue;
     if (rows.has(t.id)) duplicated.add(t.id); else rows.set(t.id, t);
   }
-  const terminalOf = (t) => { try { return isTerminal(t.type, t.status); } catch { return false; } };
-  // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same
-  // DEFAULT_LINK_TYPES entry that decides which EDGES are legal. One source, so the node set and
-  // the edge set cannot drift apart.
+  // FROM THE PASSED REGISTRIES, for the same reason `candidates` is (BLZ-392). This read
+  // `isTerminal`, which resolves through `schema.mjs`'s ambient TYPES and `workflows.mjs`'s
+  // ambient WORKFLOWS — and for a type the ambient registry does not know it THREW, the catch
+  // swallowed it, and the ticket was declared non-terminal.
+  //
+  // That was unreachable until this ticket: the node rule read a module constant, so a custom
+  // type could never be a node and its terminality never mattered. Resolved `linkTypes` made it
+  // reachable, and the consequence was the state ADR-0022 forbids outright — a `done` ticket of
+  // a custom delivery type became a CPM node, had its frozen actuals overwritten with dates
+  // months in the future, and was put on the critical path. `mutate-schedule.mjs`'s mutation #5
+  // exists to kill exactly that and did not, because every terminal-exemption test uses a
+  // SHIPPED type, where `isTerminal` happens to answer.
+  //
+  // An unknown type is still non-terminal, which is the previous behaviour of the catch.
+  const terminalOf = (t) => {
+    // `terminal` is guarded, not assumed. Replacing the old `try/catch` with a bare property
+    // read meant a `schema.workflows` block carrying `statuses` but no `terminal` — malformed,
+    // but writable — threw a TypeError out of the model and took the WHOLE hygiene report down
+    // with it. That is the regression class `tests/audit-malformed-linktypes.test.mjs` exists
+    // to prevent, reintroduced one file over. `config-schema.mjs` and `filters.mjs` already
+    // guard this same shape.
+    const wf = workflows[types[t?.type]?.workflow];
+    return Array.isArray(wf?.terminal) && wf.terminal.includes(t.status);
+  };
+  // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same RESOLVED
+  // link-type entry that decides which EDGES are legal. One source, so the node set and the edge
+  // set cannot drift apart.
   //
   // This replaced `workflowFor(type) === "delivery"` under BLZ-388, which was a SECOND definition
   // that merely coincided. The two differ by exactly one type — `epic` — and giving a container
@@ -234,6 +287,14 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // neither touches a date. So an epic gets no derived dates from anywhere today. Inert here
   // (zero epics), and stated rather than papered over — see ADR-0022 §What the scheduler treats
   // as a node.
+  //
+  // BLZ-392: the kinds come from the RESOLVED list the caller passes, not from the constant.
+  // The default keeps the pure model usable standalone; the production callers resolve and
+  // pass. A caller that forgets reinstates the old bug with NO visible symptom, so what keeps
+  // them honest is `tests/audit-malformed-linktypes.test.mjs`, which runs both real runners
+  // against fixture boards — a source grep was tried for four review rounds and leaked in
+  // every one.
+  const { source: SOURCE_KINDS, target: TARGET_KINDS } = endpointKinds(linkTypes);
   const isNodeKind = (t) => SOURCE_KINDS.has(t.type);
 
   // --- filter 1: edges, on the declared endpoint kinds (default-deny at the store) -------
@@ -268,6 +329,38 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
   // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
   // another board, which is why the filter is here rather than left to luck.
+  // BLZ-392: how many tickets the SHIPPED declaration would have made nodes. The
+  // `schedule-empty` finding needs a denominator, and this is the only one that means anything.
+  //
+  // Counting every non-terminal ticket was wrong and adversarially reproduced: `goal`, `risk`,
+  // `requirement`, `architecture` and `epic` are excluded from the schedule BY DESIGN, so a
+  // requirements-first board, or a board whose only open item is a goal, had candidates > 0 and
+  // nodes = 0 under a DEFAULT, untouched schema — and got told to "check schema.linkTypes" when
+  // it had none. Measuring against the shipped kinds asks the question that was actually meant:
+  // is anything that OUGHT to be schedulable failing to be?
+  const candidates = [...rows.keys()].filter((id) => {
+    const r = rows.get(id);
+    if (terminalOf(r) || duplicated.has(id)) return false;
+    // A type the installation ADDED counts too. Restricting the denominator to the shipped
+    // kinds alone was a false negative in exactly the case this ticket exists for: a board of
+    // only custom-typed tickets whose endpoint override breaks has no shipped-kind ticket to
+    // count, so it got NO finding while being completely unschedulable. A type the engine does
+    // not declare is one the operator added, and they added it to do something with.
+    if (SHIPPED_SOURCE_KINDS.has(r.type)) return true;
+    if (DECLARED_TYPES.has(r.type)) return false;   // declared, but excluded by design
+    // A type the ENGINE does not declare is one the installation added — but only a DELIVERY
+    // one belongs in this denominator, or a typo, a missing `type:` key and a custom
+    // non-delivery type all count and the board is told to check a `schema.linkTypes` it does
+    // not have.
+    //
+    // FROM THE PASSED REGISTRY, never `workflowFor`. That helper reads `schema.mjs`'s ambient
+    // `TYPES`, built at import time from whatever `blaze.config.json` the CWD resolves to — so
+    // this function stopped being pure and started giving different answers in different
+    // directories. `blaze audit <dir>` positionally silently lost the finding, an unrelated
+    // board's config could conjure one, and a test in this very ticket failed when run from a
+    // board directory. `linkTypes` is threaded in for exactly this reason; so is this.
+    return types[r.type]?.workflow === "delivery";
+  }).length;
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);
@@ -400,6 +493,14 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     scheduled,
     unscheduled,
     cycles,
+    // BLZ-392: what the `schedule-empty` finding needs to tell an operator WHY nothing was
+    // scheduled — the denominator, and the kinds that were actually asked for.
+    candidates,
+    // The NODE count, not the scheduled count. A board whose every ticket sits in a dependency
+    // cycle schedules nothing but is perfectly schedulable — `dependency-cycle` already explains
+    // it — so `schedule-empty` keys on "the endpoint kinds selected no nodes at all" instead.
+    node_count: nodeIds.length,
+    source_kinds: [...SOURCE_KINDS].sort(),
     edges: edges.slice().sort((a, b) =>
       cmp(a.src, b.src) || cmp(a.target, b.target) || (a.lag_minutes - b.lag_minutes)),
     // Sorted like every other array here. It is the only one that was not, and its order was
