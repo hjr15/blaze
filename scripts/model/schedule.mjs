@@ -258,8 +258,14 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   //
   // An unknown type is still non-terminal, which is the previous behaviour of the catch.
   const terminalOf = (t) => {
+    // `terminal` is guarded, not assumed. Replacing the old `try/catch` with a bare property
+    // read meant a `schema.workflows` block carrying `statuses` but no `terminal` — malformed,
+    // but writable — threw a TypeError out of the model and took the WHOLE hygiene report down
+    // with it. That is the regression class `tests/audit-malformed-linktypes.test.mjs` exists
+    // to prevent, reintroduced one file over. `config-schema.mjs` and `filters.mjs` already
+    // guard this same shape.
     const wf = workflows[types[t?.type]?.workflow];
-    return wf ? wf.terminal.includes(t.status) : false;
+    return Array.isArray(wf?.terminal) && wf.terminal.includes(t.status);
   };
   // A node is a ticket whose type is a declared `Precedes` SOURCE kind — the same RESOLVED
   // link-type entry that decides which EDGES are legal. One source, so the node set and the edge

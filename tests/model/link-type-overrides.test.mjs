@@ -780,3 +780,25 @@ describe("BLZ-392: a terminal ticket of a CUSTOM type is still terminal", () => 
     assert.equal(r.node_count, 1, "the passed workflow registry was ignored");
   });
 });
+
+describe("BLZ-392: a malformed workflow does not take the model down", () => {
+  test("a workflow override with no `terminal` list is survivable", () => {
+    // Replacing the old try/catch with a bare property read made this throw a TypeError out of
+    // scheduleModel, which in `blaze audit` means the whole hygiene report is lost — the exact
+    // failure the subprocess suite was written to prevent, reintroduced one file over.
+    assert.doesNotThrow(() => scheduleModel({
+      tickets: [t("A")], links: [], schedule: SCHEDULE, now: MON,
+      types: { ...DEFAULT_TYPES, task: { level: 0, workflow: "broken", parentTypes: [], required: [] } },
+      workflows: { broken: { statuses: ["defined", "done"], transitions: [["defined", "done"]] } },
+    }), "a workflow with no `terminal` key threw out of the model");
+  });
+
+  test("and such a ticket is treated as non-terminal, not silently skipped", () => {
+    const r = scheduleModel({
+      tickets: [t("A")], links: [], schedule: SCHEDULE, now: MON,
+      types: { ...DEFAULT_TYPES, task: { level: 0, workflow: "broken", parentTypes: [], required: [] } },
+      workflows: { broken: { statuses: ["defined"], transitions: [] } },
+    });
+    assert.equal(r.node_count, 1, "the ticket vanished from the graph entirely");
+  });
+});
