@@ -460,3 +460,31 @@ describe("BLZ-131: the subject's id list must END at a colon", () => {
     assert.deepEqual(idsFromSubject("", "BLZ"), []);
   });
 });
+
+// =============================================================================
+// Round 5 — latitude wider than anything documented or intended
+// =============================================================================
+
+describe("BLZ-131: the subject list accepts only the forms the house writes", () => {
+  test("a bare number is a continuation only after `/`", () => {
+    // `KEY-a/b/c:` is the house's own shorthand and omits the key on continuations.
+    // `+`, `,` and `&` do not, so accepting a bare number after them let an ordinary
+    // subject claim a ticket that does not exist: `BLZ-1 + 2026: annual` yielded
+    // BLZ-2026. Nothing documented that latitude and nothing wanted it.
+    assert.deepEqual(idsFromSubject("BLZ-286/287/288: config projection", "BLZ"),
+      ["BLZ-286", "BLZ-287", "BLZ-288"]);
+    assert.deepEqual(idsFromSubject("BLZ-1 + 2026: annual review", "BLZ"), [],
+      "a year is not a ticket id");
+    assert.deepEqual(idsFromSubject("BLZ-1 + BLZ-2: real pair", "BLZ"), ["BLZ-1", "BLZ-2"]);
+  });
+
+  test("an indented bullet is not a collapsed commit subject", () => {
+    // Every one of the 104 `* KEY-n:` lines in this repo's history sits at column 0,
+    // which is where GitHub writes them. An indented one is a sub-bullet inside some
+    // commit's prose, and reading it as a delivered child is a guess.
+    assert.deepEqual(idsFromCommitMessage("BLZ-1: x\n\n  * BLZ-2: a nested note", "BLZ"),
+      ["BLZ-1"]);
+    assert.deepEqual(idsFromCommitMessage("BLZ-1: x\n\n* BLZ-2: a real child", "BLZ"),
+      ["BLZ-1", "BLZ-2"]);
+  });
+});

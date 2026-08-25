@@ -209,7 +209,10 @@ export function idsFromCommitMessage(message, key) {
   // of condition 2.
   const ids = idsFromSubject(lines[0], key);
   if (!ids.length) return [];
-  const bullet = new RegExp("^\\s*\\*\\s+" + key + "-(\\d+):", "i");
+  // Column 0, not merely "starts with a bullet". All 104 such lines in this repo's
+  // history sit at column 0, which is where GitHub writes them; an indented one is a
+  // sub-bullet inside some commit's prose, and reading it as a delivered child is a guess.
+  const bullet = new RegExp("^\\*\\s+" + key + "-(\\d+):", "i");
   for (let i = 1; i < lines.length; i += 1) {
     const m = bullet.exec(lines[i]);
     if (!m) continue;
@@ -235,8 +238,12 @@ export function idsFromCommitMessage(message, key) {
 // `idFromSubject`'s rule that a downstream mention is never a claim — `BLZ-1: fixes
 // BLZ-4` still yields only BLZ-1. Separators are the ones the house actually uses.
 export function idsFromSubject(subject, key) {
+  // A bare number continues the list only after `/` — `KEY-a/b/c:` is the house's own
+  // shorthand. After `+`, `,` or `&` the key must be repeated, which is how the house
+  // writes those. Allowing a bare number everywhere let `BLZ-1 + 2026: annual review`
+  // claim a ticket BLZ-2026 that does not exist; nothing documented that latitude.
   const head = new RegExp(
-    "^" + key + "-\\d+(?:\\s*[+/,&]\\s*(?:" + key + "-)?\\d+)*(?=\\s*:)", "i",
+    "^" + key + "-\\d+(?:(?:\\s*/\\s*\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*(?=\\s*:)", "i",
   ).exec(String(subject || "").trim());
   if (!head) return [];
   const ids = [];
