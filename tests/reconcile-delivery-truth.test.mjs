@@ -488,3 +488,83 @@ describe("BLZ-131: the subject list accepts only the forms the house writes", ()
       ["BLZ-1", "BLZ-2"]);
   });
 });
+
+// =============================================================================
+// Round 6 — a fix that was described but never shipped, and two unpinned lines
+// =============================================================================
+
+// THE WRITE-ONCE RULE WAS LOST IN A COMMIT SPLIT. `57f2313` describes it, the ADR and
+// the guide assert it, and the code never had it: splitting round 4 into per-ticket
+// commits reverted the hunk and the branch carried on from the reverted tree. The
+// comment in `decide` ended "Hence also the write-once rule below" with nothing below
+// it. A review reproduced the exact corruption the commit claimed to have closed.
+describe("BLZ-130: the record is written once — the rule, not just the comment", () => {
+  test("decide flags a terminal ticket as record-if-absent-only", () => {
+    assert.equal(decide({ pr: PR_80_MERGED }, "done", "epic").recordIfAbsentOnly, true);
+    assert.equal(decide({ pr: PR_80_MERGED }, "in-review", "epic").recordIfAbsentOnly, false);
+  });
+
+  test("a later MERGED follow-up PR does not replace the record of what delivered it", async () => {
+    const followUp = {
+      number: 123, state: "MERGED", url: "u123", headRefName: "INF-645-follow-up-docs-tidy",
+      title: "INF-645: follow-up docs tidy",
+    };
+    const tmp = mkdtempSync(join(tmpdir(), "blz130-writeonce-"));
+    const codeRepo = join(tmp, "svc");
+    mkdirSync(codeRepo, { recursive: true });
+    gitInit(codeRepo);
+    execFileSync("git", ["-C", codeRepo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    const root = board(tmp, codeRepo,
+      [["INF-645", "epic", "done", "branch: INF-645-descope-dead-mans-switch\npr: '#80 — u80'\n"]]);
+    const restore = stubGh(tmp, [PR_80_MERGED, followUp]);
+    try {
+      await reconcile({ root, dryRun: false });
+      const body = readFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"), "utf8");
+      assert.match(body, /pr: '?#80/, "a docs follow-up must not claim to have delivered the epic");
+      assert.doesNotMatch(body, /#123/);
+      assert.doesNotMatch(body, /follow-up-docs-tidy/);
+    } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+
+  test("a non-terminal ticket's record still UPDATES — write-once is terminal-only", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz130-nonterm-"));
+    const codeRepo = join(tmp, "svc");
+    mkdirSync(codeRepo, { recursive: true });
+    gitInit(codeRepo);
+    execFileSync("git", ["-C", codeRepo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    const root = board(tmp, codeRepo,
+      [["INF-700", "task", "in-progress", "branch: INF-700-old\npr: '#1 — u1'\n"]]);
+    const restore = stubGh(tmp, [{ number: 9, state: "OPEN", url: "u9",
+      headRefName: "INF-700-new", title: "INF-700: the current work" }]);
+    try {
+      await reconcile({ root, dryRun: false });
+      const f = join(root, "projects", "INF", "in-review", "INF-700-t.md");
+      assert.ok(existsSync(f), "an open PR moves a non-terminal ticket to in-review");
+      assert.match(readFileSync(f, "utf8"), /#9/, "and its record must follow the live PR");
+    } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-131: the leading anchor, and the house's other multi-id form", () => {
+  test("an id that does not START the subject claims nothing", () => {
+    // The `^` was as unpinned as the colon was: deleting it left the whole suite green
+    // while `revert BLZ-42: undo` shipped BLZ-42.
+    assert.deepEqual(idsFromSubject("revert BLZ-42: undo", "BLZ"), []);
+    assert.deepEqual(idsFromSubject("chore: bump deps BLZ-99: never shipped", "BLZ"), []);
+    assert.deepEqual(idsFromCommitMessage("revert BLZ-42: undo\n\n* BLZ-43: x", "BLZ"), []);
+  });
+
+  test("`/` accepts a repeated key as well as a bare number", () => {
+    // Real subject on the board repo: `INF-409/INF-410: log time + move to in-review`.
+    // Round 5 narrowed `/` to bare numbers only, which dropped BOTH ids — the anchored
+    // match died at the `/` rather than falling back to the first id.
+    assert.deepEqual(idsFromSubject("INF-409/INF-410: log time + move to in-review", "INF"),
+      ["INF-409", "INF-410"]);
+    assert.deepEqual(idsFromSubject("BLZ-286/287/288: config projection", "BLZ"),
+      ["BLZ-286", "BLZ-287", "BLZ-288"]);
+    assert.deepEqual(idsFromSubject("BLZ-1 + 2026: annual review", "BLZ"), [],
+      "a bare number after `+` is still not a ticket id");
+  });
+});

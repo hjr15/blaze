@@ -82,7 +82,7 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined };
+             resolution: undefined, recordIfAbsentOnly: false };
   }
   let target, branchVal = null, prVal = null;
   if (pr) {
@@ -103,7 +103,7 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined };
+             resolution: undefined, recordIfAbsentOnly: false };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
   //
@@ -133,9 +133,15 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
       prVal = null;
     }
   }
+  // The write-once half. `decide` cannot see the current frontmatter, so it says the
+  // rule APPLIES and the caller — which holds it — enforces it. A terminal ticket may
+  // acquire a delivery record it never had, and may never have one replaced: gating on
+  // MERGED alone still let the LATEST merge win the rank tie-break, so a follow-up docs
+  // PR repointed a done epic away from the PR that delivered it.
+  const recordIfAbsentOnly = isTerminal(type, currentStatus);
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
-  return { target, branchVal, prVal, moved, skip: false, resolution };
+  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly };
 }
 
 // --- anchored leading-id parse of a commit subject ("<KEY>-<n>: desc") --------
@@ -243,7 +249,7 @@ export function idsFromSubject(subject, key) {
   // writes those. Allowing a bare number everywhere let `BLZ-1 + 2026: annual review`
   // claim a ticket BLZ-2026 that does not exist; nothing documented that latitude.
   const head = new RegExp(
-    "^" + key + "-\\d+(?:(?:\\s*/\\s*\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*(?=\\s*:)", "i",
+    "^" + key + "-\\d+(?:(?:\\s*/\\s*(?:" + key + "-)?\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*(?=\\s*:)", "i",
   ).exec(String(subject || "").trim());
   if (!head) return [];
   const ids = [];
@@ -590,8 +596,10 @@ export async function reconcile({
 
     const fm = { ...t.frontmatter };
     let dirty = false;
-    if (d.branchVal && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
-    if (d.prVal && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
+    // Terminal: fill a blank, never overwrite. See `recordIfAbsentOnly` in decide().
+    const keep = (current) => d.recordIfAbsentOnly && Boolean(current);
+    if (d.branchVal && !keep(fm.branch) && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
+    if (d.prVal && !keep(fm.pr) && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
     if (d.resolution !== undefined && fm.resolution !== d.resolution) { fm.resolution = d.resolution; dirty = true; }
     if (d.moved) { fm.updated = today; dirty = true; }
     if (!dirty) continue;
