@@ -41,7 +41,8 @@ A terminal move auto-sets `resolution` (`done` for `achieved`/`done`/`mitigated`
 non-default resolution (`wont-do`, `duplicate`, `cannot-reproduce`) without moving
 the file. These are the engine's **defaults**, defined once in `scripts/model/schema.mjs`
 (`DEFAULT_TYPES`) and `scripts/model/workflows.mjs` (`DEFAULT_WORKFLOWS`). A data
-repo can override or extend them — add or modify types and workflows — via a
+repo can override or extend them — add or modify types, workflows and the
+scheduler's link-type endpoint kinds (`linkTypes`, BLZ-392) — via a
 `schema` block in `blaze.config.json` (all projects); the engine applies this
 **top-level** override at load, so `blaze new`/`move`, validation, and the board
 all read it. A `projects/<KEY>/project.json` `schema` block is layered by the

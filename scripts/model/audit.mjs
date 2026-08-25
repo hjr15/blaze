@@ -12,7 +12,7 @@
 //
 // That split is blaze-pm ADR-0011's soft gate, and it is load-bearing: a gate that fails on
 // the fill queue is a gate people learn to skip, which costs the hard findings too.
-import { resolveSchema } from "./schema-config.mjs";
+import { resolveSchema, validateSchema } from "./schema-config.mjs";
 import { LINK_TYPES } from "./links.mjs";
 
 export const HARD_KINDS = new Set([
@@ -75,6 +75,24 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
     }
     return registryFor.get(key);
   };
+
+  // BLZ-392: `validateSchema`'s FIRST production caller. It has existed since ADR-0002 with
+  // nothing calling it, and ADR-0002 says in as many words that leaning on it buys "a
+  // well-tested no-op: green in CI, absent in production" — which is exactly what happened when
+  // this ticket first named it as the mitigation for a malformed link-type block.
+  //
+  // Reported per LAYER, not per project, and deduplicated: the top-level block is the same block
+  // for all eleven projects, and eleven copies of one finding is noise that hides the signal.
+  const schemaSeen = new Set();
+  for (const key of new Set([null, ...Object.keys(projects)])) {
+    const project = key === null ? null : projects[key] ?? null;
+    const resolved = resolveSchema({ config, project });
+    for (const e of validateSchema({ ...resolved, config, project: key === null ? null : project })) {
+      if (schemaSeen.has(e)) continue;
+      schemaSeen.add(e);
+      add(key === null ? "-" : key, "schema-invalid", e);
+    }
+  }
 
   for (const t of tickets) {
     const fm = t?.frontmatter ?? {};
@@ -216,6 +234,32 @@ function bindingChain(schedule, id) {
  */
 export function scheduleFindings(schedule, { persisted = [] } = {}) {
   const findings = [];
+
+  // --- schedule-empty: the endpoint kinds select nothing ----------------------------------
+  // BLZ-392. The override that makes a custom type schedulable can equally make EVERYTHING
+  // unschedulable, and every way of doing it is silent: `source_kinds: []`, a single typo'd
+  // kind (`"taks"`), or a link-type list carrying no `Precedes` at all. The node set empties,
+  // every schedule finding disappears with it, and the report is byte-identical to a healthy
+  // board — a `deadline-unreachable` that was firing yesterday simply stops.
+  //
+  // This is deliberately an OUTCOME check, not a catalogue of the causes. Enumerating the
+  // malformed shapes is what the first attempt did, and it missed the two most plausible
+  // operator typos precisely because they are well-formed. Asking "did anything get scheduled,
+  // and was there anything to schedule?" catches all of them, including the ones nobody has
+  // thought of yet.
+  // Keyed on the NODE count, not on `scheduled.length`. Those differ, and the difference is the
+  // whole point: a board whose every ticket sits in a dependency cycle schedules nothing while
+  // being perfectly schedulable, and `dependency-cycle` already says so. Conflating the two made
+  // this fire there — caught by the existing SCC test, which is exactly what it is for.
+  if ((schedule.node_count ?? 0) === 0 && (schedule.candidates ?? 0) > 0) {
+    findings.push({
+      ticket: "-", kind: "schedule-empty",
+      detail: `nothing is schedulable: ${schedule.candidates} non-terminal ticket(s) exist but `
+        + "the declared Precedes endpoint kinds match none of them "
+        + `(source kinds: ${(schedule.source_kinds ?? []).join(", ") || "none"}). `
+        + "Check schema.linkTypes — every schedule finding is suppressed while this holds",
+    });
+  }
 
   // --- deadline-unreachable: derived due_date > deadline ---------------------------------
   // STRICT. A deadline is a DATE, so finishing at 16:00 on the deadline day is on time, and

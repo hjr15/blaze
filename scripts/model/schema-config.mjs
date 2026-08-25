@@ -6,7 +6,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows } from "./workflows.mjs";
-import { DEFAULT_LINK_TYPES, mergeLinkTypes } from "./link-schema.mjs";
+import { DEFAULT_LINK_TYPES, mergeLinkTypes, linkTypeOverrideErrors } from "./link-schema.mjs";
 import { GOAL_SATISFYING_REQUIREMENT } from "./gates.mjs";
 
 export function resolveSchema({ config = null, project = null } = {}) {
@@ -28,7 +28,8 @@ export function resolveSchema({ config = null, project = null } = {}) {
 
 /** Pure structural check: every type's workflow must be a declared workflow.
  *  Returns a list of human-readable errors ([] when valid). */
-export function validateSchema({ types = {}, workflows = {}, linkTypes = null } = {}) {
+export function validateSchema({ types = {}, workflows = {}, linkTypes = null,
+                                 config = null, project = null } = {}) {
   const errors = [];
   for (const [name, def] of Object.entries(types)) {
     const wf = def && def.workflow;
@@ -84,6 +85,13 @@ export function validateSchema({ types = {}, workflows = {}, linkTypes = null } 
         }
       }
     }
+  }
+  // BLZ-392. A malformed `schema.linkTypes` entry is IGNORED by the merge — it cannot throw,
+  // because that took `blaze audit` down with a stack trace from inside `auditCorpus`. Ignoring
+  // it silently would be the other half of the same failure, so the raw blocks are inspected
+  // here and reported. The operator wrote the block; they need to know it did nothing.
+  for (const [layer, src] of [["blaze.config.json", config], ["project.json", project]]) {
+    for (const e of linkTypeOverrideErrors(src?.schema?.linkTypes)) errors.push(`${layer}: ${e}`);
   }
   return errors;
 }

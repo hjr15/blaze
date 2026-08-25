@@ -44,7 +44,8 @@ Both use the same shape:
 {
   "schema": {
     "types":     { "<name>": { "level": 0, "workflow": "<wf>", "parentTypes": ["feature"], "required": ["title", "description"] } },
-    "workflows": { "<wf>":  { "statuses": ["a", "b"], "terminal": ["b"], "transitions": [["a", "b"]], "reopenTo": "a", "resolutionOnTerminal": { "b": "done" } } }
+    "workflows": { "<wf>":  { "statuses": ["a", "b"], "terminal": ["b"], "transitions": [["a", "b"]], "reopenTo": "a", "resolutionOnTerminal": { "b": "done" } } },
+    "linkTypes": { "<Name>": { "source_kinds": ["task"], "target_kinds": ["task"], "inverse_name": "<Inverse>", "min_card": 0, "max_card": null } }
   }
 }
 ```
@@ -57,6 +58,18 @@ if the name is new); entries you don't mention keep their defaults. There is no
 deep-merge of sub-fields — supply the complete `{level, workflow, parentTypes,
 required}` for a type and the complete `{statuses, terminal, transitions,
 reopenTo, resolutionOnTerminal}` for a workflow.
+
+`linkTypes` follows the same rule, with two differences worth knowing (BLZ-392). The **key is
+the identity** — a `name` field that disagrees with it is overwritten, not honoured — and a
+malformed entry is **ignored, leaving the shipped declaration in force**, rather than throwing:
+a throw here took `blaze audit` down with a stack trace and no report at all. `blaze audit`
+reports the ignored block as a soft `schema-invalid` finding, so a block that did nothing does
+not do it quietly.
+
+**Narrowing `Precedes` narrows what can be scheduled.** `source_kinds` decides what the critical
+path treats as a node, so an empty list or a single typo'd type name makes the whole board
+unschedulable. That is reported too, as `schedule-empty` — an outcome check, because the two
+likeliest mistakes are well-formed and no validation of the block's shape would catch them.
 
 - A **type** entry: `level` (2=goal … 0=leaf … -1=subtask), `workflow` (the name
   of a workflow — built-in or one you define), `parentTypes` (which parent types
@@ -191,7 +204,7 @@ own "Engine limits" section:
   `blaze link` a new type. Keyed by link-type name, and the key is the identity:
 
       "schema": {
-        "types": { "spike": { "workflow": "delivery", "level": 5, "parentTypes": ["feature"], "required": ["title"] } },
+        "types": { "spike": { "workflow": "delivery", "level": 0, "parentTypes": ["feature"], "required": ["title", "description", "estimate"] } },
         "linkTypes": {
           "Precedes": {
             "source_kinds": ["feature", "story", "task", "bug", "subtask", "spike"],
@@ -238,6 +251,7 @@ each one has actually broken a board running this mechanism.
 |---|---|
 | **Default → top-level** | Board columns, transition legality, and every read that goes through the ambient registry. |
 | **Default → top-level → per-project** | **Ticket validation on the write path** — `blaze new` and `blaze edit` (BLZ-238) — and **corpus hygiene**, `blaze audit` (BLZ-137). |
+| **Default → top-level only** | **`linkTypes`, and therefore the scheduler** — `blaze audit`'s critical path and `blaze schedule import-deps` (BLZ-392). A CPM solve runs over the whole corpus at once, so there is no single project whose endpoint kinds could apply; a per-project `linkTypes` block resolves correctly but reaches nothing. |
 
 `blaze new` validates a create against the **target project's** registry, and `blaze edit`
 validates against the **edited ticket's** project. A retype's child sweep judges each child by

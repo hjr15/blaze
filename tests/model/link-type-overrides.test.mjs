@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { resolveSchema, validateSchema } from "../../scripts/model/schema-config.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes } from "../../scripts/model/link-schema.mjs";
 import { scheduleModel } from "../../scripts/model/schedule.mjs";
+import { scheduleFindings } from "../../scripts/model/audit.mjs";
 import { planDependencyImport, DISPOSITION } from "../../scripts/model/import-deps.mjs";
 
 const SCHEDULE = { minutes_per_day: 480, working_days: [1, 2, 3, 4, 5] };
@@ -79,7 +80,9 @@ describe("BLZ-392: link types resolve through the same layering as types and wor
   test("a malformed override is ignored rather than corrupting the registry", () => {
     // Same guard mergeTypes and mergeWorkflows already apply: an array or a non-object is
     // not a keyed registry, and silently producing a broken list would be worse than ignoring.
-    for (const bad of [[], "nope", 3, null]) {
+    // A NON-EMPTY array is the discriminating case: `Object.entries([])` is `[]`, so an empty
+    // one reaches the same answer by a different route and passes even without the guard.
+    for (const bad of [[{ name: "Precedes", source_kinds: [], target_kinds: [] }], [], "nope", 3, null]) {
       assert.deepEqual(mergeLinkTypes(DEFAULT_LINK_TYPES, bad), DEFAULT_LINK_TYPES);
     }
   });
@@ -105,21 +108,35 @@ describe("BLZ-392: link types resolve through the same layering as types and wor
   });
 });
 
-describe("BLZ-392: a malformed override is refused by name, never silently applied", () => {
-  // EVERY shape below used to collapse a working board to nothing scheduled, with no error, no
-  // finding, and a scheduleFindings() result identical to a healthy board. Adversarial review
-  // found all five. A silent board-wide zero is the worst failure this feature could have, and
-  // it needed no exotic input — `{}` and a typo'd `name` both did it.
+describe("BLZ-392: a malformed override is ignored AND reported, never silently applied", () => {
+  // Every shape below used to collapse a working board to nothing scheduled, with no error and
+  // no finding. A first fix made them THROW — which was worse than the bug: the throw escaped
+  // audit-runner's deliberate config tolerance and `blaze audit` died with a raw stack trace and
+  // NO REPORT, from inside auditCorpus, so the whole hygiene report was lost. It also inverted
+  // the tolerance: an unparseable config still audited, a valid one with one bad field was fatal.
+  //
+  // So: the merge is TOTAL and keeps the default, and validateSchema reports the block — which
+  // auditCorpus now actually calls.
   for (const [label, bad] of [
     ["null", null], ["an empty object", {}], ["a string", "yes"], ["an array", []],
     ["a number in source_kinds", { source_kinds: 5, target_kinds: ["task"] }],
     ["a string in source_kinds", { source_kinds: "spike", target_kinds: ["task"] }],
   ]) {
-    test(`${label} is a named refusal`, () => {
-      assert.throws(
-        () => resolveSchema({ config: { schema: { linkTypes: { Precedes: bad } } } }),
-        /schema\.linkTypes\["Precedes"\]/,
-        `${label} was accepted — it would zero the schedule with no signal`);
+    test(`${label} does not throw, and leaves the shipped declaration in force`, () => {
+      const cfg = { schema: { linkTypes: { Precedes: bad } } };
+      let resolved;
+      assert.doesNotThrow(() => { resolved = resolveSchema({ config: cfg }); },
+        `${label} threw — that takes \`blaze audit\` down with a stack trace and no report`);
+      assert.deepEqual(byName(resolved.linkTypes, "Precedes").source_kinds,
+        DEFAULT_LINK_TYPES.find((l) => l.name === "Precedes").source_kinds,
+        "a malformed override must leave the shipped kinds in force, not half-apply");
+    });
+
+    test(`${label} is REPORTED, so the operator learns the block did nothing`, () => {
+      const cfg = { schema: { linkTypes: { Precedes: bad } } };
+      const errors = validateSchema({ ...resolveSchema({ config: cfg }), config: cfg });
+      assert.ok(errors.some((e) => /schema\.linkTypes\["Precedes"\]/.test(e)),
+        `${label} was accepted in silence: ${errors.join(" | ") || "(no errors at all)"}`);
     });
   }
 
@@ -160,6 +177,15 @@ describe("BLZ-392: a malformed override is refused by name, never silently appli
     assert.equal(byName(resolveSchema({}).linkTypes, "Injected"), undefined,
       "a later resolve saw a mutation made to an earlier result");
     assert.equal(DEFAULT_LINK_TYPES.length, 6, "the module constant itself was grown");
+
+    // The ENTRIES too. A first fix copied only the array, so this still corrupted the constant
+    // process-wide — and the test above passed, because `.push` on the array is not the
+    // reach a caller would actually make.
+    resolveSchema({}).linkTypes.find((l) => l.name === "Precedes").source_kinds.push("PWNED");
+    assert.ok(!DEFAULT_LINK_TYPES.find((l) => l.name === "Precedes").source_kinds.includes("PWNED"),
+      "mutating a resolved entry's source_kinds corrupted DEFAULT_LINK_TYPES for every later caller");
+    assert.ok(!resolveSchema({}).linkTypes.find((l) => l.name === "Precedes").source_kinds.includes("PWNED"),
+      "a later resolve saw an entry mutation made to an earlier result");
   });
 });
 
@@ -243,10 +269,16 @@ describe("BLZ-392: the solve honours the resolved endpoint kinds", () => {
   });
 });
 
-/** Source with `//` line comments removed, so commenting a line out cannot satisfy a grep. */
+/**
+ * Source with comments removed, so commenting a line out cannot satisfy a grep.
+ *
+ * BOTH forms. A first version stripped only `//` lines, and adversarial review defeated it by
+ * reinstating the original bug and appending the resolved call inside a block comment.
+ */
 function uncommented(url) {
   return readFileSync(new URL(url, import.meta.url), "utf8")
-    .split("\n").map((l) => l.replace(/(^|[^:])\/\/.*$/, "$1")).join("\n");
+    .replace(/\/\*[\s\S]*?\*\//g, "")
+    .split("\n").map((l) => l.replace(/(^|[^:])\/\/.*$/g, "$1")).join("\n");
 }
 
 describe("BLZ-392: both production paths pass the resolved kinds, not the constant", () => {
@@ -323,5 +355,100 @@ describe("BLZ-392: the import planner honours the same resolved kinds as the sol
     assert.equal(solved.scheduled.length, 2, "the solve did not schedule what the planner proposed");
     assert.deepEqual(solved.dropped_edges ?? [], [],
       "the solve dropped an edge the planner proposed — the two readers disagree");
+  });
+});
+
+describe("BLZ-392: nothing-is-schedulable is a FINDING, not a silent board-wide zero", () => {
+  // The override that makes a custom type schedulable can equally make EVERYTHING
+  // unschedulable, and every way of doing it is silent: the node set empties, every schedule
+  // finding disappears with it, and the report is byte-identical to a healthy board — a
+  // `deadline-unreachable` that fired yesterday simply stops.
+  //
+  // An OUTCOME check, deliberately, not a catalogue of causes. The first attempt enumerated
+  // malformed shapes and missed the two most plausible operator typos precisely because they
+  // are well-formed arrays.
+  const dated = [t("A", { deadline: "2026-08-01" })];
+  const kinds = (k) => resolveSchema({ config: { schema: { linkTypes: { Precedes: {
+    inverse_name: "Follows", source_kinds: k, target_kinds: k, min_card: 0, max_card: null,
+  } } } } }).linkTypes;
+  const findingsFor = (linkTypes) => scheduleFindings(
+    scheduleModel({ tickets: dated, links: [], schedule: SCHEDULE, now: MON, ...(linkTypes ? { linkTypes } : {}) }))
+    .map((f) => f.kind);
+
+  test("a healthy board reports its real finding and NOT schedule-empty", () => {
+    // The control. Without it, a schedule-empty that fired always would look like a pass.
+    const got = findingsFor(null);
+    assert.ok(got.includes("deadline-unreachable"), `expected the real finding, got: ${got.join(",")}`);
+    assert.ok(!got.includes("schedule-empty"), "schedule-empty fired on a healthy board");
+  });
+
+  for (const [label, k] of [["an empty source_kinds", []], ["a single typo'd kind", ["taks"]]]) {
+    test(`${label} raises schedule-empty instead of vanishing`, () => {
+      const got = findingsFor(kinds(k));
+      assert.ok(got.includes("schedule-empty"),
+        `${label} silently zeroed the board — findings were: ${got.join(",") || "(none)"}`);
+      assert.ok(!got.includes("deadline-unreachable"),
+        "the premise of this test is that the real finding disappears; it did not");
+    });
+  }
+
+  test("a list with no Precedes at all raises it too", () => {
+    assert.ok(findingsFor([]).includes("schedule-empty"));
+  });
+
+  test("an EMPTY board does not raise it — nothing scheduled is correct there", () => {
+    // The denominator. Without `candidates` this fires on every empty project.
+    const r = scheduleModel({ tickets: [], links: [], schedule: SCHEDULE, now: MON });
+    assert.deepEqual(scheduleFindings(r).map((f) => f.kind), []);
+  });
+
+  test("a board that is all ONE DEPENDENCY CYCLE does not raise it", () => {
+    // The regression the existing SCC test caught. Nothing schedules, but every ticket IS a
+    // node — the board is schedulable and `dependency-cycle` already explains the outcome.
+    // Keying on `scheduled.length` instead of the node count conflated the two.
+    const r = scheduleModel({
+      tickets: [t("A"), t("B")], links: [edge("A", "B"), edge("B", "A")],
+      schedule: SCHEDULE, now: MON });
+    const kinds = scheduleFindings(r).map((f) => f.kind);
+    assert.ok(kinds.includes("dependency-cycle"), `expected the cycle finding, got: ${kinds.join(",")}`);
+    assert.ok(!kinds.includes("schedule-empty"),
+      "schedule-empty fired on a cyclic board, where dependency-cycle is the real answer");
+  });
+
+  test("a board of only TERMINAL tickets does not raise it either", () => {
+    const r = scheduleModel({
+      tickets: [t("D", { status: "done" })], links: [], schedule: SCHEDULE, now: MON });
+    assert.ok(!scheduleFindings(r).map((f) => f.kind).includes("schedule-empty"),
+      "a finished board is not an unschedulable one");
+  });
+});
+
+describe("BLZ-392: validateSchema reports malformed kinds rather than throwing", () => {
+  // This guard shipped with NO test: the whole 2234-test suite stayed green with it removed,
+  // and both original symptoms came straight back — a throw on a number (contradicting the
+  // contract stated in the comment beside it) and five bogus errors for `"spike"`, one per
+  // character, because `for...of` iterates a string.
+  const base = {
+    types: { task: { workflow: "delivery" } },
+    workflows: { delivery: { statuses: ["defined"], terminal: [] } },
+  };
+  for (const [label, kinds] of [["a number", 5], ["an object", {}], ["a string", "spike"], ["null", null]]) {
+    test(`${label} in source_kinds is ONE reported error, never a throw`, () => {
+      let errors;
+      assert.doesNotThrow(() => {
+        errors = validateSchema({ ...base,
+          linkTypes: [{ name: "Precedes", source_kinds: kinds, target_kinds: ["task"] }] });
+      }, `${label} threw — validateSchema's contract is to return errors, not to refuse`);
+      assert.equal(errors.length, 1,
+        `expected exactly one error for ${label}, got ${errors.length}: ${errors.join(" | ")}`);
+      assert.match(errors[0], /not an array/);
+    });
+  }
+
+  test("a string is not iterated per character", () => {
+    const errors = validateSchema({ ...base,
+      linkTypes: [{ name: "Precedes", source_kinds: "spike", target_kinds: ["task"] }] });
+    assert.ok(!errors.some((e) => /"s"|"p"|"i"|"k"|"e"/.test(e)),
+      `the string was iterated per character: ${errors.join(" | ")}`);
   });
 });

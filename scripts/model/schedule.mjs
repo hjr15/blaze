@@ -292,6 +292,11 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
   // It does not change the horizon today: the largest estimate on a non-terminal non-delivery
   // ticket is OBA-1 (`goal/in-progress`) at 830 minutes, against BLZ-253's 4,800. It could on
   // another board, which is why the filter is here rather than left to luck.
+  // BLZ-392: how many tickets COULD have been scheduled, regardless of endpoint kinds. The
+  // `schedule-empty` finding needs a denominator — "nothing scheduled" is only a problem when
+  // there was something to schedule, and an empty board must not raise it.
+  const candidates = [...rows.keys()]
+    .filter((id) => !terminalOf(rows.get(id)) && !duplicated.has(id)).length;
   const nodeIds = [...rows.keys()]
     .filter((id) => !terminalOf(rows.get(id)) && isNodeKind(rows.get(id)) && !duplicated.has(id))
     .sort(cmp);
@@ -424,6 +429,14 @@ export function scheduleModel({ tickets = [], links = [], schedule = null, now, 
     scheduled,
     unscheduled,
     cycles,
+    // BLZ-392: what the `schedule-empty` finding needs to tell an operator WHY nothing was
+    // scheduled — the denominator, and the kinds that were actually asked for.
+    candidates,
+    // The NODE count, not the scheduled count. A board whose every ticket sits in a dependency
+    // cycle schedules nothing but is perfectly schedulable — `dependency-cycle` already explains
+    // it — so `schedule-empty` keys on "the endpoint kinds selected no nodes at all" instead.
+    node_count: nodeIds.length,
+    source_kinds: [...SOURCE_KINDS].sort(),
     edges: edges.slice().sort((a, b) =>
       cmp(a.src, b.src) || cmp(a.target, b.target) || (a.lag_minutes - b.lag_minutes)),
     // Sorted like every other array here. It is the only one that was not, and its order was
