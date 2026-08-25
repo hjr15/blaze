@@ -14,6 +14,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { DatabaseSync } from "node:sqlite";
+import { sqliteAttachConfig } from "../../scripts/model/config-schema.mjs";
 import { mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -127,6 +128,7 @@ describe("createDbSchemaSync", () => {
   test("creates and stamps an empty database", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(SQLITE_PRAGMAS);
+    db.exec(sqliteAttachConfig());
     const r = createDbSchemaSync(execFor(db));
     assert.equal(r.version, DB_SCHEMA_VERSION);
     assert.equal(readSchemaFactsSync(execFor(db)).version, DB_SCHEMA_VERSION);
@@ -135,6 +137,7 @@ describe("createDbSchemaSync", () => {
   test("refuses a database that already holds a Blaze schema", () => {
     const db = new DatabaseSync(":memory:");
     db.exec(SQLITE_PRAGMAS);
+    db.exec(sqliteAttachConfig());
     createDbSchemaSync(execFor(db));
     assert.throws(() => createDbSchemaSync(execFor(db)), /already holds a Blaze schema/);
   });
@@ -156,17 +159,21 @@ describe("DB schema version 2", () => {
   const fresh = () => {
     const db = new DatabaseSync(":memory:");
     db.exec(SQLITE_PRAGMAS);
+    db.exec(sqliteAttachConfig());
     createDbSchemaSync(execFor(db));
     return db;
   };
   const tables = (db) =>
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
 
-  test("the stamp is 3", () => {
+  test("the stamp is 4", () => {
     // 2 -> 3 under BLZ-390, when the seven v3 tables gained STRICT.
-    assert.equal(DB_SCHEMA_VERSION, 3);
+    // 3 -> 4 under BLZ-377, which installs the blaze_config namespace and view/view_type in it.
+    // BLZ-377's own AC said "probably wants version 3"; 3 had already shipped, and adding
+    // tables to a shipped version retroactively is the silent change the stamp exists to stop.
+    assert.equal(DB_SCHEMA_VERSION, 4);
     const v = fresh().prepare("SELECT value FROM blaze_meta WHERE key='schema_version'").get().value;
-    assert.equal(v, "3");
+    assert.equal(v, "4");
   });
 
   test("a fresh create installs the v4 link tables — this is what Precedes needs", () => {
@@ -181,25 +188,31 @@ describe("DB schema version 2", () => {
     assert.ok(t.includes("hierarchy_membership"));
   });
 
-  // BLZ-360 §6.4 lists viewDdl among version 2's installs and BLZ-354 §6.2 says it "ships in
-  // version 2". Measured while implementing: it CANNOT, because `view` lives in the
-  // `blaze_config` namespace (BLZ-371 — its FKs cannot cross a SQLite database file) and
-  // **nothing in scripts/ ever installs `blaze_config`**. `configDdl` is exported and called
-  // only from its own test. So the cost of adding `view` here is not "one DDL", as spec 1
-  // reasoned, but a whole namespace with no install path. Deferred to BLZ-377, which installs
-  // blaze_config and viewDdl together. Nothing in the scheduler reads `view`.
-  test("view is deliberately NOT in version 2 — it needs a blaze_config nothing installs", () => {
+  // INVERTED BY BLZ-377, carrying its reason rather than being deleted.
+  //
+  // It used to read "view is deliberately NOT in version 2 — it needs a blaze_config nothing
+  // installs", and it pinned that absence: BLZ-360 §6.4 and BLZ-354 §6.2 both claimed `viewDdl`
+  // shipped in version 2, and it could not, because `view` lives in the `blaze_config`
+  // namespace (BLZ-371 — its FKs cannot cross a SQLite database file) and nothing in scripts/
+  // installed `blaze_config` at all. The cost of adding `view` was never "one DDL" as spec 1
+  // reasoned; it was a whole namespace with no install path.
+  //
+  // BLZ-377 built that install path, so the precondition has changed and the assertion inverts.
+  // Note what the OLD test got right and kept: `view` can only ever exist in the ATTACHed
+  // namespace, so reading `sqlite_master` — which is `main` — could never see it. An earlier
+  // version of this test did exactly that and would have stayed green through this ticket
+  // instead of inverting. Asking `PRAGMA database_list` is what makes it discriminate.
+  test("view IS installed in version 4, in the blaze_config namespace BLZ-377 creates", () => {
     const db = fresh();
-    // `view` can only ever exist in the ATTACHed blaze_config namespace, so reading
-    // sqlite_master (which is `main`) could never see it — an earlier version of this test
-    // promised to invert when BLZ-377 lands and would have stayed green instead. Ask every
-    // attached database, and assert blaze_config is not attached at all, which is the
-    // actual precondition BLZ-377 changes.
     const dbs = db.prepare("PRAGMA database_list").all().map((r) => r.name);
-    assert.deepEqual(dbs, ["main"],
-      "if blaze_config is attached here, BLZ-377 landed and this test should invert");
-    assert.ok(!tables(db).includes("view"));
-    assert.ok(!tables(db).includes("view_type"));
+    assert.ok(dbs.includes("blaze_config"),
+      `blaze_config is not attached — the namespace was not installed. Attached: ${dbs.join(", ")}`);
+    const cfg = db.prepare("SELECT name FROM blaze_config.sqlite_master WHERE type='table'")
+      .all().map((r) => r.name);
+    assert.ok(cfg.includes("view"), `view missing from blaze_config — got: ${cfg.join(", ")}`);
+    assert.ok(cfg.includes("view_type"), `view_type missing from blaze_config — got: ${cfg.join(", ")}`);
+    // Still absent from `main`: putting it there is the thing BLZ-371 ruled out.
+    assert.ok(!tables(db).includes("view"), "view must NOT be in the data namespace");
   });
 
   test("the five scheduling columns are on ticket after a fresh create", () => {
@@ -215,10 +228,15 @@ describe("DB schema version 2", () => {
   // version. That is safe because the shadow database is DERIVED: it lives under .blaze/,
   // `blaze db init` rebuilds it from the filesystem corpus, and the fs write port is the
   // default, so a stranded v1 shadow is deleted and recreated rather than migrated.
-  test("the floor rises to 3 — an older database is refused, not half-opened", () => {
+  test("the floor rises to 4 — an older database is refused, not half-opened", () => {
     // 2 -> 3 under BLZ-390. A v2 shadow's tables are NOT STRICT, so accepting one would silently
     // drop the guarantee the version exists to add.
-    assert.equal(MIN_DB_SCHEMA_VERSION, 3);
+    // 3 -> 4 under BLZ-377. A v3 shadow has no `blaze_config` at all, so a v4 engine that
+    // accepted one would fail later on "no such table: blaze_config.view" — the raw-SQL-error-
+    // instead-of-a-named-refusal failure this module exists to replace.
+    assert.equal(MIN_DB_SCHEMA_VERSION, 4);
+    assert.equal(judgeDbSchema({ hasTicket: true, hasMeta: true, version: 3 }).ok, false,
+      "a v3 shadow must be refused too — it has no blaze_config namespace");
     assert.equal(judgeDbSchema({ hasTicket: true, hasMeta: true, version: 2 }).ok, false,
       "a v2 shadow must be refused too, not just v1");
     const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 1 });

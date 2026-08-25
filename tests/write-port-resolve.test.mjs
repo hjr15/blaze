@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { resolveWritePort, openShadow, logDivergence, shadowDbPath,
          divergenceLogPath, sqliteExec } from "../scripts/model/write-port-resolve.mjs";
 import { createDbSchemaSync } from "../scripts/model/db-schema-version.mjs";
+import { sqliteAttachConfig, configDbPathFor } from "../scripts/model/config-schema.mjs";
 import { SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
 
 const root = () => mkdtempSync(join(tmpdir(), "blaze-wpr-"));
@@ -24,6 +25,9 @@ async function seededBoard() {
   mkdirSync(join(dataRoot, ".blaze"), { recursive: true });
   const db = new DatabaseSync(shadowDbPath(dataRoot));
   db.exec(SQLITE_PRAGMAS);
+  // BLZ-377: hand-rolling an opener means hand-rolling its ATTACH too. `createDbSchemaSync`
+  // refuses without it rather than silently putting the config in memory.
+  db.exec(sqliteAttachConfig(configDbPathFor(shadowDbPath(dataRoot))));
   createDbSchemaSync(sqliteExec(db));
   db.close();
   return dataRoot;

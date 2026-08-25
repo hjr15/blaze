@@ -10,6 +10,7 @@
 // registries at build time. Retyping them here would create a second source of truth
 // that drifts the first time someone adds a type — and drifts silently, because a
 // hand-written seed list is still valid SQL when it is wrong.
+import { join, dirname } from "node:path";
 import { PRIORITIES, DEFAULT_TYPES } from "./schema.mjs";
 import { RESOLUTIONS, DEFAULT_WORKFLOWS } from "./workflows.mjs";
 import { LINK_TYPES, TRACE_LINK_TYPES } from "./links.mjs";
@@ -43,11 +44,25 @@ function dialect(name) {
       // Postgres regex operator. SQLite has no regex without an extension.
       projectKeyCheck: "CHECK (key ~ '^[A-Z][A-Z0-9]*$')",
       // Postgres cannot declare an FK to a table that does not exist yet.
-      circularFk: `ALTER TABLE blaze_config.workflow
-  ADD CONSTRAINT workflow_reopen_to_fk
-  FOREIGN KEY (scope, name, reopen_to)
-  REFERENCES blaze_config.workflow_status (scope, workflow, status)
-  DEFERRABLE INITIALLY DEFERRED;`,
+      // IDEMPOTENT, like every other statement in this DDL (BLZ-377). Postgres has no
+      // `ADD CONSTRAINT IF NOT EXISTS`, so the duplicate is caught instead.
+      //
+      // This was the ONE statement here that could not be run twice, which did not matter while
+      // nothing in production ran this DDL at all. The moment `createDbSchema` started
+      // installing the namespace, it did: `blaze_config` is a schema, not a table, so it
+      // outlives the `public` tables the create guard inspects — a database whose data tables
+      // were dropped still has it. The second create then failed with
+      // `constraint "workflow_reopen_to_fk" for relation "workflow" already exists`, and on a
+      // FRESH Postgres — which is what CI provisions every run — that took the whole gate down.
+      circularFk: `DO $$
+BEGIN
+  ALTER TABLE blaze_config.workflow
+    ADD CONSTRAINT workflow_reopen_to_fk
+    FOREIGN KEY (scope, name, reopen_to)
+    REFERENCES blaze_config.workflow_status (scope, workflow, status)
+    DEFERRABLE INITIALLY DEFERRED;
+EXCEPTION WHEN duplicate_object THEN NULL;
+END $$;`,
       inlineCircularFk: "",
       namespace: "CREATE SCHEMA IF NOT EXISTS blaze_config;",
       ifNotExists: "IF NOT EXISTS ",
@@ -299,8 +314,20 @@ export function configSeedSql(name, seed = configSeed()) {
     for (const row of seed[table] ?? []) {
       const cols = Object.keys(row);
       const ph = cols.map((_, i) => (pg ? `$${i + 1}` : "?"));
+      // Re-runnable, for the same reason the DDL is: `blaze_config` outlives the data tables,
+      // KNOWN LIMIT, stated where someone would hit it: this makes the DATABASE out-rank the
+      // registry. A namespace that survives a rebuild keeps its old rows if a code registry has
+      // since changed. `blaze db init` removes both files on every create so the supported path
+      // never reaches it; making the seed authoritative needs `ON CONFLICT (pk) DO UPDATE` and a
+      // per-table primary-key map. See docs/superpowers/plans/2026-08-25-blz-377-install-plan.md.
+      // so a create against a database that already carries it re-applies this seed. Without
+      // the guard the second run dies on a primary-key collision. `write-rules.mjs` next door
+      // already seeds `migration_mode` exactly this way in both dialects.
       out.push({
-        sql: `INSERT INTO blaze_config.${table} (${cols.join(", ")}) VALUES (${ph.join(", ")})`,
+        sql: pg
+          ? `INSERT INTO blaze_config.${table} (${cols.join(", ")}) VALUES (${ph.join(", ")}) `
+            + "ON CONFLICT DO NOTHING"
+          : `INSERT OR IGNORE INTO blaze_config.${table} (${cols.join(", ")}) VALUES (${ph.join(", ")})`,
         params: cols.map((c) => enc(row[c])),
       });
     }
@@ -311,6 +338,49 @@ export function configSeedSql(name, seed = configSeed()) {
 /** `ATTACH` statement a SQLite caller runs before the config DDL. */
 export function sqliteAttachConfig(path = ":memory:") {
   return `ATTACH DATABASE '${String(path).replace(/'/g, "''")}' AS blaze_config;`;
+}
+
+/**
+ * Where the config namespace's file lives for a given main database (BLZ-377).
+ *
+ * Beside the database it belongs to, following `identityDbPath`'s precedent of a second
+ * SQLite file under `.blaze/`. Derived from the main path rather than from `dataRoot` so
+ * that ONE rule serves both openers — `openSqliteRead` is handed a path and never sees a
+ * data root.
+ *
+ * `:memory:` maps to `:memory:`, which ATTACHes a SEPARATE anonymous in-memory database.
+ * Giving an in-memory database an on-disk config file would leave a stray `config.db` in
+ * whatever directory a test happened to run from.
+ */
+export function configDbPathFor(mainPath) {
+  return mainPath === ":memory:" ? ":memory:" : join(dirname(mainPath), "config.db");
+}
+
+/**
+ * The seed, in one transaction, SYNCHRONOUSLY (BLZ-377).
+ *
+ * Not a duplicate of `seedConfigInTransaction` for style. That function is `async`, and
+ * node:sqlite's driver is synchronous: every `await` in it defers to a microtask, so a
+ * synchronous caller like `createDbSchemaSync` returns BEFORE the seed has run and hands
+ * back a database whose config tables are still empty. There is no way to await it from a
+ * sync path — that is structural, the same split `readSchemaFactsSync` already makes.
+ *
+ * The transaction is load-bearing for the same reason it is there: `workflow.reopen_to` is
+ * a deferred circular FK, so the seed is only consistent at COMMIT and fails on the first
+ * `workflow` row without one.
+ *
+ * @param run  (sql, params) => void — a SYNCHRONOUS execute. Passing an async one silently
+ *             reintroduces the very bug this exists to avoid.
+ */
+export function seedConfigSync(run, name, seed = configSeed()) {
+  run("BEGIN", []);
+  try {
+    for (const { sql, params } of configSeedSql(name, seed)) run(sql, params);
+    run("COMMIT", []);
+  } catch (e) {
+    try { run("ROLLBACK", []); } catch { /* the original error is what matters */ }
+    throw e;
+  }
 }
 
 /**

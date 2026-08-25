@@ -5,7 +5,7 @@
 // operation, plus the command that reads back what a dual-write soak has found.
 import { existsSync, readFileSync, rmSync } from "node:fs";
 import { resolveRoots, loadConfig } from "./config.mjs";
-import { openShadow, shadowDbPath, divergenceLogPath,
+import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
          readSoakState } from "./model/write-port-resolve.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
@@ -27,7 +27,38 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
     err("holds, including any divergences not yet reviewed.");
     return 1;
   }
-  if (force && existsSync(path)) rmSync(path, { force: true });
+  // BLZ-377: the config namespace is a SECOND file, and it is just as derived as the shadow.
+  // Removing only `blaze.db` left a stale `config.db` beside a fresh one — the create then
+  // re-seeded a `view_type` that already had its six rows and died on the UNIQUE constraint.
+  // A half-replaced pair is exactly the state `--force` exists to avoid, so both go together.
+  // Both files go together, on EVERY create rather than only under --force. Reaching here means
+  // a fresh shadow is being built (init refuses an existing one without --force), and a
+  // `config.db` left behind by an older engine would then be silently REUSED: its tables are
+  // all `CREATE TABLE IF NOT EXISTS`, so a column added since would never appear, and the
+  // version stamp that would catch it lives in `blaze_meta`, in the OTHER file, which was just
+  // recreated at the current version. That is precisely the silent-stale-schema defect BLZ-297
+  // exists to prevent, and the namespace is derived, so rebuilding costs nothing.
+  const cfgPath = configDbPath(dataRoot);
+  // Each removal is a NAMED REFUSAL rather than an escaping exception. They run in sequence, so
+  // a failure on the second still leaves the first removed — that is safe and is why the message
+  // says so: both files are derived, the state is idempotent on retry, and `blaze db init`
+  // rebuilds whatever is missing. `rmSync(..., { force: true })` is NOT recursive, so a
+  // `config.db` that is a DIRECTORY threw an uncaught EISDIR — after `blaze.db` had already
+  // been deleted, leaving no shadow, no message, and the same throw on every retry. A
+  // read-only `.blaze` did the same with EACCES. Both printed a caught message before this
+  // ticket touched them; `runDb`'s try/catch sits further out than this code runs.
+  for (const [label, target] of [["shadow database", force ? path : null], ["config namespace", cfgPath]]) {
+    if (!target || !existsSync(target)) continue;
+    try { rmSync(target, { recursive: true, force: true }); }
+    catch (e) {
+      err(`blaze db init: cannot remove the ${label} at ${target}.\n`);
+      err(`  ${e.message}\n`);
+      err("Remove it by hand and run 'blaze db init' again. Both files are derived, so");
+      err("deleting them loses nothing the corpus does not already hold — including whichever");
+      err("of the pair was already removed before this one failed.");
+      return 1;
+    }
+  }
 
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.

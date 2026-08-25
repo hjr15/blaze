@@ -17,6 +17,9 @@ import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
 export const shadowDbPath = (dataRoot) => join(dataRoot, ".blaze", "blaze.db");
+/** The config namespace's file, beside the shadow (BLZ-377). Same rule as `configDbPathFor`,
+ *  spelled in terms of a data root for callers that have one. */
+export const configDbPath = (dataRoot) => join(dataRoot, ".blaze", "config.db");
 export const divergenceLogPath = (dataRoot) => join(dataRoot, ".blaze", "divergences.jsonl");
 export const soakStatePath = (dataRoot) => join(dataRoot, ".blaze", "soak-ops.jsonl");
 
@@ -45,6 +48,10 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   const db = new DatabaseSync(path);
   const { SQLITE_PRAGMAS } = await import("./sqlite-schema.mjs");
   db.exec(SQLITE_PRAGMAS);
+  // BLZ-377: same contract as openSqliteRead — the config namespace is attached on every
+  // open, because the opener is the only thing that knows where its file lives.
+  const { sqliteAttachConfig, configDbPathFor } = await import("./config-schema.mjs");
+  const cfgPath = configDbPathFor(path);
   const exec = sqliteExec(db);
   const { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } =
     await import("./db-schema-version.mjs");
@@ -53,8 +60,28 @@ export async function openShadow(dataRoot, { create = false } = {}) {
   // This branch tested only `state === "empty"` and DISCARDED `ok`, so an out-of-range shadow
   // was opened silently: exactly the case the version floor exists to refuse, waved through by
   // the one opener that did not ask. sqlite-storage.mjs and pg-storage.mjs both check `ok`.
-  if (create && state.state === "empty") createDbSchemaSync(exec);
-  else if (!state.ok) { db.close(); throw new Error(`blaze: ${state.error}`); }
+  if (!state.ok && !(create && state.state === "empty")) {
+    db.close(); throw new Error(`blaze: ${state.error}`);
+  }
+  // Same contract and same ORDER as openSqliteRead: the version judgement speaks first, so a
+  // stale shadow still names itself, and only a database that is otherwise fine is required to
+  // have its namespace already. Attaching a missing file would CREATE it and let a
+  // half-deleted pair look healthy.
+  const makingOne = create && state.state === "empty";
+  // ATTACH CREATES the file, so it is only reached when a namespace is being made or one is
+  // already there. The `empty` branch skipped this check and attached anyway, so a read open
+  // over an empty shadow WROTE a 0-byte config.db — the very disguise this guard exists to
+  // stop, on the branch `blaze db status` actually uses.
+  if (cfgPath !== ":memory:" && !makingOne && !existsSync(cfgPath)) {
+    db.close();
+    throw new Error(
+      `blaze: the config namespace is missing at ${cfgPath}, but the shadow database beside it `
+      + "exists. The namespace is derived, so rebuild rather than repair it: run "
+      + "'blaze db init --force'.");
+  }
+  db.exec(sqliteAttachConfig(cfgPath));
+  if (makingOne) createDbSchemaSync(exec);
+  else assertConfigNamespace(db, cfgPath);
   return { db, exec, path };
 }
 
@@ -138,4 +165,23 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
     move(t, ctx) { recordSoakOp(dataRoot); return port.move(t, ctx); },
   };
   return { port: counted, mode, close };
+}
+
+/**
+ * A namespace that is present but EMPTY is the same failure as a missing one, and `existsSync`
+ * cannot tell them apart (BLZ-377).
+ *
+ * A 0-byte `config.db` — left by an interrupted init, or by an older engine's read open before
+ * the guard above existed — attaches happily, so `blaze db status` reported a healthy v4 while
+ * every `blaze_config.view` query failed with "no such table". The stamp cannot catch it: it
+ * lives in `blaze_meta`, in the other file.
+ */
+export function assertConfigNamespace(db, cfgPath) {
+  const rows = db.prepare(
+    "SELECT name FROM blaze_config.sqlite_master WHERE type = 'table' AND name = 'view_type'").all();
+  if (rows.length) return;
+  db.close();
+  throw new Error(
+    `blaze: the config namespace at ${cfgPath} is empty — it holds no Blaze tables. It is `
+    + "derived, so rebuild rather than repair it: run 'blaze db init --force'.");
 }

@@ -17,8 +17,8 @@ Blaze v3 has **no tenant dimension**. Four tables are `id integer PRIMARY KEY CH
 
 | Singleton table | Declared at |
 |---|---|
-| `blaze_config.board` | `scripts/model/config-schema.mjs:87` |
-| `blaze_config.config_version` | `scripts/model/config-schema.mjs:99` |
+| `blaze_config.board` | `scripts/model/config-schema.mjs:102` |
+| `blaze_config.config_version` | `scripts/model/config-schema.mjs:114` |
 | `projection_meta` | `scripts/model/projection-schema.mjs:28` |
 | `migration_mode` | `scripts/model/write-rules.mjs:69` (SQLite), `scripts/model/write-rules.mjs:119` (Postgres) |
 
@@ -138,7 +138,7 @@ one board."* Four things in it were wrong, all re-verified against the working t
 | The ADR said | What is true |
 |---|---|
 | `board_config` is a singleton | It has never existed — `grep -rn 'board_config' scripts/` returns 0 |
-| *(omitted `config_version`)* | `blaze_config.config_version` is a real singleton, `config-schema.mjs:99` |
+| *(omitted `config_version`)* | `blaze_config.config_version` is a real singleton, `config-schema.mjs:114` |
 | "the two write-rules tables" | One table counted twice — `write-rules.mjs:69` and `:119` are the SQLite and Postgres dialects of `migration_mode` |
 | "One installation is one board" | `deriveBoards()` returns **4** — `delivery` (folding `goal`), `requirement`, `architecture`, `risk` |
 

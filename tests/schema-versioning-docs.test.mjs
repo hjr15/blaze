@@ -18,6 +18,7 @@ import { readFileSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SCHEMA_VERSION, MIN_SCHEMA_VERSION } from "../scripts/model/schema-version.mjs";
+import { DB_SCHEMA_VERSION, MIN_DB_SCHEMA_VERSION } from "../scripts/model/db-schema-version.mjs";
 
 const DOC = join(dirname(fileURLToPath(import.meta.url)), "..", "docs", "schema-versioning.md");
 
@@ -49,5 +50,49 @@ test("BLZ-356: the doc does not claim there is nothing to migrate once past vers
   if (SCHEMA_VERSION > 1) {
     assert.doesNotMatch(text, /at version 1 there is nothing\s+to migrate/,
       "SCHEMA_VERSION is past 1, so this claim is stale");
+  }
+});
+
+// --- BLZ-377 -----------------------------------------------------------------
+// The section below "The DATABASE schema is a different number" carried its version in
+// PROSE — "Both are 3 as of BLZ-390" — with nothing checking it. That is the same gap
+// BLZ-356 closed for the config version's constants table, one section higher in the same
+// document, and it went stale the moment this ticket bumped the number. An operator reads
+// this section after a refusal, which is exactly when it has to be right.
+
+test("BLZ-377: the doc's DB schema version matches the constant", () => {
+  const text = readFileSync(DOC, "utf8");
+  const m = /\*\*Both are (\d+) as of ([A-Z]+-\d+)\.\*\*/.exec(text);
+  assert.notEqual(m, null,
+    'the DB-schema section must carry a "**Both are N as of TICKET.**" sentence');
+  assert.equal(Number(m[1]), DB_SCHEMA_VERSION,
+    `docs/schema-versioning.md says the DB schema version is ${m[1]}, the code says ${DB_SCHEMA_VERSION}`);
+  assert.equal(DB_SCHEMA_VERSION, MIN_DB_SCHEMA_VERSION,
+    'the doc says "both are N", so this claim only holds while the two constants agree — '
+    + `they are ${DB_SCHEMA_VERSION} and ${MIN_DB_SCHEMA_VERSION}`);
+});
+
+/** The "The DATABASE schema is a different number" section alone. Everything above it is the
+ *  CONFIG schema's, whose own version numbers are different numbers that happen to look alike. */
+function dbSection(text) {
+  const i = text.indexOf("## The DATABASE schema is a different number");
+  if (i < 0) return null;
+  const j = text.indexOf("\n## ", i + 1);
+  return text.slice(i, j < 0 ? text.length : j);
+}
+
+test("BLZ-377: the doc names every version an operator can actually be refused for", () => {
+  // The refusal message enumerates the stranded versions by number. A doc that stops naming one
+  // leaves the operator who hit it with no entry to look up.
+  //
+  // SCOPED TO THE DB SECTION. Searching the whole document was near-vacuous: adversarial review
+  // deleted every mention of version 1 from this section and the test stayed green, because
+  // `\b1\b` matched the config-schema table's `| MIN_SCHEMA_VERSION | 1 |` one heading above.
+  const section = dbSection(readFileSync(DOC, "utf8"));
+  assert.notEqual(section, null, "the DATABASE-schema section must exist");
+  for (let v = 1; v < MIN_DB_SCHEMA_VERSION; v++) {
+    assert.ok(new RegExp(`\\b${v}\\b`).test(section),
+      `version ${v} is below the floor and can be refused, but the DATABASE-schema section `
+      + "never names it — an operator who hits that refusal has no entry to look up");
   }
 });
