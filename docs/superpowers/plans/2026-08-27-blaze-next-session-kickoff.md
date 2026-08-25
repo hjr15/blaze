@@ -274,4 +274,4 @@ BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55450/postgres \
   node --test --test-concurrency=1 tests/model/config-schema.test.mjs tests/model/driver-conformance.test.mjs
 ```
 
-That pairing is the cheapest reproduction of the whole class. It passes **51/51** on .
+That pairing is the cheapest reproduction of the whole class. It passes **51/51** on `d8549b5`.
