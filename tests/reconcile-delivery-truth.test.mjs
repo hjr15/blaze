@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { reconcile, buildPrMap, decide, idsFromCommitMessage, idsFromSubject } from "../scripts/reconcile.mjs";
+import { reconcile, buildPrMap, buildBranchMap, decide, idsFromCommitMessage, idsFromSubject } from "../scripts/reconcile.mjs";
 
 const idFromRef = (ref) => {
   const m = /\bINF-(\d+)/i.exec(ref || "");
@@ -580,6 +580,31 @@ describe("BLZ-131: the leading anchor, and the house's other multi-id form", () 
     assert.deepEqual(idsFromSubject("revert BLZ-42: undo", "BLZ"), []);
     assert.deepEqual(idsFromSubject("chore: bump deps BLZ-99: never shipped", "BLZ"), []);
     assert.deepEqual(idsFromCommitMessage("revert BLZ-42: undo\n\n* BLZ-43: x", "BLZ"), []);
+  });
+
+  // THE SIBLING ANCHOR, WHICH "pin the anchors" DID NOT PIN. `idFromSubject` carries the
+  // same leading `^` as `idsFromSubject` and gates BRANCH CORROBORATION, and deleting it
+  // left the whole suite green. Asserted through `buildBranchMap` rather than the bare
+  // function, because the gate is the thing that matters: without the anchor a branch
+  // whose only commit is `revert BLZ-42: undo` corroborates BLZ-42 and shadows that
+  // ticket's real branch — the id-squatting the function's own comment warns about.
+  test("a branch whose commits only MENTION an id does not corroborate it", () => {
+    const refs = ["BLZ-42-squatter"];
+    const map = buildBranchMap(refs, () => "BLZ-42", {
+      key: "BLZ",
+      shippedSet: new Set(),
+      inspect: () => ({ own: ["revert BLZ-42: undo"], sameTipAsDefault: false }),
+    });
+    assert.equal(map.has("BLZ-42"), false,
+      "a downstream mention must not corroborate a branch");
+
+    const led = buildBranchMap(refs, () => "BLZ-42", {
+      key: "BLZ",
+      shippedSet: new Set(),
+      inspect: () => ({ own: ["BLZ-42: the real work"], sameTipAsDefault: false }),
+    });
+    assert.equal(led.get("BLZ-42"), "BLZ-42-squatter",
+      "a leading id must still corroborate — this is a gate, not a wall");
   });
 
   test("`/` accepts a repeated key as well as a bare number", () => {
