@@ -26,7 +26,21 @@ import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 
-const PR_RANK = { MERGED: 3, OPEN: 2, CLOSED: 1 };
+// BLZ-130: SELECTION precedence — deliberately NOT "how far along the PR is".
+// An OPEN PR outranks a MERGED one, because while any PR carrying the key is still
+// open the work is not shipped, whatever an earlier PR did. Epic INF-645 was
+// reported done off a docs-only PR #80 that merged while PR #81 — the actual work —
+// was open; the merged signal won on rank, and terminal status is sticky, so
+// nothing re-opened it when #81 landed later.
+//
+// This is a veto, not a re-ordering of "progress": MERGED still beats CLOSED, and a
+// ticket whose only PR is merged still reaches done. It costs a delayed done (the
+// ticket sits in in-review until the last PR carrying its key closes) and buys back
+// the failure that biases toward saying shipped when it is not.
+//
+// Type-independent on purpose. The ticket asks whether `story` shares the failure;
+// every delivery type does, because ranking never sees the type.
+const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
 
 // --- shelling out, in two layers (BLZ-350) ------------------------------------
 // `shResult` is the honest one: it reports WHAT happened — exit status, stderr,

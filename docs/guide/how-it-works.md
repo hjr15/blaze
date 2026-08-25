@@ -67,7 +67,7 @@ status from three independent signals, and only one of them needs a forge:
 |---|---|---|
 | Branch named `<KEY>-<n>-…` | `git for-each-ref` | `in-progress` |
 | `<KEY>-<n>: …` commit on the default branch | `git log` | `done` (bundled children) |
-| Pull request for `<KEY>-<n>` | `gh pr list` | `in-review` (OPEN), `done` (MERGED), `in-progress` (CLOSED) |
+| Pull request for `<KEY>-<n>` | `gh pr list` | `in-review` (any OPEN), `done` (MERGED, and only when none is OPEN), `in-progress` (CLOSED) |
 
 So the reachable statuses depend on where the code repo's remotes point. Note
 **remotes**, plural, and not just `origin`: `gh` resolves its base repo from *any*
@@ -81,6 +81,14 @@ GitHub remote, so a repo whose only GitHub remote is named `upstream` — or one
 | At least one remote on a host Blaze cannot classify | yes | yes, if `gh` can read it | yes |
 | **Every** remote on GitLab, Bitbucket, Gitea, Forgejo/Codeberg, Azure DevOps or sourcehut | yes | **no** | yes, only via a `<KEY>-<n>:` commit on the default branch — never via a merged PR |
 | No remotes, or only local-path remotes | yes | **no** | same as above |
+
+**An open pull request vetoes `done` (BLZ-130).** A ticket reaches `done` from a
+merged PR only while **no** PR carrying its key is still open. A feature accumulates
+more than one PR over its life, and any early one — a spike, a decision record, a
+docs-only precursor — used to satisfy "a merged PR carrying this key ⇒ done" and
+report the whole feature complete while its actual work sat unmerged. Terminal status
+is sticky, so nothing re-opened it afterwards. The cost of the veto is a delayed
+`done`: the ticket waits in `in-review` until the last PR carrying its key closes.
 
 An unclassifiable host is handed to `gh` rather than pre-rejected, because GitHub
 Enterprise Server is self-hosted under an arbitrary hostname and guessing

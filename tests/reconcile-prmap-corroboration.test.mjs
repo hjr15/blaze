@@ -44,19 +44,27 @@ test("buildPrMap: shippedSet corroborates a PR whose title breaks convention", (
   assert.equal(map.get("ZZZ-10").number, 28);
 });
 
-test("buildPrMap: rank contest is unchanged for corroborated PRs — MERGED beats OPEN", () => {
+// BLZ-130 INVERTED THIS. It previously asserted MERGED beats OPEN, which is the
+// defect stated as an invariant: an early docs-only PR merging under an epic's key
+// drove the epic to done while the PR carrying its work was still open. Corroboration
+// (INF-735, this file's subject) is untouched — the gate still runs first and still
+// drops uncorroborated claims. Only the contest BETWEEN two surviving claims moved.
+test("buildPrMap: an OPEN PR beats a MERGED one — work outstanding is not work shipped", () => {
   const prs = [
     { number: 1, state: "OPEN", url: "u1", headRefName: "ZZZ-500-a", title: "ZZZ-500: open work" },
     { number: 2, state: "MERGED", url: "u2", headRefName: "ZZZ-500-b", title: "ZZZ-500: merged work" },
   ];
   const map = buildPrMap(prs, idFromRef, new Set());
-  assert.equal(map.get("ZZZ-500").number, 2);
-  assert.equal(map.get("ZZZ-500").state, "MERGED");
+  assert.equal(map.get("ZZZ-500").number, 1);
+  assert.equal(map.get("ZZZ-500").state, "OPEN");
 });
 
 test("buildPrMap: an uncorroborated MERGED PR cannot outrank a corroborated OPEN one", () => {
-  // The ranking half of the bug: MERGED (rank 3) beat the real repo's OPEN
-  // (rank 2). Dropping the bogus claim must leave the real one standing.
+  // The ranking half of the bug: the bogus MERGED claim beat the real repo's OPEN
+  // one. Dropping the bogus claim must leave the real one standing. This still
+  // proves the GATE rather than the rank — BLZ-130 has since reversed the rank
+  // (OPEN 3, MERGED 2), so keep the uncorroborated PR MERGED: it is the state that
+  // would otherwise be most dangerous, and the assertion must hold on the gate alone.
   const prs = [
     { number: 37, state: "MERGED", url: "u37", headRefName: "ZZZ-28-docs-kickoff-brief",
       title: "docs: kickoff brief for the closeout" },
