@@ -39,8 +39,10 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
   // recreated at the current version. That is precisely the silent-stale-schema defect BLZ-297
   // exists to prevent, and the namespace is derived, so rebuilding costs nothing.
   const cfgPath = configDbPath(dataRoot);
-  // BOTH removals happen BEFORE either is attempted destructively, and each is a named refusal
-  // rather than an escaping exception. `rmSync(..., { force: true })` is NOT recursive, so a
+  // Each removal is a NAMED REFUSAL rather than an escaping exception. They run in sequence, so
+  // a failure on the second still leaves the first removed — that is safe and is why the message
+  // says so: both files are derived, the state is idempotent on retry, and `blaze db init`
+  // rebuilds whatever is missing. `rmSync(..., { force: true })` is NOT recursive, so a
   // `config.db` that is a DIRECTORY threw an uncaught EISDIR — after `blaze.db` had already
   // been deleted, leaving no shadow, no message, and the same throw on every retry. A
   // read-only `.blaze` did the same with EACCES. Both printed a caught message before this
@@ -51,8 +53,9 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
     catch (e) {
       err(`blaze db init: cannot remove the ${label} at ${target}.\n`);
       err(`  ${e.message}\n`);
-      err("Remove it by hand and run 'blaze db init' again — both files are derived, so");
-      err("deleting them loses nothing the corpus does not already hold.");
+      err("Remove it by hand and run 'blaze db init' again. Both files are derived, so");
+      err("deleting them loses nothing the corpus does not already hold — including whichever");
+      err("of the pair was already removed before this one failed.");
       return 1;
     }
   }

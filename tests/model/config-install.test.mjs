@@ -390,3 +390,44 @@ describe("BLZ-377: a present-but-EMPTY namespace is refused like a missing one",
     } finally { rmSync(dir, { recursive: true, force: true }); }
   });
 });
+
+describe("BLZ-377: openShadow honours the same contract as openSqliteRead", () => {
+  // Both guards existed only on the `openSqliteRead` twin, so two mutations survived the full
+  // suite: dropping the namespace assertion here, and letting a READ create the schema.
+  // `blaze db status` goes through this opener, so both were live behaviours.
+  const shadowBoard = () => {
+    const root = mkdtempSync(join(tmpdir(), "blz377-shadow-"));
+    mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "ENG", projects: ["ENG"] }));
+    writeFileSync(join(root, "projects", "ENG", "defined", "ENG-1-x.md"),
+      ["---", "id: ENG-1", 'title: "x"', "type: task", "project: ENG", "status: defined",
+       "estimate: 480", "---", ""].join("\n"));
+    return root;
+  };
+
+  test("a truncated config.db is refused, not read as healthy", async () => {
+    const { openShadow } = await import("../../scripts/model/write-port-resolve.mjs");
+    const root = shadowBoard();
+    try {
+      const made = await openShadow(root, { create: true });
+      made.db.close();
+      writeFileSync(join(root, ".blaze", "config.db"), "");
+      await assert.rejects(() => openShadow(root, { create: false }),
+        /namespace .* is empty|no Blaze tables/,
+        "a 0-byte namespace opened as if the board were healthy");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a READ never creates the schema, nor the config file", async () => {
+    const { openShadow } = await import("../../scripts/model/write-port-resolve.mjs");
+    const root = shadowBoard();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      writeFileSync(join(root, ".blaze", "blaze.db"), "");   // an empty, schema-less shadow
+      await assert.rejects(() => openShadow(root, { create: false }), /./,
+        "a read open over a schema-less shadow succeeded, and so wrote DDL");
+      assert.ok(!existsSync(join(root, ".blaze", "config.db")),
+        "a read open CREATED the config namespace");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
