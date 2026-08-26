@@ -27,7 +27,7 @@ import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
-import { addUser, ensureIdentityIgnored } from "./model/user-admin.mjs";
+import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admin.mjs";
 import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
          ensureSetupTokenIgnored } from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
@@ -144,7 +144,15 @@ function envPort() {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null;
 }
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views, identity = loadIdentity(root) } = {}) {
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views, identity = loadIdentity(root),
+                             // INJECTABLE FOR THE SAME REASON `identity` IS. The in-flight guard
+                             // below is only observable when `addUser` actually yields, and the
+                             // SQLite store does not — so with the real one, ten concurrent
+                             // correct-token requests are serialised by the event loop and the
+                             // 409 branch is never taken. Removing the guard entirely changed no
+                             // test. A store that yields (Postgres) would reach it, so the guard
+                             // is real; it just could not be SEEN. Defaults to the real one.
+                             addUser = addUserImpl } = {}) {
   // BLZ-348, ADR-0013. checkBindSafety() has existed and been tested since BLZ-304 and
   // was called by nothing, so the one control written for exactly this configuration was
   // dead code: an operator publishing the port to a LAN interface got an unauthenticated

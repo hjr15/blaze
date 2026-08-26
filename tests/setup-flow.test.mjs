@@ -483,6 +483,68 @@ describe("BLZ-358: only one setup can be in flight", () => {
     } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
+  // THE IN-FLIGHT GUARD WAS UNOBSERVABLE. Deleting the 409 check AND the flag that sets
+  // it changed no test in the suite, and lcov showed the 409 branch with zero hits. The
+  // reason is that `addUser` on the SQLite store never yields, so ten concurrent correct-
+  // token requests are serialised by the event loop: one wins with 200 and the other nine
+  // are 404ed by `gate()` AFTER `setupPending` flipped — refused by the very accident the
+  // guard exists so as not to rely on. A store that yields reaches the guard, so it is
+  // real; it simply could not be seen. `addUser` is injected here to make it yield.
+  test("only ONE concurrent setup wins when addUser yields — the rest get 409", async () => {
+    const { root, projects } = board();
+    let calls = 0;
+    const yieldingAddUser = async (r, opts) => {
+      calls += 1;
+      await new Promise((res) => setTimeout(res, 40));   // a real await point
+      return addUser(r, opts);
+    };
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0",
+                                          addUser: yieldingAddUser });
+    try {
+      const token = readSetupToken(root);
+      const results = await Promise.all(Array.from({ length: 10 }, () =>
+        postSetup(base, { token, email: "a@b.c" }).then((r) => r.status)));
+      const tally = results.reduce((m, x) => ({ ...m, [x]: (m[x] || 0) + 1 }), {});
+      assert.equal(tally[200], 1, `exactly one setup may succeed, got ${JSON.stringify(tally)}`);
+      assert.equal(tally[409], 9,
+        `the other nine must be refused BY THE GUARD, not by a race we got lucky on — got ${JSON.stringify(tally)}`);
+      assert.equal(calls, 1, "addUser must be reached exactly once");
+      const ident = loadIdentity(root);
+      try {
+        assert.equal(ident.state, "healthy");
+        assert.equal((await ident.store.listUsers()).length, 1,
+          "exactly one admin may be created, however many requests raced");
+      } finally { ident.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // AND THE LATCH MUST CLEAR ON FAILURE. Dropping `setupInFlight = false` from the
+  // addUser catch also changed no test: the one that claims to cover it sends
+  // `email: { bad: 1 }`, which the email type guard rejects one line EARLIER, so it
+  // never reaches the flag at all. Without the reset, a single failed creation latches
+  // the flag forever and setup can never be completed — on a board with no identity,
+  // that is a permanently unusable install needing a restart.
+  test("a FAILED creation clears the latch — setup stays completable, not bricked", async () => {
+    const { root, projects } = board();
+    let n = 0;
+    const failsOnce = async (r, opts) => {
+      n += 1;
+      if (n === 1) throw new Error("store unavailable");
+      return addUser(r, opts);
+    };
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0",
+                                          addUser: failsOnce });
+    try {
+      const token = readSetupToken(root);
+      assert.equal((await postSetup(base, { token, email: "a@b.c" })).status, 400,
+        "a failed creation is a 400");
+      const retry = await postSetup(base, { token, email: "a@b.c" });
+      assert.equal(retry.status, 200,
+        "the latch must have cleared — a 409 here means setup is bricked for good");
+      assert.equal(n, 2, "the retry must actually reach addUser");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("a rejected email leaves setup completable", async () => {
     const { root, projects } = board();
     const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
