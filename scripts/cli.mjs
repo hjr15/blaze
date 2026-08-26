@@ -101,29 +101,44 @@ if (isReadonly() && sub.mutates) {
 // Every verb dispatches through this file, so it is the one place a load-path check can
 // live without being added to a dozen runners and forgotten in the thirteenth.
 //
-// TWO EXEMPTIONS, BOTH DELIBERATE, AND THIS IS AC-4's RECORDED DECISION:
+// THREE EXEMPTIONS, ALL DELIBERATE, AND THIS IS AC-4's RECORDED DECISION. The count is
+// stated because it was wrong once — the list said two while the Set below held three, the
+// `commit` bullet having been appended below the closing paragraph and orphaned from the
+// list. Keep the number, the bullets and the Set in step; prose that asserts what the code
+// does not is the failure this branch has already paid for twice.
 //
-//   audit — reporting exactly this class IS its job. `auditCorpus` calls `validateSchema`
-//           and emits `schema-invalid` as a soft finding, so refusing to start it would
-//           delete the report that tells the operator what to fix. BLZ-392 closed that
-//           defect (a throw from inside `auditCorpus` killed `blaze audit` outright,
-//           losing the whole hygiene report) and it stays closed.
-//   init  — runs BEFORE a board exists, so there is no config to validate.
+//   audit  — reporting exactly this class IS its job. `auditCorpus` calls `validateSchema`
+//            and emits `schema-invalid` as a soft finding, so refusing to start it would
+//            delete the report that tells the operator what to fix. BLZ-392 closed that
+//            defect (a throw from inside `auditCorpus` killed `blaze audit` outright,
+//            losing the whole hygiene report) and it stays closed.
+//   init   — runs BEFORE a board exists, so there is no config to validate.
+//   commit — a git flush of the pending ledger. `commit-runner.mjs` imports nothing from
+//            the model, and refusing it would strand ticket files that other verbs have
+//            ALREADY relocated but not committed — the same hazard the read-only gate
+//            above cites for gating too late.
+//
+// That leaves 18 of the 21 subcommands in `SUBCOMMANDS` running this check.
 //
 // The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
 // there would kill every verb before it ran, `audit` included, with a raw stack trace.
 // See ADR-0002 and the note on `assertSchemaValid`.
-//   commit — a git flush of the pending ledger. `commit-runner.mjs` imports nothing from
-//           the model, and refusing it would strand ticket files that other verbs have
-//           ALREADY relocated but not committed — the same hazard the read-only gate
-//           above cites for gating too late.
 const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init", "commit"]);
 if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
   try {
     const { resolveRoots, loadConfig, listProjects, loadProject } = await import("./config.mjs");
     const { resolveSchema, assertSchemaValid } = await import("./model/schema-config.mjs");
-    const root = resolveRoots().dataRoot;
+    const { fsReadStorage } = await import("./model/read-storage.mjs");
+    // BOTH roots, and `projectsDir` is not derivable from `dataRoot`. `resolveRoots` returns
+    // an explicit projectsDir and derives dataRoot as its PARENT, while `loadProject`
+    // defaults to `join(root, "projects")` — so with BLAZE_PROJECTS_DIR pointing at a
+    // directory named anything else, every `loadProject` below threw, was swallowed, and
+    // every project resolved to null. The project layer was then never validated and
+    // `endpointTypes` never picked up a project-declared type. scripts/audit-runner.mjs uses
+    // `roots.projectsDir` verbatim; this follows it, because the whole design of this
+    // preflight is that it judges the board the way audit judges it.
+    const { dataRoot: root, projectsDir } = resolveRoots();
     const config = loadConfig({ root });
 
     // JUDGED THE WAY `auditCorpus` JUDGES IT, and this is not a detail. A top-level
@@ -132,9 +147,16 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     // cut of this preflight dropped it and validated the top layer alone, so every
     // non-exempt verb refused to run on a board `blaze audit` calls clean. A check that
     // disagrees with audit on the same board is worse than no check at all.
+    // The project set, with audit-runner.mjs's fallback and for audit-runner.mjs's stated
+    // reason: `listProjects` returns [] when `blaze.config.json` carries no `projects` array,
+    // so without this the preflight validated NOTHING and passed — "a gate that passes
+    // because it measured nothing is worse than no gate". Each source must be non-EMPTY to
+    // win, not merely non-null, which is the same trap `??` alone walked into there.
+    const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
+    const keys = nonEmpty(listProjects(config)) ?? fsReadStorage.listProjects(projectsDir);
     const projects = {};
-    for (const k of listProjects(config)) {
-      try { projects[k] = loadProject(k, { root }); } catch { projects[k] = null; }
+    for (const k of keys) {
+      try { projects[k] = loadProject(k, { root, projectsDir }); } catch { projects[k] = null; }
     }
     const top = resolveSchema({ config });
     const endpointTypes = { ...top.types };

@@ -145,3 +145,32 @@ test("blaze __proto__ --help (an inherited Object.prototype key) prints usage an
   assert.notEqual(r.status, 0);
   assert.match(r.stdout, /usage: blaze/);
 });
+
+// BLZ-56. The schema-preflight comment stated "TWO EXEMPTIONS" directly above a Set of
+// THREE — the `commit` bullet had been appended below the closing paragraph and orphaned
+// from the list, so the prose asserted what the code did not. That is the class this lane
+// has already paid a review round for, so the count is now checked rather than trusted.
+test("the schema-preflight comment's arithmetic matches the code beneath it", () => {
+  const src = readFileSync(cli, "utf8");
+  const SUBCOMMANDS = parseSubcommands(src);
+  const m = src.match(/const SCHEMA_PREFLIGHT_EXEMPT = new Set\((\[[^\]]*\])\)/);
+  assert.ok(m, "SCHEMA_PREFLIGHT_EXEMPT not found in cli.mjs");
+  const exempt = new Function(`return ${m[1]}`)();
+  const total = Object.keys(SUBCOMMANDS).length;
+  const checked = total - exempt.length;
+
+  // Every exempt name must actually be a subcommand — an exemption for a verb that does
+  // not exist is a verb silently left unguarded under a name nobody dispatches.
+  for (const name of exempt) {
+    assert.ok(Object.hasOwn(SUBCOMMANDS, name), `${name} is exempt but is not a subcommand`);
+  }
+  const WORDS = ["ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE"];
+  assert.match(src, new RegExp(`${WORDS[exempt.length]} EXEMPTIONS`),
+    `the comment must say ${WORDS[exempt.length]} EXEMPTIONS — the Set holds ${exempt.length}`);
+  assert.match(src, new RegExp(`${checked} of the ${total} subcommands`),
+    `the comment must say "${checked} of the ${total} subcommands"`);
+  // And one bullet per exemption, so the count and the list cannot drift apart either.
+  for (const name of exempt) {
+    assert.match(src, new RegExp(`^//\\s+${name}\\s+—`, "m"), `no bullet for the '${name}' exemption`);
+  }
+});

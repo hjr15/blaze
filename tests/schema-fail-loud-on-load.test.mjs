@@ -195,3 +195,111 @@ describe("BLZ-56: the loud error survives the pipe it is written to", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+
+// =============================================================================
+// Round 3 — the preflight was a WALL on two boards audit calls clean, and a
+// NO-OP on two boards it should have refused.
+// =============================================================================
+
+/** A board with full control over the config, the project.json, and the name of the
+ *  directory the projects live in — because two of the four defects below are only
+ *  reachable when that name is not the literal "projects". */
+function board3({ config = {}, projectJson = { key: "ENG", name: "Eng" }, dirName = "projects" } = {}) {
+  const root = mkdtempSync(join(tmpdir(), "blz56r3-"));
+  mkdirSync(join(root, dirName, "ENG", "defined"), { recursive: true });
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify(config, null, 2));
+  writeFileSync(join(root, dirName, "ENG", "project.json"), JSON.stringify(projectJson, null, 2));
+  writeFileSync(join(root, dirName, "ENG", "defined", "ENG-1-t.md"),
+    ["---", "id: ENG-1", "title: t", "type: task", "project: ENG", "priority: medium",
+     "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
+  return { root, projectsDir: join(root, dirName) };
+}
+
+const run3 = ({ root, projectsDir }, args) => spawnSync(process.execPath, [CLI, ...args],
+  { cwd: root, encoding: "utf8", env: { ...process.env, BLAZE_PROJECTS_DIR: projectsDir } });
+
+/** The partial type record docs/schema-customization.md calls "the trap worth knowing":
+ *  `mergeTypes` is a per-entry replace, so this silently drops level/parentTypes/required. */
+const PARTIAL_TYPE = { key: "ENG", name: "Eng", schema: { types: { task: { workflow: "delivery" } } } };
+
+describe("BLZ-56: a legal-but-advisory board is not refused — audit and the preflight agree", () => {
+  test("a per-project schema.linkTypes block does not brick every verb", () => {
+    // The block "resolves correctly but reaches nothing" (docs/schema-customization.md,
+    // "What reads the resolved schema"). `blaze audit` says ok=true. Refusing every
+    // non-exempt verb over a note about where to move a block is a wall, not a gate.
+    const b = board3({
+      config: { key: "ENG", projects: ["ENG"] },
+      projectJson: { key: "ENG", name: "Eng", schema: { linkTypes: { Precedes: {
+        source_kinds: ["task"], target_kinds: ["task"],
+        inverse_name: "Follows", min_card: 0, max_card: null } } } },
+    });
+    try {
+      const audit = run3(b, ["audit"]);
+      assert.match(audit.stdout, /ok=true/, `${audit.stdout}${audit.stderr}`);
+      const verb = run3(b, ["rollup"]);
+      assert.equal(verb.status, 0,
+        `a verb must not refuse a board audit calls clean\n${verb.stdout}${verb.stderr}`);
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+
+  test("a deliberately narrowed `requirement` workflow does not brick every verb", () => {
+    // BLZ-361/R48. `validateSchema`'s own comment calls this "legal when deliberate" and
+    // its message ends "Add them, or drop the gate deliberately". Advice, not a refusal.
+    const b = board3({
+      config: { key: "ENG", projects: ["ENG"], schema: { workflows: { requirement: {
+        statuses: ["proposed", "implemented", "rejected", "obsolete"],
+        terminal: ["implemented", "rejected", "obsolete"],
+        transitions: [["proposed", "implemented"]],
+        reopenTo: "proposed",
+        resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" } } } } },
+    });
+    try {
+      const audit = run3(b, ["audit"]);
+      assert.match(audit.stdout, /ok=true/, `${audit.stdout}${audit.stderr}`);
+      const verb = run3(b, ["rollup"]);
+      assert.equal(verb.status, 0,
+        `a verb must not refuse a board audit calls clean\n${verb.stdout}${verb.stderr}`);
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-56: the preflight must actually FIND the projects it claims to validate", () => {
+  test("a projects dir not named `projects` is still discovered", () => {
+    // `resolveRoots()` derives dataRoot as the PARENT of projectsDir, and `loadProject`
+    // defaults projectsDir to join(root, "projects"). With BLAZE_PROJECTS_DIR pointing at
+    // a directory named anything else, every loadProject threw, was swallowed, and every
+    // project resolved to null — so the project layer was never validated at all.
+    // scripts/audit-runner.mjs uses `roots.projectsDir` verbatim; this follows it.
+    const b = board3({ config: { key: "ENG", projects: ["ENG"] }, projectJson: PARTIAL_TYPE, dirName: "tickets" });
+    try {
+      const r = run3(b, ["rollup"]);
+      assert.notEqual(r.status, 0, `expected a refusal\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr + r.stdout, /task/, "and it must name the type");
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+
+  test("a config with no `projects` array falls back to the directories on disk", () => {
+    // `listProjects(config)` returns [] when the key is absent, so the preflight validated
+    // NOTHING and passed. scripts/audit-runner.mjs has the fallback for exactly this, with
+    // the reason in its own comment: "A gate that passes because it measured nothing is
+    // worse than no gate."
+    const b = board3({ config: { key: "ENG" }, projectJson: PARTIAL_TYPE });
+    try {
+      const r = run3(b, ["rollup"]);
+      assert.notEqual(r.status, 0, `expected a refusal\n${r.stdout}${r.stderr}`);
+      assert.match(r.stderr + r.stdout, /task/, "and it must name the type");
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+
+  test("and neither fallback breaks the silence the preflight owes a non-board", () => {
+    // The preflight is not in the business of "there is no board here". An empty dir with
+    // no config and no projects must behave exactly as it did before this check existed.
+    const root = mkdtempSync(join(tmpdir(), "blz56r3-empty-"));
+    mkdirSync(join(root, "projects"), { recursive: true });
+    try {
+      const r = spawnSync(process.execPath, [CLI, "rollup"],
+        { cwd: root, encoding: "utf8", env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") } });
+      assert.doesNotMatch(r.stderr, /is not valid/, `${r.stdout}${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
