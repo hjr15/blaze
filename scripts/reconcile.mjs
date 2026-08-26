@@ -165,8 +165,10 @@ export function idFromSubject(subject, key) {
 //
 // What survives is the BODY. GitHub's default squash message concatenates the
 // collapsed commits' messages, each subject as a `* ` bullet — verified on this
-// repo's own history, where 23 of 312 commits on origin/main carry such a bullet
-// under a ticket subject (102 bullet lines), recovering 28 ids no subject names.
+// repo's own history at blaze 7a5ddb0 (its origin/main when this was measured; the
+// name `origin/main` is not a ref, it moves, and 312 self-invalidates on the next
+// merge). 23 of those 312 commits carry such a bullet under a ticket subject, 102
+// such bullet lines in all, recovering 28 ticket ids no subject at that ref names.
 //
 // TWO CONDITIONS, AND BOTH ARE LOAD-BEARING.
 //
@@ -181,19 +183,28 @@ export function idFromSubject(subject, key) {
 // subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
 // writes every batch board commit's body as `- <KEY>-<n>: <board op> [session]`, and
 // the board repo is itself a configured codeRepo for its own project — the hazard
-// INF-735's comment already names. Measured on the board repo's origin/main: 426 ids
-// harvested that had shipped nothing. A review reproduced `decide()` moving 137 tickets
-// `defined → done` off lines reading `edit labels` — that count taken against the board's
-// local HEAD, the 299-id tree, so it is quoted with its own ref. That is BLZ-130's
-// failure at a hundred times the scale, inside the fix for its sibling.
+// INF-735's comment already names. Measured on the board repo at blaze-pm ff5f36c2
+// (its origin/main, 156 commits) for the INF key alone: 426 ids harvested beyond the
+// subjects, 386 of them named by nothing but a ledger line. Re-run at that same ref,
+// the first cut drives `decide()` to move 141 INF tickets `defined → done`, every one
+// of them named by a `- INF-<n>: <board op> [session]` line (268 across all eleven
+// project keys the board configures, 266 of those named by such a line). An earlier
+// draft quoted 137 against "the board's local HEAD, the 299-id tree", which is not a
+// ref anyone else can resolve. That is BLZ-130's failure at a hundred times the scale,
+// inside the fix for its sibling.
 //
 // Neither condition alone suffices. The board also carries squashed PRs of ticket-BODY
 // edits, subject `blaze: … board + ticket work (#60)`, whose bullets are real `KEY-n:`
 // subjects describing an edit rather than a delivery — the subject gate drops those.
 // And ledger lines swept into a PR that IS titled for a ticket are what the marker
-// drops. On the board repo, origin/main: 426 ids ungated, 49 with the subject gate
-// alone, 2 with both — and both survivors (INF-701, INF-672) are genuine bundled
-// children of a `KEY-n:` epic PR. On the code repo the rule recovers 28 ids.
+// drops. At blaze-pm ff5f36c2, across all eleven project keys the board configures:
+// 1,323 ids ungated, 63 with the subject gate alone, 3 with both — BLZ-259, INF-672
+// and INF-701, each harvested from a genuine `* KEY-n:` bullet under a squashed ticket
+// PR's subject. For the INF key alone the same three rules read 426 / 49 / 2. Both are
+// snapshots that move as the board grows: at blaze-pm bd1d151d (131 commits, an
+// ancestor of ff5f36c2) the third rule read 2 across all keys, and BLZ-259 joined it
+// when commit e3beaec3 landed. ADR-0023 §2 records the drift. On the code repo at
+// blaze 7a5ddb0 the rule recovers 28 ids.
 //
 // The multi-ticket forms in condition 2 were themselves missed once: reading only the
 // leading id discarded two of the three tickets that `BLZ-286/287/288: … (#71)`
@@ -218,8 +229,11 @@ export function idsFromCommitMessage(message, key) {
   // of condition 2.
   const ids = idsFromSubject(lines[0], key);
   if (!ids.length) return [];
-  // Column 0, not merely "starts with a bullet". All 104 such lines in this repo's
-  // history sit at column 0, which is where GitHub writes them; an indented one is a
+  // Column 0, not merely "starts with a bullet". All 104 `* <KEY>-<n>:` lines in this
+  // repo's history at blaze 7a5ddb0 sit at column 0 and none is indented. That 104 is a
+  // WIDER population than the 102 counted above: it is every such line in the history,
+  // including those under a non-ticket subject, where 102 counts only the ones under a
+  // ticket subject. Column 0 is where GitHub writes them; an indented one is a
   // sub-bullet inside some commit's prose, and reading it as a delivered child is a guess.
   const bullet = new RegExp("^\\*\\s+" + key + "-(\\d+):", "i");
   for (let i = 1; i < lines.length; i += 1) {

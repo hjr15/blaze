@@ -479,8 +479,11 @@ describe("BLZ-131: the subject list accepts only the forms the house writes", ()
   });
 
   test("an indented bullet is not a collapsed commit subject", () => {
-    // Every one of the 104 `* KEY-n:` lines in this repo's history sits at column 0,
-    // which is where GitHub writes them. An indented one is a sub-bullet inside some
+    // Every one of the 104 `* KEY-n:` lines in this repo's history at blaze 7a5ddb0
+    // sits at column 0, and none is indented. That 104 counts EVERY such line at that
+    // ref, including those under a non-ticket subject — a wider population than the 102
+    // lines under a ticket subject that `idsFromCommitMessage`'s comment quotes.
+    // Column 0 is where GitHub writes them. An indented one is a sub-bullet inside some
     // commit's prose, and reading it as a delivered child is a guess.
     assert.deepEqual(idsFromCommitMessage("BLZ-1: x\n\n  * BLZ-2: a nested note", "BLZ"),
       ["BLZ-1"]);

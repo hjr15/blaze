@@ -154,8 +154,8 @@ These repos are squash-only, and a squash collapses a branch into one commit who
 *subject* is the PR title — so a bundled child's `<KEY>-<n>:` subject does not survive
 the merge, and the child was never moved at all. GitHub's default squash message keeps
 each collapsed commit's subject as a `* ` bullet in the body, and reconcile reads those
-bullets. On this repo that recovers **28** ticket ids that no subject on the default
-branch mentions.
+bullets. On this repo at `blaze` `7a5ddb0` — a sha, because `origin/main` moves — that
+recovers **28** ticket ids that no subject at that ref mentions.
 
 **Two conditions must both hold, and each one is load-bearing.**
 
@@ -169,16 +169,25 @@ branch mentions.
 The reason both are needed is measured, on the board repo, where the board itself is a
 configured code repo for its own project:
 
-Measured on the board repo's `origin/main` (156 commits):
+This is one measurement at one named ref, and it moves as the board grows. Measured on
+`blaze-pm` `ff5f36c2` (its `origin/main`, 156 commits), harvesting each of the **eleven
+project keys the board configures** — the whole board is the population, because the
+board repo is a configured code repo for its own project. Where a figure is for the
+`INF` key alone it says so.
 
-| Rule | Ids harvested beyond the subjects | Of those, delivered nothing |
+| Rule | Ids harvested beyond the subjects | What those ids are |
 |---|---|---|
-| Any bullet, any subject | **426** | 426 |
-| Any bullet, ticket subject only | **49** | 49 |
-| `* ` bullet, ticket subject only | **2** | **0** — `INF-701` and `INF-672` both really shipped |
+| Any bullet, any subject | **1,323** (426 for `INF` alone) | board bookkeeping, not deliveries — 1,205 of them are named by nothing but a `- <KEY>-<n>: <board op> [session]` ledger line |
+| Any bullet, ticket subject only | **63** (49 for `INF` alone) | the same — 60 of the 63 are ledger-only |
+| `* ` bullet, ticket subject only | **3** (2 for `INF` alone): `BLZ-259`, `INF-672`, `INF-701` | no ledger lines. `INF-672` and `INF-701` are `done` and really shipped; `BLZ-259` comes from two real `* BLZ-259:` bullets in merged commit `e3beaec3`, so the rule did not misfire, but the ticket sits in `accepted/` at this ref |
 
 Each row drops one condition from the shipped rule: the first two use the wide `[*+-]`
-marker, and only the third is what actually runs.
+marker, and only the third is what actually runs. The two conditions still cut hard —
+1,323 → 63 → 3 across the board's keys, 426 → 49 → 2 for `INF` alone.
+
+The third row was **2** at `blaze-pm` `bd1d151d` (131 commits, an ancestor of
+`ff5f36c2`); `BLZ-259` joined it when `e3beaec3` landed. Quote this table with its sha or
+it is not reproducible.
 
 `blaze`'s own batch commits write their ledger as `- <KEY>-<n>: <board op>`, so
 "moved a ticket" and "edited its labels" read as delivery under the loosest rule. That

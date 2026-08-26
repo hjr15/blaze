@@ -128,10 +128,12 @@ whose claim INF-735's gate drops is not visible to the veto at all.
 ### 2. The shipped signal reads a squash commit's body, under two conditions
 
 GitHub's default squash message concatenates the collapsed commits' messages, each
-subject as a `* ` bullet. On this repo, **23** of 312 commits on `origin/main` carry
-such a bullet under a ticket subject — **102** bullet lines in total — and reading them
-recovers **28** ticket ids that no subject on the default branch mentions. That is the
-blind spot, measured rather than argued.
+subject as a `* ` bullet. On this repo at `blaze` `7a5ddb0` — the sha its `origin/main`
+held when this was measured, named as a sha because `origin/main` moves and `312`
+self-invalidates the moment the next PR merges — **23** of those **312** commits carry
+such a bullet under a ticket subject, **102** bullet lines in total, and reading them
+recovers **28** ticket ids that no subject at that ref mentions. That is the blind spot,
+measured rather than argued.
 
 **Two conditions must both hold, and each is load-bearing.**
 
@@ -155,39 +157,61 @@ Condition 2 was not in the first cut, and an adversarial review is why it exists
 `- <KEY>-<n>: <board op> [session]`, and the board repo is itself a configured
 `codeRepo` for its own project — the hazard INF-735's comment already names. Honouring
 any bullet under any subject therefore turned the board's own ledger into a delivery
-signal. Measured on the board repo's `origin/main`, and reproduced end-to-end by the review:
-**426** ids harvested that had shipped nothing. The review reproduced `decide()` moving
-**137** tickets `defined → done` off lines reading `edit labels` — that count was taken
-against the board's local `HEAD`, the 299-id tree, and is quoted with its own ref rather
-than attached to the 426 figure. That is
-this ADR's own §1 failure at a hundred times the scale, re-introduced inside the fix
-for its sibling.
+signal. Measured on the board repo at `blaze-pm` `ff5f36c2` — its `origin/main`, 156
+commits — for the `INF` key alone: **426** ids harvested beyond the subjects, **386** of
+them named by nothing but a `- INF-<n>: <board op> [session]` ledger line. Re-run at that
+same ref, the first cut drives `decide()` to move **141** `INF` tickets `defined → done`,
+every one of them named by such a ledger line (**268** across all eleven project keys the
+board configures, 266 of those named by a ledger line). An earlier draft of this ADR
+quoted **137** against "the board's local `HEAD`, the 299-id tree" — not a ref anyone off
+that machine can resolve, which is why it is restated here at `ff5f36c2`. That is this
+ADR's own §1 failure at a hundred times the scale, re-introduced inside the fix for its
+sibling.
 
 Narrowing the marker alone was not sufficient, and neither was the subject gate alone:
 
-Measured on `blaze-pm` `origin/main` (156 commits) with the shipped rule:
+**This table is one measurement at one named ref, and it moves as the board grows.**
+Measured on `blaze-pm` `ff5f36c2` (its `origin/main`, 156 commits), harvesting each of the
+**eleven project keys the board configures** — that is the population, because the board
+repo is a configured `codeRepo` for its own project and every key's ledger lines are in
+scope. Where a figure is for the `INF` key alone it says so.
 
-| Rule | Ids harvested beyond the subjects | Of those, delivered nothing |
+| Rule | Ids harvested beyond the subjects | What those ids are |
 |---|---|---|
-| Any bullet, any subject | 426 | 426 |
-| Any bullet, ticket subject only | 49 | 49 |
-| `* ` bullet, ticket subject only | **2** | **0** — `INF-701` and `INF-672` both really shipped |
+| Any bullet, any subject | **1,323** (426 for `INF` alone) | board bookkeeping, not deliveries: 1,205 of the 1,323 are named by nothing but a `- <KEY>-<n>: <board op> [session]` ledger line (386 of the 426) |
+| Any bullet, ticket subject only | **63** (49 for `INF` alone) | the same: 60 of the 63 are ledger-only (47 of the 49) |
+| `* ` bullet, ticket subject only — the shipped rule | **3** (2 for `INF` alone): `BLZ-259`, `INF-672`, `INF-701` | none is a ledger line. `INF-672` and `INF-701` are `done` on the board and really shipped. `BLZ-259` is harvested from two real `* BLZ-259:` bullets in merged commit `e3beaec3` — the rule did not misfire — but it sits in `projects/BLZ/accepted/` at this ref, so this cell can no longer claim "0 delivered nothing" |
 
 The first two rows are measured with the wide `[*+-]` marker and the third with `* `,
 which is the point of the comparison — each row drops one condition from the shipped
-rule.
+rule. The two conditions still cut hard: 1,323 → 63 → 3 across the board's keys, and
+426 → 49 → 2 for `INF` alone.
 
-The figure is ref-sensitive, and an earlier draft of this ADR did not say which ref it
-used: the same table on that repo's local `HEAD` reads 299 / 41 / 2. The **2** is stable
-across both, which is the part the argument rests on.
+**The third row drifted from 2 to 3, and the drift is the point.** At `blaze-pm`
+`bd1d151d` (131 commits, an ancestor of `ff5f36c2` on the same `origin/main`) the row was
+genuinely **2**; `BLZ-259` joined it when `e3beaec3` — subject `BLZ-261: the docs seam
+(ADR-0020) …`, carrying two `* BLZ-259:` bullets — landed between the two refs. An earlier
+draft asserted "the **2** is stable", and it is not; a snapshot of a growing corpus never
+is. Any figure in this section that does not name a sha is unreproducible, and an earlier
+draft quoted this table against a local `HEAD` on a branch that exists on one machine.
+
+**`BLZ-259` is not a defect in the rule, and is not claimed as one.** The
+`- BLZ-259: log 150m [auto-…]` ledger lines in that same commit are correctly rejected by
+the `* ` marker; the two `* BLZ-259:` lines are real squash-body commit subjects from a
+merged PR. What the row exposes is a board fact, not an engine fact: real merged work
+landed under `BLZ-259` while the ticket sits in `accepted/`. Reconcile moving it to `done`
+would be right; the ADR's old "delivered nothing: **0**" cell was the wrong shape of claim
+to make about it.
 
 **A claim this ADR made in an earlier draft, withdrawn.** It argued that the bullet
 requirement was load-bearing because unbulleted body lines beginning `<KEY>-<n>:`
 would otherwise mark "sixteen untouched tickets" done. Re-measured under the shipped
-rule, unbulleted lines inside gated commits add **zero** ids — the sixteen lived in
-commits the subject gate now excludes anyway, and the figure had also counted lines
-where it said tickets. The bullet requirement earns its place on the ledger evidence
-above (49 → 2 on `origin/main`), not on that argument.
+rule, unbulleted lines inside gated commits add **zero** ids on this repo at `blaze`
+`7a5ddb0` (and **4** on the board at `blaze-pm` `ff5f36c2` — `INF-667`, `INF-683`,
+`INF-707`, `INF-708`) — the sixteen lived in commits the subject gate now excludes
+anyway, and the figure had also counted lines where it said tickets. The bullet
+requirement earns its place on the ledger evidence above (63 → 3 across the board's keys
+at `ff5f36c2`, 49 → 2 for `INF` alone), not on that argument.
 
 **What this deliberately does not claim:** a bullet is not proof of work. A squashed
 ticket PR whose body lists a ticket it did not implement will be believed. The two
