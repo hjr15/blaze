@@ -585,6 +585,36 @@ describe("BLZ-130: the record is written once — the rule, not just the comment
     } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
   });
 
+  // AND THE MIRROR, because "either field keeps both" has two halves and only one was
+  // defended. Dropping `|| t.frontmatter.pr` from `hadRecord` left the FULL suite green:
+  // a terminal ticket with `pr` recorded and `branch` blank would read as having no
+  // record, and a later merged PR would then overwrite `branch` — direction 1
+  // (overwrite-anything) surviving in the half nobody looked at. No ticket is in that
+  // shape on the board today (0 of 1,679), which is exactly why no test reached it.
+  test("a pr-only record is not topped up either — the mirror of the same rule", async () => {
+    const followUp = {
+      number: 123, state: "MERGED", url: "u123", headRefName: "INF-645-follow-up-docs-tidy",
+      title: "INF-645: follow-up docs tidy",
+    };
+    const tmp = mkdtempSync(join(tmpdir(), "blz130-pronly-"));
+    const codeRepo = join(tmp, "svc");
+    mkdirSync(codeRepo, { recursive: true });
+    gitInit(codeRepo);
+    execFileSync("git", ["-C", codeRepo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    // pr recorded by whatever delivered it; branch never recorded.
+    const root = board(tmp, codeRepo, [["INF-645", "epic", "done", "pr: '#80 — u80'\n"]]);
+    const restore = stubGh(tmp, [PR_80_MERGED, followUp]);
+    try {
+      await reconcile({ root, dryRun: false });
+      const body = readFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"), "utf8");
+      assert.match(body, /pr: '?#80/, "the half that was recorded must survive untouched");
+      assert.doesNotMatch(body, /branch: INF-645-follow-up-docs-tidy/,
+        "a follow-up docs PR must not fill the blank branch beside a pr that names a different PR");
+      assert.doesNotMatch(body, /#123/);
+    } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+
   test("a non-terminal ticket's record still UPDATES — write-once is terminal-only", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz130-nonterm-"));
     const codeRepo = join(tmp, "svc");

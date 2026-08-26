@@ -61,7 +61,11 @@ The correction to that then over-corrected, recorded here because the shape recu
 nulling both fields for *every* terminal ticket stopped the overwrite and stopped the
 first write with it. Reconcile is the only producer of `branch`/`pr`, so a `done` ticket
 that never had them recorded could never acquire them — on the board repo's `origin/main`,
-1,064 of 1,594 `done` tickets, permanently. Turning a corruption into a silent omission is not a fix.
+1,064 of 1,594 `done` tickets **missing a `pr`**, permanently. Turning a corruption into a
+silent omission is not a fix. (Two counts appear in this ADR and they are different
+quantities, so each names itself: *missing a `pr`* is 1,064 of 1,594 at `blaze-pm`
+`ff5f36c2`; *carrying neither field* is 1,056 at that ref and 1,141 of 1,679 at
+`cd4b1d9d`.)
 That correction then under-corrected, which is recorded too. Gating on "the winning PR
 is MERGED" stopped an open PR overwriting the record and left a merged one free to —
 and ranking breaks ties on the higher PR number, so the *latest* merged PR always wins.
@@ -90,11 +94,15 @@ are in that shape. So `hadRecord` is snapshotted from the ticket's frontmatter B
 either field is written, and governs both: a terminal ticket with *either* field keeps
 *both*.
 
-**Cost, accepted:** those 8 tickets keep a partial record and never gain a `pr`. That is
+**Cost, accepted:** a terminal ticket holding half a record never gains the other half —
+8 of 1,679 at `cd4b1d9d` today, but the cost is **ongoing, not a fixed historical set**:
+any ticket that reaches a terminal status while half-recorded and later has a merged PR
+for its key is locked out the same way. That is
 the same asymmetry as above — a blank `pr` understates and is true; a `pr` naming the
 wrong PR overstates and is false, and write-once then locks it in permanently, since `pr`
 is not in `EDITABLE_FIELDS` and `blaze edit` will not repair it. Recovering the *right*
-PR for those 8 (by corroborating `headRefName` against the recorded `branch`) is a
+PR for a half-recorded ticket (by corroborating `headRefName` against the recorded
+`branch`) is a
 separate change and is not made here: a new inference path is exactly the shape that has
 already failed three times above.
 
