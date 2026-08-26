@@ -205,7 +205,18 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // exactly `.blaze/identity.db` satisfies the first check while leaving the token
     // file committable.
     try { ensureIdentityIgnored(root); } catch { /* not a repo, or not ours to edit */ }
-    try { ensureSetupTokenIgnored(root); } catch { /* same */ }
+    try {
+      const tokenIgnore = ensureSetupTokenIgnored(root);
+      // A path git already had in its index before this rule existed is a token that was
+      // committed — the PATH surfaced here, never the VALUE, but the operator still needs
+      // to know it, because the fix un-stages the path going forward and cannot undo
+      // whatever is already sitting in a prior commit.
+      if (tokenIgnore?.wasTracked) {
+        console.warn(`blaze: WARNING — ${tokenIgnore.path} was already tracked in git and has `
+          + "been untracked (git rm --cached). Its value may be recoverable from git history "
+          + "and must be treated as compromised: rotate it.");
+      }
+    } catch { /* same */ }
     // THE PATH, NEVER THE VALUE. A token that reaches a log stream is a token that has
     // to be rotated, and `docker logs` is shipped off-box by any log aggregator.
     console.log(`blaze: no users configured — serving first-run setup at /setup`);
@@ -259,19 +270,44 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         }
         const email = typeof body?.email === "string" ? body.email.trim() : "";
         if (!email) return json(400, { errors: ["a user needs an email address"] });
+        // TYPE-CHECKED FOR THE SAME REASON `email` is, one line above: this is the
+        // pre-auth surface, and `identity-store.mjs`'s `String(displayName ?? folded)`
+        // silently coerces whatever arrives — an object becomes the literal string
+        // "[object Object]", an array becomes "a,b", a boolean becomes "true" — and
+        // `String()` THROWS outright on an object with a poisoned toString, which used to
+        // surface as a raw internal exception message below. `null`/`undefined` stay
+        // allowed: that is "no display name given", handled by falling back to the email.
+        let displayName = null;
+        if (body?.displayName !== null && body?.displayName !== undefined) {
+          if (typeof body.displayName !== "string") {
+            return json(400, { errors: ["display name must be a string"] });
+          }
+          displayName = body.displayName.trim();
+          // A bound, not a suggestion: readJson already caps the whole request body at
+          // 256KB, which still lets a display name alone run to that size. 200 matches no
+          // deep reasoning beyond "long enough for a real name, short enough that nothing
+          // downstream — an HTML page, a database column with no length constraint of its
+          // own — has to deal with an unbounded string from an unauthenticated caller".
+          if (displayName.length > 200) {
+            return json(400, { errors: ["display name is too long (200 characters max)"] });
+          }
+          if (!displayName) displayName = null;
+        }
         if (setupInFlight) return json(409, { errors: ["setup is already in progress"] });
         setupInFlight = true;
         let created;
         try {
           // ADR-0013 section 5: the first admin is a user, not an exception. This is the
           // same `addUser` that `blaze user add` calls — there is no bootstrap branch.
-          created = await addUser(root, { email, role: "admin",
-                                          displayName: body?.displayName ?? null });
-        } catch (e) {
+          created = await addUser(root, { email, role: "admin", displayName });
+        } catch {
           // A failed creation must leave setup COMPLETABLE — the token is not consumed
-          // by a mistake the operator can correct and retry.
+          // by a mistake the operator can correct and retry. The exception's own message
+          // is NEVER echoed here — this is the pre-auth surface, and an internal message
+          // (a database constraint's own wording, `String()`'s own wording) is exactly
+          // the kind of detail this branch's sibling catch already says nothing about.
           setupInFlight = false;
-          return json(400, { errors: [String(e?.message ?? e)] });
+          return json(400, { errors: ["could not create the administrator account"] });
         }
         // Close the door in this order: the credential first, then the route.
         clearSetupToken(root);

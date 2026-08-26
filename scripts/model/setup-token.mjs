@@ -109,12 +109,34 @@ export function ensureSetupTokenIgnored(dataRoot) {
   const inside = git("rev-parse", "--is-inside-work-tree");
   if (inside.error) return { state: "unavailable", path: rel };
   if (inside.status !== 0 || inside.stdout.trim() !== "true") return { state: "not-a-repo", path: rel };
-  if (git("check-ignore", "--no-index", "-q", rel).status === 0) return { state: "already", path: rel };
-  const gitignore = join(dataRoot, ".gitignore");
-  const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
-  appendFileSync(gitignore,
-    `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
-  return { state: "added", path: rel };
+
+  let state;
+  if (git("check-ignore", "--no-index", "-q", rel).status === 0) {
+    state = "already";
+  } else {
+    const gitignore = join(dataRoot, ".gitignore");
+    const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
+    appendFileSync(gitignore,
+      `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+    state = "added";
+  }
+
+  // `--no-index` above answers a PATTERN question — does a rule match this path — never
+  // an INDEX question. A path `git add`ed before the rule existed (by the pre-fix code
+  // this ticket replaces, or by hand) matches the rule just fine and stays exactly as
+  // tracked and exactly as committable as it always was. Ask git directly whether the
+  // path is tracked, and if so untrack it — `rm --cached` removes it from the INDEX only,
+  // so the file on disk (the live token this process just wrote) is untouched, and it
+  // stops being staged by the next `git add -A` an operator runs.
+  //
+  // This cannot un-leak a value already sitting in a PRIOR commit — that needs history
+  // rewriting, which is out of scope for a boot-time check — so a token that was ever
+  // committed must still be treated as compromised and rotated. What this closes is the
+  // path staying committable going forward.
+  const tracked = git("ls-files", "--error-unmatch", rel).status === 0;
+  if (!tracked) return { state, path: rel, wasTracked: false };
+  const rm = git("rm", "--cached", "-q", "--", rel);
+  return { state: `${state}-untracked`, path: rel, wasTracked: true, untrackOk: rm.status === 0 };
 }
 
 export { existsSync as _existsSync };

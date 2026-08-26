@@ -468,6 +468,197 @@ describe("BLZ-358: the token file is git-ignored even by a narrow .gitignore", (
   });
 });
 
+// =============================================================================
+// F4 — the identity.db ignore call, wired through the REAL boot path
+// =============================================================================
+
+describe("BLZ-358: the identity database is git-ignored via the real boot path", () => {
+  test("entering setup mode on a repo with no .gitignore leaves identity.db ignored", async () => {
+    // THROUGH THE REAL SERVER, not by calling `ensureIdentityIgnored` directly.
+    // `tests/user-add.test.mjs` already exercises the helper on its own — that proves the
+    // helper works, not that `startServer`'s call site is wired to it. Deleting
+    // `try { ensureIdentityIgnored(root); } catch {}` from serve.mjs left every test in
+    // this suite green until this one was added, which is exactly the trap the sibling
+    // setup-token test above was written to avoid.
+    const { root, projects } = board();
+    try {
+      const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+      await new Promise((res) => server.once("listening", res));
+      server.close();
+      const r = spawnSync("git",
+        ["-C", root, "check-ignore", "--no-index", "-q", ".blaze/identity.db"]);
+      assert.equal(r.status, 0,
+        "identity.db must be git-ignored by the boot path itself, not merely by the helper");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// F5 — an already-TRACKED setup token is untracked, not merely ignored going forward
+// =============================================================================
+
+describe("BLZ-358: a setup token already committed to git is untracked by the boot path", () => {
+  test("a token path already tracked in the index is untracked, and stays unstageable", async () => {
+    // `check-ignore --no-index` — which the ignore-rule half of this function has always
+    // used — is blind to the INDEX by design: it asks whether a pattern matches a path,
+    // never whether git already knows that path. So a board that ran the pre-fix code
+    // and committed `.blaze/setup-token` gets a perfectly correct ignore rule added, and
+    // the live token stays exactly as committed and exactly as trackable as before.
+    const { root, projects } = board();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      // Not the real token value asserted on anywhere below — this fixture only cares
+      // whether the PATH is tracked, never what the file contains.
+      writeFileSync(join(root, ".blaze", "setup-token"), "pre-fix-fixture-value");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "pre-fix: setup-token got committed"]);
+      assert.equal(
+        spawnSync("git", ["-C", root, "ls-files", "--error-unmatch", ".blaze/setup-token"]).status,
+        0, "fixture sanity: the token path must really be tracked before the boot runs");
+
+      const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+      await new Promise((res) => server.once("listening", res));
+      server.close();
+
+      assert.notEqual(
+        spawnSync("git", ["-C", root, "ls-files", "--error-unmatch", ".blaze/setup-token"]).status,
+        0, "a setup token already tracked in git must be untracked by the boot path — an " +
+           "ignore rule alone cannot stop a path git already knows about");
+
+      // `git rm --cached` stages a DELETION of the path, which legitimately shows up in
+      // `git diff --cached --name-only` — that line is the fix working, not the leak
+      // recurring. What actually matters is what an operator's next ordinary commit
+      // produces: the path must be genuinely gone from the new HEAD, not merely
+      // re-committed with the same live bytes.
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "operator's routine commit after boot"]);
+      const show = spawnSync("git", ["-C", root, "show", "HEAD:.blaze/setup-token"]);
+      assert.notEqual(show.status, 0,
+        "the setup token must be absent from the new HEAD, not re-committed with live content");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// F6 — displayName is type-checked like email, and internal errors are not echoed
+// =============================================================================
+
+describe("BLZ-358: displayName is type-checked the same way email already is", () => {
+  test("an object displayName is refused, not stringified into storage as [object Object]", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await postSetup(base, {
+        token: readSetupToken(root), email: "a@b.c",
+        displayName: { evil: "<script>alert(1)</script>" },
+      });
+      assert.equal(r.status, 400, "a non-string displayName must be refused, not coerced");
+      const id = loadIdentity(root);
+      try { assert.equal(id.hasIdentity, false, "a rejected displayName must not create a user"); }
+      finally { id.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("an array displayName is refused, not joined into a string", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await postSetup(base,
+        { token: readSetupToken(root), email: "a@b.c", displayName: ["a", "b"] });
+      assert.equal(r.status, 400);
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a boolean displayName is refused, not coerced to the string \"true\"", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await postSetup(base,
+        { token: readSetupToken(root), email: "a@b.c", displayName: true });
+      assert.equal(r.status, 400);
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a 100KB displayName is refused rather than accepted whole", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const huge = "x".repeat(100 * 1024);
+      const r = await postSetup(base,
+        { token: readSetupToken(root), email: "a@b.c", displayName: huge });
+      assert.equal(r.status, 400, "an unbounded display name must be rejected, not stored whole");
+      const id = loadIdentity(root);
+      try { assert.equal(id.hasIdentity, false); } finally { id.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a poisoned toString on displayName is refused without echoing the internal exception", async () => {
+    // `String(displayName ?? folded)` in identity-store.mjs THROWS on this shape —
+    // "Cannot convert object to primitive value" — and that text used to reach the
+    // caller verbatim via `String(e?.message ?? e)`. The type check must reject this
+    // BEFORE it ever reaches `String(...)`, and even so this pins that no internal
+    // exception text is ever the response body on this pre-auth surface.
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await postSetup(base,
+        { token: readSetupToken(root), email: "a@b.c", displayName: { toString: null } });
+      assert.equal(r.status, 400);
+      const body = await r.text();
+      assert.doesNotMatch(body, /Cannot convert object to primitive value/,
+        "an internal exception message must never reach an unauthenticated caller");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a valid string displayName still works, trimmed", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await postSetup(base,
+        { token: readSetupToken(root), email: "a@b.c", displayName: "  Ryan  " });
+      assert.equal(r.status, 200);
+      const id = loadIdentity(root);
+      try {
+        const users = await id.store.listUsers();
+        assert.equal(users[0].display_name, "Ryan");
+      } finally { id.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("an absent displayName still falls back to the email, as before", async () => {
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      const r = await postSetup(base, { token: readSetupToken(root), email: "a@b.c" });
+      assert.equal(r.status, 200);
+      const id = loadIdentity(root);
+      try {
+        const users = await id.store.listUsers();
+        assert.equal(users[0].display_name, "a@b.c");
+      } finally { id.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("no exception from addUser leaks its internal message to the caller", async () => {
+    // Not specific to displayName: the catch around `addUser` is the one place in this
+    // branch that used to echo an internal exception's own text — a duplicate-email
+    // constraint violation would have leaked SQL-flavoured internals just the same.
+    const { root, projects } = board();
+    const throwsInternal = async () => {
+      throw new Error('duplicate key value violates unique constraint "app_user_email_unique"');
+    };
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0",
+                                          addUser: throwsInternal });
+    try {
+      const r = await postSetup(base, { token: readSetupToken(root), email: "a@b.c" });
+      assert.equal(r.status, 400);
+      const body = await r.text();
+      assert.doesNotMatch(body, /unique constraint/i,
+        "a database-internal error message must not reach an unauthenticated caller");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
 describe("BLZ-358: only one setup can be in flight", () => {
   test("ten concurrent correct-token requests create exactly one admin", async () => {
     const { root, projects } = board();
