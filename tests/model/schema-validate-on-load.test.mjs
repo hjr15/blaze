@@ -416,6 +416,68 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
     // produces — a bijection, not a tally.
     const src = readFileSync(new URL("../../scripts/model/schema-config.mjs", import.meta.url), "utf8");
 
+    // MASK COMMENTS AND STRING BODIES BEFORE LOOKING FOR CALLS. The scan used to read raw
+    // source, so any COMMENT or STRING that merely MENTIONED `hard(` minted a phantom call
+    // site claimed by no CLASSIFICATION row — `// Prefer hard(m) for structural problems`
+    // was enough to fail this test. That is a false red on a legitimate edit, and a guard
+    // that punishes documenting the very convention it enforces will simply be deleted.
+    //
+    // `masked` is `src` with every comment body and every string/template literal BODY
+    // replaced by spaces, LENGTH AND OFFSETS PRESERVED. Call sites are located in `masked`;
+    // each site's argument text is then read out of the raw `src` at the same offset, so
+    // masking costs the scan nothing. Interpolation code inside `${...}` stays live — a
+    // `hard(...)` in there would be a real call.
+    const maskCommentsAndStrings = (s) => {
+      const out = s.split("");
+      const blank = (from, to) => {
+        for (let k = from; k < to && k < s.length; k += 1) if (out[k] !== "\n") out[k] = " ";
+      };
+      const quoted = (start) => {
+        const q = s[start];
+        let j = start + 1;
+        while (j < s.length && s[j] !== q) j += (s[j] === "\\" ? 2 : 1);
+        blank(start + 1, j);
+        return j + 1;
+      };
+      const template = (start) => {
+        let j = start + 1;
+        while (j < s.length && s[j] !== "`") {
+          if (s[j] === "\\") { blank(j, j + 2); j += 2; continue; }
+          if (s[j] === "$" && s[j + 1] === "{") { j = code(j + 2, true); continue; }
+          blank(j, j + 1); j += 1;
+        }
+        return j + 1;
+      };
+      function code(from, stopAtBrace) {
+        let j = from;
+        let depth = 0;
+        while (j < s.length) {
+          const c = s[j];
+          if (stopAtBrace && c === "}" && depth === 0) return j + 1;
+          if (c === "{") { depth += 1; j += 1; continue; }
+          if (c === "}") { depth -= 1; j += 1; continue; }
+          if (c === "/" && s[j + 1] === "/") {
+            const nl = s.indexOf("\n", j);
+            const end = nl === -1 ? s.length : nl;
+            blank(j, end); j = end; continue;
+          }
+          if (c === "/" && s[j + 1] === "*") {
+            const close = s.indexOf("*/", j + 2);
+            const end = close === -1 ? s.length : close + 2;
+            blank(j, end); j = end; continue;
+          }
+          if (c === '"' || c === "'") { j = quoted(j); continue; }
+          if (c === "`") { j = template(j); continue; }
+          j += 1;
+        }
+        return j;
+      }
+      code(0, false);
+      return out.join("");
+    };
+    const masked = maskCommentsAndStrings(src);
+    assert.equal(masked.length, src.length, "masking must preserve offsets");
+
     // Walk a `${...}` interpolation from its opening brace to its matching closing one,
     // treating a nested template literal or quoted string as an opaque, un-depth-counted
     // span — schema-config.mjs has exactly one such nesting (the `requirement`-workflow
@@ -437,16 +499,37 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
       }
       return j;
     };
-    // A template literal's content, with every `${...}` replaced by a NUL placeholder so it
+    // ONE escape decoder, used by BOTH scanners. They used to disagree: `scanTemplate`
+    // DROPPED `\X` entirely while `scanQuoted` appended the raw next character, so a `\n`
+    // in a template vanished and a `\t` in a quoted string became the letter "t". Either
+    // way the extracted text stopped matching the message the code actually produces, and
+    // adding an escape to any existing message — a line break in a long finding, a tab in
+    // a continuation — false-failed this test. Decode once, decode the same, both sides.
+    const SIMPLE = { n: "\n", t: "\t", r: "\r", b: "\b", f: "\f", v: "\v", 0: "\0" };
+    const decodeEscape = (s, at) => {           // `at` is the backslash
+      const c = s[at + 1];
+      if (c === "x") return { ch: String.fromCharCode(parseInt(s.slice(at + 2, at + 4), 16)), end: at + 4 };
+      if (c === "u" && s[at + 2] === "{") {
+        const close = s.indexOf("}", at + 3);
+        return { ch: String.fromCodePoint(parseInt(s.slice(at + 3, close), 16)), end: close + 1 };
+      }
+      if (c === "u") return { ch: String.fromCharCode(parseInt(s.slice(at + 2, at + 6), 16)), end: at + 6 };
+      if (c === "\n") return { ch: "", end: at + 2 };          // line continuation
+      return { ch: Object.hasOwn(SIMPLE, c) ? SIMPLE[c] : c, end: at + 2 };
+    };
+    // Not "\0": a source-level `\0` now decodes to NUL, so the placeholder must be a
+    // character no decoded message can contain. U+E000 is private-use.
+    const HOLE = "\uE000";
+    // A template literal's content, with every `${...}` replaced by a HOLE placeholder so it
     // can be compared to a concrete message with the interpolated values stripped out.
     const scanTemplate = (s, start) => {
       let i = start + 1;
       let out = "";
       while (i < s.length) {
         const c = s[i];
-        if (c === "\\") { i += 2; continue; }
+        if (c === "\\") { const d = decodeEscape(s, i); out += d.ch; i = d.end; continue; }
         if (c === "`") { i += 1; break; }
-        if (c === "$" && s[i + 1] === "{") { i = skipInterpolation(s, i + 2); out += "\0"; continue; }
+        if (c === "$" && s[i + 1] === "{") { i = skipInterpolation(s, i + 2); out += HOLE; continue; }
         out += c; i += 1;
       }
       return { content: out, end: i };
@@ -456,7 +539,7 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
       let i = start + 1;
       let out = "";
       while (i < s.length && s[i] !== q) {
-        if (s[i] === "\\") { out += s[i + 1]; i += 2; continue; }
+        if (s[i] === "\\") { const d = decodeEscape(s, i); out += d.ch; i = d.end; continue; }
         out += s[i]; i += 1;
       }
       return { content: out, end: i + 1 };
@@ -464,10 +547,24 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
     // `hard(`/`soft(`'s one argument is always a string literal, or several joined by `+` —
     // never a variable or a call — so walking string-literal tokens from the call, following
     // `+`, captures the whole message with no need to paren-balance the call itself.
-    const callRe = /(?<![\w.$])(hard|soft)\(/g;
+    //
+    // `\s*` before the paren, and an optional `?.`: `hard ("...")`, `hard\n("...")` and
+    // `hard?.("...")` are all calls, and all three previously shipped an UNCLASSIFIED tag
+    // fully green. 0c241b9's message claimed "the natural edit this test needs to catch is
+    // a plain new `hard(`/`soft(` call, which it now does" — it did not, and it does now.
+    //
+    // THE RESIDUAL GAP IS LEXICAL, not merely aliasing: this finds a call only where the
+    // literal token `hard`/`soft` stands immediately before the parenthesis. Any other
+    // SPELLING escapes it — an alias (`const h = hard; h(msg)`), an indirect or computed
+    // call (`tags["hard"](msg)`, `[hard][0](msg)`), a `.call`/`.apply`, a regex literal is
+    // not masked either, and the original bypass this scan was built for, pushing straight
+    // onto `problems` with `{ message, hard: true }`. Those are deliberate: they are not
+    // edits anyone makes by accident, whereas every ordinary way of writing the call now
+    // lands in the table.
+    const callRe = /(?<![\w.$])(hard|soft)\s*(?:\?\.\s*)?\(/g;
     const sites = [];
     let m;
-    while ((m = callRe.exec(src))) {
+    while ((m = callRe.exec(masked))) {
       const tag = m[1];
       let pos = m.index + m[0].length;
       let literal = "";
@@ -486,7 +583,7 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
       `the scan is not working: found ${sites.length} sites`);
 
     const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-    const sitePattern = (site) => new RegExp(`^${site.literal.split("\0").map(escapeRe).join(".*")}$`, "s");
+    const sitePattern = (site) => new RegExp(`^${site.literal.split(HOLE).map(escapeRe).join(".*")}$`, "s");
 
     // Every CLASSIFICATION row must trace to exactly one call site, and every call site must
     // be claimed by exactly one row — the bijection a count can't see. Recomputes each row's
@@ -508,7 +605,7 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
     }
     claimedBy.forEach((rows, i) => {
       assert.equal(rows.length, 1,
-        `call site #${i + 1} [${sites[i].tag}] "${sites[i].literal.replace(/\0/g, "<x>")}" is claimed by `
+        `call site #${i + 1} [${sites[i].tag}] "${sites[i].literal.split(HOLE).join("<x>")}" is claimed by `
         + `${rows.length} CLASSIFICATION rows (${rows.join(", ") || "none"}) — every call site needs `
         + "exactly one row, or a new tag ships unclassified");
     });
