@@ -195,13 +195,27 @@ test("the schema-preflight comment's arithmetic matches the code beneath it", ()
   assert.ok(setLine > 0, "SCHEMA_PREFLIGHT_EXEMPT's declaration line not found");
   let start = setLine;
   while (start > 0 && lines[start - 1].startsWith("//")) start -= 1;
-  const BULLET = /^\/\/ {3}(\S+) +—/;   // exactly three spaces after `//`: a bullet.
-  const WRAPPED = /^\/\/ {4,}\S/;       // deeper: a bullet's continuation line.
+  const BULLET = /^\/\/ {3}(\S+) +—/;      // exactly three spaces after `//`: a bullet.
+  const WRAPPED = /^\/\/ ( {4,})\S/;       // deeper: a bullet's continuation line.
   const at = [];
   for (let i = start; i < setLine; i += 1) if (BULLET.test(lines[i])) at.push(i);
   assert.ok(at.length, "no exemption bullets found in the comment above the Set");
+  // A WRAPPED line must be ANCHORED to a real continuation — not merely indented four or
+  // more spaces. `WRAPPED` alone treats ANY deep-indented comment line as a bullet's
+  // continuation, so re-indenting the CLOSING PARAGRAPH after the bullets to four spaces
+  // (and dropping the blank `//` line that used to separate it) makes it read as one more
+  // continuation line — closing the visual gap a bullet moved below it would otherwise fall
+  // into. Every genuine continuation line in this block is indented to the SAME depth (they
+  // align with where each bullet's own dash-text starts), so the first continuation line
+  // found sets the depth every other one must match; a line that is merely "deep enough" but
+  // at a DIFFERENT depth is not a continuation — it interrupts the block, exactly like any
+  // other non-bullet line does.
+  let wrapDepth = null;
   for (let i = at[0]; i <= at[at.length - 1]; i += 1) {
-    assert.ok(BULLET.test(lines[i]) || WRAPPED.test(lines[i]),
+    if (BULLET.test(lines[i])) continue;
+    const w = lines[i].match(WRAPPED);
+    const anchored = w && (wrapDepth === null ? (wrapDepth = w[1].length, true) : w[1].length === wrapDepth);
+    assert.ok(anchored,
       `the exemption bullets must be ONE contiguous block — line ${i + 1} interrupts it, `
       + `so a bullet below it is orphaned from the list: ${lines[i]}`);
   }
