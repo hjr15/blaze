@@ -149,11 +149,18 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     // decides nothing.
     //
     // THAT IS NOT ADR-0002's ALTERNATIVE (c), and an earlier version of this comment cited
-    // it anyway. (c) is a guard never wired into runtime — its only callers are tests — so
-    // it is "absent in production": it never executes on a real verb at all. This union,
-    // when it existed here, DID execute in production, on every non-exempt verb; the
-    // finding it fed simply never won a decision, because that finding is soft. INERT, not
-    // ABSENT — a different shape, and the analogy overstated what was actually removed.
+    // it anyway. (c) rejected putting a guard inside `resolveSchema`, on the ground that
+    // such a guard would be "absent in production" — and it justified that with a factual
+    // aside, RECORDED 2026-07-15, that `resolveSchema` had no runtime callers at all, only
+    // tests. DO NOT READ THAT ASIDE AS A STATEMENT ABOUT TODAY: `resolveSchema` runs on
+    // every non-exempt verb in this very preflight, forty lines below this sentence, and in
+    // scripts/audit-runner.mjs, scripts/model/audit.mjs and scripts/schedule-runner.mjs.
+    // (c)'s RULING is untouched by that — it is about where a VERSION guard belongs — but
+    // the only part of it that could ever have described this union is the SHAPE of the
+    // objection, a mechanism that never executes. That shape was never this union's: the
+    // union, when it existed here, DID execute, on every non-exempt verb; the finding it
+    // fed simply never won a decision, because that finding is soft. INERT, not ABSENT —
+    // a different thing, and the analogy overstated what was actually removed.
     //
     // WHETHER THE UNION ITSELF IS PRESENT OR ABSENT IS DELIBERATELY UNPINNED, and this
     // paragraph says so rather than implying a guard that does not exist. Restoring it
@@ -163,10 +170,12 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     // union's presence is inert regardless, while the hazard that WOULD matter — the
     // endpoint-kind finding getting RE-TAGGED HARD without the union coming back, which
     // would brick every non-exempt verb on a board `blaze audit` calls clean — is already
-    // pinned end to end by two tests, not this comment: "the endpoint-kind finding is SOFT,
-    // and cli.mjs's preflight depends on it" (tests/model/schema-validate-on-load.test.mjs)
-    // goes red the moment that tag flips, and "a top-level Precedes naming a
-    // PROJECT-declared type does not brick the board" (tests/schema-fail-loud-on-load.test.mjs)
+    // pinned end to end by two tests, not this comment: "an undeclared endpoint kind never
+    // reaches the load path's refusal" (tests/model/schema-validate-on-load.test.mjs, in the
+    // describe "BLZ-56: the endpoint-kind finding is SOFT, and cli.mjs's preflight depends
+    // on it" — the describe is the CONTEXT, the test is the guard) goes red the moment that
+    // tag flips, and "a top-level Precedes naming a PROJECT-declared type does not brick the
+    // board" (tests/schema-fail-loud-on-load.test.mjs)
     // spawns `blaze rollup` against exactly such a board and would fail if it ever did. A
     // third guard here could only detect the union's textual presence, which decides
     // nothing — not worth its own upkeep. Everything else here still judges the board
