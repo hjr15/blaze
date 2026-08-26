@@ -317,3 +317,57 @@ test("BLZ-398: a cleared record is reported on the activity feed, not just the C
   assert.doesNotMatch(plain, /CLEARED/, "and an ordinary move must not claim a deletion");
   assert.match(plain, /INF-1: defined/);
 });
+
+test("BLZ-398: the supervisor PUBLISHES cleared, it does not just render it", async () => {
+  // The renderer test above builds its event by hand, so it cannot see `runReconcile`
+  // dropping the flag on the way to the bus — which is exactly what it was doing.
+  const { loadConfig } = await import("../scripts/config.mjs");
+  const { createApp } = await import("../scripts/supervisor.mjs");
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-pub-"));
+  try {
+    const repo = join(tmp, "svc");
+    mkdirSync(repo, { recursive: true });
+    for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]])
+      execFileSync("git", ["-C", repo, ...a]);
+    writeFileSync(join(repo, "R"), "x");
+    execFileSync("git", ["-C", repo, "add", "-A"]);
+    execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
+    execFileSync("git", ["-C", repo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    const root = join(tmp, "board");
+    mkdirSync(join(root, "projects", "INF", "in-review"), { recursive: true });
+    // Carries a rank-chosen record from its in-review phase — the shape that gets cleared.
+    writeFileSync(join(root, "projects", "INF", "in-review", "INF-645-t.md"),
+      "---\nid: INF-645\ntype: epic\nproject: INF\nestimate: 30\n" +
+      "branch: INF-645-docs\npr: '#40 — u40'\n---\n\nbody\n");
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [repo] }));
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]])
+      execFileSync("git", ["-C", root, ...a]);
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), "#!/usr/bin/env bash\ncat <<'JSON'\n" + JSON.stringify([
+      { number: 10, state: "MERGED", url: "u10", headRefName: "INF-645-work", title: "INF-645: the work" },
+      { number: 40, state: "MERGED", url: "u40", headRefName: "INF-645-docs", title: "INF-645: follow-up docs" },
+    ]) + "\nJSON\n");
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const prevPath = process.env.PATH;
+    process.env.PATH = bin + ":" + prevPath;
+    const app = createApp(loadConfig({ root }), { root });
+    const seen = [];
+    app.bus.subscribe((e) => seen.push(e));
+    try {
+      await app.runReconcile();
+    } finally {
+      process.env.PATH = prevPath;
+      app.server.close();
+    }
+    const ev = seen.find((e) => e.type === "reconcile" && e.id === "INF-645");
+    assert.ok(ev, "the move must reach the bus; got " + JSON.stringify(seen.map((e) => e.type)));
+    assert.equal(ev.cleared, true,
+      "under `blaze start` the feed IS the account of the run — the deletion must be in it");
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

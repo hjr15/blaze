@@ -711,3 +711,26 @@ test("BLZ-398: a cleared record is NAMED in changes — a destructive write says
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("BLZ-398: an unnumberable merged PR is not a rival deliverer", async () => {
+  // The exclusion has to be pinned in the direction that COSTS something. A ticket with
+  // one good merged PR and one the forge could not number has exactly one candidate
+  // answer to "which merged PR delivered this" — counting the unusable one as a rival
+  // makes the set ambiguous and strips a record that was perfectly knowable.
+  const good = { number: 10, state: "MERGED", url: "u10",
+    headRefName: "INF-645-work", title: "INF-645: the work" };
+  const unusable = { number: "12abc", state: "MERGED", url: "https://ghes.corp/a/pull/999",
+    headRefName: "INF-645-other", title: "INF-645: something else" };
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-rival-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [good, unusable]);
+  try {
+    const r = await reconcile({ root, dryRun: false });
+    assert.match(readTicket(root, "done"), /pr: '?#10 — u10/,
+      "one knowable deliverer plus one unusable PR is still one deliverer");
+    assert.deepEqual(r.findings.filter((f) => f.kind === "ambiguous-deliverer"), []);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

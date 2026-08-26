@@ -425,11 +425,22 @@ export function buildPrMap(prs, idFromRef, shippedSet) {
   for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
     let best = null;
     for (const pr of candidates) {
+      // Order at equal rank: RECORDABLE first, then stronger title claim, then lower
+      // number. The recordable tier is not decoration — `pr.number` is `null` for a PR
+      // the forge did not number, and `null < 10` is TRUE, so without it an unusable PR
+      // won the tie-break outright and suppressed a record that was perfectly knowable.
+      // Rank still comes from `state` alone, so this cannot move a ticket; it decides
+      // only which PR the record is taken from, which is the one thing an unusable PR
+      // must never win.
+      const recordable = (x) => (x.number === null || x.number === undefined ? 0 : 1);
+      const rank = (x) => PR_RANK[x.state] || 0;
       const better = !best ||
-        (PR_RANK[pr.state] || 0) > (PR_RANK[best.state] || 0) ||
-        ((PR_RANK[pr.state] || 0) === (PR_RANK[best.state] || 0) &&
-          (prTitleClaim(pr, id) > prTitleClaim(best, id) ||
-            (prTitleClaim(pr, id) === prTitleClaim(best, id) && pr.number < best.number)));
+        rank(pr) > rank(best) ||
+        (rank(pr) === rank(best) &&
+          (recordable(pr) > recordable(best) ||
+            (recordable(pr) === recordable(best) &&
+              (prTitleClaim(pr, id) > prTitleClaim(best, id) ||
+                (prTitleClaim(pr, id) === prTitleClaim(best, id) && pr.number < best.number)))));
       if (better) best = pr;
     }
     if (best) prMap.set(id, best);
