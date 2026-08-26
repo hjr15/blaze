@@ -140,22 +140,38 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     const { dataRoot: root, projectsDir } = resolveRoots();
     const config = loadConfig({ root });
 
-    // NO `endpointTypes` UNION HERE, AND ITS ABSENCE IS THE DELIBERATE PART. `auditCorpus`
-    // builds one (scripts/model/audit.mjs) — every type declared anywhere — because a
-    // top-level `Precedes` list may legitimately name a type only ONE PROJECT declares.
-    // That union feeds exactly one check, BLZ-392's endpoint-kind finding, and that finding
-    // is SOFT. `assertSchemaValid` takes the HARD entries only, so the union cannot change
-    // any decision this preflight makes: building it here would be a mechanism that runs,
-    // costs a `resolveSchema` per project, and can decide nothing — the shape ADR-0002's
-    // alternative (c) records as "a well-tested no-op: green in CI, absent in production".
+    // NO `endpointTypes` UNION HERE. `auditCorpus` builds one (scripts/model/audit.mjs) —
+    // every type declared anywhere — because a top-level `Precedes` list may legitimately
+    // name a type only ONE PROJECT declares. That union feeds exactly one check, BLZ-392's
+    // endpoint-kind finding, and that finding is SOFT. `assertSchemaValid` takes the HARD
+    // entries only, so the union cannot change any decision this preflight makes: building
+    // it here would be a mechanism that RUNS, costs a `resolveSchema` per project, and
+    // decides nothing.
     //
-    // IF THAT FINDING IS EVER RE-TAGGED HARD, THE UNION MUST COME BACK IN THE SAME CHANGE,
-    // or this preflight will refuse every board whose top-level `Precedes` names a
-    // project-declared type — BLZ-392's false positive, reintroduced on the load path. The
-    // re-tagging cannot happen quietly: "the endpoint-kind finding is SOFT, and cli.mjs's
-    // preflight depends on it" (tests/model/schema-validate-on-load.test.mjs) goes red and
-    // says so. Everything else here still judges the board exactly the way audit does — a
-    // check that disagrees with audit on the same board is worse than no check at all.
+    // THAT IS NOT ADR-0002's ALTERNATIVE (c), and an earlier version of this comment cited
+    // it anyway. (c) is a guard never wired into runtime — its only callers are tests — so
+    // it is "absent in production": it never executes on a real verb at all. This union,
+    // when it existed here, DID execute in production, on every non-exempt verb; the
+    // finding it fed simply never won a decision, because that finding is soft. INERT, not
+    // ABSENT — a different shape, and the analogy overstated what was actually removed.
+    //
+    // WHETHER THE UNION ITSELF IS PRESENT OR ABSENT IS DELIBERATELY UNPINNED, and this
+    // paragraph says so rather than implying a guard that does not exist. Restoring it
+    // costs a `resolveSchema` per project and changes nothing the suite can observe — no
+    // test fails either way, so this comment could drift from the code in exactly the
+    // direction it describes with no gate firing. That gap is accepted, not closed: the
+    // union's presence is inert regardless, while the hazard that WOULD matter — the
+    // endpoint-kind finding getting RE-TAGGED HARD without the union coming back, which
+    // would brick every non-exempt verb on a board `blaze audit` calls clean — is already
+    // pinned end to end by two tests, not this comment: "the endpoint-kind finding is SOFT,
+    // and cli.mjs's preflight depends on it" (tests/model/schema-validate-on-load.test.mjs)
+    // goes red the moment that tag flips, and "a top-level Precedes naming a
+    // PROJECT-declared type does not brick the board" (tests/schema-fail-loud-on-load.test.mjs)
+    // spawns `blaze rollup` against exactly such a board and would fail if it ever did. A
+    // third guard here could only detect the union's textual presence, which decides
+    // nothing — not worth its own upkeep. Everything else here still judges the board
+    // exactly the way audit does — a check that disagrees with audit on the same board is
+    // worse than no check at all.
     //
     // The project set, with audit-runner.mjs's fallback and for audit-runner.mjs's stated
     // reason: `listProjects` returns [] when `blaze.config.json` carries no `projects` array,
