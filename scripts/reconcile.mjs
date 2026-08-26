@@ -713,6 +713,13 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   return { prMap, branchMap, shippedSet, forgeErrors, ambiguous };
 }
 
+/** Two PR payloads are the same pull request. `url` is unique across repositories;
+ *  `number` alone is not, and two different repos legitimately share PR numbers. */
+function samePr(a, b) {
+  if (a.url && b.url) return a.url === b.url;
+  return a.number === b.number;
+}
+
 // --- aggregate the most-advanced signal across all of a project's repos -------
 // Tracks which configured repos were actually READABLE (INF-763). A path that
 // isn't a git repo used to be skipped in silence, so a board whose repos all
@@ -731,7 +738,16 @@ function gatherProject(project, { fetch }) {
       // repos each holding a merged PR for one ticket is a deliverer this project
       // cannot name, and the strict `>` below would otherwise settle it by scan order —
       // which repo happens to come first in `codeRepos`. That is not evidence.
-      if (cur && cur.state === "MERGED" && pr.state === "MERGED") {
+      //
+      // The identity check is not redundant, and review found why: `codeRepoPaths` is
+      // not deduped, so two entries can name the SAME repository (a duplicate line, an
+      // abs/rel pair, or a checkout plus one of its own worktrees). `gh pr list` then
+      // returns the same PR twice and, compared on state alone, one PR collides with
+      // ITSELF — declaring a healthy single-deliverer ticket ambiguous, stripping its
+      // record on every run, and reporting "more than one merged PR" while naming one.
+      // Compared on `url`, which GitHub makes unique across repositories, with `number`
+      // as the fallback for a forge payload that lacks one.
+      if (cur && cur.state === "MERGED" && pr.state === "MERGED" && !samePr(cur, pr)) {
         const seen = ambiguous.get(id) || [];
         ambiguous.set(id, [...new Set([...seen, cur.number, pr.number])].sort((a, b) => a - b));
       }
@@ -799,11 +815,16 @@ export async function reconcile({
     }, t.status, type);
     if (d.skip) continue;
 
-    // BLZ-395: recorded BEFORE the dirty check below, because this ticket's whole
-    // point is that nothing is dirty — terminal-stickiness clamps the status and the
-    // MERGED gate clamps the record, so the loop would `continue` and say nothing at
-    // all. A finding whose condition is "no change was made" cannot be gated on a
-    // change having been made.
+    // BLZ-395: recorded BEFORE the dirty check below, because this ticket's whole point
+    // is that nothing is dirty — terminal-stickiness clamps the status and the MERGED
+    // gate clamps the record, so the loop would `continue` and say nothing at all. A
+    // finding whose condition is "no change was made" cannot be gated on a change having
+    // been made. (An earlier draft of this comment said `changes` is "empty by
+    // construction" here. That is false and is corrected rather than quietly dropped: a
+    // `done` ticket with a blank `resolution` has it backfilled, which sets `dirty` and
+    // emits a change. The PLACEMENT is still load-bearing — moving this below the dirty
+    // check turns the end-to-end sequence test red — but the reason is that nothing is
+    // dirty in THIS ticket's case, not that nothing ever is.)
     if (d.openPrOnTerminal) {
       const pr = s.prMap.get(t.frontmatter.id);
       findings.push({
@@ -854,7 +875,28 @@ export async function reconcile({
     // never got to. Gated on `!keep()` so it fires only where a write would actually
     // have happened: a terminal ticket that already holds a record is protected by
     // write-once regardless, and has nothing to look at.
+    //
+    // REFUSING IS NOT ENOUGH — THE LIVE RECORD MUST BE CLEARED. Found by review, and it
+    // defeated the whole ticket: an OPEN PR outranks a MERGED one, so while any PR is
+    // open the record is set by RANK, not by any deliverer rule. A ticket whose docs PR
+    // was open at the sample moment carries `pr: #<docs>` through `in-review`; when that
+    // PR merges the set becomes ambiguous, and a bare refusal froze that rank-chosen
+    // value as the ticket went terminal. The board then held exactly the record this
+    // ticket exists to prevent — permanently, since `pr` is not in EDITABLE_FIELDS — and
+    // the finding beside it claimed nothing had been recorded. Two promises broken at
+    // once: the record named neither the deliverer nor nothing, and the report was false.
+    //
+    // Clearing is safe precisely where it applies. `!keep()` means the record is NOT
+    // write-once protected, which means either the ticket is not yet terminal — so the
+    // record is live state reconcile itself wrote and may replace — or it is terminal
+    // and blank, where there is nothing to clear. Nothing a person authored is touched:
+    // reconcile is the only producer of these two fields.
     if (d.recordAmbiguous && !keep()) {
+      if (fm.branch !== undefined || fm.pr !== undefined) {
+        delete fm.branch;
+        delete fm.pr;
+        dirty = true;
+      }
       const merged = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
       findings.push({
         kind: "ambiguous-deliverer",

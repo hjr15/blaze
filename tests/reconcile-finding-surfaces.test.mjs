@@ -167,3 +167,114 @@ describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", 
     assert.match(err, /NEEDS ATTENTION/, "and the finding must still be reported");
   });
 });
+
+// =============================================================================
+// 3. Every surfacing path is HELD BY A TEST — review round 2
+// =============================================================================
+// The behaviour-scoped review deleted each of the three publish/render sites in turn
+// and the whole suite stayed green: `newFindingEvents(...)` in the supervisor's
+// `runReconcile`, `findings: r.findings || []` on `/api/reconcile-preview`, and the
+// CLI's stderr loop. The precedent each of those cites — `forgeErrors` — IS pinned in
+// its own place, so the new field beside it being unpinned is the gap. The CLI loop is
+// covered by the `runCli` tests above; these two close the rest.
+
+test("BLZ-395: the supervisor's reconcile loop PUBLISHES the finding", async () => {
+  const { loadConfig } = await import("../scripts/config.mjs");
+  const { createApp } = await import("../scripts/supervisor.mjs");
+  const tmp = mkdtempSync(join(tmpdir(), "blz395-sup-"));
+  try {
+    const repo = join(tmp, "svc");
+    mkdirSync(repo, { recursive: true });
+    for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t"], ["config", "user.name", "t"]])
+      execFileSync("git", ["-C", repo, ...a]);
+    writeFileSync(join(repo, "R"), "x");
+    execFileSync("git", ["-C", repo, "add", "-A"]);
+    execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
+    execFileSync("git", ["-C", repo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+
+    const root = join(tmp, "board");
+    mkdirSync(join(root, "projects", "INF", "done"), { recursive: true });
+    writeFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"),
+      "---\nid: INF-645\ntype: epic\nproject: INF\nestimate: 30\nresolution: done\n---\n\nbody\n");
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [repo] }));
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]])
+      execFileSync("git", ["-C", root, ...a]);
+
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), "#!/usr/bin/env bash\ncat <<'JSON'\n" + JSON.stringify([
+      { number: 80, state: "MERGED", url: "u80", headRefName: "INF-645-docs", title: "INF-645: docs" },
+      { number: 81, state: "OPEN", url: "u81", headRefName: "INF-645-work", title: "INF-645: the real work" },
+    ]) + "\nJSON\n");
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const prevPath = process.env.PATH;
+    process.env.PATH = bin + ":" + prevPath;
+
+    const app = createApp(loadConfig({ root }), { root });
+    const seen = [];
+    app.bus.subscribe((e) => seen.push(e));
+    try {
+      await app.runReconcile();
+    } finally {
+      process.env.PATH = prevPath;
+      app.server.close();
+    }
+    const warn = seen.find((e) => e.type === "warning");
+    assert.ok(warn, "the loop that OPENS this window must be the one that reports it; got: " +
+      JSON.stringify(seen.map((e) => e.type)));
+    assert.equal(warn.id, "INF-645");
+    assert.match(warn.message, /PR #81 carrying its key is still OPEN/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-395: /api/reconcile-preview carries the findings, not just the changes", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "blz395-prev-"));
+  try {
+    const repo = join(tmp, "svc");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "t"]);
+    writeFileSync(join(repo, "R"), "x");
+    execFileSync("git", ["-C", repo, "add", "-A"]);
+    execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
+    execFileSync("git", ["-C", repo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    const root = join(tmp, "board");
+    mkdirSync(join(root, "projects", "INF", "done"), { recursive: true });
+    writeFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"),
+      "---\nid: INF-645\ntype: epic\nproject: INF\nestimate: 30\nresolution: done\n---\n\nbody\n");
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [repo] }));
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), "#!/usr/bin/env bash\ncat <<'JSON'\n" + JSON.stringify([
+      { number: 80, state: "MERGED", url: "u80", headRefName: "INF-645-docs", title: "INF-645: docs" },
+      { number: 81, state: "OPEN", url: "u81", headRefName: "INF-645-work", title: "INF-645: the real work" },
+    ]) + "\nJSON\n");
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const prevPath = process.env.PATH;
+    process.env.PATH = bin + ":" + prevPath;
+    const { startServer } = await import("../scripts/serve.mjs");
+    const srv = startServer({ root, projectsDir: join(root, "projects"), port: 0 });
+    await new Promise((r) => srv.once("listening", r));
+    try {
+      const { port } = srv.address();
+      const j = await (await fetch("http://127.0.0.1:" + port + "/api/reconcile-preview")).json();
+      assert.ok(Array.isArray(j.findings), "the preview is where a person looks before believing the board");
+      assert.equal(j.findings.length, 1);
+      assert.equal(j.findings[0].id, "INF-645");
+      assert.equal(j.findings[0].kind, "open-pr-on-terminal");
+    } finally {
+      process.env.PATH = prevPath;
+      srv.close();
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
