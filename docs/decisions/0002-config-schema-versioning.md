@@ -126,6 +126,18 @@ callers are tests. A guard there would be a well-tested no-op: green in CI,
 absent in production. Recorded so a future reader does not "fix" the guard by
 moving it there.
 
+> **Premise superseded, 2026-08-26 — the ruling is not.** The sentence above is
+> stale as a statement of fact: `resolveSchema` has **five** runtime callers
+> today — `scripts/audit-runner.mjs`, `scripts/cli.mjs`,
+> `scripts/schedule-runner.mjs`, `scripts/model/link-schema.mjs` and
+> `scripts/model/audit.mjs` — so a guard placed there would no longer be the
+> no-op this alternative rejected it for being. **(c) stays rejected**, and
+> nothing here reopens it: BLZ-56 has since settled where this class of check
+> belongs, and ADR-0023's own history is the argument against relitigating a
+> ruling because one of its supporting facts moved. The note exists so a reader
+> who checks the claim against the tree does not conclude the ADR is wrong about
+> its conclusion when it is only out of date about its reason.
+
 **(d) Guard on the ambient import-time path (`schema.mjs`/`workflows.mjs`).**
 Rejected: `ambientSchemaOverride()` swallows every error to `null` by design,
 and those modules resolve at module import time — a throw there would fire
