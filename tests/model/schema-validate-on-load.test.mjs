@@ -405,18 +405,113 @@ describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a 
     });
   }
 
-  test("the table covers every hard()/soft() call site in schema-config.mjs", () => {
-    // Without this, a NEW tag ships unclassified-by-test and the next flip is free again.
+  test("the table covers every hard()/soft() call site in schema-config.mjs, by IDENTITY not count", () => {
+    // A total can be preserved while the SET changes: convert one real `hard(` call site to
+    // a direct `problems.push({ message, hard: true })` (which this scan cannot see, because
+    // it looks for the literal token `hard(`) and add a brand-new, unclassified `hard(...)`
+    // call elsewhere, and `hard`/`soft` totals are unchanged — the count-only version of this
+    // test (its previous form) stayed green through exactly that bypass. So this instead
+    // extracts each call site's own message-template text from the source and matches it,
+    // by IDENTITY, against the concrete message each CLASSIFICATION row's fixture actually
+    // produces — a bijection, not a tally.
     const src = readFileSync(new URL("../../scripts/model/schema-config.mjs", import.meta.url), "utf8");
-    const sites = [...src.matchAll(/(?<![\w.$])(hard|soft)\(/g)].map((m) => m[1]);
-    const counted = { hard: sites.filter((s) => s === "hard").length, soft: sites.filter((s) => s === "soft").length };
-    assert.ok(counted.hard > 10 && counted.soft > 2, `the scan is not working: ${JSON.stringify(counted)}`);
-    const covered = {
-      hard: CLASSIFICATION.filter((r) => r.hard).length,
-      soft: CLASSIFICATION.filter((r) => !r.hard).length,
+
+    // Walk a `${...}` interpolation from its opening brace to its matching closing one,
+    // treating a nested template literal or quoted string as an opaque, un-depth-counted
+    // span — schema-config.mjs has exactly one such nesting (the `requirement`-workflow
+    // "omits ..." message interpolates `missing.map(m => `"${m}"`).join(", ")`), and a
+    // depth count that did not skip over it would close on the nested template's OWN `}`.
+    const skipInterpolation = (s, at) => {
+      let depth = 1;
+      let j = at;
+      while (j < s.length && depth > 0) {
+        const c = s[j];
+        if (c === "{") depth += 1;
+        else if (c === "}") depth -= 1;
+        else if (c === "`" || c === '"' || c === "'") {
+          const q = c;
+          j += 1;
+          while (j < s.length && s[j] !== q) j += (s[j] === "\\" ? 2 : 1);
+        }
+        j += 1;
+      }
+      return j;
     };
-    assert.deepEqual(covered, counted,
-      "every hard()/soft() call site needs a CLASSIFICATION row, or its classification is unpinned");
+    // A template literal's content, with every `${...}` replaced by a NUL placeholder so it
+    // can be compared to a concrete message with the interpolated values stripped out.
+    const scanTemplate = (s, start) => {
+      let i = start + 1;
+      let out = "";
+      while (i < s.length) {
+        const c = s[i];
+        if (c === "\\") { i += 2; continue; }
+        if (c === "`") { i += 1; break; }
+        if (c === "$" && s[i + 1] === "{") { i = skipInterpolation(s, i + 2); out += "\0"; continue; }
+        out += c; i += 1;
+      }
+      return { content: out, end: i };
+    };
+    const scanQuoted = (s, start) => {
+      const q = s[start];
+      let i = start + 1;
+      let out = "";
+      while (i < s.length && s[i] !== q) {
+        if (s[i] === "\\") { out += s[i + 1]; i += 2; continue; }
+        out += s[i]; i += 1;
+      }
+      return { content: out, end: i + 1 };
+    };
+    // `hard(`/`soft(`'s one argument is always a string literal, or several joined by `+` —
+    // never a variable or a call — so walking string-literal tokens from the call, following
+    // `+`, captures the whole message with no need to paren-balance the call itself.
+    const callRe = /(?<![\w.$])(hard|soft)\(/g;
+    const sites = [];
+    let m;
+    while ((m = callRe.exec(src))) {
+      const tag = m[1];
+      let pos = m.index + m[0].length;
+      let literal = "";
+      for (;;) {
+        while (/\s/.test(src[pos])) pos += 1;
+        if (src[pos] === "`") { const r = scanTemplate(src, pos); literal += r.content; pos = r.end; }
+        else if (src[pos] === '"' || src[pos] === "'") { const r = scanQuoted(src, pos); literal += r.content; pos = r.end; }
+        else break;
+        while (/\s/.test(src[pos])) pos += 1;
+        if (src[pos] === "+") { pos += 1; continue; }
+        break;
+      }
+      sites.push({ tag, literal });
+    }
+    assert.ok(sites.filter((s) => s.tag === "hard").length > 10 && sites.filter((s) => s.tag === "soft").length > 2,
+      `the scan is not working: found ${sites.length} sites`);
+
+    const escapeRe = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+    const sitePattern = (site) => new RegExp(`^${site.literal.split("\0").map(escapeRe).join(".*")}$`, "s");
+
+    // Every CLASSIFICATION row must trace to exactly one call site, and every call site must
+    // be claimed by exactly one row — the bijection a count can't see. Recomputes each row's
+    // concrete message rather than trusting `re` alone, so the row's own fixture is what
+    // proves the link.
+    const claimedBy = sites.map(() => []);
+    for (const row of CLASSIFICATION) {
+      const [message] = validateSchema(row.resolved).filter((msg) => row.re.test(msg));
+      const matches = [];
+      sites.forEach((site, i) => {
+        if (site.tag === (row.hard ? "hard" : "soft") && sitePattern(site).test(message)) {
+          matches.push(i);
+          claimedBy[i].push(row.name);
+        }
+      });
+      assert.equal(matches.length, 1,
+        `"${row.name}" must trace to exactly one hard()/soft() call site in schema-config.mjs, `
+        + `got ${matches.length} (message: ${JSON.stringify(message)})`);
+    }
+    claimedBy.forEach((rows, i) => {
+      assert.equal(rows.length, 1,
+        `call site #${i + 1} [${sites[i].tag}] "${sites[i].literal.replace(/\0/g, "<x>")}" is claimed by `
+        + `${rows.length} CLASSIFICATION rows (${rows.join(", ") || "none"}) — every call site needs `
+        + "exactly one row, or a new tag ships unclassified");
+    });
   });
 });
 
