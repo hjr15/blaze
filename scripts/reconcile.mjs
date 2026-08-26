@@ -78,11 +78,12 @@ function sh(cmd, args, opts = {}) {
 }
 
 // --- pure decision: git signal + current status + type → target status --------
-export function decide({ pr, branch, shipped }, currentStatus, type) {
+export function decide({ pr, branch, shipped, delivererAmbiguous = false }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false };
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false,
+             recordAmbiguous: false };
   }
   let target, branchVal = null, prVal = null;
   if (pr) {
@@ -103,7 +104,8 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false };
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false,
+             recordAmbiguous: false };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
   //
@@ -168,7 +170,18 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   const openPrOnTerminal = Boolean(pr) && pr.state === "OPEN" && isTerminal(type, currentStatus);
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
-  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly, openPrOnTerminal };
+  // BLZ-398: the record it is about to offer comes from a merged set git cannot
+  // resolve into a deliverer. Reported the same way `recordIfAbsentOnly` is — this
+  // function says the RULE APPLIES, and the caller, which holds the current
+  // frontmatter, enforces it. That split is ADR-0023's own, and keeping this on the
+  // same side of it is what stops the record having two owners.
+  //
+  // Gated on the TARGET being terminal, not the current status: a ticket moving
+  // `defined -> done` locks its record in on that very move, so the ambiguity has to
+  // be caught before the first write, not after the ticket is already terminal.
+  const recordAmbiguous = Boolean(delivererAmbiguous) && isTerminal(type, target);
+  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly,
+           openPrOnTerminal, recordAmbiguous };
 }
 
 // --- anchored leading-id parse of a commit subject ("<KEY>-<n>: desc") --------
@@ -358,18 +371,104 @@ function defaultBranchRef(repoPath) {
 // Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
 // an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
 // no longer beat a corroborated OPEN PR from the ticket's real repo.
-export function buildPrMap(prs, idFromRef, shippedSet) {
-  const prMap = new Map();
+function corroboratedByTicket(prs, idFromRef, shippedSet) {
+  const byId = new Map();
   for (const pr of prs || []) {
     const id = idFromRef(pr.headRefName);
     if (!id) continue;
     if (!claimCorroborated(id, { title: pr.title, shippedSet })) continue;
-    const cur = prMap.get(id);
-    const better = !cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0) ||
-      ((PR_RANK[pr.state] || 0) === (PR_RANK[cur.state] || 0) && pr.number > cur.number);
-    if (better) prMap.set(id, pr);
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push(pr);
+  }
+  return byId;
+}
+
+// --- BLZ-398: how strongly a PR's TITLE claims to have delivered this ticket ---
+// Corroboration (INF-735) is a yes/no gate: does anything beyond the ref name tie this
+// PR to the id at all. That is the right question for "may this PR speak"; it is the
+// wrong one for "which of two PRs delivered the work", because a follow-up that merely
+// MENTIONS the key passes it just as a `KEY-n: …` titled PR does.
+//
+// The house convention is that a PR delivering a ticket is TITLED for it, in the same
+// leading-id-list form `idsFromSubject` already parses. So a title that LEADS with the
+// id is a stronger claim than one that mentions it downstream, and that is the whole
+// of the ranking below. The key comes from the id rather than a parameter, so a caller
+// cannot silently degrade this to the old behaviour by forgetting to pass it.
+export function prTitleClaim(pr, id) {
+  const key = id.slice(0, id.lastIndexOf("-"));
+  return idsFromSubject(pr && pr.title, key).includes(id) ? 2 : 1;
+}
+
+// --- rank a repo's PRs into id → best-PR, gated on corroboration (INF-735) -----
+// Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
+// an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
+// no longer beat a corroborated OPEN PR from the ticket's real repo.
+//
+// BLZ-398 changed the EQUAL-RANK tie-break from "higher PR number" to "stronger title
+// claim, then LOWER number". That is safe to change and it is worth stating why,
+// because it looks like it should move tickets: `decide` derives the target status
+// from `pr.state` ALONE, and PR_RANK is one-to-one with the state, so every candidate
+// at equal rank yields the identical status. The tie-break therefore decides only
+// which PR's `headRefName`/`url` land in the delivery RECORD — never where a ticket
+// goes. `pr.number > cur.number` selected the LATEST merge among equals, which the
+// shipped comments named as a hazard while the protection built on it covered only
+// tickets that already had a record.
+export function buildPrMap(prs, idFromRef, shippedSet) {
+  const prMap = new Map();
+  for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
+    let best = null;
+    for (const pr of candidates) {
+      const better = !best ||
+        (PR_RANK[pr.state] || 0) > (PR_RANK[best.state] || 0) ||
+        ((PR_RANK[pr.state] || 0) === (PR_RANK[best.state] || 0) &&
+          (prTitleClaim(pr, id) > prTitleClaim(best, id) ||
+            (prTitleClaim(pr, id) === prTitleClaim(best, id) && pr.number < best.number)));
+      if (better) best = pr;
+    }
+    if (best) prMap.set(id, best);
   }
   return prMap;
+}
+
+// --- BLZ-398: when git cannot say WHICH merge delivered the ticket ------------
+// A record-less `done` ticket carrying two MERGED PRs acquired the LATEST one and
+// write-once made that permanent — the board recording a follow-up docs PR as what
+// delivered an epic, with no route back (`pr` is not in EDITABLE_FIELDS, so `blaze
+// edit` cannot repair it either).
+//
+// The tie-break above answers this whenever one merged PR claims the ticket more
+// strongly than the others. When it does NOT — two PRs both titled `KEY-n: …`, which
+// is exactly the reproduced INF-645 case of #10 (the real work) and #40 (a docs
+// follow-up) — there is nothing in git that says which one delivered it, and the
+// honest answer is to say so rather than to pick.
+//
+// Rule 7 of the review bar is why this is a refusal and not a heuristic. This record
+// has already been wrong in FOUR directions (overwrite-anything, write-nothing,
+// overwrite-with-the-latest-merge, per-field), and "prefer the lowest number when both
+// are MERGED" is a guess at "the deliverer", not a fact — a ticket delivered by a
+// rewrite after an abandoned first attempt would be recorded backwards by it. What is
+// asymmetric here is the COST, and it is what decides the direction: a blank `pr`
+// understates and is TRUE, and a blank stays fillable because write-once locks in a
+// written value and not an absent one; a `pr` naming the wrong PR overstates, is
+// FALSE, and is permanent. So an ambiguous deliverer writes nothing and reports.
+//
+// Scoped to MERGED deliberately. The record is only ever locked in from a merged PR:
+// the terminal path nulls a non-merged one outright, and a ticket moving to `done`
+// does so because its winning PR is MERGED. An open or closed PR's record is live
+// state that a later run corrects.
+// Returns id -> the numbers of the merged PRs that tied, so the report can NAME them.
+// A finding that says "this is ambiguous" without saying between what is not
+// actionable, and the whole point of refusing to write is to hand a person the choice.
+export function ambiguousDeliverers(prs, idFromRef, shippedSet) {
+  const out = new Map();
+  for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
+    const merged = candidates.filter((pr) => pr.state === "MERGED");
+    if (merged.length < 2) continue;
+    const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
+    const tied = merged.filter((pr) => prTitleClaim(pr, id) === top);
+    if (tied.length > 1) out.set(id, tied.map((pr) => pr.number).sort((a, b) => a - b));
+  }
+  return out;
 }
 
 // --- rank a repo's branches into id → first-corroborated-branch (INF-735) -----
@@ -541,7 +640,8 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
 
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
 function gatherRepo(repoPath, idFromRef, key, { fetch }) {
-  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [] };
+  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [],
+                  ambiguous: new Map() };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
   if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
 
@@ -565,6 +665,9 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // failure must NOT be laundered into an empty result — see gatherPrs.
   const { prs, forgeErrors } = gatherPrs(repoPath);
   const prMap = buildPrMap(prs, idFromRef, shippedSet);
+  // BLZ-398: computed from the SAME corroborated candidate set as the map above, so
+  // the two can never disagree about which PRs were eligible to speak.
+  const ambiguous = ambiguousDeliverers(prs, idFromRef, shippedSet);
 
   const refs = (sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
     "refs/heads", "refs/remotes/origin"]) || "")
@@ -584,7 +687,7 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   });
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
-  return { prMap, branchMap, shippedSet, forgeErrors };
+  return { prMap, branchMap, shippedSet, forgeErrors, ambiguous };
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
@@ -593,7 +696,7 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
 // failed to resolve reported "already in sync" having scanned nothing at all.
 function gatherProject(project, { fetch }) {
   const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
-  const missingRepos = [], forgeErrors = [];
+  const missingRepos = [], forgeErrors = [], ambiguous = new Map();
   let scannedRepos = 0;
   for (const repo of project.codeRepoPaths) {
     if (!existsSync(repo) || !existsSync(join(repo, ".git"))) { missingRepos.push(repo); continue; }
@@ -601,14 +704,26 @@ function gatherProject(project, { fetch }) {
     const r = gatherRepo(repo, project.idFromRef, project.key, { fetch });
     for (const [id, pr] of r.prMap) {
       const cur = prMap.get(id);
+      // BLZ-398: ACROSS repos the same question arises and the answer is the same. Two
+      // repos each holding a merged PR for one ticket is a deliverer this project
+      // cannot name, and the strict `>` below would otherwise settle it by scan order —
+      // which repo happens to come first in `codeRepos`. That is not evidence.
+      if (cur && cur.state === "MERGED" && pr.state === "MERGED") {
+        const seen = ambiguous.get(id) || [];
+        ambiguous.set(id, [...new Set([...seen, cur.number, pr.number])].sort((a, b) => a - b));
+      }
       if (!cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0)) prMap.set(id, pr);
+    }
+    for (const [id, nums] of r.ambiguous || []) {
+      const seen = ambiguous.get(id) || [];
+      ambiguous.set(id, [...new Set([...seen, ...nums])].sort((a, b) => a - b));
     }
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
     for (const f of r.forgeErrors || []) forgeErrors.push(f);
   }
   return {
-    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors,
+    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors, ambiguous,
     configuredRepos: project.codeRepoPaths.length,
   };
 }
@@ -653,7 +768,12 @@ export async function reconcile({
     const type = t.frontmatter.type;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;
-    const d = decide({ pr: s.prMap.get(t.frontmatter.id), branch: s.branchMap.get(t.frontmatter.id), shipped: s.shippedSet.has(t.frontmatter.id) }, t.status, type);
+    const d = decide({
+      pr: s.prMap.get(t.frontmatter.id),
+      branch: s.branchMap.get(t.frontmatter.id),
+      shipped: s.shippedSet.has(t.frontmatter.id),
+      delivererAmbiguous: s.ambiguous ? s.ambiguous.has(t.frontmatter.id) : false,
+    }, t.status, type);
     if (d.skip) continue;
 
     // BLZ-395: recorded BEFORE the dirty check below, because this ticket's whole
@@ -700,8 +820,33 @@ export async function reconcile({
     // is the intent.
     const hadRecord = Boolean(t.frontmatter.branch || t.frontmatter.pr);
     const keep = () => d.recordIfAbsentOnly && hadRecord;
-    if (d.branchVal && !keep() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
-    if (d.prVal && !keep() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
+    // BLZ-398: the second reason not to write, and it gates BOTH fields for the same
+    // reason `keep()` does — the record is ONE UNIT. Writing `branch` from an
+    // unresolvable merged set while leaving `pr` blank would rebuild ADR-0023's fourth
+    // shape of wrong out of the fix for its third.
+    const write = () => !keep() && !d.recordAmbiguous;
+    // BLZ-398: a refusal to write is reported, not swallowed. ADR-0023's round 2 is the
+    // reason — turning a corruption into a SILENT omission was itself judged not a fix,
+    // and a blank the board cannot explain is indistinguishable from one reconcile
+    // never got to. Gated on `!keep()` so it fires only where a write would actually
+    // have happened: a terminal ticket that already holds a record is protected by
+    // write-once regardless, and has nothing to look at.
+    if (d.recordAmbiguous && !keep()) {
+      const merged = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
+      findings.push({
+        kind: "ambiguous-deliverer",
+        id: t.frontmatter.id,
+        status: t.status,
+        prs: merged,
+        message: `${t.frontmatter.id} has more than one merged PR claiming it` +
+          (merged.length ? ` (${merged.map((n) => `#${n}`).join(", ")})` : "") +
+          `, and none claims it more strongly than the rest. Reconcile recorded NO ` +
+          `branch/pr rather than guess which one delivered it — a wrong delivery record ` +
+          `is permanent, a blank one is not. Set it by hand if it matters.`,
+      });
+    }
+    if (d.branchVal && write() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
+    if (d.prVal && write() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
     if (d.resolution !== undefined && fm.resolution !== d.resolution) { fm.resolution = d.resolution; dirty = true; }
     if (d.moved) { fm.updated = today; dirty = true; }
     if (!dirty) continue;
