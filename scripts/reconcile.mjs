@@ -495,23 +495,41 @@ export function buildPrMap(prs, idFromRef, shippedSet) {
 // Returns id -> the numbers of the merged PRs that tied, so the report can NAME them.
 // A finding that says "this is ambiguous" without saying between what is not
 // actionable, and the whole point of refusing to write is to hand a person the choice.
+/** The tied top-claim merged PRs for one id, or null when a deliverer is knowable.
+ *
+ *  DETECTION COUNTS EVERY MERGED CLAIMANT; SELECTION STILL ONLY WRITES A RECORDABLE ONE.
+ *  Keeping those two questions apart is the whole of round 6's finding. The previous cut
+ *  filtered unrecordable PRs out BEFORE testing the tie, on the reasoning that one which
+ *  can never be written is not an answer to "which PR delivered this". It is not an
+ *  answer — but it is still a RIVAL, and dropping it turned a genuine two-claimant tie
+ *  into an apparent single deliverer: two PRs both titled for the ticket, one of them
+ *  unnumberable, and the board permanently recorded the other with no finding at all.
+ *  One unusable number flipped it from "refuses to name a deliverer" to "names one
+ *  forever". `pr` is not in EDITABLE_FIELDS, so there is no route back.
+ *
+ *  That is the same shape as rounds 4 and 5 — a rule that reads the candidate set
+ *  disagreeing with the rule that ranks it — which is why detection now shares ONE
+ *  entry point across repos too. */
+function tiedDeliverers(candidates, id) {
+  const merged = candidates.filter((pr) => pr.state === "MERGED");
+  if (merged.length < 2) return null;
+  const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
+  const tied = merged.filter((pr) => prTitleClaim(pr, id) === top);
+  if (tied.length < 2) return null;
+  // Carry the url, not just the number. PR numbers are per-repository, so a cross-repo
+  // tie can be "#10 and #10" — and a finding naming one number is the exact wording this
+  // ticket condemns. An unrecordable rival has no number at all, so the url is the only
+  // thing that can name it.
+  return tied.map((pr) => ({ number: pr.number, url: pr.url })).sort(
+    (a, b) => (a.number ?? Infinity) - (b.number ?? Infinity) ||
+      String(a.url).localeCompare(String(b.url)));
+}
+
 export function ambiguousDeliverers(prs, idFromRef, shippedSet) {
   const out = new Map();
   for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
-    // Unrecordable PRs are excluded outright: the question here is "which merged PR
-    // delivered this", and one that can never be written into the record is not an answer.
-    const merged = candidates.filter((pr) => pr.state === "MERGED" && pr.number !== null);
-    if (merged.length < 2) continue;
-    const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
-    const tied = merged.filter((pr) => prTitleClaim(pr, id) === top);
-    // Carry the url, not just the number. PR numbers are per-repository, so a
-    // cross-repo tie can be "#10 and #10" — and a finding that says "more than one
-    // merged PR claiming it (#10)" is the exact wording this ticket condemns, now in
-    // the true-positive direction, with nothing an operator could act on.
-    if (tied.length > 1) {
-      out.set(id, tied.map((pr) => ({ number: pr.number, url: pr.url }))
-        .sort((a, b) => a.number - b.number || String(a.url).localeCompare(String(b.url))));
-    }
+    const tied = tiedDeliverers(candidates, id);
+    if (tied) out.set(id, tied);
   }
   return out;
 }
@@ -749,7 +767,7 @@ function sanitisePr(pr) {
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
 function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [],
-                  ambiguous: new Map() };
+                  candidates: new Map() };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
   if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
 
@@ -773,9 +791,11 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // failure must NOT be laundered into an empty result — see gatherPrs.
   const { prs, forgeErrors } = gatherPrs(repoPath);
   const prMap = buildPrMap(prs, idFromRef, shippedSet);
-  // BLZ-398: computed from the SAME corroborated candidate set as the map above, so
-  // the two can never disagree about which PRs were eligible to speak.
-  const ambiguous = ambiguousDeliverers(prs, idFromRef, shippedSet);
+  // BLZ-398: the corroborated candidates themselves travel upward, not a per-repo
+  // verdict. Ambiguity is a property of ALL of a project's PRs for an id, so deciding it
+  // per repo and merging the answers cannot be right — `gatherProject` unions these and
+  // asks once. That also deletes the cross-repo special case that had drifted twice.
+  const candidates = corroboratedByTicket(prs, idFromRef, shippedSet);
 
   const refs = (sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
     "refs/heads", "refs/remotes/origin"]) || "")
@@ -795,17 +815,23 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   });
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
-  return { prMap, branchMap, shippedSet, forgeErrors, ambiguous };
+  return { prMap, branchMap, shippedSet, forgeErrors, candidates };
 }
 
-/** Union two lists of PR refs, deduped by IDENTITY (url when present, else number) —
- *  never by number alone, or two repositories' #10 collapse into one. */
-function mergeRefs(seen, add) {
-  const out = [...(seen || [])];
-  for (const ref of add) {
-    if (!out.some((x) => samePr(x, ref))) out.push(ref);
-  }
-  return out.sort((a, b) => a.number - b.number || String(a.url).localeCompare(String(b.url)));
+/** Name a pull request with whatever identifier actually exists.
+ *
+ *  Every field here can be missing at once. `sanitisePr` sets `number` to null when the
+ *  forge did not supply a usable one, and `clean()` reduces a control-char-only `url` to
+ *  the empty string — the untrusted-GHES case that sanitiser exists for. The previous cut
+ *  made `url` the primary identifier and produced "the pull request at  carrying its key
+ *  is still OPEN": a report naming no pull request at all, and "at undefined" when the
+ *  field was absent. `headRefName` was in the payload and unused; it is the last resort. */
+function namePr(pr) {
+  const bits = [];
+  if (pr.number !== null && pr.number !== undefined) bits.push(`#${pr.number}`);
+  if (pr.url) bits.push(pr.url);
+  if (!bits.length && pr.headRefName) bits.push(`branch ${pr.headRefName}`);
+  return bits.length ? `the pull request ${bits.join(" — ")}` : "an unidentifiable pull request";
 }
 
 /** Two PR payloads are the same pull request. `url` is unique across repositories;
@@ -829,45 +855,42 @@ function samePr(a, b) {
 // failed to resolve reported "already in sync" having scanned nothing at all.
 function gatherProject(project, { fetch }) {
   const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
-  const missingRepos = [], forgeErrors = [], ambiguous = new Map();
+  const missingRepos = [], forgeErrors = [];
+  const allCandidates = new Map();
   let scannedRepos = 0;
   for (const repo of project.codeRepoPaths) {
     if (!existsSync(repo) || !existsSync(join(repo, ".git"))) { missingRepos.push(repo); continue; }
     scannedRepos += 1;
     const r = gatherRepo(repo, project.idFromRef, project.key, { fetch });
+    // The SAME comparator as within a repo. This used to be rank alone, so across repos
+    // an unusable PR still won and the record was decided by which path came first in
+    // `codeRepos` — scan order, which is not evidence.
     for (const [id, pr] of r.prMap) {
-      const cur = prMap.get(id);
-      // BLZ-398: ACROSS repos the same question arises and the answer is the same. Two
-      // repos each holding a merged PR for one ticket is a deliverer this project
-      // cannot name, and the strict `>` below would otherwise settle it by scan order —
-      // which repo happens to come first in `codeRepos`. That is not evidence.
-      //
-      // The identity check is not redundant, and review found why: `codeRepoPaths` is
-      // not deduped, so two entries can name the SAME repository (a duplicate line, an
-      // abs/rel pair, or a checkout plus one of its own worktrees). `gh pr list` then
-      // returns the same PR twice and, compared on state alone, one PR collides with
-      // ITSELF — declaring a healthy single-deliverer ticket ambiguous, stripping its
-      // record on every run, and reporting "more than one merged PR" while naming one.
-      // Compared on `url`, which GitHub makes unique across repositories, with `number`
-      // as the fallback for a forge payload that lacks one.
-      if (cur && cur.state === "MERGED" && pr.state === "MERGED" &&
-          cur.number !== null && pr.number !== null && !samePr(cur, pr)) {
-        ambiguous.set(id, mergeRefs(ambiguous.get(id), [
-          { number: cur.number, url: cur.url }, { number: pr.number, url: pr.url },
-        ]));
-      }
-      // The SAME comparator as within a repo. This used to be rank alone, so across
-      // repos an unusable PR still won and the record was decided by which path came
-      // first in `codeRepos` — scan order, which the comment above rightly calls not
-      // evidence. Two copies of a rule is how the halves drift apart.
-      if (betterPr(pr, cur, id)) prMap.set(id, pr);
+      if (betterPr(pr, prMap.get(id), id)) prMap.set(id, pr);
     }
-    for (const [id, refs] of r.ambiguous || []) {
-      ambiguous.set(id, mergeRefs(ambiguous.get(id), refs));
+    // Union the candidates, deduped by IDENTITY. `codeRepoPaths` is not deduped, so two
+    // entries can name the SAME repository (a duplicate line, an abs/rel pair, a checkout
+    // plus one of its own worktrees); `gh pr list` then returns the same PR twice, and
+    // without this one PR collides with itself and a healthy single-deliverer ticket is
+    // declared ambiguous. `samePr` decides identity by url, which GitHub makes unique
+    // across repositories.
+    for (const [id, prs] of r.candidates || []) {
+      const seen = allCandidates.get(id) || [];
+      for (const pr of prs) if (!seen.some((x) => samePr(x, pr))) seen.push(pr);
+      allCandidates.set(id, seen);
     }
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
     for (const f of r.forgeErrors || []) forgeErrors.push(f);
+  }
+  // Asked ONCE, over every repo's candidates at once. Deciding per repo and merging the
+  // verdicts is what let an unrecordable PR promoted into the running best shield every
+  // later repo from the check — and made the finding depend on `codeRepos` order, which
+  // is exactly what the record was fixed to stop depending on.
+  const ambiguous = new Map();
+  for (const [id, candidates] of allCandidates) {
+    const tied = tiedDeliverers(candidates, id);
+    if (tied) ambiguous.set(id, tied);
   }
   return {
     prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors, ambiguous,
@@ -944,10 +967,9 @@ export async function reconcile({
         // dropped unnumberable PRs so this never fired; round 4 kept them for their veto,
         // which is exactly when a terminal ticket is vetoed by one — and the message read
         // "PR #null carrying its key is still OPEN", on stderr, the feed and the preview.
-        message: `${t.frontmatter.id} is ${t.status}, but the pull request at ${pr.url} ` +
-          `${pr.number === null || pr.number === undefined ? "" : `(#${pr.number}) `}` +
-          `carrying its key is still OPEN. Reconcile moved nothing: a terminal status is ` +
-          `never reversed automatically. If the work is not shipped, move it back by hand.`,
+        message: `${t.frontmatter.id} is ${t.status}, but ${namePr(pr)} carrying its key ` +
+          `is still OPEN. Reconcile moved nothing: a terminal status is never reversed ` +
+          `automatically. If the work is not shipped, move it back by hand.`,
       });
     }
 

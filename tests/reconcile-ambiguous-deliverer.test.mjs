@@ -712,63 +712,96 @@ test("BLZ-398: a cleared record is NAMED in changes — a destructive write says
   }
 });
 
-test("BLZ-398: an unnumberable merged PR is not a rival deliverer", async () => {
-  // The exclusion has to be pinned in the direction that COSTS something. A ticket with
-  // one good merged PR and one the forge could not number has exactly one candidate
-  // answer to "which merged PR delivered this" — counting the unusable one as a rival
-  // makes the set ambiguous and strips a record that was perfectly knowable.
+
+// =============================================================================
+// Review round 6 — detection and selection must agree on the candidate set
+// =============================================================================
+
+test("BLZ-398: an unnumberable merged PR IS a rival — it just cannot be recorded", () => {
+  // AN EARLIER VERSION OF THIS TEST ASSERTED THE OPPOSITE, and round 6 was right that it
+  // was wrong. `ambiguousDeliverers` filtered unrecordable PRs out BEFORE testing the tie,
+  // reasoning that a PR which can never be written is not an answer to "which PR delivered
+  // this". It is not an answer — but it is still a RIVAL. Dropping it turned a genuine
+  // two-claimant tie into an apparent single deliverer, and the board then recorded the
+  // other one permanently with no finding at all: ONE unusable number flipped it from
+  // "refuses to name a deliverer" to "names one forever".
+  //
+  // Detection counts every merged claimant; SELECTION still only ever writes a recordable
+  // one. Keeping those two questions apart is the whole fix.
   const good = { number: 10, state: "MERGED", url: "u10",
     headRefName: "INF-645-work", title: "INF-645: the work" };
-  const unusable = { number: "12abc", state: "MERGED", url: "https://ghes.corp/a/pull/999",
+  const unusable = { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/999",
     headRefName: "INF-645-other", title: "INF-645: something else" };
-  const tmp = mkdtempSync(join(tmpdir(), "blz398-rival-"));
-  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
-  const restore = stubGh(tmp, [good, unusable]);
-  try {
-    const r = await reconcile({ root, dryRun: false });
-    assert.match(readTicket(root, "done"), /pr: '?#10 — u10/,
-      "one knowable deliverer plus one unusable PR is still one deliverer");
-    assert.deepEqual(r.findings.filter((f) => f.kind === "ambiguous-deliverer"), []);
-  } finally {
-    restore();
-    rmSync(tmp, { recursive: true, force: true });
+  const amb = ambiguousDeliverers([good, unusable], idFromRef, null);
+  assert.ok(amb.has("INF-645"), "two PRs both titled for the ticket are two claimants");
+  assert.deepEqual(amb.get("INF-645").map((r) => r.number), [10, null],
+    "and the unrecordable rival is named too — by url, since it has no number");
+  assert.match(amb.get("INF-645")[1].url, /pull\/999/);
+});
+
+test("BLZ-398: end-to-end, one unusable number does not hand the record to the other PR", async () => {
+  // Round 6's control-vs-probe as a regression: the control (both numbered) already
+  // refused to record; the probe differed in exactly one field and recorded permanently.
+  const good = { number: 10, state: "MERGED", url: "https://ghes.corp/a/pull/10",
+    headRefName: "INF-645-work-b", title: "INF-645: the work" };
+  const unusable = { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/5",
+    headRefName: "INF-645-work-a", title: "INF-645: also the work" };
+  for (const order of [[unusable, good], [good, unusable]]) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-rival-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+    const restore = stubGh(tmp, order);
+    try {
+      const r = await reconcile({ root, dryRun: false });
+      assert.doesNotMatch(readTicket(root, "done"), /^pr:/m,
+        "this recorded `pr: #10` permanently, with no finding, because one rival was invisible");
+      assert.ok(r.findings.some((f) => f.kind === "ambiguous-deliverer"));
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 });
 
-test("BLZ-395: a finding never renders \"PR #null\"", async () => {
-  // Round 3 dropped unnumberable PRs so this could not fire; round 4 kept them for their
-  // veto, which is exactly the case where a terminal ticket is vetoed by one. The message
-  // then read "PR #null carrying its key is still OPEN" — on stderr, the activity feed and
-  // /api/reconcile-preview at once.
-  const tmp = mkdtempSync(join(tmpdir(), "blz395-null-"));
-  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
-  const restore = stubGh(tmp, [
-    { number: 10, state: "MERGED", url: "u10", headRefName: "INF-645-docs", title: "INF-645: docs" },
-    { number: null, state: "OPEN", url: "https://ghes.corp/a/pull/1000",
-      headRefName: "INF-645-real", title: "INF-645: the real work" },
-  ]);
-  try {
-    const r = await reconcile({ root, dryRun: true });
-    const f = r.findings.find((x) => x.kind === "open-pr-on-terminal");
-    assert.ok(f, "the veto still applies, so the conflict is still reported");
-    assert.doesNotMatch(f.message, /#null/, "a PR with no number must be named by its url");
-    assert.doesNotMatch(f.message, /#undefined/);
-    assert.match(f.message, /https:\/\/ghes\.corp\/a\/pull\/1000/);
-  } finally {
-    restore();
-    rmSync(tmp, { recursive: true, force: true });
+test("BLZ-395: a finding names the PR by whatever identifier exists", async () => {
+  // Round 5 made `url` the primary identifier; round 6 found every field can be missing at
+  // once. `sanitisePr` nulls an unusable number AND empties a control-char-only url — the
+  // untrusted-GHES case that sanitiser exists for — so the message read "the pull request
+  // at  carrying its key is still OPEN": naming no pull request at all.
+  const esc = String.fromCharCode(27);
+  const cases = [
+    { pr: { number: 81, state: "OPEN", url: "https://ghes.corp/a/pull/81",
+            headRefName: "INF-645-real", title: "INF-645: real" }, want: /#81/ },
+    { pr: { number: null, state: "OPEN", url: "https://ghes.corp/a/pull/1000",
+            headRefName: "INF-645-real", title: "INF-645: real" }, want: /pull\/1000/ },
+    { pr: { number: null, state: "OPEN", url: esc,
+            headRefName: "INF-645-real", title: "INF-645: real" }, want: /branch INF-645-real/ },
+  ];
+  for (const { pr, want } of cases) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz395-name-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+    const restore = stubGh(tmp, [
+      { number: 10, state: "MERGED", url: "u10", headRefName: "INF-645-docs", title: "INF-645: docs" },
+      pr,
+    ]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      const f = r.findings.find((x) => x.kind === "open-pr-on-terminal");
+      assert.ok(f, "the veto applies, so the conflict is reported");
+      assert.match(f.message, want);
+      for (const bad of [/#null/, /#undefined/, /at undefined/, /request {2}carrying/]) {
+        assert.doesNotMatch(f.message, bad, `message must not read: ${bad}`);
+      }
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 });
 
 test("BLZ-398: an unnumberable strong claimant beats a recordable weak one, and records nothing", async () => {
-  // Round 5, and the fifth consecutive defect found in the previous round's fix. Round 4
-  // put RECORDABLE above the title claim, so a PR titled `chore: tidy the runbook after
-  // INF-645` (weak claim, real number) beat `INF-645: close the Tier-1 alert gaps` (strong
-  // claim, no number) — and the board recorded the docs chore as having delivered the
-  // epic. `ambiguousDeliverers` could not catch it: it filters unrecordable PRs out first,
-  // so only one merged candidate remained and nothing looked ambiguous. That is verbatim
-  // the INF-645 failure this ticket exists to stop, re-entered through the tier meant to
-  // protect the record.
+  // Round 5's F1. Ranking RECORDABLE above the title claim let a PR titled `chore: tidy
+  // the runbook after INF-645` be recorded as having delivered the epic while
+  // `INF-645: close the Tier-1 alert gaps` sat beside it.
   const work = { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/99",
     headRefName: "INF-645-real", title: "INF-645: close the Tier-1 alert gaps" };
   const chore = { number: 40, state: "MERGED", url: "https://ghes.corp/a/pull/40",
@@ -783,8 +816,7 @@ test("BLZ-398: an unnumberable strong claimant beats a recordable weak one, and 
       assert.doesNotMatch(text, /#40/,
         "the docs chore must never be recorded as the deliverer, whatever the input order");
       assert.doesNotMatch(text, /^pr:/m,
-        "the strong claimant wins and cannot be recorded, so the record stays BLANK — " +
-        "true, rather than filled and false");
+        "the strong claimant wins and cannot be recorded, so the record stays BLANK");
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });
@@ -792,55 +824,58 @@ test("BLZ-398: an unnumberable strong claimant beats a recordable weak one, and 
   }
 });
 
-test("BLZ-398: recordable still breaks a tie between EQUAL claims", async () => {
-  // The case the tier was added for, and it must survive being demoted below the claim:
-  // two equally-titled merged PRs, one unnumberable. `null < 10` is true, so without the
-  // tier the unusable one wins the number tie-break and suppresses a knowable record.
-  const good = { number: 10, state: "MERGED", url: "u10",
-    headRefName: "INF-645-work", title: "INF-645: the work" };
-  const bad = { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/5",
-    headRefName: "INF-645-other", title: "INF-645: also the work" };
-  const tmp = mkdtempSync(join(tmpdir(), "blz398-tie-"));
-  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
-  const restore = stubGh(tmp, [bad, good]);
-  try {
-    await reconcile({ root, dryRun: false });
-    assert.match(readTicket(root, "done"), /pr: '?#10 — u10/,
-      "equal claims, so the recordable one is the answer");
-  } finally {
-    restore();
-    rmSync(tmp, { recursive: true, force: true });
+test("BLZ-398: recordable breaks an equal-claim tie where ambiguity does not apply", () => {
+  // The tier's remaining job. On MERGED PRs an equal-claim tie is now answered by the
+  // ambiguity rule, not the tier. Ambiguity is scoped to MERGED because only a merge locks
+  // a record in; for OPEN PRs the record is live state, so a tie is broken rather than
+  // refused — and preferring the recordable one is what stops `null < 10` handing the
+  // selection to the PR that cannot supply a record.
+  const openGood = { number: 41, state: "OPEN", url: "u41",
+    headRefName: "INF-645-a", title: "INF-645: the work" };
+  const openBad = { number: null, state: "OPEN", url: "https://ghes.corp/a/pull/5",
+    headRefName: "INF-645-b", title: "INF-645: also the work" };
+  for (const order of [[openBad, openGood], [openGood, openBad]]) {
+    const w = buildPrMap(order, idFromRef, null).get("INF-645");
+    assert.equal(w.number, 41, "the recordable PR wins an equal-claim tie, whatever the order");
   }
 });
 
-test("BLZ-398: across repos the SAME comparator applies — scan order decides nothing", async () => {
-  // `gatherProject` merged on rank alone, so an unusable PR still won across repos and the
-  // record was decided by which path came first in `codeRepos`. Same board, same git,
-  // opposite records. One comparator now serves both, because two copies of a rule is how
-  // the halves drift apart.
-  async function run(order) {
+test("BLZ-398: across repos, scan order decides neither the record nor the finding", async () => {
+  // Round 5 fixed scan-order dependence of the RECORD and introduced it for the FINDING:
+  // the cross-repo check compared only against the running best, so once an unrecordable
+  // PR was promoted into that slot the check was skipped for every later repo — reporting
+  // in one order of four. Ambiguity is now decided ONCE over the union of every repo's
+  // candidates, so neither answer can depend on `codeRepos` order.
+  //
+  // Two scenarios, because "consistent" alone would be satisfied by never reporting.
+  async function run(order, titles) {
     const tmp = mkdtempSync(join(tmpdir(), "blz398-xorder-"));
-    const repos = ["alpha", "beta"].map((n) => {
+    const byName = {};
+    for (const n of ["alpha", "beta", "gamma"]) {
       const d = join(tmp, n);
       mkdirSync(d, { recursive: true });
       gitInit(d);
       execFileSync("git", ["-C", d, "remote", "add", "origin", `https://github.com/hjr15/${n}.git`]);
-      return d;
-    });
-    const ordered = order === "alpha-first" ? repos : [repos[1], repos[0]];
-    const root = board(tmp, ordered, [["INF-645", "epic", "defined"]]);
+      byName[n] = d;
+    }
+    const root = board(tmp, order.map((n) => byName[n]), [["INF-645", "epic", "defined"]]);
     const bin = join(tmp, "bin");
     mkdirSync(bin, { recursive: true });
+    const one = (n) => JSON.stringify([{ number: titles[n].number, state: "MERGED",
+      url: `https://github.com/hjr15/${n}/pull/${titles[n].number ?? "x"}`,
+      headRefName: `INF-645-${n}`, title: titles[n].title }]);
     writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash
 case "$PWD" in
   */alpha) cat <<'JSON'
-${JSON.stringify([{ number: null, state: "MERGED", url: "https://ghes.corp/alpha/pull/9",
-  headRefName: "INF-645-alpha", title: "INF-645: alpha side" }])}
+${one("alpha")}
+JSON
+  ;;
+  */beta) cat <<'JSON'
+${one("beta")}
 JSON
   ;;
   *) cat <<'JSON'
-${JSON.stringify([{ number: 20, state: "MERGED", url: "https://github.com/hjr15/beta/pull/20",
-  headRefName: "INF-645-beta", title: "INF-645: beta side" }])}
+${one("gamma")}
 JSON
   ;;
 esac
@@ -849,16 +884,45 @@ esac
     const prev = process.env.PATH;
     process.env.PATH = `${bin}:${prev}`;
     try {
-      await reconcile({ root, dryRun: false });
-      return readTicket(root, "done");
+      const r = await reconcile({ root, dryRun: false });
+      return {
+        pr: (readTicket(root, "done").match(/^pr: .*/m) || ["(none)"])[0],
+        amb: r.findings.filter((f) => f.kind === "ambiguous-deliverer").length,
+        warn: r.forgeErrors.filter((f) => f.reason === "gh-unusable-pr").length,
+      };
     } finally {
       process.env.PATH = prev;
       rmSync(tmp, { recursive: true, force: true });
     }
   }
-  const a = await run("alpha-first");
-  const b = await run("beta-first");
-  const prOf = (t) => (t.match(/^pr: .*/m) || ["(none)"])[0];
-  assert.equal(prOf(a), prOf(b), "the record must not depend on codeRepos order");
-  assert.match(prOf(a), /#20/, "and the recordable PR is the one that can answer");
+  const ORDERS = [["alpha", "beta", "gamma"], ["alpha", "gamma", "beta"],
+                  ["beta", "alpha", "gamma"], ["gamma", "beta", "alpha"]];
+
+  // A — one strong claimant, and it is the unrecordable one. git DOES name a deliverer,
+  // so there is no tie; the record is blank because that deliverer cannot be written, and
+  // the blank is explained by the forge warning rather than left mute.
+  const A = { alpha: { number: 10, title: "chore: tidy after INF-645" },
+              beta: { number: null, title: "INF-645: the real work" },
+              gamma: { number: 20, title: "chore: also after INF-645" } };
+  const a = [];
+  for (const o of ORDERS) a.push(await run(o, A));
+  for (const got of a) {
+    assert.equal(got.pr, "(none)", "the sole strong claimant cannot be recorded");
+    assert.equal(got.amb, 0, "one top claimant is not a tie");
+    assert.equal(got.warn, 1, "and the blank is explained, not mute");
+    assert.deepEqual(got, a[0], "no answer may depend on codeRepos order");
+  }
+
+  // B — two co-equal top claimants in DIFFERENT repos. This is the tie, and it must be
+  // reported in every order; under round 5 it reported in one order of four.
+  const B = { alpha: { number: 10, title: "INF-645: half the work" },
+              beta: { number: null, title: "chore: after INF-645" },
+              gamma: { number: 20, title: "INF-645: the other half" } };
+  const b = [];
+  for (const o of ORDERS) b.push(await run(o, B));
+  for (const got of b) {
+    assert.equal(got.amb, 1, "two co-equal claimants across repos are a reported tie");
+    assert.equal(got.pr, "(none)", "and nothing is recorded while the tie stands");
+    assert.deepEqual(got, b[0], "in every codeRepos order");
+  }
 });
