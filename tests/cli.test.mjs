@@ -200,25 +200,35 @@ test("the schema-preflight comment's arithmetic matches the code beneath it", ()
   const at = [];
   for (let i = start; i < setLine; i += 1) if (BULLET.test(lines[i])) at.push(i);
   assert.ok(at.length, "no exemption bullets found in the comment above the Set");
-  // A WRAPPED line must be ANCHORED to a real continuation — not merely indented four or
-  // more spaces. `WRAPPED` alone treats ANY deep-indented comment line as a bullet's
-  // continuation, so re-indenting the CLOSING PARAGRAPH after the bullets to four spaces
-  // (and dropping the blank `//` line that used to separate it) makes it read as one more
-  // continuation line — closing the visual gap a bullet moved below it would otherwise fall
-  // into. Every genuine continuation line in this block is indented to the SAME depth (they
-  // align with where each bullet's own dash-text starts), so the first continuation line
-  // found sets the depth every other one must match; a line that is merely "deep enough" but
-  // at a DIFFERENT depth is not a continuation — it interrupts the block, exactly like any
-  // other non-bullet line does.
-  let wrapDepth = null;
   for (let i = at[0]; i <= at[at.length - 1]; i += 1) {
-    if (BULLET.test(lines[i])) continue;
-    const w = lines[i].match(WRAPPED);
-    const anchored = w && (wrapDepth === null ? (wrapDepth = w[1].length, true) : w[1].length === wrapDepth);
-    assert.ok(anchored,
+    assert.ok(BULLET.test(lines[i]) || WRAPPED.test(lines[i]),
       `the exemption bullets must be ONE contiguous block — line ${i + 1} interrupts it, `
       + `so a bullet below it is orphaned from the list: ${lines[i]}`);
   }
+  // AND THE CLOSING PARAGRAPH SITS BELOW THE WHOLE LIST. Contiguity alone cannot see the
+  // original defect's real shape, because that shape does not interrupt anything: re-indent
+  // the closing `That leaves N of the M subcommands` paragraph deep enough to read as a
+  // continuation line, drop the blank `//` that separated it, and it is ABSORBED into the
+  // block — after which a bullet moved below it is still "contiguous" and still orphaned
+  // from the list a reader scans. Two earlier rounds tried to classify that paragraph by its
+  // INDENT (four or more spaces; then, tighter, a depth differing from the first continuation
+  // line's). Both lost to a paragraph re-indented to the depth the guard was looking for —
+  // the second to a paragraph at the bullets' own continuation depth — and the depth rule
+  // additionally red-lit LEGITIMATE reformatting, since re-padding the bullet names for a
+  // longer exemption moves every continuation line to a new depth at once.
+  //
+  // So stop inferring structure from indentation and pin the invariant directly: whatever
+  // that paragraph is indented to, its line must come AFTER the last bullet. That is the
+  // thing the guard exists for, and it is true of the correct file and false of every
+  // orphaned-bullet arrangement, at any indent.
+  const closing = lines.findIndex((l, i) =>
+    i >= start && i < setLine && l.includes(`That leaves ${checked} of the ${total} subcommands`));
+  assert.ok(closing >= 0,
+    `the comment above the Set must close with "That leaves ${checked} of the ${total} subcommands"`);
+  assert.ok(closing > at[at.length - 1],
+    `the closing "That leaves ..." paragraph (line ${closing + 1}) must sit BELOW the last `
+    + `exemption bullet (line ${at[at.length - 1] + 1}) — a bullet below that paragraph is `
+    + "orphaned from the list, which is the defect this block has already paid for twice");
   const bullets = at.map((i) => lines[i].match(BULLET)[1]);
   assert.deepEqual([...bullets].sort(), [...exempt].sort(),
     "the bullets and SCHEMA_PREFLIGHT_EXEMPT must name the SAME verbs — a missing bullet "
