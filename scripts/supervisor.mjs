@@ -83,7 +83,10 @@ const CONTROLS_HTML = `
     .activity .revert { margin-left:auto; cursor:pointer; color:var(--blaze-orange); background:none; border:0; font:inherit; }
   </style>`;
 
-const ACTIVITY_SCRIPT = `
+// Exported so a test can run the SHIPPED renderer rather than a hand-copied twin —
+// a twin keeps passing after someone edits the real one, which is how the missing
+// warning branch survived review in the first place.
+export const ACTIVITY_SCRIPT = `
   <script>
     const act = document.getElementById("activity");
     const conn = document.getElementById("conn");
@@ -95,7 +98,20 @@ const ACTIVITY_SCRIPT = `
         : e.noop ? ("groom " + e.id + ": no change") : ("groom " + e.id + " (" + (e.files||[]).length + " file)");
       else if (e.type === "status") txt = e.loop + " " + e.state;
       else if (e.type === "error") txt = (e.loop||"") + " error: " + e.message;
-      li.innerHTML = "<span>" + (e.ts||"") + "</span><span>" + txt + "</span>";
+      // BLZ-395: without this branch a finding rendered as the bare word "warning".
+      // The event was published, deduped and delivered — and said nothing. A report
+      // nobody can read is the same failure as no report, on the loop this feature
+      // exists for.
+      else if (e.type === "warning") txt = (e.loop||"") + ": " + e.message;
+      // textContent, not innerHTML. The rendered text carries forge-derived data — a PR
+      // url on a finding, a remote host and a codeRepo path on a forge error — and the
+      // previous innerHTML concat made every one of those an injection sink in the
+      // operator's own dashboard. Adding the warning branch above without this would
+      // have widened a live sink rather than filled a gap. (No backticks in here: this
+      // whole block lives inside a template literal.)
+      const tsEl = document.createElement("span"); tsEl.textContent = e.ts || "";
+      const txtEl = document.createElement("span"); txtEl.textContent = txt;
+      li.append(tsEl, txtEl);
       if (e.type === "groom" && e.sha) {
         const b = document.createElement("button");
         b.className = "revert"; b.textContent = "↩ revert";

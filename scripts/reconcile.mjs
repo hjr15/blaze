@@ -629,13 +629,36 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
   }
   try {
     const prs = JSON.parse(res.stdout || "[]");
-    return { prs: Array.isArray(prs) ? prs : [], forgeErrors: [] };
+    return { prs: Array.isArray(prs) ? prs.map(sanitisePr) : [], forgeErrors: [] };
   } catch (e) {
     return { prs: [], forgeErrors: [{
       repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unparsable", detail: String(e.message || e),
       message: `\`gh pr list\` returned output Blaze could not parse as JSON in ${repoPath}. ${UNREACHABLE}`,
     }] };
   }
+}
+
+// --- the forge's JSON is UNTRUSTED input, and it was trusted verbatim ---------
+// `gh pr list` output is parsed and its fields flow into three places that render or
+// persist them: the CLI's stderr warnings, the activity feed, and a ticket's
+// `branch`/`pr` frontmatter. `serializeTicket` quotes and escapes, so the file on disk
+// was never at risk — but a terminal is not an escaping context. A `pr.url` carrying ESC
+// bytes writes an OSC-8 hyperlink into an operator's stderr, and a `pr.number` carrying
+// a newline forges a whole extra `reconcile: NEEDS ATTENTION —` line.
+//
+// Blaze is GitHub-only and github.com generates `number` and `url` itself — the two
+// fields a person actually controls, `title` and `headRefName`, reach neither message.
+// The reachable path is a codeRepo on a GitHub ENTERPRISE SERVER host: `classifyRemote`
+// treats an unknown host as askable on purpose (guessing "unsupported" would break
+// working boards), so `gh` is queried against it and its JSON believed. That is the right
+// default, and this is its cost — paid once at the seam rather than at each of the three
+// consumers, because fixing one consumer and not its siblings is how a correction gets
+// made twice and still misses.
+function sanitisePr(pr) {
+  if (!pr || typeof pr !== "object") return pr;
+  const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
+  return { ...pr, number: Number(pr.number), url: clean(pr.url),
+           title: clean(pr.title), headRefName: clean(pr.headRefName), state: clean(pr.state) };
 }
 
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
