@@ -9,12 +9,14 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { planInit, questions, testConnection, OFFERED_DRIVERS } from "./init.mjs";
+import { addUser } from "./model/user-admin.mjs";
 
 const FLAGS = {
   "--dir": "dir", "--project": "project", "--project-name": "projectName",
   "--db": "driver", "--host": "host", "--port": "port", "--database": "database",
   "--user": "user", "--password-env": "passwordEnv",
   "--title": "boardTitle", "--board-port": "boardPort",
+  "--admin-email": "adminEmail",
 };
 
 export function parseArgs(argv) {
@@ -43,6 +45,10 @@ to use. Answer every question by flag, or be prompted when run at a terminal.
   --db=${OFFERED_DRIVERS.join("|")}       database driver                  (default: sqlite)
   --title=NAME          board title, shown in the viewer (default: Blaze)
   --board-port=N        port for 'blaze board'           (default: 4321)
+  --admin-email=EMAIL   create the first admin user and print its token ONCE.
+                        Optional: without it the board serves on loopback only,
+                        and 'blaze user add' or the first-run setup flow can
+                        create the admin later.
 
 postgres only — Blaze NEVER stores a password:
   --host=HOST           (default: localhost)
@@ -213,11 +219,34 @@ export async function runInit(argv, io = {}) {
       + "# Blaze runtime state and connection details — never commit these.\n.blaze/\n");
   }
 
+  // BLZ-358 AC-6. ADR-0013 section 5: the first admin is a user, not an exception — so
+  // this is the same `addUser` that `blaze user add` and the HTTP setup route call.
+  // There is no third way to make a user, and this is deliberately after the board is
+  // on disk: a half-written board with a live credential in it is the worse failure.
+  let adminNote = null;
+  if (plan.adminEmail) {
+    try {
+      const { user, token } = await addUser(plan.dataRoot, { email: plan.adminEmail, role: "admin" });
+      adminNote = { user, token };
+    } catch (e) {
+      // Not fatal. The board is already usable on loopback, and `blaze user add` can
+      // retry — failing the whole init here would leave a good board looking broken.
+      err(`\nadmin       NOT created: ${String(e?.message ?? e)}`);
+      err("            The board is fine — create it later with `blaze user add`.");
+    }
+  }
+
   log(`\nBoard ready at ${plan.dataRoot}`);
   log(`  project      ${plan.project}`);
   log(`  database     ${plan.config.database.driver}`);
   if (plan.databasePath) log(`  connection   ${plan.databasePath} (gitignored)`);
   if (gitNote) log(`  ${gitNote}`);
+  if (adminNote) {
+    log(`  admin        ${adminNote.user.email} (role: ${adminNote.user.role})`);
+    log("\nAPI token (shown once — copy it now, it is not recoverable):");
+    log(`    ${adminNote.token.token}`);
+    log("Use it as:  Authorization: Bearer <token>");
+  }
   log(`\nNext:  cd ${plan.dataRoot} && blaze new --project ${plan.project} --type task "First ticket"`);
   return 0;
 }

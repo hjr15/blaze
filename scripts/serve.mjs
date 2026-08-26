@@ -27,6 +27,9 @@ import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
+import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admin.mjs";
+import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
+         ensureSetupTokenIgnored } from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
@@ -79,6 +82,72 @@ function send(req, res, code, type, body) {
   res.end(buf);
 }
 
+// ---- first-run setup diagnostics (BLZ-358) ----------------------------------
+// The setup branch answers an UNAUTHENTICATED caller, so nothing internal is ever put
+// in an HTTP body there. That is right, and it is not the same as throwing the signal
+// away: an operator whose identity.db is read-only, whose disk is full, or who hits
+// EACCES was getting a bare 400 and no diagnostic on ANY channel — for the one
+// operation that decides whether the install is ever usable. STDERR is where the
+// operator already reads blaze's boot messages, and it is not the HTTP response.
+//
+// The MESSAGE only, never the object: an exception object can carry the request that
+// produced it, and a token value has no business in a log stream (see setup-token.mjs
+// on why `docker logs` is a rotation event). And this CANNOT THROW — `String()` raises
+// outright on an object with a poisoned `toString`, this is called from catch blocks on
+// the pre-auth surface, and a throw from inside the outer catch would end the process
+// for every connected session, which is the exact failure this branch already learned.
+function setupFailureReason(e) {
+  try { return String(e?.message ?? e); } catch { return "(the error could not be rendered)"; }
+}
+
+// ---- first-run setup page (BLZ-358) -----------------------------------------
+// Deliberately self-contained and ugly: it is shown once, before any identity
+// exists, and it must not depend on the board renderer — which is precisely the
+// thing that is not safe to serve yet.
+//
+// It renders the token's PATH and never its VALUE. A page that printed the token
+// would defeat the file it is meant to be read from: the whole point of writing it
+// to disk is that reaching it requires filesystem access, and anything rendered
+// over HTTP is available to whoever reached the port.
+function setupPageHtml(tokenPath) {
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  return `<!doctype html><meta charset="utf-8"><title>blaze — first-run setup</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
+label{display:block;margin:1rem 0 .25rem;font-weight:600}input{width:100%;padding:.5rem;font:inherit}
+code{background:#eee;padding:.15rem .35rem}button{margin-top:1.5rem;padding:.6rem 1.2rem;font:inherit}
+#out{margin-top:1.5rem;white-space:pre-wrap}</style>
+<h1>Set up blaze</h1>
+<p>This board has no users yet, so nothing is being served until you create the first
+administrator.</p>
+<p>Read the one-time setup token from this file on the machine hosting the board — it is
+not shown here, and it is not in any log:</p>
+<p><code>${esc(tokenPath)}</code></p>
+<form id="f">
+  <label for="token">Setup token</label>
+  <input id="token" name="token" autocomplete="off" required>
+  <label for="email">Your email address</label>
+  <input id="email" name="email" type="email" required>
+  <label for="displayName">Display name (optional)</label>
+  <input id="displayName" name="displayName" autocomplete="off">
+  <button type="submit">Create administrator</button>
+</form>
+<div id="out"></div>
+<script>
+document.getElementById("f").addEventListener("submit", async (e) => {
+  e.preventDefault();
+  const body = { token: token.value, email: email.value, displayName: displayName.value || null };
+  const r = await fetch("/setup", { method: "POST",
+    headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
+  const j = await r.json().catch(() => ({}));
+  out.textContent = r.ok
+    ? "Administrator created.\n\nYour API token is shown ONCE and is not recoverable:\n\n"
+      + j.token + "\n\nStore it now, then reload this page."
+    : "Setup failed: " + ((j.errors || ["unknown error"]).join(", "));
+});
+</script>`;
+}
+
 // ---- server factory ---------------------------------------------------------
 
 // PORT=0 is a REQUEST, not an absence: it means "bind any free port", which is how tests get
@@ -93,7 +162,15 @@ function envPort() {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null;
 }
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views, identity = loadIdentity(root) } = {}) {
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views, identity = loadIdentity(root),
+                             // INJECTABLE FOR THE SAME REASON `identity` IS. The in-flight guard
+                             // below is only observable when `addUser` actually yields, and the
+                             // SQLite store does not — so with the real one, ten concurrent
+                             // correct-token requests are serialised by the event loop and the
+                             // 409 branch is never taken. Removing the guard entirely changed no
+                             // test. A store that yields (Postgres) would reach it, so the guard
+                             // is real; it just could not be SEEN. Defaults to the real one.
+                             addUser = addUserImpl } = {}) {
   // BLZ-348, ADR-0013. checkBindSafety() has existed and been tested since BLZ-304 and
   // was called by nothing, so the one control written for exactly this configuration was
   // dead code: an operator publishing the port to a LAN interface got an unauthenticated
@@ -106,18 +183,226 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   // 0.0.0.0, killed the container with the false message "no users configured".
   if (identity?.state === "broken") throw new Error(identity.error);
   const bind = checkBindSafety({ host, hasIdentity: Boolean(identity?.hasIdentity) });
-  if (!bind.ok) throw new Error(bind.error);
+  // BLZ-358: the refusal is REPLACED here, not removed. `checkBindSafety` is unchanged
+  // and still returns exactly the refusal it always did — what changes is that
+  // serve.mjs now has somewhere better to go with it. The supervisor still throws on
+  // the same verdict (it is loopback-by-construction, so the setup flow must not be
+  // reachable through that second server), which is why the decision lives at this
+  // call site rather than inside the check.
+  //
+  // Refusing was right GIVEN NO ALTERNATIVE. A container has no TTY, so
+  // `scripts/init.mjs`'s wizard cannot reach it, and HTTP is the only channel the
+  // deployment has. What it must NOT become is a way to serve the board unauthenticated
+  // on a public interface — the exact hole the refusal closed — so setup mode serves
+  // the setup flow and nothing else at all.
+  let setupPending = false;
+  // One attempt at a time. `setupPending` is only cleared AFTER `addUser` awaits, so with
+  // an identity store that yields to the event loop two concurrent correct-token requests
+  // could both pass the check and both create an admin. This guard is DEFENCE IN DEPTH,
+  // stated plainly: no store that ships today yields there. `identity-db.mjs` constructs
+  // exactly one store, `identityStore(exec, { dialect: "sqlite" })`, and nothing anywhere
+  // constructs the `postgres` dialect `identity-store.mjs` also supports — so the guard
+  // does not fire in any configuration an operator can currently select. Its LOGIC is
+  // proven by an injected yielding `addUser` in tests/setup-flow.test.mjs; what is not
+  // proven, because it cannot be, is that a shipped board ever reaches it. It stays
+  // because the day a yielding store is wired up, this is the line between one admin and
+  // two — and that is not a thing to discover afterwards.
+  let setupInFlight = false;
+  if (!bind.ok) {
+    let issued;
+    try {
+      issued = issueSetupToken(root);
+    } catch (e) {
+      // A read-only data mount (`-v <data>:/data:ro`, a supported and encouraged mode)
+      // cannot hold a token, and neither can a board whose .blaze/ is not writable.
+      // There is no setup flow to offer, so the original refusal stands — with the
+      // reason appended, because "refusing to serve" without saying why the alternative
+      // was unavailable sends the operator hunting the wrong problem.
+      throw new Error(`${bind.error}\nA first-run setup flow could not be started either: `
+        + `${String(e?.message ?? e)}\nOn a read-only data mount, create the first user `
+        + `against a writable copy of the board with \`blaze user add\`.\n`);
+    }
+    setupPending = true;
+    // The token file lives beside identity.db, so the rule that hides one hides the
+    // other. Reused rather than re-derived — BLZ-348 wrote this for exactly this case.
+    // BOTH, and not one on the assumption that it covers the other: a .gitignore naming
+    // exactly `.blaze/identity.db` satisfies the first check while leaving the token
+    // file committable.
+    try { ensureIdentityIgnored(root); } catch { /* not a repo, or not ours to edit */ }
+    try {
+      const tokenIgnore = ensureSetupTokenIgnored(root);
+      // A path git already had in its index before this rule existed is a token that was
+      // committed — the PATH surfaced here, never the VALUE, but the operator still needs
+      // to know it, because the fix un-stages the path going forward and cannot undo
+      // whatever is already sitting in a prior commit.
+      if (tokenIgnore?.wasTracked && tokenIgnore.untrackOk) {
+        console.warn(`blaze: WARNING — ${tokenIgnore.path} was already tracked in git and has `
+          + "been untracked (git rm --cached -f). Its value may be recoverable from git history "
+          + "and must be treated as compromised: rotate it.");
+      } else if (tokenIgnore?.wasTracked) {
+        // THE UNTRACK FAILED and the leak is still open, so the one thing the operator
+        // must not be told is that it was closed. This branch used to be unreachable
+        // wording: the warning asserted the untrack unconditionally on `wasTracked`
+        // alone, `untrackOk` was computed and read nowhere, and git's stderr was
+        // discarded — so a board where `git rm` refused looked, from the log, exactly
+        // like a board where it succeeded.
+        console.warn(`blaze: WARNING — ${tokenIgnore.path} is tracked in git and could NOT be `
+          + `untracked${tokenIgnore.untrackError ? ` (${tokenIgnore.untrackError})` : ""}. A LIVE `
+          + "credential is still staged for your next commit. Untrack it by hand:\n"
+          + `    git rm --cached -f -- ${tokenIgnore.path}\n`
+          + "Its value must be treated as compromised either way: rotate it.");
+      }
+    } catch { /* same */ }
+    // THE PATH, NEVER THE VALUE. A token that reaches a log stream is a token that has
+    // to be rotated, and `docker logs` is shipped off-box by any log aggregator.
+    console.log(`blaze: no users configured — serving first-run setup at /setup`);
+    console.log(`blaze: read the one-time setup token from ${issued.path} (mode 0600)`);
+  }
   // null when no identity is configured — which gate() reads as the loopback case that
   // the check above has just vouched for, and serves without auth exactly as always.
-  const store = identity?.hasIdentity ? identity.store : null;
+  // `let`, because completing setup adopts the identity it just created WITHOUT a
+  // restart: leaving this null after setup would serve the new board with no credential
+  // required, which is the refusal's own hole re-opened by the fix for it.
+  let store = identity?.hasIdentity ? identity.store : null;
 
   return createServer(async (req, res) => {
-    const u = new URL(req.url, "http://localhost");
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
+    // `new URL` THROWS on a request line it cannot parse — `GET // HTTP/1.1` is enough —
+    // and this handler has no wrapping try, so that ended the process for every
+    // connected session. The line predates BLZ-358; serving setup is what made it
+    // reachable pre-auth on a public interface, which makes it this ticket's problem.
+    let u;
+    try { u = new URL(req.url, "http://localhost"); }
+    catch { return send(req, res, 400, "text/plain; charset=utf-8", "bad request\n"); }
 
     // Every /api/* request, classified and decided in ONE place. An unclassified route
     // is a 404 here rather than falling through to whichever handler happens to match
     // later — a route added without a scope must not inherit the last one's.
+    // BLZ-358: first-run setup, decided BEFORE the gate. `gate()` is fail-closed and
+    // 404s any route it does not classify, and a caller completing setup has no
+    // credential to present yet — by definition, since creating one is what it is for.
+    // So this branch carries its own authentication (the token file) and never reaches
+    // the gate. It exists ONLY while `setupPending`, so once an identity exists there is
+    // no route here to reach: not hidden, absent.
+    if (setupPending) {
+      // WRAPPED, because this branch runs BEFORE any credential is checked and the rest
+      // of this file states the rule three times: an uncaught throw in an async handler
+      // ends the process for every connected session rather than refusing one request.
+      // It was the one place here without a try, and one unauthenticated request with a
+      // poisoned `toString` was enough to take the board down.
+      try {
+      if (req.method === "GET" && u.pathname === "/setup") {
+        return send(req, res, 200, "text/html; charset=utf-8", setupPageHtml(setupTokenPath(root)));
+      }
+      if (req.method === "POST" && u.pathname === "/setup") {
+        let body;
+        try { body = await readJson(req); } catch { return json(400, { errors: ["malformed request"] }); }
+        // The token first, so a caller who cannot authenticate learns nothing about
+        // whether their email would have been acceptable.
+        if (!setupTokenMatches(body?.token, readSetupToken(root))) {
+          // Neither the presented value nor the real one is echoed. One would confirm a
+          // guess; the other would hand over the credential outright.
+          return json(401, { errors: ["invalid setup token"] });
+        }
+        const email = typeof body?.email === "string" ? body.email.trim() : "";
+        if (!email) return json(400, { errors: ["a user needs an email address"] });
+        // TYPE-CHECKED FOR THE SAME REASON `email` is, one line above: this is the
+        // pre-auth surface, and `identity-store.mjs`'s `String(displayName ?? folded)`
+        // silently coerces whatever arrives — an object becomes the literal string
+        // "[object Object]", an array becomes "a,b", a boolean becomes "true" — and
+        // `String()` THROWS outright on an object with a poisoned toString, which used to
+        // surface as a raw internal exception message below. `null`/`undefined` stay
+        // allowed: that is "no display name given", handled by falling back to the email.
+        let displayName = null;
+        if (body?.displayName !== null && body?.displayName !== undefined) {
+          if (typeof body.displayName !== "string") {
+            return json(400, { errors: ["display name must be a string"] });
+          }
+          displayName = body.displayName.trim();
+          // A bound, not a suggestion: readJson already caps the whole request body at
+          // 256KB, which still lets a display name alone run to that size. 200 matches no
+          // deep reasoning beyond "long enough for a real name, short enough that nothing
+          // downstream — an HTML page, a database column with no length constraint of its
+          // own — has to deal with an unbounded string from an unauthenticated caller".
+          if (displayName.length > 200) {
+            return json(400, { errors: ["display name is too long (200 characters max)"] });
+          }
+          if (!displayName) displayName = null;
+        }
+        if (setupInFlight) return json(409, { errors: ["setup is already in progress"] });
+        setupInFlight = true;
+        let created;
+        try {
+          // ADR-0013 section 5: the first admin is a user, not an exception. This is the
+          // same `addUser` that `blaze user add` calls — there is no bootstrap branch.
+          created = await addUser(root, { email, role: "admin", displayName });
+        } catch (e) {
+          // A failed creation must leave setup COMPLETABLE — the token is not consumed
+          // by a mistake the operator can correct and retry. The exception's own message
+          // is NEVER echoed to the CALLER — this is the pre-auth surface, and an internal
+          // message (a database constraint's own wording, `String()`'s own wording) is
+          // exactly the kind of detail this branch's sibling catch already says nothing
+          // about. It goes to the OPERATOR instead, on stderr, because the alternative
+          // tried first — binding nothing and logging nowhere — left a read-only
+          // identity.db indistinguishable from a typo'd email.
+          setupInFlight = false;
+          console.error("blaze: setup could not create the administrator account:",
+                        setupFailureReason(e));
+          return json(400, { errors: ["could not create the administrator account"] });
+        }
+        // Close the door in this order: the credential first, then the route.
+        // ADOPT FIRST, AND FAIL CLOSED. The order here is the whole control.
+        //
+        // `gate()` reads `store === null` as "no identity configured — the loopback case,
+        // already vouched for at startup". After a failed adoption that premise is FALSE:
+        // an identity now exists, it simply could not be opened. So clearing
+        // `setupPending` before knowing the adoption worked left the process with
+        // `setupPending === false` AND `store === null` — and `gate()` then answered
+        // `{ ok: true }` for every route, serving the whole board to an unauthenticated
+        // caller on 0.0.0.0. That is precisely the hole the refusal this ticket replaces
+        // existed to close, and it is worse than a restart: a restart meets
+        // `identity?.state === "broken"` and throws.
+        //
+        // `loadIdentity` can return non-healthy here for reasons that have nothing to do
+        // with the row just written — SQLITE_BUSY from a concurrent writer (a second blaze
+        // process, `blaze user add`, the supervisor's loops), EMFILE, EIO, the mount going
+        // read-only. Narrow window, maximum-severity outcome, so it is handled rather than
+        // assumed away.
+        const adopted = loadIdentity(root);
+        if (adopted?.state !== "healthy") {
+          // The token is consumed either way: the administrator WAS created, so leaving it
+          // live would let a second caller create a second admin. `setupPending` stays
+          // TRUE, so every other route keeps answering 503 and nothing is served
+          // unauthenticated. The operator restarts: with an identity present no token is
+          // minted, and if the database is genuinely broken `startServer` refuses outright.
+          clearSetupToken(root);
+          console.error("blaze: the administrator account was created, but the identity "
+            + "database could not be adopted — the board stays in setup mode and serves "
+            + "nothing. Restart blaze.");
+          return json(500, { errors: ["setup could not be completed"] });
+        }
+        store = adopted.store;
+        clearSetupToken(root);
+        setupPending = false;
+        // The API token is returned ONCE. ADR-0013 stores only its SHA-256, so this is
+        // the only moment it exists; it is not logged, for the same reason.
+        return json(200, { ok: true, user: created.user, token: created.token.token });
+      }
+      // Everything else waits. 503 rather than 404: the board is really there, it is
+      // simply not safe to serve it yet, and a 404 would suggest the operator had the
+      // wrong address. The body is a fixed string and carries nothing from the request
+      // or from the token.
+      return send(req, res, 503, "text/plain; charset=utf-8",
+        "blaze: first-run setup required — no users are configured. Open /setup\n");
+      } catch (e) {
+        // The RESPONSE deliberately says nothing about what failed: this is the pre-auth
+        // surface. The OPERATOR is told, on stderr — a silent 500 on the one route that
+        // makes the install usable is a support case with no evidence in it.
+        console.error("blaze: first-run setup failed:", setupFailureReason(e));
+        return json(500, { errors: ["setup could not be completed"] });
+      }
+    }
+
     let principal = null;
     // Board CONTENT is gated too, at `read`. `/` is rendered SERVER-SIDE and carries
     // every ticket, so leaving it open made `viewer` a role that protected nothing: a

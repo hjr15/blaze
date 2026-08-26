@@ -18,18 +18,35 @@ ENV BLAZE_PROJECTS_DIR=/data/projects
 # the container netns — unreachable via a published -p port from the host.
 # Bind all interfaces here; host-level exposure is still gated by -p.
 #
-# BLZ-348: that reasoning is unchanged and still correct. What changed is that
-# ADR-0013's bind check is now actually CALLED, and 0.0.0.0 is precisely the
-# case it was written to refuse. A container started with no users configured
-# therefore exits 1 at startup with the two fixes named, rather than serving an
-# unauthenticated board with every mutating route open to whatever can reach the
-# published port. That refusal is the point of the image change, not a
-# regression in it. Two supported ways to run it:
+# BLZ-348 made ADR-0013's bind check actually run, and 0.0.0.0 is precisely the
+# case it was written to refuse — so a container with no users exited 1 at startup
+# rather than serving an unauthenticated board with every mutating route open to
+# whatever could reach the published port.
 #
-#   1. Bring an identity. Create it once against the data repo on the host —
+# BLZ-358 REPLACED THAT REFUSAL, as the earlier note here said it would. The
+# container now STARTS and serves a first-run setup flow, and NOTHING ELSE: every
+# other route answers 503 until an admin exists. The security property is the same
+# one the refusal bought — the board is never served unauthenticated on an
+# interface something else can reach — and the operator gets a way forward instead
+# of an exit code, which matters because a container has no TTY and `blaze init`'s
+# wizard cannot prompt anyone here.
+#
+#   docker run -v <data-repo>:/data -p 4321:4321 <image>
+#
+# On first start the server writes a one-time token to <data>/.blaze/setup-token at
+# mode 0600 and logs only its PATH. Read it off disk on the host and enter it at
+# http://localhost:4321/setup. The VALUE is never logged — `docker logs` is shipped
+# off-box by any log aggregator, and a token that lands there has to be rotated.
+# Completing setup creates the admin through the same code path as
+# `blaze user add`, removes the token file, and the setup route then 404s.
+#
+# Two alternatives, both still supported:
+#
+#   1. Bring an identity. Create it against the data repo on the host —
 #        blaze user add --email you@example.com --role admin
-#      — which writes <data>/.blaze/identity.db. The bind-mount at /data carries
-#      it in, and every /api/* call then needs Authorization: Bearer blz_…
+#      (or blaze init --admin-email=you@example.com on a new board)
+#      — which writes <data>/.blaze/identity.db. The bind-mount carries it in, and
+#      every /api/* call then needs Authorization: Bearer blz_…
 #
 #   2. Or keep the container loopback-only and publish nothing:
 #        docker run -v <data-repo>:/data -e HOST=127.0.0.1 --network host <image>
@@ -38,10 +55,8 @@ ENV BLAZE_PROJECTS_DIR=/data/projects
 # whoever runs the container, and a wrong one is silent. See docs/architecture.md
 # — HTTP surface.
 #
-# THIS REFUSAL IS CURRENT BEHAVIOUR, NOT THE PERMANENT DESIGN. It is correct while
-# the only way to create the first user is a CLI command run against the data repo.
-# A first-run setup flow that asks for the initial sysadmin account is tracked
-# separately and will REPLACE this refusal rather than patch it.
+# A READ-ONLY data mount cannot hold a setup token, so there is no setup flow to
+# offer and the original refusal stands, saying why. Use option 1 or 2 there.
 #
 # A read-only data mount is supported and encouraged for a read-only board:
 #   docker run -v <data-repo>:/data:ro -p 4321:4321 <image>

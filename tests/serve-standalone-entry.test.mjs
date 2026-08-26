@@ -1,6 +1,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -100,7 +100,7 @@ test("PORT=0 means 'any free port', not 'unset' — even with 4321 already taken
 //
 // Spawned rather than imported, for the same reason as the tests above: the exit code and
 // the stderr are the contract here, and neither exists inside startServer().
-test("HOST=0.0.0.0 with no identities exits non-zero and names the two fixes", async () => {
+test("HOST=0.0.0.0 with no identities STAYS UP and serves setup, logging only the path", async () => {
   const child = spawn(process.execPath, [SERVE], {
     cwd: BOARD,
     env: { ...process.env, PORT: "0", HOST: "0.0.0.0", BLAZE_PROJECTS_DIR: join(BOARD, "projects") },
@@ -115,10 +115,19 @@ test("HOST=0.0.0.0 with no identities exits non-zero and names the two fixes", a
     child.on("exit", (c) => { clearTimeout(done); resolve(c); });
   });
 
-  assert.equal(code, 1, `expected a refusal, got ${code}\nstdout: ${stdout}\nstderr: ${stderr}`);
-  assert.doesNotMatch(stdout, /board → http:\/\//, "it must not announce a board it refused to serve");
-  assert.match(stderr, /refusing to serve on 0\.0\.0\.0 with no users configured/);
-  assert.match(stderr, /HOST=127\.0\.0\.1 blaze board/, "the loopback fix must be named");
-  assert.match(stderr, /blaze user add --email \S+ --role admin/, "the identity fix must be named");
-  assert.doesNotMatch(stderr, /at startServer/, "a stack trace is not a refusal message");
+  // BLZ-358: the container must no longer exit 1 here. It is the case with no TTY, so a
+  // terminal wizard cannot reach it and HTTP is the only channel the deployment has.
+  assert.equal(code, "still-running",
+    `expected a running setup server, got exit ${code}\nstdout: ${stdout}\nstderr: ${stderr}`);
+  assert.match(stdout, /serving first-run setup at \/setup/);
+  assert.match(stdout, /\.blaze\/setup-token/, "the operator needs the PATH to read it from");
+
+  // THE VALUE MUST NOT BE ANYWHERE IN EITHER STREAM. `docker logs` is shipped off-box by
+  // any log aggregator, so a token that reaches stdout is a token that must be rotated —
+  // which is the whole reason it is written to a 0600 file instead.
+  const token = readFileSync(join(BOARD, ".blaze", "setup-token"), "utf8").trim();
+  assert.ok(token.length > 20, "the fixture must really have a token, or this proves nothing");
+  assert.equal(stdout.includes(token), false, "the token value must never be logged");
+  assert.equal(stderr.includes(token), false, "nor to stderr");
+  assert.doesNotMatch(stderr, /at startServer/, "and no stack trace");
 });

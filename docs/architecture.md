@@ -140,12 +140,82 @@ both servers, because the page is rendered server-side and carries every ticket.
 | Identities | Bind address | Behaviour |
 |---|---|---|
 | none | loopback (`127.0.0.1`, `::1`, `localhost`) | Served without authentication, exactly as Blaze always has — the bind address *is* the boundary. This is `blaze start`'s only case, since it binds nothing else |
-| none | anything else | **`blaze board` refuses to start**, naming both fixes. `checkBindSafety` is called before `.listen()`, so nothing is ever served. This is the behaviour *until a first-run setup flow exists*, not a permanent design choice |
+| none | anything else | **`blaze board` serves the first-run setup flow, and nothing else** (BLZ-358). Every other route answers `503` — the board is never served unauthenticated on an interface something else can reach, which is what the earlier refusal bought. `blaze start` still refuses, because it binds loopback by construction and has no setup flow of its own |
 | one or more | any | Every `/api/*` and `/control/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
 | **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **Both servers refuse to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
 
+### First-run setup (BLZ-358)
+
+A container has no TTY, so `scripts/init.mjs`'s wizard cannot reach `docker run -p
+4321:4321`, and HTTP is the only channel that deployment has. On a non-loopback bind
+with no identities the server therefore starts and serves a setup flow instead of
+exiting.
+
+**The setup route is protected by a one-time token written to
+`<board>/.blaze/setup-token` at mode `0600`.** The server logs the *path*; the value is
+never logged, rendered, or echoed back — not in the setup page, not in an error. The
+operator reads it off disk and enters it. Completing setup creates the admin through
+`addUser`, the same function `blaze user add` calls (ADR-0013 §5 — the first admin is a
+user, not an exception), deletes the token file, and adopts the new identity in-process,
+so the board it goes on to serve is authenticated rather than open. The route is then
+gone, not hidden: it exists only while setup is pending, so afterwards it `404`s.
+
+**What the token protects against, and what it does not.** It reaches only someone with
+filesystem access — the same privilege that could edit `identity.db` directly — and,
+decisively, it never enters a log stream, which a printed token would (`docker logs` is
+shipped off-box by any aggregator). It is **not** transport security: the token crosses
+the network in the POST body, so on a plain-HTTP LAN bind it is observable in transit,
+and putting the flow behind a TLS-terminating proxy is the operator's job. It does not
+survive a world-readable bind mount or a container running as root. And it does not stop
+a race for an unconfigured board — whoever presents it first becomes the admin; the
+window runs from first start to completed setup, and the mitigation is to finish setup.
+
+On a **read-only data mount** (`-v <data>:/data:ro`, a supported mode) no token can be
+written, so there is no setup flow to offer and the original refusal stands, saying why.
+
+**Entering setup mode writes to the board's git repository.** This is a boot-time side
+effect on the operator's own working tree, and it is deliberate — a live credential that
+`git add -A` can pick up is the failure this closes — but it is not silent and should
+not be a surprise:
+
+1. If `<board>` is a git work tree, the server ensures each of `.blaze/identity.db` and
+   `.blaze/setup-token` is ignored, asking git about **each** path rather than assuming
+   one rule covers the other — a `.gitignore` naming exactly `.blaze/identity.db` would
+   leave the token committable. What actually gets **written** on a fresh board is a
+   single `.blaze/` rule, appended by the identity check, which runs first; the token
+   check then finds the path already ignored and appends nothing (`state: "already"`).
+   The server never appends **both** in one boot: the identity check runs first, and when
+   it appends it appends `.blaze/`, which already covers the token. The token check
+   therefore appends a rule only on a board where **git already ignores**
+   `.blaze/identity.db` but *not* `.blaze/setup-token` — and in that case the identity
+   check appended nothing, so it is still one rule.
+2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
+   pre-fix build and staged or committed the token — the server runs
+   `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index
+   only**; the file on disk, which is the live token this same boot just wrote, is not
+   touched. It therefore **stages a deletion**, which shows up in
+   `git status` / `git diff --cached` as a legitimate pending change for the operator to
+   commit. `-f` is required because the index, the working file and `HEAD` can all
+   differ — exactly the state a board left by `git add -A` plus a restart is in — and a
+   bare `git rm --cached` refuses there.
+3. The server **warns on stderr** whenever the path was tracked, naming the path and
+   never the value, and it distinguishes the two outcomes: it claims the untrack only
+   when `git rm` actually succeeded, and otherwise says it could not, gives the reason
+   git reported, and prints the exact manual command.
+
+**A token that was ever tracked must be rotated.** Untracking stops the path being
+staged again; it cannot un-leak a value already in a prior commit, which needs history
+rewriting and is out of scope for a boot-time check. Delete
+`<board>/.blaze/setup-token` and restart the board to mint a fresh one — `issueSetupToken`
+always overwrites, so an abandoned setup never leaves a live credential a later start
+re-serves.
+
+None of this happens when `<board>` is not a git work tree, or when git is unavailable:
+the check reports `not-a-repo`/`unavailable` and boot continues.
+
 Create the first identity — which turns authentication on — with
-[`blaze user add`](guide/commands.md#user).
+[`blaze user add`](guide/commands.md#user), with `blaze init --admin-email=…`, or through
+the setup flow above. All three go through `addUser`.
 
 **Both servers read the roster once, at boot.** `startServer()` and `createApp()` each
 resolve `loadIdentity()` a single time, so adding the first user to a board that is

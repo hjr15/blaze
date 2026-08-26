@@ -50,6 +50,16 @@ export function planInit(answers = {}) {
       + `expected ${OFFERED_DRIVERS.join(" or ")}`);
   }
 
+  // Absent means "no admin yet", which is legal. PRESENT AND BLANK is a mistake — an
+  // operator who typed a space has not chosen to skip, and silently treating it as a
+  // skip would hand them a board they cannot serve on a non-loopback address.
+  const rawAdmin = answers.adminEmail;
+  const adminEmail = rawAdmin === undefined || rawAdmin === null || rawAdmin === ""
+    ? null : String(rawAdmin).trim();
+  if (adminEmail !== null && !adminEmail) {
+    errors.push("--admin-email was given but is blank: supply an address, or omit it entirely");
+  }
+
   let database = null;
   if (driver === "postgres") {
     const host = String(answers.host ?? "").trim();
@@ -110,6 +120,7 @@ export function planInit(answers = {}) {
       databasePath: database ? join(dir, ".blaze", "database.json") : null,
       database,
       project,
+      adminEmail,
     },
   };
 }
@@ -124,6 +135,12 @@ export function questions({ driver = "sqlite" } = {}) {
       why: "every verb except `new` refuses an unknown project, and an empty board silently does nothing" },
     { key: "driver", prompt: `Database (${OFFERED_DRIVERS.join("/")})`, def: "sqlite",
       why: "sqlite needs no setup and is built into Node; postgres is opt-in" },
+    // BLZ-358. Optional, and blank is a real answer: loopback with no identities is
+    // what Blaze has always served, and this must not turn that into a required step.
+    // Answering it means a shell-installed board never meets the non-loopback refusal
+    // the HTTP setup flow exists to replace.
+    { key: "adminEmail", prompt: "Email for the first admin (blank to skip)", def: "",
+      why: "creates the first user, which turns authentication on and lets the board bind a non-loopback address" },
   ];
   if (driver !== "postgres") return base;
   return [...base,

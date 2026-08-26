@@ -50,22 +50,34 @@ const post = (base, path, body, headers = {}) =>
   });
 
 describe("the bind-address boundary is enforced at startup, not merely written down", () => {
-  test("a non-loopback bind with no identities configured REFUSES to start", () => {
+  // BLZ-358 REPLACED THE REFUSAL, and these two tests move with it. What must NOT
+  // change is the property the refusal bought: a userless board on a non-loopback
+  // interface still serves nobody its contents. It now serves a setup flow instead of
+  // exiting, and nothing else at all — which is a strictly better answer to the same
+  // question, and a strictly worse one if the "nothing else" half ever lapses.
+  test("a non-loopback bind with no identities serves SETUP, and nothing else", async () => {
     const { root, projects } = board();
-    assert.throws(
-      () => startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" }),
-      /refusing to serve on 0\.0\.0\.0 with no users configured/);
+    const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+    await new Promise((res) => server.once("listening", res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      assert.equal((await fetch(`${base}/setup`)).status, 200);
+      for (const path of ["/", "/api/live", "/api/hash"]) {
+        const r = await fetch(`${base}${path}`);
+        assert.equal(r.status, 503, `${path} must not be served before setup completes`);
+        assert.doesNotMatch(await r.text(), /OBA-1/, `${path} leaked board content`);
+      }
+    } finally { server.close(); }
   });
 
-  test("the refusal names `blaze user add`, and that command exists", () => {
-    const { root, projects } = board();
-    let message = "";
-    try { startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" }); }
-    catch (e) { message = e.message; }
-    assert.match(message, /blaze user add --email \S+ --role admin/);
-    // The command the message names must be a real subcommand, or the error is a lie.
+  test("`blaze user add` still exists — setup is a second door, not a replacement", () => {
+    // ADR-0013 section 5: the first admin is a user, not an exception. The HTTP flow
+    // calls the same `addUser`, so the CLI path must still be there for an operator
+    // with shell access.
     const cli = readFileSync(new URL("../scripts/cli.mjs", import.meta.url), "utf8");
     assert.match(cli, /^\s*user: \{/m, "cli.mjs must dispatch a `user` subcommand");
+    const admin = readFileSync(new URL("../scripts/model/user-admin.mjs", import.meta.url), "utf8");
+    assert.match(admin, /export async function addUser/, "and both doors must go through it");
   });
 
   test("BACKWARDS COMPATIBILITY: loopback with no identities serves exactly as it always has",
@@ -119,11 +131,18 @@ describe("an identity FILE is not an identity — only a user is", () => {
     finally { server.close(); }
   });
 
-  test("...and a non-loopback bind is still refused with one", () => {
+  test("...and a non-loopback bind serves setup with one, not the board", async () => {
+    // An empty table is `hasIdentity: false` exactly as an absent file is, so it reaches
+    // the setup flow on the same terms — it must not fall through to serving the board.
     const { root, projects } = board();
     emptyIdentityDb(root);
-    assert.throws(() => startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" }),
-      /refusing to serve on 0\.0\.0\.0 with no users configured/);
+    const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+    await new Promise((res) => server.once("listening", res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      assert.equal((await fetch(`${base}/setup`)).status, 200);
+      assert.equal((await fetch(`${base}/`)).status, 503);
+    } finally { server.close(); }
   });
 
 });

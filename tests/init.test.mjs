@@ -236,7 +236,8 @@ describe("the flags are the contract", () => {
     // If a prompt can set something no flag can, the interactive path is a second
     // source of truth and it will drift.
     const flagged = new Set(["dir", "project", "driver", "host", "port", "database",
-                             "user", "passwordEnv"]);
+                             // BLZ-358 added --admin-email alongside its question.
+                             "user", "passwordEnv", "adminEmail"]);
     for (const q of questions({ driver: "postgres" })) {
       assert.ok(flagged.has(q.key), `question '${q.key}' has no flag`);
     }
