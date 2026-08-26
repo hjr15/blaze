@@ -111,6 +111,39 @@ PR for a half-recorded ticket (by corroborating `headRefName` against the record
 separate change and is not made here: a new inference path is exactly the shape that has
 already failed three times above.
 
+**BLZ-398 adds a THIRD verb to this rule: reconcile may now DELETE a delivery record.**
+Recorded here because the rule above — "may ACQUIRE … may never have one replaced" — reads
+as though acquire and keep are the only directions, and that is no longer true.
+
+The reason is that write-once alone could not hold the record honest. `PR_RANK` puts OPEN
+above MERGED, so while any PR carrying the key is open the record is chosen by **rank, not
+by any deliverer rule** — `prTitleClaim` never runs on that path. A follow-up PR that
+happens to be open at the sample moment therefore writes itself into the record during
+`in-review`; when it later merges, the merged set becomes unresolvable, and merely refusing
+to write froze that rank-chosen value as the ticket went terminal. The board then held the
+wrong PR permanently, with a finding beside it that claimed nothing had been recorded and
+then fell silent, because a frozen record makes the write-once test true and the finding is
+gated on it.
+
+So when the deliverer is ambiguous and write-once does **not** apply, both fields are
+cleared. That is safe exactly where it applies: write-once not applying means the record is
+either live pre-terminal state reconcile itself wrote, or absent. Reconcile is the only
+producer of `branch`/`pr` — neither is in `EDITABLE_FIELDS` — so nothing a person authored
+is reachable. A cleared record is reported as `cleared` on the change, because a
+destructive direction that reports itself as `{from: "done", to: "done"}` is
+indistinguishable from a `resolution` backfill.
+
+**The residual, stated rather than papered over — and it is the same shape as §1's.** The
+clear and the finding are both gated on write-once not applying. A ticket **hand-moved** to
+`done` while a follow-up PR is still open arrives at terminal-with-a-record by a route
+reconcile never sees, and neither the clear nor the report fires: the rank-chosen record is
+frozen exactly as before, silently. That is not a regression — `origin/main` freezes the
+same value — but it is not closed either. Closing it means either overriding write-once on
+a terminal ticket, or reporting on the ~54 terminal tickets at `blaze-pm` `ff5f36c2` that
+already hold a record drawn from an ambiguous set, most of which are probably right.
+Tracked separately rather than decided here, for the same reason BLZ-395 was: it is a
+second, larger decision about a deliberate rule, not an oversight in this one.
+
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
 progress is recoverable by looking; overstating it is not.

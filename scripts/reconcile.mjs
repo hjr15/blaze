@@ -466,7 +466,14 @@ export function ambiguousDeliverers(prs, idFromRef, shippedSet) {
     if (merged.length < 2) continue;
     const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
     const tied = merged.filter((pr) => prTitleClaim(pr, id) === top);
-    if (tied.length > 1) out.set(id, tied.map((pr) => pr.number).sort((a, b) => a - b));
+    // Carry the url, not just the number. PR numbers are per-repository, so a
+    // cross-repo tie can be "#10 and #10" — and a finding that says "more than one
+    // merged PR claiming it (#10)" is the exact wording this ticket condemns, now in
+    // the true-positive direction, with nothing an operator could act on.
+    if (tied.length > 1) {
+      out.set(id, tied.map((pr) => ({ number: pr.number, url: pr.url }))
+        .sort((a, b) => a.number - b.number || String(a.url).localeCompare(String(b.url))));
+    }
   }
   return out;
 }
@@ -629,7 +636,7 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
   }
   try {
     const prs = JSON.parse(res.stdout || "[]");
-    return { prs: Array.isArray(prs) ? prs.map(sanitisePr) : [], forgeErrors: [] };
+    return { prs: Array.isArray(prs) ? prs.map(sanitisePr).filter(Boolean) : [], forgeErrors: [] };
   } catch (e) {
     return { prs: [], forgeErrors: [{
       repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unparsable", detail: String(e.message || e),
@@ -655,9 +662,21 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
 // consumers, because fixing one consumer and not its siblings is how a correction gets
 // made twice and still misses.
 function sanitisePr(pr) {
-  if (!pr || typeof pr !== "object") return pr;
+  if (!pr || typeof pr !== "object") return null;
   const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
-  return { ...pr, number: Number(pr.number), url: clean(pr.url),
+  // VALIDATE, do not coerce. The first cut used `Number(pr.number)`, which turns a
+  // missing number into NaN and a null into 0 — and `decide` renders the record as
+  // `#${pr.number} — ${pr.url}`, so a malformed payload wrote `pr: #NaN — …` onto a
+  // terminal ticket, permanently, through the very sanitiser meant to contain it. NaN
+  // then poisons identity comparison as well (`NaN === NaN` is false), so one repo
+  // listed twice collides with itself again.
+  //
+  // A PR Blaze cannot number is one it can neither record nor report, so it is DROPPED
+  // rather than repaired. That is the safe direction: a dropped claim costs a missed
+  // signal, never a corrupted ticket — the same rule INF-735's corroboration gate uses.
+  const number = typeof pr.number === "number" ? pr.number : Number.parseInt(pr.number, 10);
+  if (!Number.isInteger(number) || number <= 0) return null;
+  return { ...pr, number, url: clean(pr.url),
            title: clean(pr.title), headRefName: clean(pr.headRefName), state: clean(pr.state) };
 }
 
@@ -713,10 +732,28 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   return { prMap, branchMap, shippedSet, forgeErrors, ambiguous };
 }
 
+/** Union two lists of PR refs, deduped by IDENTITY (url when present, else number) —
+ *  never by number alone, or two repositories' #10 collapse into one. */
+function mergeRefs(seen, add) {
+  const out = [...(seen || [])];
+  for (const ref of add) {
+    if (!out.some((x) => samePr(x, ref))) out.push(ref);
+  }
+  return out.sort((a, b) => a.number - b.number || String(a.url).localeCompare(String(b.url)));
+}
+
 /** Two PR payloads are the same pull request. `url` is unique across repositories;
  *  `number` alone is not, and two different repos legitimately share PR numbers. */
 function samePr(a, b) {
-  if (a.url && b.url) return a.url === b.url;
+  // If EITHER side carries a url, identity is decided by url alone. Falling back to
+  // `number` when only one has one was a regression: two different repos legitimately
+  // both have a #10, so a payload missing its url made them the same PR, the ambiguity
+  // went undetected, and the record was settled by `codeRepos` scan order — the exact
+  // thing the caller's comment calls "not evidence". Worse, `sanitisePr` strips control
+  // characters from `url`, so a control-char-only url from the untrusted GHES payload
+  // that sanitiser exists for becomes "" and lands in the same hole. An identity
+  // decision must not turn on the PRESENCE of a forge-supplied field.
+  if (a.url || b.url) return Boolean(a.url) && a.url === b.url;
   return a.number === b.number;
 }
 
@@ -748,14 +785,14 @@ function gatherProject(project, { fetch }) {
       // Compared on `url`, which GitHub makes unique across repositories, with `number`
       // as the fallback for a forge payload that lacks one.
       if (cur && cur.state === "MERGED" && pr.state === "MERGED" && !samePr(cur, pr)) {
-        const seen = ambiguous.get(id) || [];
-        ambiguous.set(id, [...new Set([...seen, cur.number, pr.number])].sort((a, b) => a - b));
+        ambiguous.set(id, mergeRefs(ambiguous.get(id), [
+          { number: cur.number, url: cur.url }, { number: pr.number, url: pr.url },
+        ]));
       }
       if (!cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0)) prMap.set(id, pr);
     }
-    for (const [id, nums] of r.ambiguous || []) {
-      const seen = ambiguous.get(id) || [];
-      ambiguous.set(id, [...new Set([...seen, ...nums])].sort((a, b) => a - b));
+    for (const [id, refs] of r.ambiguous || []) {
+      ambiguous.set(id, mergeRefs(ambiguous.get(id), refs));
     }
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
@@ -840,6 +877,11 @@ export async function reconcile({
 
     const fm = { ...t.frontmatter };
     let dirty = false;
+    // BLZ-398: reconcile can now DELETE a delivery record, which nothing else in the
+    // engine does. A destructive direction that reports itself as `{from:"done",
+    // to:"done", moved:false}` is indistinguishable from a `resolution` backfill, so
+    // the only machine-readable account of the run never says the record was removed.
+    let cleared = false;
     // Terminal: fill a blank RECORD, never replace one. See `recordIfAbsentOnly` in
     // decide(). The record is one unit, not two fields: ADR-0023 and the guide both say a
     // terminal ticket "may ACQUIRE a delivery record it never had, and may never have one
@@ -892,19 +934,31 @@ export async function reconcile({
     // and blank, where there is nothing to clear. Nothing a person authored is touched:
     // reconcile is the only producer of these two fields.
     if (d.recordAmbiguous && !keep()) {
-      if (fm.branch !== undefined || fm.pr !== undefined) {
+      // Truthiness, to match `hadRecord` exactly. `!== undefined` disagreed with it on
+      // the empty string, and both DB storages project an absent record as
+      // `branch: row.branch ?? ""` (`toRecord`, kept identical across drivers by
+      // driver-conformance.test.mjs). `hadRecord` reads "" as absent while a
+      // `!== undefined` guard reads it as present, so the pair would clear-and-dirty
+      // the same ticket on every tick — a git commit per tick under `blaze start`.
+      if (fm.branch || fm.pr) {
         delete fm.branch;
         delete fm.pr;
         dirty = true;
+        cleared = true;
       }
-      const merged = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
+      const refs = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
+      // Name each PR unambiguously. Where two share a number they are in different
+      // repositories, so the number alone identifies nothing and the url is what makes
+      // the finding actionable.
+      const collide = new Set(refs.map((r) => r.number)).size !== refs.length;
+      const named = refs.map((r) => (collide && r.url ? `#${r.number} (${r.url})` : `#${r.number}`));
       findings.push({
         kind: "ambiguous-deliverer",
         id: t.frontmatter.id,
         status: t.status,
-        prs: merged,
-        message: `${t.frontmatter.id} has more than one merged PR claiming it` +
-          (merged.length ? ` (${merged.map((n) => `#${n}`).join(", ")})` : "") +
+        prs: refs,
+        message: `${t.frontmatter.id} has ${refs.length || "more than one"} merged PRs claiming it` +
+          (named.length ? ` (${named.join(", ")})` : "") +
           `, and none claims it more strongly than the rest. Reconcile recorded NO ` +
           `branch/pr rather than guess which one delivered it — a wrong delivery record ` +
           `is permanent, a blank one is not. Set it by hand if it matters.`,
@@ -917,7 +971,7 @@ export async function reconcile({
     if (!dirty) continue;
 
     // Always record the would-be change; only write files when not a dry-run
-    changes.push({ id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved });
+    changes.push({ id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved, cleared });
 
     if (!dryRun) {
       // BLZ-276: the last direct node:fs ticket write in the engine, and the only one
@@ -1006,6 +1060,11 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   if (!r.changes.length) { if (!quiet) console.log("reconcile: already in sync — nothing to do."); process.exit(0); }
-  for (const c of r.changes) console.log(`${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`);
+  for (const c of r.changes) {
+    const what = `${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`;
+    console.log(c.cleared
+      ? `${what} (and ${apply ? "CLEARED" : "would CLEAR"} its branch/pr — no single PR delivered it)`
+      : what);
+  }
   if (!apply) console.log(`(dry-run: ${r.changes.length} change(s); rerun with --apply to write locally — reconcile never pushes)`);
 }

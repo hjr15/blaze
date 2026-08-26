@@ -138,7 +138,9 @@ describe("BLZ-398: a title that LEADS with the id outranks one that merely menti
 describe("BLZ-398: two equally-titled merged PRs name no deliverer", () => {
   test("ambiguousDeliverers names them, and names WHICH", () => {
     const amb = ambiguousDeliverers([PR_10_WORK, PR_40_DOCS], idFromRef, null);
-    assert.deepEqual(amb.get("INF-645"), [10, 40]);
+    assert.deepEqual(amb.get("INF-645"),
+      [{ number: 10, url: "u10" }, { number: 40, url: "u40" }],
+      "refs carry the url: PR numbers are per-repository, so a number alone names nothing");
   });
 
   test("one merged PR is never ambiguous", () => {
@@ -164,7 +166,8 @@ describe("BLZ-398: two equally-titled merged PRs name no deliverer", () => {
       const f = r.findings.find((x) => x.kind === "ambiguous-deliverer");
       assert.ok(f, "a refusal to write is reported, never swallowed");
       assert.equal(f.id, "INF-645");
-      assert.deepEqual(f.prs, [10, 40], "the report names WHICH PRs tied, or it is not actionable");
+      assert.deepEqual(f.prs.map((r) => r.number), [10, 40],
+        "the report names WHICH PRs tied, or it is not actionable");
       assert.match(f.message, /#10, #40/);
     } finally {
       restore();
@@ -296,7 +299,7 @@ esac
     assert.doesNotMatch(readTicket(root, "done"), /^pr:/m);
     const f = r.findings.find((x) => x.kind === "ambiguous-deliverer");
     assert.ok(f, "two repos, two merges, one ticket — scan order must not settle it");
-    assert.deepEqual(f.prs, [10, 40]);
+    assert.deepEqual(f.prs.map((r) => r.number), [10, 40]);
   } finally {
     process.env.PATH = prev;
     rmSync(tmp, { recursive: true, force: true });
@@ -354,7 +357,7 @@ describe("BLZ-398: an ambiguous set CLEARS a live record, it does not freeze one
       assert.doesNotMatch(t2, /^branch:/m, "and the record is one unit");
       const f2 = r2.findings.find((x) => x.kind === "ambiguous-deliverer");
       assert.ok(f2, "and the refusal is reported");
-      assert.deepEqual(f2.prs, [10, 40]);
+      assert.deepEqual(f2.prs.map((r) => r.number), [10, 40]);
 
       // RUN 3 — it must keep saying so. Freezing a record made `keep()` true, which
       // silenced the finding forever; a cleared record leaves the conflict visible.
@@ -473,6 +476,175 @@ esac
       "so the record must not be written from whichever repo was scanned first");
   } finally {
     process.env.PATH = prev;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+// =============================================================================
+// Review round 3 — the defects the round-2 fix introduced
+// =============================================================================
+
+describe("BLZ-398: the forge's payload cannot decide PR identity", () => {
+  // Round 2 compared identity on `url` with `number` as a FALLBACK. Round 3 found the
+  // fallback is the hole: two different repos legitimately both have a #10, so a payload
+  // missing its url made them the same PR, the ambiguity went undetected, and the record
+  // was settled by `codeRepos` scan order. `sanitisePr` strips control characters from
+  // `url`, so a control-char-only url — from exactly the untrusted GHES payload that
+  // sanitiser exists for — becomes "" and lands in the same hole. An identity decision
+  // must not turn on the PRESENCE of a forge-supplied field.
+  const mk = (repo, url, number = 10) => ({ number, state: "MERGED", url,
+    headRefName: "INF-645-work", title: "INF-645: the work" });
+
+  async function twoRepos(urlA, urlB, numA = 10, numB = 10) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-ident-"));
+    const repos = ["alpha", "beta"].map((n) => {
+      const d = join(tmp, n);
+      mkdirSync(d, { recursive: true });
+      gitInit(d);
+      execFileSync("git", ["-C", d, "remote", "add", "origin", `https://github.com/hjr15/${n}.git`]);
+      return d;
+    });
+    const root = board(tmp, repos, [["INF-645", "epic", "done"]]);
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash
+case "$PWD" in
+  */alpha) cat <<'JSON'
+${JSON.stringify([mk("alpha", urlA, numA)])}
+JSON
+  ;;
+  *) cat <<'JSON'
+${JSON.stringify([mk("beta", urlB, numB)])}
+JSON
+  ;;
+esac
+`);
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const prev = process.env.PATH;
+    process.env.PATH = `${bin}:${prev}`;
+    try {
+      const r = await reconcile({ root, dryRun: false });
+      assert.deepEqual(r.forgeErrors, []);
+      return { r, text: readTicket(root, "done") };
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  test("a MISSING url on one side does not make two PRs one", async () => {
+    const { r, text } = await twoRepos("https://github.com/hjr15/alpha/pull/10", undefined);
+    assert.ok(r.findings.some((f) => f.kind === "ambiguous-deliverer"),
+      "the number fallback silently settled this by codeRepos scan order");
+    assert.doesNotMatch(text, /^pr:/m);
+  });
+
+  test("an EMPTIED url does not either — that is what sanitisePr produces", async () => {
+    const { r, text } = await twoRepos("https://github.com/hjr15/alpha/pull/10",
+      String.fromCharCode(27) + String.fromCharCode(7));
+    assert.ok(r.findings.some((f) => f.kind === "ambiguous-deliverer"));
+    assert.doesNotMatch(text, /^pr:/m);
+  });
+
+  test("when NEITHER side has a url, the number is all there is — and it still decides", async () => {
+    // The last branch of `samePr`, and it was unpinned until a mutation survived and
+    // said so: reducing the function to `a.url === b.url` makes two url-less payloads
+    // `undefined === undefined`, i.e. the same PR, collapsing a genuine two-repo
+    // ambiguity into one. Reachable exactly where round 1 put it — `sanitisePr` empties
+    // a control-char-only url, and it can do that to BOTH sides at once.
+    // DIFFERENT numbers, both urls emptied. Same-numbered url-less payloads are
+    // genuinely indistinguishable and the engine is right to treat them as one — the
+    // number is the only identity left, so it must be the one that decides.
+    const esc = String.fromCharCode(27);
+    const { r, text } = await twoRepos(esc, esc + String.fromCharCode(7), 10, 40);
+    assert.ok(r.findings.some((f) => f.kind === "ambiguous-deliverer"),
+      "two url-less merged PRs with different numbers are still two PRs");
+    assert.doesNotMatch(text, /^pr:/m);
+  });
+
+  test("and the finding NAMES them apart when their numbers collide", async () => {
+    const { r } = await twoRepos("https://github.com/hjr15/alpha/pull/10",
+      "https://github.com/hjr15/beta/pull/10");
+    const f = r.findings.find((x) => x.kind === "ambiguous-deliverer");
+    assert.match(f.message, /alpha\/pull\/10/,
+      "'more than one merged PR claiming it (#10)' is this ticket's own condemned wording");
+    assert.match(f.message, /beta\/pull\/10/);
+    assert.equal(f.prs.length, 2, "two PRs, not one deduped by number");
+  });
+});
+
+test("BLZ-398: a PR the forge did not number is dropped, not written as #NaN", async () => {
+  // Round 1's `sanitisePr` coerced with `Number(pr.number)`, so a missing number became
+  // NaN and `decide` rendered `pr: #NaN — …` onto a terminal ticket, permanently —
+  // through the sanitiser meant to contain the malformed payload. NaN also poisons
+  // identity (`NaN === NaN` is false), resurrecting the self-collision round 2 fixed.
+  // A PR Blaze cannot number it can neither record nor report, so it is DROPPED: a
+  // missed signal, never a corrupted ticket.
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-nan-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [
+    { state: "MERGED", url: "https://ghes.corp/hjr15/alpha/pull/10",
+      headRefName: "INF-645-work", title: "INF-645: the work" },
+  ]);
+  try {
+    const r = await reconcile({ root, dryRun: false });
+    assert.deepEqual(r.forgeErrors, []);
+    const text = readTicket(root, "done");
+    assert.doesNotMatch(text, /NaN/, "this reached the permanent record");
+    assert.doesNotMatch(text, /^pr:/m, "an unusable PR records nothing at all");
+    assert.deepEqual(r.findings, []);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: clearing does not flap when a storage projects an absent record as \"\"", async () => {
+  // `hadRecord` reads "" as absent; the round-2 clear guard read `!== undefined`, which
+  // reads "" as PRESENT. Both DB storages project an absent record as `branch: row.branch
+  // ?? ""` (`toRecord`, held identical across drivers by driver-conformance.test.mjs), so
+  // the pair would clear-and-dirty the same ticket on every tick — a git commit per tick
+  // under `blaze start`. Injected through the readStorage seam, which is where the DB
+  // drivers plug in.
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-flap-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [PR_10_WORK, PR_40_DOCS]);
+  try {
+    const { fsReadStorage } = await import("../scripts/model/read-storage.mjs");
+    const projecting = {
+      listTickets: (dir) => [...fsReadStorage.listTickets(dir)].map((t) => ({
+        ...t, frontmatter: { ...t.frontmatter, branch: t.frontmatter.branch ?? "", pr: t.frontmatter.pr ?? "" },
+      })),
+    };
+    const r1 = await reconcile({ root, dryRun: false, readStorage: projecting });
+    const r2 = await reconcile({ root, dryRun: false, readStorage: projecting });
+    assert.equal(r1.changes.filter((c) => c.cleared).length, 0,
+      "an empty-string record is ABSENT, so there is nothing to clear");
+    assert.equal(r2.changes.filter((c) => c.cleared).length, 0,
+      "and certainly nothing to re-clear on the next tick");
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: a cleared record is NAMED in changes — a destructive write says so", async () => {
+  // `{from:"done", to:"done", moved:false}` is indistinguishable from a `resolution`
+  // backfill, so the only machine-readable account of the run never said the delivery
+  // record had been deleted. Reconcile deletes nothing else anywhere in the engine.
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-named-"));
+  const root = fixture(tmp, [["INF-645", "epic", "in-review",
+    "branch: INF-645-docs\npr: '#40 — u40'\n"]]);
+  const restore = stubGh(tmp, [PR_10_WORK, PR_40_DOCS]);
+  try {
+    const r = await reconcile({ root, dryRun: false });
+    assert.deepEqual(r.forgeErrors, []);
+    const c = r.changes.find((x) => x.id === "INF-645");
+    assert.ok(c, "the move must still be reported");
+    assert.equal(c.cleared, true, "and the deletion must be reported with it");
+    assert.doesNotMatch(readTicket(root, "done"), /^pr:/m);
+  } finally {
+    restore();
     rmSync(tmp, { recursive: true, force: true });
   }
 });
