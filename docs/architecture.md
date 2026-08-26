@@ -173,6 +173,40 @@ window runs from first start to completed setup, and the mitigation is to finish
 On a **read-only data mount** (`-v <data>:/data:ro`, a supported mode) no token can be
 written, so there is no setup flow to offer and the original refusal stands, saying why.
 
+**Entering setup mode writes to the board's git repository.** This is a boot-time side
+effect on the operator's own working tree, and it is deliberate — a live credential that
+`git add -A` can pick up is the failure this closes — but it is not silent and should
+not be a surprise:
+
+1. If `<board>` is a git work tree, the server appends `.blaze/identity.db` and
+   `.blaze/setup-token` to `<board>/.gitignore` unless git already reports each path as
+   ignored. It asks git about **each** path rather than assuming one rule covers the
+   other: a `.gitignore` naming exactly `.blaze/identity.db` leaves the token
+   committable.
+2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
+   pre-fix build and staged or committed the token — the server runs
+   `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index
+   only**; the file on disk, which is the live token this same boot just wrote, is not
+   touched. It therefore **stages a deletion**, which shows up in
+   `git status` / `git diff --cached` as a legitimate pending change for the operator to
+   commit. `-f` is required because the index, the working file and `HEAD` can all
+   differ — exactly the state a board left by `git add -A` plus a restart is in — and a
+   bare `git rm --cached` refuses there.
+3. The server **warns on stderr** whenever the path was tracked, naming the path and
+   never the value, and it distinguishes the two outcomes: it claims the untrack only
+   when `git rm` actually succeeded, and otherwise says it could not, gives the reason
+   git reported, and prints the exact manual command.
+
+**A token that was ever tracked must be rotated.** Untracking stops the path being
+staged again; it cannot un-leak a value already in a prior commit, which needs history
+rewriting and is out of scope for a boot-time check. Delete
+`<board>/.blaze/setup-token` and restart the board to mint a fresh one — `issueSetupToken`
+always overwrites, so an abandoned setup never leaves a live credential a later start
+re-serves.
+
+None of this happens when `<board>` is not a git work tree, or when git is unavailable:
+the check reports `not-a-repo`/`unavailable` and boot continues.
+
 Create the first identity — which turns authentication on — with
 [`blaze user add`](guide/commands.md#user), with `blaze init --admin-email=…`, or through
 the setup flow above. All three go through `addUser`.

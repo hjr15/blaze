@@ -82,6 +82,24 @@ function send(req, res, code, type, body) {
   res.end(buf);
 }
 
+// ---- first-run setup diagnostics (BLZ-358) ----------------------------------
+// The setup branch answers an UNAUTHENTICATED caller, so nothing internal is ever put
+// in an HTTP body there. That is right, and it is not the same as throwing the signal
+// away: an operator whose identity.db is read-only, whose disk is full, or who hits
+// EACCES was getting a bare 400 and no diagnostic on ANY channel — for the one
+// operation that decides whether the install is ever usable. STDERR is where the
+// operator already reads blaze's boot messages, and it is not the HTTP response.
+//
+// The MESSAGE only, never the object: an exception object can carry the request that
+// produced it, and a token value has no business in a log stream (see setup-token.mjs
+// on why `docker logs` is a rotation event). And this CANNOT THROW — `String()` raises
+// outright on an object with a poisoned `toString`, this is called from catch blocks on
+// the pre-auth surface, and a throw from inside the outer catch would end the process
+// for every connected session, which is the exact failure this branch already learned.
+function setupFailureReason(e) {
+  try { return String(e?.message ?? e); } catch { return "(the error could not be rendered)"; }
+}
+
 // ---- first-run setup page (BLZ-358) -----------------------------------------
 // Deliberately self-contained and ugly: it is shown once, before any identity
 // exists, and it must not depend on the board renderer — which is precisely the
@@ -180,9 +198,15 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   let setupPending = false;
   // One attempt at a time. `setupPending` is only cleared AFTER `addUser` awaits, so with
   // an identity store that yields to the event loop two concurrent correct-token requests
-  // could both pass the check and both create an admin. Today's SQLite store happens not
-  // to yield, which closes the window by accident rather than by design — and 'accident'
-  // is not a property a Postgres-backed store would preserve.
+  // could both pass the check and both create an admin. This guard is DEFENCE IN DEPTH,
+  // stated plainly: no store that ships today yields there. `identity-db.mjs` constructs
+  // exactly one store, `identityStore(exec, { dialect: "sqlite" })`, and nothing anywhere
+  // constructs the `postgres` dialect `identity-store.mjs` also supports — so the guard
+  // does not fire in any configuration an operator can currently select. Its LOGIC is
+  // proven by an injected yielding `addUser` in tests/setup-flow.test.mjs; what is not
+  // proven, because it cannot be, is that a shipped board ever reaches it. It stays
+  // because the day a yielding store is wired up, this is the line between one admin and
+  // two — and that is not a thing to discover afterwards.
   let setupInFlight = false;
   if (!bind.ok) {
     let issued;
@@ -211,10 +235,22 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // committed — the PATH surfaced here, never the VALUE, but the operator still needs
       // to know it, because the fix un-stages the path going forward and cannot undo
       // whatever is already sitting in a prior commit.
-      if (tokenIgnore?.wasTracked) {
+      if (tokenIgnore?.wasTracked && tokenIgnore.untrackOk) {
         console.warn(`blaze: WARNING — ${tokenIgnore.path} was already tracked in git and has `
-          + "been untracked (git rm --cached). Its value may be recoverable from git history "
+          + "been untracked (git rm --cached -f). Its value may be recoverable from git history "
           + "and must be treated as compromised: rotate it.");
+      } else if (tokenIgnore?.wasTracked) {
+        // THE UNTRACK FAILED and the leak is still open, so the one thing the operator
+        // must not be told is that it was closed. This branch used to be unreachable
+        // wording: the warning asserted the untrack unconditionally on `wasTracked`
+        // alone, `untrackOk` was computed and read nowhere, and git's stderr was
+        // discarded — so a board where `git rm` refused looked, from the log, exactly
+        // like a board where it succeeded.
+        console.warn(`blaze: WARNING — ${tokenIgnore.path} is tracked in git and could NOT be `
+          + `untracked${tokenIgnore.untrackError ? ` (${tokenIgnore.untrackError})` : ""}. A LIVE `
+          + "credential is still staged for your next commit. Untrack it by hand:\n"
+          + `    git rm --cached -f -- ${tokenIgnore.path}\n`
+          + "Its value must be treated as compromised either way: rotate it.");
       }
     } catch { /* same */ }
     // THE PATH, NEVER THE VALUE. A token that reaches a log stream is a token that has
@@ -300,13 +336,18 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           // ADR-0013 section 5: the first admin is a user, not an exception. This is the
           // same `addUser` that `blaze user add` calls — there is no bootstrap branch.
           created = await addUser(root, { email, role: "admin", displayName });
-        } catch {
+        } catch (e) {
           // A failed creation must leave setup COMPLETABLE — the token is not consumed
           // by a mistake the operator can correct and retry. The exception's own message
-          // is NEVER echoed here — this is the pre-auth surface, and an internal message
-          // (a database constraint's own wording, `String()`'s own wording) is exactly
-          // the kind of detail this branch's sibling catch already says nothing about.
+          // is NEVER echoed to the CALLER — this is the pre-auth surface, and an internal
+          // message (a database constraint's own wording, `String()`'s own wording) is
+          // exactly the kind of detail this branch's sibling catch already says nothing
+          // about. It goes to the OPERATOR instead, on stderr, because the alternative
+          // tried first — binding nothing and logging nowhere — left a read-only
+          // identity.db indistinguishable from a typo'd email.
           setupInFlight = false;
+          console.error("blaze: setup could not create the administrator account:",
+                        setupFailureReason(e));
           return json(400, { errors: ["could not create the administrator account"] });
         }
         // Close the door in this order: the credential first, then the route.
@@ -327,8 +368,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // or from the token.
       return send(req, res, 503, "text/plain; charset=utf-8",
         "blaze: first-run setup required — no users are configured. Open /setup\n");
-      } catch {
-        // Deliberately says nothing about what failed: this is the pre-auth surface.
+      } catch (e) {
+        // The RESPONSE deliberately says nothing about what failed: this is the pre-auth
+        // surface. The OPERATOR is told, on stderr — a silent 500 on the one route that
+        // makes the install usable is a support case with no evidence in it.
+        console.error("blaze: first-run setup failed:", setupFailureReason(e));
         return json(500, { errors: ["setup could not be completed"] });
       }
     }

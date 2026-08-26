@@ -134,9 +134,37 @@ export function ensureSetupTokenIgnored(dataRoot) {
   // committed must still be treated as compromised and rotated. What this closes is the
   // path staying committable going forward.
   const tracked = git("ls-files", "--error-unmatch", rel).status === 0;
-  if (!tracked) return { state, path: rel, wasTracked: false };
-  const rm = git("rm", "--cached", "-q", "--", rel);
-  return { state: `${state}-untracked`, path: rel, wasTracked: true, untrackOk: rm.status === 0 };
+  if (!tracked) return { state, path: rel, wasTracked: false, untrackOk: null, untrackError: null };
+  // `-f`, AND AN ADVERSARIAL REVIEW IS WHY. `git rm --cached` REFUSES with exit 1 when the
+  // index entry differs from BOTH the working file and HEAD —
+  //
+  //   error: the following file has staged content different from both the file and the HEAD
+  //
+  // — and that is precisely the board this whole function exists for. An operator running
+  // the pre-fix code did the `git add -A` the comment above names, staging token T1
+  // without committing it; blaze restarted, `issueSetupToken` overwrote the file with T2
+  // because it ALWAYS overwrites, and now index, working file and HEAD all differ. The
+  // removal was refused, the return value said `-untracked` anyway, and the operator's
+  // next `git add -A && git commit` committed the live token.
+  //
+  // `-f` forces the INDEX removal only. `--cached` still means the file on disk — the
+  // live token this process just wrote — is never touched.
+  const rm = git("rm", "--cached", "-f", "-q", "--", rel);
+  const untrackOk = rm.status === 0;
+  // THE STATE SAYS WHAT HAPPENED, not what was attempted. It used to read `-untracked`
+  // unconditionally, including on every board where the removal failed. And git's own
+  // stderr is RETURNED rather than discarded: it names why (a held `.git/index.lock`, a
+  // read-only `.git`), it names paths only, and the caller has nowhere else to learn it.
+  return {
+    state: untrackOk ? `${state}-untracked` : `${state}-untrack-failed`,
+    path: rel,
+    wasTracked: true,
+    untrackOk,
+    // The FIRST line of git's stderr: that is the fatal message itself. The rest is
+    // git's own multi-paragraph advice, which belongs in a terminal and not in a boot log.
+    untrackError: untrackOk ? null
+      : ((rm.stderr || "").trim().split("\n")[0].trim() || `git rm exited ${rm.status}`),
+  };
 }
 
 export { existsSync as _existsSync };

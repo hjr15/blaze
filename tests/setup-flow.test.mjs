@@ -52,6 +52,33 @@ const postSetup = (base, body) =>
     body: JSON.stringify(body),
   });
 
+// Capture EVERY console channel, and raw stderr with it. The value-never-logged
+// invariant is about OUTPUT, not about one function: `console.warn` and `console.error`
+// go to stderr, `docker logs` ships stderr off-box exactly as it ships stdout, and a
+// guard that stubs `console.log` alone leaves both of them outside every assertion in
+// the suite. Nothing here ever PRINTS what it captured — the assertions are
+// `includes`/`match` over the buffer, because a token in a transcript is a rotation.
+function captureOutput() {
+  const saved = {
+    log: console.log, warn: console.warn, error: console.error,
+    stderr: process.stderr.write.bind(process.stderr),
+  };
+  const cap = { text: "" };
+  const grab = (...a) => { cap.text += a.join(" ") + "\n"; };
+  console.log = grab; console.warn = grab; console.error = grab;
+  process.stderr.write = (chunk, ...rest) => {
+    cap.text += String(chunk);
+    const cb = rest.find((x) => typeof x === "function");
+    if (cb) cb();
+    return true;
+  };
+  cap.stop = () => {
+    console.log = saved.log; console.warn = saved.warn; console.error = saved.error;
+    process.stderr.write = saved.stderr;
+  };
+  return cap;
+}
+
 // =============================================================================
 // The token file itself
 // =============================================================================
@@ -406,24 +433,27 @@ describe("BLZ-358: one unauthenticated request must not be able to kill the boar
 });
 
 describe("BLZ-358: the token value reaches no output channel at all", () => {
-  test("nothing written to stdout at startup contains it", async () => {
+  test("nothing written to stdout OR stderr at startup contains it", async () => {
     // The design rejects Jira's printed token BECAUSE `docker logs` ships it off-box, so
     // "the value is never logged" is the headline invariant — and nothing tested the
     // channel it is about. A mutant that logged the value survived the whole suite.
+    //
+    // STDERR IS COVERED HERE TOO, and an adversarial review is why: this test used to
+    // stub `console.log` alone, so `console.warn` — which the tracked-token warning
+    // below uses, and which `docker logs` collects just the same — sat outside every
+    // value-never-logged assertion in the suite.
     const { root, projects } = board();
-    const real = console.log;
-    let out = "";
-    console.log = (...a) => { out += a.join(" ") + "\n"; };
+    const cap = captureOutput();
     let server;
     try {
       server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
       await new Promise((res) => server.once("listening", res));
-    } finally { console.log = real; }
+    } finally { cap.stop(); }
     try {
       const token = readSetupToken(root);
       assert.ok(token && token.length > 20);
-      assert.equal(out.includes(token), false, "the token value must never be logged");
-      assert.match(out, /\.blaze\/setup-token/, "but the path must be");
+      assert.equal(cap.text.includes(token), false, "the token value must never be logged");
+      assert.match(cap.text, /\.blaze\/setup-token/, "but the path must be");
     } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -536,6 +566,259 @@ describe("BLZ-358: a setup token already committed to git is untracked by the bo
       assert.notEqual(show.status, 0,
         "the setup token must be absent from the new HEAD, not re-committed with live content");
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// F5b — the untrack must SUCCEED on the board it exists for, and say so honestly
+//       when it cannot
+// =============================================================================
+
+describe("BLZ-358: the untrack reports what actually happened", () => {
+  test("a token STAGED but never committed is untracked — the board the fix exists for", async () => {
+    // THE EXACT PRE-FIX BOARD. An operator on the old code ran `git add -A`, which staged
+    // the live token without committing it; then blaze restarted and `issueSetupToken`
+    // overwrote the file, because it always overwrites. Now the index holds T1, the
+    // working file holds T2, and HEAD holds nothing — all three differ, and that is
+    // precisely the state a bare `git rm --cached` REFUSES with exit 1:
+    //
+    //   error: the following file has staged content different from both the file and
+    //   the HEAD ... (use -f to force removal)
+    //
+    // The fix that exists for this board failed on this board, and reported success.
+    const { root, projects } = board();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      // A fixture value, never the live token, and never asserted on: this test cares
+      // only about what the INDEX knows about the path.
+      writeFileSync(join(root, ".blaze", "setup-token"), "staged-fixture-value");
+      execFileSync("git", ["-C", root, "add", "--", ".blaze/setup-token"]);
+      assert.equal(
+        spawnSync("git", ["-C", root, "ls-files", "--error-unmatch", ".blaze/setup-token"]).status,
+        0, "fixture sanity: the token path must be in the index before the boot runs");
+      assert.notEqual(
+        spawnSync("git", ["-C", root, "cat-file", "-e", "HEAD:.blaze/setup-token"]).status,
+        0, "fixture sanity: and it must NOT be in HEAD — that is what makes all three differ");
+
+      const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+      await new Promise((res) => server.once("listening", res));
+      server.close();
+
+      assert.notEqual(
+        spawnSync("git", ["-C", root, "ls-files", "--error-unmatch", ".blaze/setup-token"]).status,
+        0, "a staged-but-uncommitted token must be untracked too — this is the board the "
+         + "fix was written for, and a bare `git rm --cached` refuses exactly here");
+
+      // The file on disk is the LIVE token and must survive: `--cached` touches the index
+      // only. Checked by existence and length, never by value.
+      const live = readSetupToken(root);
+      assert.ok(live && live.length > 20, "the live token file must be untouched on disk");
+
+      // And the operator's next ordinary commit must not carry it.
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "operator's routine commit after boot"]);
+      assert.notEqual(spawnSync("git", ["-C", root, "show", "HEAD:.blaze/setup-token"]).status, 0,
+        "the operator's next `git add -A && git commit` must not commit the live token");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("an index that cannot be written is reported as NOT untracked, with the manual fix", async () => {
+    // `git rm --cached` can fail for reasons the boot path cannot fix — here a held
+    // `.git/index.lock`, which is what a concurrent git process looks like. The leak is
+    // still open, so the one thing the operator must not be told is that it was closed.
+    const { root, projects } = board();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      writeFileSync(join(root, ".blaze", "setup-token"), "locked-fixture-value");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "pre-fix: setup-token got committed"]);
+      writeFileSync(join(root, ".git", "index.lock"), "");
+
+      const cap = captureOutput();
+      let server;
+      try {
+        server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+        await new Promise((res) => server.once("listening", res));
+      } finally { cap.stop(); }
+      server.close();
+
+      assert.equal(
+        spawnSync("git", ["-C", root, "ls-files", "--error-unmatch", ".blaze/setup-token"]).status,
+        0, "fixture sanity: a locked index means the path really is still tracked");
+      assert.match(cap.text, /could NOT be untracked/i,
+        "the operator must be told the untrack FAILED — the leak is still open");
+      assert.doesNotMatch(cap.text, /has been untracked/i,
+        "and must never be told it succeeded when it did not");
+      assert.ok(cap.text.includes("git rm --cached -f -- .blaze/setup-token"),
+        "the exact manual command must be given, because blaze cannot do it here");
+      const live = readSetupToken(root);
+      assert.ok(live && live.length > 20);
+      assert.equal(cap.text.includes(live), false,
+        "and the warning must carry the PATH, never the value");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a successful untrack warns on the path, claims the untrack, and never the value", async () => {
+    // The warning block itself was pinned by NOTHING: deleting it outright left the suite
+    // fully green. It is the only channel that tells an operator a live credential is in
+    // their git history and must be rotated.
+    const { root, projects } = board();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      writeFileSync(join(root, ".blaze", "setup-token"), "committed-fixture-value");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "pre-fix: setup-token got committed"]);
+
+      const cap = captureOutput();
+      let server;
+      try {
+        server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0" });
+        await new Promise((res) => server.once("listening", res));
+      } finally { cap.stop(); }
+      server.close();
+
+      assert.ok(cap.text.includes(".blaze/setup-token"),
+        "the warning must name the path — that is the thing the operator has to act on");
+      assert.match(cap.text, /has been untracked/,
+        "on a board where the untrack really succeeded, say so");
+      assert.match(cap.text, /rotate/i,
+        "a token that was ever tracked is compromised and the operator must be told to rotate it");
+      const live = readSetupToken(root);
+      assert.ok(live && live.length > 20);
+      assert.equal(cap.text.includes(live), false,
+        "the PATH, never the VALUE — on stderr exactly as on stdout");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// F5b(ii) — the RETURN VALUE says what happened, because the caller decides on it
+// =============================================================================
+
+describe("BLZ-358: ensureSetupTokenIgnored reports the untrack outcome, not the attempt", () => {
+  // `untrackOk` used to be computed and read NOWHERE in the tree, and `state` was
+  // labelled `-untracked` unconditionally — including on every board where `git rm`
+  // had just refused. Both are the caller's only evidence, so both are asserted here
+  // directly rather than only through the warning they drive.
+  const repo = () => {
+    const root = mkdtempSync(join(tmpdir(), "blaze-ignore-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    writeFileSync(join(root, "seed"), "seed\n");
+    execFileSync("git", ["-C", root, "add", "-A"]);
+    execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+    return root;
+  };
+
+  test("an untracked path reports wasTracked false and no untrack outcome at all", () => {
+    const root = repo();
+    try {
+      const r = ensureSetupTokenIgnored(root);
+      assert.equal(r.wasTracked, false);
+      assert.equal(r.untrackOk, null, "there was no untrack, so there is no outcome to claim");
+      assert.equal(r.state, "added");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a successful untrack reports untrackOk true and a state that says untracked", () => {
+    const root = repo();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      writeFileSync(join(root, ".blaze", "setup-token"), "fixture-value");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "pre-fix"]);
+      const r = ensureSetupTokenIgnored(root);
+      assert.equal(r.wasTracked, true);
+      assert.equal(r.untrackOk, true);
+      assert.match(r.state, /-untracked$/, "the state must record that it happened");
+      assert.equal(r.untrackError, null);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a REFUSED untrack reports untrackOk false, a -untrack-failed state, and git's reason", () => {
+    const root = repo();
+    try {
+      mkdirSync(join(root, ".blaze"), { recursive: true });
+      writeFileSync(join(root, ".blaze", "setup-token"), "fixture-value");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "pre-fix"]);
+      writeFileSync(join(root, ".git", "index.lock"), "");
+      const r = ensureSetupTokenIgnored(root);
+      assert.equal(r.wasTracked, true);
+      assert.equal(r.untrackOk, false);
+      assert.match(r.state, /-untrack-failed$/,
+        "a state that says `-untracked` when git refused is a lie the caller acts on");
+      assert.ok(r.untrackError && r.untrackError.length > 0,
+        "git's own stderr is the only explanation available and must not be discarded");
+      assert.equal(r.untrackError.includes("\n"), false,
+        "the first line only — git's multi-paragraph advice does not belong in a boot log");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// =============================================================================
+// F5c — a failed first-admin creation is diagnosed for the operator, on stderr
+// =============================================================================
+
+describe("BLZ-358: a failed setup leaves the operator a diagnostic", () => {
+  test("addUser's failure reaches stderr, while the caller still learns nothing", async () => {
+    // Not echoing an internal message to a pre-auth caller is right. Discarding it
+    // ALTOGETHER is not: `} catch {` bound nothing and there was no `console.*` anywhere
+    // in this branch, so a read-only identity.db, a full disk, or an EACCES produced a
+    // bare 400 and no diagnostic on any channel — for the one operation that decides
+    // whether the install is ever usable.
+    const { root, projects } = board();
+    const throwsInternal = async () => { throw new Error("SQLITE_READONLY: attempt to write a readonly database"); };
+    const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0",
+                                addUser: throwsInternal });
+    await new Promise((res) => server.once("listening", res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const token = readSetupToken(root);
+    const cap = captureOutput();
+    let r, body;
+    try {
+      r = await postSetup(base, { token, email: "a@b.c" });
+      body = await r.text();
+    } finally { cap.stop(); }
+    try {
+      assert.equal(r.status, 400, "the HTTP answer is unchanged");
+      assert.doesNotMatch(body, /SQLITE_READONLY/,
+        "and still says nothing internal to an unauthenticated caller");
+      assert.match(cap.text, /SQLITE_READONLY/,
+        "but the operator, who reads boot messages, must get the reason on stderr");
+      assert.match(cap.text, /setup could not create the administrator account/,
+        "labelled so an operator can tell what failed");
+      assert.equal(cap.text.includes(token), false,
+        "and no token value may reach that log");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("the outer 500 catch is diagnosed too, and still says nothing to the caller", async () => {
+    // The sibling catch — the one that turns any unexpected throw in the pre-auth branch
+    // into a 500 — was silent for the same reason and deserves the same treatment.
+    // Reached here by an `addUser` that resolves with a shape the success path cannot
+    // read: `created.token.token` throws a TypeError past the inner catch entirely.
+    const { root, projects } = board();
+    const resolvesWrong = async () => ({ user: { id: 1, email: "a@b.c" } });
+    const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0",
+                                addUser: resolvesWrong });
+    await new Promise((res) => server.once("listening", res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const token = readSetupToken(root);
+    const cap = captureOutput();
+    let r, body;
+    try {
+      r = await postSetup(base, { token, email: "a@b.c" });
+      body = await r.text();
+    } finally { cap.stop(); }
+    try {
+      assert.equal(r.status, 500, "an unexpected throw is still a 500");
+      assert.doesNotMatch(body, /token/i, "which says nothing about what failed");
+      assert.match(cap.text, /first-run setup failed/,
+        "but the operator gets a labelled diagnostic on stderr rather than silence");
+      assert.equal(cap.text.includes(token), false, "and no token value reaches it");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
   });
 });
 
