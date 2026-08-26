@@ -235,10 +235,10 @@ each one has actually broken a board running this mechanism.
 
 - **`transitions` is an array of `[from, to]` pairs, not an object map.**
   `{"proposed": "accepted"}` reads like a reasonable shorthand and is wrong.
-  `validateSchema` only checks that a type's `workflow` names a declared
-  workflow — it does not check the shape of `transitions` — so the wrong
-  shape passes validation cleanly and then throws a raw `TypeError` at the
-  first `blaze move` that hits it.
+  It used to pass validation cleanly and then throw a raw `TypeError` at the
+  first `blaze move` that hit it; BLZ-56 made it a load-path refusal (see
+  [A malformed override fails loud](#a-malformed-override-fails-loud-blz-56)),
+  so it is now caught before the verb runs.
 - **`mergeTypes` can add or replace a type, never remove one.** It merges by
   spread (`{ ...defaults, ...override }`), so `"epic": null` or `"epic":
   undefined` in an override leaves the `epic` key present in the merged
@@ -284,3 +284,104 @@ affect another.
 > A project that overrides a type's `workflow` will therefore see its tickets validated by its own
 > rules but rendered in the ambient board's columns. That is a real gap, not a design choice —
 > narrowing it means threading the project through the view layer.
+
+## A malformed override fails loud (BLZ-56)
+
+A **valid-JSON but wrong-shape** override used to be accepted in silence. `level` as a
+string, `parentTypes` as a bare string, a type whose `workflow` names a workflow that
+does not exist, a workflow whose `terminal`/`reopenTo`/`transitions` name a status not
+in its own `statuses` — all resolved, and the board only found out much later, when
+`workflowDef` threw deep inside a verb or a validation rule quietly stopped firing.
+
+The resolved schema is now checked on load: every type has a numeric `level`, a
+`workflow` naming a declared workflow, `parentTypes` that are declared types, and
+`required` as an array of field names; every workflow has a non-empty `statuses` **and a
+`terminal`, `transitions` and `resolutionOnTerminal`**, all of which reference only
+statuses it declares and resolutions the engine knows. `reopenTo` stays optional — an
+absent one simply means the workflow has no reopen path, which is legal.
+
+> **A partial entry is invalid — for a workflow exactly as much as for a type, and this
+> is the trap worth knowing.** `mergeTypes` and `mergeWorkflows` are both a **per-entry
+> replace**, not a deep merge. `"task": { "workflow": "delivery" }` does not "adjust
+> task's workflow", it *replaces the whole record* and `task` loses its `level`,
+> `parentTypes` and `required`. The same is true of
+> `"delivery": { "statuses": [...] }`: it drops `terminal`, `transitions` and
+> `resolutionOnTerminal`. That one was accepted in silence until BLZ-56's own review
+> caught it — `blaze audit` reported `ok=true` with zero findings and the board then died
+> inside a verb as a raw `TypeError` from `canTransition`. **Write the complete record.**
+
+### Two paths, deliberately separate
+
+This is the decision BLZ-56's AC-4 asks to be recorded, and it exists because the two
+halves genuinely pull in opposite directions.
+
+| Path | Function | Behaviour |
+|---|---|---|
+| **Reporting** | `validateSchema(resolved)` | Returns a list of **every** problem, hard and soft. **Never throws.** |
+| **Load** | `assertSchemaValid(resolved)` | **Throws** a named `SchemaOverrideError` listing every **hard** problem at once. |
+
+### Hard and soft, and why the load path takes only the hard half
+
+Both read one internally tagged list, so the two can never drift apart.
+
+- **Hard — the override is malformed, and the verb is refused.** A type mapping to a
+  workflow nothing declares; a `level` that is not a number, a `workflow` that is not a
+  name, `parentTypes` or `required` that is not an array, a `parentTypes` entry naming no
+  declared type; a partial type record (the trap above); a workflow with no `statuses`, or
+  whose `terminal`, `transitions`, `reopenTo` or `resolutionOnTerminal` name a status it
+  does not have or a resolution the engine does not know.
+- **Soft — the configuration is legal, and only reported.** A deliberately narrowed
+  `requirement` workflow (BLZ-361/R48 — the message itself says "add them, or drop the gate
+  deliberately"); a `Precedes` endpoint kind naming no declared type (BLZ-392); a
+  `schema.linkTypes` block that was ignored, leaving the shipped declaration in force; and
+  a per-project `schema.linkTypes` block, which resolves correctly but reaches nothing.
+
+The split is not cosmetic. `blaze audit` files every soft class above as a soft finding and
+reports such a board **`ok=true`**, so refusing the same board on the load path would leave
+an operator with a board audit calls clean and not one non-exempt verb that will run. A
+check that disagrees with audit on the same board is worse than no check.
+
+`blaze audit` calls the reporting path and surfaces each problem as a `schema-invalid`
+finding. It is **exempt from the loud path on purpose**: reporting this class is its
+entire job, so refusing to start it would delete the report that tells you what to fix.
+BLZ-392 closed exactly that defect — a throw from inside `auditCorpus` killed `blaze
+audit` outright, losing the whole hygiene report for one bad field — and
+`tests/audit-malformed-linktypes.test.mjs` exists to keep it closed.
+
+Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is the one
+place every verb dispatches through. There are two more exemptions — **three in all** —
+**`blaze init`**, which runs before a board exists, and **`blaze commit`**, a git flush of
+the pending ledger that imports nothing from the model: refusing it would strand ticket
+files other verbs have already relocated but not committed. That leaves **18 of the 21
+subcommands** running the check.
+
+**The preflight judges the board the way `blaze audit` does**, and that is not a detail.
+It validates each project layer as well as the top one, and it finds the projects the way
+audit does: from `resolveRoots().projectsDir` (which is **not** `dataRoot/projects` when
+`BLAZE_PROJECTS_DIR` names a directory called something else), and falling back to the
+directories on disk when `blaze.config.json` carries no `projects` array. Earlier cuts did
+none of this: one refused every non-exempt verb on a board `blaze audit` called clean;
+another let a malformed `project.json` through while audit reported it, twice over — once
+because it looked in `dataRoot/projects` for projects that were not there, and once because
+it validated an empty project set and called that a pass. A check that disagrees with audit
+in either direction on the same board is worse than no check.
+
+There is **one deliberate departure**. `auditCorpus` also builds an `endpointTypes` union —
+every type declared anywhere, across all projects — because a top-level `Precedes` list may
+legitimately name a type only one project declares. The preflight does **not**, because that
+union feeds exactly one check, the endpoint-kind finding, and that finding is **soft**: the
+load path takes the hard entries only, so the union cannot change any decision the preflight
+makes. Building it there would be a mechanism that runs and can decide nothing. Re-tagging
+that finding hard therefore has to restore the union in `scripts/cli.mjs` in the same change,
+or the preflight would refuse every board whose top-level `Precedes` names a project-declared
+type — and the re-tagging cannot happen quietly, because a test pins the classification.
+
+The check is **not** inside `ambientSchemaOverride`, and must never be. `TYPES` and
+`WORKFLOWS` are module-scope constants resolved through it at **import time**, so a
+throw there would make merely importing the model kill every verb before it ran — `blaze
+audit` included, with a raw stack trace. That is BLZ-392's defect one level worse, and
+the guarded catch there stays exactly as it is (ADR-0002).
+
+Anything else the preflight meets — no board, an unreadable or unparseable config, a
+packaged install with no data dir — is not its business and does not stop the verb.
+Those cases behave exactly as they did before.

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // cli.mjs — the `blaze` command. Dispatches to the scripts.
 import { spawnSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isReadonly } from "./readonly.mjs";
 
@@ -94,6 +94,135 @@ if (!sub) { printUsage(); process.exit(1); }
 if (isReadonly() && sub.mutates) {
   console.error(`blaze: read-only mode (BLAZE_READONLY=1) — refusing to run a mutating command: ${key}`);
   process.exit(1);
+}
+
+// BLZ-56: a malformed schema override fails LOUD, here, before the verb runs.
+//
+// Every verb dispatches through this file, so it is the one place a load-path check can
+// live without being added to a dozen runners and forgotten in the thirteenth.
+//
+// THREE EXEMPTIONS, ALL DELIBERATE, AND THIS IS AC-4's RECORDED DECISION. The count is
+// stated because it was wrong once — the list said two while the Set below held three, the
+// `commit` bullet having been appended below the closing paragraph and orphaned from the
+// list. Keep the number, the bullets and the Set in step; prose that asserts what the code
+// does not is the failure this branch has already paid for twice.
+//
+//   audit  — reporting exactly this class IS its job. `auditCorpus` calls `validateSchema`
+//            and emits `schema-invalid` as a soft finding, so refusing to start it would
+//            delete the report that tells the operator what to fix. BLZ-392 closed that
+//            defect (a throw from inside `auditCorpus` killed `blaze audit` outright,
+//            losing the whole hygiene report) and it stays closed.
+//   init   — runs BEFORE a board exists, so there is no config to validate.
+//   commit — a git flush of the pending ledger. `commit-runner.mjs` imports nothing from
+//            the model, and refusing it would strand ticket files that other verbs have
+//            ALREADY relocated but not committed — the same hazard the read-only gate
+//            above cites for gating too late.
+//
+// That leaves 18 of the 21 subcommands in `SUBCOMMANDS` running this check.
+//
+// The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
+// `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
+// there would kill every verb before it ran, `audit` included, with a raw stack trace.
+// See ADR-0002 and the note on `assertSchemaValid`.
+const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init", "commit"]);
+if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
+  try {
+    const { resolveRoots, loadConfig, listProjects, loadProject } = await import("./config.mjs");
+    const { resolveSchema, assertSchemaValid } = await import("./model/schema-config.mjs");
+    const { fsReadStorage } = await import("./model/read-storage.mjs");
+    // BOTH roots, and `projectsDir` is not derivable from `dataRoot`. `resolveRoots` returns
+    // an explicit projectsDir and derives dataRoot as its PARENT, while `loadProject`
+    // defaults to `join(root, "projects")` — so with BLAZE_PROJECTS_DIR pointing at a
+    // directory named anything else, every `loadProject` below threw, was swallowed, and
+    // every project resolved to null, so the project layer was never validated at all.
+    // scripts/audit-runner.mjs uses `roots.projectsDir` verbatim; this follows it, because
+    // the whole design of this preflight is that it judges the board the way audit judges it.
+    const { dataRoot: root, projectsDir } = resolveRoots();
+    const config = loadConfig({ root });
+
+    // NO `endpointTypes` UNION HERE. `auditCorpus` builds one (scripts/model/audit.mjs) —
+    // every type declared anywhere — because a top-level `Precedes` list may legitimately
+    // name a type only ONE PROJECT declares. That union feeds exactly one check, BLZ-392's
+    // endpoint-kind finding, and that finding is SOFT. `assertSchemaValid` takes the HARD
+    // entries only, so the union cannot change any decision this preflight makes: building
+    // it here would be a mechanism that RUNS, costs a `resolveSchema` per project, and
+    // decides nothing.
+    //
+    // THAT IS NOT ADR-0002's ALTERNATIVE (c), and an earlier version of this comment cited
+    // it anyway. (c) rejected putting a guard inside `resolveSchema`, on the ground that
+    // such a guard would be "absent in production" — and it justified that with a factual
+    // aside, RECORDED 2026-07-15, that `resolveSchema` had no runtime callers at all, only
+    // tests. DO NOT READ THAT ASIDE AS A STATEMENT ABOUT TODAY: `resolveSchema` runs on
+    // every non-exempt verb in this very preflight, forty lines below this sentence, and in
+    // scripts/audit-runner.mjs, scripts/model/audit.mjs and scripts/schedule-runner.mjs.
+    // (c)'s RULING is untouched by that — it is about where a VERSION guard belongs — but
+    // the only part of it that could ever have described this union is the SHAPE of the
+    // objection, a mechanism that never executes. That shape was never this union's: the
+    // union, when it existed here, DID execute, on every non-exempt verb; the finding it
+    // fed simply never won a decision, because that finding is soft. INERT, not ABSENT —
+    // a different thing, and the analogy overstated what was actually removed.
+    //
+    // WHETHER THE UNION ITSELF IS PRESENT OR ABSENT IS DELIBERATELY UNPINNED, and this
+    // paragraph says so rather than implying a guard that does not exist. Restoring it
+    // costs a `resolveSchema` per project and changes nothing the suite can observe — no
+    // test fails either way, so this comment could drift from the code in exactly the
+    // direction it describes with no gate firing. That gap is accepted, not closed: the
+    // union's presence is inert regardless, while the hazard that WOULD matter — the
+    // endpoint-kind finding getting RE-TAGGED HARD without the union coming back, which
+    // would brick every non-exempt verb on a board `blaze audit` calls clean — is already
+    // pinned end to end by two tests, not this comment: "an undeclared endpoint kind never
+    // reaches the load path's refusal" (tests/model/schema-validate-on-load.test.mjs, in the
+    // describe "BLZ-56: the endpoint-kind finding is SOFT, and cli.mjs's preflight depends
+    // on it" — the describe is the CONTEXT, the test is the guard) goes red the moment that
+    // tag flips, and "a top-level Precedes naming a PROJECT-declared type does not brick the
+    // board" (tests/schema-fail-loud-on-load.test.mjs)
+    // spawns `blaze rollup` against exactly such a board and would fail if it ever did. A
+    // third guard here could only detect the union's textual presence, which decides
+    // nothing — not worth its own upkeep. Everything else here still judges the board
+    // exactly the way audit does — a check that disagrees with audit on the same board is
+    // worse than no check at all.
+    //
+    // The project set, with audit-runner.mjs's fallback and for audit-runner.mjs's stated
+    // reason: `listProjects` returns [] when `blaze.config.json` carries no `projects` array,
+    // so without this the preflight validated NOTHING and passed — "a gate that passes
+    // because it measured nothing is worse than no gate". Each source must be non-EMPTY to
+    // win, not merely non-null, which is the same trap `??` alone walked into there.
+    const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
+    const keys = nonEmpty(listProjects(config)) ?? fsReadStorage.listProjects(projectsDir);
+    const projects = {};
+    for (const k of keys) {
+      try { projects[k] = loadProject(k, { root, projectsDir }); } catch { projects[k] = null; }
+    }
+    const top = resolveSchema({ config });
+    assertSchemaValid({ ...top, config });
+    // And each project layer, which `new`/`edit` resolve through `loadProjectSchema` and
+    // the first cut never looked at — so a malformed project.json passed every verb while
+    // audit reported it. The mirror of the same asymmetry.
+    for (const k of Object.keys(projects)) {
+      const resolved = { ...resolveSchema({ config, project: projects[k] }), linkTypes: top.linkTypes };
+      assertSchemaValid({ ...resolved, config, project: projects[k] },
+        // The LABEL follows projectsDir too. Hardcoding `projects/` told an operator
+        // running BLAZE_PROJECTS_DIR=<root>/boards to "Fix projects/ENG/project.json" —
+        // a path they do not have. The whole value of this error is naming the file.
+        { source: `${relative(root, join(projectsDir, k))}/project.json` });
+    }
+  } catch (e) {
+    // ONLY this error stops the verb. Everything else reaching here — no board, an
+    // unreadable or unparseable config, a packaged install with no data dir — is not
+    // this check's business, and swallowing it preserves exactly the behaviour those
+    // cases had before. A preflight that turned "no board" into a hard failure would be
+    // a far bigger regression than the one it was written to close.
+    if (e && e.name === "SchemaOverrideError") {
+      // writeSync, not console.error: `process.exit` after a large write TRUNCATES a
+      // piped stream at 64 KiB, because pipe writes are async. The whole value of this
+      // error is "every problem at once", and a board with enough bad entries lost the
+      // tail — including the line telling the operator which file to fix.
+      const { writeSync } = await import("node:fs");
+      const buf = Buffer.from(e.message.endsWith("\n") ? e.message : `${e.message}\n`, "utf8");
+      for (let off = 0; off < buf.length;) off += writeSync(2, buf, off, buf.length - off);
+      process.exit(1);
+    }
+  }
 }
 
 const r = node(sub.file, sub.noArgs ? [] : rest);
