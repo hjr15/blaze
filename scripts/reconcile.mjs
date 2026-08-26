@@ -82,7 +82,7 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined, recordIfAbsentOnly: false };
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false };
   }
   let target, branchVal = null, prVal = null;
   if (pr) {
@@ -103,7 +103,7 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined, recordIfAbsentOnly: false };
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
   //
@@ -142,9 +142,33 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   // MERGED alone still let the LATEST merge win the rank tie-break, so a follow-up docs
   // PR repointed a done epic away from the PR that delivered it.
   const recordIfAbsentOnly = isTerminal(type, currentStatus);
+  // BLZ-395: REPORT, DON'T MOVE. The conflict this names is the residual ADR-0023 §1
+  // left open, and it is a REPORT because the alternative is to weaken terminal-
+  // stickiness, which is a separate design rule with its own blast radius.
+  //
+  // The window: BLZ-130's veto is evaluated at RUN TIME, so the board's answer depends
+  // on WHEN reconcile sampled git. One run seeing only the early merged PR writes
+  // `done`; a later run seeing that PR AND the open one that carries the real work
+  // would have written `in-review`, but terminal status is sticky so it changes
+  // nothing and reports `moved: false`. Same end state, two answers, decided by run
+  // history — and `blaze start`'s loop samples that window routinely.
+  //
+  // Why not un-stick it. Stickiness exists to stop reconcile fighting a human's
+  // hand-move; a terminal ticket that a person deliberately closed would be dragged
+  // back to `in-review` by any open PR whose branch merely carries the key. That
+  // trades a silent over-report for a silent over-write, which is the same class of
+  // bug in the other direction — and this record's history (ADR-0023 §1, four shapes
+  // of wrong) is the argument for not adding a fourth inference path. Reporting
+  // surfaces the conflict, moves nothing, and leaves the correction to a person.
+  //
+  // `pr` here has already passed INF-735's corroboration gate in `buildPrMap`, so this
+  // is "a CORROBORATED open PR" — an uncorroborated claim is not visible to the veto
+  // and must not be visible to this finding either, or the report would be noisier
+  // than the veto it is reporting on.
+  const openPrOnTerminal = Boolean(pr) && pr.state === "OPEN" && isTerminal(type, currentStatus);
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
-  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly };
+  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly, openPrOnTerminal };
 }
 
 // --- anchored leading-id parse of a commit subject ("<KEY>-<n>: desc") --------
@@ -613,19 +637,42 @@ export async function reconcile({
   const cfg = loadConfig({ root });
   const keys = listProjects(cfg);
   if (!keys.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false,
-    missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [] };
+    missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [], findings: [] };
 
   const sig = new Map();
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
 
   const changes = [];
   const touched = [];
+  // BLZ-395: what reconcile can SEE but must not ACT on. `changes` says what moved;
+  // this says what a person needs to look at. It is deliberately not an error — the
+  // run is healthy, the board is not — and it is emitted on dry runs too, because a
+  // dry run is exactly where someone would look before believing the board.
+  const findings = [];
   for (const t of readStorage.listTickets(projectsDir)) {
     const type = t.frontmatter.type;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;
     const d = decide({ pr: s.prMap.get(t.frontmatter.id), branch: s.branchMap.get(t.frontmatter.id), shipped: s.shippedSet.has(t.frontmatter.id) }, t.status, type);
     if (d.skip) continue;
+
+    // BLZ-395: recorded BEFORE the dirty check below, because this ticket's whole
+    // point is that nothing is dirty — terminal-stickiness clamps the status and the
+    // MERGED gate clamps the record, so the loop would `continue` and say nothing at
+    // all. A finding whose condition is "no change was made" cannot be gated on a
+    // change having been made.
+    if (d.openPrOnTerminal) {
+      const pr = s.prMap.get(t.frontmatter.id);
+      findings.push({
+        kind: "open-pr-on-terminal",
+        id: t.frontmatter.id,
+        status: t.status,
+        pr: { number: pr.number, state: pr.state, url: pr.url, headRefName: pr.headRefName },
+        message: `${t.frontmatter.id} is ${t.status}, but PR #${pr.number} carrying its key is still OPEN ` +
+          `(${pr.url}). Reconcile moved nothing: a terminal status is never reversed automatically. ` +
+          `If the work is not shipped, move it back by hand.`,
+      });
+    }
 
     const fm = { ...t.frontmatter };
     let dirty = false;
@@ -700,7 +747,7 @@ export async function reconcile({
   // "no pull requests"; anything else that happened is named here instead.
   const forgeErrors = [...sig.values()].flatMap((g) => g.forgeErrors || []);
   return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos,
-           forgeErrors };
+           forgeErrors, findings };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -733,6 +780,15 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // the run rather than a change).
   for (const f of r.forgeErrors || []) {
     console.error(`reconcile: FORGE UNREADABLE — ${f.message}`);
+  }
+  // BLZ-395: a conflict reconcile can see and deliberately will not act on. Same rule
+  // as the two warnings above — stderr, every run, regardless of --quiet, because
+  // `--quiet` means "print only on change" and this is precisely a reason not to trust
+  // the absence of a change. Not fatal: the run is correct, the board is not, and
+  // exiting non-zero on a condition only a human can clear would break every loop that
+  // calls this verb.
+  for (const f of r.findings || []) {
+    console.error(`reconcile: NEEDS ATTENTION — ${f.message}`);
   }
   if (r.configuredRepos > 0 && r.scannedRepos === 0) {
     console.error(`reconcile: FAILED — none of the ${r.configuredRepos} configured codeRepo(s) could be read, so NOTHING was scanned.`);

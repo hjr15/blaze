@@ -125,6 +125,29 @@ at once; it does not close it, and BLZ-130's own report of the failure as
 resolved here, because closing it means revisiting terminal-stickiness itself — a
 deliberate, separate design decision with its own blast radius.
 
+**BLZ-395's resolution, since this paragraph is where a reader will look for it: the
+window is still not closed, and it is no longer silent.** Of the three options this ADR
+recorded — un-stick on a corroborated open PR, report rather than move, or document and
+do nothing — the middle one shipped. Terminal-stickiness is **unchanged**, deliberately
+and not by omission: un-sticking would let any open PR whose branch merely carries the
+key drag back a ticket a person closed on purpose, trading a silent over-report for a
+silent over-write, which is this record's own failure shape in the other direction. So
+reconcile now emits a **finding** — `open-pr-on-terminal` — on `reconcile.findings` for
+every terminal ticket carrying a *corroborated* open PR, on dry runs and applies alike.
+It reaches the CLI on stderr regardless of `--quiet` (the same rule as the missing-repo
+and unreadable-forge warnings: `--quiet` means "print only on change", and this is a
+reason not to trust the absence of one), the `blaze start` activity feed as a
+`warning` deduped per message, and `/api/reconcile-preview`. The supervisor loop is the
+one that matters, because a timer sampling git is what opens the window in the first
+place.
+
+The finding is gated on the same corroboration as the veto, per the qualifier below —
+an open PR INF-735's gate drops is invisible to both. And it is recorded before the
+loop's dirty check, because the whole condition is that *nothing changed*: `changes` is
+empty by construction here, so a finding gated on a change would never fire. **The cost,
+stated: the board can still be wrong, and now says so instead of only being wrong.**
+Correcting it stays a person's move.
+
 Second qualifier: "no PR is open" is really "no *corroborated* PR is open". An open PR
 whose claim INF-735's gate drops is not visible to the veto at all.
 

@@ -131,6 +131,26 @@ export function newForgeErrorEvents(forgeErrors, said) {
   return out;
 }
 
+/** BLZ-395: reconcile's findings → activity-feed events, deduped the same way and for
+ *  the same reason. THIS LOOP IS THE ONE THAT MATTERS: BLZ-395's window is opened by
+ *  reconcile running on a timer and sampling git between an early merge and a later
+ *  PR opening, so a finding surfaced only on the CLI would miss the path that creates
+ *  the condition. Like a forge error it persists until a person acts, so it is said
+ *  once per distinct message rather than every tick.
+ *
+ *  `type: "warning"`, not `"error"`: the run succeeded and the engine is behaving as
+ *  designed. What is wrong is the BOARD, and calling that an engine error is the
+ *  over-statement this whole lane exists to stop. */
+export function newFindingEvents(findings, said) {
+  const out = [];
+  for (const f of findings || []) {
+    if (!f || !f.message || said.has(f.message)) continue;
+    said.add(f.message);
+    out.push({ type: "warning", loop: "reconcile", id: f.id, message: f.message });
+  }
+  return out;
+}
+
 export function createApp(cfg, { root = resolveRoots().dataRoot, identity = loadIdentity(root) } = {}) {
   // BLZ-359. A DAMAGED ROSTER IS A REFUSAL, NOT "NOBODY IS CONFIGURED". Reading only
   // `hasIdentity` here would reintroduce, in this server, the exact bug BLZ-348 shipped
@@ -155,6 +175,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
   // BLZ-350: forge problems already announced, so a timer loop reports each once.
   const forgeSaid = new Set();
+  // BLZ-395: separate memory from forgeSaid. They are different populations and a
+  // shared Set would let one silence the other on a message collision.
+  const findingSaid = new Set();
 
   // Mirrors serve.mjs's aheadCount() so the client's sync badge works the same
   // under supervisor mode.
@@ -182,6 +205,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // now breaks. Without this the app runs reconcile every tick, never reaches
       // "in-review", and the activity feed shows a healthy board.
       for (const e of newForgeErrorEvents(r && r.forgeErrors, forgeSaid)) bus.publish({ ...e, ts: today() });
+      for (const e of newFindingEvents(r && r.findings, findingSaid)) bus.publish({ ...e, ts: today() });
       if (r && r.ok && r.changes) {
         for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
       } else if (r && !r.ok) {
