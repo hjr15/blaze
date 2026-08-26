@@ -63,6 +63,12 @@ function captureOutput() {
     log: console.log, warn: console.warn, error: console.error,
     stderr: process.stderr.write.bind(process.stderr),
   };
+  // DELIBERATELY NOT `process.stdout.write`. Stubbing it in-process swallows the test
+  // runner's OWN result lines: with it stubbed this file reported 42 tests instead of 51
+  // — nine vanished silently, none failed. A harness that hides tests is worse than the
+  // gap it closes. Raw-stdout leakage is covered where it can be observed safely, from
+  // outside the process, by the spawned-child test in serve-standalone-entry.test.mjs,
+  // which reads the real token off disk and asserts it is absent from both streams.
   const cap = { text: "" };
   const grab = (...a) => { cap.text += a.join(" ") + "\n"; };
   console.log = grab; console.warn = grab; console.error = grab;
@@ -998,6 +1004,28 @@ describe("BLZ-358: only one setup can be in flight", () => {
   // never reaches the flag at all. Without the reset, a single failed creation latches
   // the flag forever and setup can never be completed — on a board with no identity,
   // that is a permanently unusable install needing a restart.
+  // THE DIAGNOSTIC HELPER MUST NOT BECOME THE CRASH. `setupFailureReason` wraps
+  // `String(e?.message ?? e)` in a try/catch, and dropping that guard left the whole
+  // suite green — while turning this case from a 400 into a 500. The 500 is the outer
+  // catch, reached by a throw from INSIDE the addUser catch, which is the pre-auth
+  // process-death class this branch was already refuted for once: `String()` throws
+  // outright on an object whose `toString` and `valueOf` are both poisoned, and an
+  // unauthenticated caller chooses the rejection an identity store can produce.
+  test("a poisoned rejection from addUser is still a 400 — the reason helper cannot throw", async () => {
+    const { root, projects } = board();
+    const poisoned = async () => { throw { toString: null, valueOf: null }; };
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0",
+                                          addUser: poisoned });
+    try {
+      const r = await postSetup(base, { token: readSetupToken(root), email: "a@b.c" });
+      assert.equal(r.status, 400,
+        "a 500 here means setupFailureReason threw out of the addUser catch and reached the outer one");
+      const body = await r.json();
+      assert.deepEqual(body.errors, ["could not create the administrator account"],
+        "and the caller still learns nothing about what failed");
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("a FAILED creation clears the latch — setup stays completable, not bricked", async () => {
     const { root, projects } = board();
     let n = 0;

@@ -178,11 +178,14 @@ effect on the operator's own working tree, and it is deliberate — a live crede
 `git add -A` can pick up is the failure this closes — but it is not silent and should
 not be a surprise:
 
-1. If `<board>` is a git work tree, the server appends `.blaze/identity.db` and
-   `.blaze/setup-token` to `<board>/.gitignore` unless git already reports each path as
-   ignored. It asks git about **each** path rather than assuming one rule covers the
-   other: a `.gitignore` naming exactly `.blaze/identity.db` leaves the token
-   committable.
+1. If `<board>` is a git work tree, the server ensures each of `.blaze/identity.db` and
+   `.blaze/setup-token` is ignored, asking git about **each** path rather than assuming
+   one rule covers the other — a `.gitignore` naming exactly `.blaze/identity.db` would
+   leave the token committable. What actually gets **written** on a fresh board is a
+   single `.blaze/` rule, appended by the identity check, which runs first; the token
+   check then finds the path already ignored and appends nothing (`state: "already"`).
+   Two rules are written only when an existing `.gitignore` covers one path and not the
+   other.
 2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
    pre-fix build and staged or committed the token — the server runs
    `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index
