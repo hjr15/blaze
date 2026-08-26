@@ -129,7 +129,23 @@ function collectSchemaProblems(input = {}) {
     }
     const declared = new Set(statuses);
     const terminal = wf.terminal;
-    if (terminal !== undefined) {
+    // PRESENCE, not just shape. `mergeWorkflows` is a per-entry REPLACE, exactly like
+    // `mergeTypes` — so a record naming only some keys does not ADJUST the shipped
+    // workflow, it replaces it and silently drops the rest. That is the same class as the
+    // partial TYPE entry above, and `docs/schema-customization.md` already states the
+    // contract: "supply the complete {statuses, terminal, transitions, reopenTo,
+    // resolutionOnTerminal} for a workflow". Guarded as optional, a record carrying only
+    // `statuses` passed this check, passed `blaze audit` with ok=true and ZERO findings,
+    // and then died inside a verb as a raw `TypeError: Cannot read properties of
+    // undefined (reading 'some')` from `canTransition` — the silent-then-fatal failure
+    // this whole ticket exists to end.
+    //
+    // `reopenTo` stays optional deliberately: `canTransition` compares against it and an
+    // absent value simply means "no reopen path", which is a legal workflow.
+    if (terminal === undefined) {
+      hard(`workflow "${name}" has no terminal — an override REPLACES the whole workflow `
+        + "record, so a partial one drops the statuses that end it and nothing can close");
+    } else {
       if (!Array.isArray(terminal)) {
         hard(`workflow "${name}" has terminal that is not an array `
           + `(${terminal === null ? "null" : typeof terminal})`);
@@ -142,21 +158,22 @@ function collectSchemaProblems(input = {}) {
         }
       }
     }
-    if (wf.transitions !== undefined) {
-      if (!Array.isArray(wf.transitions)) {
-        hard(`workflow "${name}" has transitions that is not an array`);
-      } else {
-        for (const pair of wf.transitions) {
-          if (!Array.isArray(pair) || pair.length !== 2) {
-            hard(`workflow "${name}" has a transition that is not a [from, to] pair — `
-              + `got ${JSON.stringify(pair)}`);
-            continue;
-          }
-          for (const st of pair) {
-            if (!declared.has(st)) {
-              hard(`workflow "${name}" has a transition naming "${st}", which is not one of `
-                + "its statuses — that move can never be made");
-            }
+    if (wf.transitions === undefined) {
+      hard(`workflow "${name}" has no transitions — an override REPLACES the whole workflow `
+        + "record, so a partial one drops every legal move and the ticket cannot leave its status");
+    } else if (!Array.isArray(wf.transitions)) {
+      hard(`workflow "${name}" has transitions that is not an array`);
+    } else {
+      for (const pair of wf.transitions) {
+        if (!Array.isArray(pair) || pair.length !== 2) {
+          hard(`workflow "${name}" has a transition that is not a [from, to] pair — `
+            + `got ${JSON.stringify(pair)}`);
+          continue;
+        }
+        for (const st of pair) {
+          if (!declared.has(st)) {
+            hard(`workflow "${name}" has a transition naming "${st}", which is not one of `
+              + "its statuses — that move can never be made");
           }
         }
       }
@@ -166,7 +183,15 @@ function collectSchemaProblems(input = {}) {
         + "statuses — reopening would write a status the workflow does not have");
     }
     const rot = wf.resolutionOnTerminal;
-    if (rot !== undefined) {
+    // Required for the same reason as `terminal` and `transitions`: the override replaces
+    // the record. Omitting only this one is the MOST plausible partial — it looks like a
+    // detail — and it passed, then died in `resolutionForTerminal` as `TypeError: Cannot
+    // convert undefined or null to object` the first time a ticket reached a terminal
+    // status.
+    if (rot === undefined) {
+      hard(`workflow "${name}" has no resolutionOnTerminal — an override REPLACES the whole `
+        + "workflow record, so a partial one leaves every terminal status with no resolution");
+    } else {
       if (!rot || typeof rot !== "object" || Array.isArray(rot)) {
         hard(`workflow "${name}" has resolutionOnTerminal that is not an object`);
       } else {

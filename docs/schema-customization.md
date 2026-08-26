@@ -295,14 +295,20 @@ in its own `statuses` — all resolved, and the board only found out much later,
 
 The resolved schema is now checked on load: every type has a numeric `level`, a
 `workflow` naming a declared workflow, `parentTypes` that are declared types, and
-`required` as an array of field names; every workflow has a non-empty `statuses`, and
-its `terminal`, `transitions`, `reopenTo` and `resolutionOnTerminal` reference only
-statuses it declares and resolutions the engine knows.
+`required` as an array of field names; every workflow has a non-empty `statuses` **and a
+`terminal`, `transitions` and `resolutionOnTerminal`**, all of which reference only
+statuses it declares and resolutions the engine knows. `reopenTo` stays optional — an
+absent one simply means the workflow has no reopen path, which is legal.
 
-> **A partial type entry is invalid, and this is the trap worth knowing.** `mergeTypes`
-> is a **per-entry replace**, not a deep merge — so `"task": { "workflow": "delivery" }`
-> does not "adjust task's workflow", it *replaces the whole record* and `task` loses its
-> `level`, `parentTypes` and `required`. Write the complete record.
+> **A partial entry is invalid — for a workflow exactly as much as for a type, and this
+> is the trap worth knowing.** `mergeTypes` and `mergeWorkflows` are both a **per-entry
+> replace**, not a deep merge. `"task": { "workflow": "delivery" }` does not "adjust
+> task's workflow", it *replaces the whole record* and `task` loses its `level`,
+> `parentTypes` and `required`. The same is true of
+> `"delivery": { "statuses": [...] }`: it drops `terminal`, `transitions` and
+> `resolutionOnTerminal`. That one was accepted in silence until BLZ-56's own review
+> caught it — `blaze audit` reported `ok=true` with zero findings and the board then died
+> inside a verb as a raw `TypeError` from `canTransition`. **Write the complete record.**
 
 ### Two paths, deliberately separate
 

@@ -298,9 +298,16 @@ function refusedMessages(resolved) {
   }
 }
 
+// A COMPLETE workflow record that is merely NARROWER than the shipped one — every one of
+// the five documented keys is present, only the status list is shorter. That is the BLZ-361
+// case, and it must stay purely advisory. It carries `resolutionOnTerminal` on purpose: a
+// record missing it is not a narrowing but a PARTIAL record, which is hard (see the rows
+// below and `tests/schema-fail-loud-on-load.test.mjs`), and a fixture carrying two problems
+// at once would stop measuring the one its row names.
 const NARROWED_REQUIREMENT = {
   statuses: ["proposed", "implemented"], terminal: ["implemented"],
   transitions: [["proposed", "implemented"]], reopenTo: "proposed",
+  resolutionOnTerminal: { implemented: "done" },
 };
 
 /** One row per `hard()`/`soft()` call site in scripts/model/schema-config.mjs. Each
@@ -338,12 +345,18 @@ const CLASSIFICATION = [
   { name: "statuses is not a non-empty array", hard: true,
     re: /^workflow "tiny" has statuses that is not a non-empty array/,
     resolved: withWorkflows({ tiny: { statuses: [] } }) },
+  { name: "a workflow record with no terminal at all", hard: true,
+    re: /^workflow "tiny" has no terminal/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], transitions: [], resolutionOnTerminal: {} } }) },
   { name: "terminal is not an array", hard: true,
     re: /^workflow "tiny" has terminal that is not an array/,
     resolved: withWorkflows({ tiny: { statuses: ["a"], terminal: 3 } }) },
   { name: "terminal names a status the workflow does not have", hard: true,
     re: /^workflow "tiny" marks "z" terminal/,
     resolved: withWorkflows({ tiny: { statuses: ["a"], terminal: ["z"] } }) },
+  { name: "a workflow record with no transitions at all", hard: true,
+    re: /^workflow "tiny" has no transitions/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], terminal: [], resolutionOnTerminal: {} } }) },
   { name: "transitions is not an array", hard: true,
     re: /^workflow "tiny" has transitions that is not an array/,
     resolved: withWorkflows({ tiny: { statuses: ["a"], transitions: 3 } }) },
@@ -356,6 +369,9 @@ const CLASSIFICATION = [
   { name: "reopenTo is not a declared status", hard: true,
     re: /^workflow "tiny" sets reopenTo "gone"/,
     resolved: withWorkflows({ tiny: { statuses: ["a"], reopenTo: "gone" } }) },
+  { name: "a workflow record with no resolutionOnTerminal at all", hard: true,
+    re: /^workflow "tiny" has no resolutionOnTerminal/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], terminal: [], transitions: [] } }) },
   { name: "resolutionOnTerminal is not an object", hard: true,
     re: /^workflow "tiny" has resolutionOnTerminal that is not an object/,
     resolved: withWorkflows({ tiny: { statuses: ["a"], resolutionOnTerminal: 3 } }) },

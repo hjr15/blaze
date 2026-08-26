@@ -94,7 +94,8 @@ describe("BLZ-392: link types resolve through the same layering as types and wor
     // silently unschedulable — the same failure BLZ-392 exists to end, reintroduced by spelling.
     const errors = validateSchema({
       types: { task: { workflow: "delivery" } },
-      workflows: { delivery: { statuses: ["defined"], terminal: [] } },
+      workflows: { delivery: { statuses: ["defined"], terminal: [],
+                               transitions: [], resolutionOnTerminal: {} } },
       linkTypes: [{ name: "Precedes", source_kinds: ["task", "spke"], target_kinds: ["task"] }],
     });
     assert.ok(errors.some((e) => /spke/.test(e)), `no error named the bad kind: ${errors.join(" | ")}`);
@@ -111,7 +112,8 @@ describe("BLZ-392: link types resolve through the same layering as types and wor
         task: { level: 0, workflow: "delivery", parentTypes: [], required: [] },
         spike: { level: 0, workflow: "delivery", parentTypes: [], required: [] },
       },
-      workflows: { delivery: { statuses: ["defined"], terminal: [] } },
+      workflows: { delivery: { statuses: ["defined"], terminal: [],
+                               transitions: [], resolutionOnTerminal: {} } },
       linkTypes: [{ name: "Precedes", source_kinds: ["task", "spike"], target_kinds: ["task", "spike"] }],
     });
     assert.deepEqual(errors, [], `unexpected errors: ${errors.join(" | ")}`);
@@ -483,7 +485,8 @@ describe("BLZ-392: validateSchema reports malformed kinds rather than throwing",
     // COUNT, so a fixture that is itself invalid would add errors and hide the one they
     // are actually about.
     types: { task: { level: 0, workflow: "delivery", parentTypes: [], required: [] } },
-    workflows: { delivery: { statuses: ["defined"], terminal: [] } },
+    workflows: { delivery: { statuses: ["defined"], terminal: [],
+                               transitions: [], resolutionOnTerminal: {} } },
   };
   for (const [label, kinds] of [["a number", 5], ["an object", {}], ["a string", "spike"], ["null", null]]) {
     test(`${label} in source_kinds is ONE reported error, never a throw`, () => {
