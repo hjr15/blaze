@@ -818,8 +818,16 @@ describe("BLZ-358: a failed setup leaves the operator a diagnostic", () => {
     // into a 500 — was silent for the same reason and deserves the same treatment.
     // Reached here by an `addUser` that resolves with a shape the success path cannot
     // read: `created.token.token` throws a TypeError past the inner catch entirely.
+    //
+    // It creates the user FOR REAL first, so the adoption above it succeeds. Without that
+    // the adoption fails instead and this test silently stops measuring the outer catch —
+    // which is what happened when the fail-closed adoption check landed: the injection
+    // reached the new branch, the status stayed 500, and only the stderr assertion noticed.
     const { root, projects } = board();
-    const resolvesWrong = async () => ({ user: { id: 1, email: "a@b.c" } });
+    const resolvesWrong = async (r, opts) => {
+      await addUser(r, opts);
+      return { user: { id: 1, email: "a@b.c" } };
+    };
     const server = startServer({ port: 0, root, projectsDir: projects, host: "0.0.0.0",
                                 addUser: resolvesWrong });
     await new Promise((res) => server.once("listening", res));
@@ -1024,6 +1032,76 @@ describe("BLZ-358: only one setup can be in flight", () => {
   // process-death class this branch was already refuted for once: `String()` throws
   // outright on an object whose `toString` and `valueOf` are both poisoned, and an
   // unauthenticated caller chooses the rejection an identity store can produce.
+  // THE EMPTY-TOKEN GUARD IS DOUBLE, AND NEITHER HALF WAS PINNED. `setupTokenMatches`
+  // refuses a zero-length side, and `readSetupToken` maps an empty file to `null`. Each
+  // masks the other, so dropping either alone changed no test — and dropping BOTH left the
+  // whole suite green while `timingSafeEqual(<empty>, <empty>)` returns TRUE. A zero-byte
+  // or whitespace-only token file plus `{"token":""}` from an unauthenticated caller would
+  // then create an admin with no credential at all. Both halves are asserted here, and the
+  // pre-existing `setupTokenMatches("", "blz_setup_aaa")` case cannot reach it: the LENGTH
+  // check short-circuits before the empty check is consulted.
+  test("an EMPTY token authenticates nothing — both halves of the guard", async () => {
+    assert.equal(setupTokenMatches("", ""), false, "two empty sides must not match");
+    assert.equal(setupTokenMatches("", "blz_setup_x"), false);
+    assert.equal(setupTokenMatches("blz_setup_x", ""), false);
+
+    const { root, projects } = board();
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0" });
+    try {
+      // Empty the token file the way a truncated write or a stray `> file` would.
+      writeFileSync(setupTokenPath(root), "   \n");
+      assert.equal(readSetupToken(root), null, "a whitespace-only file is not a token");
+      for (const tok of ["", "   ", "\n"]) {
+        const r = await postSetup(base, { token: tok, email: "a@b.c" });
+        assert.equal(r.status, 401,
+          `an empty presented token must never authenticate (sent ${JSON.stringify(tok)})`);
+      }
+      const id = loadIdentity(root);
+      try {
+        assert.notEqual(id.state, "healthy", "and no administrator may have been created");
+      } finally { id.close(); }
+    } finally { server.close(); rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // FAILED ADOPTION MUST FAIL CLOSED. `gate()` reads `store === null` as "no identity
+  // configured — the loopback case, already vouched for at startup". Once an admin exists
+  // that premise is false, so clearing `setupPending` BEFORE the adoption was known to
+  // have worked left the process serving the entire board to an unauthenticated caller on
+  // 0.0.0.0 — the exact hole the refusal this ticket replaces existed to close, and worse
+  // than a restart, which meets `state === "broken"` and throws.
+  test("if the identity cannot be adopted, the board serves NOTHING — it does not fall open", async () => {
+    const { root, projects } = board();
+    // Create the admin for real, then make the database unopenable at that instant —
+    // standing in for the SQLITE_BUSY / EMFILE / EIO / read-only-mount window.
+    const createThenBreak = async (r, opts) => {
+      const out = await addUser(r, opts);
+      chmodSync(join(r, ".blaze", "identity.db"), 0o000);
+      return out;
+    };
+    const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0",
+                                          addUser: createThenBreak });
+    try {
+      const done = await postSetup(base, { token: readSetupToken(root), email: "a@b.c" });
+      assert.equal(done.status, 500, "a failed adoption is a 500, not a success");
+
+      const slash = await fetch(`${base}/`);
+      assert.notEqual(slash.status, 200,
+        "the board must NOT be served to an unauthenticated caller after a failed adoption");
+      const body = await slash.text();
+      assert.doesNotMatch(body, /OBA-1/,
+        "and no ticket content may leak through it");
+
+      const live = await fetch(`${base}/api/live`);
+      assert.notEqual(live.status, 200, "nor may the API answer without a credential");
+
+      assert.equal(existsSync(setupTokenPath(root)), false,
+        "the token is consumed either way — the admin exists, so a second one must not be creatable");
+    } finally {
+      try { chmodSync(join(root, ".blaze", "identity.db"), 0o600); } catch { /* already gone */ }
+      server.close(); rmSync(root, { recursive: true, force: true });
+    }
+  });
+
   test("a poisoned rejection from addUser is still a 400 — the reason helper cannot throw", async () => {
     const { root, projects } = board();
     const poisoned = async () => { throw { toString: null, valueOf: null }; };

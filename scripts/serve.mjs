@@ -351,13 +351,39 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           return json(400, { errors: ["could not create the administrator account"] });
         }
         // Close the door in this order: the credential first, then the route.
+        // ADOPT FIRST, AND FAIL CLOSED. The order here is the whole control.
+        //
+        // `gate()` reads `store === null` as "no identity configured — the loopback case,
+        // already vouched for at startup". After a failed adoption that premise is FALSE:
+        // an identity now exists, it simply could not be opened. So clearing
+        // `setupPending` before knowing the adoption worked left the process with
+        // `setupPending === false` AND `store === null` — and `gate()` then answered
+        // `{ ok: true }` for every route, serving the whole board to an unauthenticated
+        // caller on 0.0.0.0. That is precisely the hole the refusal this ticket replaces
+        // existed to close, and it is worse than a restart: a restart meets
+        // `identity?.state === "broken"` and throws.
+        //
+        // `loadIdentity` can return non-healthy here for reasons that have nothing to do
+        // with the row just written — SQLITE_BUSY from a concurrent writer (a second blaze
+        // process, `blaze user add`, the supervisor's loops), EMFILE, EIO, the mount going
+        // read-only. Narrow window, maximum-severity outcome, so it is handled rather than
+        // assumed away.
+        const adopted = loadIdentity(root);
+        if (adopted?.state !== "healthy") {
+          // The token is consumed either way: the administrator WAS created, so leaving it
+          // live would let a second caller create a second admin. `setupPending` stays
+          // TRUE, so every other route keeps answering 503 and nothing is served
+          // unauthenticated. The operator restarts: with an identity present no token is
+          // minted, and if the database is genuinely broken `startServer` refuses outright.
+          clearSetupToken(root);
+          console.error("blaze: the administrator account was created, but the identity "
+            + "database could not be adopted — the board stays in setup mode and serves "
+            + "nothing. Restart blaze.");
+          return json(500, { errors: ["setup could not be completed"] });
+        }
+        store = adopted.store;
         clearSetupToken(root);
         setupPending = false;
-        // Adopt the identity just created, so the board this process goes on to serve is
-        // authenticated rather than open. Without this the running server keeps
-        // `store = null` and serves everything to anyone until it is restarted.
-        const adopted = loadIdentity(root);
-        if (adopted?.state === "healthy") store = adopted.store;
         // The API token is returned ONCE. ADR-0013 stores only its SHA-256, so this is
         // the only moment it exists; it is not logged, for the same reason.
         return json(200, { ok: true, user: created.user, token: created.token.token });
