@@ -596,10 +596,25 @@ export async function reconcile({
 
     const fm = { ...t.frontmatter };
     let dirty = false;
-    // Terminal: fill a blank, never overwrite. See `recordIfAbsentOnly` in decide().
-    const keep = (current) => d.recordIfAbsentOnly && Boolean(current);
-    if (d.branchVal && !keep(fm.branch) && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
-    if (d.prVal && !keep(fm.pr) && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
+    // Terminal: fill a blank RECORD, never replace one. See `recordIfAbsentOnly` in
+    // decide(). The record is one unit, not two fields: ADR-0023 and the guide both say a
+    // terminal ticket "may ACQUIRE a delivery record it never had, and may never have one
+    // replaced". Judged per-field it was neither. A `done` ticket with `branch` set and
+    // `pr` blank had its `pr` filled from whatever PR ranked top — and ranking breaks ties
+    // on PR NUMBER, so that is the LATEST merged PR, not the one that delivered the work.
+    // A follow-up docs PR merged under the same key therefore stamped itself onto half the
+    // record while `branch` still named the deliverer: one record naming two different PRs,
+    // which is round 3's bug wearing fill clothing. 8 done tickets on the board are in that
+    // shape today.
+    //
+    // Snapshotted from `t.frontmatter`, NOT read from `fm`, because the branch write below
+    // mutates `fm` — reading it there would see the branch just written, skip the pr write,
+    // and re-create round 2's write-nothing direction on the 1,141 done tickets that carry
+    // neither field.
+    const hadRecord = Boolean(t.frontmatter.branch || t.frontmatter.pr);
+    const keep = () => d.recordIfAbsentOnly && hadRecord;
+    if (d.branchVal && !keep() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
+    if (d.prVal && !keep() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
     if (d.resolution !== undefined && fm.resolution !== d.resolution) { fm.resolution = d.resolution; dirty = true; }
     if (d.moved) { fm.updated = today; dirty = true; }
     if (!dirty) continue;

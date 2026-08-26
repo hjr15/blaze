@@ -553,6 +553,38 @@ describe("BLZ-130: the record is written once — the rule, not just the comment
     } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
   });
 
+  // THE RECORD IS ONE UNIT, NOT TWO FIELDS. Judged per-field, write-once was neither:
+  // a `done` ticket with `branch` set and `pr` blank had its `pr` filled from whatever PR
+  // ranked top, and ranking breaks ties on PR NUMBER — so that is the LATEST merged PR,
+  // not the deliverer. The follow-up docs PR that round 3 was about therefore still got to
+  // stamp itself onto half the record, while `branch` went on naming the real deliverer.
+  // One record, two different PRs. 8 done tickets on the board are in that shape.
+  test("a PARTIAL record is not topped up by a later PR — the record is one unit", async () => {
+    const followUp = {
+      number: 123, state: "MERGED", url: "u123", headRefName: "INF-645-follow-up-docs-tidy",
+      title: "INF-645: follow-up docs tidy",
+    };
+    const tmp = mkdtempSync(join(tmpdir(), "blz130-partial-"));
+    const codeRepo = join(tmp, "svc");
+    mkdirSync(codeRepo, { recursive: true });
+    gitInit(codeRepo);
+    execFileSync("git", ["-C", codeRepo, "remote", "add", "origin",
+      "https://github.com/hjr15/service-platform.git"]);
+    // branch recorded by whatever delivered it; pr never recorded.
+    const root = board(tmp, codeRepo,
+      [["INF-645", "epic", "done", "branch: INF-645-descope-dead-mans-switch\n"]]);
+    const restore = stubGh(tmp, [PR_80_MERGED, followUp]);
+    try {
+      await reconcile({ root, dryRun: false });
+      const body = readFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"), "utf8");
+      assert.match(body, /branch: INF-645-descope-dead-mans-switch/,
+        "the half that was recorded must survive untouched");
+      assert.doesNotMatch(body, /#123/,
+        "a follow-up docs PR must not top up a partial record — that is one record naming two PRs");
+      assert.doesNotMatch(body, /follow-up-docs-tidy/);
+    } finally { restore(); rmSync(tmp, { recursive: true, force: true }); }
+  });
+
   test("a non-terminal ticket's record still UPDATES — write-once is terminal-only", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz130-nonterm-"));
     const codeRepo = join(tmp, "svc");

@@ -79,6 +79,25 @@ Three attempts, three shapes of wrong: overwrite anything, write nothing, overwr
 the latest merge. It is recorded at this length because the same shape keeps recurring
 across this ADR's own history.
 
+**A fourth shape, found by review: the record is ONE UNIT, not two fields.** Write-once
+was first enforced per field, against that field's own current value. A `done` ticket
+with `branch` recorded and `pr` blank therefore still had its `pr` filled — from the
+top-ranked PR, which by the tie-break above is the *latest* merged one. The follow-up
+docs PR of the paragraph before still stamped itself onto half the record while `branch`
+went on naming the real deliverer: one record naming two different PRs, which is the
+third shape again, reached through the blank half. 8 of 1,679 `done` tickets on the board
+are in that shape. So `hadRecord` is snapshotted from the ticket's frontmatter BEFORE
+either field is written, and governs both: a terminal ticket with *either* field keeps
+*both*.
+
+**Cost, accepted:** those 8 tickets keep a partial record and never gain a `pr`. That is
+the same asymmetry as above — a blank `pr` understates and is true; a `pr` naming the
+wrong PR overstates and is false, and write-once then locks it in permanently, since `pr`
+is not in `EDITABLE_FIELDS` and `blaze edit` will not repair it. Recovering the *right*
+PR for those 8 (by corroborating `headRefName` against the recorded `branch`) is a
+separate change and is not made here: a new inference path is exactly the shape that has
+already failed three times above.
+
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
 progress is recoverable by looking; overstating it is not.

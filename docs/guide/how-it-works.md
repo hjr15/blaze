@@ -142,6 +142,11 @@ last PR carrying its key closes.
 > `done` ticket with no record yet can still acquire one — reconcile is the only thing
 > that writes those fields — but nothing later overwrites it, so neither a still-open PR
 > nor a follow-up docs PR merged under the same key can claim to have delivered the work.
+>
+> **The record is one unit, and the two fields move together.** A terminal ticket
+> carrying *either* `branch` or `pr` already has a record, so neither half is topped up
+> later — otherwise a follow-up PR could fill a blank `pr` beside a `branch` that names
+> a different PR, and the record would name two.
 
 ### A squash merge's body is read, not just its subject (BLZ-131)
 
