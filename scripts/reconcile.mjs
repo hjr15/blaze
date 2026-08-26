@@ -26,7 +26,21 @@ import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 
-const PR_RANK = { MERGED: 3, OPEN: 2, CLOSED: 1 };
+// BLZ-130: SELECTION precedence — deliberately NOT "how far along the PR is".
+// An OPEN PR outranks a MERGED one, because while any PR carrying the key is still
+// open the work is not shipped, whatever an earlier PR did. Epic INF-645 was
+// reported done off a docs-only PR #80 that merged while PR #81 — the actual work —
+// was open; the merged signal won on rank, and terminal status is sticky, so
+// nothing re-opened it when #81 landed later.
+//
+// This is a veto, not a re-ordering of "progress": MERGED still beats CLOSED, and a
+// ticket whose only PR is merged still reaches done. It costs a delayed done (the
+// ticket sits in in-review until the last PR carrying its key closes) and buys back
+// the failure that biases toward saying shipped when it is not.
+//
+// Type-independent on purpose. The ticket asks whether `story` shares the failure;
+// every delivery type does, because ranking never sees the type.
+const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
 
 // --- shelling out, in two layers (BLZ-350) ------------------------------------
 // `shResult` is the honest one: it reports WHAT happened — exit status, stderr,
@@ -67,7 +81,8 @@ function sh(cmd, args, opts = {}) {
 export function decide({ pr, branch, shipped }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
-    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
+    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
+             resolution: undefined, recordIfAbsentOnly: false };
   }
   let target, branchVal = null, prVal = null;
   if (pr) {
@@ -87,13 +102,49 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     // an existing `resolution` on a ticket that's already in a terminal status.
     target = "done";
   } else {
-    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true, resolution: undefined };
+    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
+             resolution: undefined, recordIfAbsentOnly: false };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
-  if (isTerminal(type, currentStatus)) target = currentStatus;
+  //
+  // The branch and PR are clamped WITH the status, which the first cut of BLZ-130 did
+  // not do. Clamping `target` alone suppressed the move and rewrote the record anyway:
+  // a done epic delivered by merged PR #80 had its frontmatter replaced with the later
+  // OPEN #81 that now wins the rank, reported as `moved: false`. A terminal ticket's
+  // branch and PR are the HISTORY of what delivered it, not live fields, and silently
+  // repointing them at work that has not landed destroys the only record there is.
+  if (isTerminal(type, currentStatus)) {
+    target = currentStatus;
+    // Record only what could have DELIVERED it. An open or closed PR could not, so it
+    // may not write the record at all — that was the defect: a done epic delivered by
+    // merged #80, silently repointed at open #81.
+    //
+    // Three attempts, three shapes of wrong, which is why both halves of the rule are
+    // spelled out. Overwrite-anything was the original bug. Nulling both fields for
+    // EVERY terminal ticket then stopped the first write too — reconcile is the only
+    // producer of `branch`/`pr` (nothing else in scripts/ originates them, and they are
+    // not in EDITABLE_FIELDS), so a done ticket that never had them recorded could never
+    // acquire them: 1,056 of 1,594 done tickets CARRYING NEITHER FIELD at blaze-pm
+    // ff5f36c2, permanently. (The neighbouring 1,064 is a DIFFERENT population — those
+    // MISSING A PR at that same ref — and the two read alike, which is how the figure was
+    // wrong here and in ADR-0023. Name the quantity and pin the ref, never `origin/main`,
+    // which moves.) Gating on MERGED alone then let the LATEST merge win the rank
+    // tie-break, so a follow-up docs PR repointed the record again. Hence also the
+    // write-once rule below.
+    if (!pr || pr.state !== "MERGED") {
+      branchVal = null;
+      prVal = null;
+    }
+  }
+  // The write-once half. `decide` cannot see the current frontmatter, so it says the
+  // rule APPLIES and the caller — which holds it — enforces it. A terminal ticket may
+  // acquire a delivery record it never had, and may never have one replaced: gating on
+  // MERGED alone still let the LATEST merge win the rank tie-break, so a follow-up docs
+  // PR repointed a done epic away from the PR that delivered it.
+  const recordIfAbsentOnly = isTerminal(type, currentStatus);
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
-  return { target, branchVal, prVal, moved, skip: false, resolution };
+  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly };
 }
 
 // --- anchored leading-id parse of a commit subject ("<KEY>-<n>: desc") --------
@@ -102,6 +153,129 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
 export function idFromSubject(subject, key) {
   const m = new RegExp("^" + key + "-(\\d+):", "i").exec((subject || "").trim());
   return m ? `${key}-${m[1]}` : null;
+}
+
+// --- BLZ-131: what ONE commit message says shipped ---------------------------
+// The shipped signal used to read commit SUBJECTS only. These repos are squash-only
+// — blaze-pm by deliberate design (INF-556/INF-557), service-platform by convention
+// — and a squash collapses a branch into one commit whose subject is the PR TITLE.
+// Every bundled child's `KEY-n:` subject is destroyed by the merge, so six children
+// of epic INF-645 sat in `defined/` with their work live in production. Reconcile
+// said nothing: the failure is silent and biased toward under-reporting.
+//
+// What survives is the BODY. GitHub's default squash message concatenates the
+// collapsed commits' messages, each subject as a `* ` bullet — verified on this
+// repo's own history at blaze 7a5ddb0 (its origin/main when this was measured; the
+// name `origin/main` is not a ref, it moves, and 312 self-invalidates on the next
+// merge). 23 of those 312 commits carry such a bullet under a ticket subject, 102
+// such bullet lines in all, recovering 28 ticket ids no subject at that ref names.
+//
+// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING.
+//
+//   1. The marker is `* `, which is what GitHub writes and nothing else here does.
+//   2. The subject must OPEN with a ticket-id list — `KEY-n:`, and the multi-ticket
+//      forms the house also writes, `KEY-a/b/c:` and `KEY-a + KEY-b:`. The commit must
+//      itself be a squashed ticket PR, which is BLZ-131's premise: per-ticket commits
+//      inside a FEATURE's PR. Every id in that leading list counts, and the list ends
+//      at the colon, so `KEY-1: fixes KEY-4` still claims only KEY-1.
+//
+// Condition 2 exists because the first cut, which honoured any `[*+-]` bullet under any
+// subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
+// writes every batch board commit's body as `- <KEY>-<n>: <board op> [session]`, and
+// the board repo is itself a configured codeRepo for its own project — the hazard
+// INF-735's comment already names. Measured on the board repo at blaze-pm ff5f36c2
+// (its origin/main, 156 commits) for the INF key alone: 426 ids harvested beyond the
+// subjects, 386 of them named by nothing but a ledger line. Re-run at that same ref,
+// the first cut drives `decide()` to move 141 INF tickets `defined → done`, every one
+// of them named by a `- INF-<n>: <board op> [session]` line (268 across all eleven
+// project keys the board configures, 266 of those named by such a line). An earlier
+// draft quoted 137 against "the board's local HEAD, the 299-id tree", which is not a
+// ref anyone else can resolve. That is BLZ-130's failure at a hundred times the scale,
+// inside the fix for its sibling.
+//
+// Neither condition alone suffices. The board also carries squashed PRs of ticket-BODY
+// edits, subject `blaze: … board + ticket work (#60)`, whose bullets are real `KEY-n:`
+// subjects describing an edit rather than a delivery — the subject gate drops those.
+// And ledger lines swept into a PR that IS titled for a ticket are what the marker
+// drops. At blaze-pm ff5f36c2, across all eleven project keys the board configures:
+// 1,323 ids ungated, 63 with the subject gate alone, 3 with both — BLZ-259, INF-672
+// and INF-701, each harvested from a genuine `* KEY-n:` bullet under a squashed ticket
+// PR's subject. For the INF key alone the same three rules read 426 / 49 / 2. Both are
+// snapshots that move as the board grows: at blaze-pm bd1d151d (131 commits, an
+// ancestor of ff5f36c2) the third rule read 2 across all keys, and BLZ-259 joined it
+// when commit e3beaec3 landed. ADR-0023 §2 records the drift. On the code repo at
+// blaze 7a5ddb0 the rule recovers 28 ids.
+//
+// The multi-ticket forms in condition 2 were themselves missed once: reading only the
+// leading id discarded two of the three tickets that `BLZ-286/287/288: … (#71)`
+// delivered, and would have stranded BLZ-131 on the PR that introduced this function.
+//
+// What this deliberately does NOT claim: a bullet is not proof of work. A squashed
+// ticket PR whose body lists a ticket it did not implement will be believed. The two
+// conditions make that narrow rather than common, and the safe direction holds
+// elsewhere — the commit must be reachable from the default branch, so an open PR
+// strands nothing.
+//
+// This reads git and nothing else. A PR BODY listing its bundled tickets was the other
+// candidate and was rejected: it widens trust to the forge for a claim that moves a
+// ticket to DONE, and a PR body naming a ticket is weaker evidence than a commit
+// demonstrably on the default branch. The cost is a configuration dependency, recorded
+// in docs/guide/how-it-works.md — a repo whose squash message is set to "Pull request
+// title" alone destroys the bullets, and its bundled children need a manual move.
+export function idsFromCommitMessage(message, key) {
+  const lines = String(message || "").split("\n");
+  // No ticket in the subject means this is not a squashed ticket PR, so its body is
+  // not a bundle manifest — whatever it happens to list. Returning early is the whole
+  // of condition 2.
+  const ids = idsFromSubject(lines[0], key);
+  if (!ids.length) return [];
+  // Column 0, not merely "starts with a bullet". All 104 `* <KEY>-<n>:` lines in this
+  // repo's history at blaze 7a5ddb0 sit at column 0 and none is indented. That 104 is a
+  // WIDER population than the 102 counted above: it is every such line in the history,
+  // including those under a non-ticket subject, where 102 counts only the ones under a
+  // ticket subject. Column 0 is where GitHub writes them; an indented one is a
+  // sub-bullet inside some commit's prose, and reading it as a delivered child is a guess.
+  const bullet = new RegExp("^\\*\\s+" + key + "-(\\d+):", "i");
+  for (let i = 1; i < lines.length; i += 1) {
+    const m = bullet.exec(lines[i]);
+    if (!m) continue;
+    const id = `${key}-${m[1]}`;
+    // A child listed in the body of the PR that also names it in the subject is one
+    // ticket, not two.
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
+}
+
+// --- every ticket a commit SUBJECT claims, not merely the first ---------------
+// The house titles a feature PR for the ticket it delivers, and sometimes for several:
+// `BLZ-286/287/288: config projection … (#71)` and `BLZ-96/97: close batch-mode commit
+// bypasses` are both real squashed feature PRs on this repo's default branch.
+//
+// `idFromSubject` returns only the leading id, which is right for its own callers and
+// wrong as a gate: reading only the first id threw away two of the three tickets that
+// PR delivered, and would have stranded BLZ-131 on the very PR that introduced this
+// function.
+//
+// The list must be CONTIGUOUS and end at the colon, which is what preserves
+// `idFromSubject`'s rule that a downstream mention is never a claim — `BLZ-1: fixes
+// BLZ-4` still yields only BLZ-1. Separators are the ones the house actually uses.
+export function idsFromSubject(subject, key) {
+  // A bare number continues the list only after `/` — `KEY-a/b/c:` is the house's own
+  // shorthand. After `+`, `,` or `&` the key must be repeated, which is how the house
+  // writes those. Allowing a bare number everywhere let `BLZ-1 + 2026: annual review`
+  // claim a ticket BLZ-2026 that does not exist; nothing documented that latitude.
+  const head = new RegExp(
+    "^" + key + "-\\d+(?:(?:\\s*/\\s*(?:" + key + "-)?\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*(?=\\s*:)", "i",
+  ).exec(String(subject || "").trim());
+  if (!head) return [];
+  const ids = [];
+  const each = new RegExp("(?:" + key + "-)?(\\d+)", "gi");
+  for (const m of head[0].matchAll(each)) {
+    const id = `${key}-${m[1]}`;
+    if (!ids.includes(id)) ids.push(id);
+  }
+  return ids;
 }
 
 // --- INF-735: a ref-derived claim needs a SECOND signal to count --------------
@@ -337,10 +511,14 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // buildPrMap corroborates against it (INF-735).
   const shippedSet = new Set();
   const ref = defaultBranchRef(repoPath);
-  const subs = sh("git", ["-C", repoPath, "log", ref, "--format=%s"]) || "";
-  for (const line of subs.split("\n")) {
-    const id = idFromSubject(line, key);
-    if (id) shippedSet.add(id);
+  // BLZ-131: read whole messages, not subjects. `%x00%B` prefixes each commit with
+  // a NUL, which is the one byte a commit message cannot contain — so splitting on
+  // it recovers exact commit boundaries, and boundaries are what make line 1 (the
+  // subject, unbulleted) distinguishable from a body line (bullet required).
+  const log = sh("git", ["-C", repoPath, "log", ref, "--format=%x00%B"]) || "";
+  for (const record of log.split("\u0000")) {
+    if (!record.trim()) continue;
+    for (const id of idsFromCommitMessage(record, key)) shippedSet.add(id);
   }
 
   // BLZ-350: `gh` is the only forge call in the tree, and it is the one call whose
@@ -435,8 +613,32 @@ export async function reconcile({
 
     const fm = { ...t.frontmatter };
     let dirty = false;
-    if (d.branchVal && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
-    if (d.prVal && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
+    // Terminal: fill a blank RECORD, never replace one. See `recordIfAbsentOnly` in
+    // decide(). The record is one unit, not two fields: ADR-0023 and the guide both say a
+    // terminal ticket "may ACQUIRE a delivery record it never had, and may never have one
+    // replaced". Judged per-field it was neither. A `done` ticket with `branch` set and
+    // `pr` blank had its `pr` filled from whatever PR ranked top — and ranking breaks ties
+    // on PR NUMBER, so that is the LATEST merged PR, not the one that delivered the work.
+    // A follow-up docs PR merged under the same key therefore stamped itself onto half the
+    // record while `branch` still named the deliverer: one record naming two different PRs,
+    // which is round 3's bug wearing fill clothing. 8 of the 1,594 `done` tickets at
+    // blaze-pm ff5f36c2 are in that shape — `branch` recorded, `pr` blank. ("today" is
+    // not a ref; the ADR and the test twin of this sentence quote the same one.)
+    //
+    // Computed EAGERLY — before either write below — and that, not which object it reads,
+    // is the load-bearing property. `fm` is a fresh copy and is unmutated at this line, so
+    // `Boolean(fm.branch || fm.pr)` here would be exactly equivalent. What breaks is making
+    // it LAZY: evaluated inside `keep()`, the pr check would see the branch just written by
+    // the line above, skip the pr write, and re-create round 2's write-nothing direction on
+    // the 1,056 of 1,594 `done` tickets that carry NEITHER field at blaze-pm ff5f36c2 —
+    // the same population and the same figure decide()'s own comment quotes above, which
+    // is the point: one file may not print two numbers for one population. Reading
+    // `t.frontmatter` says "the state before this loop touched anything" out loud, which
+    // is the intent.
+    const hadRecord = Boolean(t.frontmatter.branch || t.frontmatter.pr);
+    const keep = () => d.recordIfAbsentOnly && hadRecord;
+    if (d.branchVal && !keep() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
+    if (d.prVal && !keep() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
     if (d.resolution !== undefined && fm.resolution !== d.resolution) { fm.resolution = d.resolution; dirty = true; }
     if (d.moved) { fm.updated = today; dirty = true; }
     if (!dirty) continue;
