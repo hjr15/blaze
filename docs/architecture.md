@@ -186,7 +186,7 @@ not be a surprise:
    check then finds the path already ignored and appends nothing (`state: "already"`).
    The server never appends **both** in one boot: the identity check runs first, and when
    it appends it appends `.blaze/`, which already covers the token. The token check
-   therefore appends a rule only on a board whose `.gitignore` ignores
+   therefore appends a rule only on a board where **git already ignores**
    `.blaze/identity.db` but *not* `.blaze/setup-token` — and in that case the identity
    check appended nothing, so it is still one rule.
 2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a

@@ -68,16 +68,20 @@ function captureOutput() {
   // reports 52 clean — TEN vanish silently, five whole suites with them, and nothing
   // fails. A harness that hides tests is worse than the gap it closes.
   //
-  // (The first version of this note said "42 instead of 51 — nine". That compared the
-  // stubbed count on THIS tree against the clean count on the tree before the test above
-  // was added: two different trees, one sentence. The same mixing of refs has cost this
-  // lane three review rounds elsewhere, so it is written down rather than quietly fixed.)
+  // (This note first said "42 instead of 51 — nine". Both numbers were real and the PAIR
+  // was not: 42 is the stubbed count on THIS tree, 51 the clean count at `6de682b`, the
+  // ref before the poisoned-rejection test at the FOOT of this file was added. Two trees,
+  // one sentence. Its second version then said "the test above" — there is no test above
+  // this helper at all, and pointing a reader upward at nothing is the same dead end as a
+  // rule that is described and never shipped. Both are written down rather than quietly
+  // replaced, because mixing refs inside one figure and citing a referent that is not
+  // there are the two mistakes this lane keeps paying for.)
   //
   // Raw-stdout leakage is covered from outside the process by the spawned-child test in
   // serve-standalone-entry.test.mjs — but only for the BOOT path, which is the only place
-  // shipped code could write one. A raw `process.stdout.write` added to the REQUEST path
-  // would leak with the whole suite green; closing that needs a spawned child driven
-  // through `POST /setup`, which nothing here does today.
+  // shipped code could write one (`grep -rn "process.stdout.write" scripts/` is empty). A
+  // raw write added to the REQUEST path would leak with the whole suite green; closing
+  // that needs a spawned child driven through `POST /setup`, which nothing here does.
   const cap = { text: "" };
   const grab = (...a) => { cap.text += a.join(" ") + "\n"; };
   console.log = grab; console.warn = grab; console.error = grab;
