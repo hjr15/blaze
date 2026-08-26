@@ -734,3 +734,131 @@ test("BLZ-398: an unnumberable merged PR is not a rival deliverer", async () => 
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("BLZ-395: a finding never renders \"PR #null\"", async () => {
+  // Round 3 dropped unnumberable PRs so this could not fire; round 4 kept them for their
+  // veto, which is exactly the case where a terminal ticket is vetoed by one. The message
+  // then read "PR #null carrying its key is still OPEN" — on stderr, the activity feed and
+  // /api/reconcile-preview at once.
+  const tmp = mkdtempSync(join(tmpdir(), "blz395-null-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [
+    { number: 10, state: "MERGED", url: "u10", headRefName: "INF-645-docs", title: "INF-645: docs" },
+    { number: null, state: "OPEN", url: "https://ghes.corp/a/pull/1000",
+      headRefName: "INF-645-real", title: "INF-645: the real work" },
+  ]);
+  try {
+    const r = await reconcile({ root, dryRun: true });
+    const f = r.findings.find((x) => x.kind === "open-pr-on-terminal");
+    assert.ok(f, "the veto still applies, so the conflict is still reported");
+    assert.doesNotMatch(f.message, /#null/, "a PR with no number must be named by its url");
+    assert.doesNotMatch(f.message, /#undefined/);
+    assert.match(f.message, /https:\/\/ghes\.corp\/a\/pull\/1000/);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: an unnumberable strong claimant beats a recordable weak one, and records nothing", async () => {
+  // Round 5, and the fifth consecutive defect found in the previous round's fix. Round 4
+  // put RECORDABLE above the title claim, so a PR titled `chore: tidy the runbook after
+  // INF-645` (weak claim, real number) beat `INF-645: close the Tier-1 alert gaps` (strong
+  // claim, no number) — and the board recorded the docs chore as having delivered the
+  // epic. `ambiguousDeliverers` could not catch it: it filters unrecordable PRs out first,
+  // so only one merged candidate remained and nothing looked ambiguous. That is verbatim
+  // the INF-645 failure this ticket exists to stop, re-entered through the tier meant to
+  // protect the record.
+  const work = { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/99",
+    headRefName: "INF-645-real", title: "INF-645: close the Tier-1 alert gaps" };
+  const chore = { number: 40, state: "MERGED", url: "https://ghes.corp/a/pull/40",
+    headRefName: "INF-645-docs", title: "chore: tidy the runbook after INF-645" };
+  for (const order of [[work, chore], [chore, work]]) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-tier-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+    const restore = stubGh(tmp, order);
+    try {
+      await reconcile({ root, dryRun: false });
+      const text = readTicket(root, "done");
+      assert.doesNotMatch(text, /#40/,
+        "the docs chore must never be recorded as the deliverer, whatever the input order");
+      assert.doesNotMatch(text, /^pr:/m,
+        "the strong claimant wins and cannot be recorded, so the record stays BLANK — " +
+        "true, rather than filled and false");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("BLZ-398: recordable still breaks a tie between EQUAL claims", async () => {
+  // The case the tier was added for, and it must survive being demoted below the claim:
+  // two equally-titled merged PRs, one unnumberable. `null < 10` is true, so without the
+  // tier the unusable one wins the number tie-break and suppresses a knowable record.
+  const good = { number: 10, state: "MERGED", url: "u10",
+    headRefName: "INF-645-work", title: "INF-645: the work" };
+  const bad = { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/5",
+    headRefName: "INF-645-other", title: "INF-645: also the work" };
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-tie-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [bad, good]);
+  try {
+    await reconcile({ root, dryRun: false });
+    assert.match(readTicket(root, "done"), /pr: '?#10 — u10/,
+      "equal claims, so the recordable one is the answer");
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: across repos the SAME comparator applies — scan order decides nothing", async () => {
+  // `gatherProject` merged on rank alone, so an unusable PR still won across repos and the
+  // record was decided by which path came first in `codeRepos`. Same board, same git,
+  // opposite records. One comparator now serves both, because two copies of a rule is how
+  // the halves drift apart.
+  async function run(order) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-xorder-"));
+    const repos = ["alpha", "beta"].map((n) => {
+      const d = join(tmp, n);
+      mkdirSync(d, { recursive: true });
+      gitInit(d);
+      execFileSync("git", ["-C", d, "remote", "add", "origin", `https://github.com/hjr15/${n}.git`]);
+      return d;
+    });
+    const ordered = order === "alpha-first" ? repos : [repos[1], repos[0]];
+    const root = board(tmp, ordered, [["INF-645", "epic", "defined"]]);
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash
+case "$PWD" in
+  */alpha) cat <<'JSON'
+${JSON.stringify([{ number: null, state: "MERGED", url: "https://ghes.corp/alpha/pull/9",
+  headRefName: "INF-645-alpha", title: "INF-645: alpha side" }])}
+JSON
+  ;;
+  *) cat <<'JSON'
+${JSON.stringify([{ number: 20, state: "MERGED", url: "https://github.com/hjr15/beta/pull/20",
+  headRefName: "INF-645-beta", title: "INF-645: beta side" }])}
+JSON
+  ;;
+esac
+`);
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    const prev = process.env.PATH;
+    process.env.PATH = `${bin}:${prev}`;
+    try {
+      await reconcile({ root, dryRun: false });
+      return readTicket(root, "done");
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+  const a = await run("alpha-first");
+  const b = await run("beta-first");
+  const prOf = (t) => (t.match(/^pr: .*/m) || ["(none)"])[0];
+  assert.equal(prOf(a), prOf(b), "the record must not depend on codeRepos order");
+  assert.match(prOf(a), /#20/, "and the recordable PR is the one that can answer");
+});

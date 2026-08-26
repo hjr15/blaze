@@ -18,7 +18,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { ACTIVITY_SCRIPT, newFindingEvents } from "../scripts/supervisor.mjs";
+import { ACTIVITY_SCRIPT, newFindingEvents, newForgeErrorEvents } from "../scripts/supervisor.mjs";
 
 const ESC = String.fromCharCode(27);
 const BEL = String.fromCharCode(7);
@@ -158,6 +158,49 @@ describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", 
     assert.doesNotMatch(err, /FORGED/, "the injected text must not survive as its own line");
   });
 
+  test("a successful forge call is NOT announced as an unreadable forge", () => {
+    // `gh-unusable-pr` means the forge answered perfectly and one field in its answer is
+    // unusable. Announcing that as FORGE UNREADABLE is false twice over, and
+    // `newFindingEvents` ten lines away in supervisor.mjs makes exactly this argument for
+    // exactly this reason. Severity decides the wording; both mutations of that survived
+    // the whole suite until this test and its twin below.
+    const err = runCli([{ number: null, state: "MERGED", url: "https://ghes.corp/a/pull/10",
+      headRefName: "INF-645-work", title: "INF-645: the work" }]);
+    assert.match(err, /FORGE DATA/, "the forge was read fine — say what is actually wrong");
+    assert.doesNotMatch(err, /FORGE UNREADABLE/);
+  });
+
+  test("...while a genuinely unreadable forge still says so", () => {
+    // The direction that keeps the test above from passing by softening everything.
+    const tmp = mkdtempSync(join(tmpdir(), "blz-unread-"));
+    try {
+      const repo = join(tmp, "svc");
+      mkdirSync(repo, { recursive: true });
+      execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+      execFileSync("git", ["-C", repo, "config", "user.email", "t@t.t"]);
+      execFileSync("git", ["-C", repo, "config", "user.name", "t"]);
+      writeFileSync(join(repo, "README.md"), "x\n");
+      execFileSync("git", ["-C", repo, "add", "-A"]);
+      execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
+      execFileSync("git", ["-C", repo, "remote", "add", "origin",
+        "https://gitlab.com/acme/svc.git"]);
+      const root = join(tmp, "board");
+      const dir = join(root, "projects", "INF", "done");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "INF-645-t.md"),
+        "---\nid: INF-645\ntype: epic\nproject: INF\nestimate: 30\n---\n\nbody\n");
+      writeFileSync(join(root, "blaze.config.json"),
+        JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [repo] }));
+      const res = spawnSync(process.execPath,
+        [join(import.meta.dirname, "..", "scripts", "reconcile.mjs")],
+        { cwd: root, encoding: "utf8" });
+      assert.match(res.stderr || "", /FORGE UNREADABLE/,
+        "a forge gh cannot talk to is still an unreadable forge");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("ESC bytes in pr.url never reach the terminal", () => {
     const err = runCli([MERGED, { number: 81, state: "OPEN",
       url: ESC + "]8;;https://evil.example/" + BEL + "CLICKME" + ESC + "]8;;" + BEL,
@@ -226,7 +269,8 @@ test("BLZ-395: the supervisor's reconcile loop PUBLISHES the finding", async () 
     assert.ok(warn, "the loop that OPENS this window must be the one that reports it; got: " +
       JSON.stringify(seen.map((e) => e.type)));
     assert.equal(warn.id, "INF-645");
-    assert.match(warn.message, /PR #81 carrying its key is still OPEN/);
+    assert.match(warn.message, /#81/);
+    assert.match(warn.message, /still OPEN/);
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
@@ -370,4 +414,19 @@ test("BLZ-398: the supervisor PUBLISHES cleared, it does not just render it", as
   } finally {
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+test("BLZ-398: the activity feed routes a forge WARNING to the warning channel", () => {
+  // The feed twin of the CLI test above. `newForgeErrorEvents` published every entry as
+  // `type: "error"` with the words "forge unreadable", including one whose own severity
+  // says the forge was read fine.
+  const warn = newForgeErrorEvents(
+    [{ severity: "warning", message: "2 pull request(s) carry a number Blaze cannot use" }], new Set());
+  assert.equal(warn[0].type, "warning");
+  assert.match(warn[0].message, /forge data/);
+  assert.doesNotMatch(warn[0].message, /unreadable/);
+
+  const err = newForgeErrorEvents([{ message: "gh could not read gitlab.com" }], new Set());
+  assert.equal(err[0].type, "error", "an entry with no severity is still an error");
+  assert.match(err[0].message, /forge unreadable/);
 });

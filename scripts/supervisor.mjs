@@ -143,7 +143,12 @@ export function newForgeErrorEvents(forgeErrors, said) {
   for (const f of forgeErrors || []) {
     if (!f || !f.message || said.has(f.message)) continue;
     said.add(f.message);
-    out.push({ type: "error", loop: "reconcile", message: `forge unreadable — ${f.message}` });
+    // Severity decides the channel. A `gh-unusable-pr` entry means the forge answered
+    // fine and one field in its answer is unusable — publishing that as an engine error
+    // saying "forge unreadable" is false twice over.
+    out.push(f.severity === "warning"
+      ? { type: "warning", loop: "reconcile", message: `forge data — ${f.message}` }
+      : { type: "error", loop: "reconcile", message: `forge unreadable — ${f.message}` });
   }
   return out;
 }

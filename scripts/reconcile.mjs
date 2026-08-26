@@ -420,28 +420,46 @@ export function prTitleClaim(pr, id) {
 // goes. `pr.number > cur.number` selected the LATEST merge among equals, which the
 // shipped comments named as a hazard while the protection built on it covered only
 // tickets that already had a record.
+/** Is `pr` a better answer than `best` for this id? ONE comparator, used by
+ *  `buildPrMap` within a repo and by `gatherProject` across repos — they had drifted,
+ *  and the cross-repo half was deciding by `codeRepos` scan order.
+ *
+ *  Order: RANK, then TITLE CLAIM, then RECORDABLE, then lower number.
+ *
+ *  The claim tier sits ABOVE recordable, and review found out why the hard way. With
+ *  recordable first, a *weak* claimant that happens to carry a number beat a *strong*
+ *  one the forge could not number — so a PR titled `chore: tidy the runbook after
+ *  INF-645` was recorded as having delivered the epic while `INF-645: close the
+ *  Tier-1 alert gaps` sat beside it, and `ambiguousDeliverers` could not see it
+ *  (it filters unrecordable PRs out first, so only one merged candidate remained and
+ *  nothing was ambiguous). That is the INF-645 failure this whole ticket exists to
+ *  stop, re-entered through the tier meant to protect the record.
+ *
+ *  With the claim first, the strong claimant wins and — being unrecordable — writes
+ *  NOTHING. Blank and true, instead of filled and false, which is this record's
+ *  standing doctrine. Recordable still breaks a tie BETWEEN EQUAL CLAIMS, which is
+ *  the case it was added for: `null < 10` is true, so without it an unusable PR won
+ *  an equal-claim tie-break and suppressed a knowable record.
+ *
+ *  Rank comes from `state` alone, so none of this can move a ticket — it decides only
+ *  which PR the delivery record is taken from. */
+export function betterPr(pr, best, id) {
+  if (!best) return true;
+  const rank = (x) => PR_RANK[x.state] || 0;
+  const recordable = (x) => (x.number === null || x.number === undefined ? 0 : 1);
+  if (rank(pr) !== rank(best)) return rank(pr) > rank(best);
+  const claim = [prTitleClaim(pr, id), prTitleClaim(best, id)];
+  if (claim[0] !== claim[1]) return claim[0] > claim[1];
+  if (recordable(pr) !== recordable(best)) return recordable(pr) > recordable(best);
+  return pr.number < best.number;
+}
+
 export function buildPrMap(prs, idFromRef, shippedSet) {
   const prMap = new Map();
   for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
     let best = null;
     for (const pr of candidates) {
-      // Order at equal rank: RECORDABLE first, then stronger title claim, then lower
-      // number. The recordable tier is not decoration — `pr.number` is `null` for a PR
-      // the forge did not number, and `null < 10` is TRUE, so without it an unusable PR
-      // won the tie-break outright and suppressed a record that was perfectly knowable.
-      // Rank still comes from `state` alone, so this cannot move a ticket; it decides
-      // only which PR the record is taken from, which is the one thing an unusable PR
-      // must never win.
-      const recordable = (x) => (x.number === null || x.number === undefined ? 0 : 1);
-      const rank = (x) => PR_RANK[x.state] || 0;
-      const better = !best ||
-        rank(pr) > rank(best) ||
-        (rank(pr) === rank(best) &&
-          (recordable(pr) > recordable(best) ||
-            (recordable(pr) === recordable(best) &&
-              (prTitleClaim(pr, id) > prTitleClaim(best, id) ||
-                (prTitleClaim(pr, id) === prTitleClaim(best, id) && pr.number < best.number)))));
-      if (better) best = pr;
+      if (betterPr(pr, best, id)) best = pr;
     }
     if (best) prMap.set(id, best);
   }
@@ -663,6 +681,13 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
     // it is just as wrong arriving through a SUCCESSFUL call as through a failed one.
     const unusable = prs.filter((pr) => pr.number === null).length;
     return { prs, forgeErrors: unusable ? [{
+      // `severity: "warning"`, and it is the whole point of the field. The forge was read
+      // PERFECTLY here — what is wrong is one field inside a successful response. Every
+      // other entry in this list means Blaze could not read the forge at all, and the
+      // consumers say so in those words. `newFindingEvents` beside this makes the same
+      // argument for the same reason: calling a correct run an engine error is the
+      // over-statement this lane exists to stop, and it is no better pointed at the forge.
+      severity: "warning",
       repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unusable-pr", detail: String(unusable),
       message: `${unusable} pull request(s) in ${repoPath} carry a number Blaze cannot use, so they ` +
         `can rank but never be recorded as having delivered a ticket. ${UNREACHABLE}`,
@@ -831,7 +856,11 @@ function gatherProject(project, { fetch }) {
           { number: cur.number, url: cur.url }, { number: pr.number, url: pr.url },
         ]));
       }
-      if (!cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0)) prMap.set(id, pr);
+      // The SAME comparator as within a repo. This used to be rank alone, so across
+      // repos an unusable PR still won and the record was decided by which path came
+      // first in `codeRepos` — scan order, which the comment above rightly calls not
+      // evidence. Two copies of a rule is how the halves drift apart.
+      if (betterPr(pr, cur, id)) prMap.set(id, pr);
     }
     for (const [id, refs] of r.ambiguous || []) {
       ambiguous.set(id, mergeRefs(ambiguous.get(id), refs));
@@ -911,9 +940,14 @@ export async function reconcile({
         id: t.frontmatter.id,
         status: t.status,
         pr: { number: pr.number, state: pr.state, url: pr.url, headRefName: pr.headRefName },
-        message: `${t.frontmatter.id} is ${t.status}, but PR #${pr.number} carrying its key is still OPEN ` +
-          `(${pr.url}). Reconcile moved nothing: a terminal status is never reversed automatically. ` +
-          `If the work is not shipped, move it back by hand.`,
+        // Name the PR by number when there is one and by url when there is not. Round 3
+        // dropped unnumberable PRs so this never fired; round 4 kept them for their veto,
+        // which is exactly when a terminal ticket is vetoed by one — and the message read
+        // "PR #null carrying its key is still OPEN", on stderr, the feed and the preview.
+        message: `${t.frontmatter.id} is ${t.status}, but the pull request at ${pr.url} ` +
+          `${pr.number === null || pr.number === undefined ? "" : `(#${pr.number}) `}` +
+          `carrying its key is still OPEN. Reconcile moved nothing: a terminal status is ` +
+          `never reversed automatically. If the work is not shipped, move it back by hand.`,
       });
     }
 
@@ -1085,7 +1119,9 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // --quiet means "print only on change", and this is a reason not to trust
   // the run rather than a change).
   for (const f of r.forgeErrors || []) {
-    console.error(`reconcile: FORGE UNREADABLE — ${f.message}`);
+    console.error(f.severity === "warning"
+      ? `reconcile: FORGE DATA — ${f.message}`
+      : `reconcile: FORGE UNREADABLE — ${f.message}`);
   }
   // BLZ-395: a conflict reconcile can see and deliberately will not act on. Same rule
   // as the two warnings above — stderr, every run, regardless of --quiet, because
