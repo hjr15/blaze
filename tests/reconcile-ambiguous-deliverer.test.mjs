@@ -573,29 +573,92 @@ esac
   });
 });
 
-test("BLZ-398: a PR the forge did not number is dropped, not written as #NaN", async () => {
-  // Round 1's `sanitisePr` coerced with `Number(pr.number)`, so a missing number became
-  // NaN and `decide` rendered `pr: #NaN — …` onto a terminal ticket, permanently —
-  // through the sanitiser meant to contain the malformed payload. NaN also poisons
-  // identity (`NaN === NaN` is false), resurrecting the self-collision round 2 fixed.
-  // A PR Blaze cannot number it can neither record nor report, so it is DROPPED: a
-  // missed signal, never a corrupted ticket.
-  const tmp = mkdtempSync(join(tmpdir(), "blz398-nan-"));
+test("BLZ-398: an unnumberable PR still RANKS, so an open one keeps its veto", async () => {
+  // Round 4, and the most dangerous defect this lane produced. Round 3 DROPPED a PR the
+  // forge could not number, reasoning that "a dropped claim costs a missed signal, never
+  // a corrupted ticket". That is false here: `decide` reads the TOP-RANKED PR and
+  // `PR_RANK` puts OPEN above MERGED, so removing a candidate is not a subtraction, it
+  // is a SUBSTITUTION — the next-ranked PR is promoted. Dropping an unnumberable OPEN PR
+  // therefore deleted BLZ-130's veto and handed the ticket to an earlier merged PR:
+  // `in-progress` went to `done`, with the early docs PR recorded as the deliverer,
+  // while the real work was still open — silently. The fix this lane exists to ship,
+  // undone by its own sanitiser.
+  const merged = { number: 10, state: "MERGED", url: "https://ghes.corp/a/pull/10",
+    headRefName: "INF-645-early", title: "INF-645: early docs" };
+  const openUnnumbered = { number: null, state: "OPEN", url: "https://ghes.corp/a/pull/41",
+    headRefName: "INF-645-real", title: "INF-645: the real work" };
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-veto-"));
+  const root = fixture(tmp, [["INF-645", "epic", "in-progress"]]);
+  const restore = stubGh(tmp, [merged, openUnnumbered]);
+  try {
+    const r = await reconcile({ root, dryRun: false });
+    assert.match(readTicket(root, "in-review"), /^id: INF-645/m,
+      "the open PR must still veto done even though Blaze cannot number it");
+    assert.doesNotMatch(readTicket(root, "in-review"), /^pr:/m,
+      "...and must still be unable to supply a record");
+    assert.doesNotMatch(readTicket(root, "in-review"), /^branch:/m, "the record is one unit");
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: an unnumberable PR is REPORTED, not swallowed", async () => {
+  // A repo whose PRs are all unusable must not read as a repo with no pull requests —
+  // the laundering BLZ-350 exists to stop, and just as wrong arriving through a
+  // SUCCESSFUL call as through a failed one.
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-report-"));
   const root = fixture(tmp, [["INF-645", "epic", "done"]]);
   const restore = stubGh(tmp, [
-    { state: "MERGED", url: "https://ghes.corp/hjr15/alpha/pull/10",
+    { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/10",
       headRefName: "INF-645-work", title: "INF-645: the work" },
   ]);
   try {
     const r = await reconcile({ root, dryRun: false });
-    assert.deepEqual(r.forgeErrors, []);
-    const text = readTicket(root, "done");
-    assert.doesNotMatch(text, /NaN/, "this reached the permanent record");
-    assert.doesNotMatch(text, /^pr:/m, "an unusable PR records nothing at all");
-    assert.deepEqual(r.findings, []);
+    assert.equal(r.forgeErrors.length, 1);
+    assert.equal(r.forgeErrors[0].reason, "gh-unusable-pr");
+    assert.match(r.forgeErrors[0].message, /can rank but never be recorded/);
+    assert.doesNotMatch(readTicket(root, "done"), /^pr:/m);
   } finally {
     restore();
     rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: prNumber is a whitelist, not a prefix parse", async () => {
+  // `Number.parseInt` is prefix-parsing wearing validation's clothes. It turned
+  // "12abc" into 12, "1e3" into 1, "007" into 7 and [5] into 5 — so a malformed payload
+  // wrote `pr: #12 — …/pull/999`: a permanent record naming one PR beside another's url.
+  // Plausible-looking is worse than obviously garbage, because nobody checks it.
+  const bad = ["12abc", "12.9", "1e3", "007", "-3", "0", "", " 12", [5], {}, null, undefined, 12.5, 0, -1];
+  for (const number of bad) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-strict-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+    const restore = stubGh(tmp, [{ number, state: "MERGED", url: "https://ghes.corp/a/pull/999",
+      headRefName: "INF-645-work", title: "INF-645: the work" }]);
+    try {
+      await reconcile({ root, dryRun: false });
+      assert.doesNotMatch(readTicket(root, "done"), /^pr:/m,
+        `number ${JSON.stringify(number)} must not reach the record`);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+  // ...and the well-formed forms still DO record, or the rule above is just "refuse".
+  for (const number of [10, "10"]) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-strict-ok-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+    const restore = stubGh(tmp, [{ number, state: "MERGED", url: "u10",
+      headRefName: "INF-645-work", title: "INF-645: the work" }]);
+    try {
+      await reconcile({ root, dryRun: false });
+      assert.match(readTicket(root, "done"), /pr: '?#10 — u10/,
+        `number ${JSON.stringify(number)} is well-formed and must record`);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   }
 });
 

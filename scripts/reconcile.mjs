@@ -90,8 +90,15 @@ export function decide({ pr, branch, shipped, delivererAmbiguous = false }, curr
     // Delivery workflow middle statuses ("in-review"/"in-progress") are intentional literals here;
     // this function is already delivery-guarded above, so there's no need to re-derive them from rules.
     target = pr.state === "MERGED" ? "done" : pr.state === "OPEN" ? "in-review" : "in-progress";
-    branchVal = pr.headRefName;
-    prVal = `#${pr.number} — ${pr.url}`;
+    // The STATUS comes from the state and is always available. The RECORD needs a number
+    // Blaze can stand behind, and `sanitisePr` sets `number: null` when the forge did not
+    // supply one. Both fields are clamped together, never one — the record is one unit,
+    // and half of it naming a PR the other half cannot identify is ADR-0023's fourth
+    // shape of wrong reached through a new door.
+    if (pr.number !== null && pr.number !== undefined) {
+      branchVal = pr.headRefName;
+      prVal = `#${pr.number} — ${pr.url}`;
+    }
   } else if (branch) {
     target = "in-progress";
     branchVal = branch;
@@ -462,7 +469,9 @@ export function buildPrMap(prs, idFromRef, shippedSet) {
 export function ambiguousDeliverers(prs, idFromRef, shippedSet) {
   const out = new Map();
   for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
-    const merged = candidates.filter((pr) => pr.state === "MERGED");
+    // Unrecordable PRs are excluded outright: the question here is "which merged PR
+    // delivered this", and one that can never be written into the record is not an answer.
+    const merged = candidates.filter((pr) => pr.state === "MERGED" && pr.number !== null);
     if (merged.length < 2) continue;
     const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
     const tied = merged.filter((pr) => prTitleClaim(pr, id) === top);
@@ -635,8 +644,18 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
     }] };
   }
   try {
-    const prs = JSON.parse(res.stdout || "[]");
-    return { prs: Array.isArray(prs) ? prs.map(sanitisePr).filter(Boolean) : [], forgeErrors: [] };
+    const parsed = JSON.parse(res.stdout || "[]");
+    const prs = (Array.isArray(parsed) ? parsed.map(sanitisePr) : []).filter(Boolean);
+    // A PR the forge could not number still RANKS (so an open one keeps its veto) but
+    // can never be recorded. Say so: a repo whose PRs are all unusable must not read as
+    // a repo with no pull requests — that is the laundering BLZ-350 exists to stop, and
+    // it is just as wrong arriving through a SUCCESSFUL call as through a failed one.
+    const unusable = prs.filter((pr) => pr.number === null).length;
+    return { prs, forgeErrors: unusable ? [{
+      repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unusable-pr", detail: String(unusable),
+      message: `${unusable} pull request(s) in ${repoPath} carry a number Blaze cannot use, so they ` +
+        `can rank but never be recorded as having delivered a ticket. ${UNREACHABLE}`,
+    }] : [] };
   } catch (e) {
     return { prs: [], forgeErrors: [{
       repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unparsable", detail: String(e.message || e),
@@ -645,38 +664,49 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
   }
 }
 
+/** A PR number Blaze can put in a record, or `null`. STRICT: this is a whitelist, not a
+ *  parse. `Number.parseInt` is prefix-parsing wearing validation's clothes — it turns
+ *  `"12abc"` into 12, `"1e3"` into 1, `"007"` into 7 and `[5]` into 5, so a malformed
+ *  payload produced `pr: #12 — …/pull/999`: a permanent record naming one PR beside
+ *  another's url. Plausible-looking is worse than obviously garbage, because nobody
+ *  checks it. */
+function prNumber(raw) {
+  if (typeof raw === "number") {
+    return Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+  }
+  if (typeof raw === "string" && /^[1-9][0-9]*$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
 // --- the forge's JSON is UNTRUSTED input, and it was trusted verbatim ---------
 // `gh pr list` output is parsed and its fields flow into three places that render or
 // persist them: the CLI's stderr warnings, the activity feed, and a ticket's
 // `branch`/`pr` frontmatter. `serializeTicket` quotes and escapes, so the file on disk
-// was never at risk — but a terminal is not an escaping context. A `pr.url` carrying ESC
-// bytes writes an OSC-8 hyperlink into an operator's stderr, and a `pr.number` carrying
-// a newline forges a whole extra `reconcile: NEEDS ATTENTION —` line.
+// was never at risk — but a terminal is not an escaping context.
 //
-// Blaze is GitHub-only and github.com generates `number` and `url` itself — the two
-// fields a person actually controls, `title` and `headRefName`, reach neither message.
-// The reachable path is a codeRepo on a GitHub ENTERPRISE SERVER host: `classifyRemote`
-// treats an unknown host as askable on purpose (guessing "unsupported" would break
-// working boards), so `gh` is queried against it and its JSON believed. That is the right
-// default, and this is its cost — paid once at the seam rather than at each of the three
-// consumers, because fixing one consumer and not its siblings is how a correction gets
-// made twice and still misses.
+// AN UNUSABLE PR IS NEUTERED, NOT DROPPED, AND THAT DISTINCTION IS THE WHOLE POINT.
+// The first cut dropped it, on the reasoning that "a dropped claim costs a missed
+// signal, never a corrupted ticket". That reasoning is FALSE HERE, and review caught it:
+// `decide` reads the TOP-RANKED PR and `PR_RANK` puts OPEN above MERGED, so removing a
+// candidate is not a subtraction, it is a SUBSTITUTION — the next-ranked PR is promoted.
+// Dropping an unnumberable OPEN PR therefore deleted BLZ-130's veto and handed the
+// ticket to an earlier merged PR: measured end to end, `in-progress` went to `done`
+// with `resolution: done` and the early docs PR recorded as the deliverer, while the
+// real work was still open, and with no finding and no forge error to say so. That is
+// the exact failure this whole lane exists to stop, reintroduced by its own fix.
+//
+// So the PR stays in the ranking, keeping whatever veto its STATE earns, and only loses
+// the ability to supply a RECORD — `number: null` is the marker, and `decide` clamps
+// both fields on it, because the record is one unit. The condition is reported through
+// `forgeErrors` rather than swallowed: a repo whose PRs are all unusable must not look
+// identical to a repo with no pull requests, which is the laundering BLZ-350 fixed.
 function sanitisePr(pr) {
   if (!pr || typeof pr !== "object") return null;
   const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
-  // VALIDATE, do not coerce. The first cut used `Number(pr.number)`, which turns a
-  // missing number into NaN and a null into 0 — and `decide` renders the record as
-  // `#${pr.number} — ${pr.url}`, so a malformed payload wrote `pr: #NaN — …` onto a
-  // terminal ticket, permanently, through the very sanitiser meant to contain it. NaN
-  // then poisons identity comparison as well (`NaN === NaN` is false), so one repo
-  // listed twice collides with itself again.
-  //
-  // A PR Blaze cannot number is one it can neither record nor report, so it is DROPPED
-  // rather than repaired. That is the safe direction: a dropped claim costs a missed
-  // signal, never a corrupted ticket — the same rule INF-735's corroboration gate uses.
-  const number = typeof pr.number === "number" ? pr.number : Number.parseInt(pr.number, 10);
-  if (!Number.isInteger(number) || number <= 0) return null;
-  return { ...pr, number, url: clean(pr.url),
+  return { ...pr, number: prNumber(pr.number), url: clean(pr.url),
            title: clean(pr.title), headRefName: clean(pr.headRefName), state: clean(pr.state) };
 }
 
@@ -784,7 +814,8 @@ function gatherProject(project, { fetch }) {
       // record on every run, and reporting "more than one merged PR" while naming one.
       // Compared on `url`, which GitHub makes unique across repositories, with `number`
       // as the fallback for a forge payload that lacks one.
-      if (cur && cur.state === "MERGED" && pr.state === "MERGED" && !samePr(cur, pr)) {
+      if (cur && cur.state === "MERGED" && pr.state === "MERGED" &&
+          cur.number !== null && pr.number !== null && !samePr(cur, pr)) {
         ambiguous.set(id, mergeRefs(ambiguous.get(id), [
           { number: cur.number, url: cur.url }, { number: pr.number, url: pr.url },
         ]));

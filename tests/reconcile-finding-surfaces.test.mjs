@@ -278,3 +278,42 @@ test("BLZ-395: /api/reconcile-preview carries the findings, not just the changes
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// =============================================================================
+// 4. `cleared` reaches the operator — review round 4
+// =============================================================================
+// BLZ-398 added the one direction in which reconcile DESTROYS data, and the argument for
+// reporting it was that the machine-readable account of a run must say so. Under
+// `blaze start` the activity feed IS that account, and `runReconcile` was dropping the
+// flag on the floor — reported everywhere except the surface the argument was about.
+
+test("BLZ-398: a cleared record is reported on the activity feed, not just the CLI", () => {
+  const src = ACTIVITY_SCRIPT;
+  const start = src.indexOf("function line(e) {");
+  let depth = 0, end = -1;
+  for (let i = src.indexOf("{", start); i < src.length; i += 1) {
+    if (src[i] === "{") depth += 1;
+    else if (src[i] === "}") { depth -= 1; if (depth === 0) { end = i + 1; break; } }
+  }
+  const el = () => {
+    const node = { children: [], textContent: "", className: "", _html: "" };
+    node.appendChild = (c) => { node.children.push(c); return c; };
+    node.append = (...cs) => { node.children.push(...cs); };
+    node.prepend = (c) => { node.children.unshift(c); };
+    node.removeChild = (c) => { node.children = node.children.filter((x) => x !== c); };
+    Object.defineProperty(node, "innerHTML", { get: () => node._html, set: (v) => { node._html = v; } });
+    return node;
+  };
+  const act = el();
+  const document = { createElement: el, getElementById: () => act };
+  const line = new Function("document", "act", src.slice(start, end) + "; return line;")(document, act);
+
+  line({ type: "reconcile", id: "INF-645", from: "in-review", to: "done", moved: true, cleared: true, ts: "d" });
+  const cleared = act.children[0].children.map((c) => c.textContent).join("|");
+  assert.match(cleared, /CLEARED/, "the deletion must be visible where the operator watches");
+
+  line({ type: "reconcile", id: "INF-1", from: "defined", to: "done", moved: true, cleared: false, ts: "d" });
+  const plain = act.children[0].children.map((c) => c.textContent).join("|");
+  assert.doesNotMatch(plain, /CLEARED/, "and an ordinary move must not claim a deletion");
+  assert.match(plain, /INF-1: defined/);
+});

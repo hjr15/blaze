@@ -93,7 +93,8 @@ export const ACTIVITY_SCRIPT = `
     function line(e) {
       const li = document.createElement("li");
       let txt = e.type;
-      if (e.type === "reconcile") txt = e.id + ": " + e.from + " → " + e.to;
+      if (e.type === "reconcile") txt = e.id + ": " + e.from + " → " + e.to
+        + (e.cleared ? " (branch/pr CLEARED — no single PR delivered it)" : "");
       else if (e.type === "groom") txt = e.error ? ("groom " + e.id + " failed: " + e.error)
         : e.noop ? ("groom " + e.id + ": no change") : ("groom " + e.id + " (" + (e.files||[]).length + " file)");
       else if (e.type === "status") txt = e.loop + " " + e.state;
@@ -223,7 +224,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       for (const e of newForgeErrorEvents(r && r.forgeErrors, forgeSaid)) bus.publish({ ...e, ts: today() });
       for (const e of newFindingEvents(r && r.findings, findingSaid)) bus.publish({ ...e, ts: today() });
       if (r && r.ok && r.changes) {
-        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
+        // `cleared` travels too. BLZ-398 added the one direction in which reconcile
+        // DESTROYS data, and under `blaze start` this feed is the operator's whole
+        // account of the run — dropping the flag here left the deletion unreported on
+        // the very surface that was the argument for reporting it.
+        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, cleared: Boolean(c.cleared), ts: today() });
       } else if (r && !r.ok) {
         bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
       }
