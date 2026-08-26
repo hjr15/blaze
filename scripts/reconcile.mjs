@@ -170,14 +170,30 @@ export function idFromSubject(subject, key) {
 // merge). 23 of those 312 commits carry such a bullet under a ticket subject, 102
 // such bullet lines in all, recovering 28 ticket ids no subject at that ref names.
 //
-// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING.
+// THREE CONDITIONS, AND ALL THREE ARE LOAD-BEARING.
 //
 //   1. The marker is `* `, which is what GitHub writes and nothing else here does.
 //   2. The subject must OPEN with a ticket-id list — `KEY-n:`, and the multi-ticket
-//      forms the house also writes, `KEY-a/b/c:` and `KEY-a + KEY-b:`. The commit must
-//      itself be a squashed ticket PR, which is BLZ-131's premise: per-ticket commits
-//      inside a FEATURE's PR. Every id in that leading list counts, and the list ends
-//      at the colon, so `KEY-1: fixes KEY-4` still claims only KEY-1.
+//      forms the house also writes, `KEY-a/b/c:`, `KEY-a + KEY-b:`, `KEY-a, KEY-b:`
+//      and `KEY-a & KEY-b:`. The commit must itself be a squashed ticket PR, which is
+//      BLZ-131's premise: per-ticket commits inside a FEATURE's PR. Every id in that
+//      leading list counts, and the list ends at the colon, so `KEY-1: fixes KEY-4`
+//      still claims only KEY-1.
+//   3. The BULLET must end at a colon too. This one shipped unstated and untested
+//      (BLZ-399): with conditions 1 and 2 both satisfied, `* KEY-4 is blocked by this`
+//      is a sentence, not a collapsed commit subject, and reading it as one drives
+//      KEY-4 to `done` off prose. Deleting the `:` from the `bullet` regex left the
+//      whole suite green at blaze 3cf1509 — 2,518 pass / 0 fail — which is why it is
+//      named here rather than left to be inferred from the regex.
+//
+// Condition 2's separator inventory is load-bearing in a way that is easy to
+// under-read, and is pinned in tests/reconcile-load-bearing-conditions.test.mjs. The
+// list is ANCHORED and must reach the colon, so an unrecognised separator does not
+// truncate the list — it makes the subject fail to match at all, condition 2 then
+// returns early, and the ids AND every bullet in the body are lost together. `&` is
+// unobserved across all 19 configured repo/key pairs (scanned 2026-08-26) and is KEPT
+// for that reason: it is one of four spellings of one construct, and the guard against
+// over-claiming is the anchor and the colon, never which separators are listed.
 //
 // Condition 2 exists because the first cut, which honoured any `[*+-]` bullet under any
 // subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
