@@ -124,8 +124,11 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     // EVERY terminal ticket then stopped the first write too — reconcile is the only
     // producer of `branch`/`pr` (nothing else in scripts/ originates them, and they are
     // not in EDITABLE_FIELDS), so a done ticket that never had them recorded could never
-    // acquire them: 1,064 of 1,594 done tickets on the board repo's origin/main,
-    // permanently. Gating on MERGED alone then let the LATEST merge win the rank
+    // acquire them: 1,056 of 1,594 done tickets CARRYING NEITHER FIELD at blaze-pm
+    // ff5f36c2, permanently. (The neighbouring 1,064 is a DIFFERENT population — those
+    // MISSING A PR at that same ref — and the two read alike, which is how the figure was
+    // wrong here and in ADR-0023. Name the quantity and pin the ref, never `origin/main`,
+    // which moves.) Gating on MERGED alone then let the LATEST merge win the rank
     // tie-break, so a follow-up docs PR repointed the record again. Hence also the
     // write-once rule below.
     if (!pr || pr.state !== "MERGED") {
