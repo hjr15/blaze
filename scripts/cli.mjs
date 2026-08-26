@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 // cli.mjs — the `blaze` command. Dispatches to the scripts.
 import { spawnSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isReadonly } from "./readonly.mjs";
 
@@ -201,7 +201,10 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     for (const k of Object.keys(projects)) {
       const resolved = { ...resolveSchema({ config, project: projects[k] }), linkTypes: top.linkTypes };
       assertSchemaValid({ ...resolved, config, project: projects[k] },
-        { source: `projects/${k}/project.json` });
+        // The LABEL follows projectsDir too. Hardcoding `projects/` told an operator
+        // running BLAZE_PROJECTS_DIR=<root>/boards to "Fix projects/ENG/project.json" —
+        // a path they do not have. The whole value of this error is naming the file.
+        { source: `${relative(root, join(projectsDir, k))}/project.json` });
     }
   } catch (e) {
     // ONLY this error stops the verb. Everything else reaching here — no board, an

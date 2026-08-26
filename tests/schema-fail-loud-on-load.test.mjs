@@ -309,3 +309,73 @@ describe("BLZ-56: the preflight must actually FIND the projects it claims to val
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
+
+// =============================================================================
+// Three guards the code had and no test reached. Each mutation below left the FULL
+// 2,407-test suite green, and each changes real behaviour — the vacuous-test shape this
+// branch has now been refuted for at every round.
+// =============================================================================
+
+describe("BLZ-56: the preflight's own escape hatches are pinned", () => {
+  test("ONLY a SchemaOverrideError stops the verb — the preflight stays silent on the rest", () => {
+    // `if (e && e.name === "SchemaOverrideError")` → `if (e)` survived everything. That
+    // mutation turns EVERY "not its business" case — an unparseable config, no board, a
+    // packaged install with no data dir — into a hard refusal FROM THE PREFLIGHT, which is
+    // precisely the regression the comment beside it and docs/schema-customization.md
+    // promise cannot happen.
+    //
+    // Both trees exit 1 here, so the exit code cannot tell them apart — the DISCRIMINATOR
+    // is who reported it. Shipped, the preflight swallows the parse error and the verb
+    // runs, so the message carries the runner's own `blaze rollup failed:` prefix. Under
+    // the mutation the preflight writes and `process.exit(1)`s, and the runner never runs.
+    const b = board3({ config: { key: "ENG", projects: ["ENG"] } });
+    try {
+      writeFileSync(join(b.root, "blaze.config.json"), "{ this is not json");
+      const verb = run3(b, ["rollup"]);
+      const out = `${verb.stdout}${verb.stderr}`;
+      assert.match(out, /rollup failed/,
+        "the verb must have RUN and reported this itself — the preflight is not to stop it");
+      assert.doesNotMatch(out, /the schema override in/,
+        "an unparseable config is not a bad schema override");
+      assert.doesNotMatch(out, /would be internally inconsistent/);
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+
+  test("one unloadable project does not silently disarm the whole preflight", () => {
+    // Dropping the per-project try/catch survived too, and it is NOT equivalent: with a
+    // key naming a directory that does not exist, `loadProject` throws, the throw escapes
+    // the per-ticket loop, and the outer catch swallows it — so a board with a genuinely
+    // malformed TOP-level schema goes from a full refusal to exit 0. The gate disarms
+    // itself on an unrelated misconfiguration.
+    const b = board3({
+      config: { key: "ENG", projects: ["ENG", "GONE"], schema: MALFORMED },
+    });
+    try {
+      const verb = run3(b, ["rollup"]);
+      assert.equal(verb.status, 1,
+        "a missing project key must not stop the top-level schema from being judged");
+      assert.match(`${verb.stdout}${verb.stderr}`, /the schema override in blaze.config.json is not valid/);
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+
+  test("the refusal names the project file the operator actually has", () => {
+    // The label was hardcoded `projects/${k}/project.json` while the LOOKUP already
+    // followed projectsDir, so a board under BLAZE_PROJECTS_DIR=<root>/boards was told to
+    // "Fix projects/ENG/project.json" — a path that does not exist. The whole value of
+    // this error is naming the file to fix.
+    const b = board3({
+      config: { key: "ENG", projects: ["ENG"] },
+      projectJson: { key: "ENG", name: "Eng", schema: MALFORMED },
+      dirName: "boards",
+    });
+    try {
+      const verb = run3(b, ["rollup"]);
+      assert.equal(verb.status, 1);
+      const out = `${verb.stdout}${verb.stderr}`;
+      assert.match(out, /boards\/ENG\/project\.json/,
+        "the refusal must name the real path");
+      assert.doesNotMatch(out, /projects\/ENG\/project\.json/,
+        "and must not name a path the operator does not have");
+    } finally { rmSync(b.root, { recursive: true, force: true }); }
+  });
+});
