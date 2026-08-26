@@ -64,11 +64,20 @@ function captureOutput() {
     stderr: process.stderr.write.bind(process.stderr),
   };
   // DELIBERATELY NOT `process.stdout.write`. Stubbing it in-process swallows the test
-  // runner's OWN result lines: with it stubbed this file reported 42 tests instead of 51
-  // — nine vanished silently, none failed. A harness that hides tests is worse than the
-  // gap it closes. Raw-stdout leakage is covered where it can be observed safely, from
-  // outside the process, by the spawned-child test in serve-standalone-entry.test.mjs,
-  // which reads the real token off disk and asserts it is absent from both streams.
+  // runner's OWN result lines: with it stubbed this file reports 42 tests where it
+  // reports 52 clean — TEN vanish silently, five whole suites with them, and nothing
+  // fails. A harness that hides tests is worse than the gap it closes.
+  //
+  // (The first version of this note said "42 instead of 51 — nine". That compared the
+  // stubbed count on THIS tree against the clean count on the tree before the test above
+  // was added: two different trees, one sentence. The same mixing of refs has cost this
+  // lane three review rounds elsewhere, so it is written down rather than quietly fixed.)
+  //
+  // Raw-stdout leakage is covered from outside the process by the spawned-child test in
+  // serve-standalone-entry.test.mjs — but only for the BOOT path, which is the only place
+  // shipped code could write one. A raw `process.stdout.write` added to the REQUEST path
+  // would leak with the whole suite green; closing that needs a spawned child driven
+  // through `POST /setup`, which nothing here does today.
   const cap = { text: "" };
   const grab = (...a) => { cap.text += a.join(" ") + "\n"; };
   console.log = grab; console.warn = grab; console.error = grab;

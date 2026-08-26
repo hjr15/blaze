@@ -184,8 +184,11 @@ not be a surprise:
    leave the token committable. What actually gets **written** on a fresh board is a
    single `.blaze/` rule, appended by the identity check, which runs first; the token
    check then finds the path already ignored and appends nothing (`state: "already"`).
-   Two rules are written only when an existing `.gitignore` covers one path and not the
-   other.
+   The server never appends **both** in one boot: the identity check runs first, and when
+   it appends it appends `.blaze/`, which already covers the token. The token check
+   therefore appends a rule only on a board whose `.gitignore` ignores
+   `.blaze/identity.db` but *not* `.blaze/setup-token` — and in that case the identity
+   check appended nothing, so it is still one rule.
 2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
    pre-fix build and staged or committed the token — the server runs
    `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index
