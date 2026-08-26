@@ -621,16 +621,20 @@ export async function reconcile({
     // on PR NUMBER, so that is the LATEST merged PR, not the one that delivered the work.
     // A follow-up docs PR merged under the same key therefore stamped itself onto half the
     // record while `branch` still named the deliverer: one record naming two different PRs,
-    // which is round 3's bug wearing fill clothing. 8 done tickets on the board are in that
-    // shape today.
+    // which is round 3's bug wearing fill clothing. 8 of the 1,594 `done` tickets at
+    // blaze-pm ff5f36c2 are in that shape — `branch` recorded, `pr` blank. ("today" is
+    // not a ref; the ADR and the test twin of this sentence quote the same one.)
     //
     // Computed EAGERLY — before either write below — and that, not which object it reads,
     // is the load-bearing property. `fm` is a fresh copy and is unmutated at this line, so
     // `Boolean(fm.branch || fm.pr)` here would be exactly equivalent. What breaks is making
     // it LAZY: evaluated inside `keep()`, the pr check would see the branch just written by
     // the line above, skip the pr write, and re-create round 2's write-nothing direction on
-    // the 1,141 done tickets that carry neither field. Reading `t.frontmatter` says
-    // "the state before this loop touched anything" out loud, which is the intent.
+    // the 1,056 of 1,594 `done` tickets that carry NEITHER field at blaze-pm ff5f36c2 —
+    // the same population and the same figure decide()'s own comment quotes above, which
+    // is the point: one file may not print two numbers for one population. Reading
+    // `t.frontmatter` says "the state before this loop touched anything" out loud, which
+    // is the intent.
     const hadRecord = Boolean(t.frontmatter.branch || t.frontmatter.pr);
     const keep = () => d.recordIfAbsentOnly && hadRecord;
     if (d.branchVal && !keep() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }

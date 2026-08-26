@@ -364,7 +364,10 @@ describe("BLZ-130: a terminal ticket's delivery record is history, not a live fi
 // `branchVal`/`prVal` were nulled for every terminal ticket, and the caller only writes
 // on a truthy value — so a done ticket that never had its PR recorded could never
 // acquire one. Reconcile is the sole producer of those fields, so that is permanent:
-// on the live board 945 of 1,479 done tickets carry no `pr:` at all. The corruption
+// 1,064 of 1,594 `done` tickets are MISSING A `pr:` at blaze-pm ff5f36c2. (An earlier
+// draft said "945 of 1,479 on the live board"; that came from a stale checkout on an
+// unrelated branch, and no commit on blaze-pm's origin/main has ever had 1,479 `done`
+// tickets. Name the population, pin the sha.) The corruption
 // this was written to stop is an OPEN PR replacing the record of the MERGED one that
 // delivered the work; withholding the merged record too was over-correction, and the
 // fix's own rationale — "the branch and PR are what delivered it" — argues against it.
@@ -536,7 +539,8 @@ describe("BLZ-130: the record is written once — the rule, not just the comment
   // "fill a blank, never overwrite" into "never write at all". That is direction 2, the
   // over-correction round 2 already made once: reconcile is the sole producer of these
   // fields, so a terminal ticket that never acquired one could never acquire it again.
-  // 1,141 of 1,679 `done` tickets on the board carry neither field today.
+  // 1,056 of 1,594 `done` tickets carry NEITHER field at blaze-pm ff5f36c2 — the same
+  // population reconcile.mjs's `hadRecord` comment quotes, and the same figure.
   test("a done ticket with NO record still acquires one — write-once fills a blank", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz130-backfill-"));
     const codeRepo = join(tmp, "svc");
@@ -561,7 +565,8 @@ describe("BLZ-130: the record is written once — the rule, not just the comment
   // ranked top, and ranking breaks ties on PR NUMBER — so that is the LATEST merged PR,
   // not the deliverer. The follow-up docs PR that round 3 was about therefore still got to
   // stamp itself onto half the record, while `branch` went on naming the real deliverer.
-  // One record, two different PRs. 8 done tickets on the board are in that shape.
+  // One record, two different PRs. 8 of the 1,594 `done` tickets at blaze-pm ff5f36c2 are
+  // in that shape — `branch` recorded, `pr` blank.
   test("a PARTIAL record is not topped up by a later PR — the record is one unit", async () => {
     const followUp = {
       number: 123, state: "MERGED", url: "u123", headRefName: "INF-645-follow-up-docs-tidy",
@@ -593,7 +598,8 @@ describe("BLZ-130: the record is written once — the rule, not just the comment
   // a terminal ticket with `pr` recorded and `branch` blank would read as having no
   // record, and a later merged PR would then overwrite `branch` — direction 1
   // (overwrite-anything) surviving in the half nobody looked at. No ticket is in that
-  // shape on the board today (0 of 1,679), which is exactly why no test reached it.
+  // shape on the board at blaze-pm ff5f36c2 — 0 of 1,594 `done` tickets are `pr`-only,
+  // against 8 that are `branch`-only — which is exactly why no test reached it.
   test("a pr-only record is not topped up either — the mirror of the same rule", async () => {
     const followUp = {
       number: 123, state: "MERGED", url: "u123", headRefName: "INF-645-follow-up-docs-tidy",

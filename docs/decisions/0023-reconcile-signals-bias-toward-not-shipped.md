@@ -60,14 +60,17 @@ what delivered the ticket, not live state.
 The correction to that then over-corrected, recorded here because the shape recurs:
 nulling both fields for *every* terminal ticket stopped the overwrite and stopped the
 first write with it. Reconcile is the only producer of `branch`/`pr`, so a `done` ticket
-that never had them recorded could never acquire them — on the board repo's `origin/main`,
-1,064 of 1,594 `done` tickets **missing a `pr`**, permanently. Turning a corruption into a
-silent omission is not a fix. (Two counts appear in this ADR and they are different
-quantities, so each names itself: *missing a `pr`* is 1,064 of 1,594 at `blaze-pm`
-`ff5f36c2`; *carrying neither field* is 1,056 of 1,594 at that ref, and 1,141 of 1,679 at
-`cd4b1d9d`. The same conflation was in `decide()`'s comment in `scripts/reconcile.mjs`
-and is corrected there too — a correction that fixes one instance and not its twin is
-how this figure was wrong twice.)
+that never had them recorded could never acquire them — on the board repo at `blaze-pm`
+`ff5f36c2`, 1,064 of 1,594 `done` tickets **missing a `pr`**, permanently. Turning a
+corruption into a silent omission is not a fix. (Two counts appear in this ADR and they
+are different quantities, so each names itself, and both are measured with the shipped
+`fsReadStorage.listTickets` at `blaze-pm` `ff5f36c2` — its `origin/main`, which anyone can
+resolve: *missing a `pr`* is **1,064 of 1,594**; *carrying neither field* is **1,056 of
+1,594**. An earlier draft also quoted 1,141 of 1,679 at `cd4b1d9d`; that is a local-only
+branch on one machine, off every remote, so it is dropped rather than repeated. The same
+conflation was in `decide()`'s comment in `scripts/reconcile.mjs` and is corrected there
+too — a correction that fixes one instance and not its twin is how this figure was wrong
+twice.)
 That correction then under-corrected, which is recorded too. Gating on "the winning PR
 is MERGED" stopped an open PR overwriting the record and left a merged one free to —
 and ranking breaks ties on the higher PR number, so the *latest* merged PR always wins.
@@ -91,16 +94,16 @@ with `branch` recorded and `pr` blank therefore still had its `pr` filled — fr
 top-ranked PR, which by the tie-break above is the *latest* merged one. The follow-up
 docs PR of the paragraph before still stamped itself onto half the record while `branch`
 went on naming the real deliverer: one record naming two different PRs, which is the
-third shape again, reached through the blank half. 8 of 1,679 `done` tickets at `cd4b1d9d`
-are in that shape. So `hadRecord` is snapshotted from the ticket's frontmatter BEFORE
-either field is written, and governs both: a terminal ticket with *either* field keeps
-*both*.
+third shape again, reached through the blank half. 8 of 1,594 `done` tickets at `blaze-pm`
+`ff5f36c2` are in that shape — `branch` recorded, `pr` blank. (The mirror shape, `pr`
+recorded and `branch` blank, is 0 of 1,594 at that ref.) So `hadRecord` is snapshotted
+from the ticket's frontmatter BEFORE either field is written, and governs both: a
+terminal ticket with *either* field keeps *both*.
 
 **Cost, accepted:** a terminal ticket holding half a record never gains the other half —
-8 of 1,679 at `cd4b1d9d` today, but the cost is **ongoing, not a fixed historical set**:
-any ticket that reaches a terminal status while half-recorded and later has a merged PR
-for its key is locked out the same way. That is
-the same asymmetry as above — a blank `pr` understates and is true; a `pr` naming the
+8 of 1,594 at `blaze-pm` `ff5f36c2`, but the cost is **ongoing, not a fixed historical
+set**: any ticket that reaches a terminal status while half-recorded and later has a
+merged PR for its key is locked out the same way. That is the same asymmetry as above — a blank `pr` understates and is true; a `pr` naming the
 wrong PR overstates and is false, and write-once then locks it in permanently, since `pr`
 is not in `EDITABLE_FIELDS` and `blaze edit` will not repair it. Recovering the *right*
 PR for a half-recorded ticket (by corroborating `headRefName` against the recorded
