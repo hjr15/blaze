@@ -166,3 +166,112 @@ describe("BLZ-56: the two paths stay separate — AC-4's decision, as code", () 
     assert.match(msg, /chore/);
   });
 });
+
+// =============================================================================
+// Round 3 — HARD vs SOFT. `assertSchemaValid` threw on everything `validateSchema`
+// returned, and `validateSchema` deliberately returns a MIX: structural
+// malformations AND advisories about configurations that are legal-but-inert or
+// deliberately narrowed. So every advisory became fatal on the load path, and two
+// boards that `blaze audit` calls ok=true could not run a single non-exempt verb.
+//
+// That is verbatim the class the previous review round refuted on this branch: a new
+// check that is worse than the bug it replaces. The split is ONE list, tagged where
+// each problem is collected — not a second function that would drift from the first.
+// =============================================================================
+
+/** The four SOFT classes, each on a board that is otherwise entirely well-formed. */
+const SOFT_ONLY = {
+  // BLZ-361: a deliberately narrowed `requirement` workflow. `validateSchema`'s own
+  // comment calls this "legal when deliberate", and its message ends "Add them, or
+  // drop the gate deliberately" — advice, not a malformation.
+  requirementNarrowed: {
+    types: DEFAULT_TYPES,
+    workflows: { ...DEFAULT_WORKFLOWS, requirement: {
+      statuses: ["proposed", "implemented", "rejected", "obsolete"],
+      terminal: ["implemented", "rejected", "obsolete"],
+      transitions: [["proposed", "implemented"]],
+      reopenTo: "proposed",
+      resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" },
+    } },
+  },
+  // The inertness note. docs/schema-customization.md calls a per-project linkTypes
+  // block one that "resolves correctly but reaches nothing" — a note about where to
+  // move a block, on a board that works.
+  projectLinkTypesInert: {
+    types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+    project: { schema: { linkTypes: { Precedes: { source_kinds: ["task"] } } } },
+  },
+  // BLZ-392: an endpoint kind naming no declared type. Audit files it SOFT, and its
+  // over-firing is what bricked the previous round.
+  endpointKindUndeclared: {
+    types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+    linkTypes: [{ name: "Precedes", source_kinds: ["ghosttype"], target_kinds: ["task"] }],
+  },
+  // The `blaze.config.json:` override notes from `linkTypeOverrideErrors` — a block
+  // that was IGNORED, leaving the shipped declaration in force. The board still runs.
+  linkTypeOverrideIgnored: {
+    types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+    config: { schema: { linkTypes: { Precedes: "not-an-object" } } },
+  },
+};
+
+describe("BLZ-56: hard malformations refuse; soft advisories only report", () => {
+  test("validateSchema's PUBLIC return shape is unchanged — an array of strings", () => {
+    // `auditCorpus` puts these straight into `new Set(...)`, prints them as a finding's
+    // `detail`, and compares them across layers with `has()`. If the tagging leaked out
+    // of this function, every `schema-invalid` detail would render as [object Object] —
+    // BLZ-392's defect returning by another route.
+    const mixed = validateSchema({
+      ...SOFT_ONLY.requirementNarrowed,
+      types: { ...DEFAULT_TYPES, spike: { level: "0", workflow: "ghost", parentTypes: [], required: [] } },
+      linkTypes: [{ name: "Precedes", source_kinds: ["ghosttype"], target_kinds: ["task"] }],
+      project: { schema: { linkTypes: {} } },
+    });
+    assert.ok(Array.isArray(mixed), "still an array");
+    assert.ok(mixed.length > 3, `expected hard AND soft entries, got ${mixed.length}`);
+    for (const e of mixed) {
+      assert.equal(typeof e, "string", `every entry is a human-readable string, got ${typeof e}: ${JSON.stringify(e)}`);
+    }
+    // And still never throws, on anything.
+    for (const v of [null, undefined, 0, "", [], "nope", { types: { x: null }, workflows: { y: null } }]) {
+      assert.doesNotThrow(() => validateSchema(v), `threw on ${JSON.stringify(v)}`);
+    }
+  });
+
+  for (const [name, resolved] of Object.entries(SOFT_ONLY)) {
+    test(`a board whose ONLY problem is soft (${name}) still REPORTS but is not refused`, () => {
+      const reported = validateSchema(resolved);
+      assert.ok(reported.length > 0,
+        `${name} must still be reported — audit's report is what tells the operator: ${reported.join(" | ")}`);
+      assert.doesNotThrow(() => assertSchemaValid(resolved),
+        `${name} is advisory; refusing every non-exempt verb over it is a wall, not a gate`);
+    });
+  }
+
+  test("a hard malformation alongside soft advisories still throws, listing the hard ones only", () => {
+    const resolved = {
+      ...SOFT_ONLY.requirementNarrowed,
+      types: { ...DEFAULT_TYPES, spike: { level: "0", workflow: "ghost", parentTypes: ["nope"], required: [] } },
+      linkTypes: [{ name: "Precedes", source_kinds: ["ghosttype"], target_kinds: ["task"] }],
+    };
+    let msg = "";
+    try { assertSchemaValid(resolved); assert.fail("expected a refusal"); }
+    catch (e) { assert.equal(e.name, "SchemaOverrideError"); msg = e.message; }
+    assert.match(msg, /spike/, "the malformation must still be named");
+    assert.match(msg, /level/);
+    assert.match(msg, /ghost/);
+    assert.match(msg, /nope/);
+    assert.doesNotMatch(msg, /goal:achieved gate/,
+      "a soft advisory in the refusal reads as a thing that must be fixed to proceed, and it is not");
+    assert.doesNotMatch(msg, /ghosttype/,
+      "the endpoint-kind finding is soft — audit files it soft and its over-firing bricked a board");
+  });
+
+  test("the partial type entry stays HARD — it is the trap the docs name", () => {
+    // `mergeTypes` is a per-entry REPLACE, so `"task": { "workflow": "delivery" }` drops
+    // level/parentTypes/required silently. This is the class BLZ-56 exists to catch.
+    assert.throws(() => assertSchemaValid({
+      types: { ...DEFAULT_TYPES, task: { workflow: "delivery" } }, workflows: DEFAULT_WORKFLOWS,
+    }), /task/);
+  });
+});

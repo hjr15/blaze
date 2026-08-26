@@ -235,10 +235,10 @@ each one has actually broken a board running this mechanism.
 
 - **`transitions` is an array of `[from, to]` pairs, not an object map.**
   `{"proposed": "accepted"}` reads like a reasonable shorthand and is wrong.
-  `validateSchema` only checks that a type's `workflow` names a declared
-  workflow — it does not check the shape of `transitions` — so the wrong
-  shape passes validation cleanly and then throws a raw `TypeError` at the
-  first `blaze move` that hits it.
+  It used to pass validation cleanly and then throw a raw `TypeError` at the
+  first `blaze move` that hit it; BLZ-56 made it a load-path refusal (see
+  [A malformed override fails loud](#a-malformed-override-fails-loud-blz-56)),
+  so it is now caught before the verb runs.
 - **`mergeTypes` can add or replace a type, never remove one.** It merges by
   spread (`{ ...defaults, ...override }`), so `"epic": null` or `"epic":
   undefined` in an override leaves the `epic` key present in the merged
@@ -311,8 +311,29 @@ halves genuinely pull in opposite directions.
 
 | Path | Function | Behaviour |
 |---|---|---|
-| **Reporting** | `validateSchema(resolved)` | Returns a list of errors. **Never throws.** |
-| **Load** | `assertSchemaValid(resolved)` | **Throws** a named `SchemaOverrideError` listing every problem at once. |
+| **Reporting** | `validateSchema(resolved)` | Returns a list of **every** problem, hard and soft. **Never throws.** |
+| **Load** | `assertSchemaValid(resolved)` | **Throws** a named `SchemaOverrideError` listing every **hard** problem at once. |
+
+### Hard and soft, and why the load path takes only the hard half
+
+Both read one internally tagged list, so the two can never drift apart.
+
+- **Hard — the override is malformed, and the verb is refused.** A type mapping to a
+  workflow nothing declares; a `level` that is not a number, a `workflow` that is not a
+  name, `parentTypes` or `required` that is not an array, a `parentTypes` entry naming no
+  declared type; a partial type record (the trap above); a workflow with no `statuses`, or
+  whose `terminal`, `transitions`, `reopenTo` or `resolutionOnTerminal` name a status it
+  does not have or a resolution the engine does not know.
+- **Soft — the configuration is legal, and only reported.** A deliberately narrowed
+  `requirement` workflow (BLZ-361/R48 — the message itself says "add them, or drop the gate
+  deliberately"); a `Precedes` endpoint kind naming no declared type (BLZ-392); a
+  `schema.linkTypes` block that was ignored, leaving the shipped declaration in force; and
+  a per-project `schema.linkTypes` block, which resolves correctly but reaches nothing.
+
+The split is not cosmetic. `blaze audit` files every soft class above as a soft finding and
+reports such a board **`ok=true`**, so refusing the same board on the load path would leave
+an operator with a board audit calls clean and not one non-exempt verb that will run. A
+check that disagrees with audit on the same board is worse than no check.
 
 `blaze audit` calls the reporting path and surfaces each problem as a `schema-invalid`
 finding. It is **exempt from the loud path on purpose**: reporting this class is its
@@ -322,18 +343,24 @@ audit` outright, losing the whole hygiene report for one bad field — and
 `tests/audit-malformed-linktypes.test.mjs` exists to keep it closed.
 
 Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is the one
-place every verb dispatches through. Two more exemptions: **`blaze init`**, which runs
-before a board exists; and **`blaze commit`**, a git flush of the pending ledger that
-imports nothing from the model — refusing it would strand ticket files other verbs have
-already relocated but not committed.
+place every verb dispatches through. There are two more exemptions — **three in all** —
+**`blaze init`**, which runs before a board exists, and **`blaze commit`**, a git flush of
+the pending ledger that imports nothing from the model: refusing it would strand ticket
+files other verbs have already relocated but not committed. That leaves **18 of the 21
+subcommands** running the check.
 
 **The preflight judges the board exactly the way `blaze audit` does**, and that is not a
 detail. It builds `endpointTypes` — every type declared anywhere, across all projects —
 because a top-level `Precedes` list may legitimately name a type only one project
-declares, and it validates each project layer as well as the top one. An earlier cut did
-neither: it refused every non-exempt verb on a board `blaze audit` called clean, and let a
-malformed `project.json` through while audit reported it. A check that disagrees with
-audit in either direction on the same board is worse than no check.
+declares, and it validates each project layer as well as the top one. It also finds the
+projects the way audit does: from `resolveRoots().projectsDir` (which is **not**
+`dataRoot/projects` when `BLAZE_PROJECTS_DIR` names a directory called something else), and
+falling back to the directories on disk when `blaze.config.json` carries no `projects`
+array. Earlier cuts did none of this: one refused every non-exempt verb on a board `blaze
+audit` called clean; another let a malformed `project.json` through while audit reported it,
+twice over — once because it looked in `dataRoot/projects` for projects that were not there,
+and once because it validated an empty project set and called that a pass. A check that
+disagrees with audit in either direction on the same board is worse than no check.
 
 The check is **not** inside `ambientSchemaOverride`, and must never be. `TYPES` and
 `WORKFLOWS` are module-scope constants resolved through it at **import time**, so a

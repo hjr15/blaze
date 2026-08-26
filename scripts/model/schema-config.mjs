@@ -26,9 +26,24 @@ export function resolveSchema({ config = null, project = null } = {}) {
   };
 }
 
-/** Pure structural check: every type's workflow must be a declared workflow.
- *  Returns a list of human-readable errors ([] when valid). */
-export function validateSchema(input = {}) {
+/** Pure structural check over the resolved schema. ONE list, tagged where each problem is
+ *  collected — never two parallel functions, which would drift the moment a check moved.
+ *  Returns `[{ message, hard }]`; the two public entry points below select from it.
+ *
+ *  HARD — the resolved schema is MALFORMED, and BLZ-56 exists to catch exactly this class:
+ *         a type mapping to a workflow nothing declares, a partial type record (`mergeTypes`
+ *         is a per-entry REPLACE, so `"task": {"workflow":"delivery"}` silently drops level,
+ *         parentTypes and required), a workflow whose terminal/transitions/reopenTo name a
+ *         status it does not have. The board is internally inconsistent and will throw or
+ *         quietly stop validating later. Refusing to start is the right answer.
+ *
+ *  SOFT — an ADVISORY about a configuration that is legal, merely inert or deliberately
+ *         narrowed: the BLZ-361 requirement-narrowing note ("legal when deliberate"), the
+ *         BLZ-392 endpoint-kind findings, and the note that a per-project `schema.linkTypes`
+ *         block never reaches the scheduler. `blaze audit` files every one of these SOFT and
+ *         calls such a board ok=true. Throwing on them made every non-exempt verb exit 1 on a
+ *         board audit calls clean — a check worse than the bug it replaced. Report only. */
+function collectSchemaProblems(input = {}) {
   // Destructuring `null` throws, and a parameter default only fires for `undefined`. This
   // function is pure and public and `auditCorpus` may call it with a config that parsed to
   // null — a throw here is the BLZ-392 regression by another route, so it takes ANYTHING.
@@ -49,11 +64,13 @@ export function validateSchema(input = {}) {
   // own report contradicted: "spike is not a declared type, so it stays unschedulable", printed
   // beside a `deadline-unreachable` proving a spike had just been scheduled.
   const known = endpointTypes ?? types;
-  const errors = [];
+  const problems = [];
+  const hard = (message) => problems.push({ message, hard: true });
+  const soft = (message) => problems.push({ message, hard: false });
   for (const [name, def] of Object.entries(types)) {
     const wf = def && def.workflow;
     if (wf && !Object.prototype.hasOwnProperty.call(workflows, wf)) {
-      errors.push(`type "${name}" maps to undeclared workflow "${wf}"`);
+      hard(`type "${name}" maps to undeclared workflow "${wf}"`);
     }
   }
 
@@ -68,45 +85,45 @@ export function validateSchema(input = {}) {
   const isStr = (v) => typeof v === "string" && v.trim() !== "";
   for (const [name, def] of Object.entries(types)) {
     if (!def || typeof def !== "object" || Array.isArray(def)) {
-      errors.push(`type "${name}" is not an object — a type is a { level, workflow, parentTypes, required } record`);
+      hard(`type "${name}" is not an object — a type is a { level, workflow, parentTypes, required } record`);
       continue;
     }
     if (typeof def.level !== "number" || !Number.isFinite(def.level)) {
-      errors.push(`type "${name}" has a level that is not a number (${def.level === null ? "null" : typeof def.level})`
+      hard(`type "${name}" has a level that is not a number (${def.level === null ? "null" : typeof def.level})`
         + " — level orders the hierarchy, and a non-number cannot be compared");
     }
     if (!isStr(def.workflow)) {
-      errors.push(`type "${name}" has a workflow that is not a name `
+      hard(`type "${name}" has a workflow that is not a name `
         + `(${def.workflow === null ? "null" : typeof def.workflow}) — every type must map to a declared workflow`);
     }
     if (!Array.isArray(def.parentTypes)) {
-      errors.push(`type "${name}" has parentTypes that is not an array `
+      hard(`type "${name}" has parentTypes that is not an array `
         + `(${def.parentTypes === null ? "null" : typeof def.parentTypes}) — use [] for a root type`);
     } else {
       for (const parent of def.parentTypes) {
         if (!Object.prototype.hasOwnProperty.call(types, parent)) {
-          errors.push(`type "${name}" lists parentTypes "${parent}", which is not a declared type — `
+          hard(`type "${name}" lists parentTypes "${parent}", which is not a declared type — `
             + "nothing could ever be created under it");
         }
       }
     }
     if (!Array.isArray(def.required)) {
-      errors.push(`type "${name}" has required that is not an array `
+      hard(`type "${name}" has required that is not an array `
         + `(${def.required === null ? "null" : typeof def.required}) — use [] for no required fields`);
     } else if (!def.required.every(isStr)) {
-      errors.push(`type "${name}" has a required entry that is not a field name — `
+      hard(`type "${name}" has a required entry that is not a field name — `
         + "every entry must be a non-empty string");
     }
   }
 
   for (const [name, wf] of Object.entries(workflows)) {
     if (!wf || typeof wf !== "object" || Array.isArray(wf)) {
-      errors.push(`workflow "${name}" is not an object — a workflow is a { statuses, terminal, transitions, reopenTo } record`);
+      hard(`workflow "${name}" is not an object — a workflow is a { statuses, terminal, transitions, reopenTo } record`);
       continue;
     }
     const statuses = wf.statuses;
     if (!Array.isArray(statuses) || statuses.length === 0 || !statuses.every(isStr)) {
-      errors.push(`workflow "${name}" has statuses that is not a non-empty array of names — `
+      hard(`workflow "${name}" has statuses that is not a non-empty array of names — `
         + "a workflow with no statuses can hold no ticket");
       continue; // every check below is relative to `statuses`; without it they are noise.
     }
@@ -114,12 +131,12 @@ export function validateSchema(input = {}) {
     const terminal = wf.terminal;
     if (terminal !== undefined) {
       if (!Array.isArray(terminal)) {
-        errors.push(`workflow "${name}" has terminal that is not an array `
+        hard(`workflow "${name}" has terminal that is not an array `
           + `(${terminal === null ? "null" : typeof terminal})`);
       } else {
         for (const t of terminal) {
           if (!declared.has(t)) {
-            errors.push(`workflow "${name}" marks "${t}" terminal, but it is not one of its statuses — `
+            hard(`workflow "${name}" marks "${t}" terminal, but it is not one of its statuses — `
               + "nothing can ever reach it");
           }
         }
@@ -127,17 +144,17 @@ export function validateSchema(input = {}) {
     }
     if (wf.transitions !== undefined) {
       if (!Array.isArray(wf.transitions)) {
-        errors.push(`workflow "${name}" has transitions that is not an array`);
+        hard(`workflow "${name}" has transitions that is not an array`);
       } else {
         for (const pair of wf.transitions) {
           if (!Array.isArray(pair) || pair.length !== 2) {
-            errors.push(`workflow "${name}" has a transition that is not a [from, to] pair — `
+            hard(`workflow "${name}" has a transition that is not a [from, to] pair — `
               + `got ${JSON.stringify(pair)}`);
             continue;
           }
           for (const st of pair) {
             if (!declared.has(st)) {
-              errors.push(`workflow "${name}" has a transition naming "${st}", which is not one of `
+              hard(`workflow "${name}" has a transition naming "${st}", which is not one of `
                 + "its statuses — that move can never be made");
             }
           }
@@ -145,22 +162,22 @@ export function validateSchema(input = {}) {
       }
     }
     if (wf.reopenTo !== undefined && !declared.has(wf.reopenTo)) {
-      errors.push(`workflow "${name}" sets reopenTo "${wf.reopenTo}", which is not one of its `
+      hard(`workflow "${name}" sets reopenTo "${wf.reopenTo}", which is not one of its `
         + "statuses — reopening would write a status the workflow does not have");
     }
     const rot = wf.resolutionOnTerminal;
     if (rot !== undefined) {
       if (!rot || typeof rot !== "object" || Array.isArray(rot)) {
-        errors.push(`workflow "${name}" has resolutionOnTerminal that is not an object`);
+        hard(`workflow "${name}" has resolutionOnTerminal that is not an object`);
       } else {
         const term = new Set(Array.isArray(terminal) ? terminal : []);
         for (const [status, resolution] of Object.entries(rot)) {
           if (!term.has(status)) {
-            errors.push(`workflow "${name}" maps a resolution onto "${status}", which is not one of its `
+            hard(`workflow "${name}" maps a resolution onto "${status}", which is not one of its `
               + "terminal statuses — the mapping can never fire");
           }
           if (!RESOLUTIONS.includes(resolution)) {
-            errors.push(`workflow "${name}" maps "${status}" to resolution "${resolution}", which is not a `
+            hard(`workflow "${name}" maps "${status}" to resolution "${resolution}", which is not a `
               + `known resolution (${RESOLUTIONS.join(", ")})`);
           }
         }
@@ -181,7 +198,7 @@ export function validateSchema(input = {}) {
   if (req && Array.isArray(req.statuses)) {
     const missing = [...GOAL_SATISFYING_REQUIREMENT].filter((s) => !req.statuses.includes(s));
     if (missing.length) {
-      errors.push(
+      soft(
         `workflow "requirement" omits ${missing.map((m) => `"${m}"`).join(", ")}, which the `
         + "goal:achieved gate requires — a goal cannot be achieved while a requirement beneath "
         + "it has not reached one of them, so with these absent no such goal can ever close. "
@@ -201,14 +218,14 @@ export function validateSchema(input = {}) {
         // `mergeLinkTypes` refuses these shapes outright now; this stays because
         // `validateSchema` is a pure function anyone may call with anything.
         if (kinds !== undefined && !Array.isArray(kinds)) {
-          errors.push(`link type "${lt?.name}" has a ${side} that is not an array `
+          soft(`link type "${lt?.name}" has a ${side} that is not an array `
             + `(${kinds === null ? "null" : typeof kinds}) — it declares no endpoints, so `
             + "nothing can be schedulable through it");
           continue;
         }
         for (const kind of kinds ?? []) {
           if (!Object.prototype.hasOwnProperty.call(known, kind)) {
-            errors.push(`link type "${lt.name}" names "${kind}" in ${side}, which is not a `
+            soft(`link type "${lt.name}" names "${kind}" in ${side}, which is not a `
               + "declared type — it can never match, so any type it was meant to cover stays "
               + "unschedulable");
           }
@@ -221,7 +238,7 @@ export function validateSchema(input = {}) {
   // it silently would be the other half of the same failure, so the raw blocks are inspected
   // here and reported. The operator wrote the block; they need to know it did nothing.
   for (const e of linkTypeOverrideErrors(config?.schema?.linkTypes)) {
-    errors.push(`blaze.config.json: ${e}`);
+    soft(`blaze.config.json: ${e}`);
   }
   // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"
   // with "…does not reach the scheduler at all" for the same block — two findings that
@@ -231,11 +248,22 @@ export function validateSchema(input = {}) {
   // the scheduler. Reporting a malformed one as "the override was ignored" implied that fixing
   // the shape would make it work. It would not, so the block itself is what gets reported.
   if (project?.schema?.linkTypes !== undefined) {
-    errors.push("project.json: schema.linkTypes does not reach the scheduler — a critical path "
+    soft("project.json: schema.linkTypes does not reach the scheduler — a critical path "
       + "is solved over the whole installation at once, so endpoint kinds are read from "
       + "blaze.config.json only. Move it there, or remove it.");
   }
-  return errors;
+  return problems;
+}
+
+/** The REPORTING path. Returns a list of human-readable strings ([] when valid), in the
+ *  order the problems were found. Never throws, on any input.
+ *
+ *  THE PUBLIC SHAPE IS LOAD-BEARING and must not become the tagged records above:
+ *  `auditCorpus` puts these straight into a `Set`, compares them across layers, and prints
+ *  each as a `schema-invalid` finding's `detail`. Handing it objects would render every
+ *  detail as [object Object] — BLZ-392's defect by another route. Pinned by a test. */
+export function validateSchema(input = {}) {
+  return collectSchemaProblems(input).map((p) => p.message);
 }
 
 // Config-schema compat window + guard (ADR-0002). Defined in schema-version.mjs —
@@ -264,10 +292,16 @@ export function loadProjectSchema(projectsDir, key, { config = null } = {}) {
  * `auditCorpus`, losing the whole hygiene report for one bad field. Those are not in
  * conflict, but only while the paths stay separate, and this function is the separation:
  *
- *   `validateSchema`    the REPORTING path. Returns errors. Never throws. `auditCorpus`
- *                       calls it, and `schema-invalid` is a soft finding.
- *   `assertSchemaValid` the LOAD path. Throws a named, actionable error listing every
+ *   `validateSchema`    the REPORTING path. Returns EVERY problem, hard and soft. Never
+ *                       throws. `auditCorpus` calls it, and `schema-invalid` is soft.
+ *   `assertSchemaValid` the LOAD path. Throws a named, actionable error listing every HARD
  *                       problem at once, so one run fixes the config rather than three.
+ *
+ * Both read the same tagged list (`collectSchemaProblems`), because two lists would drift.
+ * The load path takes only the hard entries: `validateSchema` deliberately also reports
+ * advisories — an inert per-project `linkTypes` block, a deliberately narrowed workflow —
+ * and `blaze audit` calls a board carrying those ok=true. A load check that refused them
+ * would disagree with audit on the same board, which is worse than no check at all.
  *
  * It is NOT called from `ambientSchemaOverride`, and must never be. `TYPES` and
  * `WORKFLOWS` are module-scope constants resolved through that function at IMPORT time
@@ -277,7 +311,13 @@ export function loadProjectSchema(projectsDir, key, { config = null } = {}) {
  * it is. See ADR-0002.
  */
 export function assertSchemaValid(resolved, { source = "blaze.config.json" } = {}) {
-  const errors = validateSchema(resolved ?? {});
+  // The HARD half only. `validateSchema` returns a MIX — malformations and advisories about
+  // configurations that are legal but inert or deliberately narrowed — and throwing on the
+  // whole list made a per-project `schema.linkTypes` block, or a narrowed `requirement`
+  // workflow, refuse every non-exempt verb on a board `blaze audit` reports ok=true. Both are
+  // regression-tested end to end (tests/schema-fail-loud-on-load.test.mjs). The soft entries
+  // are not dropped, only not fatal: `blaze audit` still reports every one of them.
+  const errors = collectSchemaProblems(resolved ?? {}).filter((p) => p.hard).map((p) => p.message);
   if (!errors.length) return;
   const err = new Error(
     `blaze: the schema override in ${source} is not valid, so the resolved schema would be `
