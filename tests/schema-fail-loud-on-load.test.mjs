@@ -114,13 +114,19 @@ const SPIKE = { level: 0, workflow: "delivery", parentTypes: ["feature"], requir
 
 describe("BLZ-56: the preflight must judge a board the way audit does", () => {
   test("a top-level Precedes naming a PROJECT-declared type does not brick the board", () => {
-    // THE FALSE POSITIVE THAT MATTERED. BLZ-392 added `endpointTypes` precisely because a
-    // top-level `Precedes` list legitimately names a type only one project declares —
-    // judging it against the top layer alone produced a finding its own report
-    // contradicted. The first cut of this preflight dropped `endpointTypes`, so every
-    // non-exempt verb exited 1 on a board that `origin/main` runs fine and that this
-    // branch's own `blaze audit` calls ok=true. A check that disagrees with audit in
-    // either direction on the same board is worse than no check.
+    // THE FALSE POSITIVE THAT MATTERED, AND WHY THIS PASSES TODAY. A top-level `Precedes`
+    // list legitimately names a type only one project declares; judging it against the top
+    // layer alone produced a finding its own report contradicted, which is what BLZ-392's
+    // `endpointTypes` union answered. The first cut of this preflight built that union and
+    // still exited 1 on this board, because it also threw on every SOFT finding.
+    //
+    // What makes this board run now is the hard/soft split, NOT the union: the endpoint-kind
+    // finding is soft, so `assertSchemaValid` never sees it and the preflight builds no union
+    // at all (scripts/cli.mjs says why). The classification that carries this test is pinned
+    // directly by "the endpoint-kind finding is SOFT, and cli.mjs's preflight depends on it"
+    // in tests/model/schema-validate-on-load.test.mjs. This test stays because the behaviour
+    // it asserts — a board `blaze audit` calls clean is not bricked for every other verb —
+    // is worth guarding whatever mechanism delivers it.
     const root = board(
       { linkTypes: { Precedes: {
         source_kinds: ["task", "spike"], target_kinds: ["task", "spike"],

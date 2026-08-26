@@ -165,12 +165,48 @@ test("the schema-preflight comment's arithmetic matches the code beneath it", ()
     assert.ok(Object.hasOwn(SUBCOMMANDS, name), `${name} is exempt but is not a subcommand`);
   }
   const WORDS = ["ZERO", "ONE", "TWO", "THREE", "FOUR", "FIVE"];
+  // WORDS must fail LOUDLY rather than run off its end: `WORDS[6]` is `undefined`, and
+  // `new RegExp("undefined EXEMPTIONS")` is a perfectly valid regex that simply never
+  // matches — a sixth exemption would turn this assertion into a confusing failure about
+  // a word nobody wrote, or (had the comment happened to contain it) into a pass.
+  assert.ok(exempt.length < WORDS.length,
+    `${exempt.length} exemptions, but WORDS only spells out ${WORDS.length - 1} — `
+    + "add the next word to WORDS before adding the exemption");
   assert.match(src, new RegExp(`${WORDS[exempt.length]} EXEMPTIONS`),
     `the comment must say ${WORDS[exempt.length]} EXEMPTIONS — the Set holds ${exempt.length}`);
   assert.match(src, new RegExp(`${checked} of the ${total} subcommands`),
     `the comment must say "${checked} of the ${total} subcommands"`);
-  // And one bullet per exemption, so the count and the list cannot drift apart either.
-  for (const name of exempt) {
-    assert.match(src, new RegExp(`^//\\s+${name}\\s+—`, "m"), `no bullet for the '${name}' exemption`);
+
+  // THE BULLETS: ONE CONTIGUOUS BLOCK, AND ITS SET EQUALS THE SET.
+  //
+  // The count alone killed only half of the original defect. That defect was the whole
+  // `commit` bullet sitting BELOW the closing paragraph: three bullets in the file, the
+  // count correct, and the list a reader actually scans naming two. Reproduced against
+  // the count-only assertion, it passed. So does an EXTRA bullet for a verb that is not
+  // exempt at all — prose telling a reader `move` is exempt when it is not, which is the
+  // same lie backwards. Contiguity kills the first; set EQUALITY (not containment) kills
+  // the second.
+  //
+  // Scoped to the comment block directly above the Set, so an unrelated bullet-shaped
+  // line elsewhere in cli.mjs cannot fail this, while a bullet orphaned to the far end of
+  // THIS comment — the original defect exactly — still can.
+  const lines = src.split("\n");
+  const setLine = lines.findIndex((l) => l.startsWith("const SCHEMA_PREFLIGHT_EXEMPT"));
+  assert.ok(setLine > 0, "SCHEMA_PREFLIGHT_EXEMPT's declaration line not found");
+  let start = setLine;
+  while (start > 0 && lines[start - 1].startsWith("//")) start -= 1;
+  const BULLET = /^\/\/ {3}(\S+) +—/;   // exactly three spaces after `//`: a bullet.
+  const WRAPPED = /^\/\/ {4,}\S/;       // deeper: a bullet's continuation line.
+  const at = [];
+  for (let i = start; i < setLine; i += 1) if (BULLET.test(lines[i])) at.push(i);
+  assert.ok(at.length, "no exemption bullets found in the comment above the Set");
+  for (let i = at[0]; i <= at[at.length - 1]; i += 1) {
+    assert.ok(BULLET.test(lines[i]) || WRAPPED.test(lines[i]),
+      `the exemption bullets must be ONE contiguous block — line ${i + 1} interrupts it, `
+      + `so a bullet below it is orphaned from the list: ${lines[i]}`);
   }
+  const bullets = at.map((i) => lines[i].match(BULLET)[1]);
+  assert.deepEqual([...bullets].sort(), [...exempt].sort(),
+    "the bullets and SCHEMA_PREFLIGHT_EXEMPT must name the SAME verbs — a missing bullet "
+    + "hides a real exemption, an extra one claims an exemption the code does not grant");
 });

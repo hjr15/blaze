@@ -349,18 +349,26 @@ the pending ledger that imports nothing from the model: refusing it would strand
 files other verbs have already relocated but not committed. That leaves **18 of the 21
 subcommands** running the check.
 
-**The preflight judges the board exactly the way `blaze audit` does**, and that is not a
-detail. It builds `endpointTypes` — every type declared anywhere, across all projects —
-because a top-level `Precedes` list may legitimately name a type only one project
-declares, and it validates each project layer as well as the top one. It also finds the
-projects the way audit does: from `resolveRoots().projectsDir` (which is **not**
-`dataRoot/projects` when `BLAZE_PROJECTS_DIR` names a directory called something else), and
-falling back to the directories on disk when `blaze.config.json` carries no `projects`
-array. Earlier cuts did none of this: one refused every non-exempt verb on a board `blaze
-audit` called clean; another let a malformed `project.json` through while audit reported it,
-twice over — once because it looked in `dataRoot/projects` for projects that were not there,
-and once because it validated an empty project set and called that a pass. A check that
-disagrees with audit in either direction on the same board is worse than no check.
+**The preflight judges the board the way `blaze audit` does**, and that is not a detail.
+It validates each project layer as well as the top one, and it finds the projects the way
+audit does: from `resolveRoots().projectsDir` (which is **not** `dataRoot/projects` when
+`BLAZE_PROJECTS_DIR` names a directory called something else), and falling back to the
+directories on disk when `blaze.config.json` carries no `projects` array. Earlier cuts did
+none of this: one refused every non-exempt verb on a board `blaze audit` called clean;
+another let a malformed `project.json` through while audit reported it, twice over — once
+because it looked in `dataRoot/projects` for projects that were not there, and once because
+it validated an empty project set and called that a pass. A check that disagrees with audit
+in either direction on the same board is worse than no check.
+
+There is **one deliberate departure**. `auditCorpus` also builds an `endpointTypes` union —
+every type declared anywhere, across all projects — because a top-level `Precedes` list may
+legitimately name a type only one project declares. The preflight does **not**, because that
+union feeds exactly one check, the endpoint-kind finding, and that finding is **soft**: the
+load path takes the hard entries only, so the union cannot change any decision the preflight
+makes. Building it there would be a mechanism that runs and can decide nothing. Re-tagging
+that finding hard therefore has to restore the union in `scripts/cli.mjs` in the same change,
+or the preflight would refuse every board whose top-level `Precedes` names a project-declared
+type — and the re-tagging cannot happen quietly, because a test pins the classification.
 
 The check is **not** inside `ambientSchemaOverride`, and must never be. `TYPES` and
 `WORKFLOWS` are module-scope constants resolved through it at **import time**, so a

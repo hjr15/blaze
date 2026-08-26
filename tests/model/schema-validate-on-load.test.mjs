@@ -14,6 +14,7 @@
 // exists to catch a regression in the first of those.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { readFileSync } from "node:fs";
 import { validateSchema, assertSchemaValid, resolveSchema } from "../../scripts/model/schema-config.mjs";
 import { DEFAULT_TYPES } from "../../scripts/model/schema.mjs";
 import { DEFAULT_WORKFLOWS } from "../../scripts/model/workflows.mjs";
@@ -273,5 +274,219 @@ describe("BLZ-56: hard malformations refuse; soft advisories only report", () =>
     assert.throws(() => assertSchemaValid({
       types: { ...DEFAULT_TYPES, task: { workflow: "delivery" } }, workflows: DEFAULT_WORKFLOWS,
     }), /task/);
+  });
+});
+
+// =============================================================================
+// Round 4 — the CLASSIFICATION itself is the contract, and it was unpinned.
+//
+// `collectSchemaProblems` tags every problem hard or soft, and that one boolean
+// decides whether a board runs: `assertSchemaValid` throws on the hard entries and
+// drops the soft ones. Flipping one word therefore changes what every non-exempt
+// verb does, and an adversarial review found the flip was FREE for one tag —
+// `soft()` → `hard()` on the non-array `source_kinds` note left the whole suite
+// green. The tags below are pinned one per row, so a flip in either direction is a
+// named red test rather than a silent behaviour change.
+// =============================================================================
+
+/** The hard messages `assertSchemaValid` would actually refuse on — [] when it does not
+ *  throw. This is the load path's real answer, not a re-derivation of it. */
+function refusedMessages(resolved) {
+  try { assertSchemaValid(resolved); return []; } catch (e) {
+    assert.equal(e.name, "SchemaOverrideError", `unexpected throw: ${e.stack}`);
+    return e.errors;
+  }
+}
+
+const NARROWED_REQUIREMENT = {
+  statuses: ["proposed", "implemented"], terminal: ["implemented"],
+  transitions: [["proposed", "implemented"]], reopenTo: "proposed",
+};
+
+/** One row per `hard()`/`soft()` call site in scripts/model/schema-config.mjs. Each
+ *  `resolved` must make its own tag fire and `re` must match that message alone. */
+const CLASSIFICATION = [
+  // --- the type registry -----------------------------------------------------
+  { name: "type maps to an undeclared workflow", hard: true,
+    re: /^type "spike" maps to undeclared workflow "ghost"/,
+    resolved: withTypes({ spike: { level: 0, workflow: "ghost", parentTypes: [], required: [] } }) },
+  { name: "a type that is not an object", hard: true,
+    re: /^type "spike" is not an object/,
+    resolved: withTypes({ spike: 7 }) },
+  { name: "level is not a number", hard: true,
+    re: /^type "spike" has a level that is not a number/,
+    resolved: withTypes({ spike: { level: "0", workflow: "delivery", parentTypes: [], required: [] } }) },
+  { name: "workflow is not a name", hard: true,
+    re: /^type "spike" has a workflow that is not a name/,
+    resolved: withTypes({ spike: { level: 0, workflow: 7, parentTypes: [], required: [] } }) },
+  { name: "parentTypes is not an array", hard: true,
+    re: /^type "spike" has parentTypes that is not an array/,
+    resolved: withTypes({ spike: { level: 0, workflow: "delivery", parentTypes: "feature", required: [] } }) },
+  { name: "parentTypes names an undeclared type", hard: true,
+    re: /^type "spike" lists parentTypes "nope"/,
+    resolved: withTypes({ spike: { level: 0, workflow: "delivery", parentTypes: ["nope"], required: [] } }) },
+  { name: "required is not an array", hard: true,
+    re: /^type "spike" has required that is not an array/,
+    resolved: withTypes({ spike: { level: 0, workflow: "delivery", parentTypes: [], required: 9 } }) },
+  { name: "a required entry is not a field name", hard: true,
+    re: /^type "spike" has a required entry that is not a field name/,
+    resolved: withTypes({ spike: { level: 0, workflow: "delivery", parentTypes: [], required: ["title", 3] } }) },
+  // --- the workflow registry -------------------------------------------------
+  { name: "a workflow that is not an object", hard: true,
+    re: /^workflow "tiny" is not an object/,
+    resolved: withWorkflows({ tiny: 7 }) },
+  { name: "statuses is not a non-empty array", hard: true,
+    re: /^workflow "tiny" has statuses that is not a non-empty array/,
+    resolved: withWorkflows({ tiny: { statuses: [] } }) },
+  { name: "terminal is not an array", hard: true,
+    re: /^workflow "tiny" has terminal that is not an array/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], terminal: 3 } }) },
+  { name: "terminal names a status the workflow does not have", hard: true,
+    re: /^workflow "tiny" marks "z" terminal/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], terminal: ["z"] } }) },
+  { name: "transitions is not an array", hard: true,
+    re: /^workflow "tiny" has transitions that is not an array/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], transitions: 3 } }) },
+  { name: "a transition that is not a [from, to] pair", hard: true,
+    re: /^workflow "tiny" has a transition that is not a \[from, to\] pair/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], transitions: [["a"]] } }) },
+  { name: "a transition naming a status the workflow does not have", hard: true,
+    re: /^workflow "tiny" has a transition naming "zz"/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], transitions: [["a", "zz"]] } }) },
+  { name: "reopenTo is not a declared status", hard: true,
+    re: /^workflow "tiny" sets reopenTo "gone"/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], reopenTo: "gone" } }) },
+  { name: "resolutionOnTerminal is not an object", hard: true,
+    re: /^workflow "tiny" has resolutionOnTerminal that is not an object/,
+    resolved: withWorkflows({ tiny: { statuses: ["a"], resolutionOnTerminal: 3 } }) },
+  { name: "a resolution mapped onto a non-terminal status", hard: true,
+    re: /^workflow "tiny" maps a resolution onto "a"/,
+    resolved: withWorkflows({ tiny: {
+      statuses: ["a", "b"], terminal: ["b"], resolutionOnTerminal: { a: "done" } } }) },
+  { name: "a resolution the engine does not know", hard: true,
+    re: /^workflow "tiny" maps "b" to resolution "fictional"/,
+    resolved: withWorkflows({ tiny: {
+      statuses: ["a", "b"], terminal: ["b"], resolutionOnTerminal: { b: "fictional" } } }) },
+  // --- the advisories --------------------------------------------------------
+  { name: "BLZ-361: a narrowed `requirement` workflow", hard: false,
+    re: /^workflow "requirement" omits/,
+    resolved: withWorkflows({ requirement: NARROWED_REQUIREMENT }) },
+  { name: "BLZ-392: an endpoint side that is not an array", hard: false,
+    re: /^link type "Precedes" has a source_kinds that is not an array/,
+    resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      linkTypes: [{ name: "Precedes", source_kinds: "task", target_kinds: ["task"] }] } },
+  { name: "BLZ-392: an endpoint kind naming no declared type", hard: false,
+    re: /^link type "Precedes" names "ghosttype" in source_kinds/,
+    resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      linkTypes: [{ name: "Precedes", source_kinds: ["ghosttype"], target_kinds: ["task"] }] } },
+  { name: "BLZ-392: a blaze.config.json linkTypes block the merge ignored", hard: false,
+    re: /^blaze\.config\.json: schema\.linkTypes\["Precedes"\] must be an object/,
+    resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      config: { schema: { linkTypes: { Precedes: "not-an-object" } } } } },
+  { name: "a per-project linkTypes block that reaches nothing", hard: false,
+    re: /^project\.json: schema\.linkTypes does not reach the scheduler/,
+    resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      project: { schema: { linkTypes: {} } } } },
+];
+
+describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a silent change", () => {
+  for (const { name, hard, re, resolved } of CLASSIFICATION) {
+    test(`${name} is ${hard ? "HARD (the verb is refused)" : "SOFT (reported only)"}`, () => {
+      const reported = validateSchema(resolved);
+      const matched = reported.filter((m) => re.test(m));
+      assert.equal(matched.length, 1,
+        `the fixture must make this ONE tag fire, or the row measures nothing — `
+        + `got ${matched.length} matches in: ${reported.join(" | ")}`);
+      const refused = new Set(refusedMessages(resolved));
+      assert.equal(refused.has(matched[0]), hard, hard
+        ? `this is a MALFORMATION: the load path must refuse it, and ${matched[0]} was not in the refusal`
+        : `this is an ADVISORY: \`blaze audit\` calls such a board ok=true, so refusing it `
+          + `makes the preflight a wall on a board audit runs clean — ${matched[0]}`);
+    });
+  }
+
+  test("the table covers every hard()/soft() call site in schema-config.mjs", () => {
+    // Without this, a NEW tag ships unclassified-by-test and the next flip is free again.
+    const src = readFileSync(new URL("../../scripts/model/schema-config.mjs", import.meta.url), "utf8");
+    const sites = [...src.matchAll(/(?<![\w.$])(hard|soft)\(/g)].map((m) => m[1]);
+    const counted = { hard: sites.filter((s) => s === "hard").length, soft: sites.filter((s) => s === "soft").length };
+    assert.ok(counted.hard > 10 && counted.soft > 2, `the scan is not working: ${JSON.stringify(counted)}`);
+    const covered = {
+      hard: CLASSIFICATION.filter((r) => r.hard).length,
+      soft: CLASSIFICATION.filter((r) => !r.hard).length,
+    };
+    assert.deepEqual(covered, counted,
+      "every hard()/soft() call site needs a CLASSIFICATION row, or its classification is unpinned");
+  });
+});
+
+describe("BLZ-56: the endpoint-kind finding is SOFT, and cli.mjs's preflight depends on it", () => {
+  test("an undeclared endpoint kind never reaches the load path's refusal", () => {
+    // READ THIS BEFORE MAKING IT HARD. `collectSchemaProblems` judges endpoint kinds
+    // against `known = endpointTypes ?? types`, and `endpointTypes` is the union of every
+    // type declared anywhere — which only `auditCorpus` supplies. The preflight in
+    // scripts/cli.mjs does NOT, deliberately (see its comment): while this finding is
+    // soft, `assertSchemaValid` filters it out and the union cannot change any load-path
+    // decision. Re-tag it hard and the preflight will refuse every board whose top-level
+    // `Precedes` names a type only one project declares — the BLZ-392 false positive,
+    // reintroduced on the load path. Making it hard means restoring the `endpointTypes`
+    // union in cli.mjs's preflight in the same change.
+    const resolved = { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      linkTypes: [{ name: "Precedes", source_kinds: ["ghosttype"], target_kinds: ["task"] }] };
+    assert.ok(validateSchema(resolved).some((m) => /ghosttype/.test(m)), "it must still be REPORTED");
+    assert.doesNotThrow(() => assertSchemaValid(resolved),
+      "the load path must not refuse it — and cli.mjs's preflight omits `endpointTypes` because of that");
+    // And the same, judged against the narrower registry the preflight actually passes.
+    assert.doesNotThrow(() => assertSchemaValid({ ...resolved, endpointTypes: null }));
+  });
+});
+
+// =============================================================================
+// Round 4 — `validateSchema`'s documented ORDER.
+// Its doc comment promises the problems come back "in the order the problems were
+// found", `auditCorpus` prints them in that order, and appending `.reverse()` to the
+// return left the whole suite green.
+// =============================================================================
+
+describe("BLZ-56: validateSchema returns problems in the order they were found", () => {
+  /** One problem from each stage of `collectSchemaProblems`, in source order. */
+  const MIXED = {
+    types: { ...DEFAULT_TYPES, spike: { level: "0", workflow: "delivery", parentTypes: [], required: [] } },
+    workflows: { ...DEFAULT_WORKFLOWS, requirement: NARROWED_REQUIREMENT, zzz: { statuses: [] } },
+    linkTypes: [{ name: "Precedes", source_kinds: ["ghosttype"], target_kinds: ["task"] }],
+    config: { schema: { linkTypes: { Precedes: "not-an-object" } } },
+    project: { schema: { linkTypes: {} } },
+  };
+  const STAGES = [
+    /^type "spike" has a level/,
+    /^workflow "zzz" has statuses/,
+    /^workflow "requirement" omits/,
+    /^link type "Precedes" names "ghosttype"/,
+    /^blaze\.config\.json: schema\.linkTypes/,
+    /^project\.json: schema\.linkTypes/,
+  ];
+
+  test("the stages come back in source order, not reversed or regrouped", () => {
+    const out = validateSchema(MIXED);
+    const at = STAGES.map((re) => {
+      const i = out.findIndex((m) => re.test(m));
+      assert.notEqual(i, -1, `${re} never fired, so the order is measured against nothing: ${out.join(" | ")}`);
+      return i;
+    });
+    assert.deepEqual(at, [...at].sort((a, b) => a - b),
+      `the problems must arrive in the order they were found — got positions ${at.join(", ")} `
+      + `for the stages in source order. \`auditCorpus\` prints them in this order.`);
+  });
+
+  test("and the hard subset keeps that order inside the refusal", () => {
+    // The load path renders `errors` as the body of one message; a reordering there
+    // would print a board's problems in an order its own audit report contradicts.
+    const reported = validateSchema(MIXED);
+    const refused = refusedMessages(MIXED);
+    assert.ok(refused.length >= 2, `expected several hard problems, got ${refused.length}`);
+    const positions = refused.map((m) => reported.indexOf(m));
+    assert.ok(positions.every((p) => p !== -1), "every refused message must also be reported");
+    assert.deepEqual(positions, [...positions].sort((a, b) => a - b),
+      "the refusal lists the hard problems in the order validateSchema reports them");
   });
 });

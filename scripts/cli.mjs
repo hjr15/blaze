@@ -134,19 +134,29 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     // an explicit projectsDir and derives dataRoot as its PARENT, while `loadProject`
     // defaults to `join(root, "projects")` — so with BLAZE_PROJECTS_DIR pointing at a
     // directory named anything else, every `loadProject` below threw, was swallowed, and
-    // every project resolved to null. The project layer was then never validated and
-    // `endpointTypes` never picked up a project-declared type. scripts/audit-runner.mjs uses
-    // `roots.projectsDir` verbatim; this follows it, because the whole design of this
-    // preflight is that it judges the board the way audit judges it.
+    // every project resolved to null, so the project layer was never validated at all.
+    // scripts/audit-runner.mjs uses `roots.projectsDir` verbatim; this follows it, because
+    // the whole design of this preflight is that it judges the board the way audit judges it.
     const { dataRoot: root, projectsDir } = resolveRoots();
     const config = loadConfig({ root });
 
-    // JUDGED THE WAY `auditCorpus` JUDGES IT, and this is not a detail. A top-level
-    // `Precedes` list may legitimately name a type that only ONE PROJECT declares, which
-    // is why BLZ-392 added `endpointTypes` — every type that exists anywhere. The first
-    // cut of this preflight dropped it and validated the top layer alone, so every
-    // non-exempt verb refused to run on a board `blaze audit` calls clean. A check that
-    // disagrees with audit on the same board is worse than no check at all.
+    // NO `endpointTypes` UNION HERE, AND ITS ABSENCE IS THE DELIBERATE PART. `auditCorpus`
+    // builds one (scripts/model/audit.mjs) — every type declared anywhere — because a
+    // top-level `Precedes` list may legitimately name a type only ONE PROJECT declares.
+    // That union feeds exactly one check, BLZ-392's endpoint-kind finding, and that finding
+    // is SOFT. `assertSchemaValid` takes the HARD entries only, so the union cannot change
+    // any decision this preflight makes: building it here would be a mechanism that runs,
+    // costs a `resolveSchema` per project, and can decide nothing — the shape ADR-0002's
+    // alternative (c) records as "a well-tested no-op: green in CI, absent in production".
+    //
+    // IF THAT FINDING IS EVER RE-TAGGED HARD, THE UNION MUST COME BACK IN THE SAME CHANGE,
+    // or this preflight will refuse every board whose top-level `Precedes` names a
+    // project-declared type — BLZ-392's false positive, reintroduced on the load path. The
+    // re-tagging cannot happen quietly: "the endpoint-kind finding is SOFT, and cli.mjs's
+    // preflight depends on it" (tests/model/schema-validate-on-load.test.mjs) goes red and
+    // says so. Everything else here still judges the board exactly the way audit does — a
+    // check that disagrees with audit on the same board is worse than no check at all.
+    //
     // The project set, with audit-runner.mjs's fallback and for audit-runner.mjs's stated
     // reason: `listProjects` returns [] when `blaze.config.json` carries no `projects` array,
     // so without this the preflight validated NOTHING and passed — "a gate that passes
@@ -159,17 +169,13 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
       try { projects[k] = loadProject(k, { root, projectsDir }); } catch { projects[k] = null; }
     }
     const top = resolveSchema({ config });
-    const endpointTypes = { ...top.types };
-    for (const k of Object.keys(projects)) {
-      Object.assign(endpointTypes, resolveSchema({ config, project: projects[k] }).types);
-    }
-    assertSchemaValid({ ...top, config, endpointTypes });
+    assertSchemaValid({ ...top, config });
     // And each project layer, which `new`/`edit` resolve through `loadProjectSchema` and
     // the first cut never looked at — so a malformed project.json passed every verb while
     // audit reported it. The mirror of the same asymmetry.
     for (const k of Object.keys(projects)) {
       const resolved = { ...resolveSchema({ config, project: projects[k] }), linkTypes: top.linkTypes };
-      assertSchemaValid({ ...resolved, config, project: projects[k], endpointTypes },
+      assertSchemaValid({ ...resolved, config, project: projects[k] },
         { source: `projects/${k}/project.json` });
     }
   } catch (e) {
