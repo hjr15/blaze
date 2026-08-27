@@ -62,7 +62,7 @@ export function resolveSchema({ config = null, project = null } = {}) {
  *  `undefined` is NOT a wrong shape — an absent block is how almost every board is written,
  *  and reporting it would put a finding on essentially every installation, which is worse
  *  than the bug this closes. */
-export function schemaContainerErrors(schema, dropped = null, layer = "config") {
+export function schemaContainerErrors(schema, dropped = null, layer = "config", configSchema = null) {
   const kind = (v) => (Array.isArray(v) ? "an array" : v === null ? "null" : typeof v);
   const isRecord = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
   // `null` is ABSENT, not a wrong shape. `loadConfig` and `loadProject` both normalise a
@@ -71,16 +71,25 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config") 
   // paid for twice, and the existing "a healthy board reports no schema-invalid" test
   // caught it immediately. The loaders hand the dropped KIND separately, because by the
   // time the block reaches here a wrong shape and an absent one look identical.
-  // WHAT IS STILL IN FORCE DEPENDS ON THE LAYER, and one message hardcoded to the built-in
-  // defaults was UNTRUE at the project layer: `resolveSchema` merges DEFAULT, then
-  // blaze.config.json, then the project block, so dropping the LAST one leaves the
-  // blaze.config.json override in force — not the defaults. Telling an operator with a
-  // valid top-level override that their board fell back to built-ins, and pointing them at
-  // the wrong file, is the exact class of untrue statement this ticket exists to end.
-  const stillInForce = layer === "project"
+  // WHAT IS STILL IN FORCE IS DERIVED, NEVER ASSUMED. `resolveSchema` merges DEFAULT, then
+  // blaze.config.json, then the project block, so dropping the LAST one leaves whatever the
+  // first two resolved to. Two wrong answers have already shipped through here:
+  //
+  //   1. hardcoded to the built-in defaults — untrue at the project layer whenever
+  //      blaze.config.json carries a valid override, and it named the wrong file too;
+  //   2. hardcoded to "the blaze.config.json layer is still in force" for every project-layer
+  //      report — untrue whenever that layer does not exist, is ITSELF dropped, or declares
+  //      nothing for this particular block. That is wrong on the MORE common board, and on a
+  //      board with both layers dropped the report contradicted itself in adjacent lines.
+  //
+  // So the clause is computed from the config layer that is actually present, per block. A
+  // dropped config layer arrives here as `null` (the loader flattens it), which is exactly
+  // the "not in force" case — no special handling needed.
+  const topInForce = layer === "project" && isRecord(configSchema);
+  const stillInForce = topInForce
     ? "the blaze.config.json layer is still in force"
     : "every type, workflow and link type came from the built-in defaults";
-  const blockInForce = (block) => (layer === "project"
+  const blockInForce = (block) => (topInForce && isRecord(configSchema[block])
     ? `the blaze.config.json layer's ${block} are still in force`
     : `the built-in ${block} are still in force`);
   // A dropped-kind marker is only ever set by the loaders, and only to one of these. It
@@ -346,7 +355,7 @@ function collectSchemaProblems(input = {}) {
   for (const e of schemaContainerErrors(config?.schema, config?.[SCHEMA_BLOCK_DROPPED], "config")) {
     hard(`blaze.config.json: ${e}`);
   }
-  for (const e of schemaContainerErrors(project?.schema, project?.[SCHEMA_BLOCK_DROPPED], "project")) {
+  for (const e of schemaContainerErrors(project?.schema, project?.[SCHEMA_BLOCK_DROPPED], "project", config?.schema)) {
     hard(`project.json: ${e}`);
   }
   // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"

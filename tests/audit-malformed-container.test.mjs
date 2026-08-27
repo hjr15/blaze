@@ -80,8 +80,13 @@ describe("BLZ-396: a malformed schema CONTAINER never takes `blaze audit` down",
         // Still a REAL audit, not an empty shell that happens to say ok.
         assert.match(r.stdout, /deadline-unreachable/,
           `the schedule was silently switched off:\n${r.stdout}`);
-        assert.doesNotMatch(r.stdout, /\[object Object\]/,
-          `a detail rendered as [object Object] — BLZ-392's defect by another route:\n${r.stdout}`);
+        // Against the DETAILS, not the plain report. The plain report prints a per-kind
+        // COUNT and no detail text at all, so asserting this on `r.stdout` could never
+        // fail — a vacuous assertion naming a real defect, which is worse than none.
+        for (const d of schemaDetails(root)) {
+          assert.doesNotMatch(d, /\[object Object\]/,
+            `a detail rendered as [object Object] — BLZ-392's defect by another route:\n${d}`);
+        }
       } finally { rmSync(root, { recursive: true, force: true }); }
     });
   }
@@ -118,6 +123,20 @@ describe("BLZ-396 review F1: audit names the layer that is ACTUALLY still in for
         `the blaze.config.json spike override IS in force, so this is untrue:\n${line}`);
       assert.match(line, /blaze\.config\.json layer/,
         `and the operator must be told which layer IS in force:\n${line}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("B1.a with NO config schema at all, the project message names the DEFAULTS", () => {
+    // The ordinary board, and the one the first F1 fix got wrong: it told every operator
+    // without a top-level override that "the blaze.config.json layer is still in force",
+    // pointing them at a file with no schema block in it.
+    const root = board(`${BASE}}`, '{"schema":"a string"}');
+    try {
+      const line = schemaDetails(root).find((d) => /^project\.json:/.test(d));
+      assert.ok(line, "no project-layer finding");
+      assert.doesNotMatch(line, /the blaze\.config\.json layer is still in force/,
+        `there is no such layer on this board:\n${line}`);
+      assert.match(line, /built-in defaults/, line);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 

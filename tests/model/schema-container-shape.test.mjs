@@ -21,6 +21,7 @@ import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { validateSchema, assertSchemaValid, schemaContainerErrors }
   from "../../scripts/model/schema-config.mjs";
+import { SCHEMA_BLOCK_DROPPED } from "../../scripts/model/schema-marker.mjs";
 import { loadConfig, loadProject } from "../../scripts/config.mjs";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -312,5 +313,67 @@ describe("BLZ-396 review F2: schemaContainerErrors' own dropped-kind contract", 
     // Both production call sites pass it explicitly; the default keeps the exported
     // function honest for anyone who does not.
     assert.match(schemaContainerErrors({ types: "x" })[0], /the built-in types are still in force/);
+  });
+});
+
+describe("BLZ-396 re-review B1: the layer clause is DERIVED, never assumed", () => {
+  // The first F1 fix INVERTED the untrue statement instead of removing it. It said "the
+  // blaze.config.json layer is still in force" for every project-layer report — including
+  // when that layer does not exist, is itself dropped, or declares nothing for the block in
+  // question. That is wrong on the MORE common board: the old message was only untrue when
+  // config HAD a valid override; the replacement is untrue whenever config LACKS one.
+  //
+  // Both F1 tests pinned the one case where the new clause happened to be true, because they
+  // fixed the config layer to a valid `spike` override. A test that asserts the requirement
+  // is what the code already does is not a test.
+  const SPIKE = { types: { spike: { level: 0, workflow: "delivery",
+    parentTypes: ["feature"], required: ["title"] } } };
+  const projectDetail = (config, project) =>
+    validateSchema({ config, project }).find((p) => /^project\.json:/.test(p));
+
+  test("B1.a no schema in blaze.config.json at all — the DEFAULTS are in force", () => {
+    const msg = projectDetail({ key: "ENG" }, { schema: "a string" });
+    assert.ok(msg, "no project-layer message at all");
+    assert.doesNotMatch(msg, /the blaze\.config\.json layer is still in force/,
+      `there is no blaze.config.json layer — this points the operator at a file with no `
+      + `schema block:\n${msg}`);
+    assert.match(msg, /built-in defaults/, `the defaults really are what is in force:\n${msg}`);
+  });
+
+  test("B1.b both layers dropped — the report must not contradict itself", () => {
+    const problems = validateSchema(
+      { config: { schema: null, [SCHEMA_BLOCK_DROPPED]: "string" }, project: { schema: "a string" } });
+    const top = problems.find((p) => /^blaze\.config\.json:/.test(p));
+    const proj = problems.find((p) => /^project\.json:/.test(p));
+    assert.ok(top && proj, `expected both layers reported: ${problems}`);
+    assert.doesNotMatch(proj, /the blaze\.config\.json layer is still in force/,
+      `the line above says that very layer was IGNORED:\n${top}\n${proj}`);
+  });
+
+  test("B1.c config overrides only types; a dropped project WORKFLOWS block", () => {
+    const msg = validateSchema({ config: { schema: SPIKE }, project: { schema: { workflows: 42 } } })
+      .find((p) => /^project\.json: schema\.workflows/.test(p));
+    assert.ok(msg, "no project-layer workflows message");
+    assert.doesNotMatch(msg, /blaze\.config\.json layer's workflows/,
+      `blaze.config.json declares no workflows — only types:\n${msg}`);
+    assert.match(msg, /built-in workflows/, `the built-in workflows are in force:\n${msg}`);
+  });
+
+  test("B1.d config's block is valid but declares nothing for this block", () => {
+    const msg = projectDetail({ schema: { linkTypes: {} } }, { schema: { types: "x" } });
+    assert.ok(msg, "no project-layer message");
+    assert.doesNotMatch(msg, /blaze\.config\.json layer's types/,
+      `a linkTypes-only override puts no types in force:\n${msg}`);
+  });
+
+  test("and the TRUE case still says so — the control", () => {
+    // Without this, every assertion above is satisfied by never naming the config layer,
+    // which would put back the original F1 defect.
+    const msg = projectDetail({ schema: SPIKE }, { schema: { types: "x" } });
+    assert.match(msg, /blaze\.config\.json layer's types are still in force/,
+      `the spike override IS in force and the operator must be told:\n${msg}`);
+    const whole = projectDetail({ schema: SPIKE }, { schema: "a string" });
+    assert.match(whole, /the blaze\.config\.json layer is still in force/,
+      `a dropped WHOLE project block with a real top-level override:\n${whole}`);
   });
 });

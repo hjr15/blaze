@@ -14,6 +14,11 @@
 //    them can be in its temporal dead zone when the other's body runs. This module imports
 //    nothing, so it is fully initialised before either.
 //
-// Symbols survive both `Object.freeze` (it is set before the freeze) and object spread
-// (spread copies enumerable own symbol keys), which is how it reaches `cli.mjs`'s consumers.
+// It is set BEFORE `Object.freeze`, so the freeze preserves it. `cli.mjs` passes `config`
+// and `project` by REFERENCE into its command context rather than copying them, so nothing
+// has to survive a copy on the production path — and object spread would carry it anyway,
+// since spread copies enumerable own symbol keys. What it does NOT survive is
+// `JSON.stringify`, which drops symbol keys; no production path serialises a config, and
+// `audit-runner.mjs` deliberately reads the RAW parse, where the wrong-shaped `schema` is
+// still visible directly and needs no marker.
 export const SCHEMA_BLOCK_DROPPED = Symbol("blaze.schemaBlockDropped");
