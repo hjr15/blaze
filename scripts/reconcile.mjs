@@ -933,49 +933,44 @@ function gatherProject(project, { fetch }) {
   };
 }
 
-// --- BLZ-404 round 2 (blocking 1): finish an unfinished pass, don't call it in sync ---
-// The commit block below used to gate on `touched.length` alone — the tickets THIS PASS
-// decided to write. That is right for "did this pass find anything new", and wrong for
-// "is there anything left to commit": a previous pass that wrote ticket files and then
-// FAILED to commit them (a held lock, a failing pre-commit hook) leaves those files on
-// disk, at their target status, uncommitted. The very next pass samples git+PR state,
-// finds the board already where it should be, and so decides nothing and writes nothing
-// of its own — `touched` is empty — even though the tree is still dirty from before.
-// Gating the commit on `touched.length` alone then made reconcile — the one verb whose
-// whole job is "make the board match git state" — silently leave that job undone and
-// report a healthy run.
+// --- BLZ-404 round 3: detect a dirty ticket tree, never recover it ------------
+// Round 2 shipped `dirtyTicketPaths`: when a pass found nothing new to decide, it probed
+// `git status --porcelain`, turned the output into a path list, and fed that list to
+// `git add` to finish a previous pass's uncommitted write. Round 3's adversarial review
+// reproduced five ways that went wrong, all load-bearing:
+//   - it swept a human's UNRELATED uncommitted work under `projects/` into the commit —
+//     not filtered by `keys`, not restricted to ticket files, not baselined — the exact
+//     opposite of the comment this function used to carry;
+//   - it committed another project's files under a commit scoped to the wrong project,
+//     the precise blast-radius violation BLZ-394 exists to prevent;
+//   - it reintroduced the porcelain PATH PARSER BLZ-347 deliberately deleted, so one
+//     spaced or non-ASCII (C-quoted) filename fed `git add` a path that does not exist,
+//     `git add` exited 128, and `--apply` wedged PERMANENTLY;
+//   - its arrow-split on a staged rename line kept only the destination, half-committing
+//     the rename and leaving a duplicate ticket id in HEAD;
+//   - `commitOutcome === "none"` was treated as proof of a clean board when it is not:
+//     a nested or symlinked board could make the recovery attempt itself fail silently
+//     (a path join gone wrong) and the CLI kept saying "already in sync" forever.
 //
-// Scoped to `projectsDir`, never the whole repo: this is deliberately NOT `git add -A`.
-// A human's unrelated uncommitted work sitting elsewhere in the same board repo (a draft
-// doc, an unrelated config edit) must never be swept into a reconcile commit — only the
-// board's own ticket tree is this verb's business, exactly as `--project`'s blast-radius
-// scoping already established for the SELECTION half of this same verb.
-function dirtyTicketPaths(root, projectsDir) {
-  // Deliberately NOT `shResult`/`sh`: both `.trim()` the WHOLE captured blob, and
-  // porcelain's own unstaged-change marker is a LEADING space (" D path" — the first
-  // column is the index status, blank; the second is the worktree status, D). Trimming
-  // the blob eats exactly that leading space off the FIRST line only, shifting every
-  // fixed-offset slice on it by one column and truncating the path's first character
-  // ("projects/…" read as "rojects/…") — caught by this function's own pinning test
-  // reproducing the exact " D …" line the bug this whole fix exists for produces.
+// The fix is not a better parser. It is not parsing at all: a BOOLEAN answers "does the
+// board's own ticket tree carry anything uncommitted", scoped to the SAME project keys
+// this pass is scoped to. Nothing is joined into a path, nothing is split on an arrow,
+// and nothing is ever passed to `git add` — a boolean cannot sweep a foreign file because
+// it names no file to sweep, and it is immune to a quoting or rename bug by construction.
+// Reconcile REPORTS this condition (see `dirtyTicketTree` in the return value, and the
+// CLI/supervisor sections that read it) and leaves fixing it to a person, on purpose —
+// the same "report, don't mutate" call this lane made for BLZ-403, for the same reason:
+// the mutation's blast radius is unbounded and the report's is zero.
+function hasUncommittedTicketChanges(root, projectsDir, keys) {
+  const pathspecs = keys.map((k) => join(projectsDir, k));
   let stdout;
   try {
-    stdout = execFileSync("git", ["-C", root, "status", "--porcelain", "--", projectsDir],
+    stdout = execFileSync("git", ["-C", root, "status", "--porcelain", "--", ...pathspecs],
       { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
   } catch {
-    return [];
+    return false;
   }
-  const out = [];
-  for (const line of stdout.split("\n")) {
-    if (!line) continue;
-    // Porcelain v1: two status chars, a space, then the path. A rename/copy line reads
-    // "old -> new"; the file that exists on disk NOW (and so is what `git add` needs) is
-    // the one after the arrow.
-    const path = line.slice(3);
-    const arrow = path.indexOf(" -> ");
-    out.push(arrow === -1 ? path : path.slice(arrow + 4));
-  }
-  return out;
+  return stdout.trim().length > 0;
 }
 
 // --- the reconcile pass -------------------------------------------------------
@@ -1270,44 +1265,40 @@ export async function reconcile({
   // meaningless name in `checkBranch`'s refusal message, which lists ids by this field).
   let commitOutcome = "none"; // "none" | "committed" | "queued" | "locked" | "failed"
   let commitError = null;
-  // BLZ-404 round 2 (blocking 1): when THIS pass wrote nothing (`touched` empty), that is
-  // not yet "nothing to commit" — a previous pass may have written ticket files and then
-  // failed to commit them. `recoveredCount` says which case this run landed in, so the
-  // CLI and the supervisor can tell "genuinely nothing outstanding" from "just finished
-  // someone else's unfinished write" without re-deriving it themselves.
-  let recoveredCount = 0;
-  if (commit && !dryRun) {
-    let files = touched;
-    let message = `chore(board): reconcile ${changes.length} ticket(s) to git state` +
-      (wanted ? ` (${keys.join(", ")})` : "");
-    if (!files.length) {
-      const dirty = dirtyTicketPaths(root, projectsDir).map((p) => join(root, p));
-      if (dirty.length) {
-        files = dirty;
-        recoveredCount = dirty.length;
-        message = `chore(board): reconcile recovers ${dirty.length} uncommitted ticket ` +
-          "change(s) left by a previous pass" + (wanted ? ` (${keys.join(", ")})` : "");
-      }
-    }
-    if (files.length) {
-      const c = commitOrQueue({
-        root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
-        message, files,
-      });
-      if (c.queued) {
-        commitOutcome = "queued";
-      } else if (c.ok) {
-        committed = true;
-        commitOutcome = "committed";
-      } else if (c.locked) {
-        commitOutcome = "locked";
-        commitError = "the advisory commit lock is held by another writer";
-      } else {
-        commitOutcome = "failed";
-        commitError = `git commit failed (exit status ${c.status})`;
-      }
+  // BLZ-404 round 3: this commit block only ever files THIS PASS's own decisions
+  // (`touched`) — it makes NO attempt to recover a previous pass's uncommitted ticket
+  // writes. See `hasUncommittedTicketChanges` above for why round 2's recovery attempt
+  // (`dirtyTicketPaths`) was deleted rather than patched. Whether the board's ticket tree
+  // ALSO carries leftover uncommitted dirt from some earlier pass is reported below via
+  // `dirtyTicketTree`, never fixed here.
+  if (commit && !dryRun && touched.length) {
+    const c = commitOrQueue({
+      root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
+      message: `chore(board): reconcile ${changes.length} ticket(s) to git state` +
+        (wanted ? ` (${keys.join(", ")})` : ""),
+      files: touched,
+    });
+    if (c.queued) {
+      commitOutcome = "queued";
+    } else if (c.ok) {
+      committed = true;
+      commitOutcome = "committed";
+    } else if (c.locked) {
+      commitOutcome = "locked";
+      commitError = "the advisory commit lock is held by another writer";
+    } else {
+      commitOutcome = "failed";
+      commitError = `git commit failed (exit status ${c.status})`;
     }
   }
+  // BLZ-404 round 3: computed whenever THIS pass found nothing new to decide (`changes`
+  // empty implies `touched` empty — see the per-ticket loop above — so the commit block
+  // just above never ran). A `true` here means the board's own ticket tree carries
+  // uncommitted changes this pass did not make, most likely a previous pass that wrote
+  // ticket files and then failed to commit them (a held lock, a failing pre-commit hook).
+  // reconcile does NOT auto-recover that — see the CLI and supervisor sections that read
+  // this field, both of which report it and leave fixing it to a person.
+  const dirtyTicketTree = !changes.length && hasUncommittedTicketChanges(root, projectsDir, keys);
   // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
   // never reads a `push` option and `pushed: false` is unconditional below — accepting a
   // `push` PARAMETER that nothing reads told every caller a run might push when it never
@@ -1330,7 +1321,7 @@ export async function reconcile({
   // BLZ-404: `dryRun` travels with the result too — `changes` is a PROPOSAL list on a dry
   // run and a RECORD of writes on an applied run, and until now no consumer could tell
   // which sense it was looking at without already knowing what it had passed in.
-  return { ok: true, changes, committed, commitOutcome, commitError, recoveredCount, pushed,
+  return { ok: true, changes, committed, commitOutcome, commitError, dirtyTicketTree, pushed,
            missingRepos, scannedRepos, configuredRepos, forgeErrors, findings,
            scannedProjects: keys, dryRun };
 }
@@ -1408,16 +1399,22 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("reconcile: this is a misconfiguration, not an in-sync board. If you are in a git worktree, relative codeRepos may be resolving against the wrong parent.");
     process.exit(1);
   }
-  // BLZ-404 round 2 (blocking 1): "already in sync" is a positive claim about the WHOLE
-  // board, and it must not fire merely because THIS pass found nothing NEW to decide.
-  // `reconcile()`'s own commit block (see `dirtyTicketPaths` above it) already tried, in
-  // this very call, to finish any commit a previous pass left behind — so by the time we
-  // get here `r.commitOutcome` is `"none"` only when there is truly nothing outstanding:
-  // always true in dry-run mode (which never commits at all), and in apply mode true only
-  // when the board really is clean. When it is anything else (`committed`, `queued`,
-  // `locked`, `failed`), that outcome is reported below instead — never silently, and
-  // never as "in sync".
-  if (!r.changes.length && (!apply || r.commitOutcome === "none")) {
+  // BLZ-404 round 3: "already in sync" is a positive claim about the WHOLE board, and it
+  // must not fire merely because THIS pass found nothing NEW to decide. reconcile() no
+  // longer attempts to recover a previous pass's uncommitted ticket writes (round 3's
+  // adversarial review found that recovery attempt unsafe in five distinct ways — see
+  // `hasUncommittedTicketChanges`'s own comment in reconcile.mjs) — it DETECTS the
+  // condition, as a boolean, and reports it here instead of auto-fixing it. A dirty board
+  // is never "in sync", in dry-run mode exactly as in apply mode.
+  if (!r.changes.length) {
+    if (r.dirtyTicketTree) {
+      console.error(
+        "reconcile: the board's ticket tree carries uncommitted changes this pass did not " +
+        "make — most likely a previous pass wrote ticket files and failed to commit them. " +
+        "reconcile does not auto-recover this: run `blaze commit`, or commit the tree by " +
+        "hand, then re-run.");
+      process.exit(1);
+    }
     if (!quiet) console.log("reconcile: already in sync — nothing to do.");
     process.exit(0);
   }
@@ -1433,16 +1430,11 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // rather than reusing "moved" wording (which only ever described the file, never the
   // commit) for every outcome alike.
   if (apply) {
-    const count = r.changes.length || r.recoveredCount;
+    const count = r.changes.length;
     if (r.commitOutcome === "queued") {
       console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ${count} change(s).`);
     } else if (r.commitOutcome === "committed") {
-      // BLZ-404 round 2 (blocking 1): a run whose own `changes` is empty but which still
-      // committed did NOT decide anything new — it finished a PREVIOUS pass's write. Saying
-      // "committed 0 change(s)" there would be its own small lie in the opposite direction.
-      console.log(r.recoveredCount
-        ? `reconcile: recovered and committed ${r.recoveredCount} ticket change(s) left uncommitted by an earlier pass.`
-        : `reconcile: committed ${count} change(s).`);
+      console.log(`reconcile: committed ${count} change(s).`);
     } else if (r.commitOutcome === "locked") {
       console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
         "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +

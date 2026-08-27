@@ -276,19 +276,16 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // must not STOP there when the commit did not land, since per the comment above
         // this feed is "the operator's whole account of the run" under `blaze start`.
         if (r.commitOutcome === "locked" || r.commitOutcome === "failed") {
-          // BLZ-404 round 2 (blocking 1): "applied N change(s) to disk" is only true of a
-          // pass that decided something new. A RECOVERY pass (this pass's own `changes` is
-          // empty; it is finishing a previous pass's leftover write — see `recoveredCount`
-          // in reconcile.mjs) applied nothing new to disk this tick, so it gets its own,
-          // equally true wording rather than inheriting the fresh-pass one.
-          const what = r.recoveredCount
-            ? `reconcile found ${r.recoveredCount} ticket change(s) left uncommitted by an earlier pass`
-            : `reconcile applied ${r.changes.length} change(s) to disk`;
+          // BLZ-404 round 3: this branch only ever fires when THIS pass decided something
+          // new (`commitOutcome` reaches "locked"/"failed" only through the commit block,
+          // which round 3 gated on `touched.length` alone — reconcile no longer retries a
+          // previous pass's leftover write, see reconcile.mjs's `hasUncommittedTicketChanges`
+          // comment), so "applied N change(s) to disk" is always true of the pass reporting it.
           bus.publish({
             type: "error", loop: "reconcile",
-            message: `${what} but the commit did not land (${r.commitOutcome}: ${r.commitError}) — ` +
-              "the board is now a DIRTY TREE: ticket files changed with no matching commit. " +
-              "Investigate and commit manually.",
+            message: `reconcile applied ${r.changes.length} change(s) to disk but the commit did ` +
+              `not land (${r.commitOutcome}: ${r.commitError}) — the board is now a DIRTY TREE: ` +
+              "ticket files changed with no matching commit. Investigate and commit manually.",
             ts: today(),
           });
         }
@@ -302,10 +299,26 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // calls it "the operator's whole account of the run" — was not. Say what the CLI
         // says, in the CLI's own words, so the two surfaces cannot drift on this outcome.
         if (r.commitOutcome === "queued") {
-          const count = r.changes.length || r.recoveredCount;
           bus.publish({
             type: "warning", loop: "reconcile",
-            message: `queued (commitMode: batch) — run \`blaze commit\` to flush ${count} change(s).`,
+            message: `queued (commitMode: batch) — run \`blaze commit\` to flush ${r.changes.length} change(s).`,
+            ts: today(),
+          });
+        }
+        // BLZ-404 round 3: the second of round 2's two false statements — the supervisor
+        // reporting a dirty board once and then going silent while it persisted. Round 2
+        // "fixed" this by having reconcile() retry the commit every tick (so `locked`/
+        // `failed` kept firing above); round 3 deleted that retry as unsafe. Reported here
+        // instead, straight from the boolean `dirtyTicketTree` reconcile() now returns —
+        // UNDEDUPED, like the block above, so the operator is not left reading a single
+        // stale warning while the condition (and the risk) persists tick after tick.
+        if (r.dirtyTicketTree) {
+          bus.publish({
+            type: "error", loop: "reconcile",
+            message: "reconcile: the board's ticket tree carries uncommitted changes this pass " +
+              "did not make — most likely an earlier pass wrote ticket files and failed to " +
+              "commit them. reconcile does not auto-recover this: run `blaze commit`, or " +
+              "commit the tree by hand.",
             ts: today(),
           });
         }

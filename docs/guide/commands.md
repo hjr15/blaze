@@ -115,6 +115,13 @@ reconcile prints a `FORGE UNREADABLE` line to stderr on every run (including und
 branch and merged-commit signals are unaffected. See
 [Forge support and status reachability](how-it-works.md#forge-support-and-status-reachability).
 
+Reconcile does **not** auto-recover an uncommitted prior pass. If a previous
+`--apply` moved ticket files but failed to commit them (a held lock, a failing
+pre-commit hook), the board's ticket tree stays dirty until a person clears it —
+the next run detects that (a boolean check, nothing is parsed or re-committed on
+its behalf) and reports it instead of silently claiming "already in sync". Run
+`blaze commit`, or commit the tree by hand, then re-run.
+
 ## groom
 
 ```

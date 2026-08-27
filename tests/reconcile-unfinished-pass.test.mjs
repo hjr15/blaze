@@ -1,27 +1,22 @@
-// tests/reconcile-unfinished-pass.test.mjs — BLZ-404, round-2 adversarial review,
-// blocking findings 1 and 3.
+// tests/reconcile-unfinished-pass.test.mjs — BLZ-404, round-3 adversarial review.
 //
-// Round 1 fixed reconcile()'s commit to route through the shared lock/commitMode instead
-// of shelling straight to `git add`/`git commit`. Round 2's reviewer reproduced the
-// recovery path THAT FIX ITSELF CREATES: `commit && !dryRun && touched.length` gates the
-// commit block on `touched` — the tickets THIS PASS decided to write — and `touched` is
-// empty whenever the board is already at its target status ON DISK. After a locked or
-// failed commit, the files a PREVIOUS pass wrote are exactly that: on disk, at the target
-// status, uncommitted. The very next run therefore finds nothing new to decide, commits
-// nothing, and (before this fix) told the CLI's own "already in sync — nothing to do." —
-// exit 0 — over a dirty tree. The supervisor twin is worse: the error fires exactly once
-// (the pass that first hit the lock) and then goes silent forever, because from the next
-// tick `touched` is empty and the commit block never runs again at all.
+// Round 2 shipped `dirtyTicketPaths`: when a pass found nothing new to decide, it probed
+// `git status --porcelain`, turned the output into a path list, and re-attempted the
+// commit for whatever it found. Round 3's adversarial review reproduced five ways that
+// recovery attempt went wrong — it swept a human's unrelated uncommitted work and another
+// project's files into the reconcile commit (the exact opposite of its own comment's
+// promise, and a BLZ-394 blast-radius violation), it reintroduced the porcelain path
+// parser BLZ-347 deliberately deleted (one spaced or non-ASCII filename wedged `--apply`
+// permanently), it half-committed staged renames leaving a duplicate ticket id in HEAD,
+// and `commitOutcome === "none"` was not actually proof of a clean board.
 //
-// BLOCKING 1's fix: reconcile() itself must finish an unfinished pass — when `touched` is
-// empty, probe `git status --porcelain -- <projectsDir>` (scoped to the board's own
-// ticket tree, never `git add -A`) and, if it finds leftover uncommitted ticket changes,
-// attempt the commit for THEM. `commitOutcome` then correctly reads "none" only when there
-// is truly nothing outstanding, in apply mode exactly as in dry-run mode — which is what
-// lets the CLI stop saying "already in sync" over a dirty board (the second half of the
-// fix, in scripts/reconcile.mjs's CLI section) and what makes the supervisor's existing
-// per-tick (undeduped) "commit did not land" publish fire on every tick the condition
-// persists, not just the first.
+// Round 2's actual defect was never "reconcile fails to finish an unfinished pass" — it
+// was two false statements: the CLI printing "already in sync — nothing to do." over a
+// dirty board, exit 0; and the supervisor reporting the condition once and then going
+// silent while it persisted. THIS fix closes exactly those two, with no new write path:
+// reconcile() asks a BOOLEAN whether the board's own ticket tree carries anything
+// uncommitted (`hasUncommittedTicketChanges` in reconcile.mjs — parses no paths, joins no
+// paths, passes nothing to `git add`) and REPORTS it. It does not attempt to recover it.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
@@ -46,8 +41,12 @@ function headCount(dir) {
   }
 }
 
-function porcelain(root) {
-  return execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim();
+function headSha(dir) {
+  return execFileSync("git", ["-C", dir, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+}
+
+function porcelain(root, ...pathspec) {
+  return execFileSync("git", ["-C", root, "status", "--porcelain", "--", ...pathspec], { encoding: "utf8" }).trim();
 }
 
 /** A board with ONE ticket that a real `<KEY>-<n>:` commit on the code repo's default
@@ -77,9 +76,9 @@ function movableBoard(tmp) {
   return { root, repo };
 }
 
-describe("BLZ-404 round 2 (blocking 1): reconcile finishes an unfinished pass instead of lying that it is in sync", () => {
-  test("CLI: after a locked commit, the very next --apply run recovers it — not 'already in sync' over a dirty tree", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "blz404r2-cli-"));
+describe("BLZ-404 round 3: reconcile detects a dirty ticket tree left by a previous pass — it does not recover it", () => {
+  test("CLI: after a locked commit, the very next --apply run does NOT recover it — it reports the dirty tree, exits non-zero, and touches nothing", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-cli-"));
     try {
       const { root } = movableBoard(tmp);
       const before = headCount(root);
@@ -91,24 +90,29 @@ describe("BLZ-404 round 2 (blocking 1): reconcile finishes an unfinished pass in
 
       assert.notEqual(run1.status, 0, "run 1 must fail — the lock is held");
       assert.match(run1.stderr, /FAILED TO COMMIT/);
-      assert.notEqual(porcelain(root), "", "test setup: run 1 must leave the board dirty (moved on disk, not committed)");
+      const dirtyAfterRun1 = porcelain(root);
+      assert.notEqual(dirtyAfterRun1, "", "test setup: run 1 must leave the board dirty (moved on disk, not committed)");
       assert.equal(headCount(root), before, "run 1 must not have committed anything");
+      const headAfterRun1 = headSha(root);
 
-      // The CLI's OWN remediation text from run 1: "Re-run once the lock clears". This is
-      // that re-run.
+      // The lock is now clear, so a RECOVERY attempt (round 2's design) would succeed here.
+      // Round 3 deleted that attempt: this run must report the dirty tree, not fix it.
       const run2 = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
-      assert.equal(run2.status, 0, `run 2 must succeed once the lock is clear: ${run2.stderr}`);
+      assert.notEqual(run2.status, 0, "run 2 must not exit 0 — the board is genuinely dirty and nothing committed it");
       assert.doesNotMatch(run2.stdout, /already in sync/,
-        "run 2 must not claim the board is in sync — it is dirty and run 2 is the one pass that can still fix it");
-      assert.equal(headCount(root), before + 1, "run 2 must land the commit run 1 could not");
-      assert.equal(porcelain(root), "", "the board must be fully committed after run 2 recovers it");
+        "run 2 must not claim the board is in sync — it is dirty");
+      assert.doesNotMatch((run2.stdout + run2.stderr), /recovered/i,
+        "reconcile must not claim to have recovered anything — it no longer attempts to");
+      assert.equal(headCount(root), before, "run 2 must not have created any commit");
+      assert.equal(headSha(root), headAfterRun1, "run 2 must not move HEAD at all");
+      assert.equal(porcelain(root), dirtyAfterRun1, "run 2 must leave the tree EXACTLY as it found it");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  test("reconcile() library: touched.length === 0 does not stop a leftover uncommitted write from being committed", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "blz404r2-lib-"));
+  test("reconcile() library: touched.length === 0 does not trigger a recovery commit — dirtyTicketTree reports it instead", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-lib-"));
     try {
       const { reconcile } = await import("../scripts/reconcile.mjs");
       const { root } = movableBoard(tmp);
@@ -119,25 +123,48 @@ describe("BLZ-404 round 2 (blocking 1): reconcile finishes an unfinished pass in
       releaseLock(root);
       assert.equal(first.commitOutcome, "locked");
       assert.notEqual(porcelain(root), "");
+      const headAfterFirst = headSha(root);
 
       // Second pass: the ticket is ALREADY at its target status on disk (OBA-1 already
       // moved to done/ by the first pass's write-then-commit ordering), so `decide()` finds
-      // nothing new — `changes` and `touched` are both empty for THIS pass. That must not
-      // stop reconcile from finishing the commit the first pass left behind.
+      // nothing new — `changes` and `touched` are both empty for THIS pass. The board is
+      // still dirty from the first pass; this pass must REPORT that, not fix it.
       const second = await reconcile({ fetch: false, commit: true, dryRun: false, root });
       assert.equal(second.changes.length, 0, "test setup: the second pass must find nothing NEW to decide");
-      assert.equal(second.commitOutcome, "committed",
-        "a leftover uncommitted write must still be committed even when this pass's own `changes` is empty");
-      assert.equal(second.committed, true);
-      assert.equal(headCount(root), before + 1);
-      assert.equal(porcelain(root), "", "the board must be fully committed after the recovering pass");
+      assert.equal(second.commitOutcome, "none",
+        "the second pass must not attempt any commit — it made no decision of its own");
+      assert.equal(second.committed, false);
+      assert.equal(second.dirtyTicketTree, true,
+        "the second pass must report that the board's ticket tree carries uncommitted changes it did not make");
+      assert.equal(headCount(root), before, "no new commit must land");
+      assert.equal(headSha(root), headAfterFirst, "HEAD must not move at all on the reporting pass");
+      assert.notEqual(porcelain(root), "", "the board must remain exactly as dirty as the first pass left it");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
 
-  test("supervisor twin: a later tick still reports the dirty board while the lock is continuously held — it does not go silent after the first", async () => {
-    const tmp = mkdtempSync(join(tmpdir(), "blz404r2-sup-"));
+  test("dry-run also reports a dirty tree left by an earlier failed apply — never 'already in sync'", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-dryrun-"));
+    try {
+      const { root } = movableBoard(tmp);
+      const lock = acquireLock(root);
+      const run1 = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+      releaseLock(root);
+      assert.notEqual(run1.status, 0);
+      assert.notEqual(porcelain(root), "", "test setup: the board must be dirty going into the dry run");
+
+      const dryRun = spawnSync(process.execPath, [RECONCILE_BIN], { cwd: root, encoding: "utf8" });
+      assert.doesNotMatch(dryRun.stdout, /already in sync/,
+        "a dry run over a board a previous apply left dirty must not claim it is in sync");
+      assert.notEqual(dryRun.status, 0, "a dry run reporting a dirty board must not exit 0");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("supervisor: a board left dirty by an earlier pass's failed commit keeps being reported every tick — reconcile never re-attempts the commit for it", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-sup-"));
     let app;
     try {
       const { root } = movableBoard(tmp);
@@ -149,23 +176,26 @@ describe("BLZ-404 round 2 (blocking 1): reconcile finishes an unfinished pass in
 
       const lock = acquireLock(root);
       assert.equal(lock.ok, true);
-      try {
-        await app.runReconcile(); // tick 1: applies the move, the commit hits the held lock
-        await app.runReconcile(); // tick 2: nothing NEW to decide, board still dirty
-        await app.runReconcile(); // tick 3: same
+      await app.runReconcile(); // tick 1: applies the move, the commit hits the held lock
+      releaseLock(root);
 
-        const commitFailures = events.filter((e) =>
-          (e.type === "error" || e.type === "warning") && /commit did not land/i.test(e.message || ""));
-        assert.ok(commitFailures.length >= 3,
-          "every tick while the lock is held and the board stays dirty must re-report it — " +
-          `got ${commitFailures.length} report(s) across 3 ticks: ${JSON.stringify(events)}`);
-      } finally {
-        releaseLock(root);
-      }
+      const dirtyAfterTick1 = porcelain(root);
+      assert.notEqual(dirtyAfterTick1, "", "test setup: tick 1 must leave the board dirty");
+      const headAfterTick1 = headSha(root);
 
-      // Once the lock clears, the NEXT tick must actually finish the job.
-      await app.runReconcile();
-      assert.equal(porcelain(root), "", "once the lock clears, a later tick must commit the leftover write and leave the tree clean");
+      await app.runReconcile(); // tick 2: nothing NEW to decide, board still dirty
+      await app.runReconcile(); // tick 3: same — lock is clear, but reconcile must not touch it
+
+      assert.equal(headSha(root), headAfterTick1,
+        "reconcile must never auto-commit a previous pass's leftover write, lock clear or not");
+      assert.equal(porcelain(root), dirtyAfterTick1, "the tree must be exactly as tick 1 left it");
+
+      const dirtyReports = events.filter((e) =>
+        (e.type === "error" || e.type === "warning") &&
+        /does not auto-recover/i.test(e.message || ""));
+      assert.ok(dirtyReports.length >= 2,
+        "ticks 2 and 3 must each re-report the persisting dirty board (undeduped) — " +
+        `got ${dirtyReports.length} report(s): ${JSON.stringify(events)}`);
     } finally {
       if (app) app.server.close();
       rmSync(tmp, { recursive: true, force: true });
@@ -173,7 +203,7 @@ describe("BLZ-404 round 2 (blocking 1): reconcile finishes an unfinished pass in
   });
 
   test("a failing pre-commit hook (no lock involved) gets its own, accurate remediation text", () => {
-    const tmp = mkdtempSync(join(tmpdir(), "blz404r2-hook-"));
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-hook-"));
     try {
       const { root } = movableBoard(tmp);
       const hook = join(root, ".git", "hooks", "pre-commit");
@@ -215,6 +245,77 @@ describe("BLZ-404 round 2 (blocking 3): the supervisor feed reports 'queued', no
     } finally {
       if (prevSession === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prevSession;
       if (app) app.server.close();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("BLZ-404 round 3: the dirty-tree detector never sweeps a human's unrelated work or another project's files", () => {
+  test("an untracked NON-ticket file under the board's own project is never swept into a reconcile commit", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-sweep-"));
+    try {
+      const { root } = movableBoard(tmp);
+
+      // Bring the board to a genuinely in-sync, fully-committed state first.
+      const seed = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+      assert.equal(seed.status, 0, `test setup: the seeding pass must succeed: ${seed.stderr}`);
+      assert.equal(porcelain(root), "", "test setup: the board must be fully in sync before the sweep probe");
+
+      // Now a human has a draft file sitting under the ticket tree, untracked and
+      // unrelated to any ticket.
+      writeFileSync(join(root, "projects", "OBA", "NOTES.md"), "draft thoughts, not a ticket\n");
+      const before = headSha(root);
+      const beforeCount = headCount(root);
+
+      const res = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+
+      assert.notEqual(res.status, 0, "an untracked file under the ticket tree must be reported, not silently ignored as 'in sync'");
+      assert.equal(headSha(root), before, "HEAD must not move — the untracked file must never be committed");
+      assert.equal(headCount(root), beforeCount);
+      const status = porcelain(root, join(root, "projects"));
+      assert.match(status, /\?\? .*NOTES\.md/, "the file must still be untracked, exactly as the human left it");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("--project blast radius: an in-sync OBA plus a dirty ORC ticket — --project OBA --apply leaves projects/ORC untouched and uncommitted", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r3-blast-"));
+    try {
+      const { root } = movableBoard(tmp);
+
+      // Bring OBA to a genuinely in-sync, fully-committed state first.
+      const seed = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+      assert.equal(seed.status, 0, `test setup: the seeding pass must succeed: ${seed.stderr}`);
+      assert.equal(porcelain(root), "", "test setup: OBA must be fully in sync before ORC is added");
+
+      // Add a second project, ORC, with no code-repo signal, so it never has a move of
+      // its own to propose.
+      writeFileSync(join(root, "blaze.config.json"),
+        JSON.stringify({ key: "OBA", projects: ["OBA", "ORC"] }));
+      mkdirSync(join(root, "projects", "ORC", "defined"), { recursive: true });
+      writeFileSync(join(root, "projects", "ORC", "project.json"), JSON.stringify({ key: "ORC", codeRepos: [] }));
+      writeFileSync(join(root, "projects", "ORC", "defined", "ORC-1.md"),
+        "---\nid: ORC-1\ntitle: t\ntype: task\nproject: ORC\nestimate: 30\n---\n\nbody\n");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "add ORC"]);
+
+      // Leave ORC-1 dirty (uncommitted) on disk — a stand-in for a previous pass's
+      // unfinished write, or simply a human editing it.
+      writeFileSync(join(root, "projects", "ORC", "defined", "ORC-1.md"),
+        "---\nid: ORC-1\ntitle: t2\ntype: task\nproject: ORC\nestimate: 30\n---\n\nedited\n");
+      const orcDirtyBefore = porcelain(root, join(root, "projects", "ORC"));
+      assert.notEqual(orcDirtyBefore, "", "test setup: ORC-1 must be genuinely dirty");
+      const before = headSha(root);
+
+      const res = spawnSync(process.execPath, [RECONCILE_BIN, "--project", "OBA", "--apply"],
+        { cwd: root, encoding: "utf8" });
+      void res;
+
+      assert.equal(headSha(root), before, "no commit scoped to OBA may touch or land ORC's file");
+      assert.equal(porcelain(root, join(root, "projects", "ORC")), orcDirtyBefore,
+        "projects/ORC must be left byte-for-byte as dirty as it started — --project OBA must never see it");
+    } finally {
       rmSync(tmp, { recursive: true, force: true });
     }
   });
