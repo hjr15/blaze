@@ -82,14 +82,34 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config", 
   //      nothing for this particular block. That is wrong on the MORE common board, and on a
   //      board with both layers dropped the report contradicted itself in adjacent lines.
   //
-  // So the clause is computed from the config layer that is actually present, per block. A
-  // dropped config layer arrives here as `null` (the loader flattens it), which is exactly
-  // the "not in force" case — no special handling needed.
-  const topInForce = layer === "project" && isRecord(configSchema);
-  const stillInForce = topInForce
+  //   3. `isRecord(configSchema)` — which asks whether the config layer is a RECORD, while
+  //      the sentence asserts that it puts something IN FORCE. Those diverge for every
+  //      well-formed record that declares nothing, including one whose own inner block was
+  //      reported as IGNORED on the line immediately above.
+  //
+  // So the predicate is DERIVED from `resolveSchema`: does this layer change the resolved
+  // schema, or not? Reimplementing it by hand gets the coercions wrong — `mergeTypes` and
+  // `mergeLinkTypes` flatten a non-record to `{}`, so `{"linkTypes": ["x"]}` is a NO-OP
+  // despite being a non-empty array, and a "does it have keys" rule would call it in force.
+  // Asking the merge is the only answer that cannot drift from the merge.
+  //
+  // Cost is two extra merges, and only on a board that already has a malformed block.
+  const contributes = (() => {
+    if (layer !== "project" || !isRecord(configSchema)) return () => false;
+    let base = null;
+    let withTop = null;
+    try {
+      base = resolveSchema({});
+      withTop = resolveSchema({ config: { schema: configSchema } });
+    } catch { return () => false; }  // never let a report throw — BLZ-392
+    return (block) => (block === null
+      ? JSON.stringify(base) !== JSON.stringify(withTop)
+      : JSON.stringify(base[block]) !== JSON.stringify(withTop[block]));
+  })();
+  const stillInForce = contributes(null)
     ? "the blaze.config.json layer is still in force"
     : "every type, workflow and link type came from the built-in defaults";
-  const blockInForce = (block) => (topInForce && isRecord(configSchema[block])
+  const blockInForce = (block) => (contributes(block)
     ? `the blaze.config.json layer's ${block} are still in force`
     : `the built-in ${block} are still in force`);
   // A dropped-kind marker is only ever set by the loaders, and only to one of these. It

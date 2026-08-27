@@ -377,3 +377,82 @@ describe("BLZ-396 re-review B1: the layer clause is DERIVED, never assumed", () 
       `a dropped WHOLE project block with a real top-level override:\n${whole}`);
   });
 });
+
+describe("BLZ-396 re-review B1b: 'in force' means CONTRIBUTES, not merely well-shaped", () => {
+  // Wrong a THIRD time. `isRecord(configSchema)` asks whether the config layer is a record.
+  // The sentence the operator reads asserts that it puts something in force. Those diverge
+  // for every config layer that is a well-formed record declaring nothing — including one
+  // whose own inner block was reported as IGNORED on the line immediately above.
+  //
+  // The predicate is DERIVED from `resolveSchema` rather than reimplemented, because a
+  // hand-written "does this contribute" rule gets the coercions wrong: `mergeTypes` and
+  // `mergeLinkTypes` flatten a non-record to `{}`, so `{"linkTypes":["x"]}` is a NO-OP
+  // despite being a non-empty array. Measured, not assumed: of {}, types:{}, types:null,
+  // types:"notanobject", types:["task"], linkTypes:[], linkTypes:["x"], linkTypes:{} and
+  // workflows:[1,2], every one leaves `resolveSchema` byte-identical to the defaults.
+  const projectDetail = (config, project) =>
+    validateSchema({ config, project }).find((p) => /^project\.json:/.test(p));
+
+  const DECLARES_NOTHING = {
+    "an empty schema block": {},
+    "an empty types block": { types: {} },
+    "a null types block": { types: null },
+    "a types block that is itself malformed": { types: "notanobject" },
+    "a types block that is an array": { types: ["task"] },
+    "an empty linkTypes block": { linkTypes: {} },
+    "a non-empty linkTypes ARRAY, which the merge coerces away": { linkTypes: ["x"] },
+  };
+
+  for (const [what, schema] of Object.entries(DECLARES_NOTHING)) {
+    test(`config with ${what} is not reported as in force`, () => {
+      const msg = projectDetail({ schema }, { schema: "a string" });
+      assert.ok(msg, `no project-layer message for ${what}`);
+      assert.doesNotMatch(msg, /the blaze\.config\.json layer is still in force/,
+        `${what} contributes nothing — resolveSchema returns the defaults:\n${msg}`);
+    });
+  }
+
+  test("the report cannot contradict itself when the config block is itself IGNORED", () => {
+    // The sharpest case: one line says that layer's only declaration was ignored, the next
+    // said the layer is in force. Reached by a PER-BLOCK drop, which the whole-block test
+    // above does not cover.
+    const problems = validateSchema(
+      { config: { schema: { types: "notanobject" } }, project: { schema: "a string" } });
+    const top = problems.find((p) => /^blaze\.config\.json:/.test(p));
+    const proj = problems.find((p) => /^project\.json:/.test(p));
+    assert.ok(top && proj, `expected both layers reported: ${problems}`);
+    assert.doesNotMatch(proj, /the blaze\.config\.json layer is still in force/,
+      `the line above says that layer's only declaration was IGNORED:\n${top}\n${proj}`);
+  });
+
+  test("an EMPTY config types block is not reported as putting types in force", () => {
+    const msg = validateSchema({ config: { schema: { types: {} } },
+      project: { schema: { types: "x" } } }).find((p) => /^project\.json: schema\.types/.test(p));
+    assert.ok(msg, "no project-layer types message");
+    assert.doesNotMatch(msg, /blaze\.config\.json layer's types/,
+      `mergeTypes over {} is a no-op — the built-in types are what is in force:\n${msg}`);
+  });
+
+  test("a config layer that DOES contribute is still named — the control", () => {
+    // Without this the whole block above is satisfied by never naming the config layer,
+    // which reinstates the ORIGINAL F1 defect. Third time through this loop.
+    const SPIKE = { types: { spike: { level: 0, workflow: "delivery",
+      parentTypes: ["feature"], required: ["title"] } } };
+    assert.match(projectDetail({ schema: SPIKE }, { schema: "a string" }),
+      /the blaze\.config\.json layer is still in force/, "a real override IS in force");
+    assert.match(
+      validateSchema({ config: { schema: SPIKE }, project: { schema: { types: "x" } } })
+        .find((p) => /^project\.json: schema\.types/.test(p)),
+      /blaze\.config\.json layer's types are still in force/, "and per block too");
+  });
+
+  test("a linkTypes-only override still counts for the WHOLE-block message", () => {
+    // It contributes to the resolved schema, and the whole-block sentence covers link types
+    // explicitly ("every type, workflow and link type"), so claiming defaults would be the
+    // same error mirrored.
+    const msg = projectDetail(
+      { schema: { linkTypes: { Precedes: { source_kinds: ["task"], target_kinds: ["task"],
+        min_card: 0, max_card: null } } } }, { schema: "a string" });
+    assert.match(msg, /the blaze\.config\.json layer is still in force/, msg);
+  });
+});
