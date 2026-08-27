@@ -110,15 +110,43 @@ export function ensureSetupTokenIgnored(dataRoot) {
   if (inside.error) return { state: "unavailable", path: rel };
   if (inside.status !== 0 || inside.stdout.trim() !== "true") return { state: "not-a-repo", path: rel };
 
+  // APPEND, THEN RE-ASK. `docs/architecture.md` says the server ENSURES the path is
+  // ignored; the first cut appended a rule and reported `added` without checking the rule
+  // took. A deeper `.gitignore` outranks the root one, so on a board whose
+  // `.blaze/.gitignore` contains `!setup-token` three consecutive boots gave rules=2, 3, 4
+  // with the token committable throughout: the state said `added`, the claim was false,
+  // and a duplicate line accreted every boot.
+  //
+  // The re-ask is the whole fix. "I wrote a rule" and "the path is ignored" are different
+  // statements, and only the second is worth reporting.
+  const isIgnored = () => git("check-ignore", "--no-index", "-q", rel).status === 0;
   let state;
-  if (git("check-ignore", "--no-index", "-q", rel).status === 0) {
+  if (isIgnored()) {
     state = "already";
   } else {
     const gitignore = join(dataRoot, ".gitignore");
     const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
-    appendFileSync(gitignore,
-      `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
-    state = "added";
+    // Do not append a rule that is already present. On the negating board the rule IS
+    // there and simply loses, so appending again adds a line and changes nothing — the
+    // accretion measured above. A rule already present but ineffective needs a person,
+    // not another copy of itself.
+    const alreadyWritten = existing.split("\n").some((l) => l.trim() === rel);
+    if (!alreadyWritten) {
+      appendFileSync(gitignore,
+        `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+    }
+    // RE-ASK. If it still is not ignored, say so — and warn, because a live credential
+    // staying committable is exactly the condition this function exists to prevent, and
+    // the already-tracked branch below already warns for its own version of it.
+    if (isIgnored()) {
+      state = "added";
+    } else {
+      state = alreadyWritten ? "ineffective" : "added-ineffective";
+      console.error(`blaze: WARNING — ${rel} is still not ignored by git after adding a rule `
+        + "for it. A deeper .gitignore is overriding the root one, so this live credential "
+        + "stays committable. Fix the negating rule, then restart. (The token's VALUE is "
+        + "not shown here or in any log.)");
+    }
   }
 
   // `--no-index` above answers a PATTERN question — does a rule match this path — never

@@ -189,6 +189,20 @@ not be a surprise:
    therefore appends a rule only on a board where **git already ignores**
    `.blaze/identity.db` but *not* `.blaze/setup-token` — and in that case the identity
    check appended nothing, so it is still one rule.
+
+   **"Ensures" is now literal: the server appends and then RE-ASKS git.** It used to
+   append and report `state: "added"` without checking the rule took, which is a different
+   statement — a deeper `.gitignore` outranks the root one, so on a board whose
+   `.blaze/.gitignore` contains `!setup-token` the rule loses. Measured on the pre-fix
+   code, three consecutive boots gave 2, 3 and 4 rules with the token committable
+   throughout. The path is now re-checked after the append: if it is still not ignored the
+   state says so (`added-ineffective`, or `ineffective` when a rule for it was already
+   present), no duplicate is appended on later boots, and the operator is warned on stderr
+   — naming the **path** and never the value, exactly as the already-tracked case in (2)
+   does. The board this requires is contrived: an operator must have written the negating
+   rule themselves, and across 20 adversarial `.gitignore` configurations measured during
+   BLZ-358's review the maximum appended in one boot is 1, ignored correctly in every case
+   but this one.
 2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
    pre-fix build and staged or committed the token — the server runs
    `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index
