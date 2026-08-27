@@ -775,9 +775,18 @@ function prNumber(raw) {
 // both fields on it, because the record is one unit. The condition is reported through
 // `forgeErrors` rather than swallowed: a repo whose PRs are all unusable must not look
 // identical to a repo with no pull requests, which is the laundering BLZ-350 fixed.
+function clean(v) { return typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v; }
+
+// BLZ-403 (review): `clean` above is hoisted to module scope so a fourth
+// operator-facing text site can reuse it. `sanitisePr` was its only caller; the
+// terminal-record-unverifiable finding below reads a TICKET FILE's own `pr:` line
+// rather than a `gh` payload, and interpolated it into stderr/the feed/the preview
+// JSON verbatim, unsanitised. The three EXISTING renderers (stderr, the activity
+// feed, `serializeTicket`'s escaping) all sit downstream of a `gh` payload that
+// already passed through this function; the ticket file is a fourth source that fed
+// none of them until now, and gets the SAME treatment rather than a fourth renderer.
 function sanitisePr(pr) {
   if (!pr || typeof pr !== "object") return null;
-  const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
   // A url that arrives absent, or that `clean` empties (the control-char-only case this
   // sanitiser exists for), becomes `null` — the same marker `number` uses. Leaving it as
   // `undefined` or `""` is what let `decide` persist the literal string "undefined" into
@@ -889,10 +898,34 @@ function samePr(a, b) {
  *  shape (see `prVal` above), and `url` is the one identifier `samePr` already treats as
  *  unique across repositories — so this is what lets the residual finding ask "is the
  *  record we already hold even one of the tied candidates", the same question `samePr`
- *  answers for two live PR payloads, asked instead of a frozen string and a live one. */
+ *  answers for two live PR payloads, asked instead of a frozen string and a live one.
+ *
+ *  KNOWN BLIND SPOT (review): `\S+` cannot match a url containing an embedded space
+ *  (e.g. `"u40 x"`) — `\s*$` then has no way to consume the remainder, the whole regex
+ *  fails to match, and this returns `null`. `recordOutsideCandidates` below reads that
+ *  as "nothing to check" and silently falls back to `outside=false`. That failure mode
+ *  is deliberately one-directional: a `null` here can only suppress the per-ticket
+ *  "not even among the tied candidates" finding (the ticket still lands in the
+ *  aggregate, via `unverifiableRecords`, so nothing is dropped) — it can never
+ *  FABRICATE that accusation against a record this function failed to parse. */
 function recordedPrUrl(pr) {
   const m = /—\s*(\S+)\s*$/.exec(String(pr || ""));
   return m ? m[1] : null;
+}
+
+/** BLZ-403 (review): does a live candidate's url match the FROZEN record's url? Both
+ *  sides are routed through `samePr` — the actual identity notion this file already
+ *  has, rather than a bespoke `===` this docstring merely claimed matched it. Before
+ *  this fix the record side was trimmed of trailing whitespace by `recordedPrUrl`'s own
+ *  regex (`\s*$` absorbs it) while the live side was not (`sanitisePr`'s `clean()`
+ *  strips control characters, never whitespace), so a forge url with trailing
+ *  whitespace survived into both the record and the live candidate and the two sides
+ *  disagreed — the record was falsely reported as "not even among the tied
+ *  candidates" when it WAS one of them. Trimming both sides here, once, before the
+ *  comparison, is what makes them agree again. */
+function recordMatchesCandidate(recordedUrl, ref) {
+  const liveUrl = typeof ref.url === "string" ? ref.url.trim() : ref.url;
+  return samePr({ url: recordedUrl }, { url: liveUrl });
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
@@ -1214,22 +1247,32 @@ export async function reconcile({
       // (ADR-0023) is report, never overwrite — write-once on a terminal ticket stands.
       const refs = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
       const named = refs.map((r) => namePr(r));
+      // BLZ-403 (review): sanitised ONCE, here, and every downstream use — the message,
+      // the structured `pr.raw`/`pr.branch` (served verbatim over `/api/reconcile-preview`
+      // JSON), and the url extraction below — reads this sanitised value, never
+      // `t.frontmatter.pr`/`t.frontmatter.branch` directly. A TICKET FILE's `pr:` line is
+      // free-form text nothing here has ever constrained (unlike `t.frontmatter.id`,
+      // which only reaches this branch because it matched a git ref), so it gets the
+      // same treatment `sanitisePr` already gives a `gh` payload before namePr/samePr or
+      // any operator-facing text sees it — reusing `clean`, not adding a fourth renderer.
+      const rawPr = clean(t.frontmatter.pr) || null;
+      const rawBranch = clean(t.frontmatter.branch) || null;
       // The one case worth naming on its own: the record this ticket already holds is
       // not even a candidate in the tied set — not merely unresolvable but provably
       // pointed at a PR nothing here claims delivered it. 1 of the 73 measured above
       // (OBA-773: records #336, tied set {#339, #341}).
-      const recordedUrl = recordedPrUrl(t.frontmatter.pr);
+      const recordedUrl = recordedPrUrl(rawPr);
       const recordOutsideCandidates = refs.length > 0 && recordedUrl !== null &&
-        !refs.some((r) => r.url === recordedUrl);
+        !refs.some((r) => recordMatchesCandidate(recordedUrl, r));
       const entry = {
         kind: "terminal-record-unverifiable",
         id: t.frontmatter.id,
         status: t.status,
-        pr: { raw: t.frontmatter.pr || null, branch: t.frontmatter.branch || null },
+        pr: { raw: rawPr, branch: rawBranch },
         prs: refs,
         recordOutsideCandidates,
         message: `${t.frontmatter.id} is ${t.status} and already holds a delivery record ` +
-          `(${t.frontmatter.pr || "no pr recorded"}), but git now shows ${refs.length || "more than one"} ` +
+          `(${rawPr || "no pr recorded"}), but git now shows ${refs.length || "more than one"} ` +
           `merged PRs tied for having delivered it` + (named.length ? ` (${named.join(", ")})` : "") +
           `, and none claims it more strongly than the rest. The record is write-once ` +
           `protected on a terminal ticket, so reconcile reports this rather than ` +
@@ -1289,6 +1332,15 @@ export async function reconcile({
   // tickets, not one, and `newFindingEvents` (scripts/supervisor.mjs) passes `id`
   // through unchanged — `undefined` travels the same path a per-ticket finding's real
   // id does, pinned by a test rather than assumed.
+  //
+  // BLZ-403 (review): the message used to say "none of them was changed", about the
+  // TICKET. That is false whenever the loop above also backfills a blank `resolution`
+  // on the same terminal ticket (the comment near `changes.push` already names this: "a
+  // `done` ticket with a blank `resolution` has it backfilled, which sets `dirty` and
+  // emits a change") — that write happens in THIS SAME run, on THIS SAME ticket, and is
+  // committed. Write-once guarantees only that `branch`/`pr` were not touched; it says
+  // nothing about the rest of the file. Narrowed to the one thing this code path
+  // actually guarantees.
   if (unverifiableRecords.length) {
     findings.push({
       kind: "terminal-record-unverifiable",
@@ -1297,7 +1349,9 @@ export async function reconcile({
       message: `${unverifiableRecords.length} terminal ticket(s) already hold a delivery record ` +
         `reconcile cannot verify — the merged set is unresolvable, and none claims it more ` +
         `strongly than the rest: ${unverifiableRecords.join(", ")}. Write-once protects a ` +
-        `terminal ticket's record, so none of them was changed. Verify by hand if it matters.`,
+        `terminal ticket's record: none of their branch/pr fields was changed. (The ticket ` +
+        `itself may still have been written this run — e.g. a blank resolution backfilled ` +
+        `— that is a separate write and is reported in \`changes\`.) Verify by hand if it matters.`,
     });
   }
 

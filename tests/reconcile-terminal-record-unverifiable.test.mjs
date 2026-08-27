@@ -267,6 +267,93 @@ describe("BLZ-403: a record naming a PR outside the tied set is named on its own
       rmSync(tmp, { recursive: true, force: true });
     }
   });
+
+  // BLZ-403 (review, blocking finding 2): `recordedPrUrl` normalises the RECORD side by
+  // construction (`\s*$` in its regex absorbs trailing whitespace off the captured
+  // url), but the LIVE side (`refs[i].url`, sanitised only by `sanitisePr`'s `clean()`,
+  // which strips control characters and never whitespace) was compared with bare
+  // `===` and was NOT trimmed. A forge url with trailing whitespace therefore survives
+  // untrimmed into both the live candidate and — once reconcile itself writes the
+  // record — the frozen `pr:` line, and the two sides of the comparison disagreed:
+  // the record IS one of the tied candidates, but the false accusation escalated it
+  // out of the aggregate into its own per-ticket "not even among the tied candidates"
+  // NEEDS ATTENTION line, sending an operator to hand-repair a correct record.
+  test("a trailing-space url in the frozen record still matches its live candidate — aggregate, not accused", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz403-trailing-ws-"));
+    // The record `reconcile` itself would have written from a `gh` payload whose url
+    // carried trailing whitespace: `#40 — u40 ` (note the trailing space before the
+    // closing quote) — exactly `recordedPrUrl`'s own regex trims off, but the live
+    // side below does not.
+    const root = fixture(tmp, [["INF-645", "epic", "done",
+      "branch: INF-645-docs\npr: '#40 — u40 '\nresolution: done\n"]]);
+    const DOCS_MERGED_TRAILING_WS = { ...DOCS_MERGED, url: "u40 " };
+    const restore = stubGh(tmp, [WORK, DOCS_MERGED_TRAILING_WS]);
+    try {
+      const r = await reconcile({ root, dryRun: false });
+      const perTicket = r.findings.filter((f) => f.kind === "terminal-record-unverifiable" && f.id);
+      const aggregate = r.findings.filter((f) => f.kind === "terminal-record-unverifiable" && !f.id);
+      assert.equal(perTicket.length, 0,
+        "the record IS one of the tied candidates (u40) — it must NOT be accused on its own");
+      assert.equal(aggregate.length, 1, "it belongs in the aggregate like any other unresolvable-but-plausible record");
+      assert.deepEqual(aggregate[0].ids, ["INF-645"]);
+      // Untouched on disk either way — this finding never mutates the record.
+      assert.match(readTicket(root, "INF-645", "done"), /pr: '?#40 — u40 ?'?/);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// The aggregate's wording must not be contradicted by the run's own `changes`
+// =============================================================================
+
+describe("BLZ-403: the aggregate message claims only what write-once actually guarantees", () => {
+  // BLZ-403 (review, blocking finding 3): the aggregate message ended "...so none of
+  // them was changed" — about the TICKET. `write()` is structurally false on this
+  // branch, so `branch`/`pr` truly are never written; but two lines below, a blank
+  // `resolution` on a terminal ticket is STILL backfilled (the comment beside
+  // `changes.push` already names this), which sets `dirty` and is written and
+  // committed in the SAME run, to the SAME ticket this finding just named. All 10
+  // pre-existing tests happened to pre-set a matching `resolution`, so none hit this.
+  test("a terminal ticket with no resolution is backfilled AND aggregated — the message must not call it unchanged", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz403-resbackfill-"));
+    // Deliberately NO `resolution:` line — the one field the 10 existing tests all
+    // pre-set, which is exactly what let this branch go untested.
+    const root = fixture(tmp, [["INF-645", "epic", "done",
+      "branch: INF-645-docs\npr: '#40 — u40'\n"]]);
+    const restore = stubGh(tmp, [WORK, DOCS_MERGED]);
+    try {
+      const before = readTicket(root, "INF-645", "done");
+      assert.doesNotMatch(before, /resolution:/, "setup: no resolution to backfill from");
+      const r = await reconcile({ root, dryRun: false });
+
+      // The backfill actually happened and was committed — the run's own account.
+      const change = r.changes.find((c) => c.id === "INF-645");
+      assert.ok(change, "the resolution backfill must be recorded in `changes`: " +
+        JSON.stringify(r.changes));
+      const after = readTicket(root, "INF-645", "done");
+      assert.match(after, /resolution: done/, "the backfill actually wrote the file");
+      // The RECORD itself is untouched — write-once's actual guarantee, unaffected by
+      // this fix.
+      assert.match(after, /pr: '?#40 — u40/);
+      assert.match(after, /branch: INF-645-docs/);
+
+      const agg = r.findings.find((f) => f.kind === "terminal-record-unverifiable" && !f.id);
+      assert.ok(agg, "the aggregate finding must still fire");
+      assert.deepEqual(agg.ids, ["INF-645"]);
+      // The pinning assertion: on a run that just changed and committed this exact
+      // ticket, the aggregate must not claim the ticket ("them"/"it") was unchanged.
+      assert.doesNotMatch(agg.message, /none of them was changed/,
+        "false on this run: `changes` names this very ticket");
+      // What IS guaranteed — the record, not the ticket — must still be said.
+      assert.match(agg.message, /record/i);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
 });
 
 // =============================================================================
