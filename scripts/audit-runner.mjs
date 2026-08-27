@@ -55,8 +55,16 @@ const dataRoot = explicit ? dirname(explicit) : roots.dataRoot;
 // failure of the same kind: not a parse failure, not a version mismatch, but the config
 // failing to produce a usable value. Round 2's own review measured that the first cut of
 // this fix caught ONLY the key case and left every schedule-shape failure reporting
-// `ok=true` — the very defect this lane exists to close, in a new place. So: every
-// `loadConfig` throw that is NOT a `ConfigParseError` and NOT an
+// `ok=true` — the very defect this lane exists to close, in a new place. Round 3 found a
+// THIRD instance of the same shape: a config that sets a REMOVED key (`provider`,
+// `terminal`, `codeRepo`; BLZ-298) is also neither a parse failure nor a version mismatch
+// — it says nothing about the `schemaVersion` stamp at all — yet `checkSchemaVersion` used
+// to file it under the same `{ok:false}` shape as a version-window failure, so `loadConfig`
+// wrapped it in `IncompatibleSchemaVersionError` and this runner tolerated it wholesale
+// (`tests/fixtures/board-gate-removed-key`: audit `ok=true`, reconcile exit 1 on the same
+// board). `scripts/model/schema-version.mjs` now discriminates the two reasons at the
+// source, so a removed key throws a plain `Error`, same as a malformed `schedule` block.
+// So: every `loadConfig` throw that is NOT a `ConfigParseError` and NOT an
 // `IncompatibleSchemaVersionError` is its own case below: named, HARD, `ok=false` — never
 // merged into "config is absent". `config` itself still ends up `null` on ANY throw
 // (line 40 above / the schedule guard below), because nothing downstream can safely use a

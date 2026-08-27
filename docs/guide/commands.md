@@ -212,15 +212,20 @@ block that did not do what it looks like it does, most often a `linkTypes` entry
 ignored. Soft because the shipped declaration is still in force, so the corpus is judged
 correctly; what is wrong is the operator's expectation.
 
-`config-unloadable` (BLZ-402 review finding 1, tightened by round-2 finding 3) fires on
-**any** `loadConfig` throw *except* the two BLZ-392 explicitly tolerates. Concretely, it
-fires on: an invalid `key` or `projects[]` entry (BLZ-402's shape check); and a malformed
-`schedule` block — the wrong shape (e.g. a string instead of an object), an unknown key
-(e.g. `minutesPerDay` instead of `minutes_per_day`), or a bad `minutes_per_day` /
-`working_days` value. It does **not** fire on the two cases BLZ-392 established a
-tolerance for: `blaze.config.json` failing to *parse* as JSON, or carrying a `schemaVersion`
-outside the engine's supported window — both of those are treated as though the config were
-absent, `ok=true` if the corpus itself is otherwise clean, exactly as before. Raised by the
+`config-unloadable` (BLZ-402 review finding 1, tightened by round-2 finding 3 and round-3)
+fires on **any** `loadConfig` throw *except* the two BLZ-392 explicitly tolerates.
+Concretely, it fires on: an invalid `key` or `projects[]` entry (BLZ-402's shape check); a
+malformed `schedule` block — the wrong shape (e.g. a string instead of an object), an
+unknown key (e.g. `minutesPerDay` instead of `minutes_per_day`), or a bad `minutes_per_day`
+/ `working_days` value; and a `blaze.config.json` that sets a key this engine no longer
+reads (`provider`, `terminal`, `codeRepo`; BLZ-298). That last case says nothing about the
+`schemaVersion` stamp — a removed key and an out-of-window stamp are unrelated failures, so
+`scripts/model/schema-version.mjs` tells them apart at the source (round 3) rather than
+letting a removed-key board fall into the schemaVersion tolerance below. It does **not**
+fire on the two cases BLZ-392 established a tolerance for: `blaze.config.json` failing to
+*parse* as JSON, or carrying a `schemaVersion` stamp genuinely outside the engine's
+supported window — both of those are treated as though the config were absent, `ok=true` if
+the corpus itself is otherwise clean, exactly as before. Raised by the
 runner rather than `auditCorpus`, the same way `duplicate-status` is: whether `loadConfig`
 threw, and for which of the two reasons, is a property of the load attempt, not of any
 ticket's frontmatter. HARD, deliberately — `audit` is exempt from `cli.mjs`'s schema

@@ -142,6 +142,30 @@ test("board carrying a removed config key (provider) FAILS LOUD on the `blaze` C
   });
 });
 
+// BLZ-402 round-3 fix: `blaze audit` and `blaze reconcile` must AGREE on this fixture.
+// Before this fix, `checkSchemaVersion` bucketed a removed key (`provider`) under the
+// SAME `{ok:false}` shape as a genuinely out-of-window `schemaVersion` stamp, and
+// `loadConfig` wrapped both in `IncompatibleSchemaVersionError` — the exact class
+// `scripts/audit-runner.mjs` tolerates wholesale (BLZ-392). So this fixture reported
+// `blaze audit` -> ok=true, exit 0 while `blaze reconcile` on the identical board threw
+// and exited 1 (asserted two tests above) — a check that disagrees with audit on the
+// same board is worse than no check at all. A removed key is now a HARD load failure
+// like a malformed `schedule` block, so `config-unloadable` fires here too. Driven
+// through the real `blaze audit` CLI (not the `auditRoot` helper above, which calls
+// `loadConfig` directly with no try/catch and so cannot observe audit-runner's own
+// tolerance/HARD-failure split).
+test("board carrying a removed config key (provider): the `blaze` CLI's audit AGREES with reconcile — config-unloadable, ok=false, exit 1", () => {
+  assert.throws(() => execFileSync(process.execPath,
+    [join(ROOT, "scripts", "audit-runner.mjs"), join(REMOVED_KEY, "projects")],
+    { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
+  (e) => {
+    assert.notEqual(e.status, 0, "the CLI must exit non-zero");
+    assert.match(String(e.stdout), /config-unloadable/);
+    assert.match(String(e.stdout), /ok=false/);
+    return true;
+  });
+});
+
 test("board with an out-of-window schemaVersion FAILS LOUD on reconcile", async () => {
   await assert.rejects(
     () => reconcile({ root: BAD_SCHEMA_VERSION, dryRun: true }),

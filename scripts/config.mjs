@@ -69,15 +69,21 @@ export class InvalidProjectKeyError extends Error {
   }
 }
 
-// BLZ-402 round-2 review finding 3. `loadConfig` can throw for several reasons, and
-// `scripts/audit-runner.mjs` needs to tell them apart: BLZ-392 deliberately tolerates
-// EXACTLY TWO of them (an unparseable `blaze.config.json`, and an incompatible
-// `schemaVersion` stamp) by treating the board as though it had no config at all and
-// still reporting `ok=true` over the corpus. Every OTHER `loadConfig` throw — a malformed
-// `schedule` block (wrong shape, an unknown key, a bad `minutes_per_day` or
-// `working_days`), or a bad `key`/`projects[]` entry (`InvalidProjectKeyError`) — is a
-// genuine load failure that already makes every non-exempt CLI verb refuse, and audit
-// must not call that board clean. These two classes exist so audit-runner.mjs can name
+// BLZ-402 round-2 review finding 3, narrowed by round-3. `loadConfig` can throw for
+// several reasons, and `scripts/audit-runner.mjs` needs to tell them apart: BLZ-392
+// deliberately tolerates EXACTLY TWO of them (an unparseable `blaze.config.json`, and a
+// `schemaVersion` stamp genuinely outside the engine's supported window) by treating the
+// board as though it had no config at all and still reporting `ok=true` over the corpus.
+// Every OTHER `loadConfig` throw — a malformed `schedule` block (wrong shape, an unknown
+// key, a bad `minutes_per_day` or `working_days`), a bad `key`/`projects[]` entry
+// (`InvalidProjectKeyError`), OR a config that sets a REMOVED key (`provider`, `terminal`,
+// `codeRepo`; BLZ-298) — is a genuine load failure that already makes every non-exempt CLI
+// verb refuse, and audit must not call that board clean. A removed key is semantically
+// unrelated to the schemaVersion stamp (the stamp can be exactly current while a removed
+// key is set), so round-3 stopped `checkSchemaVersion` filing it under the same `kind` as
+// a version-window failure — see `scripts/model/schema-version.mjs` — and it now throws a
+// plain `Error` below, same as the malformed-`schedule` family, instead of
+// `IncompatibleSchemaVersionError`. These two classes exist so audit-runner.mjs can name
 // the two tolerated cases by `e.name`, the same string-comparison pattern cli.mjs already
 // uses for `InvalidProjectKeyError` (so exempt verbs never pay for importing the class),
 // instead of matching on message text, which is for humans, not control flow.
@@ -145,7 +151,16 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   // before any default-merge or derivation — a board written against a contract
   // outside this engine's window must fail loud before it is interpreted at all.
   const version = checkSchemaVersion(file);
-  if (!version.ok) throw new IncompatibleSchemaVersionError(`blaze: ${version.error}`);
+  // BLZ-402 round-3: `checkSchemaVersion`'s two failure reasons are semantically
+  // unrelated (a removed key says nothing about the schemaVersion stamp), so only the
+  // version-window kind gets the `IncompatibleSchemaVersionError` class BLZ-392's
+  // tolerance keys off. A removed key throws a plain `Error`, same as a malformed
+  // `schedule` block — a genuine load failure `scripts/audit-runner.mjs` must not
+  // tolerate.
+  if (!version.ok) {
+    if (version.kind === "removed-key") throw new Error(`blaze: ${version.error}`);
+    throw new IncompatibleSchemaVersionError(`blaze: ${version.error}`);
+  }
 
   const cfg = { ...DEFAULTS, ...file };
   cfg.loops = {

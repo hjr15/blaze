@@ -40,8 +40,13 @@ export const HARD_KINDS = new Set([
   // class of problem IS its job, and a report that swallows a load failure into
   // `config = null` and still prints `ok=true` is the opposite of that job. It fires on
   // ANY `loadConfig` throw except the two BLZ-392 explicitly tolerates (unparseable JSON,
-  // an incompatible `schemaVersion`) — so a bad `key`/`projects[]` entry AND a malformed
-  // `schedule` block both land here.
+  // a `schemaVersion` stamp genuinely outside the supported window) — so a bad
+  // `key`/`projects[]` entry, a malformed `schedule` block, AND a config that sets a
+  // REMOVED key (`provider`, `terminal`, `codeRepo`; BLZ-298) all land here. The removed-
+  // key case is semantically unrelated to the schemaVersion stamp — it says nothing about
+  // whether the stamp is in-window — which is why `scripts/model/schema-version.mjs`
+  // discriminates it from a version-window failure at the source (round 3), rather than
+  // relying on this runner to re-derive the distinction from the exception's message.
   //
   // An earlier revision of this comment claimed it "cannot be a fill queue" because
   // "everything downstream ... depends on the config that failed to load, so there is
