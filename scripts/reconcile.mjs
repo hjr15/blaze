@@ -1262,8 +1262,25 @@ export async function reconcile({
       // pointed at a PR nothing here claims delivered it. 1 of the 73 measured above
       // (OBA-773: records #336, tied set {#339, #341}).
       const recordedUrl = recordedPrUrl(rawPr);
+      // BLZ-403 (round 2 review, blocking): `samePr`/`recordMatchesCandidate` answer
+      // "is this candidate PROVABLY the same PR as the record" — and `samePr`'s own
+      // comment says identity must never be decided by the PRESENCE of a forge-supplied
+      // field, so a candidate with no usable url (control-characters-only, or the field
+      // absent entirely — the ordinary degraded-forge payload `sanitisePr`/`namePr`
+      // exist for) makes `recordMatchesCandidate` answer `false` for that candidate no
+      // matter what the record says. That `false` means UNPROVEN, not DISPROVEN. Reading
+      // "none of the candidates provably match" as "the record is not even among the
+      // tied candidates" silently upgrades unproven into disproved the moment one
+      // candidate is uncomparable — accusing a record that may well be exactly that
+      // candidate, in a sentence that names the candidate in the tied set while denying
+      // it is in it. So `recordOutsideCandidates` may only fire when every tied
+      // candidate is actually comparable (carries a usable, non-empty url); if even one
+      // does not, the honest answer is UNKNOWN, and it fails CLOSED — toward the
+      // aggregate (`unverifiableRecords`, below), never toward a per-ticket accusation.
+      const allCandidatesComparable =
+        refs.every((r) => typeof r.url === "string" && r.url.trim().length > 0);
       const recordOutsideCandidates = refs.length > 0 && recordedUrl !== null &&
-        !refs.some((r) => recordMatchesCandidate(recordedUrl, r));
+        allCandidatesComparable && !refs.some((r) => recordMatchesCandidate(recordedUrl, r));
       const entry = {
         kind: "terminal-record-unverifiable",
         id: t.frontmatter.id,
