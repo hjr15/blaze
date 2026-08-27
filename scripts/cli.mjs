@@ -127,7 +127,7 @@ if (isReadonly() && sub.mutates) {
 const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init", "commit"]);
 if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
   try {
-    const { resolveRoots, loadConfig, listProjects, loadProject, InvalidProjectKeyError } = await import("./config.mjs");
+    const { resolveRoots, loadConfig, listProjects, loadProject } = await import("./config.mjs");
     const { resolveSchema, assertSchemaValid } = await import("./model/schema-config.mjs");
     const { fsReadStorage } = await import("./model/read-storage.mjs");
     // BOTH roots, and `projectsDir` is not derivable from `dataRoot`. `resolveRoots` returns
@@ -193,16 +193,27 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     for (const k of keys) {
       try { projects[k] = loadProject(k, { root, projectsDir }); }
       catch (e) {
-        // BLZ-402 review finding 1's cli.mjs analog: swallowing an InvalidProjectKeyError
-        // here — same shape as audit-runner.mjs's `catch { config = null }` — would let this
-        // ONE project's schema go unvalidated while the preflight still finishes clean, no
-        // different from the silent partial report finding 1 closed there. Every OTHER
+        // BLZ-402 round-2 review finding 1: an earlier revision of this fix re-threw
+        // InvalidProjectKeyError here, on the theory that swallowing it was an
+        // under-validation twin of finding 1's silent partial report. That was wrong and
+        // was reverted. `keys` above falls back to `fsReadStorage.listProjects(projectsDir)`
+        // — a RAW DIRECTORY LISTING — whenever `blaze.config.json` has no `projects` array,
+        // and `loadProject` runs `assertValidKey` BEFORE it checks whether the directory
+        // even exists. So re-throwing here meant ANY ordinary non-project folder under
+        // `projects/` (`archive/`, `notes/`, `_templates/`, `old-eng/`, `docs/`, `v2/` —
+        // anything not matching `^[A-Z][A-Z0-9]*$`) bricked every non-exempt verb, while
+        // `blaze audit` kept calling the same board clean — the exact "a check that
+        // disagrees with audit on the same board is worse than no check at all" the outer
+        // catch's own comment warns against, three lines below. This loop's job is SCHEMA
+        // validation of the CONFIGURED/DISCOVERED project set; a directory whose name is
+        // not a project key is not a project, so skipping it is correct, not
+        // under-validation. The swallow here was born deliberately with BLZ-56 (`6ce5c3a`,
+        // #125) for exactly this reason and must stay. This is NOT the same failure mode
+        // as finding 1 (audit-runner's `catch { config = null }`): that swallow discarded
+        // the whole corpus's findings behind a bare `ok=true`; this one skips a single
+        // directory entry that was never a project to begin with, and every OTHER
         // `loadProject` failure (a project directory that doesn't exist yet, an unreadable
-        // project.json) is still swallowed exactly as before: this preflight's whole job is
-        // schema validation, and those failures are not this check's business (same
-        // rationale as the outer catch below). Re-thrown so the outer catch reports a bad
-        // key the same way it reports a SchemaOverrideError, instead of finishing quietly.
-        if (e instanceof InvalidProjectKeyError) throw e;
+        // project.json) is swallowed the same way, as it always was.
         projects[k] = null;
       }
     }
@@ -228,22 +239,25 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
     //
     // BLZ-402 review finding 3: an `InvalidProjectKeyError` from the unwrapped
     // `loadConfig({ root })` a few lines above (a malformed `cfg.key` or `cfg.projects`
-    // entry), or re-thrown by the loop's own catch above, used to fall through this
-    // catch untouched (it is not a SchemaOverrideError) and straight to spawning the
-    // runner below — which then re-ran `loadConfig` itself and crashed with a raw Node
-    // stack trace. This is the CENTRAL fix for that: every non-exempt verb already
-    // routes through this one preflight, so catching it here, before the runner ever
-    // spawns, closes the reproduced case (`blaze new` on a board with key "eng") for
-    // every verb in `SUBCOMMANDS` at once — the "single top-level handler... covering
-    // every verb" the ticket allows as an alternative to N per-runner try/catches. It
-    // does NOT cover a bad key that only shows up on a runner's OWN deeper call (e.g.
-    // `--project 'A('`, an unconfigured value `loadProject` never sees until `applyNew`
-    // runs) — those are fixed at the runner, per-file, because this preflight only ever
-    // validates the ALREADY-configured project set, not arbitrary command-line values.
-    // Named by STRING, not `instanceof`: `InvalidProjectKeyError` was imported inside the
-    // `try` block above (so exempt verbs never pay for loading config.mjs), which makes it
-    // out of scope here in `catch` — the same reason the SchemaOverrideError check below
-    // already compares `e.name` rather than importing that class too.
+    // entry) used to fall through this catch untouched (it is not a SchemaOverrideError)
+    // and straight to spawning the runner below — which then re-ran `loadConfig` itself
+    // and crashed with a raw Node stack trace. This is the CENTRAL fix for that: every
+    // non-exempt verb already routes through this one preflight, so catching it here,
+    // before the runner ever spawns, closes the reproduced case (`blaze new` on a board
+    // with key "eng") for every verb in `SUBCOMMANDS` at once — the "single top-level
+    // handler... covering every verb" the ticket allows as an alternative to N
+    // per-runner try/catches. It does NOT cover a bad key that only shows up on a
+    // runner's OWN deeper call (e.g. `--project 'A('`, an unconfigured value
+    // `loadProject` never sees until `applyNew` runs) — those are fixed at the runner,
+    // per-file, because this preflight only ever validates the ALREADY-configured
+    // project set, not arbitrary command-line values. It also does NOT fire from the
+    // per-project loop above any more: that loop swallows every `loadProject` failure,
+    // `InvalidProjectKeyError` included (see BLZ-402 round-2 finding 1's comment there),
+    // so the only source reaching this catch is the unwrapped `loadConfig` call.
+    // Named by STRING, not `instanceof`: `InvalidProjectKeyError` is not imported in this
+    // scope at all — only inside the `try` block above (so exempt verbs never pay for
+    // loading config.mjs) — the same reason the SchemaOverrideError check below already
+    // compares `e.name` rather than importing that class too.
     if (e && e.name === "InvalidProjectKeyError") { console.error(e.message); process.exit(1); }
     if (e && e.name === "SchemaOverrideError") {
       // writeSync, not console.error: `process.exit` after a large write TRUNCATES a

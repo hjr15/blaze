@@ -102,14 +102,22 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("a badly-named DIRECTORY on disk (not in cfg.projects) refuses at the preflight's per-project loop", () => {
-    // `loadConfig` (finding 2) validates every entry of cfg.projects at load time, so the
-    // ONLY way a bad key still reaches cli.mjs's preflight's `for (const k of keys) {
-    // loadProject(k, ...) }` loop is via the DISK-LISTING fallback (no `projects` array
-    // configured at all, so keys comes from `fsReadStorage.listProjects`) — a directory an
-    // operator created by hand, never validated by anything. Before the fix this was
-    // silently swallowed into `projects[k] = null` and the preflight finished as if
-    // nothing were wrong; now it re-throws to the same clean outer refusal.
+  test("a badly-named DIRECTORY on disk (not in cfg.projects) is silently skipped, not refused", () => {
+    // BLZ-402 round-2 review finding 1. An earlier revision of this file asserted the
+    // OPPOSITE of what is asserted here: it re-threw `InvalidProjectKeyError` out of
+    // cli.mjs's preflight per-project loop whenever a disk-listed directory (the fallback
+    // that fires whenever `blaze.config.json` carries no `projects` array — see
+    // `fsReadStorage.listProjects`) had a name `assertValidKey` rejects, and this test used
+    // `A(` — a name so obviously not a project key that the resulting refusal looked like
+    // the correct, intended behaviour. It hid the actual blast radius: the per-project loop
+    // runs on EVERY board with no configured `projects` array, and `assertValidKey` rejects
+    // any name that isn't `^[A-Z][A-Z0-9]*$` — so an entirely ordinary, common directory
+    // name (`archive`, `notes`, `_templates`, `old-eng`, `docs`, `v2`, ...) bricked every
+    // non-exempt verb on such a board, while `blaze audit` kept calling it clean. The
+    // dedicated regression test below uses `archive` for exactly that reason. The swallow
+    // this test now pins (`catch { projects[k] = null }`) was born deliberately with BLZ-56
+    // (`6ce5c3a`, #125): a directory whose name is not a project key is not a project, and
+    // schema-validating it is not this preflight's job.
     const root = mkdtempSync(join(tmpdir(), "blz402-cli-refusal-disk-"));
     execFileSync("git", ["-C", root, "init", "-q"]);
     execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
@@ -121,8 +129,41 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
     try {
       const r = spawnSync(process.execPath, [CLI, "rollup"],
         { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
-      assertCleanRefusal(r, "blaze rollup with a disk-listed project directory named 'A('");
-      assert.match(r.stderr, /"A\("/, "the offending key must be named");
+      assert.equal(r.status, 0,
+        `a badly-named disk directory must not brick the verb:\nstdout:${r.stdout}\nstderr:${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("BLZ-402 round-2 finding 1: an ORDINARY non-project directory under projects/ "
+    + "(e.g. 'archive/') does not brick blaze rollup, and audit agrees the board is clean", () => {
+    // The reproduction from the round-2 review: board { key: "ENG" } with no `projects`
+    // array (so the per-project loop's key list comes from the disk listing), one real
+    // ticket under projects/ENG, and a second, completely ordinary directory
+    // `projects/archive/` that is not, and was never meant to be, a project. Before this
+    // fix `blaze rollup ENG-1` exited 1 on this board even though `blaze audit` reported
+    // `ok=true` on the very same board — "a check that disagrees with audit on the same
+    // board is worse than no check at all" (cli.mjs's own outer-catch comment).
+    const root = mkdtempSync(join(tmpdir(), "blz402-cli-refusal-archive-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    mkdirSync(join(root, "projects", "ENG", "backlog"), { recursive: true });
+    mkdirSync(join(root, "projects", "archive"), { recursive: true });
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "ENG" }));
+    writeFileSync(join(root, "projects", "ENG", "backlog", "ENG-1-x.md"),
+      ["---", "id: ENG-1", 'title: "x"', "type: task", "project: ENG", "status: backlog",
+       "estimate: 30", "---", ""].join("\n"));
+    execFileSync("git", ["-C", root, "add", "-A"]);
+    execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+    try {
+      const rollup = spawnSync(process.execPath, [CLI, "rollup", "ENG-1"],
+        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+      assert.equal(rollup.status, 0,
+        `blaze rollup ENG-1 with an ordinary 'archive/' directory present:\nstdout:${rollup.stdout}\nstderr:${rollup.stderr}`);
+      const audit = spawnSync(process.execPath, [CLI, "audit"],
+        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+      assert.match(audit.stdout, /ok=true/,
+        `audit must agree the board is clean:\n${audit.stdout}\n${audit.stderr}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
