@@ -531,7 +531,10 @@ esac
     process.env.PATH = `${bin}:${prev}`;
     try {
       const r = await reconcile({ root, dryRun: false });
-      assert.deepEqual(r.forgeErrors, []);
+      // Only that the stub was READ. A `gh-unusable-pr` WARNING is expected here — these
+      // fixtures deliberately withhold a url — and it is not a failure to read the forge.
+      assert.deepEqual(r.forgeErrors.filter((f) => f.severity !== "warning"), [],
+        "the gh stub must be read successfully or this proves nothing");
       return { r, text: readTicket(root, "done") };
     } finally {
       process.env.PATH = prev;
@@ -624,7 +627,7 @@ test("BLZ-398: an unnumberable PR is REPORTED, not swallowed", async () => {
     const r = await reconcile({ root, dryRun: false });
     assert.equal(r.forgeErrors.length, 1);
     assert.equal(r.forgeErrors[0].reason, "gh-unusable-pr");
-    assert.match(r.forgeErrors[0].message, /can rank but never be recorded/);
+    assert.match(r.forgeErrors[0].message, /can never be recorded/);
     assert.doesNotMatch(readTicket(root, "done"), /^pr:/m);
   } finally {
     restore();
@@ -1009,4 +1012,82 @@ test("BLZ-398: a PR with a number but no url records NOTHING, never `#10 — und
     restore();
     rmSync(tmp, { recursive: true, force: true });
   }
+});
+
+// =============================================================================
+// Review round 8 — the reporter, and the tier's url dimension
+// =============================================================================
+
+test("BLZ-398: betterPr's recordable tier reads the URL too, not just the number", () => {
+  // Round 8's real finding, though it mis-attributed the mutant: the WHOLE `recordablePr`
+  // change is killed (by the "#10 — undefined" test), but `betterPr`'s TIER alone was
+  // unpinned on the url dimension — reducing it to a number check survived the suite.
+  // Two same-rank, same-claim OPEN candidates, one numbered but url-less: the tier must
+  // prefer the one that can actually supply a record, or a knowable record is suppressed.
+  const urlless = { number: 10, state: "OPEN", url: null,
+    headRefName: "INF-645-a", title: "INF-645: the real work" };
+  const good = { number: 40, state: "OPEN", url: "https://github.com/hjr15/svc/pull/40",
+    headRefName: "INF-645-b", title: "INF-645: more work" };
+  for (const order of [[urlless, good], [good, urlless]]) {
+    const w = buildPrMap(order, idFromRef, null).get("INF-645");
+    assert.equal(w.number, 40,
+      "the url-less PR cannot supply a record, so it must not win an equal-claim tie");
+    assert.equal(decide({ pr: w }, "defined", "epic").prVal,
+      "#40 — https://github.com/hjr15/svc/pull/40");
+  }
+});
+
+test("BLZ-398: a PR that cannot supply a record is REPORTED, whichever half is missing", async () => {
+  // The reporter had drifted from the deciders: `gatherPrs` counted `pr.number === null`
+  // while `decide` and `betterPr` had moved on to "number AND url". So a PR with a good
+  // number and no url was silently withheld from the record and reported by NOTHING —
+  // the laundering BLZ-350 exists to stop, arriving through a successful call.
+  for (const [label, pr] of [
+    ["no number", { number: null, state: "MERGED", url: "https://ghes.corp/a/pull/10",
+      headRefName: "INF-645-work", title: "INF-645: the work" }],
+    ["no url", { number: 10, state: "MERGED",
+      headRefName: "INF-645-work", title: "INF-645: the work" }],
+    ["whitespace url", { number: 10, state: "MERGED", url: String.fromCharCode(1) + " ",
+      headRefName: "INF-645-work", title: "INF-645: the work" }],
+  ]) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz398-report-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+    const restore = stubGh(tmp, [pr]);
+    try {
+      const r = await reconcile({ root, dryRun: false });
+      assert.equal(r.forgeErrors.filter((f) => f.reason === "gh-unusable-pr").length, 1,
+        `${label}: a withheld record must say why`);
+      const text = readTicket(root, "done");
+      assert.doesNotMatch(text, /^pr:/m, `${label}: and must write nothing`);
+      assert.doesNotMatch(text, /undefined/, `${label}`);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+});
+
+test("BLZ-398: how a url is MISSING never changes the order rivals are named in", () => {
+  // The fourth consumer of the url normalisation, and the reason calling that
+  // normalisation an "equivalent mutant" was wrong: `tiedDeliverers` sorted on
+  // `String(a.url)`, comparing "null" against "" against "undefined". Missing urls now
+  // sort last by rank, so the order states something true rather than something
+  // incidental.
+  // DISTINCT headRefNames, or this test proves nothing: the first draft built both rivals
+  // with the same ref, so the joined order string was identical for every shape and the
+  // assertion held no matter what the sort did. It survived its own mutation.
+  const mk = (url, ref) => ({ number: null, url, state: "MERGED",
+    headRefName: ref, title: "INF-645: the work" });
+  const shapes = [undefined, null, "", "   "];
+  const orders = new Set();
+  for (const missing of shapes) {
+    const amb = ambiguousDeliverers(
+      [mk(missing, "INF-645-missing"), mk("https://gh/o/r/pull/7", "INF-645-hasurl")],
+      idFromRef, null);
+    const refs = amb.get("INF-645");
+    assert.ok(refs, `two number-less rivals are a tie (missing url as ${JSON.stringify(missing)})`);
+    orders.add(refs.map((r) => r.headRefName).join(","));
+  }
+  assert.equal(orders.size, 1,
+    `the naming order must not depend on how a url is missing; got ${[...orders].join(" vs ")}`);
 });

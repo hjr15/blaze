@@ -23,7 +23,7 @@
 // specific set that breaks it, in round zero rather than round six.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrMap, betterPr, decide, prTitleClaim, recordablePr } from "../scripts/reconcile.mjs";
+import { buildPrMap, betterPr, decide, prTitleClaim, recordablePr, PR_RANK } from "../scripts/reconcile.mjs";
 
 const ID = "INF-645";
 const idFromRef = () => ID;
@@ -53,6 +53,14 @@ const POOL = [
     headRefName: `${ID}-h`, title: `${ID}, INF-646: joint work` },
   { name: "merged/lower/6", state: "MERGED", number: 6, url: "u6",
     headRefName: `${ID}-i`, title: "inf-645: lowercase is still a claim" },
+  // Numbered but URL-LESS. Without this every pool entry had a url, so every
+  // `recordablePr(x)` call classified identically to `x.number != null` and the
+  // substitutions that replaced the number-only checks were INERT — they read like
+  // coverage and proved nothing.
+  { name: "open/strong/8-nourl", state: "OPEN", number: 8, url: null,
+    headRefName: `${ID}-j`, title: `${ID}: numbered but url-less` },
+  { name: "merged/strong/9-nourl", state: "MERGED", number: 9, url: null,
+    headRefName: `${ID}-k`, title: `${ID}: merged, numbered, url-less` },
 ];
 
 /** Every non-empty subset of POOL, up to `max` members. */
@@ -78,7 +86,10 @@ function permutations(xs) {
 }
 
 const SETS = subsets(POOL, 3);
-const RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
+// The SHIPPED constant, not a hand-rolled twin of it. The twin survived the round that
+// removed the `prTitleClaim` twin one expression to its left, which is the whole lesson:
+// a twin is a drift waiting for someone to change one side.
+const RANK = (state) => PR_RANK[state] || 0;
 const label = (s) => s.map((p) => p.name).join(" + ");
 
 describe("BLZ-398: the selection is a function of the SET, not of the order it arrived in", () => {
@@ -136,7 +147,7 @@ describe("BLZ-130: the STATUS depends on the winning state, and on nothing else"
     // recordability and number decide only which PR the RECORD comes from; if any of them
     // could move a ticket, every one of those changes was unsafe.
     for (const set of SETS) {
-      const top = Math.max(...set.map((p) => RANK[p.state]));
+      const top = Math.max(...set.map((p) => RANK(p.state)));
       const expected = top === 3 ? "in-review" : top === 2 ? "done" : "in-progress";
       const w = buildPrMap(set, idFromRef, null).get(ID);
       assert.ok(w, `no winner for [${label(set)}]`);
@@ -194,7 +205,7 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     for (const set of SETS) {
       const w = buildPrMap(set, idFromRef, null).get(ID);
       const peers = set.filter((p) =>
-        RANK[p.state] === RANK[w.state] && prTitleClaim(p, ID) === prTitleClaim(w, ID));
+        RANK(p.state) === RANK(w.state) && prTitleClaim(p, ID) === prTitleClaim(w, ID));
       if (!peers.some((p) => recordablePr(p))) continue;
       assert.ok(recordablePr(w),
         `[${label(set)}] picked unrecordable ${w.name} while an equal-claim recordable peer existed`);
@@ -211,7 +222,7 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
       // lowercase id), so this invariant would have raised false failures the moment
       // anyone added one to the pool. An invariant stated in terms of the wrong predicate
       // is the worst case of all: it fires on correct behaviour.
-      const sameRank = set.filter((p) => RANK[p.state] === RANK[w.state]);
+      const sameRank = set.filter((p) => RANK(p.state) === RANK(w.state));
       const top = Math.max(...sameRank.map((p) => prTitleClaim(p, ID)));
       assert.equal(prTitleClaim(w, ID), top,
         `[${label(set)}] picked ${w.name} (claim ${prTitleClaim(w, ID)}) over a claim-${top} PR`);

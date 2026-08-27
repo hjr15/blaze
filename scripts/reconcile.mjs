@@ -40,7 +40,7 @@ import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 //
 // Type-independent on purpose. The ticket asks whether `story` shares the failure;
 // every delivery type does, because ranking never sees the type.
-const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
+export const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
 
 // --- shelling out, in two layers (BLZ-350) ------------------------------------
 // `shResult` is the honest one: it reports WHAT happened — exit status, stderr,
@@ -523,9 +523,15 @@ function tiedDeliverers(candidates, id) {
   // tie can be "#10 and #10" — and a finding naming one number is the exact wording this
   // ticket condemns. An unrecordable rival has no number at all, so the url is the only
   // thing that can name it.
+  // Missing urls sort LAST by rank, never by their string form. `String(a.url)` compared
+  // "null" against "" against "undefined", so the order of two number-less rivals depended
+  // on HOW the url was missing rather than on anything true — which is also why calling
+  // the url-normalisation an equivalent mutant was wrong: this was its fourth consumer.
+  const key = (r) => (typeof r.url === "string" && r.url.trim() ? r.url : null);
   return tied.map((pr) => ({ number: pr.number, url: pr.url, headRefName: pr.headRefName })).sort(
     (a, b) => (a.number ?? Infinity) - (b.number ?? Infinity) ||
-      String(a.url).localeCompare(String(b.url)));
+      (key(a) === null) - (key(b) === null) ||
+      String(key(a) ?? "").localeCompare(String(key(b) ?? "")));
 }
 
 export function ambiguousDeliverers(prs, idFromRef, shippedSet) {
@@ -700,7 +706,12 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
     // can never be recorded. Say so: a repo whose PRs are all unusable must not read as
     // a repo with no pull requests — that is the laundering BLZ-350 exists to stop, and
     // it is just as wrong arriving through a SUCCESSFUL call as through a failed one.
-    const unusable = prs.filter((pr) => pr.number === null).length;
+    // `recordablePr`, the same predicate the deciders use. This counter read
+    // `pr.number === null` while `decide` and `betterPr` had moved on to "number AND url",
+    // so a PR with a good number and no url was silently withheld from the record and
+    // reported by nothing — the drift shape this branch keeps producing, arriving one
+    // layer over: unify the predicate, leave the reporter behind.
+    const unusable = prs.filter((pr) => !recordablePr(pr)).length;
     return { prs, forgeErrors: unusable ? [{
       // `severity: "warning"`, and it is the whole point of the field. The forge was read
       // PERFECTLY here — what is wrong is one field inside a successful response. Every
@@ -710,8 +721,10 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
       // over-statement this lane exists to stop, and it is no better pointed at the forge.
       severity: "warning",
       repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unusable-pr", detail: String(unusable),
-      message: `${unusable} pull request(s) in ${repoPath} carry a number Blaze cannot use, so they ` +
-        `can rank but never be recorded as having delivered a ticket. ${UNREACHABLE}`,
+      message: `${unusable} pull request(s) in ${repoPath} cannot supply a delivery record — ` +
+        `Blaze needs both a usable number and a url — so they can rank but can never be ` +
+        `recorded as having delivered a ticket. The forge itself was read fine — this is ` +
+        `one field inside a successful response, so PR state and "in-review" are unaffected.`,
     }] : [] };
   } catch (e) {
     return { prs: [], forgeErrors: [{
@@ -831,8 +844,11 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
  *  run. Review found `pr: #10 — undefined` written permanently from a payload with a
  *  usable number and no url; `pr` is not in EDITABLE_FIELDS, so there is no route back. */
 export function recordablePr(pr) {
+  // `.trim()`, because `clean()` strips only control characters: a url of "\u0001 \u0002"
+  // sanitises to " ", which is non-empty and would persist as `pr: #10 —  ` forever. The
+  // same hole this predicate was written to close, one character wider.
   return Boolean(pr) && pr.number !== null && pr.number !== undefined &&
-    typeof pr.url === "string" && pr.url.length > 0;
+    typeof pr.url === "string" && pr.url.trim().length > 0;
 }
 
 /** Name a pull request with whatever identifier actually exists.
