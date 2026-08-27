@@ -202,9 +202,18 @@ not be a surprise:
    re-include written for some other file — **is** fixed by appending at the end, and the
    server does so. A rule that loses to a *deeper* file cannot be fixed from the root at
    all: there the append is reverted, the `.gitignore` is left byte-for-byte as it was (and
-   is not created if it did not exist), the state reads `ineffective`, and the operator is
-   warned on stderr — naming the **path** and never the value, exactly as the
+   is not created if it did not exist), the state says which cause stopped it, and the
+   operator is warned on stderr — naming the **path** and never the value, exactly as the
    already-tracked case in (2) does.
+
+   **The state names its cause**, because the three that can stop this need three different
+   things from the operator: `ineffective` (a deeper `.gitignore` negates the rule — fix the
+   negating rule), `symlink` (the root `.gitignore` is a symlink, which **git does not read
+   at all**, so no rule can be appended there — add it to a real file), and `unwritable` (the
+   write was refused — check permissions). None of them leaves the function early: a board
+   that cannot be given a rule may still have the token **tracked**, and un-staging a live
+   credential with `git rm --cached -f` is worth doing regardless, so step (2) below runs on
+   every path.
 
    So nothing accretes on any board, and the only boards left un-ignored are the ones no
    root-level rule could have covered. Both require an operator to have written a negating
