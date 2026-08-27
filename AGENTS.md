@@ -478,6 +478,11 @@ directory, never edit code or any file outside the tracker.
 `blaze.config.json` (data-repo root): `key`, `projects` (array of project keys the
 board renders), `commitMode`, `port`, and more.
 
+`key` (and each `--project`/`BLAZE_KEY` value) must be upper-case letters and digits,
+starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — it is interpolated into the
+regexes that match ticket ids and filenames, so a value outside that shape is refused
+rather than silently accepted, even when it happens to be valid regex.
+
 `schemaVersion` (top-level, optional integer): which schema contract the board
 was written against. Absent = `1` (the pre-versioning baseline). The engine
 refuses to load a board stamped outside its supported window (currently `1..1`)

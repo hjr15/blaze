@@ -2,7 +2,7 @@
 // scripts/sprint-runner.mjs — CLI entry for `blaze sprint new|list|active`.
 // Thin CLI over model/sprints.mjs — logic lives there (covered); this file
 // is coverage-excluded (*-runner.mjs), matching new-runner.mjs's pattern.
-import { loadConfig, resolveRoots } from "./config.mjs";
+import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { loadSprints, saveSprints, addSprint, setActive, formatSprintList,
          unstampedRegistryWarning } from "./model/sprints.mjs";
@@ -18,8 +18,16 @@ import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below —
-// see new-runner.mjs for the rationale. loadConfig throws `blaze: …` on a bad stamp.
-const cfg = loadConfig({ root: dataRoot });
+// see new-runner.mjs for the rationale. loadConfig throws `blaze: …` on a bad stamp —
+// and, since BLZ-402, on a malformed project key too (BLZ-402 review finding 3:
+// `cli.mjs`'s preflight already catches this for the normal `blaze sprint` path, but a
+// direct `node sprint-runner.mjs` bypasses it entirely).
+let cfg;
+try { cfg = loadConfig({ root: dataRoot }); }
+catch (e) {
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 
 const [sub, ...rest] = process.argv.slice(2);
 

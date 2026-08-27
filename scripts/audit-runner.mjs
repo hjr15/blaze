@@ -9,7 +9,7 @@ import { fsReadStorage } from "./model/read-storage.mjs";
 import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
-import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveRoots, loadConfig, ConfigParseError, IncompatibleSchemaVersionError } from "./config.mjs";
 
 const positional = [];
 const opts = { projects: null, kind: null, json: false };
@@ -39,8 +39,45 @@ const explicit = positional[0] ? resolvePath(positional[0]) : null;
 const roots = explicit ? null : resolveRoots();
 const projectsDir = explicit || roots.projectsDir;
 const dataRoot = explicit ? dirname(explicit) : roots.dataRoot;
+// BLZ-392 established a NARROW tolerance: a `loadConfig` throw for one of exactly two
+// reasons — the file cannot even PARSE, or its `schemaVersion` stamp is outside the
+// engine's supported window — is treated as absent, `config = null`, the disk-listing
+// fallback below stands in for `config.projects`, and the run still reports `ok=true` if
+// the corpus itself is clean. That is deliberate: there is nothing to salvage from a file
+// that could not be parsed, or that was written against a contract this engine does not
+// speak, so tolerating either is no different from auditing a board with no config file.
+//
+// BLZ-402 review finding 1, and round-2 finding 3, are DIFFERENT cases, and must not be
+// folded into that tolerance. `assertValidKey` (BLZ-402) makes `loadConfig` throw
+// `InvalidProjectKeyError` on a board it USED to accept and finish loading — the exact
+// board BLZ-396 shipped a `schema-invalid` finding for — and a malformed `schedule` block
+// (wrong shape, an unknown key, a bad `minutes_per_day`/`working_days`) is a genuine load
+// failure of the same kind: not a parse failure, not a version mismatch, but the config
+// failing to produce a usable value. Round 2's own review measured that the first cut of
+// this fix caught ONLY the key case and left every schedule-shape failure reporting
+// `ok=true` — the very defect this lane exists to close, in a new place. Round 3 found a
+// THIRD instance of the same shape: a config that sets a REMOVED key (`provider`,
+// `terminal`, `codeRepo`; BLZ-298) is also neither a parse failure nor a version mismatch
+// — it says nothing about the `schemaVersion` stamp at all — yet `checkSchemaVersion` used
+// to file it under the same `{ok:false}` shape as a version-window failure, so `loadConfig`
+// wrapped it in `IncompatibleSchemaVersionError` and this runner tolerated it wholesale
+// (`tests/fixtures/board-gate-removed-key`: audit `ok=true`, reconcile exit 1 on the same
+// board). `scripts/model/schema-version.mjs` now discriminates the two reasons at the
+// source, so a removed key throws a plain `Error`, same as a malformed `schedule` block.
+// So: every `loadConfig` throw that is NOT a `ConfigParseError` and NOT an
+// `IncompatibleSchemaVersionError` is its own case below: named, HARD, `ok=false` — never
+// merged into "config is absent". `config` itself still ends up `null` on ANY throw
+// (line 40 above / the schedule guard below), because nothing downstream can safely use a
+// config that failed to load for whatever reason — only whether `ok` is allowed to stay
+// `true` depends on WHICH reason.
 let config = null;
-try { config = loadConfig({ root: dataRoot }); } catch { config = null; }
+let configLoadError = null;
+try { config = loadConfig({ root: dataRoot }); }
+catch (e) {
+  if (!(e instanceof ConfigParseError) && !(e instanceof IncompatibleSchemaVersionError)) {
+    configLoadError = e;
+  }
+}
 
 // The project set comes from the config, never from a hardcoded list — the stale-default
 // bug the Python original carried (it audited 2 of 11 projects for months).
@@ -50,12 +87,33 @@ try { config = loadConfig({ root: dataRoot }); } catch { config = null; }
 // which made `blaze audit <dir>` report "0 tickets, clean, ok=true" over a corpus it had
 // never looked at. A gate that passes because it measured nothing is worse than no gate.
 const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
+// BLZ-402 round-2 review finding 2: an earlier revision of this fix zeroed `keys` to `[]`
+// whenever `configLoadError` was set, on the theory that a board whose config failed to
+// load has "nothing safe to keep running against". That was wrong, and the runner itself
+// disproves it two ways: `tickets` a few lines below comes from `fsReadStorage.listTickets`,
+// and `schema-invalid` is read from each project's `project.json` on disk by `auditCorpus`'s
+// own loop — NEITHER touches `config.projects`, so both are exactly as safe to compute with
+// a bad key or a malformed schedule block as with none at all. `--projects <name>` already
+// proved this empirically: it reported the full corpus (tickets, `schema-invalid`,
+// everything) on a board whose config load had failed, while the flag-less path reported
+// "0 tickets across 0 project(s)" on the SAME board — a false measurement statement in the
+// grammar of a real count. The distinction that actually matters is not "report nothing vs
+// report something", it is `ok=true` vs `ok=false` — and `ok` is decided below by the
+// `config-unloadable` HARD finding, not by zeroing the denominator. So a config load failure
+// falls back to the disk listing exactly like a config that failed to PARSE already does
+// (BLZ-392's tolerance, untouched) — the disk-listing fallback can still silently include a
+// stray directory the config never named, but that same risk exists, unremarked, for every
+// other reason `config` can come back empty or null, and singling out this one reason to
+// instead report a false zero was the actual defect.
 const keys = nonEmpty(opts.projects)
   ?? nonEmpty(config?.projects)
   ?? fsReadStorage.listProjects(projectsDir);
 
-// And having resolved them, refuse to report success over an empty corpus.
-if (!keys.length) { console.error(`no projects found under ${projectsDir}`); process.exit(2); }
+// And having resolved them, refuse to report success over an empty corpus — UNLESS the
+// reason nothing resolved is a config load failure, in which case that failure IS the
+// report (the config-unloadable finding pushed below turns `ok` false and exits 1); a bare
+// stderr line here would just be a second, incompatible way of saying it.
+if (!keys.length && !configLoadError) { console.error(`no projects found under ${projectsDir}`); process.exit(2); }
 
 const projects = {};
 for (const k of keys) {
@@ -80,6 +138,15 @@ for (const t of fsReadStorage.listTickets(projectsDir)) {
 }
 
 const report = auditCorpus({ tickets, projects, config });
+
+// BLZ-402 review finding 1: name the config-load failure as a first-class, HARD finding —
+// not a swallowed exception. `report.ok` is recomputed below from `report.findings`
+// against `HARD_KINDS`, so pushing this here (rather than a bespoke early exit) is what
+// makes `ok=false` fall out of the same mechanism every other hard finding uses, and what
+// makes it visible under both the plain report and `--json`.
+if (configLoadError) {
+  report.findings.push({ ticket: null, kind: "config-unloadable", detail: configLoadError.message });
+}
 
 // One finding per id naming EVERY path, not one per surplus copy: an operator told about a
 // single path goes hunting for the other, which is the failure mode itself.
@@ -210,6 +277,12 @@ if (opts.json) {
   console.log(JSON.stringify({ ...report, findings }, null, 2));
 } else {
   console.log("=== blaze audit ===");
+  // Named UNCONDITIONALLY, ahead of any --kind filtering: the plain report's summary line
+  // below prints only a per-kind COUNT, never detail text, so without this an operator
+  // running `blaze audit --kind schema-invalid` (or any kind that isn't
+  // `config-unloadable`) would see the count go up with no way to learn which key caused
+  // it short of re-running with --json.
+  if (configLoadError) console.log(`  config failed to load: ${configLoadError.message}`);
   console.log(`  ${tickets.length} tickets across ${keys.length} project(s)`);
   if (opts.kind) {
     for (const f of findings) console.log(`  ${f.ticket}  ${f.kind}  ${f.detail}`);

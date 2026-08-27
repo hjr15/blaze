@@ -1,15 +1,23 @@
 // scripts/resolve-runner.mjs — CLI entry for `blaze resolve <id> <resolution>`.
 import { applyResolve } from "./resolve.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
-import { loadConfig, resolveRoots } from "./config.mjs";
+import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below:
 // a guard meant to stop the engine driving a board it may misread must not
-// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
-const cfg = loadConfig({ root: dataRoot });
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp — and, since
+// BLZ-402, on a malformed project key too (BLZ-402 review finding 3: `cli.mjs`'s
+// preflight already catches this for the normal `blaze resolve` path, but a
+// direct `node resolve-runner.mjs` bypasses it entirely).
+let cfg;
+try { cfg = loadConfig({ root: dataRoot }); }
+catch (e) {
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 // BLZ-121 defence-in-depth, hoisted before applyResolve below for the same
 // reason as move-runner.mjs: commitOrQueue's own guard fires too late here —
 // applyResolve writes the ticket file via direct node:fs calls before

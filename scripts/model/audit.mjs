@@ -33,6 +33,33 @@ export const HARD_KINDS = new Set([
   // `summarise` and every caller reads, so a kind raised elsewhere must still be classified
   // in one place.
   "duplicate-status",
+  // config-unloadable (BLZ-402 review finding 1, tightened by round-2 finding 3) is raised
+  // by the RUNNER, for the same reason as duplicate-status: whether `loadConfig` threw is a
+  // property of the LOAD attempt, not of any ticket's frontmatter. HARD, deliberately —
+  // `audit` is exempt from `cli.mjs`'s schema preflight on the ground that reporting this
+  // class of problem IS its job, and a report that swallows a load failure into
+  // `config = null` and still prints `ok=true` is the opposite of that job. It fires on
+  // ANY `loadConfig` throw except the two BLZ-392 explicitly tolerates (unparseable JSON,
+  // a `schemaVersion` stamp genuinely outside the supported window) — so a bad
+  // `key`/`projects[]` entry, a malformed `schedule` block, AND a config that sets a
+  // REMOVED key (`provider`, `terminal`, `codeRepo`; BLZ-298) all land here. The removed-
+  // key case is semantically unrelated to the schemaVersion stamp — it says nothing about
+  // whether the stamp is in-window — which is why `scripts/model/schema-version.mjs`
+  // discriminates it from a version-window failure at the source (round 3), rather than
+  // relying on this runner to re-derive the distinction from the exception's message.
+  //
+  // An earlier revision of this comment claimed it "cannot be a fill queue" because
+  // "everything downstream ... depends on the config that failed to load, so there is
+  // nothing safe to keep running against" — used to justify zeroing the audit-runner
+  // project-set denominator to `[]` on this finding. That was FALSE, and
+  // `scripts/audit-runner.mjs` disproves it: `tickets` comes from
+  // `fsReadStorage.listTickets` and `schema-invalid` is read from each project's
+  // `project.json` on disk, neither of which touches `config.projects`, so both remain
+  // exactly as safe to compute as when `config` is null for any other reason. What makes
+  // this HARD is not that nothing downstream is safe — it is that a config failing to load
+  // for one of these reasons is itself real information the operator must see, the same way
+  // `duplicate-status` is HARD despite the rest of the corpus still being auditable.
+  "config-unloadable",
 ]);
 
 // BLZ-353 / R48. Deliberately NOT in HARD_KINDS, and the reason is load-bearing.

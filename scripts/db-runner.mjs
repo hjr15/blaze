@@ -4,7 +4,7 @@
 // and refuses rather than writing DDL behind your back (BLZ-297). This is that named
 // operation, plus the command that reads back what a dual-write soak has found.
 import { existsSync, readFileSync, rmSync } from "node:fs";
-import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
          readSoakState } from "./model/write-port-resolve.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
@@ -75,7 +75,20 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
     const { configSeed } = await import("./model/config-schema.mjs");
 
     db.exec(projectionDdl("sqlite"));
-    const cfg = loadConfig({ root: dataRoot });
+    // BLZ-402 review finding 3: loadConfig throws `blaze: …` on a malformed project key
+    // too, since BLZ-402 — `cli.mjs`'s preflight already catches this for the normal
+    // `blaze db init` path, but a direct `node db-runner.mjs init` bypasses it entirely.
+    // The outer `finally` below still closes `db` on this path since it re-throws through it.
+    let cfg;
+    try { cfg = loadConfig({ root: dataRoot }); }
+    catch (e) {
+      if (e instanceof InvalidProjectKeyError) {
+        db.close(); // process.exit() below would otherwise skip the outer `finally`.
+        console.error(e.message);
+        process.exit(1);
+      }
+      throw e;
+    }
     await refreshProjection(exec, {
       ...configSeed(),
       project: (cfg.projects ?? []).map((key, ord) => ({ key, name: key, ord })),

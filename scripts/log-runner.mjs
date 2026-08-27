@@ -4,15 +4,23 @@
 import { applyLog } from "./log.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { formatMinutes } from "./model/time.mjs";
-import { loadConfig, resolveRoots } from "./config.mjs";
+import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below:
 // a guard meant to stop the engine driving a board it may misread must not
-// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
-const cfg = loadConfig({ root: dataRoot });
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp — and, since
+// BLZ-402, on a malformed project key too (BLZ-402 review finding 3: `cli.mjs`'s
+// preflight already catches this for the normal `blaze log` path, but a direct
+// `node log-runner.mjs` bypasses it entirely).
+let cfg;
+try { cfg = loadConfig({ root: dataRoot }); }
+catch (e) {
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 // BLZ-121 defence-in-depth, hoisted before applyLog below for the same
 // reason as move-runner.mjs: commitOrQueue's own guard fires too late here —
 // applyLog writes the ticket file via direct node:fs calls before

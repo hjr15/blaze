@@ -19,7 +19,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
+import { loadConfig, listProjects, loadProject, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
@@ -1311,8 +1311,19 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     console.error(`unknown flag: ${a}`); process.exit(1);
   }
-  const r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
-    projects: sawProject ? projectKeys : null });
+  // BLZ-402 review finding 3: `reconcile()` -> `loadConfig({ root })` throws `blaze: …` on
+  // a malformed BOARD key too, since BLZ-402 — `cli.mjs`'s preflight already catches this
+  // for the normal `blaze reconcile` path, but a direct `node reconcile.mjs` bypasses it
+  // entirely, and this CLI block previously let the throw reach the top level unwrapped.
+  // (`push` is gone as of BLZ-404: reconcile never pushed, and the parameter said it might.)
+  let r;
+  try {
+    r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
+      projects: sawProject ? projectKeys : null });
+  } catch (e) {
+    if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+    throw e;
+  }
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   // AC-5: say what was looked at BEFORE saying what was found, so "nothing to do" can never
   // be read as "the board is in sync" when it means "I only looked at one project".

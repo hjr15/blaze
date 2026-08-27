@@ -204,13 +204,38 @@ findings too.
 
 | Severity | Kinds |
 |---|---|
-| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error` |
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable` |
 | soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
 
 `schema-invalid` (BLZ-392) is `validateSchema`'s output, surfaced by `auditCorpus` — a `schema`
 block that did not do what it looks like it does, most often a `linkTypes` entry the merge
 ignored. Soft because the shipped declaration is still in force, so the corpus is judged
 correctly; what is wrong is the operator's expectation.
+
+`config-unloadable` (BLZ-402 review finding 1, tightened by round-2 finding 3 and round-3)
+fires on **any** `loadConfig` throw *except* the two BLZ-392 explicitly tolerates.
+Concretely, it fires on: an invalid `key` or `projects[]` entry (BLZ-402's shape check); a
+malformed `schedule` block — the wrong shape (e.g. a string instead of an object), an
+unknown key (e.g. `minutesPerDay` instead of `minutes_per_day`), or a bad `minutes_per_day`
+/ `working_days` value; and a `blaze.config.json` that sets a key this engine no longer
+reads (`provider`, `terminal`, `codeRepo`; BLZ-298). That last case says nothing about the
+`schemaVersion` stamp — a removed key and an out-of-window stamp are unrelated failures, so
+`scripts/model/schema-version.mjs` tells them apart at the source (round 3) rather than
+letting a removed-key board fall into the schemaVersion tolerance below. It does **not**
+fire on the two cases BLZ-392 established a tolerance for: `blaze.config.json` failing to
+*parse* as JSON, or carrying a `schemaVersion` stamp genuinely outside the engine's
+supported window — both of those are treated as though the config were absent, `ok=true` if
+the corpus itself is otherwise clean, exactly as before. Raised by the
+runner rather than `auditCorpus`, the same way `duplicate-status` is: whether `loadConfig`
+threw, and for which of the two reasons, is a property of the load attempt, not of any
+ticket's frontmatter. HARD, deliberately — `audit` is exempt from `cli.mjs`'s schema
+preflight on the ground that reporting exactly this class of problem IS its job, and a
+report that reached `ok=true` on a board whose config failed to load for one of these
+reasons would be exactly the silent pass this finding exists to prevent. It DOES still fall
+back to a disk listing for the project set when the config fails to load this way (matching
+`--projects` and matching the BLZ-392 parse-failure tolerance) — falling back to *report
+nothing* instead was tried and reverted, because the distinction that actually matters is
+`ok=true` vs `ok=false`, not whether a denominator gets reported at all.
 
 The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and are **all soft on purpose**: HARD means the *corpus* is wrong, and a missed deadline or an unschedulable pair of well-formed links means the *plan* is wrong, which is a true statement about a correct corpus. `terminal-goal-unverified-requirement` was already soft and already missing from this table before BLZ-379 — see `scripts/model/audit.mjs` for why each one is classified where it is.
 
@@ -459,7 +484,7 @@ this page is the reference.
 | Variable | Controls | Default |
 |---|---|---|
 | `BLAZE_PROJECTS_DIR` | Explicit path to the data repo's `projects/` directory. Lets the engine run from anywhere. | none — falls back to a `projects/` dir under the current working directory |
-| `BLAZE_KEY` | Ticket id prefix override. | the `key` in `blaze.config.json` |
+| `BLAZE_KEY` | Ticket id prefix override. Same shape rule as `key` in `blaze.config.json` (BLZ-402): upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — refused, not silently accepted, otherwise. | the `key` in `blaze.config.json` |
 | `BLAZE_PORT` | Board port. | 4321, unless overridden (see below) |
 | `PORT` | Board port; takes precedence over `BLAZE_PORT` and config. | — |
 | `HOST` | Bind host for `blaze board`. `blaze start` / bare `blaze` always binds `127.0.0.1`. **A non-loopback value on a board with no users refuses to start** — see [`board`](#board) and [`user`](#user). | `127.0.0.1` |

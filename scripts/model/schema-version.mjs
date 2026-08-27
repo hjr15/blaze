@@ -38,15 +38,24 @@ export const REMOVED_KEYS = {
 /** Pure guard over a parsed config object's schemaVersion stamp.
  *  `current`/`min` are injectable so every branch — including ones unreachable
  *  with the real constants (at MIN === CURRENT === 1 the too-old branch cannot
- *  fire) — stays unit-testable. Returns { ok, error } and never throws. */
+ *  fire) — stays unit-testable. Returns { ok, error } and never throws, plus a `kind`
+ *  discriminator on every `{ok:false}` result (absent when `ok` is true, so the existing
+ *  `{ ok: true, error: null }` shape is unchanged): `"removed-key"` when the config sets a
+ *  key this engine no longer reads, `"version-window"` when the `schemaVersion` stamp
+ *  itself (missing, malformed, or outside `min..current`) is the problem (BLZ-402
+ *  round-3). These are unrelated failures — a removed key says nothing about the version
+ *  stamp — which is exactly why the caller (`loadConfig`) must not throw the same
+ *  "incompatible schemaVersion" error class for both. */
 export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SCHEMA_VERSION,
                                           removed = REMOVED_KEYS } = {}) {
   // Checked before the version, and on the RAW parsed file: a board carrying a key this
-  // engine no longer honours must be told, not quietly obeyed in part.
+  // engine no longer honours must be told, not quietly obeyed in part. This is NOT a
+  // schemaVersion problem — the stamp itself may be perfectly in-window — so it gets its
+  // own `kind`, distinct from every branch below.
   const present = Object.keys(removed).filter((k) => cfg && cfg[k] !== undefined);
   if (present.length) {
     const lines = present.map((k) => `  ${k} — ${removed[k]}`).join("\n");
-    return { ok: false, error:
+    return { ok: false, kind: "removed-key", error:
       `blaze.config.json sets ${present.length === 1 ? "a key" : "keys"} this engine no `
       + `longer reads:\n${lines}\n`
       + `Delete ${present.length === 1 ? "it" : "them"} — nothing else changes. `
@@ -69,19 +78,19 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
     // via String() so NaN stays `NaN` rather than regressing to `null`
     // under JSON.stringify.
     const shown = typeof v === "number" ? String(v) : JSON.stringify(v);
-    return { ok: false, error: `invalid schemaVersion ${shown} — must be a positive integer; see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
+    return { ok: false, kind: "version-window", error: `invalid schemaVersion ${shown} — must be a positive integer; see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
   }
   if (v > current) {
-    return { ok: false, error: `board schemaVersion ${v} is newer than this engine supports (supported: ${min}..${current}); upgrade the engine — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
+    return { ok: false, kind: "version-window", error: `board schemaVersion ${v} is newer than this engine supports (supported: ${min}..${current}); upgrade the engine — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
   }
   if (v < min) {
     // An unstamped board has no value to correct — it has a key to ADD. Saying
     // "schemaVersion undefined" would send its operator looking for a key that is
     // not there, so name the absence and the value to write.
     if (absent) {
-      return { ok: false, error: `blaze.config.json has no schemaVersion stamp — an absent stamp means schema v1, which is older than this engine supports (supported: ${min}..${current}); once the board is on this engine's contract, add \`"schemaVersion": ${current}\` — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
+      return { ok: false, kind: "version-window", error: `blaze.config.json has no schemaVersion stamp — an absent stamp means schema v1, which is older than this engine supports (supported: ${min}..${current}); once the board is on this engine's contract, add \`"schemaVersion": ${current}\` — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
     }
-    return { ok: false, error: `board schemaVersion ${v} is older than this engine supports (supported: ${min}..${current}) — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
+    return { ok: false, kind: "version-window", error: `board schemaVersion ${v} is older than this engine supports (supported: ${min}..${current}) — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
   }
   return { ok: true, error: null };
 }

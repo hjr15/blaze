@@ -6,7 +6,7 @@ import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { runDryRun, runLive } from "./migrate/jira-import.mjs";
-import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 const CACHE = join(dataRoot, ".migration-cache");
@@ -32,7 +32,16 @@ if (projectSeen && project === undefined) {
 }
 // No explicit --project: fall back to blaze.config.json's configured projects
 // list rather than a hardcoded guess.
-const configuredKeys = loadConfig({ root: dataRoot }).projects;
+//
+// BLZ-402 review finding 3: `loadConfig` throws `blaze: …` on a malformed project key
+// too, since BLZ-402 — `cli.mjs`'s preflight already catches this for the normal
+// `blaze migrate` path, but a direct `node migrate-runner.mjs` bypasses it entirely.
+let configuredKeys;
+try { configuredKeys = loadConfig({ root: dataRoot }).projects; }
+catch (e) {
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 const keys = projectSeen ? [project] : configuredKeys;
 if (keys.length === 0) {
   console.error("usage: blaze migrate [--dry-run|--live] --project KEY [--merge] (no projects configured in blaze.config.json)");

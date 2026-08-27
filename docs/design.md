@@ -194,7 +194,7 @@ board outage for its duration, capped by that timeout.
 
 | Field | Meaning | Default |
 |---|---|---|
-| `key` | Ticket id prefix; `TASK-001`, branch `you/TASK-001-slug` | `"TASK"` |
+| `key` | Ticket id prefix; `TASK-001`, branch `you/TASK-001-slug`. Shape-checked on load (BLZ-402): upper-case letters and digits, starting with a letter — a key that is valid regex but not this shape (e.g. `A.*`) is refused rather than built into a silently over-broad matcher | `"TASK"` |
 | `boardTitle` | Web app heading + `<title>` | `"Blaze"` |
 | `codeRepo` | Path to the repo to mirror; `null` = standalone | `null` |
 | `provider` | Reconcile provider; only `github` implemented | `"github"` |
