@@ -459,7 +459,7 @@ this page is the reference.
 | Variable | Controls | Default |
 |---|---|---|
 | `BLAZE_PROJECTS_DIR` | Explicit path to the data repo's `projects/` directory. Lets the engine run from anywhere. | none — falls back to a `projects/` dir under the current working directory |
-| `BLAZE_KEY` | Ticket id prefix override. | the `key` in `blaze.config.json` |
+| `BLAZE_KEY` | Ticket id prefix override. Same shape rule as `key` in `blaze.config.json` (BLZ-402): upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — refused, not silently accepted, otherwise. | the `key` in `blaze.config.json` |
 | `BLAZE_PORT` | Board port. | 4321, unless overridden (see below) |
 | `PORT` | Board port; takes precedence over `BLAZE_PORT` and config. | — |
 | `HOST` | Bind host for `blaze board`. `blaze start` / bare `blaze` always binds `127.0.0.1`. **A non-loopback value on a board with no users refuses to start** — see [`board`](#board) and [`user`](#user). | `127.0.0.1` |

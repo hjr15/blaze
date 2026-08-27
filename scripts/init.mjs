@@ -18,12 +18,17 @@
 //    `terminal`, `defaultLabels` and a base URL are NOT asked because nothing reads
 //    them (BLZ-298) — a question whose answer nothing reads is ceremony, not setup.
 import { join } from "node:path";
+// BLZ-402: KEY_RE used to be a private copy here, checked ONLY on this wizard's
+// `--project` answer — nothing on the config-load path (scripts/config.mjs) ever ran
+// it. It now lives in config.mjs as the one shared definition; planInit uses the
+// predicate form (`KEY_RE.test`) because it COLLECTS errors rather than throwing on
+// the first one ("a wizard that reports one problem per run is a wizard people run
+// four times"), so the throwing `assertValidKey` form doesn't fit here.
+import { KEY_RE } from "./config.mjs";
 
 /** Drivers this engine will offer. Derived intent, per ADR-0012: a driver is offered
  *  because it passes the conformance suite, not because it is listed somewhere. */
 export const OFFERED_DRIVERS = ["sqlite", "postgres"];
-
-const KEY_RE = /^[A-Z][A-Z0-9]*$/;
 
 /**
  * Turn answers into the exact files to write. PURE — no I/O, no prompting.

@@ -46,6 +46,47 @@ const DEFAULTS = {
   schedule: { minutes_per_day: 480, working_days: [1, 2, 3, 4, 5] },
 };
 
+// --- BLZ-402: one project-key shape check, shared by every load path ---------------
+// `idRegex`/`fileRegex`/`idLineRegex` (here and in loadProject) interpolate the project
+// key RAW into `new RegExp(...)`. Escaping the key would stop it crashing the regex
+// engine, but it would NOT stop a key that is valid regex but not a valid key — e.g.
+// "A.*" — from being built into a working matcher that is silently too broad (it then
+// matches ids belonging to other projects). The fix is a SHAPE check, applied before the
+// key ever reaches `new RegExp(...)`, not quoting.
+//
+// `scripts/init.mjs`'s first-run wizard held its own private copy of this same shape
+// (`KEY_RE`) but only checked the `--project` wizard answer — nothing on the config-LOAD
+// path (this file) ever ran it, so a key that slipped in some other way (hand-edited
+// `blaze.config.json`, `BLAZE_KEY`) reached the regex builders unchecked. KEY_RE now
+// lives here as the one shared definition; init.mjs imports it instead of holding its
+// own copy.
+export const KEY_RE = /^[A-Z][A-Z0-9]*$/;
+
+export class InvalidProjectKeyError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "InvalidProjectKeyError";
+  }
+}
+
+/**
+ * Throws InvalidProjectKeyError unless `key` is a valid project-key shape. `source`
+ * names where the value came from, for the refusal message — e.g. "blaze.config.json's
+ * 'key' field", "the BLAZE_KEY environment variable", "a --project argument".
+ */
+export function assertValidKey(key, { source }) {
+  if (typeof key !== "string" || !KEY_RE.test(key)) {
+    throw new InvalidProjectKeyError(
+      `blaze: ${source} ${JSON.stringify(key)} is not a valid project key. `
+      + `A project key is interpolated directly into a regular expression that matches `
+      + `ticket ids and filenames, so its SHAPE must be exact, not merely valid regex — `
+      + `a key that is valid regex but not this shape (e.g. "A.*") would silently match `
+      + `more than it should. Expected upper-case letters and digits, starting with a `
+      + `letter (e.g. ENG, OBA, BLZ2).`,
+    );
+  }
+}
+
 /** Validate the schedule block. Refusals name the key, per v4 spine §4.2. */
 function checkSchedule(s) {
   const mpd = s.minutes_per_day;
@@ -109,10 +150,16 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   checkSchedule(cfg.schedule);
 
   // Env overrides (highest precedence).
-  if (env.BLAZE_KEY) cfg.key = env.BLAZE_KEY;
+  let keySource = "blaze.config.json's 'key' field";
+  if (env.BLAZE_KEY) { cfg.key = env.BLAZE_KEY; keySource = "the BLAZE_KEY environment variable"; }
   if (env.BLAZE_PORT) cfg.port = Number(env.BLAZE_PORT);
   if (env.BLAZE_AGENT_COMMAND) cfg.agentCommand = env.BLAZE_AGENT_COMMAND;
   if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;
+
+  // BLZ-402: ONE call, made AFTER the env override lands on cfg.key and BEFORE any
+  // regex is derived from it — this is what makes the env override validated exactly
+  // as much as the file key (AC-2), rather than a second, easy-to-forget check.
+  assertValidKey(cfg.key, { source: keySource });
 
   // Derived values.
   cfg.idRegex = new RegExp("\\b" + cfg.key + "-(\\d+)", "i");
@@ -267,6 +314,10 @@ export function listProjects(cfg, { root = ROOT } = {}) {
 // misconfiguration and must throw.
 export function loadProject(key, { root = ROOT, projectsDir = join(root, "projects"), allowMissing = false } = {}) {
   const cfg = loadConfig({ root });
+  // BLZ-402: shape-check BEFORE anything else — a malformed key is refused up front
+  // rather than surfacing later as "unknown project" (directory-existence) or a raw
+  // regex-engine crash once `merged.idRegex` is built from it below.
+  assertValidKey(key, { source: "a --project argument" });
   // BLZ-140: a missing project DIRECTORY is a misconfiguration (typo'd --project,
   // an unscaffolded key), not an empty taxonomy. Returning PROJECT_DEFAULTS for it
   // is a false-empty fail-open: the caller reads "exists, declares nothing" and
