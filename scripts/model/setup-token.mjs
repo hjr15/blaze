@@ -134,20 +134,38 @@ export function ensureSetupTokenIgnored(dataRoot) {
     // `.gitignore` symlink read as "absent" had `appendFileSync` create the link's target
     // and the undo then delete the LINK, leaving an orphan file behind.
     const gitignore = join(dataRoot, ".gitignore");
+    // `blocked` SKIPS THE APPEND — IT DOES NOT LEAVE THE FUNCTION. Review found the
+    // difference the hard way: the first cut `return`ed from here, which jumped over the
+    // `git rm --cached` untrack step below that base and every earlier cut always reached,
+    // and hardcoded `wasTracked: false`. On a board whose token was ALREADY TRACKED, the
+    // live credential stayed staged for the next commit and `serve.mjs` — which gates BOTH
+    // of its operator warnings on `wasTracked` — said nothing at all. Skipping the part
+    // that cannot work must not skip the part that still can.
+    let blocked = null;
     let before = null;              // Buffer when a regular file is there, else null
-    let link = false;
-    try {
-      const st = lstatSync(gitignore);
-      link = st.isSymbolicLink();
-      if (st.isFile()) before = readFileSync(gitignore);
-    } catch { /* nothing there — before stays null */ }
-    if (link) {
+    // lstat and read are SEPARATE questions. Wrapping both in one bare catch conflated
+    // "absent" with "present but unreadable", and an unreadable file left `before` null,
+    // so the undo took the `rmSync` branch and DELETED the operator's .gitignore — every
+    // rule in it, not just the one blaze added.
+    let st = null;
+    try { st = lstatSync(gitignore); } catch { /* genuinely absent */ }
+    if (st?.isSymbolicLink()) {
       // Writing through an operator's symlink, and undoing it, is not something a
-      // boot-time hygiene check should attempt. Say so and stop.
-      console.error(`blaze: WARNING — ${dataRoot}/.gitignore is a symlink, so blaze did not `
-        + `modify it. ${rel} may not be ignored; check it by hand. (The token's VALUE is `
-        + "not shown here or in any log.)");
-      return { state: "ineffective", path: rel, wasTracked: false, untrackOk: null, untrackError: null };
+      // boot-time hygiene check should attempt — and git does not read a symlinked
+      // .gitignore anyway, so appending through it could never have helped.
+      blocked = "symlink";
+      console.error(`blaze: WARNING — ${rel}'s .gitignore is a symlink, so blaze did not `
+        + `modify it. git does not read a symlinked .gitignore, so ${rel} is NOT ignored; `
+        + "add the rule to a real .gitignore by hand. (The token's VALUE is not shown here "
+        + "or in any log.)");
+    } else if (st?.isFile()) {
+      try { before = readFileSync(gitignore); } catch (e) {
+        blocked = "unreadable";
+        console.error(`blaze: WARNING — blaze could not read .gitignore `
+          + `(${e && e.code ? e.code : "read failed"}), so it did not modify it. ${rel} is `
+          + "NOT ignored; add the rule by hand. (The token's VALUE is not shown here or in "
+          + "any log.)");
+      }
     }
     const existedBefore = before !== null;
     const existing = before ?? Buffer.alloc(0);
@@ -169,31 +187,40 @@ export function ensureSetupTokenIgnored(dataRoot) {
     // possible at once — "I wrote a rule" and "the path is ignored" are different
     // statements and only the second decides what to do next.
     // Newline probe on BYTES: 0x0a, not `String.endsWith`.
-    const needsNl = existing.length > 0 && existing.at(-1) !== 0x0a;
-    try {
-      appendFileSync(gitignore,
-        `${needsNl ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
-    } catch (e) {
-      // A read-only `.gitignore` (or any write refusal) must not throw out of a boot-time
-      // hygiene check — `serve.mjs` catches it bare and the operator then loses the ONE
-      // warning that says a live credential is still committable. Report and warn instead.
-      console.error(`blaze: WARNING — ${rel} is not ignored by git and blaze could not add a `
-        + `rule for it (${e && e.code ? e.code : "write failed"}). This live credential stays `
-        + "committable. Add the rule by hand, then restart. (The token's VALUE is not shown "
-        + "here or in any log.)");
-      return { state: "ineffective", path: rel, wasTracked: false, untrackOk: null, untrackError: null };
-    }
-    if (isIgnored()) {
-      state = "added";
+    if (blocked) {
+      // Diagnosed above. No rule can be added here, but control MUST still reach the
+      // untrack step below: the token may already be tracked, and un-staging a live
+      // credential is worth doing even when no rule can be written.
+      state = blocked;
     } else {
-      // Undo, so a board that cannot be fixed this way does not grow a line every boot.
-      if (existedBefore) writeFileSync(gitignore, existing);
-      else rmSync(gitignore, { force: true });
-      state = "ineffective";
-      console.error(`blaze: WARNING — ${rel} is still not ignored by git, and adding a rule `
-        + "for it did not change that: a deeper .gitignore is overriding the root one. This "
-        + "live credential stays committable. Fix the negating rule, then restart. (The "
-        + "token's VALUE is not shown here or in any log.)");
+      // Newline probe on BYTES: 0x0a, not `String.endsWith`.
+      const needsNl = existing.length > 0 && existing.at(-1) !== 0x0a;
+      try {
+        appendFileSync(gitignore,
+          `${needsNl ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+      } catch (e) {
+        // A write refusal must not throw out of a boot-time hygiene check — `serve.mjs`
+        // catches it bare, and the operator would lose the one warning that says a live
+        // credential is still committable.
+        state = "unwritable";
+        console.error(`blaze: WARNING — ${rel} is not ignored by git and blaze could not add `
+          + `a rule for it (${e && e.code ? e.code : "write failed"}). This live credential `
+          + "stays committable. Add the rule by hand, then restart. (The token's VALUE is "
+          + "not shown here or in any log.)");
+      }
+      if (state) { /* the append failed and said so */ }
+      else if (isIgnored()) {
+        state = "added";
+      } else {
+        // Undo, so a board that cannot be fixed this way does not grow a line every boot.
+        if (existedBefore) writeFileSync(gitignore, existing);
+        else rmSync(gitignore, { force: true });
+        state = "ineffective";
+        console.error(`blaze: WARNING — ${rel} is still not ignored by git, and adding a rule `
+          + "for it did not change that: a deeper .gitignore is overriding the root one. This "
+          + "live credential stays committable. Fix the negating rule, then restart. (The "
+          + "token's VALUE is not shown here or in any log.)");
+      }
     }
   }
 

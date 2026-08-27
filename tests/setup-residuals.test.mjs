@@ -417,8 +417,11 @@ describe("BLZ-397: the undo restores the operator's file, byte for byte", () => 
     try { r = ensureSetupTokenIgnored(root); } catch (e) { threw = e; } finally { cap.stop(); }
     try {
       assert.equal(threw, null, "a boot-time hygiene check must not throw at its caller");
-      assert.equal(r.state, "ineffective");
-      assert.match(cap.text, /setup-token/, "and the operator is still warned");
+      assert.equal(r.state, "unwritable",
+        "and the state names THIS cause — `ineffective` covered three unrelated ones that " +
+        "need different operator actions");
+      assert.match(cap.text, /could not add/, "and the operator is warned about the write, " +
+        "not about a negating rule that is not there");
     } finally {
       try { chmodSync(join(root, ".gitignore"), 0o644); } catch { /* ignore */ }
       rmSync(root, { recursive: true, force: true });
@@ -443,7 +446,7 @@ describe("BLZ-397: the undo restores the operator's file, byte for byte", () => 
     try {
       assert.equal(isIgnoredAt(root), false,
         "premise: git does not honour a symlinked .gitignore, even one naming the token");
-      assert.equal(r.state, "ineffective", "so blaze must not claim it added anything");
+      assert.equal(r.state, "symlink", "so blaze must not claim it added anything");
       assert.equal(readFileSync(join(root, "shared-ignore"), "utf8"),
         "node_modules/\n.blaze/setup-token\n",
         "and must not write into the operator's shared file through the link");
@@ -462,10 +465,86 @@ describe("BLZ-397: the undo restores the operator's file, byte for byte", () => 
     let r;
     try { r = ensureSetupTokenIgnored(root); } finally { cap.stop(); }
     try {
-      assert.equal(r.state, "ineffective");
+      assert.equal(r.state, "symlink");
       assert.equal(existsSync(join(root, "nowhere-at-all")), false,
         "blaze must not create the symlink's target behind the operator's back");
       assert.match(cap.text, /symlink/i, "and must say why it did nothing");
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-397: a blocked path still untracks a token that is already staged", () => {
+  /** THE PART THAT CANNOT WORK MUST NOT SKIP THE PART THAT STILL CAN. An earlier cut
+   *  `return`ed from the symlink and write-refusal branches, jumping over the
+   *  `git rm --cached -f` untrack step that every prior version always reached, and
+   *  hardcoding `wasTracked: false`. `serve.mjs` gates BOTH of its operator warnings on
+   *  `wasTracked`, so on a board whose token was already staged the live credential stayed
+   *  staged for the next commit and the operator was told nothing at all. */
+  function trackedBoard(makeBlocked) {
+    const root = mkdtempSync(join(tmpdir(), "blaze-blocked-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    writeFileSync(join(root, ".blaze", "setup-token"), "LIVE-TOKEN-VALUE\n");
+    execFileSync("git", ["-C", root, "add", "-f", "--", ".blaze/setup-token"]);
+    makeBlocked(root);
+    return root;
+  }
+  const staged = (root) =>
+    execFileSync("git", ["-C", root, "diff", "--cached", "--name-only"], { encoding: "utf8" });
+
+  for (const [label, makeBlocked] of Object.entries({
+    "a symlinked .gitignore": (root) => symlinkSync("shared", join(root, ".gitignore")) ||
+      writeFileSync(join(root, "shared"), "node_modules/\n"),
+    "an unwritable .gitignore": (root) => {
+      writeFileSync(join(root, ".gitignore"), "node_modules/\n");
+      writeFileSync(join(root, ".blaze", ".gitignore"), "!setup-token\n");
+      chmodSync(join(root, ".gitignore"), 0o444);
+    },
+  })) {
+    test(`${label} still un-stages the token and reports it was tracked`, () => {
+      const root = trackedBoard(makeBlocked);
+      const cap = captureOutput();
+      let r;
+      try { r = ensureSetupTokenIgnored(root); } finally { cap.stop(); }
+      try {
+        assert.match(staged(root), /^$/,
+          `${label}: the live credential must be un-staged even when no rule can be added`);
+        assert.equal(r.wasTracked, true,
+          "and `wasTracked` must be true, or serve.mjs prints neither of its warnings");
+        assert.equal(r.untrackOk, true);
+        assert.equal(existsSync(join(root, ".blaze", "setup-token")), true,
+          "--cached removes it from the INDEX only; the live token on disk stays");
+        assert.equal(cap.text.includes("LIVE-TOKEN-VALUE"), false, "never a value");
+      } finally {
+        try { chmodSync(join(root, ".gitignore"), 0o644); } catch { /* ignore */ }
+        rmSync(root, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("an unreadable .gitignore is not mistaken for an absent one, and is not deleted", () => {
+    // lstat and read were wrapped in ONE bare catch, so "present but unreadable" read as
+    // "absent" -> `existedBefore` false -> the undo took `rmSync` and DELETED the
+    // operator's .gitignore, taking every rule in it with it.
+    const root = mkdtempSync(join(tmpdir(), "blaze-unreadable-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    writeFileSync(join(root, ".gitignore"), "node_modules/\nsecrets.env\n");
+    writeFileSync(join(root, ".blaze", ".gitignore"), "!setup-token\n");
+    chmodSync(join(root, ".gitignore"), 0o200);          // write-only: read denied
+    const cap = captureOutput();
+    try { ensureSetupTokenIgnored(root); } finally { cap.stop(); }
+    try {
+      assert.equal(existsSync(join(root, ".gitignore")), true,
+        "the operator's .gitignore must not be deleted — every rule in it would go with it");
+      chmodSync(join(root, ".gitignore"), 0o644);
+      assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "node_modules/\nsecrets.env\n",
+        "and must come back exactly as it was");
+    } finally {
+      try { chmodSync(join(root, ".gitignore"), 0o644); } catch { /* ignore */ }
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
