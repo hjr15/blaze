@@ -5,6 +5,7 @@ import { join, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { checkSchemaVersion } from "./model/schema-version.mjs";
+import { SCHEMA_BLOCK_DROPPED } from "./model/schema-marker.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -124,8 +125,18 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
 
   // Declarative schema override block (types/workflows). Passed through verbatim;
   // resolved against the built-in defaults by the model layer. Non-object → null.
-  cfg.schema = (file.schema && typeof file.schema === "object" && !Array.isArray(file.schema))
-    ? file.schema : null;
+  // BLZ-396: remember that a block was DROPPED. Only this function sees the raw value —
+  // downstream, a wrong-shaped `schema` and an absent one are both `null` and no consumer
+  // can tell them apart, so a whole `"schema": "a string"` was ignored in silence. The
+  // marker is the kind that was dropped, or null when nothing was.
+  const rawSchema = file.schema;
+  cfg.schema = (rawSchema && typeof rawSchema === "object" && !Array.isArray(rawSchema))
+    ? rawSchema : null;
+  // SYMBOL-keyed: `audit-runner.mjs` passes `auditCorpus` the raw `JSON.parse` of
+  // project.json, so a string key would let an operator forge a malformation that is not
+  // there. See model/schema-marker.mjs.
+  cfg[SCHEMA_BLOCK_DROPPED] = (rawSchema === undefined || rawSchema === null || cfg.schema !== null)
+    ? null : (Array.isArray(rawSchema) ? "an array" : typeof rawSchema);
 
   return Object.freeze(cfg);
 }
@@ -278,7 +289,13 @@ export function loadProject(key, { root = ROOT, projectsDir = join(root, "projec
   merged.idRegex = new RegExp("\\b" + key + "-(\\d+)", "i");
   merged.idFromRef = (ref) => { const m = merged.idRegex.exec(ref || ""); return m ? `${key}-${m[1]}` : null; };
   merged.fileRegex = new RegExp("^" + key + "-\\d+.*\\.md$");
-  merged.schema = (merged.schema && typeof merged.schema === "object" && !Array.isArray(merged.schema))
-    ? merged.schema : null;
+  const rawProjSchema = merged.schema;
+  merged.schema = (rawProjSchema && typeof rawProjSchema === "object" && !Array.isArray(rawProjSchema))
+    ? rawProjSchema : null;
+  // `null` here is the value PROJECT_DEFAULTS seeds, not something the operator wrote —
+  // treating it as a dropped block refused every ordinary board, which the "a NON-EXEMPT
+  // verb runs clean on an ordinary good board" test caught at once.
+  merged[SCHEMA_BLOCK_DROPPED] = (rawProjSchema === undefined || rawProjSchema === null || merged.schema !== null)
+    ? null : (Array.isArray(rawProjSchema) ? "an array" : typeof rawProjSchema);
   return Object.freeze(merged);
 }

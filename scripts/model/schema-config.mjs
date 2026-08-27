@@ -8,6 +8,10 @@ import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows, RESOLUTIONS } from "./workflows.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes, linkTypeOverrideErrors } from "./link-schema.mjs";
 import { GOAL_SATISFYING_REQUIREMENT } from "./gates.mjs";
+import { SCHEMA_BLOCK_DROPPED } from "./schema-marker.mjs";
+
+/** Every kind the loaders can drop: `typeof` of a non-record, plus arrays. */
+const DROPPED_KINDS = new Set(["an array", "string", "number", "boolean", "bigint", "symbol", "function"]);
 
 export function resolveSchema({ config = null, project = null } = {}) {
   const topTypes = config?.schema?.types;
@@ -43,6 +47,147 @@ export function resolveSchema({ config = null, project = null } = {}) {
  *         block never reaches the scheduler. `blaze audit` files every one of these SOFT and
  *         calls such a board ok=true. Throwing on them made every non-exempt verb exit 1 on a
  *         board audit calls clean — a check worse than the bug it replaced. Report only. */
+/** BLZ-396: the override's CONTAINER, not its entries.
+ *
+ *  `mergeTypes`/`mergeWorkflows` coerce a non-record block to `{}` and say nothing, so
+ *  `{"schema": {"types": "notanobject"}}` — and an array, a number, or a whole `schema`
+ *  that is a string — produced ZERO findings and `blaze audit` reported ok=true. The
+ *  operator wrote a block, it did nothing, and the board ran on built-in defaults it never
+ *  asked for. That is BLZ-56's failure one level up.
+ *
+ *  The engine already has the right shape of answer for this class: `linkTypeOverrideErrors`
+ *  says "the whole block was IGNORED". This mirrors that wording deliberately rather than
+ *  inventing a second vocabulary for the same fact.
+ *
+ *  `undefined` is NOT a wrong shape — an absent block is how almost every board is written,
+ *  and reporting it would put a finding on essentially every installation, which is worse
+ *  than the bug this closes. */
+export function schemaContainerErrors(schema, dropped = null, layer = "config", configSchema = null) {
+  const kind = (v) => (Array.isArray(v) ? "an array" : v === null ? "null" : typeof v);
+  const isRecord = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+  // `null` is ABSENT, not a wrong shape. `loadConfig` and `loadProject` both normalise a
+  // missing `schema` to null, so treating null as malformed put a `schema-invalid` finding
+  // on EVERY ordinary board — the "a new check is worse than the bug" outcome this repo has
+  // paid for twice, and the existing "a healthy board reports no schema-invalid" test
+  // caught it immediately. The loaders hand the dropped KIND separately, because by the
+  // time the block reaches here a wrong shape and an absent one look identical.
+  // WHAT IS STILL IN FORCE IS DERIVED, NEVER ASSUMED. `resolveSchema` merges DEFAULT, then
+  // blaze.config.json, then the project block, so dropping the LAST one leaves whatever the
+  // first two resolved to. Two wrong answers have already shipped through here:
+  //
+  //   1. hardcoded to the built-in defaults — untrue at the project layer whenever
+  //      blaze.config.json carries a valid override, and it named the wrong file too;
+  //   2. hardcoded to "the blaze.config.json layer is still in force" for every project-layer
+  //      report — untrue whenever that layer does not exist, is ITSELF dropped, or declares
+  //      nothing for this particular block. That is wrong on the MORE common board, and on a
+  //      board with both layers dropped the report contradicted itself in adjacent lines.
+  //
+  //   3. `isRecord(configSchema)` — which asks whether the config layer is a RECORD, while
+  //      the sentence asserts that it puts something IN FORCE. Those diverge for every
+  //      well-formed record that declares nothing, including one whose own inner block was
+  //      reported as IGNORED on the line immediately above.
+  //
+  // So the predicate is DERIVED from `resolveSchema`: does this layer change the resolved
+  // schema, or not? Reimplementing it by hand gets the coercions wrong — `mergeTypes` and
+  // `mergeLinkTypes` flatten a non-record to `{}`, so `{"linkTypes": ["x"]}` is a NO-OP
+  // despite being a non-empty array, and a "does it have keys" rule would call it in force.
+  // Asking the merge is the only answer that cannot drift from the merge.
+  //
+  //   4. and, in the half fix 3 never touched, the CONFIG layer's own clause stayed hardcoded
+  //      to "the built-in X are still in force" — untrue whenever a PROJECT layer carries a
+  //      valid override. Round 1's defect exactly, mirrored. Every test written for fix 3
+  //      filtered on `project.json:`, so not one of them looked at it.
+  //
+  // The config layer's clause cannot be repaired by naming what IS in force, because that
+  // finding is emitted ONCE for the whole installation — `auditCorpus` dedups it across every
+  // project — so no single project's schema is the right thing to name, and rendering two
+  // different sentences for one finding is its own defect. It therefore says something true
+  // about the FILE and claims nothing about the board.
+  //
+  // LAZY, because the resolves are only needed to build a message: an eager version charged
+  // two merges to every ordinary board with a config schema record, finding or not.
+  //   5. and in the branch fix 4 itself added: when the comparison could not be COMPUTED it
+  //      returned false, which renders as the definite claim "the built-in X are still in
+  //      force" — round 1's defect verbatim. `false` is not the weaker answer. It is also
+  //      REACHABLE from `JSON.parse`, which the previous comment here denied: `JSON.parse`
+  //      accepts nesting depths `JSON.stringify` cannot serialise, so a hand-written
+  //      blaze.config.json reaches it with no exotic runtime value involved.
+  //
+  // Hence a TRI-STATE. "Unknown" gets the sentence that is unconditionally true whatever the
+  // config layer turns out to be: the block being reported was dropped, so THAT file
+  // contributes nothing. It is the same shape of answer the config layer always gives.
+  let inForce;  // undefined = not computed; null = could not be computed
+  const contributes = (block) => {
+    if (layer !== "project" || !isRecord(configSchema)) return false;
+    if (inForce === undefined) {
+      inForce = null;
+      try {
+        // EVERY stringify inside the try. They sat outside it, so a config that cannot be
+        // serialised — a circular structure, a BigInt, a throwing `toJSON` — made a REPORT
+        // throw, breaking this file's "never throws, on any input" contract. Unreachable
+        // from `JSON.parse`, but the contract is what other code relies on, and deleting
+        // this guard survived the whole suite until it was pinned.
+        const base = resolveSchema({});
+        const top = resolveSchema({ config: { schema: configSchema } });
+        const differs = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
+        inForce = { all: differs(base, top), types: differs(base.types, top.types),
+                    workflows: differs(base.workflows, top.workflows) };
+      } catch { inForce = null; }  // unknown is NOT the same as in force — say the weaker thing
+    }
+    if (inForce === null) return null;  // UNKNOWN — never collapse this into `false`
+    // `?? null` so a block this memo does not carry reads as UNKNOWN, not as "no". The memo
+    // holds `types` and `workflows` because those are the two the loop below inspects; add
+    // `linkTypes` to that loop without this and `undefined` falls to the falsy branch and
+    // renders "the built-in linkTypes are still in force" — round 1's defect a sixth time,
+    // via a road nothing currently travels.
+    return block === null ? inForce.all : (inForce[block] ?? null);
+  };
+  // The layer's own file, which is true for both layers and needs no resolve: the block
+  // being reported was dropped, so it contributes nothing.
+  const thisFile = layer === "project" ? "project.json" : "blaze.config.json";
+  // FUNCTIONS, not values. As a bare ternary this ran on every call, including the ordinary
+  // boards that produce no finding at all — the eager cost the previous commit claimed to
+  // have removed and had not.
+  const stillInForce = () => {
+    if (layer !== "project") return `nothing in ${thisFile} reaches the resolved schema`;
+    const c = contributes(null);
+    if (c === null) return `nothing in ${thisFile} reaches the resolved schema`;
+    return c ? "the blaze.config.json layer is still in force"
+             : "every type, workflow and link type came from the built-in defaults";
+  };
+  const blockInForce = (block) => {
+    if (layer !== "project") return `${thisFile} contributes no ${block}`;
+    const c = contributes(block);
+    if (c === null) return `${thisFile} contributes no ${block}`;
+    return c ? `the blaze.config.json layer's ${block} are still in force`
+             : `the built-in ${block} are still in force`;
+  };
+  // A dropped-kind marker is only ever set by the loaders, and only to one of these. It
+  // arrives as a SYMBOL key so operator-written JSON cannot forge one — but a wrong VALUE
+  // under the right key would still render `[object Object]` into an audit detail, which is
+  // BLZ-392's defect by another route, so the value is whitelisted as well.
+  if (dropped && DROPPED_KINDS.has(dropped)) {
+    return [`schema must be an object, got ${dropped} — the whole block was IGNORED, `
+      + `so ${stillInForce()}`];
+  }
+  if (schema === undefined || schema === null) return [];
+  if (!isRecord(schema)) {
+    return [`schema must be an object, got ${kind(schema)} — the whole block was IGNORED, `
+      + `so ${stillInForce()}`];
+  }
+  const errors = [];
+  for (const block of ["types", "workflows"]) {
+    const v = schema[block];
+    // `null` is absent here too, for the same reason it is absent one level up: the loaders
+    // produce it for "not written", and a check that cannot tell the two apart fires on
+    // ordinary boards.
+    if (v === undefined || v === null || isRecord(v)) continue;
+    errors.push(`schema.${block} must be an object keyed by ${block === "types" ? "type" : "workflow"} `
+      + `name, got ${kind(v)} — the whole block was IGNORED, so ${blockInForce(block)}`);
+  }
+  return errors;
+}
+
 function collectSchemaProblems(input = {}) {
   // Destructuring `null` throws, and a parameter default only fires for `undefined`. This
   // function is pure and public and `auditCorpus` may call it with a config that parsed to
@@ -264,6 +409,24 @@ function collectSchemaProblems(input = {}) {
   // here and reported. The operator wrote the block; they need to know it did nothing.
   for (const e of linkTypeOverrideErrors(config?.schema?.linkTypes)) {
     soft(`blaze.config.json: ${e}`);
+  }
+  // BLZ-396. HARD, and the split is BLZ-56's: this is a genuine MALFORMATION, not a
+  // legal-but-inert block. An operator who writes `"types": "notanobject"` meant to change
+  // the registry and did not; continuing on defaults they never chose is exactly the silent
+  // acceptance BLZ-56 exists to end. Both layers are inspected, because unlike `linkTypes`
+  // — which is inert per-project by design — a per-project `types`/`workflows` block IS
+  // read (`resolveSchema` merges `project.schema.types` over the top-level layer), so a
+  // malformed one there is just as much a lie about what the board is running.
+  //
+  // Measured before shipping the refusal, because a preflight that refuses a board `blaze
+  // audit` calls clean has been the worse-than-the-bug outcome here twice: at blaze-pm's
+  // v4-spine worktree, `blaze.config.json` carries a well-formed `schema` and NO
+  // project.json carries a `schema` block at all. This refuses nothing that exists today.
+  for (const e of schemaContainerErrors(config?.schema, config?.[SCHEMA_BLOCK_DROPPED], "config")) {
+    hard(`blaze.config.json: ${e}`);
+  }
+  for (const e of schemaContainerErrors(project?.schema, project?.[SCHEMA_BLOCK_DROPPED], "project", config?.schema)) {
+    hard(`project.json: ${e}`);
   }
   // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"
   // with "…does not reach the scheduler at all" for the same block — two findings that
