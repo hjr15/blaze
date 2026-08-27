@@ -125,27 +125,38 @@ export function ensureSetupTokenIgnored(dataRoot) {
     state = "already";
   } else {
     const gitignore = join(dataRoot, ".gitignore");
-    const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
-    // Do not append a rule that is already present. On the negating board the rule IS
-    // there and simply loses, so appending again adds a line and changes nothing — the
-    // accretion measured above. A rule already present but ineffective needs a person,
-    // not another copy of itself.
-    const alreadyWritten = existing.split("\n").some((l) => l.trim() === rel);
-    if (!alreadyWritten) {
-      appendFileSync(gitignore,
-        `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
-    }
-    // RE-ASK. If it still is not ignored, say so — and warn, because a live credential
-    // staying committable is exactly the condition this function exists to prevent, and
-    // the already-tracked branch below already warns for its own version of it.
+    const existedBefore = existsSync(gitignore);
+    const existing = existedBefore ? readFileSync(gitignore, "utf8") : "";
+    // APPEND UNCONDITIONALLY, THEN RE-ASK, THEN UNDO IF IT DID NOT HELP.
+    //
+    // The first cut skipped the append whenever a rule for the path was already in the
+    // file, reasoning that a second copy of a losing rule cannot help. That is true only
+    // when the rule loses to a DEEPER .gitignore. Git resolves within one file by
+    // LAST MATCHING RULE, so when the rule loses to a later line in the SAME file —
+    // `!.blaze/setup-token`, or a broad `!.blaze/*` re-include written for some other
+    // file — appending at the end IS the fix, and the pre-fix code did exactly that.
+    // Review measured four such board shapes where the live token was ignored before this
+    // change and committable after it: a regression, in the one direction this function
+    // exists to protect.
+    //
+    // So: append, ask git, and if the answer is still no, put the file back exactly as it
+    // was. The boards where appending works are fixed; the boards where it cannot work
+    // accrete nothing, which is the whole of BLZ-397. The re-ask is what makes both
+    // possible at once — "I wrote a rule" and "the path is ignored" are different
+    // statements and only the second decides what to do next.
+    appendFileSync(gitignore,
+      `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
     if (isIgnored()) {
       state = "added";
     } else {
-      state = alreadyWritten ? "ineffective" : "added-ineffective";
-      console.error(`blaze: WARNING — ${rel} is still not ignored by git after adding a rule `
-        + "for it. A deeper .gitignore is overriding the root one, so this live credential "
-        + "stays committable. Fix the negating rule, then restart. (The token's VALUE is "
-        + "not shown here or in any log.)");
+      // Undo, so a board that cannot be fixed this way does not grow a line every boot.
+      if (existedBefore) writeFileSync(gitignore, existing);
+      else rmSync(gitignore, { force: true });
+      state = "ineffective";
+      console.error(`blaze: WARNING — ${rel} is still not ignored by git, and adding a rule `
+        + "for it did not change that: a deeper .gitignore is overriding the root one. This "
+        + "live credential stays committable. Fix the negating rule, then restart. (The "
+        + "token's VALUE is not shown here or in any log.)");
     }
   }
 

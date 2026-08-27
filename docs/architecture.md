@@ -190,19 +190,26 @@ not be a surprise:
    `.blaze/identity.db` but *not* `.blaze/setup-token` — and in that case the identity
    check appended nothing, so it is still one rule.
 
-   **"Ensures" is now literal: the server appends and then RE-ASKS git.** It used to
-   append and report `state: "added"` without checking the rule took, which is a different
-   statement — a deeper `.gitignore` outranks the root one, so on a board whose
-   `.blaze/.gitignore` contains `!setup-token` the rule loses. Measured on the pre-fix
-   code, three consecutive boots gave 2, 3 and 4 rules with the token committable
-   throughout. The path is now re-checked after the append: if it is still not ignored the
-   state says so (`added-ineffective`, or `ineffective` when a rule for it was already
-   present), no duplicate is appended on later boots, and the operator is warned on stderr
-   — naming the **path** and never the value, exactly as the already-tracked case in (2)
-   does. The board this requires is contrived: an operator must have written the negating
-   rule themselves, and across 20 adversarial `.gitignore` configurations measured during
-   BLZ-358's review the maximum appended in one boot is 1, ignored correctly in every case
-   but this one.
+   **The server appends, RE-ASKS git, and undoes the append if it did not help.** It used
+   to append and report `state: "added"` without checking the rule took, which is a
+   different statement: a deeper `.gitignore` outranks the root one, so on a board whose
+   `.blaze/.gitignore` contains `!setup-token` the rule loses. Measured on that code, three
+   consecutive boots gave 2, 3 and 4 rules with the token committable throughout.
+
+   The re-ask is what makes the two cases separable, and they need separating because git
+   resolves **within one file by last-matching-rule**. A rule that loses to a later line in
+   the *same* `.gitignore` — an explicit `!.blaze/setup-token`, or a broad `!.blaze/*`
+   re-include written for some other file — **is** fixed by appending at the end, and the
+   server does so. A rule that loses to a *deeper* file cannot be fixed from the root at
+   all: there the append is reverted, the `.gitignore` is left byte-for-byte as it was (and
+   is not created if it did not exist), the state reads `ineffective`, and the operator is
+   warned on stderr — naming the **path** and never the value, exactly as the
+   already-tracked case in (2) does.
+
+   So nothing accretes on any board, and the only boards left un-ignored are the ones no
+   root-level rule could have covered. Both require an operator to have written a negating
+   rule themselves; across 20 adversarial `.gitignore` configurations measured during
+   BLZ-358's review, the maximum appended in one boot is 1.
 2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
    pre-fix build and staged or committed the token — the server runs
    `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index

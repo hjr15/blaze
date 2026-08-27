@@ -16,10 +16,11 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync
          chmodSync, unlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { DatabaseSync } from "node:sqlite";
 import { startServer, CSRF } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
-import { identityDbPath } from "../scripts/model/identity-db.mjs";
+import { identityDbPath, loadIdentity } from "../scripts/model/identity-db.mjs";
 import { setupTokenPath, readSetupToken, ensureSetupTokenIgnored } from "../scripts/model/setup-token.mjs";
 
 function board() {
@@ -78,8 +79,18 @@ describe("BLZ-400: a failed adoption names the recovery route", () => {
     // no identity.db at all -> `absent`. `gate()` reads a null store as "loopback, no
     // identity configured" and serves everything.
     absent: (r) => unlinkSync(identityDbPath(r)),
-    // present but carrying no users -> `empty`, same fall-open shape as `absent`.
-    empty: (r) => { unlinkSync(identityDbPath(r)); writeFileSync(identityDbPath(r), ""); },
+    // SCHEMA INTACT, NO ROWS -> `empty`. The first version of this breaker wrote a
+    // ZERO-BYTE file, which is not an empty schema at all: `SELECT count(*) FROM app_user`
+    // throws on it, so `loadIdentity` returned `broken` and this case was a byte-for-byte
+    // duplicate of the one above it. `empty` — a genuine unauthenticated full-board serve
+    // if the guard is narrowed — was pinned by nothing, while the commit message said all
+    // three states were driven. Hence the assertion below: every breaker now PROVES which
+    // state it produced.
+    empty: (r) => {
+      const db = new DatabaseSync(identityDbPath(r));
+      db.exec("DELETE FROM app_user");
+      db.close();
+    },
   };
 
   for (const [state, breakIt] of Object.entries(breakers)) {
@@ -88,6 +99,10 @@ describe("BLZ-400: a failed adoption names the recovery route", () => {
       const createThenBreak = async (r, opts) => {
         const out = await addUser(r, opts);
         breakIt(r);
+        // PROVE the breaker produced the state this test is named for. Without this the
+        // `empty` case silently drove `broken` and duplicated its sibling.
+        assert.equal(loadIdentity(r)?.state, state,
+          `the ${state} breaker must actually produce the ${state} state`);
         return out;
       };
       const { server, base } = await boot({ root, projectsDir: projects, host: "0.0.0.0",
@@ -176,17 +191,25 @@ describe("BLZ-397: ensureSetupTokenIgnored verifies the rule took", () => {
     const p = join(root, ".gitignore");
     return existsSync(p) ? readFileSync(p, "utf8").split("\n").filter((l) => l.trim()).length : 0;
   };
-  const ignored = (root) =>
-    execFileSync("git", ["-C", root, "check-ignore", "--no-index", "-q", "--", ".blaze/setup-token"],
-      { encoding: "utf8", stdio: "pipe" }) === "" ;
+  /** The only question that actually matters: does git ignore the token? The first cut
+   *  of this file defined a helper for this, never called it, and had it backwards —
+   *  `-q` prints nothing and EXITS 1 when the path is not ignored, so `execFileSync`
+   *  throws rather than returning false. Every BLZ-397 test therefore asserted only the
+   *  returned state string and the rule count, and a regression that left a live token
+   *  committable walked straight past all four of them. */
+  const isIgnored = (root) =>
+    spawnSync("git", ["-C", root, "check-ignore", "--no-index", "-q", "--", ".blaze/setup-token"])
+      .status === 0;
 
   test("a rule that does not take is reported as such, not as `added`", async () => {
     const root = negatingBoard();
     try {
       const r = ensureSetupTokenIgnored(root);
+      assert.equal(isIgnored(root), false,
+        "premise check: on this board git genuinely cannot be made to ignore the token");
       assert.notEqual(r.state, "added",
         "`added` claims the path is ignored; a deeper .gitignore outranks the root one");
-      assert.match(r.state, /ineffective|not-ignored|failed/,
+      assert.equal(r.state, "ineffective",
         `the state must say the rule did not take; got ${JSON.stringify(r.state)}`);
       assert.equal(r.path, ".blaze/setup-token", "and it names the PATH");
       assert.equal(JSON.stringify(r).includes("setup-token\n"), false, "never a value");
@@ -235,6 +258,76 @@ describe("BLZ-397: ensureSetupTokenIgnored verifies the rule took", () => {
       assert.equal(rules(root), 2, "one comment line plus one rule");
       ensureSetupTokenIgnored(root);
       assert.equal(rules(root), 2, "and a second boot appends nothing — it is already ignored");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-397: appending is attempted wherever it can work", () => {
+  /** Git resolves within ONE file by LAST MATCHING RULE, so a rule that loses to a later
+   *  line in the same file is fixed by appending at the end. The first cut skipped the
+   *  append whenever a rule for the path was already present — correct only for the
+   *  DEEPER-file case — and review measured four board shapes where the live token was
+   *  ignored before that change and committable after it. A regression in the one
+   *  direction this function exists to protect, and no test saw it because not one of
+   *  them asked git whether the token was ignored. */
+  function repo(files) {
+    const root = mkdtempSync(join(tmpdir(), "blaze-gi-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    for (const [rel, body] of Object.entries(files)) writeFileSync(join(root, rel), body);
+    return root;
+  }
+  const isIgnored = (root) =>
+    spawnSync("git", ["-C", root, "check-ignore", "--no-index", "-q", "--", ".blaze/setup-token"])
+      .status === 0;
+  const rules = (root) => {
+    const p = join(root, ".gitignore");
+    return existsSync(p) ? readFileSync(p, "utf8").split("\n").filter((l) => l.trim()).length : 0;
+  };
+
+  // Same-file negation: the rule IS present and loses to a LATER line. Appending wins.
+  for (const [label, gitignore] of Object.entries({
+    "an explicit same-file negation": ".blaze/setup-token\n!.blaze/setup-token\n",
+    "a broad re-include written for another file": ".blaze/setup-token\n!.blaze/*\n",
+    "a wildcard re-include": ".blaze/setup-token\n!.blaze/setup-*\n",
+    "CRLF line endings": ".blaze/setup-token\r\n!.blaze/setup-token\r\n",
+  })) {
+    test(`the token ends up IGNORED despite ${label}`, () => {
+      const root = repo({ ".gitignore": gitignore });
+      try {
+        assert.equal(isIgnored(root), false, "premise: it starts un-ignored");
+        const r = ensureSetupTokenIgnored(root);
+        assert.equal(isIgnored(root), true,
+          "appending at the end is the fix here — git takes the LAST matching rule");
+        assert.equal(r.state, "added");
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+
+  test("where appending cannot work, the file is left exactly as it was", () => {
+    // The accretion BLZ-397 was raised for, closed harder than the ticket asked: the
+    // append is undone, so the count does not grow even once.
+    const root = repo({ ".blaze/.gitignore": "!setup-token\n" });
+    try {
+      const before = rules(root);
+      const states = [];
+      for (let i = 0; i < 3; i += 1) states.push(ensureSetupTokenIgnored(root).state);
+      assert.deepEqual(states, ["ineffective", "ineffective", "ineffective"]);
+      assert.equal(rules(root), before, "not one line added across three boots");
+      assert.equal(isIgnored(root), false, "and it is honest that the token is still exposed");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a board with no .gitignore at all does not gain an empty one on failure", () => {
+    // The undo must not leave a stray file behind where none existed.
+    const root = repo({ ".blaze/.gitignore": "!setup-token\n" });
+    try {
+      assert.equal(existsSync(join(root, ".gitignore")), false, "premise: none to begin with");
+      ensureSetupTokenIgnored(root);
+      assert.equal(existsSync(join(root, ".gitignore")), false,
+        "an append that did not help is removed, not left as an empty file");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
