@@ -278,9 +278,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         if (r.commitOutcome === "locked" || r.commitOutcome === "failed") {
           // BLZ-404 round 3: this branch only ever fires when THIS pass decided something
           // new (`commitOutcome` reaches "locked"/"failed" only through the commit block,
-          // which round 3 gated on `touched.length` alone — reconcile no longer retries a
-          // previous pass's leftover write, see reconcile.mjs's `hasUncommittedTicketChanges`
-          // comment), so "applied N change(s) to disk" is always true of the pass reporting it.
+          // gated on `touched.length` alone — reconcile never retries a previous pass's
+          // leftover write), so "applied N change(s) to disk" is always true of the pass
+          // reporting it.
           bus.publish({
             type: "error", loop: "reconcile",
             message: `reconcile applied ${r.changes.length} change(s) to disk but the commit did ` +
@@ -305,23 +305,14 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
             ts: today(),
           });
         }
-        // BLZ-404 round 3: the second of round 2's two false statements — the supervisor
-        // reporting a dirty board once and then going silent while it persisted. Round 2
-        // "fixed" this by having reconcile() retry the commit every tick (so `locked`/
-        // `failed` kept firing above); round 3 deleted that retry as unsafe. Reported here
-        // instead, straight from the boolean `dirtyTicketTree` reconcile() now returns —
-        // UNDEDUPED, like the block above, so the operator is not left reading a single
-        // stale warning while the condition (and the risk) persists tick after tick.
-        if (r.dirtyTicketTree) {
-          bus.publish({
-            type: "error", loop: "reconcile",
-            message: "reconcile: the board's ticket tree carries uncommitted changes this pass " +
-              "did not make — most likely an earlier pass wrote ticket files and failed to " +
-              "commit them. reconcile does not auto-recover this: run `blaze commit`, or " +
-              "commit the tree by hand.",
-            ts: today(),
-          });
-        }
+        // BLZ-404 round 5: rounds 2-4 each tried to have the supervisor also report a
+        // ticket tree left dirty by some EARLIER pass — first by recovering it (round 2),
+        // then by detecting it as a boolean (round 3, round 4). Both attempts were
+        // refuted (see the PR body: the recovery write had an unbounded blast radius, and
+        // the detector conflated a genuinely failed prior commit with a healthy
+        // `commitMode: "batch"` queue and with a human's own untracked file). Telling
+        // those apart needs the pending ledger, not `git status`, so nothing here attempts
+        // it any more — the supervisor, like the CLI, reports only what THIS pass decided.
       } else if (r && !r.ok) {
         bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
       }
