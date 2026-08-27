@@ -95,7 +95,7 @@ export function decide({ pr, branch, shipped, delivererAmbiguous = false }, curr
     // supply one. Both fields are clamped together, never one — the record is one unit,
     // and half of it naming a PR the other half cannot identify is ADR-0023's fourth
     // shape of wrong reached through a new door.
-    if (pr.number !== null && pr.number !== undefined) {
+    if (recordablePr(pr)) {
       branchVal = pr.headRefName;
       prVal = `#${pr.number} — ${pr.url}`;
     }
@@ -446,7 +446,7 @@ export function prTitleClaim(pr, id) {
 export function betterPr(pr, best, id) {
   if (!best) return true;
   const rank = (x) => PR_RANK[x.state] || 0;
-  const recordable = (x) => (x.number === null || x.number === undefined ? 0 : 1);
+  const recordable = (x) => (recordablePr(x) ? 1 : 0);
   if (rank(pr) !== rank(best)) return rank(pr) > rank(best);
   const claim = [prTitleClaim(pr, id), prTitleClaim(best, id)];
   if (claim[0] !== claim[1]) return claim[0] > claim[1];
@@ -511,6 +511,9 @@ export function buildPrMap(prs, idFromRef, shippedSet) {
  *  disagreeing with the rule that ranks it — which is why detection now shares ONE
  *  entry point across repos too. */
 function tiedDeliverers(candidates, id) {
+  // Unrecordable rivals are deliberately KEPT. They cannot be written, but they can still
+  // be the deliverer, and dropping them turned a genuine tie into an apparent lone
+  // deliverer (round 6's F1). Recordability gates the WRITE, never the vote.
   const merged = candidates.filter((pr) => pr.state === "MERGED");
   if (merged.length < 2) return null;
   const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
@@ -520,7 +523,7 @@ function tiedDeliverers(candidates, id) {
   // tie can be "#10 and #10" — and a finding naming one number is the exact wording this
   // ticket condemns. An unrecordable rival has no number at all, so the url is the only
   // thing that can name it.
-  return tied.map((pr) => ({ number: pr.number, url: pr.url })).sort(
+  return tied.map((pr) => ({ number: pr.number, url: pr.url, headRefName: pr.headRefName })).sort(
     (a, b) => (a.number ?? Infinity) - (b.number ?? Infinity) ||
       String(a.url).localeCompare(String(b.url)));
 }
@@ -760,7 +763,12 @@ function prNumber(raw) {
 function sanitisePr(pr) {
   if (!pr || typeof pr !== "object") return null;
   const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
-  return { ...pr, number: prNumber(pr.number), url: clean(pr.url),
+  // A url that arrives absent, or that `clean` empties (the control-char-only case this
+  // sanitiser exists for), becomes `null` — the same marker `number` uses. Leaving it as
+  // `undefined` or `""` is what let `decide` persist the literal string "undefined" into
+  // a ticket's frontmatter, permanently, and made "is this recordable" two questions.
+  const url = clean(pr.url);
+  return { ...pr, number: prNumber(pr.number), url: url || null,
            title: clean(pr.title), headRefName: clean(pr.headRefName), state: clean(pr.state) };
 }
 
@@ -816,6 +824,15 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
   return { prMap, branchMap, shippedSet, forgeErrors, candidates };
+}
+
+/** Can this PR supply a delivery record? BOTH halves or neither — the record is
+ *  `#<number> — <url>` and half of it is not a record, it is a defect that outlives the
+ *  run. Review found `pr: #10 — undefined` written permanently from a payload with a
+ *  usable number and no url; `pr` is not in EDITABLE_FIELDS, so there is no route back. */
+export function recordablePr(pr) {
+  return Boolean(pr) && pr.number !== null && pr.number !== undefined &&
+    typeof pr.url === "string" && pr.url.length > 0;
 }
 
 /** Name a pull request with whatever identifier actually exists.
@@ -1045,11 +1062,13 @@ export async function reconcile({
         cleared = true;
       }
       const refs = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
-      // Name each PR unambiguously. Where two share a number they are in different
-      // repositories, so the number alone identifies nothing and the url is what makes
-      // the finding actionable.
-      const collide = new Set(refs.map((r) => r.number)).size !== refs.length;
-      const named = refs.map((r) => (collide && r.url ? `#${r.number} (${r.url})` : `#${r.number}`));
+      // Named through `namePr`, exactly like the sibling finding. This site had its own
+      // formatter, and round 6 gave `refs` a shape it had never seen — an entry whose
+      // `number` is null — so it printed `#null`, and suppressed the url in precisely the
+      // case where the url is the only identifier there is. Three places in this file turn
+      // a PR into operator-facing text; unifying the three DECIDERS and leaving the three
+      // RENDERERS apart is how the same drift reappeared one layer down.
+      const named = refs.map((r) => namePr(r));
       findings.push({
         kind: "ambiguous-deliverer",
         id: t.frontmatter.id,

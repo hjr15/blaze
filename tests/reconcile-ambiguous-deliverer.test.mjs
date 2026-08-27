@@ -138,9 +138,11 @@ describe("BLZ-398: a title that LEADS with the id outranks one that merely menti
 describe("BLZ-398: two equally-titled merged PRs name no deliverer", () => {
   test("ambiguousDeliverers names them, and names WHICH", () => {
     const amb = ambiguousDeliverers([PR_10_WORK, PR_40_DOCS], idFromRef, null);
-    assert.deepEqual(amb.get("INF-645"),
+    assert.deepEqual(amb.get("INF-645").map((r) => ({ number: r.number, url: r.url })),
       [{ number: 10, url: "u10" }, { number: 40, url: "u40" }],
       "refs carry the url: PR numbers are per-repository, so a number alone names nothing");
+    assert.ok(amb.get("INF-645").every((r) => r.headRefName),
+      "and the branch, so an unrecordable rival with no number and no url can still be named");
   });
 
   test("one merged PR is never ambiguous", () => {
@@ -168,7 +170,12 @@ describe("BLZ-398: two equally-titled merged PRs name no deliverer", () => {
       assert.equal(f.id, "INF-645");
       assert.deepEqual(f.prs.map((r) => r.number), [10, 40],
         "the report names WHICH PRs tied, or it is not actionable");
-      assert.match(f.message, /#10, #40/);
+      // Rendered through `namePr`, the one function in the file that turns a PR into
+      // operator-facing text — so both identifiers appear, not just the numbers.
+      assert.match(f.message, /#10/);
+      assert.match(f.message, /#40/);
+      assert.match(f.message, /u10/);
+      assert.match(f.message, /u40/);
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });
@@ -924,5 +931,82 @@ esac
     assert.equal(got.amb, 1, "two co-equal claimants across repos are a reported tie");
     assert.equal(got.pr, "(none)", "and nothing is recorded while the tie stands");
     assert.deepEqual(got, b[0], "in every codeRepos order");
+  }
+});
+
+// =============================================================================
+// Review round 7 — the RENDERER layer, unified last
+// =============================================================================
+
+test("BLZ-398: the ambiguity finding never renders #null, and always names the rival", async () => {
+  // Round 6 made `tiedDeliverers` count unrecordable rivals, so `refs` could carry
+  // `{number: null}` for the FIRST time — and this site had its own formatter, which
+  // printed `#null` and suppressed the url in exactly the case where the url is the only
+  // identifier there is. Round 6 wrote `namePr` for precisely this string and routed only
+  // the sibling finding through it.
+  const good = { number: 10, state: "MERGED", url: "u10",
+    headRefName: "INF-645-work", title: "INF-645: close the Tier-1 alert gaps" };
+  const rival = { number: "abc", state: "MERGED", url: "u40",
+    headRefName: "INF-645-docs", title: "INF-645: follow-up docs tidy" };
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-render-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [good, rival]);
+  try {
+    const r = await reconcile({ root, dryRun: true });
+    const f = r.findings.find((x) => x.kind === "ambiguous-deliverer");
+    assert.ok(f, "an unnumberable rival is still a rival");
+    assert.doesNotMatch(f.message, /#null/, "this printed `(#10, #null)` on the operator's terminal");
+    assert.doesNotMatch(f.message, /#undefined/);
+    assert.match(f.message, /u40/, "the rival must be named by the identifier it actually has");
+    assert.match(f.message, /#10/);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: a rival with no number AND no url is named by its branch", async () => {
+  // The worst case round 7 found: `sanitisePr` empties a control-char-only url — the
+  // untrusted-GHES case it exists for — so the refusal handed a person one option and a
+  // bare `#null`. `headRefName` was in the payload and unrendered.
+  const esc = String.fromCharCode(27);
+  const good = { number: 10, state: "MERGED", url: "u10",
+    headRefName: "INF-645-work", title: "INF-645: the work" };
+  const nameless = { number: null, state: "MERGED", url: esc,
+    headRefName: "INF-645-ghes-side", title: "INF-645: also the work" };
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-nameless-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [good, nameless]);
+  try {
+    const r = await reconcile({ root, dryRun: true });
+    const f = r.findings.find((x) => x.kind === "ambiguous-deliverer");
+    assert.ok(f);
+    assert.match(f.message, /branch INF-645-ghes-side/,
+      "a refusal whose whole purpose is to hand a person the choice must name both options");
+    assert.doesNotMatch(f.message, /#null/);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-398: a PR with a number but no url records NOTHING, never `#10 — undefined`", async () => {
+  // Older than round 6 and permanent: `decide` interpolated `pr.url` unguarded, so a
+  // payload with a usable number and no url wrote the literal string "undefined" into
+  // frontmatter. The record is `#<number> — <url>`; half of it is not a record.
+  const tmp = mkdtempSync(join(tmpdir(), "blz398-halfurl-"));
+  const root = fixture(tmp, [["INF-645", "epic", "done"]]);
+  const restore = stubGh(tmp, [
+    { number: 10, state: "MERGED", headRefName: "INF-645-work", title: "INF-645: the work" },
+  ]);
+  try {
+    await reconcile({ root, dryRun: false });
+    const text = readTicket(root, "done");
+    assert.doesNotMatch(text, /undefined/, "this persisted `pr: #10 — undefined`, permanently");
+    assert.doesNotMatch(text, /^pr:/m, "both halves or neither");
+    assert.doesNotMatch(text, /^branch:/m);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
   }
 });

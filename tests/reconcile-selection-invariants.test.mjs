@@ -23,7 +23,7 @@
 // specific set that breaks it, in round zero rather than round six.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrMap, betterPr, decide } from "../scripts/reconcile.mjs";
+import { buildPrMap, betterPr, decide, prTitleClaim, recordablePr } from "../scripts/reconcile.mjs";
 
 const ID = "INF-645";
 const idFromRef = () => ID;
@@ -46,6 +46,13 @@ const POOL = [
     headRefName: `${ID}-f`, title: `chore: follow-up for ${ID}` },
   { name: "closed/strong/7", state: "CLOSED", number: 7, url: "u7",
     headRefName: `${ID}-g`, title: `${ID}: abandoned attempt` },
+  // The two house forms a hand-rolled /^INF-645:/ cannot see, and which the first draft of
+  // this file therefore never exercised: the leading-id LIST that `idsFromSubject` exists
+  // to parse, and a lowercase id (`claimCorroborated` and `idsFromSubject` are both /i).
+  { name: "merged/list/5", state: "MERGED", number: 5, url: "u5",
+    headRefName: `${ID}-h`, title: `${ID}, INF-646: joint work` },
+  { name: "merged/lower/6", state: "MERGED", number: 6, url: "u6",
+    headRefName: `${ID}-i`, title: "inf-645: lowercase is still a claim" },
 ];
 
 /** Every non-empty subset of POOL, up to `max` members. */
@@ -155,7 +162,7 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
   test("an unrecordable winner writes NEITHER field", () => {
     for (const set of SETS) {
       const w = buildPrMap(set, idFromRef, null).get(ID);
-      if (w.number !== null && w.number !== undefined) continue;
+      if (recordablePr(w)) continue;
       const d = decide({ pr: w }, "in-review", "epic");
       assert.equal(d.prVal, null, `[${label(set)}] wrote a pr from an unnumberable PR`);
       assert.equal(d.branchVal, null,
@@ -168,8 +175,10 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     // nothing at all.
     for (const set of SETS) {
       const w = buildPrMap(set, idFromRef, null).get(ID);
-      if (w.number === null || w.number === undefined) continue;
-      if (w.state !== "MERGED") continue;          // a terminal record needs a merged PR
+      if (!recordablePr(w)) continue;
+      // MERGED only: `decide` clamps the record on a terminal ticket unless the winning PR
+      // is merged, so a non-merged winner proves nothing about the write here.
+      if (w.state !== "MERGED") continue;
       const d = decide({ pr: w }, "in-review", "epic");
       assert.equal(d.prVal, `#${w.number} — ${w.url}`, `[${label(set)}]`);
       assert.equal(d.branchVal, w.headRefName, `[${label(set)}]`);
@@ -185,9 +194,9 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     for (const set of SETS) {
       const w = buildPrMap(set, idFromRef, null).get(ID);
       const peers = set.filter((p) =>
-        RANK[p.state] === RANK[w.state] && /^INF-645:/.test(p.title) === /^INF-645:/.test(w.title));
-      if (!peers.some((p) => p.number !== null && p.number !== undefined)) continue;
-      assert.ok(w.number !== null && w.number !== undefined,
+        RANK[p.state] === RANK[w.state] && prTitleClaim(p, ID) === prTitleClaim(w, ID));
+      if (!peers.some((p) => recordablePr(p))) continue;
+      assert.ok(recordablePr(w),
         `[${label(set)}] picked unrecordable ${w.name} while an equal-claim recordable peer existed`);
     }
   });
@@ -197,11 +206,15 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     // being unrecordable makes it write NOTHING rather than hand the record to a chore.
     for (const set of SETS) {
       const w = buildPrMap(set, idFromRef, null).get(ID);
+      // `prTitleClaim`, the SHIPPED predicate — not a regex twin of it. Review found the
+      // twin diverges on two house-legal titles (`INF-645, INF-646: joint work` and a
+      // lowercase id), so this invariant would have raised false failures the moment
+      // anyone added one to the pool. An invariant stated in terms of the wrong predicate
+      // is the worst case of all: it fires on correct behaviour.
       const sameRank = set.filter((p) => RANK[p.state] === RANK[w.state]);
-      const strong = sameRank.filter((p) => /^INF-645:/.test(p.title));
-      if (!strong.length) continue;
-      assert.ok(/^INF-645:/.test(w.title),
-        `[${label(set)}] picked the weak claimant ${w.name} over a ticket-titled PR`);
+      const top = Math.max(...sameRank.map((p) => prTitleClaim(p, ID)));
+      assert.equal(prTitleClaim(w, ID), top,
+        `[${label(set)}] picked ${w.name} (claim ${prTitleClaim(w, ID)}) over a claim-${top} PR`);
     }
   });
 });
