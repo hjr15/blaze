@@ -333,6 +333,14 @@ never touched. That is a real problem and a different one — the fix is a
 deliberately not bundled here, because it changes the write path and this change
 does not touch it.
 
+**Shipped 2026-08-27 (BLZ-394).** `blaze reconcile --project <KEY>` restricts both
+the scan and the write, repeatable or comma-separated. An unknown key — or a
+`--project` that resolves to no key at all, which a shell produces from an unset
+variable — refuses the whole run rather than reconciling nothing or, worse,
+everything. Scope is checked on the ticket's DIRECTORY, not its frontmatter,
+because blast radius is a property of the path. The ruling above is unchanged:
+`--apply` is still a direct write and is still not session-scoped.
+
 ### 4. "Tickets stay 1:1 with commits" is true of the branch, not of the trunk
 
 The `feature-pr-bundling` skill's wording — *"Tickets stay 1:1 with commits and
