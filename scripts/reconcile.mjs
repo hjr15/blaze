@@ -1090,6 +1090,34 @@ export async function reconcile({
   const unverifiableRecords = [];
   for (const t of readStorage.listTickets(projectsDir)) {
     const type = t.frontmatter.type;
+    // BLZ-406: raised BEFORE the scope guard below, and unconditionally — on every
+    // run, filtered or not. `t.project` is the DIRECTORY (first-class from the walk,
+    // BLZ-271) and `t.frontmatter.project` is whatever the file's own frontmatter
+    // claims; ADR-0001 makes the directory authoritative for where a write lands, but
+    // that does not make the ticket reconcilable. The signal map (`sig`) is keyed by
+    // the FRONTMATTER project, so a ticket like this is invisible to a `--project`
+    // run naming its directory (the signal map for that key has no entry keyed by the
+    // frontmatter's project) AND to one naming its frontmatter's key (the directory
+    // guard below excludes it before `sig` is even consulted) — only an unfiltered run
+    // reaches it at all, via the frontmatter key. No single-project run can ever
+    // reconcile it, and the honest answer is to say so, not to silently pick a side.
+    // Gating this on `wanted` (or putting it after the guard) would make it exactly
+    // the silent skip this finding exists to report.
+    if (t.frontmatter.project != null && t.frontmatter.project !== t.project) {
+      findings.push({
+        kind: "project-mismatch",
+        id: t.frontmatter.id,
+        directory: t.project,
+        frontmatterProject: t.frontmatter.project,
+        message: `${t.frontmatter.id} sits under projects/${t.project}/ but its frontmatter names ` +
+          `project: ${t.frontmatter.project}. The directory is authoritative for where a write ` +
+          `lands (ADR-0001), but no single-project run will reconcile it: a --project ${t.project} ` +
+          `run has no ${t.frontmatter.project}-keyed signal for it, and a --project ` +
+          `${t.frontmatter.project} run excludes it by directory before it ever reaches that signal. ` +
+          `Fix it by moving the file to projects/${t.frontmatter.project}/ if the frontmatter is ` +
+          `right, or by correcting its \`project:\` field to ${t.project} if the directory is right.`,
+      });
+    }
     // Scope on the DIRECTORY as well as the frontmatter. `sig` is keyed by the
     // frontmatter's project, but the write lands by `t.project` — the directory the
     // ticket sits in — so a ticket at `projects/OBA/…` carrying `project: INF` was

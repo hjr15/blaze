@@ -138,6 +138,17 @@ line both name two quantities for the same reason: how many tickets' status actu
 moved, and — only when it is non-zero — how many files were written without a status
 change.
 
+**A ticket a single-project run cannot reconcile is reported, not resolved
+(BLZ-406).** `--project <KEY>` scopes on the ticket's DIRECTORY (ADR-0001: the directory
+is status, and it is where a write lands), while the signal that would move it is keyed
+by the ticket's frontmatter `project`. A ticket sitting under one project's directory
+while its frontmatter names another is therefore invisible to every single-`--project`
+run — naming its directory excludes it before the signal is even consulted, and naming
+its frontmatter key finds no signal keyed by the directory it is actually filed under.
+Reconcile emits a `project-mismatch` finding for it on **every** run, filtered or not,
+naming the ticket, its directory, and its frontmatter key, rather than silently picking
+a side. See [ADR-0023 §6](../decisions/0023-reconcile-signals-bias-toward-not-shipped.md).
+
 ## groom
 
 ```
@@ -214,7 +225,7 @@ findings too.
 
 | Severity | Kinds |
 |---|---|
-| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed` |
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch` |
 | soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
 
 `schema-malformed` and `schema-invalid` (BLZ-392, split by severity in BLZ-407) both come from
@@ -272,6 +283,16 @@ silently picks one. The finding names every path; the mutating verbs
 (`move`/`edit`/`link`/`log`/`resolve`) refuse to act on such an id at all rather
 than guess which copy is the ticket. Repair it by deleting the wrong-directory
 *duplicate file* — never the ticket, and never its id claim.
+
+**`project-mismatch`** (BLZ-406 AC-3) is another walk-raised finding: a ticket whose
+directory disagrees with its frontmatter `project` — filed under one project's tree
+while claiming another's. `auditCorpus` cannot see it (it is a function of frontmatter,
+which carries no path); the runner can, the same way it sees `duplicate-status`. HARD
+because the corpus really is wrong, not merely unfilled — re-measured at blaze-pm branch
+`BLZ-305-v4-spine` (`1d172e1e6edfe481465609c9dfd05bd97f6b8930`), across 2,682 tickets in
+11 projects, this is **zero**, so shipping it hard fails no existing board (the BLZ-353
+lesson: measure before shipping hard). `reconcile`'s own `project-mismatch` finding is
+this one's sibling on the write side — see [`reconcile`](#reconcile) above.
 
 ## move
 

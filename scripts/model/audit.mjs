@@ -67,6 +67,26 @@ export const HARD_KINDS = new Set([
   // `SchemaOverrideError` — the same message, the tag simply lost on the way to a finding.
   // See ADR-0024.
   "schema-malformed",
+  // project-mismatch (BLZ-406 AC-3) is raised by the RUNNER, not by auditCorpus, for the
+  // same reason duplicate-status and config-unloadable are: whether a ticket's DIRECTORY
+  // agrees with its frontmatter `project` is a property of the WALK — which path the file
+  // sits at — and this pure function is a function of frontmatter, which carries no path.
+  //
+  // HARD, deliberately: the corpus really is wrong. A ticket filed under one project's
+  // directory while its frontmatter names another is exactly the shape this file's own
+  // header sets as the test for HARD, and it is not a fill queue — there is nothing to
+  // queue, only a file sitting in the wrong place. It also fails `reconcile --project
+  // <KEY>` silently for BOTH keys (scripts/reconcile.mjs's `project-mismatch` finding is
+  // the sibling of this one, on the write side): the signal map is keyed by frontmatter
+  // `project`, the write lands by directory, and a run naming either key alone can never
+  // reconcile such a ticket.
+  //
+  // Licensed by measurement, per the BLZ-353 lesson that shipping a plausible-sounding
+  // hard finding on an unmeasured assumption fails the live board on day one: re-verified
+  // at blaze-pm branch BLZ-305-v4-spine (1d172e1e6edfe481465609c9dfd05bd97f6b8930), across
+  // 2,682 tickets in 11 projects, BOTH `frontmatter.project != directory` and
+  // `id-prefix != directory` measure ZERO. Shipping this hard fails no existing board.
+  "project-mismatch",
 ]);
 
 // BLZ-353 / R48. Deliberately NOT in HARD_KINDS, and the reason is load-bearing.
