@@ -93,25 +93,50 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config", 
   // despite being a non-empty array, and a "does it have keys" rule would call it in force.
   // Asking the merge is the only answer that cannot drift from the merge.
   //
-  // Cost is two extra merges, and only on a board that already has a malformed block.
-  const contributes = (() => {
-    if (layer !== "project" || !isRecord(configSchema)) return () => false;
-    let base = null;
-    let withTop = null;
-    try {
-      base = resolveSchema({});
-      withTop = resolveSchema({ config: { schema: configSchema } });
-    } catch { return () => false; }  // never let a report throw — BLZ-392
-    return (block) => (block === null
-      ? JSON.stringify(base) !== JSON.stringify(withTop)
-      : JSON.stringify(base[block]) !== JSON.stringify(withTop[block]));
-  })();
-  const stillInForce = contributes(null)
-    ? "the blaze.config.json layer is still in force"
-    : "every type, workflow and link type came from the built-in defaults";
-  const blockInForce = (block) => (contributes(block)
-    ? `the blaze.config.json layer's ${block} are still in force`
-    : `the built-in ${block} are still in force`);
+  //   4. and, in the half fix 3 never touched, the CONFIG layer's own clause stayed hardcoded
+  //      to "the built-in X are still in force" — untrue whenever a PROJECT layer carries a
+  //      valid override. Round 1's defect exactly, mirrored. Every test written for fix 3
+  //      filtered on `project.json:`, so not one of them looked at it.
+  //
+  // The config layer's clause cannot be repaired by naming what IS in force, because that
+  // finding is emitted ONCE for the whole installation — `auditCorpus` dedups it across every
+  // project — so no single project's schema is the right thing to name, and rendering two
+  // different sentences for one finding is its own defect. It therefore says something true
+  // about the FILE and claims nothing about the board.
+  //
+  // LAZY, because the resolves are only needed to build a message: an eager version charged
+  // two merges to every ordinary board with a config schema record, finding or not.
+  let inForce;  // undefined = not computed; null = could not be computed
+  const contributes = (block) => {
+    if (layer !== "project" || !isRecord(configSchema)) return false;
+    if (inForce === undefined) {
+      inForce = null;
+      try {
+        // EVERY stringify inside the try. They sat outside it, so a config that cannot be
+        // serialised — a circular structure, a BigInt, a throwing `toJSON` — made a REPORT
+        // throw, breaking this file's "never throws, on any input" contract. Unreachable
+        // from `JSON.parse`, but the contract is what other code relies on, and deleting
+        // this guard survived the whole suite until it was pinned.
+        const base = resolveSchema({});
+        const top = resolveSchema({ config: { schema: configSchema } });
+        const differs = (a, b) => JSON.stringify(a) !== JSON.stringify(b);
+        inForce = { all: differs(base, top), types: differs(base.types, top.types),
+                    workflows: differs(base.workflows, top.workflows) };
+      } catch { inForce = null; }  // unknown is NOT the same as in force — say the weaker thing
+    }
+    if (inForce === null) return false;
+    return block === null ? inForce.all : (inForce[block] ?? false);
+  };
+  const stillInForce = layer !== "project"
+    ? "nothing in blaze.config.json reaches the resolved schema"
+    : contributes(null)
+      ? "the blaze.config.json layer is still in force"
+      : "every type, workflow and link type came from the built-in defaults";
+  const blockInForce = (block) => (layer !== "project"
+    ? `blaze.config.json contributes no ${block}`
+    : contributes(block)
+      ? `the blaze.config.json layer's ${block} are still in force`
+      : `the built-in ${block} are still in force`);
   // A dropped-kind marker is only ever set by the loaders, and only to one of these. It
   // arrives as a SYMBOL key so operator-written JSON cannot forge one — but a wrong VALUE
   // under the right key would still render `[object Object]` into an audit detail, which is

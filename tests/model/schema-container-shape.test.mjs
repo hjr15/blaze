@@ -242,10 +242,14 @@ describe("BLZ-396 review F1: the message names what is ACTUALLY still in force",
       `untrue with a top-level override present: ${msg}`);
   });
 
-  test("the CONFIG layer still says built-in defaults, because there it is true", () => {
+  test("the CONFIG layer speaks about its own FILE, not about the board", () => {
+    // It said "the built-in types are still in force", which was untrue whenever a PROJECT
+    // layer carried a valid override — round 1's defect mirrored onto the other layer. The
+    // finding is installation-wide (deduped across every project), so there is no single
+    // board state it could correctly describe.
     const msg = validateSchema({ config: { schema: { types: "notanobject" } } })
       .find((p) => /^blaze\.config\.json: schema\.types/.test(p));
-    assert.ok(msg && /built-in/.test(msg), `the top layer really does fall back: ${msg}`);
+    assert.match(msg, /blaze\.config\.json contributes no types/, msg);
   });
 });
 
@@ -297,7 +301,7 @@ describe("BLZ-396 review F2: schemaContainerErrors' own dropped-kind contract", 
     for (const kind of ["an array", "string", "number", "boolean", "bigint", "symbol", "function"]) {
       assert.deepEqual(schemaContainerErrors(null, kind),
         [`schema must be an object, got ${kind} — the whole block was IGNORED, `
-         + "so every type, workflow and link type came from the built-in defaults"],
+         + "so nothing in blaze.config.json reaches the resolved schema"],
         `${kind} is a kind loadConfig really emits and must be reported`);
     }
   });
@@ -312,7 +316,7 @@ describe("BLZ-396 review F2: schemaContainerErrors' own dropped-kind contract", 
   test("and the layer argument defaults to the config layer", () => {
     // Both production call sites pass it explicitly; the default keeps the exported
     // function honest for anyone who does not.
-    assert.match(schemaContainerErrors({ types: "x" })[0], /the built-in types are still in force/);
+    assert.match(schemaContainerErrors({ types: "x" })[0], /blaze\.config\.json contributes no types/);
   });
 });
 
@@ -455,4 +459,88 @@ describe("BLZ-396 re-review B1b: 'in force' means CONTRIBUTES, not merely well-s
         min_card: 0, max_card: null } } } }, { schema: "a string" });
     assert.match(msg, /the blaze\.config\.json layer is still in force/, msg);
   });
+});
+
+describe("BLZ-396 re-review B1c: the CONFIG layer's own clause", () => {
+  // Wrong a FOURTH time, in the half the third fix never touched. `configSchema` was threaded
+  // into the PROJECT-layer call only, so the config-layer call kept a hardcoded "the built-in
+  // X are still in force" — round 1's defect exactly, mirrored. Every one of the eleven tests
+  // written for round 3 filters on /^project\.json:/, so not one of them looked at it.
+  //
+  // And the config-layer finding cannot be fixed by naming what IS in force, because it is
+  // emitted ONCE for the whole installation (audit.mjs dedups it across every project), so no
+  // single project's schema is the right thing to name. The sentence must stop claiming the
+  // board and speak only about the file it is in.
+  const WIDGET = { types: { widget: { level: 9, workflow: "delivery",
+    parentTypes: [], required: ["title"] } } };
+  const configDetail = (config, project) =>
+    validateSchema({ config, project }).find((p) => /^blaze\.config\.json:/.test(p));
+
+  test("a dropped WHOLE config block does not claim the board is on built-in defaults", () => {
+    const msg = configDetail({ schema: null, [SCHEMA_BLOCK_DROPPED]: "string" },
+      { schema: WIDGET });
+    assert.ok(msg, "no config-layer message");
+    assert.doesNotMatch(msg, /came from the built-in defaults/,
+      `project.json declares a live \`widget\` type, so the board is NOT on defaults:\n${msg}`);
+  });
+
+  test("a dropped config TYPES block does not claim the built-in types are in force", () => {
+    const msg = validateSchema({ config: { schema: { types: "notanobject" } },
+      project: { schema: WIDGET } }).find((p) => /^blaze\.config\.json: schema\.types/.test(p));
+    assert.ok(msg, "no config-layer types message");
+    assert.doesNotMatch(msg, /the built-in types are still in force/,
+      `\`widget\` is a live type on this board:\n${msg}`);
+  });
+
+  test("and it says something true about the FILE, not about the board", () => {
+    // The installation-wide finding has no single project to describe, so the only honest
+    // subject is blaze.config.json itself.
+    const msg = validateSchema({ config: { schema: { types: "notanobject" } } })
+      .find((p) => /^blaze\.config\.json: schema\.types/.test(p));
+    assert.match(msg, /blaze\.config\.json contributes no types/, msg);
+    const whole = validateSchema({ config: { schema: "a string" } })
+      .find((p) => /^blaze\.config\.json:/.test(p));
+    assert.match(whole, /nothing in blaze\.config\.json reaches the resolved schema/, whole);
+  });
+
+  test("the same wording holds whether or not a project layer exists — the control", () => {
+    // The config-layer string is deduped across the whole installation, so it must not vary
+    // with which project happens to be resolved beside it.
+    const withProject = validateSchema(
+      { config: { schema: { types: "notanobject" } }, project: { schema: WIDGET } })
+      .find((p) => /^blaze\.config\.json: schema\.types/.test(p));
+    const without = validateSchema({ config: { schema: { types: "notanobject" } } })
+      .find((p) => /^blaze\.config\.json: schema\.types/.test(p));
+    assert.equal(withProject, without,
+      "one installation-wide finding must not render two different sentences");
+  });
+});
+
+describe("BLZ-396 re-review N1/N2: the report survives a config it cannot stringify", () => {
+  // `contributes` compares `JSON.stringify` of two resolves. Those calls sat OUTSIDE the try
+  // whose comment claims a report never throws, so `validateSchema` began throwing on four
+  // shapes it tolerated one commit earlier. None is reachable from `JSON.parse`, so no board
+  // could hit it — but this file's contract is "Never throws, on any input", the existing
+  // test asserting that was passing only because nothing exercised these, and deleting the
+  // try/catch entirely survived the whole suite.
+  const circular = () => { const t = {}; t.self = t; return { types: { a: t } }; };
+  const HOSTILE = {
+    "a circular structure": circular(),
+    "a BigInt value": { types: { a: { level: 1n } } },
+    "a throwing toJSON": { types: { a: { toJSON() { throw new Error("boom"); } } } },
+    "a throwing getter": { types: { get a() { throw new Error("boom"); } } },
+  };
+  for (const [what, configSchema] of Object.entries(HOSTILE)) {
+    test(`${what} in the config layer neither throws nor is reported as in force`, () => {
+      let problems;
+      assert.doesNotThrow(() => {
+        problems = validateSchema({ config: { schema: configSchema },
+          project: { schema: "a string" } });
+      }, `${what} escaped the guard`);
+      const msg = problems.find((p) => /^project\.json:/.test(p));
+      assert.ok(msg, `${what}: the project-layer finding was lost`);
+      assert.doesNotMatch(msg, /the blaze\.config\.json layer is still in force/,
+        `${what}: unknown is not the same as in force:\n${msg}`);
+    });
+  }
 });

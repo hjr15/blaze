@@ -140,12 +140,27 @@ describe("BLZ-396 review F1: audit names the layer that is ACTUALLY still in for
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("a dropped CONFIG block still says built-in defaults, because there it is true", () => {
-    const root = board(`${BASE},"schema":{"types":"notanobject"}}`, undefined);
-    try {
-      const line = schemaDetails(root).find((d) => /^blaze\.config\.json:/.test(d));
-      assert.ok(line && /built-in/.test(line), `the top layer really does fall back:\n${line}`);
-    } finally { rmSync(root, { recursive: true, force: true }); }
+  test("a dropped CONFIG block speaks about its own FILE, not about the board", () => {
+    // It claimed "the built-in types are still in force", untrue whenever a project layer
+    // carries a valid override. The finding is emitted once per INSTALLATION, so it must
+    // render one sentence regardless of which project is resolved beside it — asserted here
+    // across a board with a contributing project layer and one without.
+    const WIDGET = '{"schema":{"types":{"widget":{"level":9,"workflow":"delivery",'
+      + '"parentTypes":[],"required":["title"]}}}}';
+    const lineFor = (proj) => {
+      const root = board(`${BASE},"schema":{"types":"notanobject"}}`, proj);
+      try {
+        return schemaDetails(root).find((d) => /^blaze\.config\.json: schema\.types/.test(d));
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    };
+    const withWidget = lineFor(WIDGET);
+    const alone = lineFor(undefined);
+    assert.ok(withWidget, "no config-layer finding on the widget board");
+    assert.doesNotMatch(withWidget, /the built-in types are still in force/,
+      `widget is a live type on this board:\n${withWidget}`);
+    assert.match(withWidget, /blaze\.config\.json contributes no types/, withWidget);
+    assert.equal(withWidget, alone,
+      "one installation-wide finding must not render two different sentences");
   });
 });
 
