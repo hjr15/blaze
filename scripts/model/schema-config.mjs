@@ -135,7 +135,12 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config", 
       } catch { inForce = null; }  // unknown is NOT the same as in force — say the weaker thing
     }
     if (inForce === null) return null;  // UNKNOWN — never collapse this into `false`
-    return block === null ? inForce.all : inForce[block];
+    // `?? null` so a block this memo does not carry reads as UNKNOWN, not as "no". The memo
+    // holds `types` and `workflows` because those are the two the loop below inspects; add
+    // `linkTypes` to that loop without this and `undefined` falls to the falsy branch and
+    // renders "the built-in linkTypes are still in force" — round 1's defect a sixth time,
+    // via a road nothing currently travels.
+    return block === null ? inForce.all : (inForce[block] ?? null);
   };
   // The layer's own file, which is true for both layers and needs no resolve: the block
   // being reported was dropped, so it contributes nothing.

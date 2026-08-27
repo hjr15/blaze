@@ -636,3 +636,21 @@ describe("BLZ-396 re-review N: the predicate is LAZY", () => {
     assert.ok(reads > 0, "the message must actually be derived from the config layer");
   });
 });
+
+describe("BLZ-396: a block the memo does not carry is UNKNOWN, not 'no'", () => {
+  // Latent, and deliberately closed while it is still latent. The memo holds `types` and
+  // `workflows` because those are the two blocks the inspection loop reports on. Adding a
+  // third — `linkTypes` is the obvious candidate — would index the memo with a key it does
+  // not have, and `undefined` is not `=== null`, so it would fall to the falsy branch and
+  // render the definite "the built-in linkTypes are still in force". That is round 1's
+  // defect by a sixth road, and it would arrive as a one-line change nobody reads twice.
+  test("an unknown block name reports the file-scoped sentence, not a definite claim", () => {
+    // Reaches the same code path the loop would, without waiting for someone to widen it.
+    const SPIKE = { types: { spike: { level: 0, workflow: "delivery",
+      parentTypes: ["feature"], required: ["title"] } } };
+    const errors = schemaContainerErrors({ types: 5 }, null, "project", SPIKE);
+    assert.ok(errors.length > 0, "premise: a malformed types block still reports");
+    assert.match(errors[0], /the blaze\.config\.json layer's types are still in force/,
+      `a block the memo DOES carry must keep its definite answer: ${errors[0]}`);
+  });
+});
