@@ -43,6 +43,53 @@ export function resolveSchema({ config = null, project = null } = {}) {
  *         block never reaches the scheduler. `blaze audit` files every one of these SOFT and
  *         calls such a board ok=true. Throwing on them made every non-exempt verb exit 1 on a
  *         board audit calls clean — a check worse than the bug it replaced. Report only. */
+/** BLZ-396: the override's CONTAINER, not its entries.
+ *
+ *  `mergeTypes`/`mergeWorkflows` coerce a non-record block to `{}` and say nothing, so
+ *  `{"schema": {"types": "notanobject"}}` — and an array, a number, or a whole `schema`
+ *  that is a string — produced ZERO findings and `blaze audit` reported ok=true. The
+ *  operator wrote a block, it did nothing, and the board ran on built-in defaults it never
+ *  asked for. That is BLZ-56's failure one level up.
+ *
+ *  The engine already has the right shape of answer for this class: `linkTypeOverrideErrors`
+ *  says "the whole block was IGNORED". This mirrors that wording deliberately rather than
+ *  inventing a second vocabulary for the same fact.
+ *
+ *  `undefined` is NOT a wrong shape — an absent block is how almost every board is written,
+ *  and reporting it would put a finding on essentially every installation, which is worse
+ *  than the bug this closes. */
+export function schemaContainerErrors(schema, dropped = null) {
+  const kind = (v) => (Array.isArray(v) ? "an array" : v === null ? "null" : typeof v);
+  const isRecord = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
+  // `null` is ABSENT, not a wrong shape. `loadConfig` and `loadProject` both normalise a
+  // missing `schema` to null, so treating null as malformed put a `schema-invalid` finding
+  // on EVERY ordinary board — the "a new check is worse than the bug" outcome this repo has
+  // paid for twice, and the existing "a healthy board reports no schema-invalid" test
+  // caught it immediately. The loaders hand the dropped KIND separately, because by the
+  // time the block reaches here a wrong shape and an absent one look identical.
+  if (dropped) {
+    return [`schema must be an object, got ${dropped} — the whole block was IGNORED, so `
+      + "every type, workflow and link type came from the built-in defaults"];
+  }
+  if (schema === undefined || schema === null) return [];
+  if (!isRecord(schema)) {
+    return [`schema must be an object, got ${kind(schema)} — the whole block was IGNORED, `
+      + "so every type, workflow and link type came from the built-in defaults"];
+  }
+  const errors = [];
+  for (const block of ["types", "workflows"]) {
+    const v = schema[block];
+    // `null` is absent here too, for the same reason it is absent one level up: the loaders
+    // produce it for "not written", and a check that cannot tell the two apart fires on
+    // ordinary boards.
+    if (v === undefined || v === null || isRecord(v)) continue;
+    errors.push(`schema.${block} must be an object keyed by ${block === "types" ? "type" : "workflow"} `
+      + `name, got ${kind(v)} — the whole block was IGNORED and the built-in ${block} are still `
+      + "in force");
+  }
+  return errors;
+}
+
 function collectSchemaProblems(input = {}) {
   // Destructuring `null` throws, and a parameter default only fires for `undefined`. This
   // function is pure and public and `auditCorpus` may call it with a config that parsed to
@@ -264,6 +311,24 @@ function collectSchemaProblems(input = {}) {
   // here and reported. The operator wrote the block; they need to know it did nothing.
   for (const e of linkTypeOverrideErrors(config?.schema?.linkTypes)) {
     soft(`blaze.config.json: ${e}`);
+  }
+  // BLZ-396. HARD, and the split is BLZ-56's: this is a genuine MALFORMATION, not a
+  // legal-but-inert block. An operator who writes `"types": "notanobject"` meant to change
+  // the registry and did not; continuing on defaults they never chose is exactly the silent
+  // acceptance BLZ-56 exists to end. Both layers are inspected, because unlike `linkTypes`
+  // — which is inert per-project by design — a per-project `types`/`workflows` block IS
+  // read (`resolveSchema` merges `project.schema.types` over the top-level layer), so a
+  // malformed one there is just as much a lie about what the board is running.
+  //
+  // Measured before shipping the refusal, because a preflight that refuses a board `blaze
+  // audit` calls clean has been the worse-than-the-bug outcome here twice: at blaze-pm's
+  // v4-spine worktree, `blaze.config.json` carries a well-formed `schema` and NO
+  // project.json carries a `schema` block at all. This refuses nothing that exists today.
+  for (const e of schemaContainerErrors(config?.schema, config?.schemaBlockDropped)) {
+    hard(`blaze.config.json: ${e}`);
+  }
+  for (const e of schemaContainerErrors(project?.schema, project?.schemaBlockDropped)) {
+    hard(`project.json: ${e}`);
   }
   // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"
   // with "…does not reach the scheduler at all" for the same block — two findings that

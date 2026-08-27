@@ -403,6 +403,22 @@ const CLASSIFICATION = [
     re: /^project\.json: schema\.linkTypes does not reach the scheduler/,
     resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
       project: { schema: { linkTypes: {} } } } },
+
+  // --- BLZ-396: the override's CONTAINER ---------------------------------------
+  // HARD, unlike every linkTypes row above, and the difference is BLZ-56's own split: a
+  // wrong-shaped `types`/`workflows` container is a genuine MALFORMATION, not a
+  // legal-but-inert block. The operator meant to change the registry and did not, and the
+  // board ran on defaults they never chose. Measured against blaze-pm before shipping the
+  // refusal — its blaze.config.json carries a well-formed `schema` and no project.json
+  // carries one at all — so it refuses nothing that exists today.
+  { name: "BLZ-396: a blaze.config.json types container the merge ignored", hard: true,
+    re: /^blaze\.config\.json: schema\.types must be an object keyed by type name/,
+    resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      config: { schema: { types: "notanobject" } } } },
+  { name: "BLZ-396: a project.json workflows container the merge ignored", hard: true,
+    re: /^project\.json: schema\.workflows must be an object keyed by workflow name/,
+    resolved: { types: DEFAULT_TYPES, workflows: DEFAULT_WORKFLOWS,
+      project: { schema: { workflows: 42 } } } },
 ];
 
 describe("BLZ-56: every hard/soft tag is pinned — a flip is a red test, not a silent change", () => {
