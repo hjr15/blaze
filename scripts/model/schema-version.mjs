@@ -38,15 +38,14 @@ export const REMOVED_KEYS = {
 /** Pure guard over a parsed config object's schemaVersion stamp.
  *  `current`/`min` are injectable so every branch — including ones unreachable
  *  with the real constants (at MIN === CURRENT === 1 the too-old branch cannot
- *  fire) — stays unit-testable. Returns { ok, error, kind } and never throws.
- *
- *  `kind` discriminates WHY `ok` is false, for callers that must not conflate the two
- *  reasons (BLZ-402 round-3): `"removed-key"` when the config sets a key this engine no
- *  longer reads, `"version-window"` when the `schemaVersion` stamp itself (missing,
- *  malformed, or outside `min..current`) is the problem. These are unrelated failures —
- *  a removed key says nothing about the version stamp, which is exactly why the caller
- *  (`loadConfig`) must not throw the same "incompatible schemaVersion" error class for
- *  both. `kind` is `null` when `ok` is true. */
+ *  fire) — stays unit-testable. Returns { ok, error } and never throws, plus a `kind`
+ *  discriminator on every `{ok:false}` result (absent when `ok` is true, so the existing
+ *  `{ ok: true, error: null }` shape is unchanged): `"removed-key"` when the config sets a
+ *  key this engine no longer reads, `"version-window"` when the `schemaVersion` stamp
+ *  itself (missing, malformed, or outside `min..current`) is the problem (BLZ-402
+ *  round-3). These are unrelated failures — a removed key says nothing about the version
+ *  stamp — which is exactly why the caller (`loadConfig`) must not throw the same
+ *  "incompatible schemaVersion" error class for both. */
 export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SCHEMA_VERSION,
                                           removed = REMOVED_KEYS } = {}) {
   // Checked before the version, and on the RAW parsed file: a board carrying a key this
@@ -93,5 +92,5 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
     }
     return { ok: false, kind: "version-window", error: `board schemaVersion ${v} is older than this engine supports (supported: ${min}..${current}) — see https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md` };
   }
-  return { ok: true, kind: null, error: null };
+  return { ok: true, error: null };
 }
