@@ -13,7 +13,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync,
-         chmodSync, unlinkSync } from "node:fs";
+         chmodSync, unlinkSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -63,6 +63,11 @@ function captureOutput() {
     stop() { console.error = saved.error; process.stderr.write = saved.stderr; },
   };
 }
+
+/** Does git ignore the setup token on this board? The only question that matters. */
+const isIgnoredAt = (root) =>
+  spawnSync("git", ["-C", root, "check-ignore", "--no-index", "-q", "--", ".blaze/setup-token"])
+    .status === 0;
 
 // =============================================================================
 // BLZ-400 — the operator is told how to recover, and every non-healthy state fails closed
@@ -328,6 +333,113 @@ describe("BLZ-397: appending is attempted wherever it can work", () => {
       ensureSetupTokenIgnored(root);
       assert.equal(existsSync(join(root, ".gitignore")), false,
         "an append that did not help is removed, not left as an empty file");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-397: the undo restores the operator's file, byte for byte", () => {
+  /** EVERY earlier `ineffective` test used a board with NO root .gitignore, so
+   *  `existedBefore` was always false and only the `rmSync` branch ever ran. The
+   *  `writeFileSync` branch — the one that touches content the operator wrote — was
+   *  exercised by nothing, and BLANKING THE WHOLE FILE passed all 2,649 tests. That is how
+   *  a utf8 round-trip that silently rewrote non-UTF-8 bytes got in. These boards all have
+   *  a root .gitignore. */
+  function board(rootGitignore, deeper = "!setup-token\n") {
+    const root = mkdtempSync(join(tmpdir(), "blaze-undo-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    writeFileSync(join(root, ".gitignore"), rootGitignore);
+    writeFileSync(join(root, ".blaze", ".gitignore"), deeper);
+    return root;
+  }
+
+  test("an ordinary .gitignore comes back unchanged when the append cannot help", () => {
+    const root = board("node_modules/\n*.log\n");
+    try {
+      const before = readFileSync(join(root, ".gitignore"));
+      const r = ensureSetupTokenIgnored(root);
+      assert.equal(r.state, "ineffective", "premise: this board cannot be fixed from the root");
+      assert.deepEqual(readFileSync(join(root, ".gitignore")), before,
+        "the operator's file must come back exactly as it was");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("bytes that are not valid UTF-8 survive the round trip", () => {
+    // A latin-1 filename in a rule. Read as utf8 and written back, `0xe9` returns as
+    // U+FFFD (ef bf bd) — the rule the operator wrote is rewritten, and whatever it
+    // covered stops being ignored, by the one function that exists to stop that.
+    const raw = Buffer.from([0x63, 0x61, 0x66, 0xe9, 0x2e, 0x6c, 0x6f, 0x67, 0x0a]); // café.log\n
+    const root = mkdtempSync(join(tmpdir(), "blaze-bytes-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    writeFileSync(join(root, ".gitignore"), raw);
+    writeFileSync(join(root, ".blaze", ".gitignore"), "!setup-token\n");
+    try {
+      ensureSetupTokenIgnored(root);
+      const after = readFileSync(join(root, ".gitignore"));
+      assert.equal(after.toString("hex"), raw.toString("hex"),
+        `non-UTF-8 bytes were rewritten: ${raw.toString("hex")} -> ${after.toString("hex")}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a file with no trailing newline is restored without one", () => {
+    const root = board("node_modules/");
+    try {
+      const before = readFileSync(join(root, ".gitignore"));
+      ensureSetupTokenIgnored(root);
+      assert.deepEqual(readFileSync(join(root, ".gitignore")), before);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("...and the append still succeeds where it CAN help, on the same shape", () => {
+    // The direction that stops all of the above being satisfied by never writing at all:
+    // a root .gitignore present AND fixable means the file must genuinely change.
+    const root = board(".blaze/setup-token\n!.blaze/setup-token\n", "");
+    try {
+      const before = readFileSync(join(root, ".gitignore"));
+      const r = ensureSetupTokenIgnored(root);
+      assert.equal(r.state, "added");
+      assert.notDeepEqual(readFileSync(join(root, ".gitignore")), before,
+        "a fixable board must actually gain the rule");
+      assert.equal(isIgnoredAt(root), true);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a read-only .gitignore warns instead of throwing out of the boot check", () => {
+    // The append is unconditional now, so a write refusal reaches the caller. `serve.mjs`
+    // catches it bare, which would swallow the only warning the operator gets.
+    const root = board("node_modules/\n");
+    chmodSync(join(root, ".gitignore"), 0o444);
+    const cap = captureOutput();
+    let r, threw = null;
+    try { r = ensureSetupTokenIgnored(root); } catch (e) { threw = e; } finally { cap.stop(); }
+    try {
+      assert.equal(threw, null, "a boot-time hygiene check must not throw at its caller");
+      assert.equal(r.state, "ineffective");
+      assert.match(cap.text, /setup-token/, "and the operator is still warned");
+    } finally {
+      try { chmodSync(join(root, ".gitignore"), 0o644); } catch { /* ignore */ }
+      rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  test("a symlinked .gitignore is left alone, and said to be left alone", () => {
+    // `existsSync` follows a symlink, so a dangling one read as "absent": the append
+    // created the link's TARGET and the undo deleted the LINK, orphaning the file.
+    const root = mkdtempSync(join(tmpdir(), "blaze-link-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    symlinkSync(join(root, "nowhere-at-all"), join(root, ".gitignore"));
+    const cap = captureOutput();
+    let r;
+    try { r = ensureSetupTokenIgnored(root); } finally { cap.stop(); }
+    try {
+      assert.equal(r.state, "ineffective");
+      assert.equal(existsSync(join(root, "nowhere-at-all")), false,
+        "blaze must not create the symlink's target behind the operator's back");
+      assert.match(cap.text, /symlink/i, "and must say why it did nothing");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

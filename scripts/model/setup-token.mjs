@@ -32,7 +32,7 @@
 // The VALUE is never logged, echoed, or rendered. The PATH is — that is the thing the
 // operator needs, and it discloses nothing.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -124,9 +124,33 @@ export function ensureSetupTokenIgnored(dataRoot) {
   if (isIgnored()) {
     state = "already";
   } else {
+    // RAW BYTES, NOT A utf8 STRING. This file belongs to the operator and a decode/encode
+    // round-trip is not byte-preserving: any sequence that is not valid UTF-8 — a latin-1
+    // filename in a rule, say — comes back as U+FFFD, silently rewriting a rule they wrote
+    // and taking whatever it covered from ignored to committable. In the one function whose
+    // entire job is to stop a file being committable. Buffers in, buffers out, no decode.
+    //
+    // `lstatSync`, not `existsSync`: the latter FOLLOWS a symlink, so a dangling
+    // `.gitignore` symlink read as "absent" had `appendFileSync` create the link's target
+    // and the undo then delete the LINK, leaving an orphan file behind.
     const gitignore = join(dataRoot, ".gitignore");
-    const existedBefore = existsSync(gitignore);
-    const existing = existedBefore ? readFileSync(gitignore, "utf8") : "";
+    let before = null;              // Buffer when a regular file is there, else null
+    let link = false;
+    try {
+      const st = lstatSync(gitignore);
+      link = st.isSymbolicLink();
+      if (st.isFile()) before = readFileSync(gitignore);
+    } catch { /* nothing there — before stays null */ }
+    if (link) {
+      // Writing through an operator's symlink, and undoing it, is not something a
+      // boot-time hygiene check should attempt. Say so and stop.
+      console.error(`blaze: WARNING — ${dataRoot}/.gitignore is a symlink, so blaze did not `
+        + `modify it. ${rel} may not be ignored; check it by hand. (The token's VALUE is `
+        + "not shown here or in any log.)");
+      return { state: "ineffective", path: rel, wasTracked: false, untrackOk: null, untrackError: null };
+    }
+    const existedBefore = before !== null;
+    const existing = before ?? Buffer.alloc(0);
     // APPEND UNCONDITIONALLY, THEN RE-ASK, THEN UNDO IF IT DID NOT HELP.
     //
     // The first cut skipped the append whenever a rule for the path was already in the
@@ -144,8 +168,21 @@ export function ensureSetupTokenIgnored(dataRoot) {
     // accrete nothing, which is the whole of BLZ-397. The re-ask is what makes both
     // possible at once — "I wrote a rule" and "the path is ignored" are different
     // statements and only the second decides what to do next.
-    appendFileSync(gitignore,
-      `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+    // Newline probe on BYTES: 0x0a, not `String.endsWith`.
+    const needsNl = existing.length > 0 && existing.at(-1) !== 0x0a;
+    try {
+      appendFileSync(gitignore,
+        `${needsNl ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+    } catch (e) {
+      // A read-only `.gitignore` (or any write refusal) must not throw out of a boot-time
+      // hygiene check — `serve.mjs` catches it bare and the operator then loses the ONE
+      // warning that says a live credential is still committable. Report and warn instead.
+      console.error(`blaze: WARNING — ${rel} is not ignored by git and blaze could not add a `
+        + `rule for it (${e && e.code ? e.code : "write failed"}). This live credential stays `
+        + "committable. Add the rule by hand, then restart. (The token's VALUE is not shown "
+        + "here or in any log.)");
+      return { state: "ineffective", path: rel, wasTracked: false, untrackOk: null, untrackError: null };
+    }
     if (isIgnored()) {
       state = "added";
     } else {
