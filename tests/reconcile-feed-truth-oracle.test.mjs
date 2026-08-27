@@ -5,8 +5,8 @@
 // in five successive directions because every round's tests pinned only the case that
 // made the new claim true. This oracle instead:
 //
-//   1. builds ONE board holding a GENERATED cross-product of ticket shapes (96 tickets,
-//      not a hand-picked list) — status x forge-signal x type x resolution;
+//   1. builds ONE board holding a GENERATED cross-product of ticket shapes (status x
+//      forge-signal x type x resolution x PRE-EXISTING DELIVERY RECORD);
 //   2. runs the supervisor's real `runReconcile` (via `createApp`, subscribing to the
 //      real `bus`) in both an applied pass and a preview pass;
 //   3. derives every expectation from BEFORE/AFTER SNAPSHOTS OF THE FILESYSTEM ALONE —
@@ -14,9 +14,27 @@
 //      themselves. Deriving the oracle's ground truth from the same machinery it is
 //      meant to check is exactly the vacuity trap that cost six rounds last time.
 //
-// Non-vacuity (D1/D2/D3) is proven by hand, outside this file, by re-introducing each
-// defect this oracle exists to catch and confirming this NAMED test goes red for the
-// reason its name claims — see the PR body for the commands and the failing assertions.
+// REVIEW ROUND (2026-08-27) found this oracle itself REFUTED on two counts, both fixed
+// here and both re-verified by hand (the mutation commands and their results are quoted
+// in the PR body, not just asserted here):
+//
+//   - `buildOracleBoard` never wrote a `branch:`/`pr:` line, so no ticket could ever be
+//     CLEARED — `clearedIds` was always empty and clause (d) only ever asserted
+//     `false === false`. The cross-product was missing the one dimension that reaches
+//     `hadRecord`/`recordIfAbsentOnly`/`recordAmbiguous`: a PRE-EXISTING delivery record.
+//     Fixed by adding a `RECORDS` dimension (a ticket may already carry a `branch`/`pr`,
+//     including the `""`-vs-absent shape `hadRecord`'s own comment warns about) and an
+//     `ambiguous-merged` forge signal (two equally-titled MERGED PRs, BLZ-398's tie), which
+//     together make clause (d) execute both a real CLEAR and a real NON-clear.
+//   - `buildOracleBoard` git-inited `repo` but never `root`, so `commit: true` could never
+//     reach a real commit and this PR's headline behaviour change (the loop COMMITS) had
+//     NO oracle coverage. Fixed by git-initing `root` too and adding a commit-existence
+//     clause whose ground truth is `git log`/`git show`, never `r.changes`.
+//
+// Non-vacuity (D1/D2/D3, now also D4/D5 for the two fixes above) is proven by hand,
+// outside this file, by re-introducing each defect this oracle exists to catch and
+// confirming this NAMED test goes red for the reason its name claims — see the PR body
+// for the commands and the failing assertions.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, statSync, rmSync } from "node:fs";
@@ -26,14 +44,26 @@ import { execFileSync } from "node:child_process";
 
 const KEY = "ORC";
 const STATUSES = ["defined", "in-progress", "in-review", "done"];
-const FORGES = ["none", "branch-only", "open-pr", "merged-pr", "closed-pr", "shipped-commit"];
+// "ambiguous-merged": two MERGED PRs, equally titled `<id>: the work` — BLZ-398's tie,
+// the branch this oracle previously could not reach at all (see header).
+const FORGES = ["none", "branch-only", "open-pr", "merged-pr", "closed-pr", "shipped-commit", "ambiguous-merged"];
 const TYPES = ["task", "goal"];
 const RESOLUTIONS = [null, "done"];
+// A ticket may already carry a delivery record before this run — the dimension whose
+// absence made clause (d) vacuous (see header). "emptyString" pins the `""`-vs-absent
+// shape `hadRecord`'s own comment warns a DB storage can produce; the filesystem storage
+// this fixture uses can produce it too (`branch: ""` parses to the empty string, not
+// `null` — scripts/model/ticket.mjs's `coerceScalar`), and `hadRecord` must read both the
+// same as truly absent.
+const RECORDS = ["none", "hasRecord", "emptyString"];
 
 // =============================================================================
-// The fixture: one board, one code repo, one `gh` stub, 96 generated tickets.
-// Follows the `twoProjectBoard`/`stubGh` idiom in tests/reconcile-project-filter.test.mjs
-// (real `git init`, a stub `gh` on PATH) rather than mocking reconcile's internals.
+// The fixture: one board, one code repo, one `gh` stub, a generated cross-product of
+// tickets. Follows the `twoProjectBoard`/`stubGh` idiom in
+// tests/reconcile-project-filter.test.mjs (real `git init`, a stub `gh` on PATH) rather
+// than mocking reconcile's internals. BOTH `repo` (the code repo) and `root` (the board
+// itself) are real git repos — `root` was the gap review found: without it `commit: true`
+// never reaches a real commit and this PR's headline behaviour change has no coverage.
 // =============================================================================
 function buildOracleBoard(tmp) {
   const repo = join(tmp, "repo");
@@ -59,34 +89,55 @@ function buildOracleBoard(tmp) {
     for (const forge of FORGES) {
       for (const type of TYPES) {
         for (const resolution of RESOLUTIONS) {
-          n += 1;
-          const id = `${KEY}-${n}`;
-          manifest.push({ id, status, forge, type, resolution });
+          for (const record of RECORDS) {
+            n += 1;
+            const id = `${KEY}-${n}`;
+            manifest.push({ id, status, forge, type, resolution, record });
 
-          const dir = join(root, "projects", KEY, status);
-          mkdirSync(dir, { recursive: true });
-          const fm = [`id: ${id}`, `title: ${id} ${status}/${forge}/${type}`, `type: ${type}`,
-            `project: ${KEY}`, `estimate: 30`];
-          if (resolution) fm.push(`resolution: ${resolution}`);
-          writeFileSync(join(dir, `${id}-t.md`), `---\n${fm.join("\n")}\n---\n\nbody\n`);
+            const dir = join(root, "projects", KEY, status);
+            mkdirSync(dir, { recursive: true });
+            const fm = [`id: ${id}`, `title: ${id} ${status}/${forge}/${type}/${record}`, `type: ${type}`,
+              `project: ${KEY}`, `estimate: 30`];
+            if (resolution) fm.push(`resolution: ${resolution}`);
+            // The added dimension: a PRE-EXISTING delivery record, written BEFORE reconcile
+            // ever runs — the only way to reach `hadRecord`/`recordIfAbsentOnly` true, and
+            // (combined with "ambiguous-merged" below) `recordAmbiguous` and a real CLEAR.
+            if (record === "hasRecord") {
+              fm.push(`branch: ${id}-legacy-branch`);
+              fm.push(`pr: #900 — https://github.com/hjr15/orc/pull/900`);
+            } else if (record === "emptyString") {
+              fm.push(`branch: ""`);
+              fm.push(`pr: ""`);
+            }
+            writeFileSync(join(dir, `${id}-t.md`), `---\n${fm.join("\n")}\n---\n\nbody\n`);
 
-          if (forge === "shipped-commit") {
-            // A <KEY>-<n>: commit reachable from the default branch — the bundled-child
-            // signal (BLZ-131). Must land on `main`, which is always the checked-out
-            // branch at this point in the loop (branch-only below always returns to it).
-            execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", `${id}: shipped work`]);
-          } else if (forge === "branch-only") {
-            // A branch embedding the key, with a commit of its own — corroborated per
-            // buildBranchMap — that never merges into `main`.
-            execFileSync("git", ["-C", repo, "checkout", "-q", "-b", `${id}-work`]);
-            execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", `${id}: work`]);
-            execFileSync("git", ["-C", repo, "checkout", "-q", "main"]);
-          } else if (forge === "open-pr" || forge === "merged-pr" || forge === "closed-pr") {
-            const state = forge === "open-pr" ? "OPEN" : forge === "merged-pr" ? "MERGED" : "CLOSED";
-            prs.push({ number: n, state, url: `https://github.com/hjr15/orc/pull/${n}`,
-              headRefName: `${id}-pr`, title: `${id}: the work` });
+            if (forge === "shipped-commit") {
+              // A <KEY>-<n>: commit reachable from the default branch — the bundled-child
+              // signal (BLZ-131). Must land on `main`, which is always the checked-out
+              // branch at this point in the loop (branch-only below always returns to it).
+              execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", `${id}: shipped work`]);
+            } else if (forge === "branch-only") {
+              // A branch embedding the key, with a commit of its own — corroborated per
+              // buildBranchMap — that never merges into `main`.
+              execFileSync("git", ["-C", repo, "checkout", "-q", "-b", `${id}-work`]);
+              execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", `${id}: work`]);
+              execFileSync("git", ["-C", repo, "checkout", "-q", "main"]);
+            } else if (forge === "open-pr" || forge === "merged-pr" || forge === "closed-pr") {
+              const state = forge === "open-pr" ? "OPEN" : forge === "merged-pr" ? "MERGED" : "CLOSED";
+              prs.push({ number: n, state, url: `https://github.com/hjr15/orc/pull/${n}`,
+                headRefName: `${id}-pr`, title: `${id}: the work` });
+            } else if (forge === "ambiguous-merged") {
+              // BLZ-398's tie: two MERGED PRs, equally titled — git cannot say which one
+              // delivered it, so `ambiguousDeliverers` must flag it and `decide` must
+              // refuse to write (or must CLEAR) the record, never guess. Distinct numbers
+              // and urls (samePr decides identity by url) so the two are genuinely two.
+              prs.push({ number: n, state: "MERGED", url: `https://github.com/hjr15/orc/pull/${n}`,
+                headRefName: `${id}-pr-a`, title: `${id}: the work` });
+              prs.push({ number: n + 100000, state: "MERGED", url: `https://github.com/hjr15/orc/pull/${n}-b`,
+                headRefName: `${id}-pr-b`, title: `${id}: the work` });
+            }
+            // "none": no branch, no PR, no shipped commit — the ticket is left untouched.
           }
-          // "none": no branch, no PR, no shipped commit — the ticket is left untouched.
         }
       }
     }
@@ -96,6 +147,16 @@ function buildOracleBoard(tmp) {
   mkdirSync(bin, { recursive: true });
   writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\ncat <<'JSON'\n${JSON.stringify(prs)}\nJSON\n`);
   execFileSync("chmod", ["+x", join(bin, "gh")]);
+
+  // BLZ-404 (review): `root` must ALSO be a real git repo, git-inited AFTER every ticket
+  // file above is written so the seed commit captures the whole starting fixture. Without
+  // this, `commit: true` never reaches a real `git commit` and the loop's headline
+  // behaviour change — it now COMMITS — had no oracle coverage at all.
+  execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed board"]);
 
   return { root, repo, bin, manifest };
 }
@@ -120,15 +181,27 @@ function snapshotBoard(root) {
       if (!idMatch) continue;
       const branchMatch = /^branch:\s*(.+)$/m.exec(fmBlock[1]);
       const prMatch = /^pr:\s*(.+)$/m.exec(fmBlock[1]);
+      // Raw frontmatter text, INCLUDING a bare `""` — ground truth for the has-a-record
+      // question must read the same way `hadRecord` does (falsy on absent, null, AND the
+      // empty string), not merely on the line being present at all.
+      const val = (raw) => {
+        if (raw === undefined || raw === null) return null;
+        const v = raw.trim();
+        return v === '""' || v === "''" ? "" : v;
+      };
       out.set(idMatch[1], {
         status,
-        branch: branchMatch ? branchMatch[1].trim() : null,
-        pr: prMatch ? prMatch[1].trim() : null,
+        branch: val(branchMatch && branchMatch[1]),
+        pr: val(prMatch && prMatch[1]),
       });
     }
   }
   return out;
 }
+
+// A record counts as PRESENT the same way `hadRecord` in reconcile.mjs does:
+// `Boolean(fm.branch || fm.pr)` — falsy on absent, `null`, AND `""`.
+const hasRecord = (snap) => Boolean(snap && (snap.branch || snap.pr));
 
 // =============================================================================
 // The clauses. Every comparison reads ONLY `before`/`after` (the filesystem) and the
@@ -137,6 +210,12 @@ function snapshotBoard(root) {
 // an event with NO `applied` field at all (every event this feed published before this
 // ticket) is read as claiming completion, which is exactly the ambient, unqualified
 // claim BLZ-404 exists to stop.
+//
+// REVIEW (finding 4.2): `clauses` now counts assertions actually EXECUTED, not loop
+// iterations — a clause whose body is gated (`if (...)`) increments the counter INSIDE
+// the gate, at the point the assert.* call actually runs, so an iteration that never
+// reaches an assertion is not counted as one. Applied to (a), (b) and (d) below; (c) was
+// already gated correctly (it iterates `movedIds`, which IS the real ground truth).
 // =============================================================================
 function checkGroundTruth(before, after, reconcileEvents, label) {
   let clauses = 0;
@@ -147,32 +226,30 @@ function checkGroundTruth(before, after, reconcileEvents, label) {
     clauses += 1;
     assert.ok(a, `${label}: ${id} must still exist on disk after the run`);
     if (b.status !== a.status) movedIds.add(id);
-    if ((b.branch || b.pr) && !(a.branch || a.pr)) clearedIds.add(id);
+    if (hasRecord(b) && !hasRecord(a)) clearedIds.add(id);
   }
 
   // (a) every event presenting a COMPLETED move names a ticket that really moved.
   for (const e of reconcileEvents) {
+    if (!(e.moved === true && e.applied !== false)) continue; // not a completed-move claim
     clauses += 1;
-    if (e.moved === true && e.applied !== false) {
-      const b = before.get(e.id), a = after.get(e.id);
-      assert.ok(b && a && b.status !== a.status,
-        `${label}: ${e.id} — event claims a completed move ${e.from} -> ${e.to}, ` +
-        `but the directory on disk did not change`);
-      assert.equal(b.status, e.from,
-        `${label}: ${e.id} — event 'from' (${e.from}) does not match the real before-directory (${b.status})`);
-      assert.equal(a.status, e.to,
-        `${label}: ${e.id} — event 'to' (${e.to}) does not match the real after-directory (${a.status})`);
-    }
+    const b = before.get(e.id), a = after.get(e.id);
+    assert.ok(b && a && b.status !== a.status,
+      `${label}: ${e.id} — event claims a completed move ${e.from} -> ${e.to}, ` +
+      `but the directory on disk did not change`);
+    assert.equal(b.status, e.from,
+      `${label}: ${e.id} — event 'from' (${e.from}) does not match the real before-directory (${b.status})`);
+    assert.equal(a.status, e.to,
+      `${label}: ${e.id} — event 'to' (${e.to}) does not match the real after-directory (${a.status})`);
   }
 
   // (b) no ticket whose directory did NOT change has any event presenting it as completed.
   for (const id of before.keys()) {
+    if (movedIds.has(id)) continue; // covered by (c) below instead
     clauses += 1;
-    if (!movedIds.has(id)) {
-      const bad = reconcileEvents.find((e) => e.id === id && e.moved === true && e.applied !== false);
-      assert.equal(bad, undefined,
-        `${label}: ${id} — directory did not change on disk, but ${JSON.stringify(bad)} presents it as a completed move`);
-    }
+    const bad = reconcileEvents.find((e) => e.id === id && e.moved === true && e.applied !== false);
+    assert.equal(bad, undefined,
+      `${label}: ${id} — directory did not change on disk, but ${JSON.stringify(bad)} presents it as a completed move`);
   }
 
   // (c) every ticket whose directory DID change has exactly one event describing it,
@@ -189,7 +266,19 @@ function checkGroundTruth(before, after, reconcileEvents, label) {
   }
 
   // (d) e.cleared === true iff branch/pr really disappeared from disk.
+  //
+  // REVIEW (finding 3): gated on `e.applied !== false`. A PREVIEW event PROPOSES what
+  // would happen; nothing on disk moves during a dry run (the write port is never called),
+  // so `after` trivially equals `before` for every ticket and `clearedIds` is always empty
+  // regardless of what the run proposed. Comparing a preview event's `cleared` against
+  // that necessarily-unchanged snapshot is comparing a PROPOSAL to a REALISATION that
+  // never occurred — exactly the shape the file's own header warns "would fail spuriously
+  // once the fixture gains a clearable ticket" once one exists (it now does: the
+  // ambiguous-merged + hasRecord dimension). The preview half's PROPOSAL is instead
+  // checked directly against `movedIds`/`clearedIds`-independent non-vacuity assertions in
+  // the test body below (`cleared === true` must still be PROPOSED by at least one event).
   for (const e of reconcileEvents) {
+    if (e.applied === false) continue; // proposal, not a realisation — nothing on disk to check it against
     clauses += 1;
     const reallyCleared = clearedIds.has(e.id);
     assert.equal(Boolean(e.cleared), reallyCleared,
@@ -211,6 +300,8 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       process.env.PATH = `${bin}:${prevPath}`;
 
       const before = snapshotBoard(root);
+      const commitCountBefore = Number(
+        execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
 
       const { loadConfig } = await import("../scripts/config.mjs");
       const { createApp } = await import("../scripts/supervisor.mjs");
@@ -222,17 +313,51 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const after = snapshotBoard(root);
       const reconcileEvents = events.filter((e) => e.type === "reconcile");
 
-      const { clauses, movedIds } = checkGroundTruth(before, after, reconcileEvents, "applied");
+      const { clauses, movedIds, clearedIds } = checkGroundTruth(before, after, reconcileEvents, "applied");
+      let bonusClauses = 2;
       // Non-vacuity: an applied run that moves nothing proves nothing about whether the
       // feed's claims track reality — and is exactly what the permanent-dry-run defect
-      // (D1) produces. 96 generated tickets across four forge signals guarantee real
-      // candidates; assert the run actually acted on some of them.
+      // (D1) produces. The generated cross-product across many forge signals guarantees
+      // real candidates; assert the run actually acted on some of them.
       assert.ok(movedIds.size > 0,
         "applied: the fixture must produce at least one real directory move — 0 means the run never really applied");
       assert.ok(reconcileEvents.length > 0, "applied: the run must publish at least one reconcile event");
-      totalClauses += clauses + 2;
-      console.log(`ORACLE (applied): ${clauses + 2} clauses checked over ${before.size} tickets and ` +
-        `${reconcileEvents.length} events (${movedIds.size} real moves), 0 mismatches`);
+
+      // Non-vacuity for the added dimension (review finding 3): a run that never clears a
+      // record proves nothing about whether `cleared` is reported honestly. The
+      // ambiguous-merged + hasRecord + non-terminal-status combination is DESIGNED to
+      // clear — assert it actually did, on disk, independent of the event.
+      assert.ok(clearedIds.size > 0,
+        "applied: the fixture must produce at least one REAL branch/pr clear on disk — 0 means " +
+        "the added ambiguous-merged + pre-existing-record dimension is not actually exercised");
+      bonusClauses += 1;
+
+      // BLZ-404 (review finding 3): a commit-existence clause, ground truth from
+      // `git log`/`git show` alone — never from `reconcile()`'s return value. This board's
+      // `commitMode` is the default ("per-op"), so a run with real moves must land exactly
+      // one new commit whose subject's own claimed ticket-count matches the count of
+      // DISTINCT tickets the commit's diff actually touches.
+      const commitCountAfter = Number(
+        execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
+      assert.equal(commitCountAfter, commitCountBefore + 1,
+        "applied: a run with real moves, on a per-op-mode board, must create exactly one new commit");
+      bonusClauses += 1;
+
+      const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
+      const diffFiles = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+        { encoding: "utf8" }).trim().split("\n").filter(Boolean);
+      const diffIds = new Set(diffFiles.map((f) => (/(ORC-\d+)/.exec(f) || [])[1]).filter(Boolean));
+      const countMatch = /reconcile (\d+) ticket/.exec(subject);
+      assert.ok(countMatch, `applied: the commit subject must state its ticket count, got: ${subject}`);
+      assert.equal(Number(countMatch[1]), diffIds.size,
+        "applied: the commit subject's claimed ticket count must match the number of DISTINCT " +
+        `tickets the commit's OWN diff touches (ground truth: git show), got subject "${subject}" ` +
+        `but the diff touches ${diffIds.size} distinct ticket id(s): ${[...diffIds].join(", ")}`);
+      bonusClauses += 1;
+
+      totalClauses += clauses + bonusClauses;
+      console.log(`ORACLE (applied): ${clauses + bonusClauses} clauses checked over ${before.size} tickets and ` +
+        `${reconcileEvents.length} events (${movedIds.size} real moves, ${clearedIds.size} real clears), 0 mismatches`);
     } finally {
       if (app) app.server.close();
       process.env.PATH = prevPath;
@@ -261,14 +386,27 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const reconcileEvents = events.filter((e) => e.type === "reconcile");
 
       const { clauses, movedIds } = checkGroundTruth(before, after, reconcileEvents, "preview");
+      let bonusClauses = 2;
       // (e) in preview mode, NO ticket's path changed on disk at all.
       assert.equal(movedIds.size, 0, "preview: dryRun must not move any ticket's directory on disk");
       // Non-vacuity for this half: a preview that finds nothing to propose cannot prove
       // that a genuine proposal is rendered honestly.
       assert.ok(reconcileEvents.some((e) => e.moved === true),
         "preview: the run must have proposed at least one move, or this half of the oracle is vacuous");
-      totalClauses += clauses + 2;
-      console.log(`ORACLE (preview): ${clauses + 2} clauses checked over ${before.size} tickets and ` +
+
+      // Non-vacuity for the added dimension (review finding 3), preview half: the run must
+      // PROPOSE at least one clear (this is exactly the proposal clause (d) above
+      // deliberately does not grade against ground truth, per its own comment — a dry run
+      // never touches disk, so there is nothing real to compare a PROPOSAL against). This
+      // still proves the ambiguous-merged + hasRecord dimension reaches the clearing code
+      // path in preview, rather than the dimension only ever being reachable when applied.
+      assert.ok(reconcileEvents.some((e) => e.cleared === true),
+        "preview: the run must have PROPOSED at least one clear, or the added ambiguous-merged + " +
+        "pre-existing-record dimension is not exercised in preview at all");
+      bonusClauses += 1;
+
+      totalClauses += clauses + bonusClauses;
+      console.log(`ORACLE (preview): ${clauses + bonusClauses} clauses checked over ${before.size} tickets and ` +
         `${reconcileEvents.length} events (${movedIds.size} real moves), 0 mismatches`);
     } finally {
       if (app) app.server.close();
@@ -278,7 +416,11 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
   });
 
   test("ORACLE TOTAL", () => {
-    // Reported so the PR body can quote an exact figure, not a range.
+    // Reported so the PR body can quote an exact figure, not a range. REVIEW (finding
+    // 4.2): this number is now a count of assertions actually EXECUTED (see
+    // `checkGroundTruth`'s header comment), not of loop iterations — it is smaller than
+    // the previously-claimed total, and it is smaller because the previous total was
+    // wrong, not because less is now checked.
     console.log(`ORACLE TOTAL: ${totalClauses} clauses checked across both runs, 0 mismatches`);
     assert.ok(totalClauses > 0);
   });
