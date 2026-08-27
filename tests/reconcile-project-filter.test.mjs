@@ -267,3 +267,192 @@ describe("BLZ-394: the CLI surface", () => {
     }
   });
 });
+
+// =============================================================================
+// Adversarial review — the shapes the first cut got wrong
+// =============================================================================
+
+describe("BLZ-394: a --project that yields no key REFUSES, it does not go wide", () => {
+  function runCli(root, tmp, args) {
+    return spawnSync(process.execPath,
+      [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), ...args],
+      { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+  }
+
+  // The first cut passed `projectKeys.length ? projectKeys : null`, so a flag that was
+  // GIVEN but produced no key fell back to null — UNFILTERED. `blaze reconcile
+  // --project=$PROJ --apply` with `$PROJ` unset reconciled and committed the whole board,
+  // and with `--quiet` nothing on stderr said so. A shell script produces this by accident.
+  for (const args of [["--project="], ["--project=,,"], ["--project", ","], ["--project", ",,"],
+                      ["--project", " "], ["--project", ""]]) {
+    test(`\`${args.join(" ")}\` is refused, not treated as unfiltered`, () => {
+      const tmp = mkdtempSync(join(tmpdir(), "blz394-empty-"));
+      const root = twoProjectBoard(tmp);
+      const restore = stubGh(tmp);
+      try {
+        const res = runCli(root, tmp, [...args, "--apply"]);
+        assert.notEqual(res.status, 0,
+          "an empty --project must not silently reconcile every project on the board");
+        assert.match(res.stderr, /--project/);
+        assert.ok(at(root, "INF", "defined"), "and must write nothing at all");
+        assert.ok(at(root, "OBA", "defined"));
+      } finally {
+        restore();
+        rmSync(tmp, { recursive: true, force: true });
+      }
+    });
+  }
+
+  test("the library refuses an empty list directly, too", async () => {
+    // The guard the CLI failed to reach. It was unpinned: replacing it with `if (false)`
+    // survived the whole suite.
+    const tmp = mkdtempSync(join(tmpdir(), "blz394-emptylib-"));
+    const root = twoProjectBoard(tmp);
+    const restore = stubGh(tmp);
+    try {
+      const r = await reconcile({ root, dryRun: false, commit: true, projects: [] });
+      assert.equal(r.ok, false);
+      assert.match(r.error, /--project/);
+      assert.ok(at(root, "INF", "defined"));
+      assert.ok(at(root, "OBA", "defined"));
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("--quiet does not hide which projects were scanned on a filtered run", () => {
+    // `--quiet` means "print only on change"; a narrowed scope is a reason not to trust
+    // the absence of one. This `|| projectKeys.length` was unpinned.
+    const tmp = mkdtempSync(join(tmpdir(), "blz394-quiet-"));
+    const root = twoProjectBoard(tmp);
+    const restore = stubGh(tmp);
+    try {
+      const res = runCli(root, tmp, ["--project", "INF", "--quiet"]);
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stderr, /scanned project\(s\): INF/);
+      assert.doesNotMatch(res.stderr, /OBA/);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+test("BLZ-394: a typo'd key is refused even on a board with no projects configured", async () => {
+  // The unknown-key guard sat BEHIND the standalone early return, so on such a board a
+  // typo reported `ok: true, standalone: true` — a clean, empty, successful run, which is
+  // the exact shape the refusal exists to prevent.
+  const tmp = mkdtempSync(join(tmpdir(), "blz394-standalone-"));
+  const root = join(tmp, "board");
+  mkdirSync(join(root, "projects"), { recursive: true });
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "INF", projects: [] }));
+  try {
+    const r = await reconcile({ root, dryRun: true, projects: ["NOPE"] });
+    assert.equal(r.ok, false, "a standalone board must still refuse a key it does not have");
+    assert.match(r.error, /NOPE/);
+    const clean = await reconcile({ root, dryRun: true });
+    assert.equal(clean.ok, true, "...while an unfiltered run on the same board is still fine");
+    assert.equal(clean.standalone, true);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-394: scope follows the DIRECTORY, not just the frontmatter", async () => {
+  // `sig` is keyed by the frontmatter's project but the write lands by the ticket's
+  // DIRECTORY, so a ticket at projects/OBA/ carrying `project: INF` was selected by an
+  // INF filter and then written into projects/OBA/ — a commit naming its scope as (INF)
+  // while touching another project's files. Blast radius is a property of the path.
+  const tmp = mkdtempSync(join(tmpdir(), "blz394-crossdir-"));
+  const root = twoProjectBoard(tmp);
+  writeFileSync(join(root, "projects", "OBA", "defined", "INF-2-t.md"),
+    "---\nid: INF-2\ntype: task\nproject: INF\nestimate: 30\n---\n\nbody\n");
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  // The misfiled ticket needs a MERGED PR of its own, or it never moves under either the
+  // shipped code or the mutant and this test proves nothing. The first version of it had
+  // no such PR and survived the very mutation it names.
+  const bin = join(tmp, "bin");
+  mkdirSync(bin, { recursive: true });
+  const pr = (ref, n) => ({ number: n, state: "MERGED", url: `https://github.com/hjr15/x/pull/${n}`,
+    headRefName: ref, title: `${ref.split("-").slice(0, 2).join("-")}: the work` });
+  writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash
+case "$PWD" in
+  *repo-INF) cat <<'JSON'
+${JSON.stringify([pr("INF-1-work", 11), pr("INF-2-work", 12)])}
+JSON
+  ;;
+  *) cat <<'JSON'
+${JSON.stringify([pr("OBA-1-work", 22)])}
+JSON
+  ;;
+esac
+`);
+  execFileSync("chmod", ["+x", join(bin, "gh")]);
+  const prevPath = process.env.PATH;
+  process.env.PATH = `${bin}:${prevPath}`;
+  const restore = () => { process.env.PATH = prevPath; };
+  try {
+    // Control: unfiltered, INF-2 DOES move — so the assertion below is about scope, not
+    // about INF-2 being inert.
+    const control = await reconcile({ root, dryRun: true });
+    assert.ok(control.changes.some((c) => c.id === "INF-2"),
+      "the misfiled ticket must be movable, or this test cannot see the filter at all");
+
+    const r = await reconcile({ root, dryRun: false, commit: true, projects: ["INF"] });
+    assert.equal(r.ok, true);
+    assert.deepEqual(r.changes.map((c) => c.id), ["INF-1"],
+      "the misfiled ticket lives under OBA, so an INF-scoped run must leave it alone");
+    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+      { encoding: "utf8" });
+    assert.doesNotMatch(files, /projects\/OBA/,
+      "a commit scoped to INF must not touch projects/OBA, whatever the frontmatter says");
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-394: the --apply commit subject carries the scope", async () => {
+  // Unpinned in the first cut: dropping the `(${keys})` suffix survived the suite.
+  const tmp = mkdtempSync(join(tmpdir(), "blz394-subject-"));
+  const root = twoProjectBoard(tmp);
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  const restore = stubGh(tmp);
+  try {
+    await reconcile({ root, dryRun: false, commit: true, projects: ["INF"] });
+    const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" });
+    assert.match(subject, /\(INF\)/, "a scoped commit must say so in its subject");
+    assert.doesNotMatch(subject, /OBA/);
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => {
+  // Four of the original CLI tests stayed green under a `no-filter` mutation: they matched
+  // /INF/ against output that an unfiltered run also produces. This one asserts the
+  // negative — the project OUT of scope must appear nowhere.
+  const tmp = mkdtempSync(join(tmpdir(), "blz394-disc-"));
+  const root = twoProjectBoard(tmp);
+  const restore = stubGh(tmp);
+  try {
+    const res = spawnSync(process.execPath,
+      [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
+      { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.doesNotMatch(res.stdout + res.stderr, /OBA/,
+      "an INF-scoped run must not mention OBA anywhere in its output");
+    assert.ok(at(root, "OBA", "defined"), "nor move it");
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

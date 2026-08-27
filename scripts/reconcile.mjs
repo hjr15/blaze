@@ -954,9 +954,6 @@ export async function reconcile({
   const today = new Date().toISOString().slice(0, 10);
   const cfg = loadConfig({ root });
   const configured = listProjects(cfg);
-  if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false,
-    missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [], findings: [],
-    scannedProjects: [] };
 
   // BLZ-394: restrict the scan AND the write to the named projects.
   //
@@ -980,12 +977,18 @@ export async function reconcile({
       forgeErrors: [], findings: [], scannedProjects: [] };
   }
   const unknown = (wanted || []).filter((k) => !configured.includes(k));
+  // Checked BEFORE the standalone return below, deliberately. Behind it, a typo'd key on a
+  // board with no projects configured reported `ok: true, standalone: true` — a clean,
+  // empty, successful run, which is the exact shape this refusal exists to prevent.
   if (unknown.length) {
     return { ok: false,
       error: `unknown project key(s): ${unknown.join(", ")}. This board configures: ${configured.join(", ")}`,
       changes: [], committed: false, pushed: false, missingRepos: [], scannedRepos: 0,
       configuredRepos: configured.length, forgeErrors: [], findings: [], scannedProjects: [] };
   }
+  if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
+    pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [],
+    findings: [], scannedProjects: [] };
   const keys = wanted || configured;
 
   const sig = new Map();
@@ -1000,6 +1003,13 @@ export async function reconcile({
   const findings = [];
   for (const t of readStorage.listTickets(projectsDir)) {
     const type = t.frontmatter.type;
+    // Scope on the DIRECTORY as well as the frontmatter. `sig` is keyed by the
+    // frontmatter's project, but the write lands by `t.project` — the directory the
+    // ticket sits in — so a ticket at `projects/OBA/…` carrying `project: INF` was
+    // selected by an `INF` filter and then written into `projects/OBA/`, producing a
+    // commit that names its scope as (INF) while touching another project's files.
+    // Blast radius, which is all this ticket is about, is a property of the path.
+    if (wanted && !keys.includes(t.project)) continue;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;
     const d = decide({
@@ -1190,25 +1200,32 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // three because all three are what a person types, and a filter that silently ignores
   // the spelling it did not expect is worse than no filter.
   const projectKeys = [];
+  // Whether the flag was SEEN, not whether it yielded a key. `projectKeys.length ? … : null`
+  // meant `--project=` and `--project ,` fell back to an UNFILTERED run: `blaze reconcile
+  // --project=$PROJ --apply` with `$PROJ` unset reconciled and committed the whole board,
+  // silently, and with `--quiet` nothing on stderr said so. That is precisely the failure
+  // this ticket exists to prevent, produced by a shell script by accident. The library
+  // already refuses an empty list; the CLI simply never reached it.
+  let sawProject = false;
   const addKeys = (v) => { for (const k of String(v).split(",")) if (k.trim()) projectKeys.push(k.trim()); };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === "--apply") { apply = true; continue; }
     if (a === "--fetch") { fetchFlag = true; continue; }
     if (a === "--quiet") { quiet = true; continue; }
-    if (a.startsWith("--project=")) { addKeys(a.slice("--project=".length)); continue; }
+    if (a.startsWith("--project=")) { sawProject = true; addKeys(a.slice("--project=".length)); continue; }
     if (a === "--project") {
       // A missing value must NOT swallow the next flag. `--project --apply` scoping the run
       // to a project named "--apply" would refuse every ticket on the board and report a
       // clean, empty, successful run.
       const v = args[i + 1];
       if (!v || v.startsWith("-")) { console.error("--project needs a project key, e.g. --project BLZ"); process.exit(1); }
-      addKeys(v); i += 1; continue;
+      sawProject = true; addKeys(v); i += 1; continue;
     }
     console.error(`unknown flag: ${a}`); process.exit(1);
   }
   const r = await reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply,
-    projects: projectKeys.length ? projectKeys : null });
+    projects: sawProject ? projectKeys : null });
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   // AC-5: say what was looked at BEFORE saying what was found, so "nothing to do" can never
   // be read as "the board is in sync" when it means "I only looked at one project".
