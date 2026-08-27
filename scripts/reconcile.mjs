@@ -972,8 +972,10 @@ export async function reconcile({
   const wanted = projects === null ? null
     : [...new Set((Array.isArray(projects) ? projects : [projects]).map((k) => String(k).trim()).filter(Boolean))];
   if (wanted && !wanted.length) {
+    // `configuredRepos: 0`, not `configured.length`: that field counts REPOS, and putting a
+    // project count in it was a wrong value in a named field, unreachable or not.
     return { ok: false, error: "--project was given no project key", changes: [], committed: false,
-      pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: configured.length,
+      pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
       forgeErrors: [], findings: [], scannedProjects: [] };
   }
   const unknown = (wanted || []).filter((k) => !configured.includes(k));
@@ -982,9 +984,12 @@ export async function reconcile({
   // empty, successful run, which is the exact shape this refusal exists to prevent.
   if (unknown.length) {
     return { ok: false,
-      error: `unknown project key(s): ${unknown.join(", ")}. This board configures: ${configured.join(", ")}`,
+      // "configures: " with an empty tail told a person nothing; a board with no projects
+      // says so in words.
+      error: `unknown project key(s): ${unknown.join(", ")}. This board configures: ` +
+        (configured.length ? configured.join(", ") : "no projects at all"),
       changes: [], committed: false, pushed: false, missingRepos: [], scannedRepos: 0,
-      configuredRepos: configured.length, forgeErrors: [], findings: [], scannedProjects: [] };
+      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [] };
   }
   if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
     pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [],

@@ -456,3 +456,41 @@ test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => 
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+test("BLZ-394: the refusal never reports a project count in the REPO count field", async () => {
+  // `configuredRepos` counts REPOS. Both refusal returns set it to `configured.length` —
+  // a project count in a named field. Unreachable through today's callers, but a wrong
+  // value in a named field is wrong whether or not anyone currently reads it.
+  const tmp = mkdtempSync(join(tmpdir(), "blz394-counts-"));
+  const root = twoProjectBoard(tmp);
+  const restore = stubGh(tmp);
+  try {
+    for (const projects of [["NOPE"], []]) {
+      const r = await reconcile({ root, dryRun: true, projects });
+      assert.equal(r.ok, false, JSON.stringify(projects));
+      assert.equal(r.configuredRepos, 0,
+        `${JSON.stringify(projects)}: a refused run scanned no repos, so it configures none to report`);
+      assert.deepEqual(r.scannedProjects, []);
+    }
+  } finally {
+    restore();
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-394: a board with no projects says so, rather than trailing off", async () => {
+  // The message read "This board configures: " with an empty tail, which tells a person
+  // nothing at the moment they most need telling.
+  const tmp = mkdtempSync(join(tmpdir(), "blz394-emptyboard-"));
+  const root = join(tmp, "board");
+  mkdirSync(join(root, "projects"), { recursive: true });
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "INF", projects: [] }));
+  try {
+    const r = await reconcile({ root, dryRun: true, projects: ["NOPE"] });
+    assert.equal(r.ok, false);
+    assert.match(r.error, /no projects at all/);
+    assert.doesNotMatch(r.error, /configures: *$/);
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});

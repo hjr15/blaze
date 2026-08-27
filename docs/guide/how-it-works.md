@@ -53,6 +53,22 @@ names. Reconcile is dry-run by default; `--apply` commits the resulting moves
 locally. It never pushes — pushing is not something reconcile does, under any
 flag.
 
+**Scoping a run.** `--project <KEY>` restricts both the scan and the write to the
+projects you name — repeatable, or comma-separated:
+
+```
+blaze reconcile --project BLZ
+blaze reconcile --project BLZ,INF --apply
+```
+
+Without it, every configured project reconciles, exactly as before. The point is
+blast radius: `--apply` writes ticket files directly and commits every file it
+touched, so a session that owns three tickets would otherwise author a commit
+moving fifteen it never looked at. An unknown key is refused outright — it does
+not quietly reconcile nothing, which would be indistinguishable from an in-sync
+board — and every run says which projects it scanned, so a narrowed run cannot be
+mistaken for one that found nothing.
+
 ## Forge support and status reachability
 
 **Blaze reads pull requests through the GitHub CLI (`gh`), and that is the only
