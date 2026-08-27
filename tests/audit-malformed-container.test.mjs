@@ -12,6 +12,14 @@
 //   F2 — `audit-runner.mjs` hands `auditCorpus` the RAW `JSON.parse(project.json)`, never
 //        `loadProject`, so a string-keyed dropped marker let a board invent a malformation
 //        that was not there.
+//
+// BLZ-407: a wrong-shaped `types`/`workflows` container is genuinely MALFORMED — the same
+// class `assertSchemaValid` (the load path) already refuses on — and `collectSchemaProblems`
+// has always tagged it `hard`. Before BLZ-407 that tag never reached a finding: `auditCorpus`
+// read `validateSchema`'s flattened strings and filed every schema problem under one soft
+// kind, so `blaze audit` reported `ok=true` on a board every non-exempt verb already refused.
+// The assertions below were written against that flattened reporting and are updated here to
+// the corrected one: a container-shape problem is now `[hard] schema-malformed`, `ok=false`.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -40,12 +48,14 @@ function board(configJson, projectJson) {
 const audit = (root, ...args) => spawnSync(process.execPath, [runner, ...args],
   { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
 
-/** The `schema-invalid` DETAILS, as the operator reads them. The plain report prints only a
- *  per-kind count, so the wording — the whole subject of F1 — is only visible under --json. */
+/** The `schema-malformed` DETAILS, as the operator reads them. The plain report prints only a
+ *  per-kind count, so the wording — the whole subject of F1 — is only visible under --json.
+ *  A container-shape problem is HARD (BLZ-407): `assertSchemaValid` already refuses on it, so
+ *  it is filed under the hard kind, not the soft `schema-invalid`. */
 function schemaDetails(root) {
   const r = audit(root, "--json");
   const parsed = JSON.parse(r.stdout);
-  return (parsed.findings ?? []).filter((f) => f.kind === "schema-invalid").map((f) => f.detail);
+  return (parsed.findings ?? []).filter((f) => f.kind === "schema-malformed").map((f) => f.detail);
 }
 
 const BASE = '{"key":"ENG","projects":["ENG"]';
@@ -73,9 +83,10 @@ describe("BLZ-396: a malformed schema CONTAINER never takes `blaze audit` down",
         assert.doesNotMatch(r.stderr ?? "",
           /at schemaContainerErrors|at collectSchemaProblems|at resolveSchema|at auditCorpus/,
           `blaze audit died with a stack trace:\n${r.stderr}`);
-        assert.match(r.stdout, /ok=true/,
-          `no report was produced.\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
-        assert.match(r.stdout, /schema-invalid/,
+        assert.match(r.stdout, /ok=false/,
+          `a malformed container is HARD (BLZ-407) — assertSchemaValid already refuses it, `
+          + `so audit must not call this board clean.\nstdout: ${r.stdout}\nstderr: ${r.stderr}`);
+        assert.match(r.stdout, /schema-malformed/,
           `the operator wrote a block that did nothing and was never told:\n${r.stdout}`);
         // Still a REAL audit, not an empty shell that happens to say ok.
         assert.match(r.stdout, /deadline-unreachable/,
@@ -91,8 +102,8 @@ describe("BLZ-396: a malformed schema CONTAINER never takes `blaze audit` down",
     });
   }
 
-  test("a healthy board reports no schema-invalid — the check is not always-on", () => {
-    // Without this control, a schema-invalid that fired unconditionally satisfies every
+  test("a healthy board reports no schema-malformed and no schema-invalid — the check is not always-on", () => {
+    // Without this control, a container finding that fired unconditionally satisfies every
     // assertion above. This is the direction that has been worse than the bug twice here.
     for (const [what, cfg, proj] of [
       ["no schema anywhere", `${BASE}}`, undefined],
@@ -105,6 +116,8 @@ describe("BLZ-396: a malformed schema CONTAINER never takes `blaze audit` down",
       try {
         const r = audit(root);
         assert.match(r.stdout, /ok=true/, `${what}: ${r.stderr}`);
+        assert.doesNotMatch(r.stdout, /schema-malformed/,
+          `${what}: an ordinary board was told its container was malformed:\n${r.stdout}`);
         assert.doesNotMatch(r.stdout, /schema-invalid/,
           `${what}: an ordinary board was told its block was ignored:\n${r.stdout}`);
       } finally { rmSync(root, { recursive: true, force: true }); }
@@ -174,6 +187,8 @@ describe("BLZ-396 review F2: a hand-written marker key invents no finding", () =
       try {
         const r = audit(root);
         assert.match(r.stdout, /ok=true/, r.stderr);
+        assert.doesNotMatch(r.stdout, /schema-malformed/,
+          `audit invented a malformation the board does not have:\n${r.stdout}`);
         assert.doesNotMatch(r.stdout, /schema-invalid/,
           `audit invented a malformation the board does not have:\n${r.stdout}`);
       } finally { rmSync(root, { recursive: true, force: true }); }
