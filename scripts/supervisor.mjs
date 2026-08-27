@@ -83,19 +83,36 @@ const CONTROLS_HTML = `
     .activity .revert { margin-left:auto; cursor:pointer; color:var(--blaze-orange); background:none; border:0; font:inherit; }
   </style>`;
 
-const ACTIVITY_SCRIPT = `
+// Exported so a test can run the SHIPPED renderer rather than a hand-copied twin —
+// a twin keeps passing after someone edits the real one, which is how the missing
+// warning branch survived review in the first place.
+export const ACTIVITY_SCRIPT = `
   <script>
     const act = document.getElementById("activity");
     const conn = document.getElementById("conn");
     function line(e) {
       const li = document.createElement("li");
       let txt = e.type;
-      if (e.type === "reconcile") txt = e.id + ": " + e.from + " → " + e.to;
+      if (e.type === "reconcile") txt = e.id + ": " + e.from + " → " + e.to
+        + (e.cleared ? " (branch/pr CLEARED — no single PR delivered it)" : "");
       else if (e.type === "groom") txt = e.error ? ("groom " + e.id + " failed: " + e.error)
         : e.noop ? ("groom " + e.id + ": no change") : ("groom " + e.id + " (" + (e.files||[]).length + " file)");
       else if (e.type === "status") txt = e.loop + " " + e.state;
       else if (e.type === "error") txt = (e.loop||"") + " error: " + e.message;
-      li.innerHTML = "<span>" + (e.ts||"") + "</span><span>" + txt + "</span>";
+      // BLZ-395: without this branch a finding rendered as the bare word "warning".
+      // The event was published, deduped and delivered — and said nothing. A report
+      // nobody can read is the same failure as no report, on the loop this feature
+      // exists for.
+      else if (e.type === "warning") txt = (e.loop||"") + ": " + e.message;
+      // textContent, not innerHTML. The rendered text carries forge-derived data — a PR
+      // url on a finding, a remote host and a codeRepo path on a forge error — and the
+      // previous innerHTML concat made every one of those an injection sink in the
+      // operator's own dashboard. Adding the warning branch above without this would
+      // have widened a live sink rather than filled a gap. (No backticks in here: this
+      // whole block lives inside a template literal.)
+      const tsEl = document.createElement("span"); tsEl.textContent = e.ts || "";
+      const txtEl = document.createElement("span"); txtEl.textContent = txt;
+      li.append(tsEl, txtEl);
       if (e.type === "groom" && e.sha) {
         const b = document.createElement("button");
         b.className = "revert"; b.textContent = "↩ revert";
@@ -126,7 +143,32 @@ export function newForgeErrorEvents(forgeErrors, said) {
   for (const f of forgeErrors || []) {
     if (!f || !f.message || said.has(f.message)) continue;
     said.add(f.message);
-    out.push({ type: "error", loop: "reconcile", message: `forge unreadable — ${f.message}` });
+    // Severity decides the channel. A `gh-unusable-pr` entry means the forge answered
+    // fine and one field in its answer is unusable — publishing that as an engine error
+    // saying "forge unreadable" is false twice over.
+    out.push(f.severity === "warning"
+      ? { type: "warning", loop: "reconcile", message: `forge data — ${f.message}` }
+      : { type: "error", loop: "reconcile", message: `forge unreadable — ${f.message}` });
+  }
+  return out;
+}
+
+/** BLZ-395: reconcile's findings → activity-feed events, deduped the same way and for
+ *  the same reason. THIS LOOP IS THE ONE THAT MATTERS: BLZ-395's window is opened by
+ *  reconcile running on a timer and sampling git between an early merge and a later
+ *  PR opening, so a finding surfaced only on the CLI would miss the path that creates
+ *  the condition. Like a forge error it persists until a person acts, so it is said
+ *  once per distinct message rather than every tick.
+ *
+ *  `type: "warning"`, not `"error"`: the run succeeded and the engine is behaving as
+ *  designed. What is wrong is the BOARD, and calling that an engine error is the
+ *  over-statement this whole lane exists to stop. */
+export function newFindingEvents(findings, said) {
+  const out = [];
+  for (const f of findings || []) {
+    if (!f || !f.message || said.has(f.message)) continue;
+    said.add(f.message);
+    out.push({ type: "warning", loop: "reconcile", id: f.id, message: f.message });
   }
   return out;
 }
@@ -155,6 +197,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   const loops = { reconcile: { timer: null, busy: false }, groomer: { timer: null, busy: false } };
   // BLZ-350: forge problems already announced, so a timer loop reports each once.
   const forgeSaid = new Set();
+  // BLZ-395: separate memory from forgeSaid. They are different populations and a
+  // shared Set would let one silence the other on a message collision.
+  const findingSaid = new Set();
 
   // Mirrors serve.mjs's aheadCount() so the client's sync badge works the same
   // under supervisor mode.
@@ -182,8 +227,13 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // now breaks. Without this the app runs reconcile every tick, never reaches
       // "in-review", and the activity feed shows a healthy board.
       for (const e of newForgeErrorEvents(r && r.forgeErrors, forgeSaid)) bus.publish({ ...e, ts: today() });
+      for (const e of newFindingEvents(r && r.findings, findingSaid)) bus.publish({ ...e, ts: today() });
       if (r && r.ok && r.changes) {
-        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, ts: today() });
+        // `cleared` travels too. BLZ-398 added the one direction in which reconcile
+        // DESTROYS data, and under `blaze start` this feed is the operator's whole
+        // account of the run — dropping the flag here left the deletion unreported on
+        // the very surface that was the argument for reporting it.
+        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, cleared: Boolean(c.cleared), ts: today() });
       } else if (r && !r.ok) {
         bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
       }

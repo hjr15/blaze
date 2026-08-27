@@ -467,7 +467,10 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       const { reconcile } = await import("./reconcile.mjs");
       const r = await reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
       // BLZ-350: a thin preview and an unreadable forge look identical otherwise.
-      return json(200, { changes: r.changes || [], forgeErrors: r.forgeErrors || [] });
+      // BLZ-395: findings travel with the preview. The preview is where a person
+      // looks before believing the board, and a conflict reconcile refuses to act on
+      // is exactly what it must not omit.
+      return json(200, { changes: r.changes || [], forgeErrors: r.forgeErrors || [], findings: r.findings || [] });
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {

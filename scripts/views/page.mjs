@@ -437,8 +437,23 @@ export function pageHtml({
     });
     document.getElementById("reconcileBtn")?.addEventListener("click", async () => {
       const j = await (await fetch("/api/reconcile-preview")).json();
-      const lines = (j.changes || []).map((c) => c.id + ": " + c.from + " → " + c.to);
-      toast(lines.length ? lines.length + " code-bound move(s) — apply via 'blaze reconcile --apply'" : "no code-bound changes");
+      // The preview must not say less than the run knows. It reported the move count and
+      // silently discarded three things: cleared (BLZ-398 — reconcile now DELETES a
+      // delivery record, and this said only "done to done"), findings (BLZ-395 — it
+      // could read "no code-bound changes" with a NEEDS ATTENTION conflict live), and
+      // forgeErrors (BLZ-350 — a thin preview and an unreadable forge look identical).
+      // No backticks in here: this block lives inside a template literal.
+      const moves = (j.changes || []).length;
+      const cleared = (j.changes || []).filter((c) => c.cleared).length;
+      const findings = (j.findings || []).length;
+      const forge = (j.forgeErrors || []).length;
+      const parts = [];
+      parts.push(moves ? moves + " code-bound move(s) — apply via 'blaze reconcile --apply'"
+                       : "no code-bound changes");
+      if (cleared) parts.push(cleared + " would have their branch/pr CLEARED");
+      if (findings) parts.push(findings + " need attention");
+      if (forge) parts.push(forge + " forge problem(s)");
+      toast(parts.join(" · "));
     });
   </script>
   <script>

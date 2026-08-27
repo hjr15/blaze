@@ -272,7 +272,7 @@ test("BLZ-350 regression: a GitHub remote named `upstream` still reaches gh", ()
       return { ok: true, status: 0, stderr: "",
         stdout: "remote.upstream.url https://github.com/hjr15/blaze.git" };
     }
-    return { ok: true, status: 0, stderr: "", stdout: '[{"number":93,"state":"OPEN"}]' };
+    return { ok: true, status: 0, stderr: "", stdout: '[{"number":93,"state":"OPEN","url":"https://github.com/hjr15/blaze/pull/93"}]' };
   };
   const { prs, forgeErrors } = gatherPrs("/repo", { run, ghHost: "" });
   assert.ok(calls.includes("gh"),
@@ -290,7 +290,7 @@ test("BLZ-350 regression: origin on GitLab + upstream on GitHub still reaches gh
         stdout: "remote.origin.url https://gitlab.com/acme/svc.git\n"
               + "remote.upstream.url git@github.com:hjr15/blaze.git" };
     }
-    return { ok: true, status: 0, stderr: "", stdout: '[{"number":93,"state":"OPEN"}]' };
+    return { ok: true, status: 0, stderr: "", stdout: '[{"number":93,"state":"OPEN","url":"https://github.com/hjr15/blaze/pull/93"}]' };
   };
   const { prs, forgeErrors } = gatherPrs("/repo", { run, ghHost: "" });
   assert.ok(calls.includes("gh"),
@@ -377,7 +377,7 @@ test("BLZ-350: an UNCLASSIFIABLE host is handed to gh — GHES lives under arbit
     if (cmd === "git") {
       return { ok: true, status: 0, stderr: "", stdout: "remote.origin.url https://git.corp.example/o/r.git" };
     }
-    return { ok: true, status: 0, stderr: "", stdout: '[{"number":7,"state":"OPEN"}]' };
+    return { ok: true, status: 0, stderr: "", stdout: '[{"number":7,"state":"OPEN","url":"https://ghes.corp/hjr15/blaze/pull/7"}]' };
   };
   assert.equal(classifyRemote("https://git.corp.example/o/r.git", { ghHost: "" }).kind, "unknown");
   const { prs, forgeErrors } = gatherPrs("/repo", { run, ghHost: "" });

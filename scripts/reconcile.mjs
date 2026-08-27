@@ -40,7 +40,7 @@ import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 //
 // Type-independent on purpose. The ticket asks whether `story` shares the failure;
 // every delivery type does, because ranking never sees the type.
-const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
+export const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
 
 // --- shelling out, in two layers (BLZ-350) ------------------------------------
 // `shResult` is the honest one: it reports WHAT happened — exit status, stderr,
@@ -78,19 +78,27 @@ function sh(cmd, args, opts = {}) {
 }
 
 // --- pure decision: git signal + current status + type → target status --------
-export function decide({ pr, branch, shipped }, currentStatus, type) {
+export function decide({ pr, branch, shipped, delivererAmbiguous = false }, currentStatus, type) {
   // Only delivery-workflow types mirror git state; goal/risk stay manual.
   if (!isType(type) || workflowFor(type) !== "delivery") {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined, recordIfAbsentOnly: false };
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false,
+             recordAmbiguous: false };
   }
   let target, branchVal = null, prVal = null;
   if (pr) {
     // Delivery workflow middle statuses ("in-review"/"in-progress") are intentional literals here;
     // this function is already delivery-guarded above, so there's no need to re-derive them from rules.
     target = pr.state === "MERGED" ? "done" : pr.state === "OPEN" ? "in-review" : "in-progress";
-    branchVal = pr.headRefName;
-    prVal = `#${pr.number} — ${pr.url}`;
+    // The STATUS comes from the state and is always available. The RECORD needs a number
+    // Blaze can stand behind, and `sanitisePr` sets `number: null` when the forge did not
+    // supply one. Both fields are clamped together, never one — the record is one unit,
+    // and half of it naming a PR the other half cannot identify is ADR-0023's fourth
+    // shape of wrong reached through a new door.
+    if (recordablePr(pr)) {
+      branchVal = pr.headRefName;
+      prVal = `#${pr.number} — ${pr.url}`;
+    }
   } else if (branch) {
     target = "in-progress";
     branchVal = branch;
@@ -103,7 +111,8 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
     target = "done";
   } else {
     return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
-             resolution: undefined, recordIfAbsentOnly: false };
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false,
+             recordAmbiguous: false };
   }
   // Terminal-sticky: never pull a ticket out of a terminal status automatically.
   //
@@ -142,9 +151,44 @@ export function decide({ pr, branch, shipped }, currentStatus, type) {
   // MERGED alone still let the LATEST merge win the rank tie-break, so a follow-up docs
   // PR repointed a done epic away from the PR that delivered it.
   const recordIfAbsentOnly = isTerminal(type, currentStatus);
+  // BLZ-395: REPORT, DON'T MOVE. The conflict this names is the residual ADR-0023 §1
+  // left open, and it is a REPORT because the alternative is to weaken terminal-
+  // stickiness, which is a separate design rule with its own blast radius.
+  //
+  // The window: BLZ-130's veto is evaluated at RUN TIME, so the board's answer depends
+  // on WHEN reconcile sampled git. One run seeing only the early merged PR writes
+  // `done`; a later run seeing that PR AND the open one that carries the real work
+  // would have written `in-review`, but terminal status is sticky so it changes
+  // nothing and reports `moved: false`. Same end state, two answers, decided by run
+  // history — and `blaze start`'s loop samples that window routinely.
+  //
+  // Why not un-stick it. Stickiness exists to stop reconcile fighting a human's
+  // hand-move; a terminal ticket that a person deliberately closed would be dragged
+  // back to `in-review` by any open PR whose branch merely carries the key. That
+  // trades a silent over-report for a silent over-write, which is the same class of
+  // bug in the other direction — and this record's history (ADR-0023 §1, four shapes
+  // of wrong) is the argument for not adding a fourth inference path. Reporting
+  // surfaces the conflict, moves nothing, and leaves the correction to a person.
+  //
+  // `pr` here has already passed INF-735's corroboration gate in `buildPrMap`, so this
+  // is "a CORROBORATED open PR" — an uncorroborated claim is not visible to the veto
+  // and must not be visible to this finding either, or the report would be noisier
+  // than the veto it is reporting on.
+  const openPrOnTerminal = Boolean(pr) && pr.state === "OPEN" && isTerminal(type, currentStatus);
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
-  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly };
+  // BLZ-398: the record it is about to offer comes from a merged set git cannot
+  // resolve into a deliverer. Reported the same way `recordIfAbsentOnly` is — this
+  // function says the RULE APPLIES, and the caller, which holds the current
+  // frontmatter, enforces it. That split is ADR-0023's own, and keeping this on the
+  // same side of it is what stops the record having two owners.
+  //
+  // Gated on the TARGET being terminal, not the current status: a ticket moving
+  // `defined -> done` locks its record in on that very move, so the ambiguity has to
+  // be caught before the first write, not after the ticket is already terminal.
+  const recordAmbiguous = Boolean(delivererAmbiguous) && isTerminal(type, target);
+  return { target, branchVal, prVal, moved, skip: false, resolution, recordIfAbsentOnly,
+           openPrOnTerminal, recordAmbiguous };
 }
 
 // --- anchored leading-id parse of a commit subject ("<KEY>-<n>: desc") --------
@@ -170,14 +214,30 @@ export function idFromSubject(subject, key) {
 // merge). 23 of those 312 commits carry such a bullet under a ticket subject, 102
 // such bullet lines in all, recovering 28 ticket ids no subject at that ref names.
 //
-// TWO CONDITIONS, AND BOTH ARE LOAD-BEARING.
+// THREE CONDITIONS, AND ALL THREE ARE LOAD-BEARING.
 //
 //   1. The marker is `* `, which is what GitHub writes and nothing else here does.
 //   2. The subject must OPEN with a ticket-id list — `KEY-n:`, and the multi-ticket
-//      forms the house also writes, `KEY-a/b/c:` and `KEY-a + KEY-b:`. The commit must
-//      itself be a squashed ticket PR, which is BLZ-131's premise: per-ticket commits
-//      inside a FEATURE's PR. Every id in that leading list counts, and the list ends
-//      at the colon, so `KEY-1: fixes KEY-4` still claims only KEY-1.
+//      forms the house also writes, `KEY-a/b/c:`, `KEY-a + KEY-b:`, `KEY-a, KEY-b:`
+//      and `KEY-a & KEY-b:`. The commit must itself be a squashed ticket PR, which is
+//      BLZ-131's premise: per-ticket commits inside a FEATURE's PR. Every id in that
+//      leading list counts, and the list ends at the colon, so `KEY-1: fixes KEY-4`
+//      still claims only KEY-1.
+//   3. The BULLET must end at a colon too. This one shipped unstated and untested
+//      (BLZ-399): with conditions 1 and 2 both satisfied, `* KEY-4 is blocked by this`
+//      is a sentence, not a collapsed commit subject, and reading it as one drives
+//      KEY-4 to `done` off prose. Deleting the `:` from the `bullet` regex left the
+//      whole suite green at blaze 3cf1509 — 2,518 pass / 0 fail — which is why it is
+//      named here rather than left to be inferred from the regex.
+//
+// Condition 2's separator inventory is load-bearing in a way that is easy to
+// under-read, and is pinned in tests/reconcile-load-bearing-conditions.test.mjs. The
+// list is ANCHORED and must reach the colon, so an unrecognised separator does not
+// truncate the list — it makes the subject fail to match at all, condition 2 then
+// returns early, and the ids AND every bullet in the body are lost together. `&` is
+// unobserved across all 19 configured repo/key pairs (scanned 2026-08-26) and is KEPT
+// for that reason: it is one of four spellings of one construct, and the guard against
+// over-claiming is the anchor and the colon, never which separators are listed.
 //
 // Condition 2 exists because the first cut, which honoured any `[*+-]` bullet under any
 // subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
@@ -318,18 +378,169 @@ function defaultBranchRef(repoPath) {
 // Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
 // an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
 // no longer beat a corroborated OPEN PR from the ticket's real repo.
-export function buildPrMap(prs, idFromRef, shippedSet) {
-  const prMap = new Map();
+function corroboratedByTicket(prs, idFromRef, shippedSet) {
+  const byId = new Map();
   for (const pr of prs || []) {
     const id = idFromRef(pr.headRefName);
     if (!id) continue;
     if (!claimCorroborated(id, { title: pr.title, shippedSet })) continue;
-    const cur = prMap.get(id);
-    const better = !cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0) ||
-      ((PR_RANK[pr.state] || 0) === (PR_RANK[cur.state] || 0) && pr.number > cur.number);
-    if (better) prMap.set(id, pr);
+    if (!byId.has(id)) byId.set(id, []);
+    byId.get(id).push(pr);
+  }
+  return byId;
+}
+
+// --- BLZ-398: how strongly a PR's TITLE claims to have delivered this ticket ---
+// Corroboration (INF-735) is a yes/no gate: does anything beyond the ref name tie this
+// PR to the id at all. That is the right question for "may this PR speak"; it is the
+// wrong one for "which of two PRs delivered the work", because a follow-up that merely
+// MENTIONS the key passes it just as a `KEY-n: …` titled PR does.
+//
+// The house convention is that a PR delivering a ticket is TITLED for it, in the same
+// leading-id-list form `idsFromSubject` already parses. So a title that LEADS with the
+// id is a stronger claim than one that mentions it downstream, and that is the whole
+// of the ranking below. The key comes from the id rather than a parameter, so a caller
+// cannot silently degrade this to the old behaviour by forgetting to pass it.
+export function prTitleClaim(pr, id) {
+  const key = id.slice(0, id.lastIndexOf("-"));
+  return idsFromSubject(pr && pr.title, key).includes(id) ? 2 : 1;
+}
+
+// --- rank a repo's PRs into id → best-PR, gated on corroboration (INF-735) -----
+// Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
+// an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
+// no longer beat a corroborated OPEN PR from the ticket's real repo.
+//
+// BLZ-398 changed the EQUAL-RANK tie-break from "higher PR number" to "stronger title
+// claim, then LOWER number". That is safe to change and it is worth stating why,
+// because it looks like it should move tickets: `decide` derives the target status
+// from `pr.state` ALONE, and PR_RANK is one-to-one with the state, so every candidate
+// at equal rank yields the identical status. The tie-break therefore decides only
+// which PR's `headRefName`/`url` land in the delivery RECORD — never where a ticket
+// goes. `pr.number > cur.number` selected the LATEST merge among equals, which the
+// shipped comments named as a hazard while the protection built on it covered only
+// tickets that already had a record.
+/** Is `pr` a better answer than `best` for this id? ONE comparator, used by
+ *  `buildPrMap` within a repo and by `gatherProject` across repos — they had drifted,
+ *  and the cross-repo half was deciding by `codeRepos` scan order.
+ *
+ *  Order: RANK, then TITLE CLAIM, then RECORDABLE, then lower number.
+ *
+ *  The claim tier sits ABOVE recordable, and review found out why the hard way. With
+ *  recordable first, a *weak* claimant that happens to carry a number beat a *strong*
+ *  one the forge could not number — so a PR titled `chore: tidy the runbook after
+ *  INF-645` was recorded as having delivered the epic while `INF-645: close the
+ *  Tier-1 alert gaps` sat beside it, and `ambiguousDeliverers` could not see it
+ *  (it filters unrecordable PRs out first, so only one merged candidate remained and
+ *  nothing was ambiguous). That is the INF-645 failure this whole ticket exists to
+ *  stop, re-entered through the tier meant to protect the record.
+ *
+ *  With the claim first, the strong claimant wins and — being unrecordable — writes
+ *  NOTHING. Blank and true, instead of filled and false, which is this record's
+ *  standing doctrine. Recordable still breaks a tie BETWEEN EQUAL CLAIMS, which is
+ *  the case it was added for: `null < 10` is true, so without it an unusable PR won
+ *  an equal-claim tie-break and suppressed a knowable record.
+ *
+ *  Rank comes from `state` alone, so none of this can move a ticket — it decides only
+ *  which PR the delivery record is taken from. */
+export function betterPr(pr, best, id) {
+  if (!best) return true;
+  const rank = (x) => PR_RANK[x.state] || 0;
+  const recordable = (x) => (recordablePr(x) ? 1 : 0);
+  if (rank(pr) !== rank(best)) return rank(pr) > rank(best);
+  const claim = [prTitleClaim(pr, id), prTitleClaim(best, id)];
+  if (claim[0] !== claim[1]) return claim[0] > claim[1];
+  if (recordable(pr) !== recordable(best)) return recordable(pr) > recordable(best);
+  return pr.number < best.number;
+}
+
+export function buildPrMap(prs, idFromRef, shippedSet) {
+  const prMap = new Map();
+  for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
+    let best = null;
+    for (const pr of candidates) {
+      if (betterPr(pr, best, id)) best = pr;
+    }
+    if (best) prMap.set(id, best);
   }
   return prMap;
+}
+
+// --- BLZ-398: when git cannot say WHICH merge delivered the ticket ------------
+// A record-less `done` ticket carrying two MERGED PRs acquired the LATEST one and
+// write-once made that permanent — the board recording a follow-up docs PR as what
+// delivered an epic, with no route back (`pr` is not in EDITABLE_FIELDS, so `blaze
+// edit` cannot repair it either).
+//
+// The tie-break above answers this whenever one merged PR claims the ticket more
+// strongly than the others. When it does NOT — two PRs both titled `KEY-n: …`, which
+// is exactly the reproduced INF-645 case of #10 (the real work) and #40 (a docs
+// follow-up) — there is nothing in git that says which one delivered it, and the
+// honest answer is to say so rather than to pick.
+//
+// Rule 7 of the review bar is why this is a refusal and not a heuristic. This record
+// has already been wrong in FOUR directions (overwrite-anything, write-nothing,
+// overwrite-with-the-latest-merge, per-field), and "prefer the lowest number when both
+// are MERGED" is a guess at "the deliverer", not a fact — a ticket delivered by a
+// rewrite after an abandoned first attempt would be recorded backwards by it. What is
+// asymmetric here is the COST, and it is what decides the direction: a blank `pr`
+// understates and is TRUE, and a blank stays fillable because write-once locks in a
+// written value and not an absent one; a `pr` naming the wrong PR overstates, is
+// FALSE, and is permanent. So an ambiguous deliverer writes nothing and reports.
+//
+// Scoped to MERGED deliberately. The record is only ever locked in from a merged PR:
+// the terminal path nulls a non-merged one outright, and a ticket moving to `done`
+// does so because its winning PR is MERGED. An open or closed PR's record is live
+// state that a later run corrects.
+// Returns id -> the numbers of the merged PRs that tied, so the report can NAME them.
+// A finding that says "this is ambiguous" without saying between what is not
+// actionable, and the whole point of refusing to write is to hand a person the choice.
+/** The tied top-claim merged PRs for one id, or null when a deliverer is knowable.
+ *
+ *  DETECTION COUNTS EVERY MERGED CLAIMANT; SELECTION STILL ONLY WRITES A RECORDABLE ONE.
+ *  Keeping those two questions apart is the whole of round 6's finding. The previous cut
+ *  filtered unrecordable PRs out BEFORE testing the tie, on the reasoning that one which
+ *  can never be written is not an answer to "which PR delivered this". It is not an
+ *  answer — but it is still a RIVAL, and dropping it turned a genuine two-claimant tie
+ *  into an apparent single deliverer: two PRs both titled for the ticket, one of them
+ *  unnumberable, and the board permanently recorded the other with no finding at all.
+ *  One unusable number flipped it from "refuses to name a deliverer" to "names one
+ *  forever". `pr` is not in EDITABLE_FIELDS, so there is no route back.
+ *
+ *  That is the same shape as rounds 4 and 5 — a rule that reads the candidate set
+ *  disagreeing with the rule that ranks it — which is why detection now shares ONE
+ *  entry point across repos too. */
+function tiedDeliverers(candidates, id) {
+  // Unrecordable rivals are deliberately KEPT. They cannot be written, but they can still
+  // be the deliverer, and dropping them turned a genuine tie into an apparent lone
+  // deliverer (round 6's F1). Recordability gates the WRITE, never the vote.
+  const merged = candidates.filter((pr) => pr.state === "MERGED");
+  if (merged.length < 2) return null;
+  const top = Math.max(...merged.map((pr) => prTitleClaim(pr, id)));
+  const tied = merged.filter((pr) => prTitleClaim(pr, id) === top);
+  if (tied.length < 2) return null;
+  // Carry the url, not just the number. PR numbers are per-repository, so a cross-repo
+  // tie can be "#10 and #10" — and a finding naming one number is the exact wording this
+  // ticket condemns. An unrecordable rival has no number at all, so the url is the only
+  // thing that can name it.
+  // Missing urls sort LAST by rank, never by their string form. `String(a.url)` compared
+  // "null" against "" against "undefined", so the order of two number-less rivals depended
+  // on HOW the url was missing rather than on anything true — which is also why calling
+  // the url-normalisation an equivalent mutant was wrong: this was its fourth consumer.
+  const key = (r) => (typeof r.url === "string" && r.url.trim() ? r.url : null);
+  return tied.map((pr) => ({ number: pr.number, url: pr.url, headRefName: pr.headRefName })).sort(
+    (a, b) => (a.number ?? Infinity) - (b.number ?? Infinity) ||
+      (key(a) === null) - (key(b) === null) ||
+      String(key(a) ?? "").localeCompare(String(key(b) ?? "")));
+}
+
+export function ambiguousDeliverers(prs, idFromRef, shippedSet) {
+  const out = new Map();
+  for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
+    const tied = tiedDeliverers(candidates, id);
+    if (tied) out.set(id, tied);
+  }
+  return out;
 }
 
 // --- rank a repo's branches into id → first-corroborated-branch (INF-735) -----
@@ -489,8 +700,32 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
     }] };
   }
   try {
-    const prs = JSON.parse(res.stdout || "[]");
-    return { prs: Array.isArray(prs) ? prs : [], forgeErrors: [] };
+    const parsed = JSON.parse(res.stdout || "[]");
+    const prs = (Array.isArray(parsed) ? parsed.map(sanitisePr) : []).filter(Boolean);
+    // A PR the forge could not number still RANKS (so an open one keeps its veto) but
+    // can never be recorded. Say so: a repo whose PRs are all unusable must not read as
+    // a repo with no pull requests — that is the laundering BLZ-350 exists to stop, and
+    // it is just as wrong arriving through a SUCCESSFUL call as through a failed one.
+    // `recordablePr`, the same predicate the deciders use. This counter read
+    // `pr.number === null` while `decide` and `betterPr` had moved on to "number AND url",
+    // so a PR with a good number and no url was silently withheld from the record and
+    // reported by nothing — the drift shape this branch keeps producing, arriving one
+    // layer over: unify the predicate, leave the reporter behind.
+    const unusable = prs.filter((pr) => !recordablePr(pr)).length;
+    return { prs, forgeErrors: unusable ? [{
+      // `severity: "warning"`, and it is the whole point of the field. The forge was read
+      // PERFECTLY here — what is wrong is one field inside a successful response. Every
+      // other entry in this list means Blaze could not read the forge at all, and the
+      // consumers say so in those words. `newFindingEvents` beside this makes the same
+      // argument for the same reason: calling a correct run an engine error is the
+      // over-statement this lane exists to stop, and it is no better pointed at the forge.
+      severity: "warning",
+      repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unusable-pr", detail: String(unusable),
+      message: `${unusable} pull request(s) in ${repoPath} cannot supply a delivery record — ` +
+        `Blaze needs both a usable number and a url — so they can rank but can never be ` +
+        `recorded as having delivered a ticket. The forge itself was read fine — this is ` +
+        `one field inside a successful response, so PR state and "in-review" are unaffected.`,
+    }] : [] };
   } catch (e) {
     return { prs: [], forgeErrors: [{
       repo: repoPath, remotes: urls, host: askedHost, reason: "gh-unparsable", detail: String(e.message || e),
@@ -499,9 +734,61 @@ export function gatherPrs(repoPath, { run = shResult, ghHost = process.env.GH_HO
   }
 }
 
+/** A PR number Blaze can put in a record, or `null`. STRICT: this is a whitelist, not a
+ *  parse. `Number.parseInt` is prefix-parsing wearing validation's clothes — it turns
+ *  `"12abc"` into 12, `"1e3"` into 1, `"007"` into 7 and `[5]` into 5, so a malformed
+ *  payload produced `pr: #12 — …/pull/999`: a permanent record naming one PR beside
+ *  another's url. Plausible-looking is worse than obviously garbage, because nobody
+ *  checks it. */
+function prNumber(raw) {
+  if (typeof raw === "number") {
+    return Number.isSafeInteger(raw) && raw > 0 ? raw : null;
+  }
+  if (typeof raw === "string" && /^[1-9][0-9]*$/.test(raw)) {
+    const n = Number(raw);
+    return Number.isSafeInteger(n) ? n : null;
+  }
+  return null;
+}
+
+// --- the forge's JSON is UNTRUSTED input, and it was trusted verbatim ---------
+// `gh pr list` output is parsed and its fields flow into three places that render or
+// persist them: the CLI's stderr warnings, the activity feed, and a ticket's
+// `branch`/`pr` frontmatter. `serializeTicket` quotes and escapes, so the file on disk
+// was never at risk — but a terminal is not an escaping context.
+//
+// AN UNUSABLE PR IS NEUTERED, NOT DROPPED, AND THAT DISTINCTION IS THE WHOLE POINT.
+// The first cut dropped it, on the reasoning that "a dropped claim costs a missed
+// signal, never a corrupted ticket". That reasoning is FALSE HERE, and review caught it:
+// `decide` reads the TOP-RANKED PR and `PR_RANK` puts OPEN above MERGED, so removing a
+// candidate is not a subtraction, it is a SUBSTITUTION — the next-ranked PR is promoted.
+// Dropping an unnumberable OPEN PR therefore deleted BLZ-130's veto and handed the
+// ticket to an earlier merged PR: measured end to end, `in-progress` went to `done`
+// with `resolution: done` and the early docs PR recorded as the deliverer, while the
+// real work was still open, and with no finding and no forge error to say so. That is
+// the exact failure this whole lane exists to stop, reintroduced by its own fix.
+//
+// So the PR stays in the ranking, keeping whatever veto its STATE earns, and only loses
+// the ability to supply a RECORD — `number: null` is the marker, and `decide` clamps
+// both fields on it, because the record is one unit. The condition is reported through
+// `forgeErrors` rather than swallowed: a repo whose PRs are all unusable must not look
+// identical to a repo with no pull requests, which is the laundering BLZ-350 fixed.
+function sanitisePr(pr) {
+  if (!pr || typeof pr !== "object") return null;
+  const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
+  // A url that arrives absent, or that `clean` empties (the control-char-only case this
+  // sanitiser exists for), becomes `null` — the same marker `number` uses. Leaving it as
+  // `undefined` or `""` is what let `decide` persist the literal string "undefined" into
+  // a ticket's frontmatter, permanently, and made "is this recordable" two questions.
+  const url = clean(pr.url);
+  return { ...pr, number: prNumber(pr.number), url: url || null,
+           title: clean(pr.title), headRefName: clean(pr.headRefName), state: clean(pr.state) };
+}
+
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
 function gatherRepo(repoPath, idFromRef, key, { fetch }) {
-  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [] };
+  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [],
+                  candidates: new Map() };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
   if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
 
@@ -525,6 +812,11 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // failure must NOT be laundered into an empty result — see gatherPrs.
   const { prs, forgeErrors } = gatherPrs(repoPath);
   const prMap = buildPrMap(prs, idFromRef, shippedSet);
+  // BLZ-398: the corroborated candidates themselves travel upward, not a per-repo
+  // verdict. Ambiguity is a property of ALL of a project's PRs for an id, so deciding it
+  // per repo and merging the answers cannot be right — `gatherProject` unions these and
+  // asks once. That also deletes the cross-repo special case that had drifted twice.
+  const candidates = corroboratedByTicket(prs, idFromRef, shippedSet);
 
   const refs = (sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
     "refs/heads", "refs/remotes/origin"]) || "")
@@ -544,7 +836,50 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   });
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
-  return { prMap, branchMap, shippedSet, forgeErrors };
+  return { prMap, branchMap, shippedSet, forgeErrors, candidates };
+}
+
+/** Can this PR supply a delivery record? BOTH halves or neither — the record is
+ *  `#<number> — <url>` and half of it is not a record, it is a defect that outlives the
+ *  run. Review found `pr: #10 — undefined` written permanently from a payload with a
+ *  usable number and no url; `pr` is not in EDITABLE_FIELDS, so there is no route back. */
+export function recordablePr(pr) {
+  // `.trim()`, because `clean()` strips only control characters: a url of "\u0001 \u0002"
+  // sanitises to " ", which is non-empty and would persist as `pr: #10 —  ` forever. The
+  // same hole this predicate was written to close, one character wider.
+  return Boolean(pr) && pr.number !== null && pr.number !== undefined &&
+    typeof pr.url === "string" && pr.url.trim().length > 0;
+}
+
+/** Name a pull request with whatever identifier actually exists.
+ *
+ *  Every field here can be missing at once. `sanitisePr` sets `number` to null when the
+ *  forge did not supply a usable one, and `clean()` reduces a control-char-only `url` to
+ *  the empty string — the untrusted-GHES case that sanitiser exists for. The previous cut
+ *  made `url` the primary identifier and produced "the pull request at  carrying its key
+ *  is still OPEN": a report naming no pull request at all, and "at undefined" when the
+ *  field was absent. `headRefName` was in the payload and unused; it is the last resort. */
+function namePr(pr) {
+  const bits = [];
+  if (pr.number !== null && pr.number !== undefined) bits.push(`#${pr.number}`);
+  if (pr.url) bits.push(pr.url);
+  if (!bits.length && pr.headRefName) bits.push(`branch ${pr.headRefName}`);
+  return bits.length ? `the pull request ${bits.join(" — ")}` : "an unidentifiable pull request";
+}
+
+/** Two PR payloads are the same pull request. `url` is unique across repositories;
+ *  `number` alone is not, and two different repos legitimately share PR numbers. */
+function samePr(a, b) {
+  // If EITHER side carries a url, identity is decided by url alone. Falling back to
+  // `number` when only one has one was a regression: two different repos legitimately
+  // both have a #10, so a payload missing its url made them the same PR, the ambiguity
+  // went undetected, and the record was settled by `codeRepos` scan order — the exact
+  // thing the caller's comment calls "not evidence". Worse, `sanitisePr` strips control
+  // characters from `url`, so a control-char-only url from the untrusted GHES payload
+  // that sanitiser exists for becomes "" and lands in the same hole. An identity
+  // decision must not turn on the PRESENCE of a forge-supplied field.
+  if (a.url || b.url) return Boolean(a.url) && a.url === b.url;
+  return a.number === b.number;
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
@@ -554,21 +889,44 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
 function gatherProject(project, { fetch }) {
   const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
   const missingRepos = [], forgeErrors = [];
+  const allCandidates = new Map();
   let scannedRepos = 0;
   for (const repo of project.codeRepoPaths) {
     if (!existsSync(repo) || !existsSync(join(repo, ".git"))) { missingRepos.push(repo); continue; }
     scannedRepos += 1;
     const r = gatherRepo(repo, project.idFromRef, project.key, { fetch });
+    // The SAME comparator as within a repo. This used to be rank alone, so across repos
+    // an unusable PR still won and the record was decided by which path came first in
+    // `codeRepos` — scan order, which is not evidence.
     for (const [id, pr] of r.prMap) {
-      const cur = prMap.get(id);
-      if (!cur || (PR_RANK[pr.state] || 0) > (PR_RANK[cur.state] || 0)) prMap.set(id, pr);
+      if (betterPr(pr, prMap.get(id), id)) prMap.set(id, pr);
+    }
+    // Union the candidates, deduped by IDENTITY. `codeRepoPaths` is not deduped, so two
+    // entries can name the SAME repository (a duplicate line, an abs/rel pair, a checkout
+    // plus one of its own worktrees); `gh pr list` then returns the same PR twice, and
+    // without this one PR collides with itself and a healthy single-deliverer ticket is
+    // declared ambiguous. `samePr` decides identity by url, which GitHub makes unique
+    // across repositories.
+    for (const [id, prs] of r.candidates || []) {
+      const seen = allCandidates.get(id) || [];
+      for (const pr of prs) if (!seen.some((x) => samePr(x, pr))) seen.push(pr);
+      allCandidates.set(id, seen);
     }
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
     for (const f of r.forgeErrors || []) forgeErrors.push(f);
   }
+  // Asked ONCE, over every repo's candidates at once. Deciding per repo and merging the
+  // verdicts is what let an unrecordable PR promoted into the running best shield every
+  // later repo from the check — and made the finding depend on `codeRepos` order, which
+  // is exactly what the record was fixed to stop depending on.
+  const ambiguous = new Map();
+  for (const [id, candidates] of allCandidates) {
+    const tied = tiedDeliverers(candidates, id);
+    if (tied) ambiguous.set(id, tied);
+  }
   return {
-    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors,
+    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors, ambiguous,
     configuredRepos: project.codeRepoPaths.length,
   };
 }
@@ -597,22 +955,64 @@ export async function reconcile({
   const cfg = loadConfig({ root });
   const keys = listProjects(cfg);
   if (!keys.length) return { ok: true, standalone: true, changes: [], committed: false, pushed: false,
-    missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [] };
+    missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [], findings: [] };
 
   const sig = new Map();
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
 
   const changes = [];
   const touched = [];
+  // BLZ-395: what reconcile can SEE but must not ACT on. `changes` says what moved;
+  // this says what a person needs to look at. It is deliberately not an error — the
+  // run is healthy, the board is not — and it is emitted on dry runs too, because a
+  // dry run is exactly where someone would look before believing the board.
+  const findings = [];
   for (const t of readStorage.listTickets(projectsDir)) {
     const type = t.frontmatter.type;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;
-    const d = decide({ pr: s.prMap.get(t.frontmatter.id), branch: s.branchMap.get(t.frontmatter.id), shipped: s.shippedSet.has(t.frontmatter.id) }, t.status, type);
+    const d = decide({
+      pr: s.prMap.get(t.frontmatter.id),
+      branch: s.branchMap.get(t.frontmatter.id),
+      shipped: s.shippedSet.has(t.frontmatter.id),
+      delivererAmbiguous: s.ambiguous ? s.ambiguous.has(t.frontmatter.id) : false,
+    }, t.status, type);
     if (d.skip) continue;
+
+    // BLZ-395: recorded BEFORE the dirty check below, because this ticket's whole point
+    // is that nothing is dirty — terminal-stickiness clamps the status and the MERGED
+    // gate clamps the record, so the loop would `continue` and say nothing at all. A
+    // finding whose condition is "no change was made" cannot be gated on a change having
+    // been made. (An earlier draft of this comment said `changes` is "empty by
+    // construction" here. That is false and is corrected rather than quietly dropped: a
+    // `done` ticket with a blank `resolution` has it backfilled, which sets `dirty` and
+    // emits a change. The PLACEMENT is still load-bearing — moving this below the dirty
+    // check turns the end-to-end sequence test red — but the reason is that nothing is
+    // dirty in THIS ticket's case, not that nothing ever is.)
+    if (d.openPrOnTerminal) {
+      const pr = s.prMap.get(t.frontmatter.id);
+      findings.push({
+        kind: "open-pr-on-terminal",
+        id: t.frontmatter.id,
+        status: t.status,
+        pr: { number: pr.number, state: pr.state, url: pr.url, headRefName: pr.headRefName },
+        // Name the PR by number when there is one and by url when there is not. Round 3
+        // dropped unnumberable PRs so this never fired; round 4 kept them for their veto,
+        // which is exactly when a terminal ticket is vetoed by one — and the message read
+        // "PR #null carrying its key is still OPEN", on stderr, the feed and the preview.
+        message: `${t.frontmatter.id} is ${t.status}, but ${namePr(pr)} carrying its key ` +
+          `is still OPEN. Reconcile moved nothing: a terminal status is never reversed ` +
+          `automatically. If the work is not shipped, move it back by hand.`,
+      });
+    }
 
     const fm = { ...t.frontmatter };
     let dirty = false;
+    // BLZ-398: reconcile can now DELETE a delivery record, which nothing else in the
+    // engine does. A destructive direction that reports itself as `{from:"done",
+    // to:"done", moved:false}` is indistinguishable from a `resolution` backfill, so
+    // the only machine-readable account of the run never says the record was removed.
+    let cleared = false;
     // Terminal: fill a blank RECORD, never replace one. See `recordIfAbsentOnly` in
     // decide(). The record is one unit, not two fields: ADR-0023 and the guide both say a
     // terminal ticket "may ACQUIRE a delivery record it never had, and may never have one
@@ -637,14 +1037,74 @@ export async function reconcile({
     // is the intent.
     const hadRecord = Boolean(t.frontmatter.branch || t.frontmatter.pr);
     const keep = () => d.recordIfAbsentOnly && hadRecord;
-    if (d.branchVal && !keep() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
-    if (d.prVal && !keep() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
+    // BLZ-398: the second reason not to write, and it gates BOTH fields for the same
+    // reason `keep()` does — the record is ONE UNIT. Writing `branch` from an
+    // unresolvable merged set while leaving `pr` blank would rebuild ADR-0023's fourth
+    // shape of wrong out of the fix for its third.
+    const write = () => !keep() && !d.recordAmbiguous;
+    // BLZ-398: a refusal to write is reported, not swallowed. ADR-0023's round 2 is the
+    // reason — turning a corruption into a SILENT omission was itself judged not a fix,
+    // and a blank the board cannot explain is indistinguishable from one reconcile
+    // never got to. Gated on `!keep()` so it fires only where a write would actually
+    // have happened: a terminal ticket that already holds a record is protected by
+    // write-once regardless, and has nothing to look at.
+    //
+    // REFUSING IS NOT ENOUGH — THE LIVE RECORD MUST BE CLEARED. Found by review, and it
+    // defeated the whole ticket: an OPEN PR outranks a MERGED one, so while any PR is
+    // open the record is set by RANK, not by any deliverer rule. A ticket whose docs PR
+    // was open at the sample moment carries `pr: #<docs>` through `in-review`; when that
+    // PR merges the set becomes ambiguous, and a bare refusal froze that rank-chosen
+    // value as the ticket went terminal. The board then held exactly the record this
+    // ticket exists to prevent — permanently, since `pr` is not in EDITABLE_FIELDS — and
+    // the finding beside it claimed nothing had been recorded. Two promises broken at
+    // once: the record named neither the deliverer nor nothing, and the report was false.
+    //
+    // Clearing is safe precisely where it applies. `!keep()` means the record is NOT
+    // write-once protected, which means either the ticket is not yet terminal — so the
+    // record is live state reconcile itself wrote and may replace — or it is terminal
+    // and blank, where there is nothing to clear. Nothing a person authored is touched:
+    // reconcile is the only producer of these two fields.
+    if (d.recordAmbiguous && !keep()) {
+      // Truthiness, to match `hadRecord` exactly. `!== undefined` disagreed with it on
+      // the empty string, and both DB storages project an absent record as
+      // `branch: row.branch ?? ""` (`toRecord`, kept identical across drivers by
+      // driver-conformance.test.mjs). `hadRecord` reads "" as absent while a
+      // `!== undefined` guard reads it as present, so the pair would clear-and-dirty
+      // the same ticket on every tick — a git commit per tick under `blaze start`.
+      if (fm.branch || fm.pr) {
+        delete fm.branch;
+        delete fm.pr;
+        dirty = true;
+        cleared = true;
+      }
+      const refs = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
+      // Named through `namePr`, exactly like the sibling finding. This site had its own
+      // formatter, and round 6 gave `refs` a shape it had never seen — an entry whose
+      // `number` is null — so it printed `#null`, and suppressed the url in precisely the
+      // case where the url is the only identifier there is. Three places in this file turn
+      // a PR into operator-facing text; unifying the three DECIDERS and leaving the three
+      // RENDERERS apart is how the same drift reappeared one layer down.
+      const named = refs.map((r) => namePr(r));
+      findings.push({
+        kind: "ambiguous-deliverer",
+        id: t.frontmatter.id,
+        status: t.status,
+        prs: refs,
+        message: `${t.frontmatter.id} has ${refs.length || "more than one"} merged PRs claiming it` +
+          (named.length ? ` (${named.join(", ")})` : "") +
+          `, and none claims it more strongly than the rest. Reconcile recorded NO ` +
+          `branch/pr rather than guess which one delivered it — a wrong delivery record ` +
+          `is permanent, a blank one is not. Set it by hand if it matters.`,
+      });
+    }
+    if (d.branchVal && write() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
+    if (d.prVal && write() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
     if (d.resolution !== undefined && fm.resolution !== d.resolution) { fm.resolution = d.resolution; dirty = true; }
     if (d.moved) { fm.updated = today; dirty = true; }
     if (!dirty) continue;
 
     // Always record the would-be change; only write files when not a dry-run
-    changes.push({ id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved });
+    changes.push({ id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved, cleared });
 
     if (!dryRun) {
       // BLZ-276: the last direct node:fs ticket write in the engine, and the only one
@@ -684,7 +1144,7 @@ export async function reconcile({
   // "no pull requests"; anything else that happened is named here instead.
   const forgeErrors = [...sig.values()].flatMap((g) => g.forgeErrors || []);
   return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos,
-           forgeErrors };
+           forgeErrors, findings };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -716,7 +1176,18 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // --quiet means "print only on change", and this is a reason not to trust
   // the run rather than a change).
   for (const f of r.forgeErrors || []) {
-    console.error(`reconcile: FORGE UNREADABLE — ${f.message}`);
+    console.error(f.severity === "warning"
+      ? `reconcile: FORGE DATA — ${f.message}`
+      : `reconcile: FORGE UNREADABLE — ${f.message}`);
+  }
+  // BLZ-395: a conflict reconcile can see and deliberately will not act on. Same rule
+  // as the two warnings above — stderr, every run, regardless of --quiet, because
+  // `--quiet` means "print only on change" and this is precisely a reason not to trust
+  // the absence of a change. Not fatal: the run is correct, the board is not, and
+  // exiting non-zero on a condition only a human can clear would break every loop that
+  // calls this verb.
+  for (const f of r.findings || []) {
+    console.error(`reconcile: NEEDS ATTENTION — ${f.message}`);
   }
   if (r.configuredRepos > 0 && r.scannedRepos === 0) {
     console.error(`reconcile: FAILED — none of the ${r.configuredRepos} configured codeRepo(s) could be read, so NOTHING was scanned.`);
@@ -724,6 +1195,11 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     process.exit(1);
   }
   if (!r.changes.length) { if (!quiet) console.log("reconcile: already in sync — nothing to do."); process.exit(0); }
-  for (const c of r.changes) console.log(`${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`);
+  for (const c of r.changes) {
+    const what = `${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`;
+    console.log(c.cleared
+      ? `${what} (and ${apply ? "CLEARED" : "would CLEAR"} its branch/pr — no single PR delivered it)`
+      : what);
+  }
   if (!apply) console.log(`(dry-run: ${r.changes.length} change(s); rerun with --apply to write locally — reconcile never pushes)`);
 }

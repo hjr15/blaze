@@ -111,6 +111,39 @@ PR for a half-recorded ticket (by corroborating `headRefName` against the record
 separate change and is not made here: a new inference path is exactly the shape that has
 already failed three times above.
 
+**BLZ-398 adds a THIRD verb to this rule: reconcile may now DELETE a delivery record.**
+Recorded here because the rule above — "may ACQUIRE … may never have one replaced" — reads
+as though acquire and keep are the only directions, and that is no longer true.
+
+The reason is that write-once alone could not hold the record honest. `PR_RANK` puts OPEN
+above MERGED, so while any PR carrying the key is open the record is chosen by **rank, not
+by any deliverer rule** — `prTitleClaim` never runs on that path. A follow-up PR that
+happens to be open at the sample moment therefore writes itself into the record during
+`in-review`; when it later merges, the merged set becomes unresolvable, and merely refusing
+to write froze that rank-chosen value as the ticket went terminal. The board then held the
+wrong PR permanently, with a finding beside it that claimed nothing had been recorded and
+then fell silent, because a frozen record makes the write-once test true and the finding is
+gated on it.
+
+So when the deliverer is ambiguous and write-once does **not** apply, both fields are
+cleared. That is safe exactly where it applies: write-once not applying means the record is
+either live pre-terminal state reconcile itself wrote, or absent. Reconcile is the only
+producer of `branch`/`pr` — neither is in `EDITABLE_FIELDS` — so nothing a person authored
+is reachable. A cleared record is reported as `cleared` on the change, because a
+destructive direction that reports itself as `{from: "done", to: "done"}` is
+indistinguishable from a `resolution` backfill.
+
+**The residual, stated rather than papered over — and it is the same shape as §1's.** The
+clear and the finding are both gated on write-once not applying. A ticket **hand-moved** to
+`done` while a follow-up PR is still open arrives at terminal-with-a-record by a route
+reconcile never sees, and neither the clear nor the report fires: the rank-chosen record is
+frozen exactly as before, silently. That is not a regression — `origin/main` freezes the
+same value — but it is not closed either. Closing it means either overriding write-once on
+a terminal ticket, or reporting on the ~54 terminal tickets at `blaze-pm` `ff5f36c2` that
+already hold a record drawn from an ambiguous set, most of which are probably right.
+Tracked separately rather than decided here, for the same reason BLZ-395 was: it is a
+second, larger decision about a deliberate rule, not an oversight in this one.
+
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
 progress is recoverable by looking; overstating it is not.
@@ -124,6 +157,29 @@ at once; it does not close it, and BLZ-130's own report of the failure as
 "self-reinforcing" therefore remains partly open. Tracked as BLZ-395 rather than
 resolved here, because closing it means revisiting terminal-stickiness itself — a
 deliberate, separate design decision with its own blast radius.
+
+**BLZ-395's resolution, since this paragraph is where a reader will look for it: the
+window is still not closed, and it is no longer silent.** Of the three options this ADR
+recorded — un-stick on a corroborated open PR, report rather than move, or document and
+do nothing — the middle one shipped. Terminal-stickiness is **unchanged**, deliberately
+and not by omission: un-sticking would let any open PR whose branch merely carries the
+key drag back a ticket a person closed on purpose, trading a silent over-report for a
+silent over-write, which is this record's own failure shape in the other direction. So
+reconcile now emits a **finding** — `open-pr-on-terminal` — on `reconcile.findings` for
+every terminal ticket carrying a *corroborated* open PR, on dry runs and applies alike.
+It reaches the CLI on stderr regardless of `--quiet` (the same rule as the missing-repo
+and unreadable-forge warnings: `--quiet` means "print only on change", and this is a
+reason not to trust the absence of one), the `blaze start` activity feed as a
+`warning` deduped per message, and `/api/reconcile-preview`. The supervisor loop is the
+one that matters, because a timer sampling git is what opens the window in the first
+place.
+
+The finding is gated on the same corroboration as the veto, per the qualifier below —
+an open PR INF-735's gate drops is invisible to both. And it is recorded before the
+loop's dirty check, because the whole condition is that *nothing changed*: `changes` is
+empty by construction here, so a finding gated on a change would never fire. **The cost,
+stated: the board can still be wrong, and now says so instead of only being wrong.**
+Correcting it stays a person's move.
 
 Second qualifier: "no PR is open" is really "no *corroborated* PR is open". An open PR
 whose claim INF-735's gate drops is not visible to the veto at all.

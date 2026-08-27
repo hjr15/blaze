@@ -7,7 +7,10 @@
 *:Zone.Identifier
 
 # Node
-node_modules/
+# No trailing slash: every worktree gets node_modules as a SYMLINK to the primary
+# checkout's, and `node_modules/` matches a directory only — so `git check-ignore`
+# said not-ignored and a `git add -A` would have committed the link.
+node_modules
 
 # Python
 __pycache__/
