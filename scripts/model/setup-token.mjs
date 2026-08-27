@@ -32,7 +32,7 @@
 // The VALUE is never logged, echoed, or rendered. The PATH is — that is the thing the
 // operator needs, and it discloses nothing.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
 
@@ -110,15 +110,125 @@ export function ensureSetupTokenIgnored(dataRoot) {
   if (inside.error) return { state: "unavailable", path: rel };
   if (inside.status !== 0 || inside.stdout.trim() !== "true") return { state: "not-a-repo", path: rel };
 
+  // APPEND, THEN RE-ASK. `docs/architecture.md` says the server ENSURES the path is
+  // ignored; the first cut appended a rule and reported `added` without checking the rule
+  // took. A deeper `.gitignore` outranks the root one, so on a board whose
+  // `.blaze/.gitignore` contains `!setup-token` three consecutive boots gave rules=2, 3, 4
+  // with the token committable throughout: the state said `added`, the claim was false,
+  // and a duplicate line accreted every boot.
+  //
+  // The re-ask is the whole fix. "I wrote a rule" and "the path is ignored" are different
+  // statements, and only the second is worth reporting.
+  const isIgnored = () => git("check-ignore", "--no-index", "-q", rel).status === 0;
   let state;
-  if (git("check-ignore", "--no-index", "-q", rel).status === 0) {
+  if (isIgnored()) {
     state = "already";
   } else {
+    // RAW BYTES, NOT A utf8 STRING. This file belongs to the operator and a decode/encode
+    // round-trip is not byte-preserving: any sequence that is not valid UTF-8 — a latin-1
+    // filename in a rule, say — comes back as U+FFFD, silently rewriting a rule they wrote
+    // and taking whatever it covered from ignored to committable. In the one function whose
+    // entire job is to stop a file being committable. Buffers in, buffers out, no decode.
+    //
+    // `lstatSync`, not `existsSync`: the latter FOLLOWS a symlink, so a dangling
+    // `.gitignore` symlink read as "absent" had `appendFileSync` create the link's target
+    // and the undo then delete the LINK, leaving an orphan file behind.
     const gitignore = join(dataRoot, ".gitignore");
-    const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
-    appendFileSync(gitignore,
-      `${existing && !existing.endsWith("\n") ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
-    state = "added";
+    // `blocked` SKIPS THE APPEND — IT DOES NOT LEAVE THE FUNCTION. Review found the
+    // difference the hard way: the first cut `return`ed from here, which jumped over the
+    // `git rm --cached` untrack step below that base and every earlier cut always reached,
+    // and hardcoded `wasTracked: false`. On a board whose token was ALREADY TRACKED, the
+    // live credential stayed staged for the next commit and `serve.mjs` — which gates BOTH
+    // of its operator warnings on `wasTracked` — said nothing at all. Skipping the part
+    // that cannot work must not skip the part that still can.
+    let blocked = null;
+    let before = null;              // Buffer when a regular file is there, else null
+    // lstat and read are SEPARATE questions. Wrapping both in one bare catch conflated
+    // "absent" with "present but unreadable", and an unreadable file left `before` null,
+    // so the undo took the `rmSync` branch and DELETED the operator's .gitignore — every
+    // rule in it, not just the one blaze added.
+    let st = null;
+    try { st = lstatSync(gitignore); } catch { /* genuinely absent */ }
+    if (st?.isSymbolicLink()) {
+      // Writing through an operator's symlink, and undoing it, is not something a
+      // boot-time hygiene check should attempt — and git does not read a symlinked
+      // .gitignore anyway, so appending through it could never have helped.
+      blocked = "symlink";
+      console.error("blaze: WARNING — this board's root .gitignore is a symlink, so blaze "
+        + `did not modify it. git does not read a symlinked .gitignore, so ${rel} is NOT ignored; `
+        + "add the rule to a real .gitignore by hand. (The token's VALUE is not shown here "
+        + "or in any log.)");
+    } else if (st?.isFile()) {
+      try { before = readFileSync(gitignore); } catch (e) {
+        blocked = "unreadable";
+        console.error(`blaze: WARNING — blaze could not read .gitignore `
+          + `(${e && e.code ? e.code : "read failed"}), so it did not modify it. ${rel} is `
+          + "NOT ignored; add the rule by hand. (The token's VALUE is not shown here or in "
+          + "any log.)");
+      }
+    }
+    const existedBefore = before !== null;
+    const existing = before ?? Buffer.alloc(0);
+    // APPEND UNCONDITIONALLY, THEN RE-ASK, THEN UNDO IF IT DID NOT HELP.
+    //
+    // The first cut skipped the append whenever a rule for the path was already in the
+    // file, reasoning that a second copy of a losing rule cannot help. That is true only
+    // when the rule loses to a DEEPER .gitignore. Git resolves within one file by
+    // LAST MATCHING RULE, so when the rule loses to a later line in the SAME file —
+    // `!.blaze/setup-token`, or a broad `!.blaze/*` re-include written for some other
+    // file — appending at the end IS the fix, and the pre-fix code did exactly that.
+    // Review measured four such board shapes where the live token was ignored before this
+    // change and committable after it: a regression, in the one direction this function
+    // exists to protect.
+    //
+    // So: append, ask git, and if the answer is still no, put the file back exactly as it
+    // was. The boards where appending works are fixed; the boards where it cannot work
+    // accrete nothing, which is the whole of BLZ-397. The re-ask is what makes both
+    // possible at once — "I wrote a rule" and "the path is ignored" are different
+    // statements and only the second decides what to do next.
+    // Newline probe on BYTES: 0x0a, not `String.endsWith`.
+    if (blocked) {
+      // Diagnosed above. No rule can be added here, but control MUST still reach the
+      // untrack step below: the token may already be tracked, and un-staging a live
+      // credential is worth doing even when no rule can be written.
+      state = blocked;
+    } else {
+      // Newline probe on BYTES: 0x0a, not `String.endsWith`.
+      const needsNl = existing.length > 0 && existing.at(-1) !== 0x0a;
+      try {
+        appendFileSync(gitignore,
+          `${needsNl ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
+      } catch (e) {
+        // A write refusal must not throw out of a boot-time hygiene check — `serve.mjs`
+        // catches it bare, and the operator would lose the one warning that says a live
+        // credential is still committable.
+        state = "unwritable";
+        // A write can fail PART WAY — ENOSPC mid-append — leaving the operator's file half
+        // extended. The same restore the ineffective branch uses puts it back; there is
+        // nothing to keep, since the append by definition did not complete.
+        try {
+          if (existedBefore) writeFileSync(gitignore, existing);
+          else rmSync(gitignore, { force: true });
+        } catch { /* the restore itself failed; the warning below is all that is left */ }
+        console.error(`blaze: WARNING — ${rel} is not ignored by git and blaze could not add `
+          + `a rule for it (${e && e.code ? e.code : "write failed"}). This live credential `
+          + "stays committable. Add the rule by hand, then restart. (The token's VALUE is "
+          + "not shown here or in any log.)");
+      }
+      if (state) { /* the append failed and said so */ }
+      else if (isIgnored()) {
+        state = "added";
+      } else {
+        // Undo, so a board that cannot be fixed this way does not grow a line every boot.
+        if (existedBefore) writeFileSync(gitignore, existing);
+        else rmSync(gitignore, { force: true });
+        state = "ineffective";
+        console.error(`blaze: WARNING — ${rel} is still not ignored by git, and adding a rule `
+          + "for it did not change that: a deeper .gitignore is overriding the root one. This "
+          + "live credential stays committable. Fix the negating rule, then restart. (The "
+          + "token's VALUE is not shown here or in any log.)");
+      }
+    }
   }
 
   // `--no-index` above answers a PATTERN question — does a rule match this path — never

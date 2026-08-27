@@ -109,6 +109,27 @@ function setupFailureReason(e) {
 // would defeat the file it is meant to be read from: the whole point of writing it
 // to disk is that reaching it requires filesystem access, and anything rendered
 // over HTTP is available to whoever reached the port.
+// BLZ-400: what /setup says AFTER an adoption failed. The setup token has been consumed
+// — the admin row exists, so leaving it live would let a second caller create a second
+// admin — and it cannot be reissued while that row is there. The ordinary page would send
+// the operator to read a file this process deleted. Path and command only; no value.
+function setupFailedPageHtml() {
+  return `<!doctype html><meta charset="utf-8"><title>blaze — setup could not be completed</title>
+<style>body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
+code{background:#eee;padding:.15rem .35rem}</style>
+<h1>Setup could not be completed</h1>
+<p>The administrator account <strong>was created</strong>, but blaze could not open the
+identity database immediately afterwards, so its API token was never issued. The board
+stays in setup mode and serves nothing until that is resolved.</p>
+<p>The one-time setup token has been consumed and will not be reissued while an
+administrator exists — so this page cannot help you finish here.</p>
+<p>On the machine hosting the board, restart blaze, then create a credential:</p>
+<p><code>blaze user add --email &lt;you&gt; --role admin</code></p>
+<p>If blaze refuses to start, the identity database itself is damaged; that is the message
+to act on.</p>
+`;
+}
+
 function setupPageHtml(tokenPath) {
   const esc = (v) => String(v).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
@@ -196,6 +217,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   // on a public interface — the exact hole the refusal closed — so setup mode serves
   // the setup flow and nothing else at all.
   let setupPending = false;
+  // BLZ-400: an adoption that failed is not the same state as setup never having started.
+  // The token is consumed either way (the admin exists, so a second must not be creatable)
+  // while `setupPending` stays true — so without this, GET /setup went on telling the
+  // operator to read a file that this very request had deleted.
+  let adoptionFailed = false;
   // One attempt at a time. `setupPending` is only cleared AFTER `addUser` awaits, so with
   // an identity store that yields to the event loop two concurrent correct-token requests
   // could both pass the check and both create an admin. This guard is DEFENCE IN DEPTH,
@@ -292,6 +318,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // poisoned `toString` was enough to take the board down.
       try {
       if (req.method === "GET" && u.pathname === "/setup") {
+        if (adoptionFailed) {
+          // The token is gone and cannot be reissued while an admin row exists. Point at
+          // the route that actually works from here. Path only — never a value.
+          return send(req, res, 200, "text/html; charset=utf-8", setupFailedPageHtml());
+        }
         return send(req, res, 200, "text/html; charset=utf-8", setupPageHtml(setupTokenPath(root)));
       }
       if (req.method === "POST" && u.pathname === "/setup") {
@@ -376,9 +407,18 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           // unauthenticated. The operator restarts: with an identity present no token is
           // minted, and if the database is genuinely broken `startServer` refuses outright.
           clearSetupToken(root);
+          // NAME THE ROUTE OUT. The operator is now holding an admin account whose API
+          // token was never issued — `created.token.token` exists in this scope and is
+          // discarded with the 500, and ADR-0013 stores only its SHA-256, so it cannot be
+          // recovered. That is not a brick: `blaze user add` mints a fresh credential, and
+          // it needs the same filesystem privilege as reading the setup token did, so it
+          // grants nothing new. The product simply never said so, and "Restart blaze" on
+          // its own sends the operator back to a board that will not let them in.
+          adoptionFailed = true;
           console.error("blaze: the administrator account was created, but the identity "
             + "database could not be adopted — the board stays in setup mode and serves "
-            + "nothing. Restart blaze.");
+            + "nothing. The account's API token was NOT issued. Restart blaze, then create "
+            + "a credential with: blaze user add --email <you> --role admin");
           return json(500, { errors: ["setup could not be completed"] });
         }
         store = adopted.store;
