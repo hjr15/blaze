@@ -425,6 +425,32 @@ describe("BLZ-397: the undo restores the operator's file, byte for byte", () => 
     }
   });
 
+  test("a symlink to a REAL file is refused too — git will not read it either", () => {
+    // The obvious worry about refusing symlinks is that it gives up where appending would
+    // have worked. It would not: GIT ITSELF DOES NOT HONOUR A SYMLINKED .gitignore —
+    // `git check-ignore` reports "unable to access" and ignores nothing from it. So writing
+    // through the link would have modified the operator's shared file AND left the token
+    // committable, while reporting `added`. Refusing is strictly better, and this pins the
+    // premise the refusal rests on rather than assuming it.
+    const root = mkdtempSync(join(tmpdir(), "blaze-symreal-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    mkdirSync(join(root, ".blaze"), { recursive: true });
+    writeFileSync(join(root, "shared-ignore"), "node_modules/\n.blaze/setup-token\n");
+    symlinkSync("shared-ignore", join(root, ".gitignore"));
+    const cap = captureOutput();
+    let r;
+    try { r = ensureSetupTokenIgnored(root); } finally { cap.stop(); }
+    try {
+      assert.equal(isIgnoredAt(root), false,
+        "premise: git does not honour a symlinked .gitignore, even one naming the token");
+      assert.equal(r.state, "ineffective", "so blaze must not claim it added anything");
+      assert.equal(readFileSync(join(root, "shared-ignore"), "utf8"),
+        "node_modules/\n.blaze/setup-token\n",
+        "and must not write into the operator's shared file through the link");
+      assert.match(cap.text, /symlink/i);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("a symlinked .gitignore is left alone, and said to be left alone", () => {
     // `existsSync` follows a symlink, so a dangling one read as "absent": the append
     // created the link's TARGET and the undo deleted the LINK, orphaning the file.
