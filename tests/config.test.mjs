@@ -255,7 +255,14 @@ test("loadConfig throws on an invalid schemaVersion stamp", () => {
   const dir = withConfig({ key: "X", schemaVersion: "one" });
   // Quoted: the rendered value must read as a JSON string, not a bare word
   // (see the "1"-vs-1 regression test in tests/model/schema-config.test.mjs).
-  assert.throws(() => loadConfig({ root: dir, env: {} }), /^Error: blaze: invalid schemaVersion "one"/);
+  // BLZ-402 round-2 finding 3: this throw is now an `IncompatibleSchemaVersionError`
+  // (scripts/config.mjs), not a bare `Error` — so `scripts/audit-runner.mjs` can tell it
+  // apart, by `e.name`, from every OTHER `loadConfig` throw and keep BLZ-392's tolerance
+  // (`ok=true`) for exactly this one and an unparseable config, while every other reason
+  // `loadConfig` can throw now becomes a HARD `config-unloadable` finding. The stringified
+  // prefix changes accordingly (`Error.prototype.toString` renders `${name}: ${message}`).
+  assert.throws(() => loadConfig({ root: dir, env: {} }),
+    /^IncompatibleSchemaVersionError: blaze: invalid schemaVersion "one"/);
   rmSync(dir, { recursive: true, force: true });
 });
 

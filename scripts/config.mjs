@@ -69,6 +69,32 @@ export class InvalidProjectKeyError extends Error {
   }
 }
 
+// BLZ-402 round-2 review finding 3. `loadConfig` can throw for several reasons, and
+// `scripts/audit-runner.mjs` needs to tell them apart: BLZ-392 deliberately tolerates
+// EXACTLY TWO of them (an unparseable `blaze.config.json`, and an incompatible
+// `schemaVersion` stamp) by treating the board as though it had no config at all and
+// still reporting `ok=true` over the corpus. Every OTHER `loadConfig` throw — a malformed
+// `schedule` block (wrong shape, an unknown key, a bad `minutes_per_day` or
+// `working_days`), or a bad `key`/`projects[]` entry (`InvalidProjectKeyError`) — is a
+// genuine load failure that already makes every non-exempt CLI verb refuse, and audit
+// must not call that board clean. These two classes exist so audit-runner.mjs can name
+// the two tolerated cases by `e.name`, the same string-comparison pattern cli.mjs already
+// uses for `InvalidProjectKeyError` (so exempt verbs never pay for importing the class),
+// instead of matching on message text, which is for humans, not control flow.
+export class ConfigParseError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "ConfigParseError";
+  }
+}
+
+export class IncompatibleSchemaVersionError extends Error {
+  constructor(message) {
+    super(message);
+    this.name = "IncompatibleSchemaVersionError";
+  }
+}
+
 /**
  * Throws InvalidProjectKeyError unless `key` is a valid project-key shape. `source`
  * names where the value came from, for the refusal message — e.g. "blaze.config.json's
@@ -111,7 +137,7 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
     try {
       file = JSON.parse(readFileSync(path, "utf8"));
     } catch (e) {
-      throw new Error(`blaze: cannot parse ${fileName}: ${e.message}`);
+      throw new ConfigParseError(`blaze: cannot parse ${fileName}: ${e.message}`);
     }
   }
 
@@ -119,7 +145,7 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   // before any default-merge or derivation — a board written against a contract
   // outside this engine's window must fail loud before it is interpreted at all.
   const version = checkSchemaVersion(file);
-  if (!version.ok) throw new Error(`blaze: ${version.error}`);
+  if (!version.ok) throw new IncompatibleSchemaVersionError(`blaze: ${version.error}`);
 
   const cfg = { ...DEFAULTS, ...file };
   cfg.loops = {
