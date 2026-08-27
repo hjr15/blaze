@@ -53,10 +53,13 @@ let __wp;
 try { __wp = await resolveWritePort({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
 const { port: writePort, close: closeWritePort } = __wp;
-// BLZ-402 review finding 3: `applyMove` -> `loadProject(found.frontmatter.project, ...)`
-// (scripts/move.mjs) can raise the same InvalidProjectKeyError on a ticket whose stored
-// `project` field is malformed — a corrupt-file case `cli.mjs`'s preflight cannot see
-// (it only validates the board's OWN configured project set, not per-ticket values).
+// BLZ-402 review finding 3, defence-in-depth: `applyMove`'s own `loadProject
+// (found.frontmatter.project, ...)` call (scripts/move.mjs) is already locally
+// try/caught there (falls back to `requireWorklogBeforeTerminal: false` on ANY
+// failure, including a malformed key) — it is edit.mjs's EQUIVALENT call
+// (`applyEdit`, unwrapped there) that is the actually-reproduced crash site for a
+// corrupt `project:` value, per scripts/edit-runner.mjs. This wrap costs nothing and
+// keeps this file symmetric with that one if move.mjs's internal guard ever changes.
 let r;
 try { r = await applyMove(projectsDir, id, toStatus, { today, writePort }); }
 catch (e) {

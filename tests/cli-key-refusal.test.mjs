@@ -15,7 +15,7 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -73,6 +73,25 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  test("blaze start (supervisor.mjs, LONG-RUNNING) refuses at the preflight and never binds a port", () => {
+    // supervisor.mjs's own CLI block calls `loadConfig` unwrapped, with NO local catch of
+    // its own (unlike new/move/edit/... which this ticket also patched directly) — so this
+    // is the one case in this file where the FIX BEING TESTED IS SPECIFICALLY cli.mjs's
+    // central preflight catch, not a redundant per-runner one. Without it, `cli.mjs` would
+    // silently swallow the throw (old behaviour) and still spawn supervisor.mjs, which
+    // would then crash raw AFTER already trying to bind a port — worse than the other
+    // cases here, not merely a stack trace. spawnSync completing at all (rather than
+    // hanging until the timeout) is itself part of the proof: a supervisor that actually
+    // started serving would never exit on its own.
+    const root = board({ key: "eng" });
+    try {
+      const r = spawnSync(process.execPath, [CLI, "start"],
+        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8", timeout: 5000 });
+      assert.notEqual(r.signal, "SIGTERM", "spawnSync's own timeout fired — the server never exited on its own");
+      assertCleanRefusal(r, "blaze start on a board with key 'eng'");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   test("the same malformed board key refuses cleanly for a DIFFERENT non-exempt verb (blaze move)", () => {
     // Proves the fix is at the shared preflight, not special-cased to `new`.
     const root = board({ key: "eng" });
@@ -80,6 +99,30 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
       const r = spawnSync(process.execPath, [CLI, "move", "ENG-1", "in-progress"],
         { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
       assertCleanRefusal(r, "blaze move on a board with key 'eng'");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a badly-named DIRECTORY on disk (not in cfg.projects) refuses at the preflight's per-project loop", () => {
+    // `loadConfig` (finding 2) validates every entry of cfg.projects at load time, so the
+    // ONLY way a bad key still reaches cli.mjs's preflight's `for (const k of keys) {
+    // loadProject(k, ...) }` loop is via the DISK-LISTING fallback (no `projects` array
+    // configured at all, so keys comes from `fsReadStorage.listProjects`) — a directory an
+    // operator created by hand, never validated by anything. Before the fix this was
+    // silently swallowed into `projects[k] = null` and the preflight finished as if
+    // nothing were wrong; now it re-throws to the same clean outer refusal.
+    const root = mkdtempSync(join(tmpdir(), "blz402-cli-refusal-disk-"));
+    execFileSync("git", ["-C", root, "init", "-q"]);
+    execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+    mkdirSync(join(root, "projects", "A(", "backlog"), { recursive: true });
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "ENG" }));
+    execFileSync("git", ["-C", root, "add", "-A"]);
+    execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+    try {
+      const r = spawnSync(process.execPath, [CLI, "rollup"],
+        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+      assertCleanRefusal(r, "blaze rollup with a disk-listed project directory named 'A('");
+      assert.match(r.stderr, /"A\("/, "the offending key must be named");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -91,6 +134,23 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
       const r = spawnSync(process.execPath, [CLI, "audit"],
         { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
       assert.match(r.stdout, /config-unloadable|ok=false/, `audit must still produce a report:\n${r.stdout}\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a CORRUPT ticket file (project: 'A(' in frontmatter, hand-edited outside blaze) refuses"
+    + " cleanly on an otherwise-healthy board", () => {
+    // `edit.mjs`'s `applyEdit` -> `loadProject(fm.project, ...)` is unwrapped (unlike
+    // move.mjs's equivalent call, which already falls back to a default on ANY failure) —
+    // this is the actually-reproduced crash site for a per-TICKET bad key, as opposed to a
+    // per-BOARD one. `cli.mjs`'s preflight cannot see this: it only validates the board's
+    // configured project set, never a ticket's own frontmatter.
+    const root = board(); // healthy board — ENG is a real, validly-keyed project
+    try {
+      const file = join(root, "projects", "ENG", "backlog", "ENG-1-x.md");
+      writeFileSync(file, readFileSync(file, "utf8").replace("project: ENG", "project: A("));
+      const r = spawnSync(process.execPath, [CLI, "edit", "ENG-1", "title", "new title"],
+        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+      assertCleanRefusal(r, "blaze edit on a ticket with a corrupt project field");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
