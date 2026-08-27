@@ -1141,6 +1141,18 @@ export async function reconcile({
     // to:"done", moved:false}` is indistinguishable from a `resolution` backfill, so
     // the only machine-readable account of the run never says the record was removed.
     let cleared = false;
+    // BLZ-401: the other two ways this loop can be dirty WITHOUT the status moving.
+    // `changes` used to gate its render on `dirty` alone, so a `done` ticket that only
+    // had its `resolution` backfilled (or its record filled in for the first time)
+    // landed on `r.changes` with `from === to` and the CLI printed it as a move that
+    // never happened — "would move INF-645: done → done". These two flags are what let
+    // the RENDERER (below, and in the CLI block) tell that case apart from a real move,
+    // without dropping the entry: `r.changes` still says "what this run did to the
+    // file", `moved` still says whether the status changed, and now the caller can say
+    // WHICH non-move thing happened instead of merely "backfilled clothing" over a
+    // silent no-op.
+    let resolutionBackfilled = false;
+    let recordFilled = false;
     // Terminal: fill a blank RECORD, never replace one. See `recordIfAbsentOnly` in
     // decide(). The record is one unit, not two fields: ADR-0023 and the guide both say a
     // terminal ticket "may ACQUIRE a delivery record it never had, and may never have one
@@ -1310,14 +1322,25 @@ export async function reconcile({
         unverifiableRecords.push(entry.id);
       }
     }
-    if (d.branchVal && write() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
-    if (d.prVal && write() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
-    if (d.resolution !== undefined && fm.resolution !== d.resolution) { fm.resolution = d.resolution; dirty = true; }
+    if (d.branchVal && write() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; recordFilled = true; }
+    if (d.prVal && write() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; recordFilled = true; }
+    if (d.resolution !== undefined && fm.resolution !== d.resolution) {
+      fm.resolution = d.resolution; dirty = true; resolutionBackfilled = true;
+    }
     if (d.moved) { fm.updated = today; dirty = true; }
     if (!dirty) continue;
 
-    // Always record the would-be change; only write files when not a dry-run
-    changes.push({ id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved, cleared });
+    // Always record the would-be change; only write files when not a dry-run. BLZ-401:
+    // `resolutionBackfilled`/`recordFilled` are meaningful only when `moved` is false —
+    // on a real move they describe part of the same transition the move already
+    // reports, so the renderer (and the CLI below) reads them ONLY on the non-move
+    // branch. They stay on the object unconditionally rather than being reset when
+    // `moved` is true, because a change entry is a record of what the run actually did
+    // to the file, not a value pre-shaped for one particular reader.
+    changes.push({
+      id: t.frontmatter.id, from: t.status, to: d.target, moved: d.moved, cleared,
+      resolutionBackfilled, recordFilled,
+    });
 
     if (!dryRun) {
       // BLZ-276: the last direct node:fs ticket write in the engine, and the only one
@@ -1400,9 +1423,18 @@ export async function reconcile({
   // leftover uncommitted dirt from an earlier pass is invisible to this function; a
   // person notices it the same way they always have, via `git status`.
   if (commit && !dryRun && touched.length) {
+    // BLZ-401: the message counts TICKETS WHOSE STATUS ACTUALLY MOVED, not
+    // `changes.length` — `changes` also carries entries where a resolution was
+    // backfilled or a record cleared/filled with `from === to`, and a commit touching
+    // three files that says "1 ticket" replaces one understatement with another. Both
+    // quantities are named: a run that also wrote non-moving updates says so rather
+    // than folding them into (or hiding them from) the moved count.
+    const movedCount = changes.filter((c) => c.moved).length;
+    const nonMovedCount = changes.length - movedCount;
     const c = commitOrQueue({
       root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
-      message: `chore(board): reconcile ${changes.length} ticket(s) to git state` +
+      message: `chore(board): reconcile ${movedCount} ticket(s) moved to git state` +
+        (nonMovedCount ? `, ${nonMovedCount} ticket(s) updated without a status change` : "") +
         (wanted ? ` (${keys.join(", ")})` : ""),
       files: touched,
     });
@@ -1546,23 +1578,55 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     if (!quiet) console.log("reconcile: no code-bound change found — nothing to do.");
     process.exit(0);
   }
+  // BLZ-401: a `moved: false` entry never claims a move — `from === to` for every one
+  // of them (moved = target !== currentStatus), so the ticket's status is unchanged
+  // and the line says what DID change instead: a resolution backfilled, a delivery
+  // record recorded for the first time, and/or (mirroring `cleared`'s existing suffix,
+  // unchanged in both branches) a record CLEARED because no single PR delivered it.
   for (const c of r.changes) {
-    const what = `${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`;
+    if (c.moved) {
+      const what = `${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`;
+      console.log(c.cleared
+        ? `${what} (and ${apply ? "CLEARED" : "would CLEAR"} its branch/pr — no single PR delivered it)`
+        : what);
+      continue;
+    }
+    const verb = apply ? "updated" : "would update";
+    const bits = [];
+    if (c.resolutionBackfilled) bits.push("its resolution was backfilled");
+    if (c.recordFilled) bits.push("its branch/pr was recorded");
+    const base = bits.length
+      ? `${verb} ${c.id} (still ${c.to}): ${bits.join(" and ")}`
+      : `${verb} ${c.id} (still ${c.to})`;
     console.log(c.cleared
-      ? `${what} (and ${apply ? "CLEARED" : "would CLEAR"} its branch/pr — no single PR delivered it)`
-      : what);
+      ? `${base} (and ${apply ? "CLEARED" : "would CLEAR"} its branch/pr — no single PR delivered it)`
+      : base);
   }
-  if (!apply) console.log(`(dry-run: ${r.changes.length} change(s); rerun with --apply to write locally — reconcile never pushes)`);
+  // BLZ-401: the dry-run tail states BOTH quantities `r.changes` actually carries —
+  // `r.changes.length` alone was a change-report count that silently included
+  // non-moving writes, so "N change(s)" overstated how many tickets would MOVE.
+  const movedCount = r.changes.filter((c) => c.moved).length;
+  const nonMovedCount = r.changes.length - movedCount;
+  if (!apply) {
+    console.log(`(dry-run: ${movedCount} move(s)` +
+      (nonMovedCount ? `, ${nonMovedCount} other update(s)` : "") +
+      "; rerun with --apply to write locally — reconcile never pushes)");
+  }
   // BLZ-404 (review finding 1): the CLI's own commit block is the same code path the
   // supervisor loop now uses, and its output must stay truthful about queued-vs-committed
   // rather than reusing "moved" wording (which only ever described the file, never the
   // commit) for every outcome alike.
   if (apply) {
-    const count = r.changes.length;
+    // BLZ-401: named the same way the commit message itself now is — a moved count and,
+    // only when it is non-zero, a second quantity for the writes that did not move a
+    // ticket. `r.changes.length` alone repeats the same overstatement the commit
+    // message used to make, one line lower.
+    const suffix = nonMovedCount ? `, ${nonMovedCount} ticket(s) updated without a status change` : "";
     if (r.commitOutcome === "queued") {
-      console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ${count} change(s).`);
+      console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ` +
+        `${movedCount} ticket(s) moved${suffix}.`);
     } else if (r.commitOutcome === "committed") {
-      console.log(`reconcile: committed ${count} change(s).`);
+      console.log(`reconcile: committed ${movedCount} ticket(s) moved${suffix}.`);
     } else if (r.commitOutcome === "locked") {
       console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
         "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +

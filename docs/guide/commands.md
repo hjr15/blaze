@@ -128,6 +128,16 @@ separate, unbuilt feature. If a run reports nothing to do but `git status`
 still shows changes under `projects/`, run `blaze commit`, or commit the tree
 by hand.
 
+**A change line only ever claims a move it can prove (BLZ-401).** A ticket can be
+written without its status changing — a blank `resolution` backfilled on an already-
+`done` ticket, a delivery record filled in for the first time, or cleared because no
+single PR delivered it (ADR-0023 §1) — and that entry stays on the report (dropping it
+would erase the only account of a record deletion) but is rendered as `updated <id>
+(still <status>): …`, never as a move. The `--apply` commit message and the dry-run tail
+line both name two quantities for the same reason: how many tickets' status actually
+moved, and — only when it is non-zero — how many files were written without a status
+change.
+
 ## groom
 
 ```
