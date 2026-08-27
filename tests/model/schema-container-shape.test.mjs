@@ -40,8 +40,10 @@ const WRONG_SHAPES = [
   { what: "types as a number", cfg: { schema: { types: 42 } }, re: /schema\.types/ },
   { what: "workflows as a number", cfg: { schema: { workflows: 42 } }, re: /schema\.workflows/ },
   { what: "workflows as an array", cfg: { schema: { workflows: [] } }, re: /schema\.workflows/ },
-  { what: "the whole schema as a string", cfg: { schema: "a string" }, re: /schema/ },
-  { what: "the whole schema as an array", cfg: { schema: [] }, re: /schema/ },
+  { what: "the whole schema as a string", cfg: { schema: "a string" },
+    re: /^blaze\.config\.json: schema must be an object, got string/ },
+  { what: "the whole schema as an array", cfg: { schema: [] },
+    re: /^blaze\.config\.json: schema must be an object, got an array/ },
 ];
 
 describe("BLZ-396: a wrong-shaped container is reported, not ignored in silence", () => {
@@ -119,7 +121,11 @@ describe("BLZ-396: a well-formed board is untouched", () => {
   });
 });
 
-describe("BLZ-396: audit still never throws on any of it", () => {
+describe("BLZ-396: validateSchema never throws on any of it", () => {
+  // Named for what it MEASURES. It drives `validateSchema` in process and never runs `blaze
+  // audit`; the end-to-end claim is pinned by tests/audit-malformed-container.test.mjs, a
+  // subprocess test, because in this repo a unit-green/audit-dying gap is a real defect class
+  // and not a hypothetical one.
   // `tests/audit-malformed-linktypes.test.mjs` must stay green: BLZ-392 made this path
   // REPORT rather than throw, because throwing killed `blaze audit` outright — a stack
   // trace and no report at all, losing the whole hygiene report for one bad field.
@@ -203,5 +209,78 @@ describe("BLZ-396: the whole-block case, through the REAL loader", () => {
           `${what}: an ordinary board must not be told its block was ignored`);
       } finally { rmSync(root, { recursive: true, force: true }); }
     }
+  });
+});
+
+describe("BLZ-396 review F1: the message names what is ACTUALLY still in force", () => {
+  // ONE message served both layers and its "what is still in force" clause was hardcoded to
+  // the built-in defaults. With a valid top-level override present that is FALSE: the
+  // project block is the SECOND merge in `resolveSchema`, so dropping it leaves
+  // DEFAULT + blaze.config.json in force, not DEFAULT alone. Telling the operator their
+  // board is on defaults, and pointing at the wrong file, is the exact class of untrue
+  // statement this ticket exists to end — reintroduced inside the report.
+  const TOP = { schema: { types: { spike: { level: 0, workflow: "delivery",
+    parentTypes: ["feature"], required: ["title"] } } } };
+
+  test("a dropped PROJECT block does not claim the board fell back to built-in defaults", () => {
+    const problems = validateSchema({ config: TOP, project: { schema: { types: "notanobject" } } });
+    const msg = problems.find((p) => /^project\.json: schema\.types/.test(p));
+    assert.ok(msg, `no project-layer types message: ${problems}`);
+    assert.doesNotMatch(msg, /built-in/,
+      `the blaze.config.json override IS in force, so this is untrue: ${msg}`);
+    assert.match(msg, /blaze\.config\.json/,
+      `the project layer must name the layer that is still in force: ${msg}`);
+  });
+
+  test("a dropped whole PROJECT schema block says the same true thing", () => {
+    const problems = validateSchema({ config: TOP, project: { schema: "a string" } });
+    const msg = problems.find((p) => /^project\.json: schema must be an object/.test(p));
+    assert.ok(msg, `no project-layer whole-block message: ${problems}`);
+    assert.doesNotMatch(msg, /every type, workflow and link type came from the built-in defaults/,
+      `untrue with a top-level override present: ${msg}`);
+  });
+
+  test("the CONFIG layer still says built-in defaults, because there it is true", () => {
+    const msg = validateSchema({ config: { schema: { types: "notanobject" } } })
+      .find((p) => /^blaze\.config\.json: schema\.types/.test(p));
+    assert.ok(msg && /built-in/.test(msg), `the top layer really does fall back: ${msg}`);
+  });
+});
+
+describe("BLZ-396 review F2: the dropped-kind marker is not operator-controllable", () => {
+  // `audit-runner.mjs` hands `auditCorpus` the RAW `JSON.parse(project.json)` — it never
+  // calls `loadProject` — so any key an operator writes arrives verbatim. A string-keyed
+  // marker therefore let a board invent a malformation that does not exist: audit reported
+  // "the whole block was IGNORED" on a project.json with no schema block at all, and the
+  // load path disagreed with audit on the same board. A Symbol cannot come out of JSON.
+  test("a hand-written schemaBlockDropped key invents no finding", () => {
+    for (const forged of ["string", "an array", { a: 1 }, 42, true]) {
+      const project = JSON.parse(JSON.stringify({ key: "ENG", schemaBlockDropped: forged }));
+      assert.deepEqual(
+        validateSchema({ project }).filter((p) => /IGNORED/.test(p)), [],
+        `a forged marker ${JSON.stringify(forged)} must not report a malformation`);
+      assert.deepEqual(refused({ project }).filter((e) => /IGNORED/.test(e)), [],
+        `and must never refuse the board: ${JSON.stringify(forged)}`);
+    }
+  });
+
+  test("a forged marker cannot render an object into a detail string", () => {
+    // The rendering `[object Object]` is BLZ-392's defect by another route, and the existing
+    // "every message is a STRING" test does not catch it — it asserts the message is a
+    // string, not that the interpolated KIND is.
+    for (const p of validateSchema({ project: { schemaBlockDropped: { a: 1 } } })) {
+      assert.doesNotMatch(p, /\[object Object\]/, `rendered an object: ${p}`);
+    }
+  });
+
+  test("the real loader's marker still reports, through the Symbol", () => {
+    const root = mkdtempSync(join(tmpdir(), "blz396-sym-"));
+    try {
+      mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
+      writeFileSync(join(root, "blaze.config.json"), '{"key":"ENG","projects":["ENG"],"schema":"a string"}');
+      const config = loadConfig({ root });
+      assert.ok(validateSchema({ config }).some((p) => /schema must be an object, got string/.test(p)),
+        "the loader path must still report — a Symbol marker that nothing reads is no marker");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

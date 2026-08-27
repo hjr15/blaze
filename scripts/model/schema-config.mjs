@@ -8,6 +8,10 @@ import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows, RESOLUTIONS } from "./workflows.mjs";
 import { DEFAULT_LINK_TYPES, mergeLinkTypes, linkTypeOverrideErrors } from "./link-schema.mjs";
 import { GOAL_SATISFYING_REQUIREMENT } from "./gates.mjs";
+import { SCHEMA_BLOCK_DROPPED } from "./schema-marker.mjs";
+
+/** Every kind the loaders can drop: `typeof` of a non-record, plus arrays. */
+const DROPPED_KINDS = new Set(["an array", "string", "number", "boolean", "bigint", "symbol", "function"]);
 
 export function resolveSchema({ config = null, project = null } = {}) {
   const topTypes = config?.schema?.types;
@@ -58,7 +62,7 @@ export function resolveSchema({ config = null, project = null } = {}) {
  *  `undefined` is NOT a wrong shape — an absent block is how almost every board is written,
  *  and reporting it would put a finding on essentially every installation, which is worse
  *  than the bug this closes. */
-export function schemaContainerErrors(schema, dropped = null) {
+export function schemaContainerErrors(schema, dropped = null, layer = "config") {
   const kind = (v) => (Array.isArray(v) ? "an array" : v === null ? "null" : typeof v);
   const isRecord = (v) => Boolean(v) && typeof v === "object" && !Array.isArray(v);
   // `null` is ABSENT, not a wrong shape. `loadConfig` and `loadProject` both normalise a
@@ -67,14 +71,30 @@ export function schemaContainerErrors(schema, dropped = null) {
   // paid for twice, and the existing "a healthy board reports no schema-invalid" test
   // caught it immediately. The loaders hand the dropped KIND separately, because by the
   // time the block reaches here a wrong shape and an absent one look identical.
-  if (dropped) {
-    return [`schema must be an object, got ${dropped} — the whole block was IGNORED, so `
-      + "every type, workflow and link type came from the built-in defaults"];
+  // WHAT IS STILL IN FORCE DEPENDS ON THE LAYER, and one message hardcoded to the built-in
+  // defaults was UNTRUE at the project layer: `resolveSchema` merges DEFAULT, then
+  // blaze.config.json, then the project block, so dropping the LAST one leaves the
+  // blaze.config.json override in force — not the defaults. Telling an operator with a
+  // valid top-level override that their board fell back to built-ins, and pointing them at
+  // the wrong file, is the exact class of untrue statement this ticket exists to end.
+  const stillInForce = layer === "project"
+    ? "the blaze.config.json layer is still in force"
+    : "every type, workflow and link type came from the built-in defaults";
+  const blockInForce = (block) => (layer === "project"
+    ? `the blaze.config.json layer's ${block} are still in force`
+    : `the built-in ${block} are still in force`);
+  // A dropped-kind marker is only ever set by the loaders, and only to one of these. It
+  // arrives as a SYMBOL key so operator-written JSON cannot forge one — but a wrong VALUE
+  // under the right key would still render `[object Object]` into an audit detail, which is
+  // BLZ-392's defect by another route, so the value is whitelisted as well.
+  if (dropped && DROPPED_KINDS.has(dropped)) {
+    return [`schema must be an object, got ${dropped} — the whole block was IGNORED, `
+      + `so ${stillInForce}`];
   }
   if (schema === undefined || schema === null) return [];
   if (!isRecord(schema)) {
     return [`schema must be an object, got ${kind(schema)} — the whole block was IGNORED, `
-      + "so every type, workflow and link type came from the built-in defaults"];
+      + `so ${stillInForce}`];
   }
   const errors = [];
   for (const block of ["types", "workflows"]) {
@@ -84,8 +104,7 @@ export function schemaContainerErrors(schema, dropped = null) {
     // ordinary boards.
     if (v === undefined || v === null || isRecord(v)) continue;
     errors.push(`schema.${block} must be an object keyed by ${block === "types" ? "type" : "workflow"} `
-      + `name, got ${kind(v)} — the whole block was IGNORED and the built-in ${block} are still `
-      + "in force");
+      + `name, got ${kind(v)} — the whole block was IGNORED, so ${blockInForce(block)}`);
   }
   return errors;
 }
@@ -324,10 +343,10 @@ function collectSchemaProblems(input = {}) {
   // audit` calls clean has been the worse-than-the-bug outcome here twice: at blaze-pm's
   // v4-spine worktree, `blaze.config.json` carries a well-formed `schema` and NO
   // project.json carries a `schema` block at all. This refuses nothing that exists today.
-  for (const e of schemaContainerErrors(config?.schema, config?.schemaBlockDropped)) {
+  for (const e of schemaContainerErrors(config?.schema, config?.[SCHEMA_BLOCK_DROPPED], "config")) {
     hard(`blaze.config.json: ${e}`);
   }
-  for (const e of schemaContainerErrors(project?.schema, project?.schemaBlockDropped)) {
+  for (const e of schemaContainerErrors(project?.schema, project?.[SCHEMA_BLOCK_DROPPED], "project")) {
     hard(`project.json: ${e}`);
   }
   // NOT also run over the project layer. Doing so paired "…stays unschedulable, fix the kind"

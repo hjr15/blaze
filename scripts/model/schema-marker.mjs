@@ -1,0 +1,19 @@
+// scripts/model/schema-marker.mjs — BLZ-396.
+//
+// The key under which `loadConfig`/`loadProject` record that they DROPPED a wrong-shaped
+// `schema` block. It is a SYMBOL on purpose, and it lives alone in a leaf module for two
+// reasons:
+//
+// 1. `audit-runner.mjs` hands `auditCorpus` the raw `JSON.parse(project.json)` — it never
+//    calls `loadProject` — so a STRING key would arrive straight from operator-written JSON
+//    and let a board invent a malformation that does not exist. `blaze audit` reported "the
+//    whole block was IGNORED" on a project.json with no schema block at all, and the load
+//    path disagreed with audit on the same board. `JSON.parse` cannot produce a symbol key.
+// 2. `config.mjs` and `model/schema-config.mjs` are in an import CYCLE
+//    (config → schema-config → schema → config), so a shared binding declared in either of
+//    them can be in its temporal dead zone when the other's body runs. This module imports
+//    nothing, so it is fully initialised before either.
+//
+// Symbols survive both `Object.freeze` (it is set before the freeze) and object spread
+// (spread copies enumerable own symbol keys), which is how it reaches `cli.mjs`'s consumers.
+export const SCHEMA_BLOCK_DROPPED = Symbol("blaze.schemaBlockDropped");

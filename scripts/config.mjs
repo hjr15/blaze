@@ -5,6 +5,7 @@ import { join, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { checkSchemaVersion } from "./model/schema-version.mjs";
+import { SCHEMA_BLOCK_DROPPED } from "./model/schema-marker.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
@@ -131,7 +132,10 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   const rawSchema = file.schema;
   cfg.schema = (rawSchema && typeof rawSchema === "object" && !Array.isArray(rawSchema))
     ? rawSchema : null;
-  cfg.schemaBlockDropped = (rawSchema === undefined || rawSchema === null || cfg.schema !== null)
+  // SYMBOL-keyed: `audit-runner.mjs` passes `auditCorpus` the raw `JSON.parse` of
+  // project.json, so a string key would let an operator forge a malformation that is not
+  // there. See model/schema-marker.mjs.
+  cfg[SCHEMA_BLOCK_DROPPED] = (rawSchema === undefined || rawSchema === null || cfg.schema !== null)
     ? null : (Array.isArray(rawSchema) ? "an array" : typeof rawSchema);
 
   return Object.freeze(cfg);
@@ -291,7 +295,7 @@ export function loadProject(key, { root = ROOT, projectsDir = join(root, "projec
   // `null` here is the value PROJECT_DEFAULTS seeds, not something the operator wrote —
   // treating it as a dropped block refused every ordinary board, which the "a NON-EXEMPT
   // verb runs clean on an ordinary good board" test caught at once.
-  merged.schemaBlockDropped = (rawProjSchema === undefined || rawProjSchema === null || merged.schema !== null)
+  merged[SCHEMA_BLOCK_DROPPED] = (rawProjSchema === undefined || rawProjSchema === null || merged.schema !== null)
     ? null : (Array.isArray(rawProjSchema) ? "an array" : typeof rawProjSchema);
   return Object.freeze(merged);
 }
