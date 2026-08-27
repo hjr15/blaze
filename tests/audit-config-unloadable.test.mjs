@@ -100,11 +100,17 @@ describe("BLZ-402 review finding 1: an unloadable config never reports ok=true",
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("BLZ-402 round-2 finding 2: a schema-invalid project surfaces on a bad-key board "
+  test("BLZ-402 round-2 finding 2: a malformed-schema project surfaces on a bad-key board "
     + "exactly as it does with --projects", () => {
-    // The round-2 review's own reproduction: a schema-invalid project.json must not vanish
+    // The round-2 review's own reproduction: a project.json schema finding must not vanish
     // behind a bad top-level key. Compares the flag-less path against `--projects ENG`,
     // which already proved the corpus was safely auditable.
+    //
+    // The KIND here is `schema-malformed`, not `schema-invalid`: BLZ-407 split the two by
+    // severity, and this fixture's `types.task = { bogus_field_xyz: true }` is a partial
+    // type record — a HARD malformation the load path already refuses on. What this test
+    // pins is unchanged and is not about the kind: the schema finding for a project must
+    // still be reported when the top-level config failed to load.
     const root = board({
       configJson: '{"key":"ENG","projects":["ENG","old-eng"]}',
       extraProjectDirs: [],
@@ -118,11 +124,11 @@ describe("BLZ-402 review finding 1: an unloadable config never reports ok=true",
     try {
       const flagless = audit(root);
       const flagged = audit(root, "--projects", "ENG");
-      assert.match(flagless.stdout, /schema-invalid/,
-        `plain audit must report schema-invalid on a bad-key board:\n${flagless.stdout}`);
+      assert.match(flagless.stdout, /schema-malformed/,
+        `plain audit must report the project's schema finding on a bad-key board:\n${flagless.stdout}`);
       assert.match(flagless.stdout, /config-unloadable/, flagless.stdout);
       assert.match(flagless.stdout, /2 tickets/, flagless.stdout);
-      assert.match(flagged.stdout, /schema-invalid/, flagged.stdout);
+      assert.match(flagged.stdout, /schema-malformed/, flagged.stdout);
       assert.match(flagless.stdout, /ok=false/, flagless.stdout);
       assert.match(flagged.stdout, /ok=false/, flagged.stdout);
     } finally { rmSync(root, { recursive: true, force: true }); }
