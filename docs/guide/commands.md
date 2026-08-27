@@ -204,13 +204,23 @@ findings too.
 
 | Severity | Kinds |
 |---|---|
-| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error` |
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable` |
 | soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
 
 `schema-invalid` (BLZ-392) is `validateSchema`'s output, surfaced by `auditCorpus` — a `schema`
 block that did not do what it looks like it does, most often a `linkTypes` entry the merge
 ignored. Soft because the shipped declaration is still in force, so the corpus is judged
 correctly; what is wrong is the operator's expectation.
+
+`config-unloadable` (BLZ-402 review finding 1) fires when `blaze.config.json` itself fails to
+load — most commonly an invalid `key` or `projects[]` entry (BLZ-402's shape check). Raised by
+the runner rather than `auditCorpus`, the same way `duplicate-status` is: whether `loadConfig`
+threw is a property of the load attempt, not of any ticket's frontmatter. HARD, deliberately —
+`audit` is exempt from `cli.mjs`'s schema preflight on the ground that reporting exactly this
+class of problem IS its job, so it must never fall back to a bare directory listing and report
+`ok=true` over a board it could not really measure. A config that merely fails to *parse* (bad
+JSON, an incompatible `schemaVersion`) is unaffected by this and keeps the older, tolerant
+behaviour (BLZ-392): treated as absent, `ok=true` if the corpus itself is otherwise clean.
 
 The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and are **all soft on purpose**: HARD means the *corpus* is wrong, and a missed deadline or an unschedulable pair of well-formed links means the *plan* is wrong, which is a true statement about a correct corpus. `terminal-goal-unverified-requirement` was already soft and already missing from this table before BLZ-379 — see `scripts/model/audit.mjs` for why each one is classified where it is.
 

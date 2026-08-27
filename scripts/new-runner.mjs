@@ -3,15 +3,24 @@
 import { applyNew } from "./new.mjs";
 import { derivedFieldRefusal } from "./model/fields.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
-import { loadConfig, resolveRoots } from "./config.mjs";
+import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below:
 // a guard meant to stop the engine driving a board it may misread must not
-// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
-const cfg = loadConfig({ root: dataRoot });
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp — and, since
+// BLZ-402, on a malformed project key too (BLZ-402 review finding 3: this call, at
+// this line, is the one an adversarial review reproduced a raw stack trace from —
+// `cli.mjs`'s preflight already catches this for the normal `blaze new` path, but a
+// direct `node new-runner.mjs` bypasses it entirely).
+let cfg;
+try { cfg = loadConfig({ root: dataRoot }); }
+catch (e) {
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 // BLZ-121 defence-in-depth, hoisted before applyNew below for the same
 // reason as move-runner.mjs: commitOrQueue's own guard fires too late here —
 // applyNew writes the new ticket file via direct node:fs calls before
@@ -92,7 +101,17 @@ let __wp;
 try { __wp = await resolveWritePort({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
 const { port: writePort, close: closeWritePort } = __wp;
-const r = await applyNew(projectsDir, { ...opts, writePort });
+// BLZ-402 review finding 3: `applyNew` -> `loadProject(project, { allowMissing: true })`
+// is the actual reproduced crash site for `blaze new --project 'A(' ...` — an
+// UNCONFIGURED --project value that `cli.mjs`'s preflight never sees (it only validates
+// projects blaze.config.json already names), so the refusal has to be caught here.
+let r;
+try { r = await applyNew(projectsDir, { ...opts, writePort }); }
+catch (e) {
+  closeWritePort();
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 closeWritePort();
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);

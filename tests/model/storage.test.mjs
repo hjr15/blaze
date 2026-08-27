@@ -129,7 +129,12 @@ function board() {
   execFileSync("git", ["-C", d, "init", "-q"]);
   mkdirSync(join(d, "projects", "BLZ"), { recursive: true });
   writeFileSync(join(d, "blaze.config.json"), JSON.stringify({
-    projects: [{ key: "BLZ", name: "Blaze" }], defaultLabels: ["backend"],
+    // BLZ-402 review finding 2: `projects` entries are plain KEY STRINGS everywhere else
+    // in this codebase (`["ENG", "OBA"]`) — this fixture's `{ key, name }` object shape
+    // was always wrong, it just went unnoticed because nothing validated `cfg.projects`
+    // entries before `loadConfig` gained that check. None of these three tests reads
+    // `cfg.projects` at all; only the on-disk `projects/BLZ/` directory matters to them.
+    projects: ["BLZ"], defaultLabels: ["backend"],
   }));
   return { root: d, projectsDir: join(d, "projects") };
 }

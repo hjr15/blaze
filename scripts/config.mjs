@@ -161,6 +161,21 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   // as much as the file key (AC-2), rather than a second, easy-to-forget check.
   assertValidKey(cfg.key, { source: keySource });
 
+  // BLZ-402 review finding 2: `cfg.projects` members are project keys too, and reach
+  // `new RegExp(...)` the same way `cfg.key` does — `scripts/loops/groomer.mjs`'s
+  // `matchersFor` builds one straight from each entry, with no shape check of its own.
+  // Validating `cfg.key` alone left every `projects[]` entry able to reach a regex
+  // builder unchecked, which is precisely the crash (a metacharacter key) and the
+  // silent over-match (a valid-regex-but-not-a-key value like "A.*") this file's own
+  // `assertValidKey` exists to make unreachable. Guarded on Array.isArray: a
+  // wrong-shaped `projects` block is a different defect (not this ticket's) and stays
+  // whatever it already was rather than a new TypeError from iterating a non-array.
+  if (Array.isArray(cfg.projects)) {
+    for (const p of cfg.projects) {
+      assertValidKey(p, { source: "blaze.config.json's 'projects' array" });
+    }
+  }
+
   // Derived values.
   cfg.idRegex = new RegExp("\\b" + cfg.key + "-(\\d+)", "i");
   cfg.idFromRef = (ref) => {

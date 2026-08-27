@@ -686,9 +686,17 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
 
 // CLI: `node scripts/loops/groomer.mjs` runs one grooming pass.
 if (process.argv[1] === fileURLToPath(import.meta.url)) {
-  const { loadConfig, resolveRoots } = await import("../config.mjs");
+  const { loadConfig, resolveRoots, InvalidProjectKeyError } = await import("../config.mjs");
   const root = resolveRoots().dataRoot;
-  const cfg = loadConfig({ root });
+  // BLZ-402 review finding 3: loadConfig throws `blaze: …` on a malformed project key too,
+  // since BLZ-402 — `cli.mjs`'s preflight already catches this for the normal `blaze groom`
+  // path, but a direct `node scripts/loops/groomer.mjs` bypasses it entirely.
+  let cfg;
+  try { cfg = loadConfig({ root }); }
+  catch (e) {
+    if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+    throw e;
+  }
   let agentsMd = "";
   try { agentsMd = readFileSync(join(root, "AGENTS.md"), "utf8"); } catch {}
   const today = new Date().toISOString().slice(0, 10);

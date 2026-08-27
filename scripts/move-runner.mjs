@@ -2,15 +2,23 @@
 // against the resolved data tree, then commit (or queue) the relocation.
 import { applyMove } from "./move.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
-import { loadConfig, resolveRoots } from "./config.mjs";
+import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below:
 // a guard meant to stop the engine driving a board it may misread must not
-// half-drive it first. loadConfig throws `blaze: …` on a bad stamp.
-const cfg = loadConfig({ root: dataRoot });
+// half-drive it first. loadConfig throws `blaze: …` on a bad stamp — and, since
+// BLZ-402, on a malformed project key too (BLZ-402 review finding 3: `cli.mjs`'s
+// preflight already catches this for the normal `blaze move` path, but a direct
+// `node move-runner.mjs` bypasses it entirely).
+let cfg;
+try { cfg = loadConfig({ root: dataRoot }); }
+catch (e) {
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 // BLZ-121 defence-in-depth, hoisted for the same reason as the guard above:
 // commitOrQueue's own BLAZE_READONLY guard fires too late here — applyMove
 // below writes/renames the ticket file via direct node:fs calls before
@@ -45,7 +53,17 @@ let __wp;
 try { __wp = await resolveWritePort({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
 const { port: writePort, close: closeWritePort } = __wp;
-const r = await applyMove(projectsDir, id, toStatus, { today, writePort });
+// BLZ-402 review finding 3: `applyMove` -> `loadProject(found.frontmatter.project, ...)`
+// (scripts/move.mjs) can raise the same InvalidProjectKeyError on a ticket whose stored
+// `project` field is malformed — a corrupt-file case `cli.mjs`'s preflight cannot see
+// (it only validates the board's OWN configured project set, not per-ticket values).
+let r;
+try { r = await applyMove(projectsDir, id, toStatus, { today, writePort }); }
+catch (e) {
+  closeWritePort();
+  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
+  throw e;
+}
 closeWritePort();
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);

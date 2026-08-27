@@ -9,7 +9,7 @@ import { fsReadStorage } from "./model/read-storage.mjs";
 import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
-import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 
 const positional = [];
 const opts = { projects: null, kind: null, json: false };
@@ -39,8 +39,25 @@ const explicit = positional[0] ? resolvePath(positional[0]) : null;
 const roots = explicit ? null : resolveRoots();
 const projectsDir = explicit || roots.projectsDir;
 const dataRoot = explicit ? dirname(explicit) : roots.dataRoot;
+// BLZ-392 established the tolerance below: a config `loadConfig` cannot even PARSE (bad
+// JSON, an incompatible schemaVersion, a malformed schedule block) is treated as absent —
+// `config = null`, the disk-listing fallback below stands in for `config.projects`, and the
+// run still reports `ok=true` if the corpus itself is clean. That is deliberate: there is
+// nothing to salvage from a file that could not be parsed at all, so tolerating it is no
+// different from auditing a board with no config file.
+//
+// BLZ-402 review finding 1 is a DIFFERENT case, and must not be folded into that tolerance:
+// `assertValidKey` (BLZ-402) makes `loadConfig` throw `InvalidProjectKeyError` on a
+// board it USED to accept and finish loading — the exact board BLZ-396 shipped a
+// `schema-invalid` finding for. Because the key check runs before the schema block is ever
+// examined, that throw silently deletes information this runner used to be able to report
+// (the schema-invalid finding, the real `config.projects` denominator, the schedule) while
+// still saying `ok=true`. `InvalidProjectKeyError` is therefore its own case below: named,
+// HARD, `ok=false` — never merged into "config is absent".
 let config = null;
-try { config = loadConfig({ root: dataRoot }); } catch { config = null; }
+let keyLoadError = null;
+try { config = loadConfig({ root: dataRoot }); }
+catch (e) { if (e instanceof InvalidProjectKeyError) keyLoadError = e; }
 
 // The project set comes from the config, never from a hardcoded list — the stale-default
 // bug the Python original carried (it audited 2 of 11 projects for months).
@@ -52,10 +69,21 @@ try { config = loadConfig({ root: dataRoot }); } catch { config = null; }
 const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 const keys = nonEmpty(opts.projects)
   ?? nonEmpty(config?.projects)
-  ?? fsReadStorage.listProjects(projectsDir);
+  // A board whose key ITSELF is invalid must NEVER fall back to a bare directory listing —
+  // that is the same stale-default failure mode above, inverted: instead of under-counting
+  // a hardcoded list, a disk scan can silently INCLUDE a stray directory the config never
+  // named (e.g. an old project's leftover folder), moving the denominator while the run
+  // still reports as though it had measured the real board. BLZ-402 review finding 1:
+  // reproduced as "1 project(s)" silently becoming "2" the moment the key check failed.
+  // A config that is merely unparseable (keyLoadError null, config null) still falls
+  // through to the disk listing — BLZ-392's existing, tested tolerance, untouched.
+  ?? (keyLoadError ? [] : fsReadStorage.listProjects(projectsDir));
 
-// And having resolved them, refuse to report success over an empty corpus.
-if (!keys.length) { console.error(`no projects found under ${projectsDir}`); process.exit(2); }
+// And having resolved them, refuse to report success over an empty corpus — UNLESS the
+// reason nothing resolved is an invalid project key, in which case that failure IS the
+// report (the config-unloadable finding pushed below turns `ok` false and exits 1); a bare
+// stderr line here would just be a second, incompatible way of saying it.
+if (!keys.length && !keyLoadError) { console.error(`no projects found under ${projectsDir}`); process.exit(2); }
 
 const projects = {};
 for (const k of keys) {
@@ -80,6 +108,15 @@ for (const t of fsReadStorage.listTickets(projectsDir)) {
 }
 
 const report = auditCorpus({ tickets, projects, config });
+
+// BLZ-402 review finding 1: name the config-load failure as a first-class, HARD finding —
+// not a swallowed exception. `report.ok` is recomputed below from `report.findings`
+// against `HARD_KINDS`, so pushing this here (rather than a bespoke early exit) is what
+// makes `ok=false` fall out of the same mechanism every other hard finding uses, and what
+// makes it visible under both the plain report and `--json`.
+if (keyLoadError) {
+  report.findings.push({ ticket: null, kind: "config-unloadable", detail: keyLoadError.message });
+}
 
 // One finding per id naming EVERY path, not one per surplus copy: an operator told about a
 // single path goes hunting for the other, which is the failure mode itself.
@@ -210,6 +247,12 @@ if (opts.json) {
   console.log(JSON.stringify({ ...report, findings }, null, 2));
 } else {
   console.log("=== blaze audit ===");
+  // Named UNCONDITIONALLY, ahead of any --kind filtering: the plain report's summary line
+  // below prints only a per-kind COUNT, never detail text, so without this an operator
+  // running `blaze audit --kind schema-invalid` (or any kind that isn't
+  // `config-unloadable`) would see the count go up with no way to learn which key caused
+  // it short of re-running with --json.
+  if (keyLoadError) console.log(`  config failed to load: ${keyLoadError.message}`);
   console.log(`  ${tickets.length} tickets across ${keys.length} project(s)`);
   if (opts.kind) {
     for (const f of findings) console.log(`  ${f.ticket}  ${f.kind}  ${f.detail}`);

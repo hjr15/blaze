@@ -33,6 +33,15 @@ export const HARD_KINDS = new Set([
   // `summarise` and every caller reads, so a kind raised elsewhere must still be classified
   // in one place.
   "duplicate-status",
+  // config-unloadable (BLZ-402 review finding 1) is raised by the RUNNER, for the same
+  // reason as duplicate-status: whether `loadConfig` threw is a property of the LOAD
+  // attempt, not of any ticket's frontmatter. HARD, deliberately — `audit` is exempt from
+  // `cli.mjs`'s schema preflight on the ground that reporting this class of problem IS its
+  // job, and a report that swallows a load failure into `config = null` and still prints
+  // `ok=true` is the opposite of that job. It also cannot be a fill queue: everything
+  // downstream (the project set, the schema-invalid check, the schedule) depends on the
+  // config that failed to load, so there is nothing safe to keep running against.
+  "config-unloadable",
 ]);
 
 // BLZ-353 / R48. Deliberately NOT in HARD_KINDS, and the reason is load-bearing.
