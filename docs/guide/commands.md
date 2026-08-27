@@ -204,13 +204,19 @@ findings too.
 
 | Severity | Kinds |
 |---|---|
-| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable` |
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed` |
 | soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
 
-`schema-invalid` (BLZ-392) is `validateSchema`'s output, surfaced by `auditCorpus` — a `schema`
-block that did not do what it looks like it does, most often a `linkTypes` entry the merge
-ignored. Soft because the shipped declaration is still in force, so the corpus is judged
-correctly; what is wrong is the operator's expectation.
+`schema-malformed` and `schema-invalid` (BLZ-392, split by severity in BLZ-407) both come from
+`auditCorpus` reading the tagged `collectSchemaProblems`. `schema-malformed` is HARD: the
+override is internally inconsistent — a type mapping to an undeclared workflow, a partial type
+or workflow record, a wrong-shaped `types`/`workflows` container — the same class the load
+path's `assertSchemaValid` already refuses on for every non-exempt verb, so `blaze audit` must
+refuse too or it is the one surface claiming a broken board is healthy. `schema-invalid` stays
+SOFT: a `schema` block that is legal but did not do what it looks like it does, most often a
+`linkTypes` entry the merge ignored, or a deliberately narrowed workflow. Soft because the
+shipped declaration is still in force there, so the corpus is judged correctly; what is wrong is
+the operator's expectation. See [ADR-0024](../decisions/0024-audit-and-the-load-path-agree-on-a-malformed-schema-override.md).
 
 `config-unloadable` (BLZ-402 review finding 1, tightened by round-2 finding 3 and round-3)
 fires on **any** `loadConfig` throw *except* the two BLZ-392 explicitly tolerates.

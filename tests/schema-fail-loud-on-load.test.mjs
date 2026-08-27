@@ -85,7 +85,9 @@ describe("BLZ-56: `blaze audit` still REPORTS — the BLZ-392 regression stays c
       const out = r.stdout + r.stderr;
       // The precise exit code is audit's own business; what must not happen is a crash
       // with no report. Assert the REPORT exists, not merely that something was printed.
-      assert.match(out, /schema-invalid/,
+      // BLZ-407: MALFORMED is a HARD shape — assertSchemaValid already refuses it — so it is
+      // filed under the hard kind `schema-malformed`, not the soft `schema-invalid`.
+      assert.match(out, /schema-malformed/,
         "the malformed override must be REPORTED as a finding, which is what audit is for");
       assert.doesNotMatch(out, /at assertSchemaValid/,
         "audit must never take the loud path — a throw there loses the whole report");

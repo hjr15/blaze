@@ -329,24 +329,35 @@ Both read one internally tagged list, so the two can never drift apart.
   name, `parentTypes` or `required` that is not an array, a `parentTypes` entry naming no
   declared type; a partial type record (the trap above); a workflow with no `statuses`, or
   whose `terminal`, `transitions`, `reopenTo` or `resolutionOnTerminal` name a status it
-  does not have or a resolution the engine does not know.
+  does not have or a resolution the engine does not know; a wrong-shaped `types`/
+  `workflows` container (BLZ-396); a whole `schema` block that is a string, an array, or
+  any other non-object.
 - **Soft — the configuration is legal, and only reported.** A deliberately narrowed
   `requirement` workflow (BLZ-361/R48 — the message itself says "add them, or drop the gate
   deliberately"); a `Precedes` endpoint kind naming no declared type (BLZ-392); a
   `schema.linkTypes` block that was ignored, leaving the shipped declaration in force; and
   a per-project `schema.linkTypes` block, which resolves correctly but reaches nothing.
 
-The split is not cosmetic. `blaze audit` files every soft class above as a soft finding and
-reports such a board **`ok=true`**, so refusing the same board on the load path would leave
-an operator with a board audit calls clean and not one non-exempt verb that will run. A
-check that disagrees with audit on the same board is worse than no check.
+The split is not cosmetic, and until BLZ-407 it did not reach `blaze audit` at all:
+`auditCorpus` called `validateSchema`, which returns every problem as a bare string with the
+`hard`/`soft` tag already dropped, and filed all of them — hard and soft alike — under one
+soft kind, `schema-invalid`. A board whose override was genuinely malformed reported
+**`ok=true`** while every non-exempt verb already refused it with `SchemaOverrideError`, the
+identical message — the same disagreement this whole section exists to prevent, just moved
+one layer up. `auditCorpus` now reads the tagged list directly (`collectSchemaProblems`,
+exported alongside `validateSchema` for exactly this): a **hard** problem is filed under a
+hard kind, `schema-malformed`, and fails `blaze audit`; a **soft** one keeps the soft
+`schema-invalid` kind and does not (ADR-0024). `validateSchema`'s own return shape — an array
+of strings — is unchanged; nothing else that calls it sees any difference.
 
-`blaze audit` calls the reporting path and surfaces each problem as a `schema-invalid`
-finding. It is **exempt from the loud path on purpose**: reporting this class is its
+`blaze audit` is **exempt from the loud path on purpose**: reporting this class is its
 entire job, so refusing to start it would delete the report that tells you what to fix.
-BLZ-392 closed exactly that defect — a throw from inside `auditCorpus` killed `blaze
-audit` outright, losing the whole hygiene report for one bad field — and
-`tests/audit-malformed-linktypes.test.mjs` exists to keep it closed.
+BLZ-392 closed the defect where a throw from inside `auditCorpus` killed `blaze audit`
+outright, losing the whole hygiene report for one bad field — `blaze audit` still never
+takes that path, and `tests/audit-malformed-linktypes.test.mjs` exists to keep it closed.
+What changed under BLZ-407 is only `ok`: a hard problem now fails the run through
+`schema-malformed`, the same way every other hard finding does, instead of being folded
+into a soft one that could never flip it.
 
 Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is the one
 place every verb dispatches through. There are two more exemptions — **three in all** —

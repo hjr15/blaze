@@ -12,7 +12,7 @@
 //
 // That split is blaze-pm ADR-0011's soft gate, and it is load-bearing: a gate that fails on
 // the fill queue is a gate people learn to skip, which costs the hard findings too.
-import { resolveSchema, validateSchema } from "./schema-config.mjs";
+import { resolveSchema, collectSchemaProblems } from "./schema-config.mjs";
 import { LINK_TYPES } from "./links.mjs";
 
 /** Every soft kind this module can emit. Exported so `blaze audit --help` prints what exists
@@ -60,6 +60,13 @@ export const HARD_KINDS = new Set([
   // for one of these reasons is itself real information the operator must see, the same way
   // `duplicate-status` is HARD despite the rest of the corpus still being auditable.
   "config-unloadable",
+  // BLZ-407: a MALFORMED schema override — the class `assertSchemaValid` (the load path)
+  // already refuses on. Before this, every problem `collectSchemaProblems` tags `hard` was
+  // flattened into `schema-invalid` by `validateSchema` and filed SOFT, so `blaze audit`
+  // reported `ok=true` on a board every non-exempt verb already refused with
+  // `SchemaOverrideError` — the same message, the tag simply lost on the way to a finding.
+  // See ADR-0024.
+  "schema-malformed",
 ]);
 
 // BLZ-353 / R48. Deliberately NOT in HARD_KINDS, and the reason is load-bearing.
@@ -134,8 +141,33 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
   for (const key of Object.keys(projects)) {
     Object.assign(endpointTypes, resolveSchema({ config, project: projects[key] ?? null }).types);
   }
-  const topLevel = new Set(validateSchema({ ...topResolved, config, endpointTypes }));
-  for (const e of topLevel) add("-", "schema-invalid", e);
+  // BLZ-407: the TAGGED list, not `validateSchema`'s flattened strings — `collectSchemaProblems`
+  // already marks each problem `hard` (assertSchemaValid, the load path, refuses on exactly
+  // these) or `soft` (legal-but-inert configuration, an advisory), and folding both into one
+  // `schema-invalid` kind is the defect this ticket exists to close: `blaze audit` reported
+  // `ok=true` on a board every non-exempt verb already refused. A hard problem is now filed
+  // under the hard kind `schema-malformed`; a soft one keeps the existing soft `schema-invalid`
+  // — `validateSchema`'s own public shape (an array of strings) is untouched, because
+  // `auditCorpus` still needs it nowhere else and other callers still get strings.
+  //
+  // Deduped by MESSAGE, exactly as before (`new Set(validateSchema(top))` was the pre-BLZ-407
+  // dedup, just untagged): a message's hard/soft classification cannot differ by layer — it is
+  // decided once, at the `hard(...)`/`soft(...)` call site that produced it — so filing by
+  // whichever layer reported it first carries the right tag regardless of which layer that was.
+  //
+  // Each branch calls `add(...)` with a LITERAL kind, never a computed one: BLZ-392's own
+  // anti-drift scan (tests/model/link-type-overrides.test.mjs, "the finding registries are
+  // complete, not just consistent") greps this file for `add\(...,\s*"kind"` to keep
+  // `HARD_KINDS`/`SOFT_KINDS` from silently drifting from what actually gets emitted. A
+  // `hard ? "schema-malformed" : "schema-invalid"` ternary here is invisible to that regex —
+  // it would make `schema-invalid` look unemitted and `SOFT_KINDS` report a phantom.
+  const topProblems = collectSchemaProblems({ ...topResolved, config, endpointTypes });
+  const topByMessage = new Map();
+  for (const p of topProblems) if (!topByMessage.has(p.message)) topByMessage.set(p.message, p.hard);
+  for (const [message, hard] of topByMessage) {
+    if (hard) add("-", "schema-malformed", message);
+    else add("-", "schema-invalid", message);
+  }
   for (const key of Object.keys(projects)) {
     const project = projects[key] ?? null;
     // Judged against the EFFECTIVE link types — the top layer's — not the project-merged ones.
@@ -143,12 +175,13 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
     // unschedulable, fix the kind" alongside "does not reach the scheduler" gave the operator
     // two findings that contradict each other, one proposing a repair that cannot work.
     const resolved = { ...resolveSchema({ config, project }), linkTypes: topResolved.linkTypes };
-    // No per-project dedup Set: `validateSchema` returns entries distinct by construction for
-    // one layer, so the one that used to sit here was unreachable — a mutation removing it
-    // survived the whole suite, which is how it was found.
-    for (const e of validateSchema({ ...resolved, config, project, endpointTypes })) {
-      if (topLevel.has(e)) continue;   // already reported against the top layer
-      add(key, "schema-invalid", e);
+    // No per-project dedup Map: `collectSchemaProblems` returns entries distinct by construction
+    // for one layer (mirroring the pre-BLZ-407 comment about `validateSchema`), so a second one
+    // here would be unreachable.
+    for (const p of collectSchemaProblems({ ...resolved, config, project, endpointTypes })) {
+      if (topByMessage.has(p.message)) continue;   // already reported against the top layer
+      if (p.hard) add(key, "schema-malformed", p.message);
+      else add(key, "schema-invalid", p.message);
     }
   }
 

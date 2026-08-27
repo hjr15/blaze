@@ -53,10 +53,14 @@ transition legality remain board-wide. With no override the table above applies
 unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
 `validateSchema` (also in `scripts/model/schema-config.mjs`) is a pure structural
 check — every type's `workflow` must name a declared workflow — returning a list
-of human-readable errors (`[]` when valid). `auditCorpus` calls it and reports its
-output as soft `schema-invalid` findings (BLZ-392) — for years nothing did, which is
-why ADR-0002 warns that relying on it buys "a well-tested no-op: green in CI, absent
-in production".
+of human-readable errors (`[]` when valid). `auditCorpus` reads the same checks
+through the tagged `collectSchemaProblems` and splits them: a MALFORMED override —
+the class the load path's `assertSchemaValid` already refuses on — is a hard
+`schema-malformed` finding and fails `blaze audit`; a legal-but-inert or
+deliberately narrowed configuration is a soft `schema-invalid` finding and does not
+(BLZ-392, BLZ-407, ADR-0024) — for years nothing called either path in production,
+which is why ADR-0002 warns that relying on it buys "a well-tested no-op: green in
+CI, absent in production".
 
 The model above is what earlier docs called the **`engineering` preset**. Since
 BLZ-231 it is no longer a preset a board opts into — it is what the engine

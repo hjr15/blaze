@@ -188,7 +188,17 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config", 
   return errors;
 }
 
-function collectSchemaProblems(input = {}) {
+/** The TAGGED reporting path (BLZ-407). Same list `validateSchema` and `assertSchemaValid`
+ *  both read, exported directly rather than through a second wrapper: two functions
+ *  computing "the same list" independently is exactly the drift this module's header
+ *  warns against. `auditCorpus` is the production caller — it needs the `hard` tag to file
+ *  a problem under the hard kind `schema-malformed` or the soft kind `schema-invalid`,
+ *  which is the split `validateSchema`'s flattened strings cannot carry (BLZ-407: the tag
+ *  was being read by `assertSchemaValid` and thrown away by `validateSchema`, and
+ *  `auditCorpus` only ever saw the second, so a hard problem and a soft one were
+ *  indistinguishable by the time either reached a finding). `validateSchema`'s public
+ *  shape below is UNCHANGED — this is an addition, not a replacement. */
+export function collectSchemaProblems(input = {}) {
   // Destructuring `null` throws, and a parameter default only fires for `undefined`. This
   // function is pure and public and `auditCorpus` may call it with a config that parsed to
   // null — a throw here is the BLZ-392 regression by another route, so it takes ANYTHING.
