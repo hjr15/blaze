@@ -13,6 +13,14 @@
 // This is a SUBPROCESS test, matching tests/audit-malformed-container.test.mjs's own
 // rationale: a unit-level check on `auditCorpus` alone cannot see what `audit-runner.mjs`
 // does around it (the `config = null` catch, the `keys` fallback, `report.ok`).
+//
+// BLZ-402 round 2 correction: an earlier revision of this fix additionally zeroed `keys`
+// to `[]` whenever the key load failed, so as to "never report over an unsafe corpus" — see
+// the tests below named "round-2 finding 2". That over-corrected: the fix this file exists
+// to pin was `ok=true` hiding the problem, not the disk-listing fallback existing at all.
+// `keys` now falls back to the disk listing on a bad key exactly as it already did for a
+// config that merely failed to PARSE (BLZ-392) — what changed, and the only thing that
+// needed to change, is that `ok` is `false` and the exit code is 1.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
@@ -61,20 +69,78 @@ describe("BLZ-402 review finding 1: an unloadable config never reports ok=true",
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("does not silently swap in a disk-listing denominator (the BLZ-133 bug, inverted)", () => {
-    // A stray project directory on disk ("OLD") that is NOT in blaze.config.json's
-    // `projects` array. Before the fix, a config load failure fell back to
-    // `fsReadStorage.listProjects(projectsDir)`, which lists EVERY directory under
-    // projects/ — silently growing "1 project(s)" into "2 project(s)" the moment the
-    // config that was supposed to scope the run failed to load.
+  test("BLZ-402 round-2 finding 2: DOES fall back to the disk listing on a bad key, "
+    + "and still reports ok=false", () => {
+    // An earlier revision of this fix asserted the OPPOSITE of what is asserted here: that
+    // a config load failure must never fall back to `fsReadStorage.listProjects`, on the
+    // theory that "everything downstream depends on the config that failed to load, so
+    // there is nothing safe to keep running against". That was wrong. `--projects <name>`
+    // proves the corpus IS safely auditable against a failed key load: `tickets` comes from
+    // `fsReadStorage.listTickets` and `schema-invalid` is read from each project's
+    // `project.json` on disk — neither touches the bad key. Zeroing `keys` to `[]` instead
+    // produced "0 tickets across 0 project(s)" — a false measurement statement in the
+    // grammar of a real count, understating the corpus rather than overstating it, but
+    // still a number the code did not measure. The distinction that actually matters is not
+    // "report nothing vs report something", it is `ok=true` vs `ok=false` — and `ok` is
+    // still decided by the `config-unloadable` HARD finding below, independent of how
+    // `keys` was resolved. So a stray project directory on disk ("OLD") that is NOT in
+    // blaze.config.json's `projects` array now DOES surface, exactly as it would for a
+    // config that merely failed to PARSE (BLZ-392's existing, tested tolerance) — the run
+    // still reports the fuller corpus, and still exits 1 because the key itself was bad.
     const root = board({
       configJson: '{"key":"eng","projects":["ENG"]}',
       extraProjectDirs: ["OLD"],
     });
     try {
       const r = audit(root);
-      assert.doesNotMatch(r.stdout, /2 project\(s\)/,
-        `a config load failure silently substituted a disk-listing fallback:\n${r.stdout}`);
+      assert.match(r.stdout, /2 project\(s\)/,
+        `a config load failure must still fall back to the disk listing:\n${r.stdout}`);
+      assert.match(r.stdout, /ok=false/, `must still report ok=false:\n${r.stdout}`);
+      assert.equal(r.status, 1, `must still exit 1:\n${r.stdout}\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("BLZ-402 round-2 finding 2: a schema-invalid project surfaces on a bad-key board "
+    + "exactly as it does with --projects", () => {
+    // The round-2 review's own reproduction: a schema-invalid project.json must not vanish
+    // behind a bad top-level key. Compares the flag-less path against `--projects ENG`,
+    // which already proved the corpus was safely auditable.
+    const root = board({
+      configJson: '{"key":"ENG","projects":["ENG","old-eng"]}',
+      extraProjectDirs: [],
+    });
+    writeFileSync(join(root, "projects", "ENG", "project.json"),
+      JSON.stringify({ key: "ENG", schema: { types: { task: { bogus_field_xyz: true } } } }));
+    // Second ticket so the corpus isn't trivially size-1.
+    writeFileSync(join(root, "projects", "ENG", "defined", "ENG-2-y.md"),
+      ["---", "id: ENG-2", 'title: "y"', "type: task", "project: ENG", "status: defined",
+       "estimate: 30", "---", ""].join("\n"));
+    try {
+      const flagless = audit(root);
+      const flagged = audit(root, "--projects", "ENG");
+      assert.match(flagless.stdout, /schema-invalid/,
+        `plain audit must report schema-invalid on a bad-key board:\n${flagless.stdout}`);
+      assert.match(flagless.stdout, /config-unloadable/, flagless.stdout);
+      assert.match(flagless.stdout, /2 tickets/, flagless.stdout);
+      assert.match(flagged.stdout, /schema-invalid/, flagged.stdout);
+      assert.match(flagless.stdout, /ok=false/, flagless.stdout);
+      assert.match(flagged.stdout, /ok=false/, flagged.stdout);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("--json still carries a real denominator, not only the config-unloadable finding", () => {
+    const root = board({
+      configJson: '{"key":"eng","projects":["ENG"]}',
+      extraProjectDirs: ["OLD"],
+    });
+    try {
+      const r = audit(root, "--json");
+      const parsed = JSON.parse(r.stdout);
+      assert.equal(parsed.ok, false, `ok must be false: ${r.stdout}`);
+      assert.ok(Array.isArray(parsed.findings) && parsed.findings.length > 1,
+        `--json must carry more than just config-unloadable:\n${r.stdout}`);
+      const kinds = parsed.findings.map((f) => f.kind);
+      assert.ok(kinds.includes("config-unloadable"), `--json:\n${r.stdout}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -83,6 +149,66 @@ describe("BLZ-402 review finding 1: an unloadable config never reports ok=true",
     try {
       const r = audit(root);
       assert.match(r.stdout, /ok=true/, r.stderr);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-402 round-2 finding 3: config-unloadable fires on ANY loadConfig throw "
+  + "except the two BLZ-392 exceptions", () => {
+  // The round-2 review measured that the first cut of this fix caught ONLY a bad
+  // key/projects[] entry and left every malformed-`schedule` shape reporting `ok=true` —
+  // the very defect this lane exists to close, shipped again in a new place.
+  test("a malformed schedule (wrong shape: a string instead of an object) is HARD, ok=false", () => {
+    const root = board({ configJson: '{"key":"ENG","projects":["ENG"],"schedule":"8h"}' });
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /config-unloadable/, `must report config-unloadable:\n${r.stdout}`);
+      assert.match(r.stdout, /ok=false/, `must report ok=false:\n${r.stdout}`);
+      assert.equal(r.status, 1, `must exit 1:\n${r.stdout}\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a malformed schedule (unknown key: minutesPerDay instead of minutes_per_day) is HARD, ok=false", () => {
+    const root = board({
+      configJson: '{"key":"ENG","projects":["ENG"],"schedule":{"minutesPerDay":480}}',
+    });
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /config-unloadable/, `must report config-unloadable:\n${r.stdout}`);
+      assert.match(r.stdout, /ok=false/, `must report ok=false:\n${r.stdout}`);
+      assert.equal(r.status, 1, `must exit 1:\n${r.stdout}\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("a malformed schedule (minutes_per_day: 0) is HARD, ok=false", () => {
+    const root = board({
+      configJson: '{"key":"ENG","projects":["ENG"],"schedule":{"minutes_per_day":0}}',
+    });
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /config-unloadable/, `must report config-unloadable:\n${r.stdout}`);
+      assert.match(r.stdout, /ok=false/, `must report ok=false:\n${r.stdout}`);
+      assert.equal(r.status, 1, `must exit 1:\n${r.stdout}\n${r.stderr}`);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("BLZ-392 control: unparseable JSON still reports ok=true — the tolerance is untouched", () => {
+    const root = board({ configJson: "{ this is not json" });
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /ok=true/,
+        `an unparseable config must keep BLZ-392's tolerance:\n${r.stdout}\n${r.stderr}`);
+      assert.doesNotMatch(r.stdout, /config-unloadable/, r.stdout);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("BLZ-392 control: an incompatible schemaVersion still reports ok=true — the tolerance is untouched", () => {
+    const root = board({ configJson: '{"key":"ENG","projects":["ENG"],"schemaVersion":99}' });
+    try {
+      const r = audit(root);
+      assert.match(r.stdout, /ok=true/,
+        `an incompatible schemaVersion must keep BLZ-392's tolerance:\n${r.stdout}\n${r.stderr}`);
+      assert.doesNotMatch(r.stdout, /config-unloadable/, r.stdout);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

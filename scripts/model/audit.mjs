@@ -33,14 +33,27 @@ export const HARD_KINDS = new Set([
   // `summarise` and every caller reads, so a kind raised elsewhere must still be classified
   // in one place.
   "duplicate-status",
-  // config-unloadable (BLZ-402 review finding 1) is raised by the RUNNER, for the same
-  // reason as duplicate-status: whether `loadConfig` threw is a property of the LOAD
-  // attempt, not of any ticket's frontmatter. HARD, deliberately — `audit` is exempt from
-  // `cli.mjs`'s schema preflight on the ground that reporting this class of problem IS its
-  // job, and a report that swallows a load failure into `config = null` and still prints
-  // `ok=true` is the opposite of that job. It also cannot be a fill queue: everything
-  // downstream (the project set, the schema-invalid check, the schedule) depends on the
-  // config that failed to load, so there is nothing safe to keep running against.
+  // config-unloadable (BLZ-402 review finding 1, tightened by round-2 finding 3) is raised
+  // by the RUNNER, for the same reason as duplicate-status: whether `loadConfig` threw is a
+  // property of the LOAD attempt, not of any ticket's frontmatter. HARD, deliberately —
+  // `audit` is exempt from `cli.mjs`'s schema preflight on the ground that reporting this
+  // class of problem IS its job, and a report that swallows a load failure into
+  // `config = null` and still prints `ok=true` is the opposite of that job. It fires on
+  // ANY `loadConfig` throw except the two BLZ-392 explicitly tolerates (unparseable JSON,
+  // an incompatible `schemaVersion`) — so a bad `key`/`projects[]` entry AND a malformed
+  // `schedule` block both land here.
+  //
+  // An earlier revision of this comment claimed it "cannot be a fill queue" because
+  // "everything downstream ... depends on the config that failed to load, so there is
+  // nothing safe to keep running against" — used to justify zeroing the audit-runner
+  // project-set denominator to `[]` on this finding. That was FALSE, and
+  // `scripts/audit-runner.mjs` disproves it: `tickets` comes from
+  // `fsReadStorage.listTickets` and `schema-invalid` is read from each project's
+  // `project.json` on disk, neither of which touches `config.projects`, so both remain
+  // exactly as safe to compute as when `config` is null for any other reason. What makes
+  // this HARD is not that nothing downstream is safe — it is that a config failing to load
+  // for one of these reasons is itself real information the operator must see, the same way
+  // `duplicate-status` is HARD despite the rest of the corpus still being auditable.
   "config-unloadable",
 ]);
 
