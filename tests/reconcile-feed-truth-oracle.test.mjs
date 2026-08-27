@@ -355,6 +355,28 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
         `but the diff touches ${diffIds.size} distinct ticket id(s): ${[...diffIds].join(", ")}`);
       bonusClauses += 1;
 
+      // BLZ-404 round 2 (blocking 2 — adversarial re-review's M6 mutation): the two clauses
+      // above collapse a move to a SET of distinct ticket ids and survive a mutation that
+      // commits only the DESTINATION path of a move and drops the SOURCE from `touched`
+      // (`touched.push(dest)` alone, never `touched.push(t.file)`). Under that mutation the
+      // subject still reads "reconcile N ticket(s)" and `git show --name-only` still touches
+      // N distinct ids — the new path IS one of them — so both clauses above stay green while
+      // the product commits a ticket at its OLD status (still tracked, still on disk, now
+      // untracked-deleted) and its NEW status at once, and leaves the old path permanently
+      // unstaged. `git status --porcelain`, scoped to the board's own project tree, is ground
+      // truth no `git show`/subject-parsing clause can be fooled by: a real move's source
+      // deletion and destination creation must BOTH have landed in the commit, or the
+      // working tree is not clean. Verified by hand against the M6 mutation (see the PR
+      // body): with only this clause reverted, `node --test` on this file stays green under
+      // the mutation; with it in place, this exact assertion goes red.
+      const boardTreeDirty = execFileSync("git",
+        ["-C", root, "status", "--porcelain", "--", join(root, "projects", KEY)],
+        { encoding: "utf8" }).trim();
+      assert.equal(boardTreeDirty, "",
+        "applied: the board's own project tree must be FULLY committed after an applied run — " +
+        `git status --porcelain reports uncommitted change(s) it must not:\n${boardTreeDirty}`);
+      bonusClauses += 1;
+
       totalClauses += clauses + bonusClauses;
       console.log(`ORACLE (applied): ${clauses + bonusClauses} clauses checked over ${before.size} tickets and ` +
         `${reconcileEvents.length} events (${movedIds.size} real moves, ${clearedIds.size} real clears), 0 mismatches`);
