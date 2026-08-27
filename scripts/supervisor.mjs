@@ -276,11 +276,36 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // must not STOP there when the commit did not land, since per the comment above
         // this feed is "the operator's whole account of the run" under `blaze start`.
         if (r.commitOutcome === "locked" || r.commitOutcome === "failed") {
+          // BLZ-404 round 2 (blocking 1): "applied N change(s) to disk" is only true of a
+          // pass that decided something new. A RECOVERY pass (this pass's own `changes` is
+          // empty; it is finishing a previous pass's leftover write — see `recoveredCount`
+          // in reconcile.mjs) applied nothing new to disk this tick, so it gets its own,
+          // equally true wording rather than inheriting the fresh-pass one.
+          const what = r.recoveredCount
+            ? `reconcile found ${r.recoveredCount} ticket change(s) left uncommitted by an earlier pass`
+            : `reconcile applied ${r.changes.length} change(s) to disk`;
           bus.publish({
             type: "error", loop: "reconcile",
-            message: `reconcile applied ${r.changes.length} change(s) to disk but the commit did ` +
-              `not land (${r.commitOutcome}: ${r.commitError}) — the board is now a DIRTY TREE: ` +
-              "ticket files changed with no matching commit. Investigate and commit manually.",
+            message: `${what} but the commit did not land (${r.commitOutcome}: ${r.commitError}) — ` +
+              "the board is now a DIRTY TREE: ticket files changed with no matching commit. " +
+              "Investigate and commit manually.",
+            ts: today(),
+          });
+        }
+        // BLZ-404 round 2 (blocking 3): `queued` was the one non-commit outcome this feed
+        // said NOTHING about — only `locked`/`failed` published anything beyond the raw
+        // per-ticket `reconcile` events. On a `commitMode: "batch"` board that means the
+        // feed shows `applied: true` for every ticket move and stops there: nothing tells
+        // the operator the board is now accumulating a pending ledger entry and a tree that
+        // stays uncommitted until `blaze commit` runs. The CLI is truthful here ("queued
+        // (commitMode: batch) — run `blaze commit`"); the feed — this ticket's own comment
+        // calls it "the operator's whole account of the run" — was not. Say what the CLI
+        // says, in the CLI's own words, so the two surfaces cannot drift on this outcome.
+        if (r.commitOutcome === "queued") {
+          const count = r.changes.length || r.recoveredCount;
+          bus.publish({
+            type: "warning", loop: "reconcile",
+            message: `queued (commitMode: batch) — run \`blaze commit\` to flush ${count} change(s).`,
             ts: today(),
           });
         }

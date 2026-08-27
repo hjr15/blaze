@@ -933,6 +933,51 @@ function gatherProject(project, { fetch }) {
   };
 }
 
+// --- BLZ-404 round 2 (blocking 1): finish an unfinished pass, don't call it in sync ---
+// The commit block below used to gate on `touched.length` alone — the tickets THIS PASS
+// decided to write. That is right for "did this pass find anything new", and wrong for
+// "is there anything left to commit": a previous pass that wrote ticket files and then
+// FAILED to commit them (a held lock, a failing pre-commit hook) leaves those files on
+// disk, at their target status, uncommitted. The very next pass samples git+PR state,
+// finds the board already where it should be, and so decides nothing and writes nothing
+// of its own — `touched` is empty — even though the tree is still dirty from before.
+// Gating the commit on `touched.length` alone then made reconcile — the one verb whose
+// whole job is "make the board match git state" — silently leave that job undone and
+// report a healthy run.
+//
+// Scoped to `projectsDir`, never the whole repo: this is deliberately NOT `git add -A`.
+// A human's unrelated uncommitted work sitting elsewhere in the same board repo (a draft
+// doc, an unrelated config edit) must never be swept into a reconcile commit — only the
+// board's own ticket tree is this verb's business, exactly as `--project`'s blast-radius
+// scoping already established for the SELECTION half of this same verb.
+function dirtyTicketPaths(root, projectsDir) {
+  // Deliberately NOT `shResult`/`sh`: both `.trim()` the WHOLE captured blob, and
+  // porcelain's own unstaged-change marker is a LEADING space (" D path" — the first
+  // column is the index status, blank; the second is the worktree status, D). Trimming
+  // the blob eats exactly that leading space off the FIRST line only, shifting every
+  // fixed-offset slice on it by one column and truncating the path's first character
+  // ("projects/…" read as "rojects/…") — caught by this function's own pinning test
+  // reproducing the exact " D …" line the bug this whole fix exists for produces.
+  let stdout;
+  try {
+    stdout = execFileSync("git", ["-C", root, "status", "--porcelain", "--", projectsDir],
+      { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 });
+  } catch {
+    return [];
+  }
+  const out = [];
+  for (const line of stdout.split("\n")) {
+    if (!line) continue;
+    // Porcelain v1: two status chars, a space, then the path. A rename/copy line reads
+    // "old -> new"; the file that exists on disk NOW (and so is what `git add` needs) is
+    // the one after the arrow.
+    const path = line.slice(3);
+    const arrow = path.indexOf(" -> ");
+    out.push(arrow === -1 ? path : path.slice(arrow + 4));
+  }
+  return out;
+}
+
 // --- the reconcile pass -------------------------------------------------------
 export async function reconcile({
   fetch = false, commit = false, dryRun = true, root, projectsDir,
@@ -1225,24 +1270,42 @@ export async function reconcile({
   // meaningless name in `checkBranch`'s refusal message, which lists ids by this field).
   let commitOutcome = "none"; // "none" | "committed" | "queued" | "locked" | "failed"
   let commitError = null;
-  if (commit && !dryRun && touched.length) {
-    const message = `chore(board): reconcile ${changes.length} ticket(s) to git state` +
+  // BLZ-404 round 2 (blocking 1): when THIS pass wrote nothing (`touched` empty), that is
+  // not yet "nothing to commit" — a previous pass may have written ticket files and then
+  // failed to commit them. `recoveredCount` says which case this run landed in, so the
+  // CLI and the supervisor can tell "genuinely nothing outstanding" from "just finished
+  // someone else's unfinished write" without re-deriving it themselves.
+  let recoveredCount = 0;
+  if (commit && !dryRun) {
+    let files = touched;
+    let message = `chore(board): reconcile ${changes.length} ticket(s) to git state` +
       (wanted ? ` (${keys.join(", ")})` : "");
-    const c = commitOrQueue({
-      root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
-      message, files: touched,
-    });
-    if (c.queued) {
-      commitOutcome = "queued";
-    } else if (c.ok) {
-      committed = true;
-      commitOutcome = "committed";
-    } else if (c.locked) {
-      commitOutcome = "locked";
-      commitError = "the advisory commit lock is held by another writer";
-    } else {
-      commitOutcome = "failed";
-      commitError = `git commit failed (exit status ${c.status})`;
+    if (!files.length) {
+      const dirty = dirtyTicketPaths(root, projectsDir).map((p) => join(root, p));
+      if (dirty.length) {
+        files = dirty;
+        recoveredCount = dirty.length;
+        message = `chore(board): reconcile recovers ${dirty.length} uncommitted ticket ` +
+          "change(s) left by a previous pass" + (wanted ? ` (${keys.join(", ")})` : "");
+      }
+    }
+    if (files.length) {
+      const c = commitOrQueue({
+        root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
+        message, files,
+      });
+      if (c.queued) {
+        commitOutcome = "queued";
+      } else if (c.ok) {
+        committed = true;
+        commitOutcome = "committed";
+      } else if (c.locked) {
+        commitOutcome = "locked";
+        commitError = "the advisory commit lock is held by another writer";
+      } else {
+        commitOutcome = "failed";
+        commitError = `git commit failed (exit status ${c.status})`;
+      }
     }
   }
   // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
@@ -1267,8 +1330,9 @@ export async function reconcile({
   // BLZ-404: `dryRun` travels with the result too — `changes` is a PROPOSAL list on a dry
   // run and a RECORD of writes on an applied run, and until now no consumer could tell
   // which sense it was looking at without already knowing what it had passed in.
-  return { ok: true, changes, committed, commitOutcome, commitError, pushed, missingRepos,
-           scannedRepos, configuredRepos, forgeErrors, findings, scannedProjects: keys, dryRun };
+  return { ok: true, changes, committed, commitOutcome, commitError, recoveredCount, pushed,
+           missingRepos, scannedRepos, configuredRepos, forgeErrors, findings,
+           scannedProjects: keys, dryRun };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -1344,7 +1408,19 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("reconcile: this is a misconfiguration, not an in-sync board. If you are in a git worktree, relative codeRepos may be resolving against the wrong parent.");
     process.exit(1);
   }
-  if (!r.changes.length) { if (!quiet) console.log("reconcile: already in sync — nothing to do."); process.exit(0); }
+  // BLZ-404 round 2 (blocking 1): "already in sync" is a positive claim about the WHOLE
+  // board, and it must not fire merely because THIS pass found nothing NEW to decide.
+  // `reconcile()`'s own commit block (see `dirtyTicketPaths` above it) already tried, in
+  // this very call, to finish any commit a previous pass left behind — so by the time we
+  // get here `r.commitOutcome` is `"none"` only when there is truly nothing outstanding:
+  // always true in dry-run mode (which never commits at all), and in apply mode true only
+  // when the board really is clean. When it is anything else (`committed`, `queued`,
+  // `locked`, `failed`), that outcome is reported below instead — never silently, and
+  // never as "in sync".
+  if (!r.changes.length && (!apply || r.commitOutcome === "none")) {
+    if (!quiet) console.log("reconcile: already in sync — nothing to do.");
+    process.exit(0);
+  }
   for (const c of r.changes) {
     const what = `${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`;
     console.log(c.cleared
@@ -1357,14 +1433,31 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // rather than reusing "moved" wording (which only ever described the file, never the
   // commit) for every outcome alike.
   if (apply) {
+    const count = r.changes.length || r.recoveredCount;
     if (r.commitOutcome === "queued") {
-      console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ${r.changes.length} change(s).`);
+      console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ${count} change(s).`);
     } else if (r.commitOutcome === "committed") {
-      console.log(`reconcile: committed ${r.changes.length} change(s).`);
-    } else if (r.commitOutcome === "locked" || r.commitOutcome === "failed") {
+      // BLZ-404 round 2 (blocking 1): a run whose own `changes` is empty but which still
+      // committed did NOT decide anything new — it finished a PREVIOUS pass's write. Saying
+      // "committed 0 change(s)" there would be its own small lie in the opposite direction.
+      console.log(r.recoveredCount
+        ? `reconcile: recovered and committed ${r.recoveredCount} ticket change(s) left uncommitted by an earlier pass.`
+        : `reconcile: committed ${count} change(s).`);
+    } else if (r.commitOutcome === "locked") {
       console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
         "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
         "Re-run once the lock clears, or commit the tree manually.");
+      process.exit(1);
+    } else if (r.commitOutcome === "failed") {
+      // BLZ-404 round 2 (blocking 1, item 3): this branch used to share the lock's own
+      // wording ("re-run once the lock clears"), which is FALSE for a failing pre-commit
+      // hook or a detached HEAD — outcomes that reach "failed", never "locked", and carry
+      // no lock at all. Each outcome gets advice that is true for it.
+      console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
+        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
+        "No lock is involved in this failure — check for a failing pre-commit hook, a detached " +
+        "HEAD, or another reason `git commit` itself refuses, fix it, then commit the tree " +
+        "manually or re-run.");
       process.exit(1);
     }
   }
