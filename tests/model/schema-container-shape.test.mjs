@@ -19,7 +19,8 @@
 // vocabulary for the same fact.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { validateSchema, assertSchemaValid } from "../../scripts/model/schema-config.mjs";
+import { validateSchema, assertSchemaValid, schemaContainerErrors }
+  from "../../scripts/model/schema-config.mjs";
 import { loadConfig, loadProject } from "../../scripts/config.mjs";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -282,5 +283,34 @@ describe("BLZ-396 review F2: the dropped-kind marker is not operator-controllabl
       assert.ok(validateSchema({ config }).some((p) => /schema must be an object, got string/.test(p)),
         "the loader path must still report — a Symbol marker that nothing reads is no marker");
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+describe("BLZ-396 review F2: schemaContainerErrors' own dropped-kind contract", () => {
+  // The Symbol marker means no operator-written JSON can reach `dropped` through the two
+  // production call sites, so reverting the value whitelist alone kills nothing in the
+  // suite. But this function is EXPORTED, and the whitelist is the only thing standing
+  // between a caller's bad value and `[object Object]` in an audit detail — the BLZ-392
+  // rendering defect. Pinned where it is actually reachable: at the public boundary.
+  test("only the kinds the loaders can produce are reported", () => {
+    for (const kind of ["an array", "string", "number", "boolean", "bigint", "symbol", "function"]) {
+      assert.deepEqual(schemaContainerErrors(null, kind),
+        [`schema must be an object, got ${kind} — the whole block was IGNORED, `
+         + "so every type, workflow and link type came from the built-in defaults"],
+        `${kind} is a kind loadConfig really emits and must be reported`);
+    }
+  });
+
+  test("anything else is ignored rather than rendered into a detail", () => {
+    for (const bogus of [{ a: 1 }, ["x"], 42, true, "notakind", () => {}]) {
+      assert.deepEqual(schemaContainerErrors(null, bogus), [],
+        `a value no loader produces must not become a finding: ${String(bogus)}`);
+    }
+  });
+
+  test("and the layer argument defaults to the config layer", () => {
+    // Both production call sites pass it explicitly; the default keeps the exported
+    // function honest for anyone who does not.
+    assert.match(schemaContainerErrors({ types: "x" })[0], /the built-in types are still in force/);
   });
 });
