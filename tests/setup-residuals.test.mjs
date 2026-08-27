@@ -535,10 +535,15 @@ describe("BLZ-397: a blocked path still untracks a token that is already staged"
     writeFileSync(join(root, ".blaze", ".gitignore"), "!setup-token\n");
     chmodSync(join(root, ".gitignore"), 0o200);          // write-only: read denied
     const cap = captureOutput();
-    try { ensureSetupTokenIgnored(root); } finally { cap.stop(); }
+    let r;
+    try { r = ensureSetupTokenIgnored(root); } finally { cap.stop(); }
     try {
       assert.equal(existsSync(join(root, ".gitignore")), true,
         "the operator's .gitignore must not be deleted — every rule in it would go with it");
+      assert.equal(r.state, "unreadable",
+        "and the state must name THIS cause, not be lumped in with a negating rule");
+      assert.match(cap.text, /could not read/,
+        "and the operator must be told — this board's token is committable and nothing else says so");
       chmodSync(join(root, ".gitignore"), 0o644);
       assert.equal(readFileSync(join(root, ".gitignore"), "utf8"), "node_modules/\nsecrets.env\n",
         "and must come back exactly as it was");

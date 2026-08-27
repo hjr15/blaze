@@ -206,19 +206,24 @@ not be a surprise:
    operator is warned on stderr — naming the **path** and never the value, exactly as the
    already-tracked case in (2) does.
 
-   **The state names its cause**, because the three that can stop this need three different
+   **The state names its cause**, because the FOUR that can stop this need four different
    things from the operator: `ineffective` (a deeper `.gitignore` negates the rule — fix the
    negating rule), `symlink` (the root `.gitignore` is a symlink, which **git does not read
-   at all**, so no rule can be appended there — add it to a real file), and `unwritable` (the
-   write was refused — check permissions). None of them leaves the function early: a board
-   that cannot be given a rule may still have the token **tracked**, and un-staging a live
-   credential with `git rm --cached -f` is worth doing regardless, so step (2) below runs on
-   every path.
+   at all**, so no rule can be appended there — add it to a real file), `unreadable` (blaze
+   could not read the existing `.gitignore`, so it will not risk replacing it — check
+   permissions), and `unwritable` (the append itself was refused — check permissions). None
+   of them leaves the function early: a board that cannot be given a rule may still have the
+   token **tracked**, and un-staging a live credential with `git rm --cached -f` is worth
+   doing regardless, so step (2) below runs on every path.
 
-   So nothing accretes on any board, and the only boards left un-ignored are the ones no
-   root-level rule could have covered. Both require an operator to have written a negating
-   rule themselves; across 20 adversarial `.gitignore` configurations measured during
-   BLZ-358's review, the maximum appended in one boot is 1.
+   So nothing accretes on any board. Two of the four causes are boards no root-level rule
+   could have covered — a deeper negating rule, or a symlinked `.gitignore` git will not
+   read — and those do require an operator to have set them up that way. **The other two do
+   not:** a `.gitignore` blaze cannot read or cannot write is left un-ignored purely because
+   blaze declines to touch a file it cannot handle safely, and a root-level rule would have
+   worked there had it been writable. In every one of the four the operator is warned on
+   stderr with the action that fits that cause. Across 20 adversarial `.gitignore`
+   configurations measured during BLZ-358's review, the maximum appended in one boot is 1.
 2. If git reports `.blaze/setup-token` as already **tracked** — a board that ran a
    pre-fix build and staged or committed the token — the server runs
    `git rm --cached -f -- .blaze/setup-token`. That removes the path from the **index

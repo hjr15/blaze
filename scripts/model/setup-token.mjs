@@ -154,8 +154,8 @@ export function ensureSetupTokenIgnored(dataRoot) {
       // boot-time hygiene check should attempt — and git does not read a symlinked
       // .gitignore anyway, so appending through it could never have helped.
       blocked = "symlink";
-      console.error(`blaze: WARNING — ${rel}'s .gitignore is a symlink, so blaze did not `
-        + `modify it. git does not read a symlinked .gitignore, so ${rel} is NOT ignored; `
+      console.error("blaze: WARNING — this board's root .gitignore is a symlink, so blaze "
+        + `did not modify it. git does not read a symlinked .gitignore, so ${rel} is NOT ignored; `
         + "add the rule to a real .gitignore by hand. (The token's VALUE is not shown here "
         + "or in any log.)");
     } else if (st?.isFile()) {
@@ -203,6 +203,13 @@ export function ensureSetupTokenIgnored(dataRoot) {
         // catches it bare, and the operator would lose the one warning that says a live
         // credential is still committable.
         state = "unwritable";
+        // A write can fail PART WAY — ENOSPC mid-append — leaving the operator's file half
+        // extended. The same restore the ineffective branch uses puts it back; there is
+        // nothing to keep, since the append by definition did not complete.
+        try {
+          if (existedBefore) writeFileSync(gitignore, existing);
+          else rmSync(gitignore, { force: true });
+        } catch { /* the restore itself failed; the warning below is all that is left */ }
         console.error(`blaze: WARNING — ${rel} is not ignored by git and blaze could not add `
           + `a rule for it (${e && e.code ? e.code : "write failed"}). This live credential `
           + "stays committable. Add the rule by hand, then restart. (The token's VALUE is "
