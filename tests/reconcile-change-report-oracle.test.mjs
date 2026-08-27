@@ -113,7 +113,7 @@ function buildFixture(tmp) {
   return { codeRepo, tickets, prs, misfiled };
 }
 
-function materializeBoard(root, { codeRepo, tickets, misfiled }) {
+function materializeBoard(root, { codeRepo, tickets, misfiled }, cfgExtra = {}) {
   const projectsDir = join(root, "projects");
   for (const t of tickets) {
     const dir = join(projectsDir, "ZZZ", t.status);
@@ -136,7 +136,8 @@ function materializeBoard(root, { codeRepo, tickets, misfiled }) {
   writeFileSync(join(projectsDir, "ZZZ", "project.json"), JSON.stringify({ key: "ZZZ", codeRepos: [codeRepo] }));
   mkdirSync(join(projectsDir, "YYY"), { recursive: true });
   writeFileSync(join(projectsDir, "YYY", "project.json"), JSON.stringify({ key: "YYY", codeRepos: [] }));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "ZZZ", projects: ["ZZZ", "YYY"] }));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ", "YYY"], ...cfgExtra }));
 
   for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
                    ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
@@ -183,6 +184,32 @@ function snapshotBoard(projectsDir) {
 
 const MOVE_RE = /^(?:moved|would move) (\S+): (\S+) → (\S+)/;
 const NONMOVE_RE = /^(?:updated|would update) (\S+) \(still (\S+)\)/;
+
+// BLZ-401 (adversarial round, finding 1): the per-ticket MOVE_RE/NONMOVE_RE lines were
+// the only surfaces the oracle pinned. Two more readers state the SAME two quantities in
+// aggregate — the dry-run tail line, and the `--apply` summary line (committed or, on a
+// `commitMode: "batch"` board, queued) — and both were provably unguarded: reverting
+// either verbatim to its pre-BLZ-401 wording (or to a wrong number) left the whole suite
+// green. These three regexes pin them against the same ground truth as everything else
+// in this file.
+const DRYRUN_TAIL_RE = /\(dry-run: (\d+) move\(s\)(?:, (\d+) other update\(s\))?; rerun with --apply to write locally — reconcile never pushes\)/;
+const COMMITTED_LINE_RE = /reconcile: committed (\d+) ticket\(s\) moved(?:, (\d+) ticket\(s\) updated without a status change)?\./;
+const QUEUED_LINE_RE = /reconcile: queued \(commitMode: batch\) — run `blaze commit` to flush (\d+) ticket\(s\) moved(?:, (\d+) ticket\(s\) updated without a status change)?\./;
+
+/** Asserts a two-quantity summary line (dry-run tail, --apply committed, or --apply
+ *  queued) states exactly the ground-truth moved/non-moved counts — including the
+ *  absence of the second clause when there is nothing non-moving to report, the same
+ *  rule the commit-message check below already enforces. */
+function assertSummaryLine({ label, what, re, text, movedGT, nonMovedGT }) {
+  const m = re.exec(text);
+  assert.ok(m, `${label}: no ${what} line matched the expected shape in: ${JSON.stringify(text)}`);
+  assert.equal(Number(m[1]), movedGT, `${label}: the ${what} line's moved count must equal the real directory-change count (${movedGT})`);
+  if (nonMovedGT > 0) {
+    assert.equal(Number(m[2]), nonMovedGT, `${label}: the ${what} line must also state the real non-moving write count (${nonMovedGT})`);
+  } else {
+    assert.equal(m[2], undefined, `${label}: the ${what} line claims non-moving updates that did not really happen`);
+  }
+}
 
 /** Parses the CLI's stdout into the two shapes of line it emits: a claimed MOVE
  *  and a claimed non-moving update. Anything else on stdout (the dry-run tail
@@ -271,15 +298,25 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
     // what it PREDICTS. The predictions are checked against a real `--apply` pass over
     // an IDENTICALLY materialized, otherwise untouched copy of the same board.
     const modes = [
-      { label: "dry-run (unfiltered)", args: [], groundArgs: ["--apply"], commit: false, apply: false },
+      { label: "dry-run (unfiltered)", args: [], groundArgs: ["--apply"], commit: false, apply: false, dryRunTail: true },
       { label: "--apply (unfiltered)", args: ["--apply"], commit: true, apply: true },
       { label: "--apply --project ZZZ", args: ["--project", "ZZZ", "--apply"], commit: true, apply: true },
+      // BLZ-401 (adversarial round, finding 1): the `queued` outcome — a
+      // `commitMode: "batch"` board — states the identical two quantities through its
+      // OWN wording branch (`reconcile: queued (commitMode: batch) — run \`blaze
+      // commit\` to flush …`), a distinct code path from "committed" that nothing
+      // exercised before this round. Files still land on disk (queueing only defers
+      // the git commit), so the same filesystem ground truth applies; there is no
+      // commit to read a subject line off, so this mode is checked via the CLI's own
+      // stdout instead of `git log`.
+      { label: "--apply (unfiltered, commitMode: batch — queued)", args: ["--apply"], commit: true, apply: true,
+        queued: true, cfgExtra: { commitMode: "batch" } },
     ];
 
     for (const mode of modes) {
       await t.test(mode.label, () => {
         const root = mkdtempSync(join(tmp, "board-"));
-        materializeBoard(root, fixture);
+        materializeBoard(root, fixture, mode.cfgExtra);
         const projectsDir = join(root, "projects");
         const before = snapshotBoard(projectsDir);
 
@@ -296,7 +333,7 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
             totalChecked += 1;
           }
           const groundRoot = mkdtempSync(join(tmp, "ground-"));
-          materializeBoard(groundRoot, fixture);
+          materializeBoard(groundRoot, fixture, mode.cfgExtra);
           const groundBefore = snapshotBoard(join(groundRoot, "projects"));
           const groundRes = spawnSync(process.execPath, [RECONCILE_BIN, ...mode.groundArgs],
             { cwd: groundRoot, encoding: "utf8", env });
@@ -322,29 +359,62 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
           `${mode.label}: the finding must say no single-project run reconciles it`);
         totalChecked += 1;
 
-        // d) the --apply commit message's two quantities, both from ground truth.
-        if (mode.commit) {
-          const movedGT = [...before.keys()].filter((id) => {
-            const b = before.get(id), a = after.get(id);
-            return b && a && b.dir !== a.dir;
-          }).length;
-          const nonMovedGT = [...before.keys()].filter((id) => {
-            const b = before.get(id), a = after.get(id);
-            return b && a && b.dir === a.dir && b.raw !== a.raw;
-          }).length;
-          const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%B"], { encoding: "utf8" });
-          assert.match(subject, new RegExp(`\\b${movedGT} ticket\\(s\\) moved`),
-            `${mode.label}: commit message's moved count must equal the real directory-change count (${movedGT})`);
+        // Ground truth for every aggregate-count reader below (the dry-run tail, the
+        // --apply commit message, and the --apply/queued summary line): the SAME two
+        // quantities the per-ticket oracle above already checked line-by-line, computed
+        // once here from the filesystem, not from anything reconcile printed.
+        const movedGT = [...before.keys()].filter((id) => {
+          const b = before.get(id), a = after.get(id);
+          return b && a && b.dir !== a.dir;
+        }).length;
+        const nonMovedGT = [...before.keys()].filter((id) => {
+          const b = before.get(id), a = after.get(id);
+          return b && a && b.dir === a.dir && b.raw !== a.raw;
+        }).length;
+
+        // BLZ-401 (adversarial round, finding 1): the dry-run tail line — the surface a
+        // person reads before believing the board on the default, no-flags invocation —
+        // was provably unpinned; reverting it verbatim to its pre-BLZ-401 wording, or to
+        // either count being wrong, left the whole suite green. Pinned here against the
+        // same ground truth as every other reader.
+        if (mode.dryRunTail) {
+          assertSummaryLine({ label: mode.label, what: "dry-run tail", re: DRYRUN_TAIL_RE,
+            text: res.stdout, movedGT, nonMovedGT });
           totalChecked += 1;
-          if (nonMovedGT > 0) {
-            assert.match(subject, new RegExp(`\\b${nonMovedGT} ticket\\(s\\) updated without a status change`),
-              `${mode.label}: commit message must also state the real non-moving write count (${nonMovedGT})`);
+        }
+
+        if (mode.commit) {
+          // d) the --apply commit message's two quantities, both from ground truth.
+          // Only meaningful when a commit actually happened — a queued (`commitMode:
+          // "batch"`) run defers the commit entirely, so there is no new subject line
+          // to read; that outcome is pinned via the CLI's own stdout instead, below.
+          if (!mode.queued) {
+            const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%B"], { encoding: "utf8" });
+            assert.match(subject, new RegExp(`\\b${movedGT} ticket\\(s\\) moved`),
+              `${mode.label}: commit message's moved count must equal the real directory-change count (${movedGT})`);
             totalChecked += 1;
-          } else {
-            assert.doesNotMatch(subject, /updated without a status change/,
-              `${mode.label}: commit message claims non-moving updates that did not really happen`);
-            totalChecked += 1;
+            if (nonMovedGT > 0) {
+              assert.match(subject, new RegExp(`\\b${nonMovedGT} ticket\\(s\\) updated without a status change`),
+                `${mode.label}: commit message must also state the real non-moving write count (${nonMovedGT})`);
+              totalChecked += 1;
+            } else {
+              assert.doesNotMatch(subject, /updated without a status change/,
+                `${mode.label}: commit message claims non-moving updates that did not really happen`);
+              totalChecked += 1;
+            }
           }
+
+          // BLZ-401 (adversarial round, finding 1): the CLI's own `--apply` summary
+          // line — committed or queued — states the identical two quantities and was
+          // just as unpinned as the dry-run tail; the queued branch in particular was
+          // not exercised by any test before this round.
+          assertSummaryLine({
+            label: mode.label,
+            what: mode.queued ? "queued summary" : "committed summary",
+            re: mode.queued ? QUEUED_LINE_RE : COMMITTED_LINE_RE,
+            text: res.stdout, movedGT, nonMovedGT,
+          });
+          totalChecked += 1;
         }
       });
     }
