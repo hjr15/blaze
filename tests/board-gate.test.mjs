@@ -80,7 +80,7 @@ test("good fixture board: the `blaze` CLI itself passes audit and reconcile --dr
     encoding: "utf8",
     env: { ...process.env, BLAZE_PROJECTS_DIR: join(GOOD, "projects") },
   });
-  assert.match(reconcileOut, /already in sync/);
+  assert.match(reconcileOut, /no code-bound change found/);
 });
 
 // --- the good direction, on the REAL board's config shape (not a hand-built one) ----
@@ -117,7 +117,7 @@ test("real-shape fixture board: the `blaze` CLI itself passes audit and reconcil
     encoding: "utf8",
     env: { ...process.env, BLAZE_PROJECTS_DIR: join(REAL_SHAPE, "projects") },
   });
-  assert.match(reconcileOut, /already in sync/);
+  assert.match(reconcileOut, /no code-bound change found/);
 });
 
 // --- the bad direction: the guard must fail LOUD, not silently ----------------------

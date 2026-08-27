@@ -268,8 +268,9 @@ also stored on the index (`idx.warnings`) for any consumer that wants them.
 
 `blaze.config.json`'s `commitMode` decides how CLI verbs commit:
 
-- `per-op` (default) — each `new`/`move`/`log`/`resolve`/`edit` commits immediately,
-  scoped to exactly the file(s) it touched (never a broad `git add -A`).
+- `per-op` (default) — each `new`/`move`/`log`/`resolve`/`edit`/`reconcile --apply`
+  commits immediately, scoped to exactly the file(s) it touched (never a broad
+  `git add -A`).
 - `batch` — the op is appended to a pending queue instead; run `blaze commit` to
   flush your queue into one commit (subject = a per-op count summary, body = one
   line per queued op).

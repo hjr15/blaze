@@ -281,7 +281,7 @@ Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member
 | GET | `/api/sync` | `read` | Unsynced-commit count for the `⇧ N ahead` badge |
 | GET | `/api/live` | `read` | Live agent-activity feed (`model/activity.mjs`) |
 | GET | `/api/panel?id=` | `read` | Detail-panel HTML for one ticket |
-| GET | `/api/reconcile-preview` | `read` | Dry-run of the code-bound moves reconcile would make |
+| GET | `/api/reconcile-preview` | `read` | Dry-run of the code-bound moves reconcile would make — `{ ok, changes, forgeErrors, findings }`, or `{ ok: false, error, changes: [] }` on a refused run (BLZ-405) |
 | GET | `/api/matrix` · `/api/coverage` | `read` | v4 traceability matrix and coverage (BLZ-323) |
 | POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push) |
 | POST | `/api/artifact` · `/api/link` · `/api/baseline` | `write` | v4 artifact model mutations (BLZ-323) |
@@ -294,7 +294,7 @@ Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member
 | Method | Route | Scope | Purpose |
 |---|---|---|---|
 | GET | `/events` | `read` | Server-sent activity stream — it names ticket ids and commit shas |
-| POST | `/control/{reconcile,groomer}/{start,stop,run}` | `write` | Start, stop or fire one pass of a loop. `groomer/run` is the **agent-dispatch** endpoint; `reconcile/run` commits and pushes. None of them is a read — `start`/`stop` decide whether the other two happen at all |
+| POST | `/control/{reconcile,groomer}/{start,stop,run}` | `write` | Start, stop or fire one pass of a loop. `groomer/run` is the **agent-dispatch** endpoint; `reconcile/run` applies for real and commits locally — it never pushes (BLZ-404 AC-4: `reconcile()` hardcodes `pushed: false` and has no `push` parameter to contradict it). None of them is a read — `start`/`stop` decide whether the other two happen at all |
 | POST | `/control/revert` | `write` | `git revert --no-edit <sha>` on the board repo, for the ↩ button on a groom event |
 | *anything else under* `/control/` | — | **`404 unknown endpoint`** — unclassified is denied |
 

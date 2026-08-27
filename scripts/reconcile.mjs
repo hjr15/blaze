@@ -25,6 +25,8 @@ import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
+import { commitOrQueue } from "./commit-or-queue.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 // BLZ-130: SELECTION precedence — deliberately NOT "how far along the PR is".
 // An OPEN PR outranks a MERGED one, because while any PR carrying the key is still
@@ -933,7 +935,7 @@ function gatherProject(project, { fetch }) {
 
 // --- the reconcile pass -------------------------------------------------------
 export async function reconcile({
-  fetch = false, commit = false, push = false, dryRun = true, root, projectsDir,
+  fetch = false, commit = false, dryRun = true, root, projectsDir,
   readStorage = fsReadStorage, storage = fsStorage, writePort = null, projects = null,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
@@ -974,9 +976,13 @@ export async function reconcile({
   if (wanted && !wanted.length) {
     // `configuredRepos: 0`, not `configured.length`: that field counts REPOS, and putting a
     // project count in it was a wrong value in a named field, unreachable or not.
+    // BLZ-404: `dryRun` on every return site, refusals included — `changes` is a PROPOSAL
+    // list on a dry run and a RECORD of writes on an applied run, and a caller reading a
+    // refusal's (empty) `changes` could not previously tell which sense it would have been.
     return { ok: false, error: "--project was given no project key", changes: [], committed: false,
+      commitOutcome: "none", commitError: null,
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-      forgeErrors: [], findings: [], scannedProjects: [] };
+      forgeErrors: [], findings: [], scannedProjects: [], dryRun };
   }
   const unknown = (wanted || []).filter((k) => !configured.includes(k));
   // Checked BEFORE the standalone return below, deliberately. Behind it, a typo'd key on a
@@ -988,13 +994,38 @@ export async function reconcile({
       // says so in words.
       error: `unknown project key(s): ${unknown.join(", ")}. This board configures: ` +
         (configured.length ? configured.join(", ") : "no projects at all"),
-      changes: [], committed: false, pushed: false, missingRepos: [], scannedRepos: 0,
-      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [] };
+      changes: [], committed: false, commitOutcome: "none", commitError: null,
+      pushed: false, missingRepos: [], scannedRepos: 0,
+      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [], dryRun };
   }
   if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
+    commitOutcome: "none", commitError: null,
     pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [],
-    findings: [], scannedProjects: [] };
+    findings: [], scannedProjects: [], dryRun };
   const keys = wanted || configured;
+
+  // BLZ-404 (review finding 1): every other board git writer gates its write through
+  // `assertWritable` before it touches disk (BLZ-121 defence-in-depth — cli.mjs is the
+  // primary gate and refuses to even spawn this file under BLAZE_READONLY, but a direct
+  // `reconcile({ dryRun: false })` library call, or `node scripts/reconcile.mjs --apply`,
+  // bypasses that). reconcile() never carried this guard at all.
+  //
+  // Gated on `!dryRun`, not on `commit`: the per-ticket loop below writes/renames ticket
+  // files through the write port whenever `dryRun` is false, REGARDLESS of whether a git
+  // commit was even requested. Hoisted to run BEFORE that loop, for the reason
+  // new-runner.mjs documents under its own assertWritable call: a refusal placed at the
+  // commit block instead would let the writes happen and only then decline to commit —
+  // the "dirty-tree failure, not a clean refusal" hazard, not a clean one.
+  if (!dryRun) {
+    try {
+      assertWritable("reconcile: apply board state");
+    } catch (e) {
+      return { ok: false, error: e.message, changes: [], committed: false,
+        commitOutcome: "none", commitError: null, pushed: false, missingRepos: [],
+        scannedRepos: 0, configuredRepos: 0, forgeErrors: [], findings: [],
+        scannedProjects: [], dryRun };
+    }
+  }
 
   const sig = new Map();
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
@@ -1175,13 +1206,60 @@ export async function reconcile({
   }
 
   let committed = false;
+  // BLZ-404 (review finding 1 + 2): reconcile used to shell straight to `git add`/`git
+  // commit`, the one board git writer answering to neither the advisory commit lock nor
+  // `commitMode`. It could commit THROUGH a held lock, and on a `commitMode: "batch"`
+  // board it committed ticket moves out from under a pending `blaze commit` batch instead
+  // of queueing them. Routed through the same single decision point every other verb uses
+  // (move/edit/log/resolve/new/link/sprint-runner): `acquireLock` in `per-op` mode, the
+  // pending ledger (with its branch record, INF-673) in `batch` mode.
+  //
+  // `commitFile` returns `{ ok, locked, status }` and treats "nothing to commit" as a
+  // benign no-op (`ok: true`) — that shape is carried out here as `commitOutcome`, not
+  // flattened into a bare boolean, so a caller (the CLI, the supervisor) can tell
+  // "committed" apart from "queued" apart from "locked" apart from "failed" rather than
+  // reading every non-commit as an indistinguishable `committed: false`.
+  //
+  // `id` names the WHOLE op, not a single ticket: reconcile can touch many tickets in one
+  // pass, and a null-ish id would make an unreadable pending-ledger entry (and a
+  // meaningless name in `checkBranch`'s refusal message, which lists ids by this field).
+  let commitOutcome = "none"; // "none" | "committed" | "queued" | "locked" | "failed"
+  let commitError = null;
+  // BLZ-404 round 5: this commit block only ever files THIS PASS's own decisions
+  // (`touched`) — it makes no attempt to recover a previous pass's uncommitted ticket
+  // writes, and reconcile makes no attempt to DETECT that condition either (round 2's
+  // recovery write and round 3/4's detect-and-report boolean were both tried and both
+  // deleted — see the PR body for why). Whether the board's ticket tree also carries
+  // leftover uncommitted dirt from an earlier pass is invisible to this function; a
+  // person notices it the same way they always have, via `git status`.
   if (commit && !dryRun && touched.length) {
-    sh("git", ["-C", root, "add", "--", ...touched]);
-    committed = sh("git", ["-C", root, "commit", "-m",
-      `chore(board): reconcile ${changes.length} ticket(s) to git state` +
-      (wanted ? ` (${keys.join(", ")})` : ""), "--", ...touched]) !== null;
+    const c = commitOrQueue({
+      root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
+      message: `chore(board): reconcile ${changes.length} ticket(s) to git state` +
+        (wanted ? ` (${keys.join(", ")})` : ""),
+      files: touched,
+    });
+    if (c.queued) {
+      commitOutcome = "queued";
+    } else if (c.ok) {
+      committed = true;
+      commitOutcome = "committed";
+    } else if (c.locked) {
+      commitOutcome = "locked";
+      commitError = "the advisory commit lock is held by another writer";
+    } else {
+      commitOutcome = "failed";
+      commitError = `git commit failed (exit status ${c.status})`;
+    }
   }
-  // push is never performed — hardcoded false regardless of the push param
+  // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
+  // never reads a `push` option and `pushed: false` is unconditional below — accepting a
+  // `push` PARAMETER that nothing reads told every caller a run might push when it never
+  // could, and `supervisor.mjs` passed exactly that. A removed parameter cannot be pinned
+  // by a mutation (there is nothing left to flip), so what is pinned instead is the
+  // CONTRACT this line states: `pushed` is `false` on every applied, committing run —
+  // see tests/reconcile-pertype.test.mjs.
+  const pushed = false;
   // INF-763: surface repo reachability so a caller can tell "scanned everything,
   // nothing to change" from "scanned nothing, so of course nothing changed".
   const missingRepos = [...new Set([...sig.values()].flatMap((g) => g.missingRepos))];
@@ -1193,8 +1271,12 @@ export async function reconcile({
   // BLZ-394 AC-5: a filtered run must not be mistakable for an in-sync board, so the result
   // says which projects it looked at — on every run, not only filtered ones, because the
   // caller cannot tell the difference from a `changes: []` alone.
-  return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos,
-           forgeErrors, findings, scannedProjects: keys };
+  // BLZ-404: `dryRun` travels with the result too — `changes` is a PROPOSAL list on a dry
+  // run and a RECORD of writes on an applied run, and until now no consumer could tell
+  // which sense it was looking at without already knowing what it had passed in.
+  return { ok: true, changes, committed, commitOutcome, commitError, pushed,
+           missingRepos, scannedRepos, configuredRepos, forgeErrors, findings,
+           scannedProjects: keys, dryRun };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -1229,7 +1311,7 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     console.error(`unknown flag: ${a}`); process.exit(1);
   }
-  const r = await reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply,
+  const r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
     projects: sawProject ? projectKeys : null });
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   // AC-5: say what was looked at BEFORE saying what was found, so "nothing to do" can never
@@ -1270,7 +1352,22 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error("reconcile: this is a misconfiguration, not an in-sync board. If you are in a git worktree, relative codeRepos may be resolving against the wrong parent.");
     process.exit(1);
   }
-  if (!r.changes.length) { if (!quiet) console.log("reconcile: already in sync — nothing to do."); process.exit(0); }
+  // BLZ-404 round 5: "already in sync" was a positive claim about the WHOLE board's git
+  // tree — more than reconcile ever knows. Rounds 2 through 4 each tried to make that
+  // claim true by either recovering (round 2) or detecting (round 3, round 4) a dirty
+  // tree left by some earlier pass, and each attempt was itself refuted (see the PR
+  // body): a recovery write with an unbounded blast radius, then a boolean detector that
+  // conflated a genuinely failed prior commit with a healthy `commitMode: "batch"` queue
+  // and with a human's own untracked file, while still missing the symlinked-`projects/`
+  // case it was written to catch. There is no version of this that works from the tree
+  // alone — telling those apart needs the pending ledger, not `git status` — so nothing
+  // here attempts it any more. Reconcile knows exactly one thing: whether THIS pass found
+  // any code-bound change to make. It says exactly that, and nothing about the state of
+  // the git tree, which may be dirty for reasons this pass neither caused nor can see.
+  if (!r.changes.length) {
+    if (!quiet) console.log("reconcile: no code-bound change found — nothing to do.");
+    process.exit(0);
+  }
   for (const c of r.changes) {
     const what = `${apply ? "moved" : "would move"} ${c.id}: ${c.from} → ${c.to}`;
     console.log(c.cleared
@@ -1278,4 +1375,32 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
       : what);
   }
   if (!apply) console.log(`(dry-run: ${r.changes.length} change(s); rerun with --apply to write locally — reconcile never pushes)`);
+  // BLZ-404 (review finding 1): the CLI's own commit block is the same code path the
+  // supervisor loop now uses, and its output must stay truthful about queued-vs-committed
+  // rather than reusing "moved" wording (which only ever described the file, never the
+  // commit) for every outcome alike.
+  if (apply) {
+    const count = r.changes.length;
+    if (r.commitOutcome === "queued") {
+      console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ${count} change(s).`);
+    } else if (r.commitOutcome === "committed") {
+      console.log(`reconcile: committed ${count} change(s).`);
+    } else if (r.commitOutcome === "locked") {
+      console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
+        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
+        "Re-run once the lock clears, or commit the tree manually.");
+      process.exit(1);
+    } else if (r.commitOutcome === "failed") {
+      // BLZ-404 round 2 (blocking 1, item 3): this branch used to share the lock's own
+      // wording ("re-run once the lock clears"), which is FALSE for a failing pre-commit
+      // hook or a detached HEAD — outcomes that reach "failed", never "locked", and carry
+      // no lock at all. Each outcome gets advice that is true for it.
+      console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
+        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
+        "No lock is involved in this failure — check for a failing pre-commit hook, a detached " +
+        "HEAD, or another reason `git commit` itself refuses, fix it, then commit the tree " +
+        "manually or re-run.");
+      process.exit(1);
+    }
+  }
 }

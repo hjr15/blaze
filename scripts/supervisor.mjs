@@ -26,7 +26,7 @@ const today = () => new Date().toISOString().slice(0, 10);
  * the control strip and the activity stream.
  *
  * Everything under `/control/*` is `write`, including `stop`. None of them is a read:
- * `run` dispatches the configured agent or a committing-and-pushing reconcile pass,
+ * `run` dispatches the configured agent or a committing (never pushing) reconcile pass,
  * `revert` shells out to `git revert`, and `start`/`stop` decide whether either happens
  * at all. `/events` is `read` because the feed names ticket ids and commit shas.
  *
@@ -93,8 +93,21 @@ export const ACTIVITY_SCRIPT = `
     function line(e) {
       const li = document.createElement("li");
       let txt = e.type;
-      if (e.type === "reconcile") txt = e.id + ": " + e.from + " → " + e.to
-        + (e.cleared ? " (branch/pr CLEARED — no single PR delivered it)" : "");
+      if (e.type === "reconcile") {
+        // BLZ-404: a non-applied event is a PROPOSAL, not a record of a write — mirror
+        // the CLI's own dry-run wording ("would move" / "would CLEAR") so the feed
+        // cannot claim a move that did not happen. e.applied is only ever false
+        // when the reconcile() pass this event came from ran with dryRun: true; an
+        // event with no applied field at all (every event this file published
+        // before this ticket) is read as applied, so old rendering is unchanged.
+        // (No backticks in here: this whole block lives inside a template literal.)
+        var preview = e.applied === false;
+        txt = (preview ? "would move " : "") + e.id + ": " + e.from + " → " + e.to;
+        if (e.cleared) {
+          txt += preview ? " (and would CLEAR its branch/pr — no single PR delivered it)"
+            : " (branch/pr CLEARED — no single PR delivered it)";
+        }
+      }
       else if (e.type === "groom") txt = e.error ? ("groom " + e.id + " failed: " + e.error)
         : e.noop ? ("groom " + e.id + ": no change") : ("groom " + e.id + " (" + (e.files||[]).length + " file)");
       else if (e.type === "status") txt = e.loop + " " + e.state;
@@ -215,14 +228,26 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   // async: reconcile awaits the write port (BLZ-293/294). The busy flag still guards
   // correctly — it is set before the await and cleared in the finally, which now runs
   // after the awaited work rather than before it.
-  async function runReconcile() {
+  //
+  // BLZ-404: `dryRun` defaults to `false` here — the loop applies for real. `AGENTS.md`
+  // and the `blaze` skill both say reconcile is what drives the delivery statuses ("never
+  // hand-move a ticket through the reconcile-owned statuses"), the loop already passes
+  // `commit: true`, and it ships `enabled: true` (the groomer, which dispatches an
+  // arbitrary agent, ships `enabled: false` deliberately). AC-1's two options are "apply
+  // for real" or "state plainly it is previewing" — the alternative here is a loop that is
+  // inert while its own config asks it to commit, so this picks the first. The parameter
+  // exists so a test can drive a genuine preview through this SAME publish path (the
+  // timer and `/control/reconcile/run` both call this with no arguments, i.e. applying).
+  async function runReconcile({ dryRun = false } = {}) {
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
     try {
       // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
-      const r = await reconcile({ fetch: true, commit: true, push: true, root, projectsDir });
+      // BLZ-404 AC-4: `push` deleted — reconcile() never read it and hardcodes
+      // `pushed: false` regardless, so passing `push: true` told nothing but a lie.
+      const r = await reconcile({ fetch: true, commit: true, dryRun, root, projectsDir });
       // BLZ-350: an unreadable forge is the loop's version of the silence the CLI
       // now breaks. Without this the app runs reconcile every tick, never reaches
       // "in-review", and the activity feed shows a healthy board.
@@ -233,7 +258,61 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // DESTROYS data, and under `blaze start` this feed is the operator's whole
         // account of the run — dropping the flag here left the deletion unreported on
         // the very surface that was the argument for reporting it.
-        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, cleared: Boolean(c.cleared), ts: today() });
+        //
+        // BLZ-404: `applied` is computed from `r.dryRun` on every publish, never
+        // branched on — the feed used to publish `moved: true` on EVERY dry run
+        // (which, before this ticket, was every run: `runReconcile` never passed
+        // `dryRun` and the board never actually wrote), so the feed asserted moves
+        // that never happened. `r.dryRun` reports what the pass this event came
+        // from actually did, so a mutation that hardcodes this field cannot silently
+        // agree with a mutation that reverts the `dryRun` passed above.
+        for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, cleared: Boolean(c.cleared), applied: !r.dryRun, ts: today() });
+        // BLZ-404 (review finding 2): `grep -n "committed" scripts/supervisor.mjs` used to
+        // have no match at all — `r.committed` was discarded entirely, and under lock
+        // contention, a failing pre-commit hook, or a detached HEAD the files moved on
+        // disk while the commit silently failed, and the feed published `applied: true`
+        // with no mention that nothing was committed. `applied: true` is still TRUE (the
+        // files really did move) — what is missing is that the feed's account of the run
+        // must not STOP there when the commit did not land, since per the comment above
+        // this feed is "the operator's whole account of the run" under `blaze start`.
+        if (r.commitOutcome === "locked" || r.commitOutcome === "failed") {
+          // BLZ-404 round 3: this branch only ever fires when THIS pass decided something
+          // new (`commitOutcome` reaches "locked"/"failed" only through the commit block,
+          // gated on `touched.length` alone — reconcile never retries a previous pass's
+          // leftover write), so "applied N change(s) to disk" is always true of the pass
+          // reporting it.
+          bus.publish({
+            type: "error", loop: "reconcile",
+            message: `reconcile applied ${r.changes.length} change(s) to disk but the commit did ` +
+              `not land (${r.commitOutcome}: ${r.commitError}) — the board is now a DIRTY TREE: ` +
+              "ticket files changed with no matching commit. Investigate and commit manually.",
+            ts: today(),
+          });
+        }
+        // BLZ-404 round 2 (blocking 3): `queued` was the one non-commit outcome this feed
+        // said NOTHING about — only `locked`/`failed` published anything beyond the raw
+        // per-ticket `reconcile` events. On a `commitMode: "batch"` board that means the
+        // feed shows `applied: true` for every ticket move and stops there: nothing tells
+        // the operator the board is now accumulating a pending ledger entry and a tree that
+        // stays uncommitted until `blaze commit` runs. The CLI is truthful here ("queued
+        // (commitMode: batch) — run `blaze commit`"); the feed — this ticket's own comment
+        // calls it "the operator's whole account of the run" — was not. Say what the CLI
+        // says, in the CLI's own words, so the two surfaces cannot drift on this outcome.
+        if (r.commitOutcome === "queued") {
+          bus.publish({
+            type: "warning", loop: "reconcile",
+            message: `queued (commitMode: batch) — run \`blaze commit\` to flush ${r.changes.length} change(s).`,
+            ts: today(),
+          });
+        }
+        // BLZ-404 round 5: rounds 2-4 each tried to have the supervisor also report a
+        // ticket tree left dirty by some EARLIER pass — first by recovering it (round 2),
+        // then by detecting it as a boolean (round 3, round 4). Both attempts were
+        // refuted (see the PR body: the recovery write had an unbounded blast radius, and
+        // the detector conflated a genuinely failed prior commit with a healthy
+        // `commitMode: "batch"` queue and with a human's own untracked file). Telling
+        // those apart needs the pending ledger, not `git status`, so nothing here attempts
+        // it any more — the supervisor, like the CLI, reports only what THIS pass decided.
       } else if (r && !r.ok) {
         bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
       }

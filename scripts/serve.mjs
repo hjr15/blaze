@@ -69,6 +69,30 @@ function aheadCount(root) {
   return r.status === 0 ? Number(r.stdout.trim()) || 0 : 0;
 }
 
+// BLZ-405: `/api/reconcile-preview`'s own reconcile call, pulled out from the request
+// handler so it can be driven directly. `reconcile()` has had two `ok: false` refusal
+// shapes since BLZ-394 (an unknown `--project` key, or `--project` given no key at all),
+// and this handler used to return `{ changes: r.changes || [], ... }` without ever
+// checking `r.ok` — a refused run and a genuinely clean one both render as "no code-bound
+// changes", an in-sync board that is not actually in sync; it just never ran.
+//
+// Both refusals require `projects !== null` in reconcile()'s options, and the route below
+// never passes one — so through the ROUTE, neither refusal is reachable today (this is a
+// contract gap, fixed as one, not a claim that today's traffic can trigger it). `projects`
+// is exposed as a parameter here ONLY so a test can drive this exact function past that
+// gate without adding a query-string surface that would silently turn the endpoint into a
+// per-project preview — a real feature, and a different ticket's scope. Production callers
+// (the route below) always call this with no `projects`.
+export async function reconcilePreview({ root, projectsDir, projects = null } = {}) {
+  const { reconcile } = await import("./reconcile.mjs");
+  const r = await reconcile({ fetch: false, commit: false, dryRun: true, root, projectsDir, projects });
+  if (!r.ok) return { ok: false, error: r.error, changes: [] };
+  // BLZ-395: findings travel with the preview. The preview is where a person looks before
+  // believing the board, and a conflict reconcile refuses to act on is exactly what it
+  // must not omit.
+  return { ok: true, changes: r.changes || [], forgeErrors: r.forgeErrors || [], findings: r.findings || [] };
+}
+
 // Compresses when the client advertises gzip support and the body is large
 // enough that compression is worth the CPU (below 1KB, gzip overhead can
 // exceed the savings).
@@ -504,13 +528,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       }
     }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
-      const { reconcile } = await import("./reconcile.mjs");
-      const r = await reconcile({ fetch: false, commit: false, push: false, dryRun: true, root, projectsDir });
-      // BLZ-350: a thin preview and an unreadable forge look identical otherwise.
-      // BLZ-395: findings travel with the preview. The preview is where a person
-      // looks before believing the board, and a conflict reconcile refuses to act on
-      // is exactly what it must not omit.
-      return json(200, { changes: r.changes || [], forgeErrors: r.forgeErrors || [], findings: r.findings || [] });
+      // BLZ-405: `reconcilePreview` is the one place this shape is built — see its own
+      // comment for why `r.ok` matters and why `projects` is never passed here.
+      return json(200, await reconcilePreview({ root, projectsDir }));
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {

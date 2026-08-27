@@ -62,9 +62,11 @@ blaze reconcile --project BLZ,INF --apply
 ```
 
 Without it, every configured project reconciles, exactly as before. The point is
-blast radius: `--apply` writes ticket files directly and commits every file it
-touched, so a session that owns three tickets would otherwise author a commit
-moving fifteen it never looked at. An unknown key is refused outright — it does
+blast radius: `--apply` writes ticket files directly, then commits every file it
+touched the same way every other mutating verb does (or queues them for `blaze
+commit`, under `commitMode: "batch"` — see "Commit modes" in AGENTS.md), so a
+session that owns three tickets would otherwise author a commit moving fifteen it
+never looked at. An unknown key is refused outright — it does
 not quietly reconcile nothing, which would be indistinguishable from an in-sync
 board — and every run says which projects it scanned, so a narrowed run cannot be
 mistaken for one that found nothing.

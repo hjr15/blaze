@@ -104,7 +104,7 @@ what it would change and writes nothing.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--apply` | Commit the mirrored changes locally. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
+| `--apply` | Commit the mirrored changes locally (or queue them, in batch mode — see [Commit modes](../../AGENTS.md#commit-modes)), through the same advisory-lock-serialised path every other mutating verb uses. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
 | `--quiet` | Suppress output for tickets already in sync. | off |
 
@@ -114,6 +114,19 @@ reconcile prints a `FORGE UNREADABLE` line to stderr on every run (including und
 `--quiet`) rather than reporting a clean board; it still exits 0, because the
 branch and merged-commit signals are unaffected. See
 [Forge support and status reachability](how-it-works.md#forge-support-and-status-reachability).
+
+Reconcile does **not** auto-recover an uncommitted prior pass, and it does
+**not** detect one either. If a previous `--apply` moved ticket files but
+failed to commit them (a held lock, a failing pre-commit hook), the board's
+ticket tree stays dirty until a person notices and clears it — the next run
+reports only what *it* found (no code-bound change, most likely, since the
+prior pass already wrote the files), never a claim about the state of the git
+tree. Telling a genuinely failed prior commit apart from a `commitMode:
+"batch"` board that queued by design, or from a human's own uncommitted edit
+under `projects/`, needs the pending ledger, not `git status` — that is a
+separate, unbuilt feature. If a run reports nothing to do but `git status`
+still shows changes under `projects/`, run `blaze commit`, or commit the tree
+by hand.
 
 ## groom
 
