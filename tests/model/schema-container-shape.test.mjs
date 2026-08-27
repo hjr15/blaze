@@ -513,6 +513,10 @@ describe("BLZ-396 re-review B1c: the CONFIG layer's own clause", () => {
       .find((p) => /^blaze\.config\.json: schema\.types/.test(p));
     assert.equal(withProject, without,
       "one installation-wide finding must not render two different sentences");
+    // Equality alone is satisfied by two identically-WRONG sentences, which is how this
+    // control passed through a revert of the very hunk it was written for.
+    assert.doesNotMatch(withProject, /still in force|built-in/,
+      `the config-layer finding must claim nothing about board state:\n${withProject}`);
   });
 });
 
@@ -543,4 +547,92 @@ describe("BLZ-396 re-review N1/N2: the report survives a config it cannot string
         `${what}: unknown is not the same as in force:\n${msg}`);
     });
   }
+});
+
+describe("BLZ-396 re-review B1d: an UNKNOWN answer must not render as a definite claim", () => {
+  // Wrong a FIFTH time, in the branch the fourth fix itself added. When `contributes` cannot
+  // compute it returned `false` — and `false` is not the weaker answer, it is the positive
+  // claim "the built-in types are still in force". So an uncomputable board printed round 1's
+  // defect verbatim.
+  //
+  // AND IT IS REACHABLE FROM `JSON.parse`, which the code comment denied. `JSON.parse`
+  // accepts nesting depths that `JSON.stringify` cannot serialise, so a hand-written
+  // blaze.config.json is enough — no exotic runtime value required.
+  const SPIKE = { types: { spike: { level: 0, workflow: "delivery",
+    parentTypes: ["feature"], required: ["title"] } } };
+  /** Deep enough that `JSON.parse` succeeds and `JSON.stringify` throws RangeError. */
+  const unserialisable = () => JSON.parse("[".repeat(6000) + "]".repeat(6000));
+  const hostileSpike = () => {
+    const cfg = JSON.parse(JSON.stringify(SPIKE));
+    cfg.types.spike.note = unserialisable();
+    return cfg;
+  };
+
+  test("the premise: this really does parse and really does not stringify", () => {
+    const v = unserialisable();
+    assert.ok(v, "JSON.parse rejected it — the whole case would be unreachable");
+    assert.throws(() => JSON.stringify(v), RangeError,
+      "if this serialises the test below proves nothing");
+  });
+
+  test("a per-block finding does not claim the built-in types are in force", () => {
+    const msg = validateSchema({ config: { schema: hostileSpike() },
+      project: { schema: { types: 5 } } }).find((p) => /^project\.json: schema\.types/.test(p));
+    assert.ok(msg, "the project-layer finding was lost entirely");
+    assert.doesNotMatch(msg, /the built-in types are still in force/,
+      `\`spike\` came from blaze.config.json and IS in force on this board:\n${msg}`);
+  });
+
+  test("a whole-block finding does not claim the board fell back to defaults", () => {
+    const msg = validateSchema({ config: { schema: hostileSpike() },
+      project: { schema: "a string" } }).find((p) => /^project\.json:/.test(p));
+    assert.ok(msg, "the project-layer finding was lost entirely");
+    assert.doesNotMatch(msg, /came from the built-in defaults/,
+      `the config layer contributes \`spike\` on this board:\n${msg}`);
+  });
+
+  test("it says the true, weaker thing about the file instead", () => {
+    // The one sentence that is unconditionally true whatever the config layer turns out to
+    // be: the block being reported was dropped, so THAT file contributes nothing.
+    const perBlock = validateSchema({ config: { schema: hostileSpike() },
+      project: { schema: { types: 5 } } }).find((p) => /^project\.json: schema\.types/.test(p));
+    assert.match(perBlock, /project\.json contributes no types/, perBlock);
+    const whole = validateSchema({ config: { schema: hostileSpike() },
+      project: { schema: "a string" } }).find((p) => /^project\.json:/.test(p));
+    assert.match(whole, /nothing in project\.json reaches the resolved schema/, whole);
+  });
+
+  test("a COMPUTABLE board still gets the definite answer — both ways, the control", () => {
+    // Without this, the whole block is satisfied by always saying the unknown sentence,
+    // which throws away the information the last four rounds were spent getting right.
+    assert.match(
+      validateSchema({ config: { schema: SPIKE }, project: { schema: "a string" } })
+        .find((p) => /^project\.json:/.test(p)),
+      /the blaze\.config\.json layer is still in force/, "contributing config layer");
+    assert.match(
+      validateSchema({ config: { schema: {} }, project: { schema: "a string" } })
+        .find((p) => /^project\.json:/.test(p)),
+      /came from the built-in defaults/, "non-contributing config layer");
+  });
+});
+
+describe("BLZ-396 re-review N: the predicate is LAZY", () => {
+  // The lazy rework was entirely unpinned — reverting it failed zero tests. It matters
+  // because an eager version charges two schema merges to every ordinary board that has a
+  // config schema record, whether or not any finding is produced.
+  test("a well-formed project block never touches the config layer at all", () => {
+    let reads = 0;
+    const probe = { get types() { reads += 1; return {}; } };
+    const errors = schemaContainerErrors({ types: {} }, null, "project", probe);
+    assert.deepEqual(errors, [], "premise: a well-formed block produces no finding");
+    assert.equal(reads, 0,
+      "the config layer was resolved to build a message that was never built");
+  });
+
+  test("and a malformed one does — the control", () => {
+    let reads = 0;
+    const probe = { get types() { reads += 1; return {}; } };
+    assert.ok(schemaContainerErrors({ types: 5 }, null, "project", probe).length > 0);
+    assert.ok(reads > 0, "the message must actually be derived from the config layer");
+  });
 });

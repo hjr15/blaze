@@ -106,6 +106,16 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config", 
   //
   // LAZY, because the resolves are only needed to build a message: an eager version charged
   // two merges to every ordinary board with a config schema record, finding or not.
+  //   5. and in the branch fix 4 itself added: when the comparison could not be COMPUTED it
+  //      returned false, which renders as the definite claim "the built-in X are still in
+  //      force" — round 1's defect verbatim. `false` is not the weaker answer. It is also
+  //      REACHABLE from `JSON.parse`, which the previous comment here denied: `JSON.parse`
+  //      accepts nesting depths `JSON.stringify` cannot serialise, so a hand-written
+  //      blaze.config.json reaches it with no exotic runtime value involved.
+  //
+  // Hence a TRI-STATE. "Unknown" gets the sentence that is unconditionally true whatever the
+  // config layer turns out to be: the block being reported was dropped, so THAT file
+  // contributes nothing. It is the same shape of answer the config layer always gives.
   let inForce;  // undefined = not computed; null = could not be computed
   const contributes = (block) => {
     if (layer !== "project" || !isRecord(configSchema)) return false;
@@ -124,31 +134,41 @@ export function schemaContainerErrors(schema, dropped = null, layer = "config", 
                     workflows: differs(base.workflows, top.workflows) };
       } catch { inForce = null; }  // unknown is NOT the same as in force — say the weaker thing
     }
-    if (inForce === null) return false;
-    return block === null ? inForce.all : (inForce[block] ?? false);
+    if (inForce === null) return null;  // UNKNOWN — never collapse this into `false`
+    return block === null ? inForce.all : inForce[block];
   };
-  const stillInForce = layer !== "project"
-    ? "nothing in blaze.config.json reaches the resolved schema"
-    : contributes(null)
-      ? "the blaze.config.json layer is still in force"
-      : "every type, workflow and link type came from the built-in defaults";
-  const blockInForce = (block) => (layer !== "project"
-    ? `blaze.config.json contributes no ${block}`
-    : contributes(block)
-      ? `the blaze.config.json layer's ${block} are still in force`
-      : `the built-in ${block} are still in force`);
+  // The layer's own file, which is true for both layers and needs no resolve: the block
+  // being reported was dropped, so it contributes nothing.
+  const thisFile = layer === "project" ? "project.json" : "blaze.config.json";
+  // FUNCTIONS, not values. As a bare ternary this ran on every call, including the ordinary
+  // boards that produce no finding at all — the eager cost the previous commit claimed to
+  // have removed and had not.
+  const stillInForce = () => {
+    if (layer !== "project") return `nothing in ${thisFile} reaches the resolved schema`;
+    const c = contributes(null);
+    if (c === null) return `nothing in ${thisFile} reaches the resolved schema`;
+    return c ? "the blaze.config.json layer is still in force"
+             : "every type, workflow and link type came from the built-in defaults";
+  };
+  const blockInForce = (block) => {
+    if (layer !== "project") return `${thisFile} contributes no ${block}`;
+    const c = contributes(block);
+    if (c === null) return `${thisFile} contributes no ${block}`;
+    return c ? `the blaze.config.json layer's ${block} are still in force`
+             : `the built-in ${block} are still in force`;
+  };
   // A dropped-kind marker is only ever set by the loaders, and only to one of these. It
   // arrives as a SYMBOL key so operator-written JSON cannot forge one — but a wrong VALUE
   // under the right key would still render `[object Object]` into an audit detail, which is
   // BLZ-392's defect by another route, so the value is whitelisted as well.
   if (dropped && DROPPED_KINDS.has(dropped)) {
     return [`schema must be an object, got ${dropped} — the whole block was IGNORED, `
-      + `so ${stillInForce}`];
+      + `so ${stillInForce()}`];
   }
   if (schema === undefined || schema === null) return [];
   if (!isRecord(schema)) {
     return [`schema must be an object, got ${kind(schema)} — the whole block was IGNORED, `
-      + `so ${stillInForce}`];
+      + `so ${stillInForce()}`];
   }
   const errors = [];
   for (const block of ["types", "workflows"]) {
