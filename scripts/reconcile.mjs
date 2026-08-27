@@ -933,7 +933,7 @@ function gatherProject(project, { fetch }) {
 
 // --- the reconcile pass -------------------------------------------------------
 export async function reconcile({
-  fetch = false, commit = false, push = false, dryRun = true, root, projectsDir,
+  fetch = false, commit = false, dryRun = true, root, projectsDir,
   readStorage = fsReadStorage, storage = fsStorage, writePort = null, projects = null,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
@@ -974,9 +974,12 @@ export async function reconcile({
   if (wanted && !wanted.length) {
     // `configuredRepos: 0`, not `configured.length`: that field counts REPOS, and putting a
     // project count in it was a wrong value in a named field, unreachable or not.
+    // BLZ-404: `dryRun` on every return site, refusals included — `changes` is a PROPOSAL
+    // list on a dry run and a RECORD of writes on an applied run, and a caller reading a
+    // refusal's (empty) `changes` could not previously tell which sense it would have been.
     return { ok: false, error: "--project was given no project key", changes: [], committed: false,
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-      forgeErrors: [], findings: [], scannedProjects: [] };
+      forgeErrors: [], findings: [], scannedProjects: [], dryRun };
   }
   const unknown = (wanted || []).filter((k) => !configured.includes(k));
   // Checked BEFORE the standalone return below, deliberately. Behind it, a typo'd key on a
@@ -989,11 +992,11 @@ export async function reconcile({
       error: `unknown project key(s): ${unknown.join(", ")}. This board configures: ` +
         (configured.length ? configured.join(", ") : "no projects at all"),
       changes: [], committed: false, pushed: false, missingRepos: [], scannedRepos: 0,
-      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [] };
+      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [], dryRun };
   }
   if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
     pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [],
-    findings: [], scannedProjects: [] };
+    findings: [], scannedProjects: [], dryRun };
   const keys = wanted || configured;
 
   const sig = new Map();
@@ -1181,7 +1184,14 @@ export async function reconcile({
       `chore(board): reconcile ${changes.length} ticket(s) to git state` +
       (wanted ? ` (${keys.join(", ")})` : ""), "--", ...touched]) !== null;
   }
-  // push is never performed — hardcoded false regardless of the push param
+  // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
+  // never reads a `push` option and `pushed: false` is unconditional below — accepting a
+  // `push` PARAMETER that nothing reads told every caller a run might push when it never
+  // could, and `supervisor.mjs` passed exactly that. A removed parameter cannot be pinned
+  // by a mutation (there is nothing left to flip), so what is pinned instead is the
+  // CONTRACT this line states: `pushed` is `false` on every applied, committing run —
+  // see tests/reconcile-pertype.test.mjs.
+  const pushed = false;
   // INF-763: surface repo reachability so a caller can tell "scanned everything,
   // nothing to change" from "scanned nothing, so of course nothing changed".
   const missingRepos = [...new Set([...sig.values()].flatMap((g) => g.missingRepos))];
@@ -1193,8 +1203,11 @@ export async function reconcile({
   // BLZ-394 AC-5: a filtered run must not be mistakable for an in-sync board, so the result
   // says which projects it looked at — on every run, not only filtered ones, because the
   // caller cannot tell the difference from a `changes: []` alone.
-  return { ok: true, changes, committed, pushed: false, missingRepos, scannedRepos, configuredRepos,
-           forgeErrors, findings, scannedProjects: keys };
+  // BLZ-404: `dryRun` travels with the result too — `changes` is a PROPOSAL list on a dry
+  // run and a RECORD of writes on an applied run, and until now no consumer could tell
+  // which sense it was looking at without already knowing what it had passed in.
+  return { ok: true, changes, committed, pushed, missingRepos, scannedRepos, configuredRepos,
+           forgeErrors, findings, scannedProjects: keys, dryRun };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -1229,7 +1242,7 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     }
     console.error(`unknown flag: ${a}`); process.exit(1);
   }
-  const r = await reconcile({ fetch: fetchFlag, commit: apply, push: false, dryRun: !apply,
+  const r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
     projects: sawProject ? projectKeys : null });
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   // AC-5: say what was looked at BEFORE saying what was found, so "nothing to do" can never

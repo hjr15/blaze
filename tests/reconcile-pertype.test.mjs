@@ -38,9 +38,30 @@ test("reconcile dry-run makes no file moves", async () => {
   writeFileSync(join(projects, "OBA", "project.json"), JSON.stringify({ key: "OBA", name: "OBA" }));
   writeFileSync(join(projects, "OBA", "defined", "OBA-1.md"),
     "---\nid: OBA-1\ntitle: t\ntype: task\nproject: OBA\nestimate: 30\nbranch: OBA-1-x\n---\nb\n");
-  const r = await reconcile({ fetch: false, commit: false, push: true, dryRun: true, root });
+  const r = await reconcile({ fetch: false, commit: false, dryRun: true, root });
   // dry-run never moves the file regardless of derived target
   assert.ok(existsSync(join(projects, "OBA", "defined", "OBA-1.md")));
   assert.equal(r.pushed, false);   // push is never performed
+  assert.equal(r.dryRun, true, "reconcile()'s own dryRun travels on the result too (BLZ-404)");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-404 AC-4: `push` is answered by DELETING the parameter, not by refusing it —
+// reconcile() never read it, and `pushed: false` was already unconditional. A removed
+// parameter cannot be pinned by a mutation (there is nothing left to flip), so what is
+// pinned here is the CONTRACT statement itself: `pushed` stays false even on a genuinely
+// applied, committing run — the shape that matters, since a dry run proving it is cheap
+// and unpersuasive.
+test("pushed stays false on an applied, committing run — the contract push once contradicted", async () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-rec-push-"));
+  const projects = join(root, "projects");
+  mkdirSync(join(projects, "OBA", "defined"), { recursive: true });
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"] }));
+  writeFileSync(join(projects, "OBA", "project.json"), JSON.stringify({ key: "OBA", name: "OBA" }));
+  writeFileSync(join(projects, "OBA", "defined", "OBA-1.md"),
+    "---\nid: OBA-1\ntitle: t\ntype: task\nproject: OBA\nestimate: 30\n---\nb\n");
+  const r = await reconcile({ fetch: false, commit: true, dryRun: false, root });
+  assert.equal(r.pushed, false, "an applied, committing run must still never report a push");
+  assert.equal(r.dryRun, false);
   rmSync(root, { recursive: true, force: true });
 });
