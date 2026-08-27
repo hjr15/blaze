@@ -267,6 +267,23 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // from actually did, so a mutation that hardcodes this field cannot silently
         // agree with a mutation that reverts the `dryRun` passed above.
         for (const c of r.changes) bus.publish({ type: "reconcile", id: c.id, from: c.from, to: c.to, moved: c.moved, cleared: Boolean(c.cleared), applied: !r.dryRun, ts: today() });
+        // BLZ-404 (review finding 2): `grep -n "committed" scripts/supervisor.mjs` used to
+        // have no match at all — `r.committed` was discarded entirely, and under lock
+        // contention, a failing pre-commit hook, or a detached HEAD the files moved on
+        // disk while the commit silently failed, and the feed published `applied: true`
+        // with no mention that nothing was committed. `applied: true` is still TRUE (the
+        // files really did move) — what is missing is that the feed's account of the run
+        // must not STOP there when the commit did not land, since per the comment above
+        // this feed is "the operator's whole account of the run" under `blaze start`.
+        if (r.commitOutcome === "locked" || r.commitOutcome === "failed") {
+          bus.publish({
+            type: "error", loop: "reconcile",
+            message: `reconcile applied ${r.changes.length} change(s) to disk but the commit did ` +
+              `not land (${r.commitOutcome}: ${r.commitError}) — the board is now a DIRTY TREE: ` +
+              "ticket files changed with no matching commit. Investigate and commit manually.",
+            ts: today(),
+          });
+        }
       } else if (r && !r.ok) {
         bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
       }

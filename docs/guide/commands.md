@@ -104,7 +104,7 @@ what it would change and writes nothing.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--apply` | Commit the mirrored changes locally. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
+| `--apply` | Commit the mirrored changes locally (or queue them, in batch mode — see [Commit modes](../../AGENTS.md#commit-modes)), through the same advisory-lock-serialised path every other mutating verb uses. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
 | `--quiet` | Suppress output for tickets already in sync. | off |
 

@@ -442,6 +442,17 @@ test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => 
   // negative — the project OUT of scope must appear nowhere.
   const tmp = mkdtempSync(join(tmpdir(), "blz394-disc-"));
   const root = twoProjectBoard(tmp);
+  // BLZ-404 (review finding 1): `root` must be a real git repo. Before reconcile's commit
+  // block routed through `commitOrQueue` -> `commitFile`, a non-repo `root` silently
+  // failed `git add`/`git commit` and the CLI never checked the result — this test passed
+  // by accident while nothing was ever actually committed. Now a failed commit is reported
+  // and exits non-zero (finding 2), so the fixture needs a real repo to prove the SCOPE
+  // discrimination this test is actually about, exactly like the sibling "--apply commit
+  // subject carries the scope" test above it.
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
   const restore = stubGh(tmp);
   try {
     const res = spawnSync(process.execPath,
