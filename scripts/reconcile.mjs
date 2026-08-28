@@ -775,9 +775,18 @@ function prNumber(raw) {
 // both fields on it, because the record is one unit. The condition is reported through
 // `forgeErrors` rather than swallowed: a repo whose PRs are all unusable must not look
 // identical to a repo with no pull requests, which is the laundering BLZ-350 fixed.
+function clean(v) { return typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v; }
+
+// BLZ-403 (review): `clean` above is hoisted to module scope so a fourth
+// operator-facing text site can reuse it. `sanitisePr` was its only caller; the
+// terminal-record-unverifiable finding below reads a TICKET FILE's own `pr:` line
+// rather than a `gh` payload, and interpolated it into stderr/the feed/the preview
+// JSON verbatim, unsanitised. The three EXISTING renderers (stderr, the activity
+// feed, `serializeTicket`'s escaping) all sit downstream of a `gh` payload that
+// already passed through this function; the ticket file is a fourth source that fed
+// none of them until now, and gets the SAME treatment rather than a fourth renderer.
 function sanitisePr(pr) {
   if (!pr || typeof pr !== "object") return null;
-  const clean = (v) => (typeof v === "string" ? v.replace(/[\u0000-\u001f\u007f]/g, "") : v);
   // A url that arrives absent, or that `clean` empties (the control-char-only case this
   // sanitiser exists for), becomes `null` — the same marker `number` uses. Leaving it as
   // `undefined` or `""` is what let `decide` persist the literal string "undefined" into
@@ -882,6 +891,41 @@ function samePr(a, b) {
   // decision must not turn on the PRESENCE of a forge-supplied field.
   if (a.url || b.url) return Boolean(a.url) && a.url === b.url;
   return a.number === b.number;
+}
+
+/** BLZ-403: the url half of a terminal ticket's FROZEN `pr: "#N — url"` record, or
+ *  `null` when there is none to parse. `decide`/the write loop always write that exact
+ *  shape (see `prVal` above), and `url` is the one identifier `samePr` already treats as
+ *  unique across repositories — so this is what lets the residual finding ask "is the
+ *  record we already hold even one of the tied candidates", the same question `samePr`
+ *  answers for two live PR payloads, asked instead of a frozen string and a live one.
+ *
+ *  KNOWN BLIND SPOT (review): `\S+` cannot match a url containing an embedded space
+ *  (e.g. `"u40 x"`) — `\s*$` then has no way to consume the remainder, the whole regex
+ *  fails to match, and this returns `null`. `recordOutsideCandidates` below reads that
+ *  as "nothing to check" and silently falls back to `outside=false`. That failure mode
+ *  is deliberately one-directional: a `null` here can only suppress the per-ticket
+ *  "not even among the tied candidates" finding (the ticket still lands in the
+ *  aggregate, via `unverifiableRecords`, so nothing is dropped) — it can never
+ *  FABRICATE that accusation against a record this function failed to parse. */
+function recordedPrUrl(pr) {
+  const m = /—\s*(\S+)\s*$/.exec(String(pr || ""));
+  return m ? m[1] : null;
+}
+
+/** BLZ-403 (review): does a live candidate's url match the FROZEN record's url? Both
+ *  sides are routed through `samePr` — the actual identity notion this file already
+ *  has, rather than a bespoke `===` this docstring merely claimed matched it. Before
+ *  this fix the record side was trimmed of trailing whitespace by `recordedPrUrl`'s own
+ *  regex (`\s*$` absorbs it) while the live side was not (`sanitisePr`'s `clean()`
+ *  strips control characters, never whitespace), so a forge url with trailing
+ *  whitespace survived into both the record and the live candidate and the two sides
+ *  disagreed — the record was falsely reported as "not even among the tied
+ *  candidates" when it WAS one of them. Trimming both sides here, once, before the
+ *  comparison, is what makes them agree again. */
+function recordMatchesCandidate(recordedUrl, ref) {
+  const liveUrl = typeof ref.url === "string" ? ref.url.trim() : ref.url;
+  return samePr({ url: recordedUrl }, { url: liveUrl });
 }
 
 // --- aggregate the most-advanced signal across all of a project's repos -------
@@ -1037,6 +1081,13 @@ export async function reconcile({
   // run is healthy, the board is not — and it is emitted on dry runs too, because a
   // dry run is exactly where someone would look before believing the board.
   const findings = [];
+  // BLZ-403: ids of terminal tickets whose FROZEN record is unverifiable but IS one of
+  // the tied candidates — the common case (72 of 73 measured at blaze-pm 57212799).
+  // Collected here rather than pushed straight into `findings` so the volume can be
+  // aggregated into ONE finding after the loop; the ONE genuinely wrong case
+  // (`recordOutsideCandidates`) is rare enough, and important enough, to still name on
+  // its own — see the per-ticket push below.
+  const unverifiableRecords = [];
   for (const t of readStorage.listTickets(projectsDir)) {
     const type = t.frontmatter.type;
     // Scope on the DIRECTORY as well as the frontmatter. `sig` is keyed by the
@@ -1173,6 +1224,91 @@ export async function reconcile({
           `branch/pr rather than guess which one delivered it — a wrong delivery record ` +
           `is permanent, a blank one is not. Set it by hand if it matters.`,
       });
+    } else if (d.recordAmbiguous && keep()) {
+      // BLZ-403 — the residual ADR-0023's "residual" paragraph named and left open. The
+      // clear and the finding above are both gated on write-once NOT applying; `keep()`
+      // reading true means this ticket was ALREADY terminal, and already held a record,
+      // before this run — most often because it was HAND-MOVED to a terminal status
+      // while a follow-up PR was still open, arriving at terminal-with-a-record by a
+      // route reconcile never sees. Write-once then protects that rank-chosen record
+      // forever: `pr` is not in `EDITABLE_FIELDS`, so nothing but a person can fix it.
+      //
+      // THIS IS A FINDING ON THE STATE, NOT THE ROUTE. Reconcile cannot see that a
+      // ticket was hand-moved — it can only see a terminal ticket holding a record it
+      // cannot verify — so this reports the SUPERSET reconcile can actually observe,
+      // never the narrower "hand-moved" claim the ticket that opened this is titled for.
+      //
+      // Measured at blaze-pm 57212799269cb946c3949da459c04e0e4e765afb (BLZ-305-v4-spine,
+      // NCA excluded): 73 terminal-with-record tickets whose merged set is unresolvable.
+      // 72 of the 73 hold a record that IS one of the plausible deliverers — reconcile
+      // simply cannot prove which one. Clearing those would destroy 72 probably-correct
+      // records that NOTHING can restore (reconcile is the only producer of `branch`/
+      // `pr`), to fix the 1 that is provably wrong. That trade is refused: the DECISION
+      // (ADR-0023) is report, never overwrite — write-once on a terminal ticket stands.
+      const refs = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
+      const named = refs.map((r) => namePr(r));
+      // BLZ-403 (review): sanitised ONCE, here, and every downstream use — the message,
+      // the structured `pr.raw`/`pr.branch` (served verbatim over `/api/reconcile-preview`
+      // JSON), and the url extraction below — reads this sanitised value, never
+      // `t.frontmatter.pr`/`t.frontmatter.branch` directly. A TICKET FILE's `pr:` line is
+      // free-form text nothing here has ever constrained (unlike `t.frontmatter.id`,
+      // which only reaches this branch because it matched a git ref), so it gets the
+      // same treatment `sanitisePr` already gives a `gh` payload before namePr/samePr or
+      // any operator-facing text sees it — reusing `clean`, not adding a fourth renderer.
+      const rawPr = clean(t.frontmatter.pr) || null;
+      const rawBranch = clean(t.frontmatter.branch) || null;
+      // The one case worth naming on its own: the record this ticket already holds is
+      // not even a candidate in the tied set — not merely unresolvable but provably
+      // pointed at a PR nothing here claims delivered it. 1 of the 73 measured above
+      // (OBA-773: records #336, tied set {#339, #341}).
+      const recordedUrl = recordedPrUrl(rawPr);
+      // BLZ-403 (round 2 review, blocking): `samePr`/`recordMatchesCandidate` answer
+      // "is this candidate PROVABLY the same PR as the record" — and `samePr`'s own
+      // comment says identity must never be decided by the PRESENCE of a forge-supplied
+      // field, so a candidate with no usable url (control-characters-only, or the field
+      // absent entirely — the ordinary degraded-forge payload `sanitisePr`/`namePr`
+      // exist for) makes `recordMatchesCandidate` answer `false` for that candidate no
+      // matter what the record says. That `false` means UNPROVEN, not DISPROVEN. Reading
+      // "none of the candidates provably match" as "the record is not even among the
+      // tied candidates" silently upgrades unproven into disproved the moment one
+      // candidate is uncomparable — accusing a record that may well be exactly that
+      // candidate, in a sentence that names the candidate in the tied set while denying
+      // it is in it. So `recordOutsideCandidates` may only fire when every tied
+      // candidate is actually comparable (carries a usable, non-empty url); if even one
+      // does not, the honest answer is UNKNOWN, and it fails CLOSED — toward the
+      // aggregate (`unverifiableRecords`, below), never toward a per-ticket accusation.
+      const allCandidatesComparable =
+        refs.every((r) => typeof r.url === "string" && r.url.trim().length > 0);
+      const recordOutsideCandidates = refs.length > 0 && recordedUrl !== null &&
+        allCandidatesComparable && !refs.some((r) => recordMatchesCandidate(recordedUrl, r));
+      const entry = {
+        kind: "terminal-record-unverifiable",
+        id: t.frontmatter.id,
+        status: t.status,
+        pr: { raw: rawPr, branch: rawBranch },
+        prs: refs,
+        recordOutsideCandidates,
+        message: `${t.frontmatter.id} is ${t.status} and already holds a delivery record ` +
+          `(${rawPr || "no pr recorded"}), but git now shows ${refs.length || "more than one"} ` +
+          `merged PRs tied for having delivered it` + (named.length ? ` (${named.join(", ")})` : "") +
+          `, and none claims it more strongly than the rest. The record is write-once ` +
+          `protected on a terminal ticket, so reconcile reports this rather than ` +
+          `overwriting it` +
+          (recordOutsideCandidates
+            ? " — and the recorded PR is not even among the tied candidates."
+            : ".") +
+          ` Verify by hand which PR actually delivered it.`,
+      };
+      // VOLUME CONTROL: 73 `NEEDS ATTENTION` lines on every run would bury the findings
+      // that matter (`scripts/model/audit.mjs`'s own warning: a gate that fires on the
+      // fill queue is a gate people learn to skip). Only the provably-wrong case is
+      // named per ticket; the rest are aggregated below into ONE finding that still
+      // names every one of them in `ids`, so nothing is hidden, only not repeated.
+      if (recordOutsideCandidates) {
+        findings.push(entry);
+      } else {
+        unverifiableRecords.push(entry.id);
+      }
     }
     if (d.branchVal && write() && fm.branch !== d.branchVal) { fm.branch = d.branchVal; dirty = true; }
     if (d.prVal && write() && fm.pr !== d.prVal) { fm.pr = d.prVal; dirty = true; }
@@ -1203,6 +1339,37 @@ export async function reconcile({
         touched.push(file);
       }
     }
+  }
+
+  // BLZ-403: the aggregated half of the volume control above — ONE finding for every
+  // terminal ticket whose already-held record is unverifiable but IS a plausible
+  // deliverer, carrying the exact count and the full `ids` array so every affected
+  // ticket is still named in the JSON (nothing hidden, only not repeated once per
+  // ticket on a terminal). Deliberately no `id` field: this finding is about MANY
+  // tickets, not one, and `newFindingEvents` (scripts/supervisor.mjs) passes `id`
+  // through unchanged — `undefined` travels the same path a per-ticket finding's real
+  // id does, pinned by a test rather than assumed.
+  //
+  // BLZ-403 (review): the message used to say "none of them was changed", about the
+  // TICKET. That is false whenever the loop above also backfills a blank `resolution`
+  // on the same terminal ticket (the comment near `changes.push` already names this: "a
+  // `done` ticket with a blank `resolution` has it backfilled, which sets `dirty` and
+  // emits a change") — that write happens in THIS SAME run, on THIS SAME ticket, and is
+  // committed. Write-once guarantees only that `branch`/`pr` were not touched; it says
+  // nothing about the rest of the file. Narrowed to the one thing this code path
+  // actually guarantees.
+  if (unverifiableRecords.length) {
+    findings.push({
+      kind: "terminal-record-unverifiable",
+      count: unverifiableRecords.length,
+      ids: unverifiableRecords,
+      message: `${unverifiableRecords.length} terminal ticket(s) already hold a delivery record ` +
+        `reconcile cannot verify — the merged set is unresolvable, and none claims it more ` +
+        `strongly than the rest: ${unverifiableRecords.join(", ")}. Write-once protects a ` +
+        `terminal ticket's record: none of their branch/pr fields was changed. (The ticket ` +
+        `itself may still have been written this run — e.g. a blank resolution backfilled ` +
+        `— that is a separate write and is reported in \`changes\`.) Verify by hand if it matters.`,
+    });
   }
 
   let committed = false;

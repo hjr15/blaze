@@ -142,7 +142,8 @@ same value — but it is not closed either. Closing it means either overriding w
 a terminal ticket, or reporting on the ~54 terminal tickets at `blaze-pm` `ff5f36c2` that
 already hold a record drawn from an ambiguous set, most of which are probably right.
 Tracked separately rather than decided here, for the same reason BLZ-395 was: it is a
-second, larger decision about a deliberate rule, not an oversight in this one.
+second, larger decision about a deliberate rule, not an oversight in this one — until
+BLZ-403 measured it and decided it; see §5.
 
 **Cost, accepted:** a delayed `done`. A ticket waits in `in-review` until the last
 PR carrying its key closes. That is the safe direction — the board understating
@@ -353,6 +354,61 @@ survive, so stop writing them — would discard the only record of which ticket 
 what, which is the thing the squash body preserves and the thing reconcile now
 reads. `AGENTS.md`'s "The loop" states the squash behaviour explicitly rather than
 leaving the 1:1 claim to be read as trunk-level.
+
+### 5. A terminal ticket's unverifiable record is reported, never overwritten (BLZ-403)
+
+§1's residual, closed. A ticket **hand-moved** to a terminal status while a follow-up PR
+is still open arrives at terminal-with-a-record by a route reconcile never sees: the
+clear and the `ambiguous-deliverer` finding at §1 are both gated on `d.recordAmbiguous
+&& !keep()`, and `keep()` reads true for exactly this ticket — it is already terminal and
+already holds a record before the run that discovers the merged set is unresolvable. So
+neither the clear nor the report fires, and the rank-chosen record is frozen forever
+(`pr` is not in `EDITABLE_FIELDS`, so `blaze edit` cannot repair it either). Not a
+regression — `origin/main` freezes the same value — but not closed either, until now.
+
+**The two options were the same two §1 already named:** override write-once on a
+terminal ticket to let this path CLEAR and re-report like §1's does, or leave write-once
+standing and REPORT the state without touching the record.
+
+**The measurement that decided it.** At blaze-pm
+`57212799269cb946c3949da459c04e0e4e765afb` (branch `BLZ-305-v4-spine`), NCA excluded,
+computed with the engine's own exports (`fsReadStorage.listTickets`, `isTerminal`,
+`gatherPrs`, `idsFromCommitMessage`, `ambiguousDeliverers`) over all 18 configured
+`codeRepos`, every one of which read cleanly: 2,614 tickets, 1,890 terminal, 534 terminal
+tickets holding a delivery record, and of those, **73** whose merged set is unresolvable.
+Of the 73, **1** holds a record that is not even among the tied deliverers at all —
+`OBA-773` (`done`, records `#336`; tied set `{#339, #341}`) — the one case where the
+frozen record is arguably WRONG rather than merely unresolvable. This is a DIFFERENT
+figure from the ADR's own earlier "~54 at `ff5f36c2`" — that count is a different ref and
+is kept beside this one, not overwritten by it; a newer measurement does not erase an
+older one pinned to its own sha.
+
+**Decided: report, do not mutate.** 72 of the 73 hold a record that IS one of the
+plausible deliverers — reconcile simply cannot prove which one delivered it. Overriding
+write-once to clear all 73 (or all 72, sparing only the 1 provably wrong) would destroy
+up to 72 probably-correct records that **nothing can restore**: reconcile is the only
+producer of `branch`/`pr`, and neither field is in `EDITABLE_FIELDS`. Fixing 1 record by
+destroying up to 72 is the wrong trade, and it would reverse write-once — a deliberate
+design rule with its own history of three prior shapes of wrong (§1) — to make it. So
+reconcile now emits a finding of a new kind, `terminal-record-unverifiable`, on exactly
+this condition (`d.recordAmbiguous && keep()`), and never touches the record. Volume is
+controlled the same way a raw per-ticket count would otherwise bury the one finding that
+matters: the `recordOutsideCandidates` case (`OBA-773`'s shape) is reported on its own,
+per ticket; every other affected ticket is folded into ONE aggregate finding per run that
+still names all of them in an `ids` array, so nothing is hidden, only not repeated once
+per terminal ticket.
+
+**This is a finding on the STATE, not the ROUTE.** Reconcile cannot see that a ticket was
+hand-moved — it can only see a terminal ticket already holding a record it cannot verify.
+The condition this reports is therefore a SUPERSET of "hand-moved": any route that leaves
+a ticket terminal-with-a-record before its merged set becomes unresolvable trips it, not
+only a hand-move.
+
+**What remains open.** Reconcile still cannot identify which of the tied PRs actually
+delivered a ticket — that inference is rejected here for the same reason §1 rejects a new
+inference path for the half-recorded case: it is exactly the shape that has already
+failed three times. `pr` is still not in `EDITABLE_FIELDS`, so `OBA-773`'s one
+provably-wrong record must be repaired by hand, or not at all.
 
 ## Consequences
 

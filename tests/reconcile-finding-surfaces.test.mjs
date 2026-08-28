@@ -102,8 +102,13 @@ describe("BLZ-395: a published finding is READABLE in the activity feed", () => 
 // =============================================================================
 
 describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", () => {
-  /** Drive the REAL CLI with a stub `gh`, capturing stderr as a terminal would see it. */
-  function runCli(prs) {
+  /** Drive the REAL CLI with a stub `gh`, capturing stderr as a terminal would see it.
+   *  `ticketExtra` (BLZ-403 review) inserts extra frontmatter lines into INF-645's
+   *  ticket file BEFORE the CLI runs — the second untrusted-text source: a `gh`
+   *  payload is not the only thing that can carry hostile bytes into this file's
+   *  operator-facing text; a ticket's own frontmatter, never sanitised by anything
+   *  upstream of reconcile, is the other one. */
+  function runCli(prs, ticketExtra = "") {
     const tmp = mkdtempSync(join(tmpdir(), "blz-forge-"));
     try {
       const repo = join(tmp, "svc");
@@ -120,7 +125,7 @@ describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", 
       const dir = join(root, "projects", "INF", "done");
       mkdirSync(dir, { recursive: true });
       writeFileSync(join(dir, "INF-645-t.md"),
-        "---\nid: INF-645\ntype: epic\nproject: INF\nestimate: 30\n---\n\nbody\n");
+        `---\nid: INF-645\ntype: epic\nproject: INF\nestimate: 30\n${ticketExtra}---\n\nbody\n`);
       writeFileSync(join(root, "blaze.config.json"),
         JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [repo] }));
       const bin = join(tmp, "bin");
@@ -206,6 +211,33 @@ describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", 
       url: ESC + "]8;;https://evil.example/" + BEL + "CLICKME" + ESC + "]8;;" + BEL,
       headRefName: "INF-645-work", title: "INF-645: work" }]);
     assert.equal(err.includes(ESC), false, "no ESC byte may reach stderr");
+    assert.equal(err.includes(BEL), false, "nor a BEL");
+    assert.match(err, /NEEDS ATTENTION/, "and the finding must still be reported");
+  });
+
+  // BLZ-403 (review, blocking finding 1): the `terminal-record-unverifiable` finding
+  // interpolated a TICKET's own `pr:` frontmatter line verbatim — read from the ticket
+  // file, never through `sanitisePr`/`clean`/`namePr`. Unlike `t.frontmatter.id` (only
+  // reachable here because it matched a parsed git ref), a ticket's `pr:` line carries
+  // no such constraint: it is free-form text a person or a prior buggy run could have
+  // written, and nothing upstream of this finding ever sanitised it. This is the fourth
+  // renderer the file's own comment (above `sanitisePr`) warns drifts back in.
+  test("BLZ-403 (review): ESC bytes in a TICKET's own pr: line never reach the terminal", () => {
+    const evil = ESC + "]8;;https://evil.example/" + BEL + "CLICKME" + ESC + "]8;;" + BEL;
+    // Already terminal (done/), already holding a record (`keep()` needs both) — and
+    // the two merged, equally-titled PRs below make the deliverer set genuinely
+    // ambiguous, which is what routes this ticket into the finding under test rather
+    // than the (already-covered) open-pr-on-terminal one.
+    const err = runCli(
+      [
+        { number: 10, state: "MERGED", url: "u10", headRefName: "INF-645-tier1",
+          title: "INF-645: close the Tier-1 alert gaps" },
+        { number: 40, state: "MERGED", url: "u40", headRefName: "INF-645-docs",
+          title: "INF-645: follow-up docs tidy" },
+      ],
+      `branch: INF-645-docs\npr: '#40 — ${evil}'\nresolution: done\n`,
+    );
+    assert.equal(err.includes(ESC), false, "no ESC byte from the TICKET's own pr: line may reach stderr");
     assert.equal(err.includes(BEL), false, "nor a BEL");
     assert.match(err, /NEEDS ATTENTION/, "and the finding must still be reported");
   });
