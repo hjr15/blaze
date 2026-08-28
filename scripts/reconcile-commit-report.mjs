@@ -44,6 +44,28 @@ export function commitOutcomeFrom(c) {
  *  apart the way they did before BLZ-404. Returns null for outcomes that print
  *  nothing ("none": no commit was attempted, so there is nothing to report). */
 export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
+  // BLZ-447: this says "N ticket(s) updated without a status change"; the dashboard
+  // toast (scripts/views/reconcile-summary.mjs) says "N other update(s)" for the same
+  // quantity. Two surfaces, one quantity, two vocabularies — and the difference is
+  // DELIBERATE, along the preview/write-record line rather than at random.
+  //
+  //   PREVIEW surfaces say "other update(s)":
+  //     - the dashboard toast (reconcile-summary.mjs)
+  //     - reconcile.mjs's dry-run tail, "(dry-run: N move(s), M other update(s); rerun
+  //       with --apply …)"
+  //   WRITE-RECORD surfaces say "N ticket(s) updated without a status change":
+  //     - this line, printed after an --apply pass
+  //     - the commit subject reconcile.mjs writes
+  //
+  // A preview is a short parenthetical read immediately beside its own move count,
+  // where "other" is unambiguous and brevity is the point. A write record is a durable
+  // sentence — in `git log`, or on a terminal scrolled back to hours later — read
+  // alone, with no move count beside it to make "other" mean anything. Measured: 4
+  // sites, 2 vocabularies, and the split is exactly this one; no site is on the wrong
+  // side of it. All four are pinned by name, so the rule cannot lapse silently — these
+  // two by tests/board-overstatement-guards.test.mjs, reconcile.mjs's two by
+  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, COMMITTED_LINE_RE
+  // and QUEUED_LINE_RE.
   const suffix = nonMovedCount
     ? `, ${nonMovedCount} ticket(s) updated without a status change`
     : "";

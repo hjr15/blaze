@@ -8,6 +8,7 @@ import { loadConfig, resolveRoots } from "../config.mjs";
 import { PRIORITIES } from "../model/schema.mjs";
 import { esc } from "./render-lib.mjs";
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "./reconcile-summary.mjs";
+import { writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END } from "./write-outcome.mjs";
 import { activeStatuses } from "../model/filters.mjs";
 import { boardModel } from "./data.mjs";
 import { metricsModel } from "../model/metrics.mjs";
@@ -47,6 +48,13 @@ export const CSRF = randomUUID();
 // test recover the definition from the served HTML and evaluate THAT copy.
 function reconcileSummarySource() {
   return `${SUMMARY_FN_BEGIN}\n${String(reconcileSummary)}\n${SUMMARY_FN_END}`;
+}
+
+// BLZ-449: the same construction for the sentence the page says after a WRITE. See
+// scripts/views/write-outcome.mjs for why the dashboard needed a consumer for the
+// `committed`/`queued` fields serve.mjs has been sending since BLZ-422.
+function writeOutcomeSource() {
+  return `${WRITE_OUTCOME_FN_BEGIN}\n${String(writeOutcome)}\n${WRITE_OUTCOME_FN_END}`;
 }
 
 // ---- view registry --------------------------------------------------------
@@ -374,11 +382,26 @@ export function pageHtml({
       el.textContent = msg; el.classList.add("show");
       clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 4000);
     }
+    // BLZ-449: the sentence a WRITE gets. Not written here either — its one definition
+    // lives in scripts/views/write-outcome.mjs and its source is injected verbatim
+    // between the two marker comments below, exactly as reconcileSummary is, so the
+    // served page and the tested function are the same text by construction.
+    ${writeOutcomeSource()}
     async function blazePost(path, body) {
       try {
         const res = await fetch(path, { method: "POST",
           headers: { "content-type": "application/json", "x-blaze-csrf": CSRF }, body: JSON.stringify(body) });
-        if (res.ok) { window.blazeSwapView(document.documentElement.dataset.view); return true; }
+        if (res.ok) {
+          // BLZ-449: the 200 body carries committed/queued (serve.mjs's gitOutcome,
+          // added by BLZ-422) and this consumer used to discard it. A queued write and an
+          // idempotent re-write that git had nothing to commit both looked identical to a
+          // real commit from here — on a board whose model is one op, one commit.
+          const j = await res.json().catch(() => null);
+          const note = writeOutcome(j);
+          if (note) toast(note);
+          window.blazeSwapView(document.documentElement.dataset.view);
+          return true;
+        }
         const j = await res.json().catch(() => ({ errors: [res.statusText] }));
         toast((j.errors || ["error"]).join("; ")); return false;
       } catch (e) { toast("network error: " + e.message); return false; }

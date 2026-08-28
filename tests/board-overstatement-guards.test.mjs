@@ -23,6 +23,7 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "../scripts/views/reconcile-summary.mjs";
+import { writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END } from "../scripts/views/write-outcome.mjs";
 import { pageHtml } from "../scripts/views/page.mjs";
 import { commitFile } from "../scripts/serve-commit.mjs";
 import { commitOrQueue, commitSuffix } from "../scripts/commit-or-queue.mjs";
@@ -344,6 +345,166 @@ describe("BLZ-427: `blaze commit`'s subject counts tickets and names every op", 
       if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
       rmSync(root, { recursive: true, force: true });
       rmSync(codeRepo, { recursive: true, force: true });
+    }
+  });
+});
+
+describe("BLZ-450: an in-sync claim never sits beside a degraded check", () => {
+  // Reproduced BEFORE it was changed, because the ticket was flagged UNPROVEN and
+  // PRE-EXISTING. Both halves were checked and both held: at the function, and end to
+  // end through the real `reconcilePreview` on a board with one `defined` ticket and a
+  // `gh` that exits 1 — which returns `{ok:true, changes:[], forgeErrors:[1]}` and
+  // composed exactly "no code-bound changes · 1 forge problem(s)". The end-to-end half
+  // is the oracle's own `forge-error-clean` shape (added by this ticket); this file
+  // holds the named unit guard.
+  test("a zero-change preview with an unreadable forge does not claim the board is in sync", () => {
+    const text = reconcileSummary({ ok: true, changes: [], findings: [], forgeErrors: [{ repo: "r", error: "gh: 1" }] });
+    assert.match(text, /forge problem\(s\)/, `the degraded check must still be named, got ${JSON.stringify(text)}`);
+    assert.doesNotMatch(text, /^no code-bound changes/,
+      "an unreadable forge means candidates were never examined, so 'no code-bound changes' " +
+      "asserts an in-sync board the run is not entitled to claim — BLZ-450's own defect. " +
+      `Got ${JSON.stringify(text)}`);
+    assert.match(text, /says nothing about whether the board is in sync/,
+      `the clause must be QUALIFIED, not merely reworded, got ${JSON.stringify(text)}`);
+  });
+
+  test("a zero-change preview with a READABLE forge still says the board is in sync", () => {
+    // The other direction, or the guard above is satisfied by a summary that never
+    // claims an in-sync board at all — which would be a different overstatement.
+    const text = reconcileSummary({ ok: true, changes: [], findings: [], forgeErrors: [] });
+    assert.equal(text, "no code-bound changes",
+      "a clean board whose forge WAS readable must still say so plainly");
+  });
+
+  test("a degraded forge with real changes still reports them — only the in-sync claim is withheld", () => {
+    const text = reconcileSummary({
+      ok: true,
+      changes: [{ id: "T-1", moved: true }, { id: "T-2", moved: false }],
+      forgeErrors: [{ repo: "r", error: "gh: 1" }],
+    });
+    assert.match(text, /1 code-bound move\(s\)/, `got ${JSON.stringify(text)}`);
+    assert.match(text, /1 other update\(s\)/, `got ${JSON.stringify(text)}`);
+    assert.doesNotMatch(text, /says nothing about whether the board is in sync/,
+      "a count of what WAS found is not an in-sync claim, and must not be qualified as one");
+  });
+});
+
+describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-record line", () => {
+  // The rule, decided rather than converged, and written down in both files it governs
+  // (scripts/views/reconcile-summary.mjs and scripts/reconcile-commit-report.mjs):
+  // PREVIEW surfaces say "other update(s)"; WRITE-RECORD surfaces say "N ticket(s)
+  // updated without a status change". Measured: 4 sites, 2 vocabularies, and no site is
+  // on the wrong side.
+  //
+  // This file pins the TWO sites in the files it can reach. reconcile.mjs's other two —
+  // the dry-run tail and the commit subject — belong to a different owner and are pinned
+  // by name in tests/reconcile-change-report-oracle.test.mjs, by DRYRUN_TAIL_RE
+  // ("other update(s)"), COMMITTED_LINE_RE and QUEUED_LINE_RE ("updated without a status
+  // change"), against filesystem ground truth. Full convergence to ONE vocabulary would
+  // require editing reconcile.mjs, so the ticket's second option was taken deliberately.
+  test("the preview surface says 'other update(s)'", () => {
+    const text = reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: false }] });
+    assert.match(text, /\b1 other update\(s\)/, `got ${JSON.stringify(text)}`);
+    assert.doesNotMatch(text, /updated without a status change/,
+      "a preview must not borrow the write record's wording");
+  });
+
+  test("the write-record surface says 'N ticket(s) updated without a status change'", () => {
+    for (const outcome of ["committed", "queued", "no-op"]) {
+      const line = applySummary({ outcome, error: null, movedCount: 2, nonMovedCount: 3 });
+      assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
+        `${outcome}: got ${JSON.stringify(line.text)}`);
+      assert.doesNotMatch(line.text, /other update\(s\)/,
+        `${outcome}: a durable write record must not use the preview's shorthand — read alone, ` +
+        "with no move count beside it, 'other' names nothing");
+    }
+  });
+
+  test("neither surface states the quantity at all when it is zero", () => {
+    assert.doesNotMatch(reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: true }] }),
+      /other update\(s\)/);
+    assert.doesNotMatch(applySummary({ outcome: "committed", error: null, movedCount: 2, nonMovedCount: 0 }).text,
+      /updated without a status change/);
+  });
+});
+
+describe("BLZ-449: the dashboard surfaces the git outcome of a write", () => {
+  test("an idempotent re-write is not reported as a commit", () => {
+    const note = writeOutcome({ ok: true, committed: false, queued: false });
+    assert.match(note, /no commit created/i,
+      `a POST whose commit was an empty-diff no-op must say so, got ${JSON.stringify(note)}`);
+    assert.match(note, /git log/,
+      "and must say plainly that nothing was added to git log");
+  });
+
+  test("a queued write is named as queued, not as an idempotent no-op", () => {
+    // `committed: false` is true of BOTH, and testing it first would report a real
+    // pending write as "the file already matched HEAD".
+    const note = writeOutcome({ ok: true, committed: false, queued: true });
+    assert.match(note, /queued for blaze commit/, `got ${JSON.stringify(note)}`);
+    assert.doesNotMatch(note, /already matched HEAD/,
+      "a deferred commit is not an absent one");
+  });
+
+  test("a real commit says nothing — one op, one commit is the board's ordinary case", () => {
+    assert.equal(writeOutcome({ ok: true, committed: true, queued: false }), "");
+    assert.equal(writeOutcome({ ok: false, errors: ["nope"] }), "");
+    assert.equal(writeOutcome(null), "");
+  });
+
+  test("the dashboard's words for a git outcome are the CLI's words", () => {
+    // The binding BLZ-447 is about, applied to BLZ-449's own sentence: the two doors
+    // onto the same fact must not grow two vocabularies. `commitSuffix` is what every
+    // per-ticket CLI verb appends; each of its phrases must appear verbatim in the
+    // dashboard's sentence for the same outcome.
+    for (const [c, body] of [
+      [{ ok: true, committed: false, queued: true }, { ok: true, committed: false, queued: true }],
+      [{ ok: true, committed: false, noop: true }, { ok: true, committed: false, queued: false }],
+    ]) {
+      const cli = commitSuffix(c).trim();
+      assert.notEqual(cli, "", "fixture check: this outcome must have a CLI suffix at all");
+      assert.ok(writeOutcome(body).includes(cli),
+        `the dashboard says ${JSON.stringify(writeOutcome(body))} where the CLI says ` +
+        `${JSON.stringify(cli)} — two doors onto one fact must not word it differently`);
+    }
+  });
+
+  test("the served page runs THIS definition, and calls it exactly once", () => {
+    // The same two proofs BLZ-426 established for reconcileSummary: the page carries this
+    // module's own source text, and the one call site is the page's own wiring. Without
+    // the call site the fields are back to having no consumer, which is the whole ticket.
+    const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
+    assert.ok(html.includes(String(writeOutcome)),
+      "the served page does not contain write-outcome.mjs's own source — the dashboard is " +
+      "running a DUPLICATE, or nothing at all");
+    const begin = html.indexOf(WRITE_OUTCOME_FN_BEGIN);
+    const end = html.indexOf(WRITE_OUTCOME_FN_END);
+    assert.ok(begin !== -1 && end > begin, "the injected definition is not delimited");
+    const wiring = html.slice(0, begin) + html.slice(end + WRITE_OUTCOME_FN_END.length);
+    assert.equal((wiring.match(/writeOutcome\(/g) || []).length, 1,
+      "writeOutcome must be called exactly once outside its own definition — blazePost, and " +
+      "nowhere else");
+    assert.match(html.slice(end), /const note = writeOutcome\(j\);\s*\n\s*if \(note\) toast\(note\);/,
+      "blazePost must pass the 200 body through the INJECTED writeOutcome and toast the " +
+      "result — a success path that discards the body is exactly BLZ-449's defect");
+  });
+
+  test("the extracted browser copy behaves like the module's", () => {
+    // Evaluated from the page's own text, not from the import — a stale injected copy
+    // fails here rather than passing quietly.
+    const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
+    const i = html.indexOf(WRITE_OUTCOME_FN_BEGIN);
+    const j = html.indexOf(WRITE_OUTCOME_FN_END);
+    // eslint-disable-next-line no-new-func -- compiling the page's own text is the point
+    const fn = new Function(`${html.slice(i + WRITE_OUTCOME_FN_BEGIN.length, j)}; return writeOutcome;`)();
+    for (const body of [
+      { ok: true, committed: false, queued: false },
+      { ok: true, committed: false, queued: true },
+      { ok: true, committed: true, queued: false },
+      { ok: false, errors: ["nope"] },
+    ]) {
+      assert.equal(fn(body), writeOutcome(body),
+        `the page's copy disagrees with the module for ${JSON.stringify(body)}`);
     }
   });
 });

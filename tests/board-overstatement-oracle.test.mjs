@@ -29,11 +29,12 @@
 //
 // THE CROSS-PRODUCT, generated (not a hand-written list):
 //   preview shape ∈ refused-unknown-project / refused-no-key / clean / moves-only /
-//                   cleared / findings / forge-error / non-moving-update      (8)
+//                   cleared / findings / forge-error / forge-error-clean /
+//                   non-moving-update                                         (9)
 //   commit outcome ∈ committed / no-op / queued / locked / failed             (5)
 //   consumer ∈ dashboard-toast / reconcile-cli / commit-outcome-report /
 //              blaze-commit-subject                                           (4)
-// = 8 × 5 × 4 = 160 cells. The size is ASSERTED, not merely printed: deleting a
+// = 9 × 5 × 4 = 180 cells. The size is ASSERTED, not merely printed: deleting a
 // dimension must fail this file rather than silently shrink it. So is the CLAUSE count,
 // and as of BLZ-444/BLZ-452 it is DERIVED from the cross-product's own shape and checked
 // PER CELL — see `budgetFor`. (The same hole in three sibling oracles was BLZ-415,
@@ -43,11 +44,22 @@
 //   - The two REFUSAL shapes require `projects !== null`, and serve.mjs's
 //     `/api/reconcile-preview` route never passes one. Through the ROUTE they are
 //     unreachable today; they are reachable through `reconcile` the CLI
-//     (`--project NOPE`, `--project=`), which this file drives. The dashboard half
-//     is therefore a CONTRACT gap, tested as one — the same precedent
+//     (`--project NOPE`, `--project=`), which this file drives. For THOSE TWO BODIES
+//     the dashboard half is a CONTRACT gap, tested as one — the same precedent
 //     tests/reconcile-preview-refusal.test.mjs set for BLZ-405, and for the same
 //     reason: adding a `?project=` query-string surface to make it reachable would
 //     ship a per-project preview, a real feature and a different ticket's scope.
+//   - BLZ-446 CORRECTS THE SENTENCE THAT USED TO STOP THERE. "Contract-only" was true
+//     of the two `projects`-gated refusals and FALSE of the branch as a whole. The
+//     toast's `ok !== true` arm is also taken for any non-`{ok:true}` body the route
+//     can return today, with no code change and nothing to do with `projects`: a 401
+//     from `gate()` (no credential, or an expired/revoked/unknown bearer token, on any
+//     board with users configured), a 503 when the gate itself throws or before
+//     first-run setup completes, a 500 `{errors:[…]}`, a reverse proxy's error page.
+//     Under the pre-BLZ-426 inline code every one of those left `j.changes` undefined,
+//     so `moves` was 0 and the toast read "no code-bound changes" ON AN AUTH FAILURE.
+//     That was a live production bug, not a contract gap. The named test at the foot of
+//     this file drives the REAL server and proves those bodies reach the REAL toast.
 //   - reconcile can never reach `commitFile`'s empty-diff no-op: a change entry
 //     requires a byte difference or a rename, so the staged tree is never clean.
 //     The `"no-op"` arm of `commitOutcomeFrom` is therefore UNREACHABLE THROUGH
@@ -143,6 +155,14 @@ const SHAPES = [
     projects: null, refused: false, expectFindings: true, expectForge: false, ghFails: false },
   { name: "forge-error", plant: "shipped", cliArgs: [], moves: true, other: false,
     projects: null, refused: false, expectFindings: false, expectForge: true, ghFails: true },
+  // BLZ-450: the combination the cross-product did not contain. `forge-error` above has
+  // `moves: true`, so the toast always had a move count to report and the ZERO-DECIDABLE-
+  // CHANGE-plus-degraded-forge cell was never generated — which is why the oracle passed
+  // while the toast composed "no code-bound changes · 1 forge problem(s)": an in-sync
+  // claim in the same sentence as "the check was degraded". Same plant as `clean` (one
+  // `defined` ticket, no signal at all), same `gh` that exits 1 as `forge-error`.
+  { name: "forge-error-clean", plant: "none", cliArgs: [], moves: false, other: false,
+    projects: null, refused: false, expectFindings: false, expectForge: true, ghFails: true },
   // A change that is NOT a move: a terminal ticket with a blank resolution and a
   // merged PR gets its resolution backfilled and its delivery record filled in
   // place. `changes` carries it, the directory does not change — which is exactly
@@ -177,6 +197,18 @@ const CONSUMERS = ["dashboard-toast", "reconcile-cli", "commit-outcome-report", 
 // its own count against it, so a deleted assertion now names the cell it was deleted
 // from; and the file total is the sum over the cross-product, so it cannot be fitted.
 //
+// BLZ-466 NARROWS WHAT THAT BUYS, because the BLZ-444 commit claimed more than it does.
+// It said "the same pair of edits names both the cell that lost a clause and the ones
+// that gained". It does not. `assert` THROWS, so a run carrying a removal in one arm and
+// an addition in another stops at whichever cell the loops reach FIRST and names only
+// that consumer's cells — review measured 41/41 failing, every one of them at
+// `dashboard-toast`, with the cells that gained never reported. What IS true, and all
+// that is claimed here: a REMOVAL-ONLY edit names every cell that lost a clause (a
+// deleted `blaze-commit-subject` clause named all five `*/queued/blaze-commit-subject`
+// cells), and in ANY run the FIRST affected cell is named with its coordinates instead
+// of surfacing as a wrong grand total hundreds of clauses later. Fix what it names, re-
+// run, and the next one is named; the budget does not report them all at once.
+//
 // The one input that is not a coordinate is `shape.moves` / `shape.other`, and those are
 // DECLARED by the fixture and separately asserted against the filesystem measurement
 // (see `assertShapeSpecMatchesGroundTruth`) — so a shape that stopped moving anything
@@ -191,7 +223,10 @@ function budgetFor(shape, outcome, consumer) {
     } else {
       n += shape.moves ? 2 : 1;                   // the move count is right, or absent
       n += shape.other ? 2 : 1;                   // ditto the non-moving count
-      if (!shape.moves && !shape.other) n += 1;   // "no code-bound changes"
+      // BLZ-450: the in-sync claim is now TWO clauses, not one — which wording was used,
+      // and whether it was qualified — because "no code-bound changes" is an assertion
+      // about the board and a degraded forge is not entitled to make it.
+      if (!shape.moves && !shape.other) n += 2;
       n += 3;                                     // CLEARED count, findings presence, forge presence
     }
     // The wording-invariant clause compares against the FIRST outcome's text, so it does
@@ -433,15 +468,15 @@ const CLEARED_RE = /(\d+) would have their branch\/pr CLEARED/;
 
 test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross-product", async (t) => {
   // --- the cross-product's own size, ASSERTED (BLZ-415/420/437) -------------
-  assert.equal(SHAPES.length, 8, "preview-shape dimension changed size");
+  assert.equal(SHAPES.length, 9, "preview-shape dimension changed size");
   assert.equal(OUTCOMES.length, 5, "commit-outcome dimension changed size");
   assert.equal(CONSUMERS.length, 4, "consumer dimension changed size");
   const CELLS = [];
   for (const shape of SHAPES) for (const outcome of OUTCOMES) for (const consumer of CONSUMERS) {
     CELLS.push({ shape, outcome, consumer });
   }
-  assert.equal(CELLS.length, 160,
-    `the cross-product must be 8 × 5 × 4 = 160 cells, got ${CELLS.length} — a dimension was deleted`);
+  assert.equal(CELLS.length, 180,
+    `the cross-product must be 9 × 5 × 4 = 180 cells, got ${CELLS.length} — a dimension was deleted`);
 
   // BLZ-444: the total is the SUM OF THE CROSS-PRODUCT'S OWN BUDGET, not a number read
   // off a run. Nothing below may adjust it.
@@ -514,6 +549,9 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
             if (MOVES_RE.test(text)) clauseKindsSeen.add("moves");
             if (OTHER_RE.test(text)) clauseKindsSeen.add("other");
             if (/no code-bound changes/.test(text)) clauseKindsSeen.add("clean");
+            // BLZ-450: the qualified form is its own arm of the sentence, so the
+            // non-vacuity check below fails if the cross-product stops generating it.
+            if (/no code-bound change was DECIDABLE/.test(text)) clauseKindsSeen.add("clean-degraded");
             if (CLEARED_RE.test(text)) clauseKindsSeen.add("cleared");
             if (/need attention/.test(text)) clauseKindsSeen.add("findings");
             if (/forge problem/.test(text)) clauseKindsSeen.add("forge");
@@ -552,8 +590,21 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
                   `${shape.name}/${outcome}: the toast claims non-moving updates that never happen`);
               }
               if (gt.moved === 0 && gt.other === 0) {
-                matches(text, /no code-bound changes/,
-                  `${shape.name}/${outcome}: a genuinely clean board must say so`);
+                // BLZ-450. "no code-bound changes" is an IN-SYNC CLAIM about the board,
+                // and it is only earned when the check that produced it was complete. An
+                // unreadable forge means candidates were never examined, so the run may
+                // report what it could decide and nothing more. Ground truth for WHICH
+                // sentence is owed is the fixture's own statement of what it planted
+                // (source (4), presence only) — never anything the toast said.
+                matches(text,
+                  shape.expectForge ? /no code-bound change was DECIDABLE/ : /no code-bound changes/,
+                  `${shape.name}/${outcome}: a board with nothing to do and a ` +
+                  `${shape.expectForge ? "DEGRADED" : "healthy"} forge check must say so in ` +
+                  `those terms; it said ${JSON.stringify(text)}`);
+                eq(/says nothing about whether the board is in sync/.test(text), shape.expectForge,
+                  `${shape.name}/${outcome}: the in-sync claim must be QUALIFIED exactly when ` +
+                  "the forge could not be read — an unqualified 'no code-bound changes' beside " +
+                  `'N forge problem(s)' is BLZ-450's own defect. Got ${JSON.stringify(text)}`);
               }
               // cleared, from the filesystem: a ticket whose branch/pr lines vanished.
               const clearedGT = gt.changedIds.length === 0 ? 0 : countCleared(tmp, shape, fixture, env);
@@ -803,11 +854,11 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
     // Non-vacuity: every clause the summary can emit was really emitted by at least
     // one generated cell, so no arm of the sentence is untested.
     deepEq([...clauseKindsSeen].sort(),
-      ["clean", "cleared", "findings", "forge", "moves", "other", "refused"],
+      ["clean", "clean-degraded", "cleared", "findings", "forge", "moves", "other", "refused"],
       "the cross-product did not exercise every clause the toast can render — " +
       `saw ${JSON.stringify([...clauseKindsSeen].sort())}`);
-    assert.equal(cellsEvaluated, 160,
-      `every one of the 160 cells must be evaluated; ${cellsEvaluated} were`);
+    assert.equal(cellsEvaluated, 180,
+      `every one of the 180 cells must be evaluated; ${cellsEvaluated} were`);
     assert.equal(clauses, EXPECTED_CLAUSES,
       `the oracle executed ${clauses} clauses; the cross-product's own budget is ` +
       `${EXPECTED_CLAUSES}. Every cell already checked its own share, so a mismatch HERE ` +
@@ -844,3 +895,136 @@ function countCleared(tmp, shape, fixture, env) {
   _clearedCache.set(shape.name, n);
   return n;
 }
+
+// =============================================================================
+// BLZ-446 — THE REACHABLE HALF OF THE `ok !== true` BRANCH.
+//
+// The cross-product above drives `reconcilePreview` as a FUNCTION, so the only non-ok
+// bodies it can generate are the two `projects`-gated refusals — the ones the route
+// genuinely cannot produce, and the ones the BLZ-426 commit was describing when it
+// called the fix "contract-only". That description was incomplete, and the header of
+// this file now says so. This test covers what it left out: the bodies the ROUTE
+// really can return today, taken from the REAL SERVER over a REAL SOCKET, fed to the
+// REAL toast.
+//
+// Why it matters, concretely. Under the pre-BLZ-426 inline consumer, `j.changes` on
+// every one of these bodies was `undefined` -> `moves = 0` -> the toast read "no code-
+// bound changes". A person whose token had expired was told the board was in sync. The
+// clause below that asserts `changes === undefined` is that mechanism, pinned: it is
+// the property that made the old code silently wrong, and it still holds of these
+// bodies, so the ONLY thing standing between them and a false in-sync claim is the
+// `ok !== true` branch.
+//
+// The asserts here are deliberately BARE `assert.` calls, not the `eq`/`ok`/`matches`
+// wrappers: they are not cells of the cross-product and must not move its clause
+// budget. (Same convention the fixture preconditions above follow.)
+//
+// NOT COVERED, stated plainly: a 500 from `/api/reconcile-preview` itself. The route
+// body is `json(200, await reconcilePreview(...))` with no throwing path between the
+// gate and the response, so there is no way to force one without editing serve.mjs to
+// create it. The 500 shape reaches this consumer only from a route-level crash or a
+// reverse proxy, and it is covered at the FUNCTION by the `{errors:[…]}` case in
+// tests/board-overstatement-guards.test.mjs. What is proven live here is 401 and 503.
+test("BLZ-446: a REACHABLE non-ok body from /api/reconcile-preview reaches the toast as a refusal", async (t) => {
+  const { startServer } = await import("../scripts/serve.mjs");
+  const { addUser } = await import("../scripts/model/user-admin.mjs");
+
+  /** The summary function the BROWSER runs, compiled from the served page's own text.
+   *  Bare asserts, for the reason in this block's header. */
+  function browserSummaryFn(projectsDir) {
+    const html = pageHtml({ project: "all", projectsDir, now: 1751932800000, transitions: [] });
+    assert.ok(html.includes(String(reconcileSummary)),
+      "the served page does not carry reconcile-summary.mjs's own source");
+    const i = html.indexOf(SUMMARY_FN_BEGIN);
+    const j = html.indexOf(SUMMARY_FN_END);
+    // eslint-disable-next-line no-new-func -- compiling the page's own text is the point
+    return new Function(`${html.slice(i + SUMMARY_FN_BEGIN.length, j)}; return reconcileSummary;`)();
+  }
+
+  const tmp = mkdtempSync(join(tmpdir(), "blz446-reachable-"));
+  /** A board with ONE clean ticket: were the request to get through, the preview would
+   *  return `{ok:true, changes:[]}` and the toast would legitimately say the board is
+   *  in sync. So a toast that says "in sync" here is indistinguishable from the honest
+   *  answer — which is exactly what made the pre-fix bug invisible. */
+  function board() {
+    const root = mkdtempSync(join(tmp, "board-"));
+    const projectsDir = join(root, "projects");
+    mkdirSync(join(projectsDir, "ZZZ", "defined"), { recursive: true });
+    writeFileSync(join(projectsDir, "ZZZ", "defined", "ZZZ-1-t.md"),
+      "---\nid: ZZZ-1\ntitle: t\ntype: task\nproject: ZZZ\nestimate: 30\n---\n\nbody\n");
+    writeFileSync(join(projectsDir, "ZZZ", "project.json"), JSON.stringify({ key: "ZZZ", codeRepos: [] }));
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "ZZZ", projects: ["ZZZ"] }));
+    for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
+                     ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+      git(root, ...a);
+    }
+    return { root, projectsDir };
+  }
+
+  // A gate that cannot decide. Same injection tests/identity-resilience.test.mjs uses:
+  // it isolates the one thing under test (what the route answers) from any need for a
+  // read-only mount or a held lock.
+  const explodingIdentity = () => ({
+    hasIdentity: true,
+    close() {},
+    store: { authenticate: async () => { throw new Error("database is locked"); } },
+  });
+
+  const CASES = [
+    { name: "401 — no credential at all",
+      status: 401, headers: {}, withUser: true, identity: undefined },
+    { name: "401 — an expired, revoked or unknown bearer token",
+      status: 401, headers: { authorization: "Bearer blz_this_token_is_not_valid" },
+      withUser: true, identity: undefined },
+    { name: "503 — the gate itself could not decide",
+      status: 503, headers: { authorization: "Bearer blz_whatever" },
+      withUser: false, identity: explodingIdentity },
+  ];
+
+  try {
+    for (const c of CASES) {
+      await t.test(c.name, async () => {
+        const { root, projectsDir } = board();
+        if (c.withUser) await addUser(root, { email: "ops@example.com", role: "admin" });
+        const server = startServer({ port: 0, root, projectsDir,
+          ...(c.identity ? { identity: c.identity() } : {}) });
+        await new Promise((res) => server.once("listening", res));
+        try {
+          const res = await fetch(
+            `http://127.0.0.1:${server.address().port}/api/reconcile-preview`,
+            { headers: c.headers });
+          assert.equal(res.status, c.status,
+            `${c.name}: this body is only reachable if the route really answers ${c.status}`);
+          const body = await res.json();
+
+          // THE MECHANISM, pinned. `changes` is absent on every one of these bodies, so
+          // a consumer that reads `j.changes` and not `j.ok` computes 0 moves and says
+          // the board is in sync. That is precisely the pre-BLZ-426 inline code.
+          assert.equal(body.changes, undefined,
+            `${c.name}: this body carries no \`changes\` — the property that made the ` +
+            "pre-fix consumer silently report an in-sync board");
+          assert.ok(Array.isArray(body.errors) && body.errors.length > 0,
+            `${c.name}: the route must say why: ${JSON.stringify(body)}`);
+
+          const text = browserSummaryFn(projectsDir)(body);
+          assert.match(text, /^reconcile REFUSED: /,
+            `${c.name}: the toast must render this as a refusal, it rendered ` +
+            `${JSON.stringify(text)}`);
+          assert.doesNotMatch(text, /no code-bound change/,
+            `${c.name}: THE PRODUCTION BUG — the toast told a caller whose request was ` +
+            `refused with ${c.status} that the board had no code-bound changes. Got ` +
+            `${JSON.stringify(text)}`);
+          assert.ok(text.includes(body.errors[0]),
+            `${c.name}: the refusal must carry the server's own reason ` +
+            `(${JSON.stringify(body.errors[0])}), it said ${JSON.stringify(text)}`);
+          assert.match(text, /the board was NOT checked/,
+            `${c.name}: and must say plainly that nothing was checked`);
+        } finally {
+          server.close();
+        }
+      });
+    }
+  } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
