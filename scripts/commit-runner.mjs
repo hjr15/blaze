@@ -15,6 +15,7 @@ import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 import { assertWritable } from "./readonly.mjs";
 import { checkBranch } from "./branch-guard.mjs";
+import { summarizeEntries } from "./commit-summary.mjs";
 
 const { dataRoot } = resolveRoots();
 const argv = process.argv.slice(2);
@@ -125,13 +126,10 @@ if (hasUpstream.status === 0) {
   }
 }
 
-// Counts by op → "2 new, 3 logged, 1 moved, 1 resolved"
-const LABEL = { new: "new", log: "logged", move: "moved", resolve: "resolved" };
-const counts = {};
-for (const e of entries) counts[e.op] = (counts[e.op] || 0) + 1;
-const summary = Object.entries(counts)
-  .map(([op, n]) => `${n} ${LABEL[op] || op}`)
-  .join(", ");
+// Counts by op → "2 new, 3 logged, 1 moved, 1 resolved". BLZ-427: composed in
+// commit-summary.mjs, which is importable — this file is a script with top-level
+// side effects, so nothing here could ever be reached by a test.
+const summary = summarizeEntries(entries);
 
 const date = new Date().toISOString().slice(0, 10);
 const subject = `blaze: ${date} board update (${summary})`;

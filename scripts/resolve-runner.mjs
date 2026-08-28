@@ -2,7 +2,7 @@
 import { applyResolve } from "./resolve.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -58,4 +58,4 @@ if (!r.ok) { console.error(`blaze resolve failed:\n  ${r.errors.join("\n  ")}`);
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "resolve", id, message: `${id}: resolution → ${resolution}`, files: [r.file] });
 if (!c.ok) { console.error(`blaze resolve: file updated but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`${id}: resolution → ${resolution}${c.queued ? " (queued for blaze commit)" : ""}`);
+console.log(`${id}: resolution → ${resolution}${commitSuffix(c)}`);

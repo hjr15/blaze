@@ -37,7 +37,7 @@ test("commitFile refuses instead of racing when the lock is held by a live owner
   assert.equal(acquireLock(root, { session: "other" }).ok, true);
   writeFileSync(join(root, "f.md"), "x");
   const r = commitFile(root, "f.md", "msg", [], { retries: 1, delayMs: 10 });
-  assert.deepEqual(r, { ok: false, locked: true, status: -1 });
+  assert.deepEqual(r, { ok: false, committed: false, locked: true, status: -1 });
   releaseLock(root);
   const r2 = commitFile(root, "f.md", "msg");
   assert.equal(r2.ok, true);

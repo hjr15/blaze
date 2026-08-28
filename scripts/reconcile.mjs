@@ -26,6 +26,7 @@ import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
 import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOutcomeFrom, applySummary } from "./reconcile-commit-report.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 // BLZ-130: SELECTION precedence — deliberately NOT "how far along the PR is".
@@ -1441,7 +1442,13 @@ export async function reconcile({
   // `id` names the WHOLE op, not a single ticket: reconcile can touch many tickets in one
   // pass, and a null-ish id would make an unreadable pending-ledger entry (and a
   // meaningless name in `checkBranch`'s refusal message, which lists ids by this field).
-  let commitOutcome = "none"; // "none" | "committed" | "queued" | "locked" | "failed"
+  // BLZ-422: "no-op" joined this list — see reconcile-commit-report.mjs, which owns
+  // both the classification and the wording. Reconcile itself cannot REACH "no-op": a
+  // change entry requires either a byte difference or a rename, so the staged tree is
+  // never clean by the time `commitFile` runs. It is carried here as a contract, the
+  // same way BLZ-405 carried `reconcilePreview`'s unreachable refusals, and it is
+  // pinned where it IS reachable — `commitFile`'s other callers.
+  let commitOutcome = "none"; // one of COMMIT_OUTCOMES (reconcile-commit-report.mjs)
   let commitError = null;
   // BLZ-404 round 5: this commit block only ever files THIS PASS's own decisions
   // (`touched`) — it makes no attempt to recover a previous pass's uncommitted ticket
@@ -1461,23 +1468,20 @@ export async function reconcile({
     const nonMovedCount = changes.length - movedCount;
     const c = commitOrQueue({
       root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
+      // BLZ-427: one reconcile op covers EVERY ticket this pass wrote. `id` names the
+      // op (it has to — a pass has no single ticket), so without this list `blaze
+      // commit` counted the whole pass as one and a flush of twelve moved tickets read
+      // "1 reconcile". Every other verb queues one ticket per op and passes none.
+      ids: changes.map((ch) => ch.id),
       message: `chore(board): reconcile ${movedCount} ticket(s) moved to git state` +
         (nonMovedCount ? `, ${nonMovedCount} ticket(s) updated without a status change` : "") +
         (wanted ? ` (${keys.join(", ")})` : ""),
       files: touched,
     });
-    if (c.queued) {
-      commitOutcome = "queued";
-    } else if (c.ok) {
-      committed = true;
-      commitOutcome = "committed";
-    } else if (c.locked) {
-      commitOutcome = "locked";
-      commitError = "the advisory commit lock is held by another writer";
-    } else {
-      commitOutcome = "failed";
-      commitError = `git commit failed (exit status ${c.status})`;
-    }
+    // BLZ-422: the classification lives in reconcile-commit-report.mjs so it can be
+    // driven directly — see that file for why `ok: true` alone was not enough.
+    ({ outcome: commitOutcome, error: commitError } = commitOutcomeFrom(c));
+    committed = commitOutcome === "committed";
   }
   // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
   // never reads a `push` option and `pushed: false` is unconditional below — accepting a
@@ -1649,28 +1653,15 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     // only when it is non-zero, a second quantity for the writes that did not move a
     // ticket. `r.changes.length` alone repeats the same overstatement the commit
     // message used to make, one line lower.
-    const suffix = nonMovedCount ? `, ${nonMovedCount} ticket(s) updated without a status change` : "";
-    if (r.commitOutcome === "queued") {
-      console.log(`reconcile: queued (commitMode: batch) — run \`blaze commit\` to flush ` +
-        `${movedCount} ticket(s) moved${suffix}.`);
-    } else if (r.commitOutcome === "committed") {
-      console.log(`reconcile: committed ${movedCount} ticket(s) moved${suffix}.`);
-    } else if (r.commitOutcome === "locked") {
-      console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
-        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
-        "Re-run once the lock clears, or commit the tree manually.");
-      process.exit(1);
-    } else if (r.commitOutcome === "failed") {
-      // BLZ-404 round 2 (blocking 1, item 3): this branch used to share the lock's own
-      // wording ("re-run once the lock clears"), which is FALSE for a failing pre-commit
-      // hook or a detached HEAD — outcomes that reach "failed", never "locked", and carry
-      // no lock at all. Each outcome gets advice that is true for it.
-      console.error(`reconcile: FAILED TO COMMIT — ${r.commitError}. Ticket file(s) were already ` +
-        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
-        "No lock is involved in this failure — check for a failing pre-commit hook, a detached " +
-        "HEAD, or another reason `git commit` itself refuses, fix it, then commit the tree " +
-        "manually or re-run.");
-      process.exit(1);
+    // BLZ-422: the wording (and the exit code each outcome demands) lives in
+    // reconcile-commit-report.mjs beside the classifier that produced the outcome, so
+    // a new outcome cannot be added to one without the other.
+    const line = applySummary({
+      outcome: r.commitOutcome, error: r.commitError, movedCount, nonMovedCount,
+    });
+    if (line) {
+      if (line.stream === "err") console.error(line.text); else console.log(line.text);
+      if (line.exit) process.exit(line.exit);
     }
   }
 }

@@ -3,7 +3,7 @@
 import { applyMove } from "./move.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -73,4 +73,4 @@ for (const w of r.warnings) console.error(`warning: ${w}`);
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "move", id, message: `${id}: ${r.from} → ${r.to}`, files: [r.fromFile, r.file] });
 if (!c.ok) { console.error(`blaze move: file relocated but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`${id}: ${r.from} → ${r.to}${r.resolution ? ` (resolution: ${r.resolution})` : ""}${c.queued ? " (queued for blaze commit)" : ""}`);
+console.log(`${id}: ${r.from} → ${r.to}${r.resolution ? ` (resolution: ${r.resolution})` : ""}${commitSuffix(c)}`);

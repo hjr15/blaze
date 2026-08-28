@@ -34,7 +34,10 @@ test("batch mode appends to the ledger and makes no commit", () => {
     if (prev !== undefined) process.env.BLAZE_SESSION = prev;
   }
 
-  assert.deepEqual(r, { ok: true, queued: true });
+  // BLZ-422: `committed: false` travels with every non-committing outcome, so a
+  // caller reads one field to answer "is there a new commit" rather than inferring it
+  // from the absence of `queued`.
+  assert.deepEqual(r, { ok: true, committed: false, queued: true });
   const after = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
   assert.equal(before, after, "HEAD must not move in batch mode");
   // Whatever commitOrQueue's own sessionId() resolved to for this process's

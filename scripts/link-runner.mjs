@@ -3,7 +3,7 @@ import { applyLink } from "./link.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { LINK_TYPES } from "./model/links.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -66,4 +66,4 @@ if (!r.ok) { console.error(`blaze link failed:\n  ${r.errors.join("\n  ")}`); pr
 const verb = remove ? "unlink" : "link";
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "link", id, message: `${id}: ${verb} ${type} ${target}`, files: [r.file] });
 if (!c.ok) { console.error(`blaze link: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`${id}: ${remove ? "removed" : "added"} ${type} → ${target}${c.queued ? " (queued for blaze commit)" : ""}`);
+console.log(`${id}: ${remove ? "removed" : "added"} ${type} → ${target}${commitSuffix(c)}`);

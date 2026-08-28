@@ -5,7 +5,7 @@ import { applyLog } from "./log.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { formatMinutes } from "./model/time.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -73,4 +73,4 @@ if (!r.ok) { console.error(`blaze log failed:\n  ${r.errors.join("\n  ")}`); pro
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "log", id: r.id, message: `${r.id}: log ${r.minutes}m`, files: [r.file] });
 if (!c.ok) { console.error(`blaze log: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`logged ${r.minutes}m to ${r.id} (total ${formatMinutes(r.total_worklog_minutes)})${c.queued ? " (queued for blaze commit)" : ""}`);
+console.log(`logged ${r.minutes}m to ${r.id} (total ${formatMinutes(r.total_worklog_minutes)})${commitSuffix(c)}`);

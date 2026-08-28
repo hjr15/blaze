@@ -4,7 +4,7 @@
 import { applyEdit } from "./edit.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -78,4 +78,4 @@ if (!r.ok) { console.error(`blaze edit failed:\n  ${r.errors.join("\n  ")}`); pr
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "edit", id, message: `${id}: edit ${field}`, files: [r.file] });
 if (!c.ok) { console.error(`blaze edit: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`${id}: ${field} = ${value}${c.queued ? " (queued for blaze commit)" : ""}`);
+console.log(`${id}: ${field} = ${value}${commitSuffix(c)}`);

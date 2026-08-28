@@ -298,6 +298,13 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // (commitMode: batch) — run `blaze commit`"); the feed — this ticket's own comment
         // calls it "the operator's whole account of the run" — was not. Say what the CLI
         // says, in the CLI's own words, so the two surfaces cannot drift on this outcome.
+        // BLZ-422: `commitOutcome` gained a "no-op" arm (nothing entered `git log`
+        // because the staged tree already matched HEAD). Nothing is published for it
+        // and that is deliberate, not an omission: reconcile cannot reach it (a change
+        // entry implies a byte difference or a rename), and even if it could there is
+        // no dirty tree and no pending queue to warn about — the two conditions this
+        // feed exists to name. The falsehood BLZ-422 removed was the CLI calling it
+        // "committed"; the feed never claimed a commit at all.
         if (r.commitOutcome === "queued") {
           bus.publish({
             type: "warning", loop: "reconcile",
