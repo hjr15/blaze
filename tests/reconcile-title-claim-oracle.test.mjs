@@ -59,7 +59,12 @@
 
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { claimCorroborated, buildPrMap, decide, betterPr, prTitleClaim, PR_RANK } from "../scripts/reconcile.mjs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { execFileSync } from "node:child_process";
+import { claimCorroborated, buildPrMap, decide, betterPr, prTitleClaim, PR_RANK, reconcile }
+  from "../scripts/reconcile.mjs";
 
 const KEY = "ORC";
 const N = 408;
@@ -672,4 +677,242 @@ describe("BLZ-440 regression fixture: hjr15/blaze PR #140", () => {
     const map = buildPrMap([PR_140, real], blzFromRef, new Set());
     assert.equal(map.get("BLZ-408")?.number, 200);
   });
+});
+
+// =============================================================================
+// BLZ-458 ROUND 2 — THE NUMBER DIMENSION, PUT WHERE THE CORROBORATION TIER IS
+// ACTUALLY REACHABLE.
+//
+// Round 1 made the subject's number a dimension of every WITHIN-REPO pool above, and
+// adversarial review showed that is the one place it cannot matter. Within one repo
+// `betterPr`'s CORROBORATED tier is unreachable — the file says so itself at the
+// CROSS-REPO test above: corroboration and the claim tier are the same question there,
+// so the CLAIM tier always separates the pair first and the number tiebreak is never
+// consulted on a corroboration difference. The measurement: the literal mutant
+//
+//     const skipCorr = pr.uncorroborated && pr.state === "CLOSED" && pr.number > best.number;
+//     if (!skipCorr && corroborated(pr) !== corroborated(best)) return ...
+//
+// left `node --test` at 3987/3987 pass. Every case round 1 added — `SUBJECT_NUMBERS`,
+// both `CORROBORATED_POOL_*` tables, the eight-row `THREE_PR_POOL` — runs `buildPrMap`
+// with ONE `shippedSet`, so none of them can see it.
+//
+// The tier is reachable only where `shippedSet` DIFFERS between the compared candidates,
+// which is `gatherProject` merging two repos: `shippedSet` is computed per repo, so the
+// same weak title is corroborated in the repo whose default branch carries the `KEY-n:`
+// commit and uncorroborated in the one that does not. THAT is where the number dimension
+// belongs, and it needs both directions AND the unrecordable (`number: null`) shape,
+// because the two tiers underneath the corroboration tier are RECORDABLE and then LOWER
+// NUMBER — so skipping corroboration hands the selection to the uncorroborated claim by
+// a different route in each direction:
+//
+//   - uncorroborated LOWER  (#140 vs #200): the number tiebreak hands it over;
+//   - uncorroborated HIGHER (#300 vs a corroborated PR the forge could not number):
+//     the RECORDABLE tier hands it over, and the mutant above is exactly this case.
+//
+// In both, an uncorroborated claim takes the cross-repo selection from a corroborated
+// one and — being uncorroborated — moves nothing and records nothing, suppressing the
+// delivery signal that was sitting right there. There is NO production defect here:
+// every ordered pair below is antisymmetric at HEAD. This is the coverage the tier's
+// only reachable path never had.
+// =============================================================================
+describe("BLZ-458: cross-repo, the corroboration tier holds in BOTH number directions", () => {
+  const CORR_TITLE = `chore: tidy the runbook after ${ID}`;   // weak title, claim 1
+  const UNCORR_TITLE = `docs: the ${ID}..439 lane`;           // weak title, claim 1
+  const xpr = (number, state, suffix, title) => ({
+    number, state, url: number === null ? "uA-unnumbered" : `u${number}`,
+    headRefName: `${ID.toLowerCase()}-${suffix}`, title,
+  });
+
+  // corroborated repo-A number | uncorroborated repo-B number | why the tier is load-bearing
+  const NUMBER_DIRECTIONS = [
+    [200, 140, "the uncorroborated claim carries the LOWER number: without the tier the " +
+               "number tiebreak hands it the selection"],
+    [200, 300, "the uncorroborated claim carries the HIGHER number: the tier must not be " +
+               "a restatement of the number tiebreak"],
+    [null, 140, "the corroborated PR is UNRECORDABLE and the uncorroborated one is lower: " +
+                "without the tier, RECORDABLE and then NUMBER both hand it over"],
+    [null, 300, "the corroborated PR is UNRECORDABLE and the uncorroborated one is HIGHER: " +
+                "without the tier the RECORDABLE tier alone hands it over — the surviving mutant"],
+  ];
+  // state (shared by both repos, so RANK can never decide) | target | record from repo A?
+  const XREPO_STATES = [
+    ["OPEN", "in-review"],
+    ["MERGED", "done"],
+    ["CLOSED", "in-progress"],
+  ];
+  const START = "defined";
+
+  test("the cross-repo grid declares both number directions and the unrecordable shape", () => {
+    assert.equal(NUMBER_DIRECTIONS.length, 4, "the cross-repo grid changed size");
+    assert.ok(NUMBER_DIRECTIONS.some(([c, u]) => u < (c ?? Infinity)),
+      "one row must give the uncorroborated claim the LOWER number");
+    assert.ok(NUMBER_DIRECTIONS.some(([c, u]) => c !== null && u > c),
+      "one row must give the uncorroborated claim the HIGHER number");
+    assert.ok(NUMBER_DIRECTIONS.some(([c]) => c === null),
+      "one row must make the CORROBORATED PR unrecordable — the shape that makes the " +
+      "suppression visible");
+    assert.equal(XREPO_STATES.length, 3, "every PR state, so rank never decides");
+  });
+
+  test("TWO shippedSets: an uncorroborated claim never takes the selection, in either number direction", () => {
+    // The premise, asserted rather than assumed: the two repos disagree about the SAME
+    // title because `shippedSet` is per repo. Nothing here is computed by calling
+    // `betterPr` — every expectation is hand-declared from the documented tier order.
+    let clauses = 0;
+    for (const [corrNumber, uncorrNumber, why] of NUMBER_DIRECTIONS) {
+      for (const [state, wantTarget] of XREPO_STATES) {
+        const label = `corr#${corrNumber} vs unc#${uncorrNumber} ${state}: ${why}`;
+        // Repo A: its own default branch carries `ORC-408: …`, so the weak title corroborates.
+        const fromRepoA = buildPrMap([xpr(corrNumber, state, "a", CORR_TITLE)], idFromRef,
+          new Set([ID])).get(ID);
+        // Repo B: nothing shipped there, so the same shape of weak title does not.
+        const fromRepoB = buildPrMap([xpr(uncorrNumber, state, "b", UNCORR_TITLE)], idFromRef,
+          new Set()).get(ID);
+        assert.equal(prTitleClaim(fromRepoA, ID), 1, `${label}: repo A's title is weak`);
+        assert.equal(prTitleClaim(fromRepoB, ID), 1, `${label}: repo B's title is weak`);
+        assert.equal(Boolean(fromRepoA.uncorroborated), false, `${label}: repo A corroborated`);
+        assert.equal(fromRepoB.uncorroborated, true, `${label}: repo B uncorroborated`);
+        // The tier itself, in BOTH argument orders — `gatherProject` asks it in whichever
+        // order `codeRepos` happens to list the repos, so a non-antisymmetric comparator
+        // makes the winner scan-order dependent.
+        assert.equal(betterPr(fromRepoB, fromRepoA, ID), false, `${label}: B must not beat A`);
+        assert.equal(betterPr(fromRepoA, fromRepoB, ID), true, `${label}: A must beat B`);
+        // ...and what the winner then does with the ticket.
+        const d = decide({ pr: fromRepoA }, START, "epic");
+        assert.equal(d.target, wantTarget, `${label}: target`);
+        assert.equal(d.prVal, corrNumber === null ? null : `#${corrNumber} — u${corrNumber}`,
+          `${label}: record`);
+        clauses += 8;
+      }
+    }
+    assert.equal(clauses, NUMBER_DIRECTIONS.length * XREPO_STATES.length * 8);
+  });
+});
+
+// =============================================================================
+// ...and the same grid through `gatherProject` itself, because the unit assertions
+// above still call `betterPr` by hand. `gatherProject` is not exported — it is reached
+// only by running `reconcile` over a board whose config names TWO code repos — so this
+// is the seam that proves the tier is wired, not merely correct. Two real git repos,
+// one carrying an `ORC-408:` commit on its default branch and one not, which is what
+// makes the two `shippedSet`s differ; the forge payload is stubbed per repo.
+//
+// CLOSED on both sides throughout: `tiedDeliverers` only considers MERGED candidates,
+// so a CLOSED pair keeps the ambiguity machinery out of the way and leaves the ticket's
+// final status a clean readout of which repo's PR won the merge.
+//
+// Both `codeRepos` ORDERS are run and must agree. Scan order is not evidence, and it is
+// the observable a non-antisymmetric comparator changes.
+// =============================================================================
+describe("BLZ-458: gatherProject merges two repos' shippedSets with the corroboration tier", () => {
+  const XKEY = "ORC";
+
+  function gitRepo(dir, name, subjects) {
+    mkdirSync(dir, { recursive: true });
+    execFileSync("git", ["-C", dir, "init", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", dir, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
+    // A forge remote, or `gatherPrs` reports `no-remote` and never calls `gh` at all.
+    execFileSync("git", ["-C", dir, "remote", "add", "origin",
+      `https://github.com/hjr15/${name}.git`]);
+    for (const [i, subject] of subjects.entries()) {
+      writeFileSync(join(dir, `f${i}.md`), `x${i}\n`);
+      execFileSync("git", ["-C", dir, "add", "-A"]);
+      execFileSync("git", ["-C", dir, "commit", "-q", "-m", subject]);
+    }
+    return dir;
+  }
+
+  /** Run a real reconcile over a two-repo board and report where the ticket landed. */
+  async function twoRepoReconcile({ corrNumber, uncorrNumber, state, repoAFirst }) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz458-xrepo-"));
+    const prev = process.env.PATH;
+    try {
+      // alpha's own default branch ships the id, so ITS shippedSet corroborates the weak
+      // title. beta's log never mentions it, so the identical shape stays uncorroborated.
+      const alpha = gitRepo(join(tmp, "alpha"), "alpha", ["seed", `${ID}: the work this ticket describes`]);
+      const beta = gitRepo(join(tmp, "beta"), "beta", ["seed", "docs: unrelated"]);
+      const repos = repoAFirst ? [alpha, beta] : [beta, alpha];
+
+      const root = join(tmp, "board");
+      const dir = join(root, "projects", XKEY, "defined");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, `${ID}-t.md`),
+        `---\nid: ${ID}\ntype: epic\nproject: ${XKEY}\nestimate: 30\n---\n\nbody\n`);
+      writeFileSync(join(root, "blaze.config.json"),
+        JSON.stringify({ key: XKEY, projects: [XKEY], codeRepos: repos }));
+
+      const prA = { number: corrNumber, state,
+        url: corrNumber === null ? "uA-unnumbered" : `u${corrNumber}`,
+        headRefName: `${ID.toLowerCase()}-a`, title: `chore: tidy the runbook after ${ID}` };
+      const prB = { number: uncorrNumber, state, url: `u${uncorrNumber}`,
+        headRefName: `${ID.toLowerCase()}-b`, title: `docs: the ${ID}..439 lane` };
+      const bin = join(tmp, "bin");
+      mkdirSync(bin, { recursive: true });
+      writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash
+case "$PWD" in
+  */alpha) cat <<'JSON'
+${JSON.stringify([prA])}
+JSON
+  ;;
+  *) cat <<'JSON'
+${JSON.stringify([prB])}
+JSON
+  ;;
+esac
+`);
+      execFileSync("chmod", ["+x", join(bin, "gh")]);
+      process.env.PATH = `${bin}:${prev}`;
+
+      const r = await reconcile({ root, dryRun: false });
+      const projectDir = join(root, "projects", XKEY);
+      let landed = null, text = null;
+      for (const status of readdirSync(projectDir)) {
+        const f = join(projectDir, status, `${ID}-t.md`);
+        try { text = readFileSync(f, "utf8"); landed = status; } catch { /* not here */ }
+      }
+      return { landed, text, forgeErrors: r.forgeErrors };
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  // corroborated repo-A number | uncorroborated repo-B number | what the tier is holding off
+  const XREPO_ROWS = [
+    [200, 140, "the LOWER-numbered uncorroborated claim (the number tiebreak's direction)"],
+    [200, 300, "the HIGHER-numbered uncorroborated claim"],
+    [null, 140, "a LOWER-numbered uncorroborated claim against an unrecordable corroborated one"],
+    [null, 300, "a HIGHER-numbered uncorroborated claim against an unrecordable corroborated one"],
+  ];
+
+  for (const [corrNumber, uncorrNumber, what] of XREPO_ROWS) {
+    for (const repoAFirst of [true, false]) {
+      const order = repoAFirst ? "corroborated repo first" : "uncorroborated repo first";
+      test(`CROSS-REPO through gatherProject: corr #${corrNumber} beats ${what} (${order})`, async () => {
+        const { landed, text, forgeErrors } = await twoRepoReconcile({
+          corrNumber, uncorrNumber, state: "CLOSED", repoAFirst });
+        // The unnumbered corroborated PR legitimately raises the `gh-unusable-pr` WARNING
+        // — that is the shape being exercised, and it is reported rather than hidden.
+        // Anything else means the harness, not the tier, decided the outcome.
+        assert.deepEqual(forgeErrors.filter((f) => f.reason !== "gh-unusable-pr"), []);
+        assert.equal(forgeErrors.some((f) => f.reason === "gh-unusable-pr"), corrNumber === null,
+          "the unrecordable shape must be REPORTED, and only that row may report it");
+        // Hand-declared, not computed: the corroborated repo's CLOSED PR wins the merge,
+        // and a corroborated CLOSED winner means `in-progress`. If the uncorroborated
+        // claim took the selection instead, the winner would move NOTHING and the ticket
+        // would still be sitting in `defined` — which is the suppression this tier stops.
+        assert.equal(landed, "in-progress",
+          "the corroborated repo's PR must decide the ticket, whatever its number");
+        if (corrNumber === null) {
+          assert.doesNotMatch(text, /^pr:/m,
+            "an unrecordable winner writes no record — blank and true, never filled and false");
+        } else {
+          assert.match(text, new RegExp(`^pr: '?#${corrNumber} — u${corrNumber}`, "m"),
+            "the corroborated repo's PR supplies the delivery record");
+        }
+      });
+    }
+  }
 });
