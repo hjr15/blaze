@@ -164,10 +164,10 @@ So:
   catches a deleted clause, not an added one written as a bare `assert.`
   (BLZ-444).
 - **A count that varies with the data is a weak invariant — so validate it,
-  don't ban it.** An earlier draft of this section said never to accumulate the
-  size through data-dependent conditionals. That is not what this repo's
-  oracles do, and a method rule the codebase contradicts will be followed by
-  neither (BLZ-467). Every clause count here is still incremented inside
+  don't ban it.** Banning data-dependent accumulation outright would be the
+  easy rule and it is the wrong one: it is what this repo's oracles all do, and
+  a method rule the codebase contradicts will be followed by neither (BLZ-467).
+  Every clause count here is incremented inside
   `if (shape.refused) / else if (outcome === "queued") / …`. What makes it
   evidence is the two things layered on top:
   **(a)** the total is validated PER CELL against a budget derived from that

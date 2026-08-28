@@ -92,11 +92,16 @@ export function reconcileSummary(j) {
   // both say "N ticket(s) updated without a status change". A preview is a short
   // parenthetical about what WOULD happen and is read next to its own move count; a
   // write record is a durable sentence about what DID happen, read later and alone,
-  // where "other" names nothing. All four sites are pinned — the two here and in
-  // reconcile-commit-report.mjs by tests/board-overstatement-guards.test.mjs, the
-  // two in reconcile.mjs by tests/reconcile-change-report-oracle.test.mjs's
-  // DRYRUN_TAIL_RE / COMMITTED_LINE_RE / QUEUED_LINE_RE — so this rule cannot lapse
-  // on one side without a named failure.
+  // where "other" names nothing. The ruling is ADR-0029 (BLZ-482).
+  //
+  // All four sites are pinned, so the rule cannot lapse on one side without a named
+  // failure — but BLZ-477 corrects WHICH test pins which, because this sentence named
+  // the wrong constants. This toast and `applySummary` are pinned by
+  // tests/board-overstatement-guards.test.mjs. reconcile.mjs's dry-run tail is pinned by
+  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, and its commit
+  // subject by that file's COMMIT_SUBJECT_MOVED_RE / COMMIT_SUBJECT_NONMOVED_RE.
+  // COMMITTED_LINE_RE and QUEUED_LINE_RE pin NEITHER reconcile.mjs site: both match
+  // `res.stdout`, which is `applySummary`'s line driven through the CLI.
   if (other) parts.push(other + " other update(s)");
   if (!moved && !other) {
     // BLZ-450: "no code-bound changes" is an IN-SYNC CLAIM, and it used to sit

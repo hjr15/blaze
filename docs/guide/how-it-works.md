@@ -185,8 +185,10 @@ is deliberately loose, because ref names are: `feature/blz-408-work`,
 **A ref name is a naming convention, not evidence.** So a ref-derived claim needs a
 second signal before it counts, and the second signal must describe the WORK:
 
-1. the PR **title CLAIMS the ticket** — it opens with `<KEY>-<n>:`, in the same
-   leading-id-list form as a commit subject (see [the separators](#the-leading-id-list-and-its-separators)); or
+1. the PR **title CLAIMS the ticket** — it opens with `<KEY>-<n>` followed by `:` or an
+   em-dash, in the same leading-id-list form as a commit subject (see
+   [where the list ends](#where-the-leading-id-list-ends) and
+   [its separators](#the-leading-id-list-and-its-separators)); or
 2. a `<KEY>-<n>:` commit for it is **reachable from the default branch** (the shipped
    signal of the previous rule).
 
@@ -202,11 +204,31 @@ character and the boundary holds, so a range corroborated its own first element.
 real board that proposed `BLZ-408: defined → done` for a ticket that had never been
 worked, on the evidence of a PR whose branch and title both named the range 408..439.
 
-#### The leading id list, and its separators
+#### Where the leading id list ends
 
 Both rules above read the same **leading id list**, parsed by `idsFromSubject`
-(`scripts/reconcile.mjs`). It starts at column 0 with `<KEY>-<n>`, and it **ends at the
-colon** — `BLZ-1: fixes BLZ-4` claims only `BLZ-1`.
+(`scripts/reconcile.mjs`). It starts at column 0 with `<KEY>-<n>` and it ends at a
+**terminator** — `BLZ-1: fixes BLZ-4` claims only `BLZ-1`.
+
+Two terminators are accepted, and no others
+([ADR-0026](../decisions/0026-a-pr-title-claims-a-ticket-with-a-colon-or-an-em-dash-and-nothing-else.md)):
+a **colon** (`BLZ-455: a title claims a ticket`) and an **em-dash, U+2014**
+(`INF-327 — Author the 3 Excalidraw-flagged diagrams`). An em-dash immediately after the
+id is as unambiguous a separator as the colon: there is no reading of that title on which
+it is about anything but INF-327. **One code point was decided, and its neighbours are not
+it** — en-dash (U+2013), hyphen-minus, minus sign (U+2212), horizontal bar (U+2015) and
+`--` are all still rejected.
+
+**Words between the id and the terminator stay rejected, and that is the load-bearing
+half.** `INF-889 to INF-892: corpus landing` is a real merged PR title; admitting
+words-before-colon would make it claim INF-889 — which is a *range*, and therefore exactly
+the defect this rule exists to stop. So are `feat(KEY-n):`, `[KEY-n]`, `KEY-n desc`,
+`Revert "KEY-n: …"` and `WIP: KEY-n: …`.
+
+A terminator is not a separator. The em-dash **ends** the list; it never continues one,
+and it is absent from the table below for that reason.
+
+#### The leading id list, and its separators
 
 **Four separators are accepted, and no others:**
 
@@ -220,7 +242,25 @@ colon** — `BLZ-1: fixes BLZ-4` claims only `BLZ-1`.
 A bare number continues the list only after `/`. Allowing it everywhere let
 `BLZ-1 + 2026: annual review` claim a `BLZ-2026` that does not exist.
 
-`tests/how-it-works-claim-list.test.mjs` runs this table against `idsFromSubject` in both
+#### A bundle names one ticket in the subject and the rest in the body
+
+A PR delivering sixteen tickets cannot list sixteen ids in its title and stay readable.
+`BLZ-414 + 15 more: the oracles are non-vacuous` used to claim **nothing at all** — after
+`+` the key must be repeated, so `15` is not `BLZ-15`, the head match failed, and not even
+BLZ-414 was claimed. All sixteen were hand-moved.
+
+The manifest form fixes that: **`<KEY>-<n> + N more: desc`** claims `<KEY>-<n>` from the
+subject and nothing else, and the squash body's `* <KEY>-<m>:` bullets at column 0 claim
+the rest, through the manifest reader described below. `N` is a **count** and is never
+read as an id — it sits exactly where a bare list element sits after `/`, and reading it
+as one would claim a ticket that does not exist.
+
+A range still claims nothing under this form: `BLZ-408..439 + 15 more:` fails the head
+match on the `..` before the manifest tail is reached. And `BLZ-408 + 15 others:` — a
+bundle marker Blaze does not know — claims nothing rather than silently falling back to
+its leading id.
+
+`tests/how-it-works-doc-pins.test.mjs` runs this table against `idsFromSubject` in both
 directions — every separator this page documents is accepted, and no separator it omits
 is — so the two cannot drift apart again.
 
@@ -285,11 +325,13 @@ recovers **28** ticket ids that no subject at that ref mentions.
 **Two conditions must both hold, and each one is load-bearing.**
 
 1. The marker is `* ` — what GitHub writes, and what nothing else here writes.
-2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …`, or one of
-   the multi-ticket forms below. A bundled child lives
+2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …` or
+   `<KEY>-<n> — …`, or one of the multi-ticket forms below (including the
+   `<KEY>-<n> + N more:` bundle form). A bundled child lives
    inside a *feature's* PR, titled that way by convention; a commit whose subject names
    no ticket is not a bundle manifest, whatever its body lists. Every id in the leading
-   list counts, and the list ends at the colon — `BLZ-1: fixes BLZ-4` claims only BLZ-1.
+   list counts, and the list ends at its terminator — `BLZ-1: fixes BLZ-4` claims only
+   BLZ-1.
 
 The reason both are needed is measured, on the board repo, where the board itself is a
 configured code repo for its own project:

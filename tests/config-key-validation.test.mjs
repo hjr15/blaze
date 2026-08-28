@@ -392,12 +392,26 @@ test("BLZ-402 review finding 2: an over-broad projects entry ('A.*') would let s
 // exists. `npm pack --dry-run --json` is what an installer actually receives.
 //
 // The invariant is a disjunction, not "must be a URL": a pointer is reachable if the
-// tarball contains it, OR if it is an absolute URL that needs no tarball. Today no `docs/`
-// path ships, so the URL arm is the one taken; if `package.json`'s `files` ever ships
-// `docs/decisions/`, a repo-relative pointer becomes legal again and this test says so
-// without being edited.
+// tarball contains it, OR if it is an absolute URL that needs no tarball.
+//
+// BLZ-478 CORRECTS WHAT THAT DISJUNCTION IS WORTH, because the original comment implied
+// both arms were live and only one is. The tarball arm is UNREACHABLE BY POLICY, not by
+// coincidence: ADR-0028 keeps `docs/` out of the package and `tests/package.test.mjs`
+// hard-asserts it on every run (`assert.ok(!f.startsWith("docs/"))`), so no input can make
+// `packed.includes(pointer)` true for a `docs/` path while both hold. It is kept anyway,
+// and this is the reason: it is what makes ADR-0028 reversible in a single edit — ship
+// `docs/` in `package.json`'s `files`, drop that assertion, and a repo-relative pointer is
+// legal again with nothing here rewritten. It is a contract, stated as one, exactly as
+// BLZ-405's unreachable refusals are.
+//
+// BLZ-473: the URL arm now pins the REF as well. The original recovery regex was
+// `^https://github\.com/hjr15/blaze/blob/[^/]+/` — org, repo and path pinned, ref not:
+// rewriting the pointer to `blob/no-such-ref-xyz/docs/decisions/0025-….md` left this test
+// green while that URL returned a live HTTP 404. `main` is not privileged (a SHA or a tag
+// is an equally good pointer); what is refused is a ref no object in this repository
+// answers to. Resolved locally with `git rev-parse`, so there is no network call to flake.
 test("BLZ-460: every operator-facing pointer at the key rule resolves from an INSTALLED package", async () => {
-  const { execFileSync } = await import("node:child_process");
+  const { execFileSync, spawnSync } = await import("node:child_process");
   const { readFileSync: read } = await import("node:fs");
   const { fileURLToPath } = await import("node:url");
   const { dirname } = await import("node:path");
@@ -427,15 +441,29 @@ test("BLZ-460: every operator-facing pointer at the key rule resolves from an IN
   assert.ok(USAGE.includes(KEY_RULE_DOC),
     "`blaze init --help` said 'see ADR-0025' with no path at all — name the reachable pointer");
 
-  // And whichever arm is taken, the pointer is not a typo: it names a file that exists.
-  // A working-tree check, deliberately, and only as a supplement — it is `reachable()`
-  // above that pins the property an installed user depends on. Written per-arm so the
-  // disjunction stays live: shipping `docs/decisions/` in `package.json`'s `files` makes
-  // a repo-relative pointer legal again and this test follows without being edited.
-  const inRepo = KEY_RULE_DOC.startsWith("https://")
-    ? KEY_RULE_DOC.replace(/^https:\/\/github\.com\/hjr15\/blaze\/blob\/[^/]+\//, "")
-    : KEY_RULE_DOC;
-  assert.notEqual(inRepo, KEY_RULE_DOC.startsWith("https://") ? KEY_RULE_DOC : null,
-    "a URL pointer must be the canonical github blob form, so its repo path is recoverable");
+  // And whichever arm is taken, the pointer is not a typo: it names a REF that resolves and
+  // a file that exists. A working-tree check, deliberately, and only as a supplement — it
+  // is `reachable()` above that pins the property an installed user depends on. Written
+  // per-arm so the disjunction stays live (see BLZ-478 in the header for what that is
+  // worth today): shipping `docs/decisions/` in `package.json`'s `files` makes a
+  // repo-relative pointer legal again and this test follows without being edited.
+  let inRepo = KEY_RULE_DOC;
+  if (KEY_RULE_DOC.startsWith("https://")) {
+    const m = /^https:\/\/github\.com\/hjr15\/blaze\/blob\/([^/]+)\/(.+)$/.exec(KEY_RULE_DOC);
+    assert.ok(m,
+      "a URL pointer must be the canonical github blob form, so its repo path is recoverable");
+    const [, ref, path] = m;
+    // BLZ-473: the ref, resolved against THIS repository. Bare and under `origin/`, so a
+    // detached CI checkout that has `origin/main` but no local `main` still passes; a ref
+    // nothing answers to still fails, which is the case that used to slip through.
+    const resolves = (r) => spawnSync("git", ["-C", REPO, "rev-parse", "--verify", "-q", `${r}^{commit}`],
+      { encoding: "utf8" }).status === 0;
+    assert.ok(resolves(ref) || resolves(`origin/${ref}`),
+      `KEY_RULE_DOC names the ref ${JSON.stringify(ref)}, which this repository does not resolve ` +
+      "— the pointer returns a live 404 for anyone who follows it");
+    assert.equal(resolves("no-such-ref-xyz"), false,
+      "the ref check accepts a ref that cannot exist — it would bless a 404");
+    inRepo = path;
+  }
   assert.ok(existsSync(join(REPO, inRepo)), `${inRepo} does not exist — the pointer is dangling`);
 });

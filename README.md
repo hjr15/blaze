@@ -22,13 +22,13 @@ or with the `blaze` CLI. No API client, no auth, no SDK required either way.
 
 ## Documentation
 
-New here? The **[user guide](docs/guide/)** covers Blaze end to end:
-[Why Blaze](docs/guide/why-blaze.md) ·
-[How it works](docs/guide/how-it-works.md) ·
-[Getting started](docs/guide/getting-started.md) ·
-[Command reference](docs/guide/commands.md) ·
-[The schema](docs/guide/schema.md) ·
-[Driving Blaze with an AI agent](docs/guide/driving-with-an-ai-agent.md).
+New here? The **[user guide](https://github.com/hjr15/blaze/blob/main/docs/guide/README.md)** covers Blaze end to end:
+[Why Blaze](https://github.com/hjr15/blaze/blob/main/docs/guide/why-blaze.md) ·
+[How it works](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md) ·
+[Getting started](https://github.com/hjr15/blaze/blob/main/docs/guide/getting-started.md) ·
+[Command reference](https://github.com/hjr15/blaze/blob/main/docs/guide/commands.md) ·
+[The schema](https://github.com/hjr15/blaze/blob/main/docs/guide/schema.md) ·
+[Driving Blaze with an AI agent](https://github.com/hjr15/blaze/blob/main/docs/guide/driving-with-an-ai-agent.md).
 
 ## Install
 
@@ -87,7 +87,7 @@ flowchart TB
 ```
 <!-- DIAGRAM:END -->
 
-See [`docs/architecture.md`](docs/architecture.md) for the full as-built picture.
+See [`docs/architecture.md`](https://github.com/hjr15/blaze/blob/main/docs/architecture.md) for the full as-built picture.
 
 ## Quickstart
 
@@ -122,7 +122,7 @@ small commit per ticket, scoped to the files it actually touched.
 | `blaze resolve <id> <done\|wont-do\|duplicate\|cannot-reproduce>` | Set a non-default resolution without moving the file |
 | `blaze log <id> <minutes>` | Append a worklog entry |
 | `blaze rollup [<id>]` | Print rolled-up estimate/logged time for one node, or a summary of every goal/epic |
-| `blaze reconcile [--apply] [--fetch]` | Mirror a linked code repo's branch/PR state onto delivery-workflow tickets (dry-run by default). PR state is read with `gh`, so **GitHub only** — on any other remote `in-review` is unreachable and reconcile says so on every run ([details](docs/guide/how-it-works.md#forge-support-and-status-reachability)) |
+| `blaze reconcile [--apply] [--fetch]` | Mirror a linked code repo's branch/PR state onto delivery-workflow tickets (dry-run by default). PR state is read with `gh`, so **GitHub only** — on any other remote `in-review` is unreachable and reconcile says so on every run ([details](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md#forge-support-and-status-reachability)) |
 | `blaze edit <id> ...` | Edit ticket fields |
 | `blaze link [--rm] <id> <TYPE> <target>` | Add (or `--rm` remove) a typed link on `<id>` — `TYPE` ∈ `Blocks`/`Relates`/`Duplicate`/`Cloners` |
 | `blaze reindex` | Rebuild/validate the on-disk index (warns on malformed or dangling `links` entries) |
@@ -178,12 +178,12 @@ An optional integer `schemaVersion` stamps which schema contract the board was
 written against; absent means `1`, the pre-versioning baseline, so existing
 boards need no change. The engine refuses to load a board stamped outside the
 window it supports (currently `1..1`) instead of silently misreading it — see
-[`docs/schema-versioning.md`](docs/schema-versioning.md).
+[`docs/schema-versioning.md`](https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md).
 
 The type registry and workflows are themselves configurable: add a `schema` block
 (top-level or per-project) to override or extend the built-in defaults without
 editing engine source — see
-[`docs/schema-customization.md`](docs/schema-customization.md).
+[`docs/schema-customization.md`](https://github.com/hjr15/blaze/blob/main/docs/schema-customization.md).
 
 ## Forkability guarantees / CI gates
 

@@ -61,22 +61,28 @@ describe("BLZ-425: a persistent reconcile refusal is stated once, not once per t
       "…but it clears the memory, so the condition coming back is news again");
   });
 
+  /** A board the reconcile loop can run against. Returned as a teardown-carrying handle so
+   *  the two loop tests below build it the same way. */
+  function loopBoard(name) {
+    const dir = mkdtempSync(join(tmpdir(), name));
+    mkdirSync(join(dir, "projects", "TASK", "defined"), { recursive: true });
+    writeFileSync(join(dir, "projects", "TASK", "project.json"),
+      JSON.stringify({ key: "TASK", codeRepos: [] }));
+    writeFileSync(join(dir, "projects", "TASK", "defined", "TASK-1-x.md"),
+      "---\nid: TASK-1\ntitle: x\ntype: task\nproject: TASK\n---\nbody\n");
+    writeFileSync(join(dir, "blaze.config.json"),
+      JSON.stringify({ key: "TASK", projects: ["TASK"] }));
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+      execFileSync("git", ["-C", dir, ...a]);
+    }
+    return dir;
+  }
+
   test("the loop publishes ONE error across many ticks under BLAZE_READONLY", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blz425-ro-"));
+    const dir = loopBoard("blz425-ro-");
     const prev = process.env.BLAZE_READONLY;
     try {
-      mkdirSync(join(dir, "projects", "TASK", "defined"), { recursive: true });
-      writeFileSync(join(dir, "projects", "TASK", "project.json"),
-        JSON.stringify({ key: "TASK", codeRepos: [] }));
-      writeFileSync(join(dir, "projects", "TASK", "defined", "TASK-1-x.md"),
-        "---\nid: TASK-1\ntitle: x\ntype: task\nproject: TASK\n---\nbody\n");
-      writeFileSync(join(dir, "blaze.config.json"),
-        JSON.stringify({ key: "TASK", projects: ["TASK"] }));
-      for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
-                       ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
-        execFileSync("git", ["-C", dir, ...a]);
-      }
-
       const cfg = loadConfig({ root: dir, env: {} });
       const app = createApp(cfg, { root: dir });
       const seen = [];
@@ -91,6 +97,74 @@ describe("BLZ-425: a persistent reconcile refusal is stated once, not once per t
         `five ticks under BLAZE_READONLY published ${errors.length} error events: ` +
         JSON.stringify(errors.map((e) => e.message)));
       assert.match(errors[0].message, /read-only mode \(BLAZE_READONLY=1\)/);
+    } finally {
+      if (prev === undefined) delete process.env.BLAZE_READONLY;
+      else process.env.BLAZE_READONLY = prev;
+      rmSync(dir, { recursive: true, force: true });
+    }
+  });
+
+  // BLZ-476. THE CALL SITE, not the pure function.
+  //
+  // `newRunErrorEvent(null, said)` clearing the memory is pinned above, by direct call. What
+  // was pinned by NOTHING is the line in `createApp`'s `runReconcile` that MAKES that call on
+  // a healthy pass — `if (r && r.ok) newRunErrorEvent(null, runErrorSaid);`. Review deleted it
+  // and the supervisor suite stayed 57/57 green, while the behaviour it protects genuinely
+  // broke: an operator who fixes a condition and then re-breaks it is never told a second
+  // time, because the memory still holds the first message.
+  //
+  // A SINGLE TICK CANNOT SEE THAT, which is why this drives the whole sequence. Ticks 1 and 2
+  // (broken) and tick 3 (healthy) publish identically with the line and without it; the two
+  // runs diverge only at tick 4. Cumulative counts, asserted at every step:
+  //
+  //     tick        1 break   2 still broken   3 healthy   4 re-break
+  //     with    →      1            1              1           2
+  //     without →      1            1              1           1
+  //
+  // The break is `BLAZE_READONLY=1`: reconcile's `assertWritable` returns a byte-identical
+  // `{ ok: false, error }` every time, so a differing message can never be what re-announces
+  // it. The fix is unsetting the variable — a healthy pass, `r.ok === true`, which is the one
+  // input the deleted line reads.
+  test("BLZ-476: a condition FIXED and then RE-BROKEN is announced a second time", async () => {
+    const dir = loopBoard("blz476-rebreak-");
+    const prev = process.env.BLAZE_READONLY;
+    try {
+      const app = createApp(loadConfig({ root: dir, env: {} }), { root: dir });
+      const seen = [];
+      const off = app.bus.subscribe((e) => seen.push(e));
+      const errors = () => seen.filter((e) => e.type === "error" && e.loop === "reconcile");
+
+      const setBroken = (broken) => {
+        if (broken) process.env.BLAZE_READONLY = "1";
+        else delete process.env.BLAZE_READONLY;
+      };
+
+      const SEQUENCE = [
+        { broken: true,  cumulative: 1, why: "the first failing tick announces the condition" },
+        { broken: true,  cumulative: 1, why: "a persistent condition is stated once, not once per tick" },
+        { broken: false, cumulative: 1, why: "a healthy pass publishes no error of its own" },
+        { broken: true,  cumulative: 2, why: "…but it CLEARED the memory, so the condition coming " +
+          "back is news again — this is the tick the healthy-pass clear exists for, and the only " +
+          "one that can tell whether the line is there" },
+      ];
+      for (const [i, step] of SEQUENCE.entries()) {
+        setBroken(step.broken);
+        await app.runReconcile();
+        assert.equal(errors().length, step.cumulative,
+          `after tick ${i + 1} (${step.broken ? "broken" : "healthy"}): expected ${step.cumulative} ` +
+          `cumulative error event(s), got ${errors().length} — ${step.why}. Events so far: ` +
+          JSON.stringify(errors().map((e) => e.message)));
+      }
+      off();
+
+      // Both announcements are the SAME condition, so nothing but the healthy-pass clear can
+      // account for the second one: a dedup keyed on the message would have suppressed it.
+      const messages = errors().map((e) => e.message);
+      assert.equal(messages.length, 2, JSON.stringify(messages));
+      assert.equal(messages[0], messages[1],
+        "the re-announcement must be the SAME message — if it differs, this test is passing " +
+        "on the new-message rule instead of on the healthy-pass clear");
+      assert.match(messages[0], /read-only mode \(BLAZE_READONLY=1\)/);
     } finally {
       if (prev === undefined) delete process.env.BLAZE_READONLY;
       else process.env.BLAZE_READONLY = prev;

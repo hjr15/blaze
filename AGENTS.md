@@ -50,7 +50,7 @@ all read it. A `projects/<KEY>/project.json` `schema` block is layered by the
 new` and `blaze edit` validate against the ticket's own project's registry, and
 `blaze audit` judges each project's corpus by its own. Board columns and
 transition legality remain board-wide. With no override the table above applies
-unchanged. See [`docs/schema-customization.md`](docs/schema-customization.md).
+unchanged. See [`docs/schema-customization.md`](https://github.com/hjr15/blaze/blob/main/docs/schema-customization.md).
 `validateSchema` (also in `scripts/model/schema-config.mjs`) is a pure structural
 check — every type's `workflow` must name a declared workflow — returning a list
 of human-readable errors (`[]` when valid). `auditCorpus` reads the same checks
@@ -74,7 +74,7 @@ uncalled.
 The model above is what earlier docs called the **`engineering` preset**. Since
 BLZ-231 it is no longer a preset a board opts into — it is what the engine
 ships, and a board opts *out* with a `schema` block. See
-[`docs/method/work-item-types.md`](docs/method/work-item-types.md) for the full
+[`docs/method/work-item-types.md`](https://github.com/hjr15/blaze/blob/main/docs/method/work-item-types.md) for the full
 type table and the reasoning; its `approved`/`verified` (on `requirement`) and
 `superseded`/`deprecated` (on `architecture`) gates are designed but not
 shipped, so they are absent from the statuses above.
@@ -107,7 +107,7 @@ ticket id is still the identity.
    only reaches `done` while **no** PR carrying its key is still open, so an early
    docs-only PR cannot report the whole feature shipped (BLZ-130). This does not
    re-open a ticket that already reached `done` — terminal status is sticky — see
-   [how-it-works](docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest).
+   [how-it-works](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest).
    Goals and risks are always manual.
    Never hand-move a delivery ticket through the reconcile-owned statuses once a
    branch/PR exists for it — let reconcile own it.
@@ -118,12 +118,12 @@ ticket id is still the identity.
    manual `blaze move` needed. Under a **squash** merge the child's own subject does
    not survive, so reconcile also reads the `* <KEY>-<n>: …` bullets GitHub writes
    into the squash body (BLZ-131) — see
-   [how-it-works](docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest)
+   [how-it-works](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest)
    for the repository setting that has to be right. This is terminal-sticky and idempotent like the
    branch/PR paths, and it does not fire while the feature PR is still open (the
    child's commit then lives only on the feature branch, not the default branch).
    Reconcile mirrors **delivery** state, not deploy state — see
-   [ADR-0003](docs/decisions/0003-engine-scope-delivery-truth-not-deploy-truth.md).
+   [ADR-0003](https://github.com/hjr15/blaze/blob/main/docs/decisions/0003-engine-scope-delivery-truth-not-deploy-truth.md).
 
 ## Sprints
 
@@ -147,7 +147,7 @@ A ticket joins a sprint by carrying the `sprint` field (plus optional
 errors) on a ticket referencing a sprint id absent from the registry, mirroring
 the dangling-link lint. Sprints are additive and do **not** bump
 `SCHEMA_VERSION` — see
-[ADR-0004](docs/decisions/0004-sprints-are-additive-not-a-schema-bump.md).
+[ADR-0004](https://github.com/hjr15/blaze/blob/main/docs/decisions/0004-sprints-are-additive-not-a-schema-bump.md).
 
 ## The join key
 
@@ -207,7 +207,7 @@ blaze link --rm ENG-12 Blocks ENG-9   # remove that link
 while an open (non-terminal) ticket holds a `Blocks` link targeting it prints
 a warning to stderr — the move still proceeds. `blaze move` never refuses a
 transition because of a `Blocks` link; see
-[ADR-0001](docs/decisions/0001-blocks-link-advisory-not-hard-gate.md) for why.
+[ADR-0001](https://github.com/hjr15/blaze/blob/main/docs/decisions/0001-blocks-link-advisory-not-hard-gate.md) for why.
 
 Link data doesn't need a separate integrity check: `blaze reindex` already
 lints every ticket's `links` for malformed entries and dangling targets (see
@@ -523,7 +523,7 @@ start silently becoming the file key for a consumer added later.
 was written against. Absent = `1` (the pre-versioning baseline). The engine
 refuses to load a board stamped outside its supported window (currently `1..1`)
 instead of silently misreading it — see
-[`docs/schema-versioning.md`](docs/schema-versioning.md).
+[`docs/schema-versioning.md`](https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md).
 
 `projects/<KEY>/project.json` (optional, per project): `labels`, `components`
 (the project's taxonomy for those fields — see "Labels/components taxonomy"
@@ -534,7 +534,7 @@ above), `codeRepos` (repos `reconcile` mirrors for this project),
 (story/task/bug/subtask) needs at least one `worklog` entry before it can enter a
 terminal status; features/goals/risks are exempt since their time rolls up from
 children), and `schema` (a per-project type/workflow override — see
-[`docs/schema-customization.md`](docs/schema-customization.md)).
+[`docs/schema-customization.md`](https://github.com/hjr15/blaze/blob/main/docs/schema-customization.md)).
 
 `views` (top-level, `blaze.config.json`): `{ board, list, live, metrics, map,
 gantt }`, each defaulting to `true` — set any to `false` to hide that view's pill and

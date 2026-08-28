@@ -18,6 +18,15 @@ test("package identity", () => {
   assert.equal(pkg.engines?.node, ">=24", "engine floor matches the tested Node line — node:sqlite needs 24 (BLZ-264)");
 });
 
+// BLZ-474 / ADR-0028: the `docs/` assertion below is LOAD-BEARING, not incidental tidiness.
+// It is one half of a decision, and the other half is that `AGENTS.md` and `README.md` — the
+// two documents that DO ship — link outward by absolute URL rather than by relative path.
+// Before that decision, 20 relative `docs/` links (9 in AGENTS.md, 11 in README.md) were dead
+// for every installed user. Shipping `docs/` would publish `docs/superpowers/plans/` and
+// `docs/superpowers/specs/` — internal work orders and hand-off briefs — to every installer,
+// so the decision was to keep the tarball as it is and fix the links. Relaxing this line
+// therefore reverses ADR-0028; do it deliberately, with `tests/shipped-doc-links.test.mjs`
+// and `tests/config-key-validation.test.mjs`'s BLZ-460 pointer test in the same change.
 test("npm pack ships engine only — no tests, no data dirs, no dotfiles beyond defaults", () => {
   const out = execFileSync("npm", ["pack", "--dry-run", "--json"], { cwd: REPO, encoding: "utf8" });
   const files = JSON.parse(out)[0].files.map((f) => f.path);
@@ -26,7 +35,7 @@ test("npm pack ships engine only — no tests, no data dirs, no dotfiles beyond 
   for (const f of files) {
     assert.ok(!f.startsWith("tests/"), `tests must not ship: ${f}`);
     assert.ok(!f.startsWith("projects/"), `data must not ship: ${f}`);
-    assert.ok(!f.startsWith("docs/"), `docs must not ship: ${f}`);
+    assert.ok(!f.startsWith("docs/"), `docs must not ship (ADR-0028): ${f}`);
     assert.ok(!f.startsWith("brand/"), `brand must not ship: ${f}`);
     assert.ok(f !== "CONVENTIONS.md", "CONVENTIONS.md must not ship");
   }

@@ -410,7 +410,10 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
   });
 
   test("the write-record surface says 'N ticket(s) updated without a status change'", () => {
-    for (const outcome of ["committed", "queued", "no-op"]) {
+    // BLZ-481 added "locked" and "failed" to this loop. They are write-record surfaces by
+    // the same rule as the other three and they were the only arms stating neither
+    // quantity — see the named test below for why that mattered most on exactly them.
+    for (const outcome of ["committed", "queued", "no-op", "locked", "failed"]) {
       const line = applySummary({ outcome, error: null, movedCount: 2, nonMovedCount: 3 });
       assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
         `${outcome}: got ${JSON.stringify(line.text)}`);
@@ -418,6 +421,31 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
         `${outcome}: a durable write record must not use the preview's shorthand — read alone, ` +
         "with no move count beside it, 'other' names nothing");
     }
+  });
+
+  // BLZ-481. `applySummary`'s locked and failed arms are the two outcomes where the ticket
+  // files ARE on disk and are NOT in `git log` — the one case a person has to go and clear
+  // by hand. They were also the only two arms that stated no quantity at all: "Ticket
+  // file(s) were already written to disk" told the operator to go and look at a dirty tree
+  // without telling them how big it is. Every other arm states `N ticket(s) moved` and, when
+  // it is non-zero, the non-moving count beside it.
+  test("BLZ-481: the locked and failed lines state the SAME two quantities every other arm does", () => {
+    for (const outcome of ["locked", "failed"]) {
+      const line = applySummary({ outcome, error: "the lock is held", movedCount: 2, nonMovedCount: 3 });
+      assert.match(line.text, /\b2 ticket\(s\) moved/,
+        `${outcome}: the line states no moved count — ${JSON.stringify(line.text)}`);
+      assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
+        `${outcome}: the line states no non-moving count — ${JSON.stringify(line.text)}`);
+      assert.match(line.text, /UNCOMMITTED/,
+        `${outcome}: the line must still say the tree is dirty, not merely un-applied`);
+      assert.equal(line.exit, 1, `${outcome}: an unlanded commit must still exit non-zero`);
+    }
+    // …and the zero case is suppressed here exactly as it is everywhere else, so the line
+    // never reads "0 ticket(s) updated without a status change".
+    assert.doesNotMatch(
+      applySummary({ outcome: "locked", error: "x", movedCount: 1, nonMovedCount: 0 }).text,
+      /updated without a status change/,
+      "a quantity that is zero must not be stated at all");
   });
 
   test("neither surface states the quantity at all when it is zero", () => {

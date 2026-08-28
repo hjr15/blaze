@@ -50,6 +50,37 @@ confirm it goes red *for the reason its name gives*. A test that stays green und
 revert is not evidence, whatever it is called — see
 [the engineering method](method/engineering-method.md#when-the-evidence-is-an-oracle).
 
+### It mutates a copy, so it cannot make another run go red
+
+It used to rewrite `scripts/model/schedule.mjs` **in place, in the checkout, with no
+lock**. A `node --test` run in the same worktree while it was mutating read a
+half-mutated module and reported a failure that was not real. That happened during the
+2026-08-28 wave: `npm run test:coverage` reported
+`tests/model/link-type-overrides.test.mjs:422 ✖ a board that is all ONE DEPENDENCY CYCLE
+does not raise it — expected the cycle finding, got: (empty)`; the same test passed in
+isolation, a clean re-run with nothing else in the worktree was 4,017/0, and the control
+on the parent commit was 4,016/0. It cost a full re-run, and the real cost is that it
+teaches a reader to re-run instead of investigate.
+
+Since BLZ-472 every run copies the **working tree** — `scripts/`, `tests/`,
+`package.json`, uncommitted hunks included, since judging HEAD would judge code nobody is
+about to ship — into a throwaway directory and mutates and tests there. Two things follow,
+and the banner says the first of them on every run:
+
+- **A suite failure you see in the checkout while this is running is REAL.** This process
+  opens no file in the checkout for writing, so it cannot be the cause. Triage it as a
+  real failure; do not re-run on the theory that the mutation harness caused it.
+- A crash between mutating and restoring can no longer leave the checkout mutated. It
+  leaves a temp directory, which the OS sweeps.
+
+A lock was considered and rejected. The process that would have to respect it is
+`node --test`, which knows nothing about this harness; a lock here would serialise
+mutation runs against each other — never the failure — and nothing else.
+
+`tests/ci-mutation-sandbox.test.mjs` pins it: writing to the sandbox's copy leaves the
+checkout byte-identical, and every `writeFileSync` in the runner goes through the
+sandbox-joined path.
+
 ## Triage: is a red gate real or transient?
 
 The job is structured so the failing **step** tells you which:
@@ -60,6 +91,7 @@ The job is structured so the failing **step** tells you which:
 | **`Run tests + coverage gate`** step is red, log shows `ERROR: Coverage ... does not meet threshold` | **Real** — coverage regressed below the floor | Add tests (or, if intentional, justify and raise/adjust `.c8rc.json` in the same PR). Do not rerun. |
 | **Install dependencies** step is red, log shows `npm error code EUSAGE` / `Missing: <pkg> from lock file` | **Real** — `package.json` and `package-lock.json` disagree | Run `npm install --package-lock-only` and commit the lockfile. Rerunning will never fix it. |
 | **Checkout / Set up Node / Install dependencies** step is red for any other reason | **Transient** — GitHub Actions infra or npm registry hiccup | Rerun the job (below). |
+| A test is red **only** while `mutate-schedule.mjs` is running in the same worktree | **Real** since BLZ-472 — the mutation runner works on a copy and cannot corrupt your checkout | Investigate the failure. Before BLZ-472 this was the one genuinely false failure this repo produced; it is not any more. |
 | **Initialize containers** step is red | **Transient** — the Postgres service failed to start | Rerun the job (below). |
 | Run shows **`cancelled`** | **Not a failure** — superseded by a newer push, or hit `timeout-minutes` | If superseded, ignore. If a lone run timed out with no newer push, rerun. |
 

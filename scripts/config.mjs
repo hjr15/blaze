@@ -233,16 +233,27 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   // and `loadProject` derives its own matchers from the per-project key.
   //
   // `cfg.key`'s derived matchers below have exactly ONE consumer in the engine:
-  // `scripts/loops/groomer.mjs:70`, `matchersFor(cfg, null)`, reached only from that
-  // file's legacy flat-layout branch — which `statusDirs` takes only on a board whose
-  // status directories sit at the ROOT (`<root>/backlog/`). On the `projects/<KEY>/
-  // <status>/` layout every board here uses, no call path reaches it at all.
+  // `scripts/loops/groomer.mjs`'s `matchersFor(cfg, null)`, reached from that file's
+  // legacy flat-layout branch.
+  //
+  // BLZ-483 CORRECTS THE "ONLY" THIS SENTENCE USED TO CARRY. It said that branch is taken
+  // "only on a board whose status directories sit at the ROOT", and that `projects/<KEY>/
+  // <status>/` boards never reach it. `statusDirs` is ADDITIVE, not a choice: it appends
+  // one entry per configured project that has the column, and THEN appends `{dir: col,
+  // key: null}` whenever `<root>/<col>/` also exists — there is no `else`. So a HYBRID
+  // board (a `projects/` tree plus a leftover root-level `backlog/`, `defined/`, …)
+  // reaches `matchersFor(cfg, null)` too, on top of its per-project matchers. That is
+  // pinned, and has been since BLZ-298 — `tests/groomer.test.mjs`'s "statusDirs prefers
+  // configured projects and keeps a flat fallback" asserts exactly the two-entry result
+  // for a board that has both. What is true is narrower than "only": no board in this
+  // repo's own family carries such a directory today, and the groomer loop is disabled by
+  // default.
   // `cfg.idRegex` and `cfg.idFromRef` have no consumer on any layout — reconcile derives
   // its own per project from `loadProject`.
   //
   // So this flip is DEFENSIVE. It is correct, and the blast radius of the behaviour it
-  // replaced was one call path on one legacy layout — not `move`, not `new`, not
-  // reconcile. Its value is that an empty override cannot silently become the file key
+  // replaced was one call path — the groomer's flat-layout branch — not `move`, not
+  // `new`, not reconcile. Its value is that an empty override cannot silently become the file key
   // for a consumer added tomorrow, not that a verb is misbehaving now.
   if (env.BLAZE_KEY !== undefined) {
     cfg.key = env.BLAZE_KEY; keySource = "the BLAZE_KEY environment variable";
