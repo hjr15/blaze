@@ -110,14 +110,29 @@ and exit 1. The exit is split rather than unconditional: a run that *did* find c
 prints them before exiting non-zero, because hiding real work behind a probe failure would be
 a second silence.
 
-**Only one half of that split is reachable deterministically, and it is stated rather than
-implied.** Every signal reconcile can turn into a change comes from `git` — the merged-commit
-set, the branch set, and the PR list, whose `gatherPrs` reads the remotes with `git config`
-before it ever calls `gh` — so a `git` that is absent or unexecutable takes them all down and
-`changes` is empty by construction. The falling-through half is reached only by a
-per-invocation spawn failure that hits some probes and not others (EAGAIN under resource
-exhaustion), which no test can construct deterministically. **No mutation can kill that
-branch**; it exists because exiting before printing real work would be wrong.
+**Both halves of that split are reachable, and a first revision of this ADR wrongly said one
+was not.** It argued that every signal reconcile can turn into a change comes from `git`, so a
+`git` that cannot run takes them all down and `changes` is empty by construction — therefore
+the falling-through half needed a spawn failure no test could construct, and no mutation could
+kill it.
+
+**That was false, and it is this ADR's own defect class: a claim asserting more than had been
+established.** It assumed probe failures are all-or-nothing. They are not — a probe fails on
+its own merits while its siblings answer. Deterministic, with plain git and no spawn
+manipulation:
+
+```sh
+git init -b main svc && git commit --allow-empty -m base
+PARENT=$(git rev-parse HEAD) && git commit --allow-empty -m second
+git branch INF-1-work                          # a branch signal — a real change
+rm -f .git/objects/${PARENT:0:2}/${PARENT:2}   # break ONLY the commit-log walk
+```
+
+`rev-parse main` exits 0, `for-each-ref` exits 0, `git log main --format=%x00%B` exits 128,
+and reconcile prints `GIT UNREADABLE`, `FAILED`, `would move INF-1: defined → in-progress`,
+and exits 1. A missing or corrupt object is an ordinary real-world state: an interrupted
+fetch, a partial clone, a damaged object store. Both halves are pinned by tests; mutating the
+guard to an unconditional `process.exit(1)` turns the fall-through test red.
 
 **A corollary that is easy to get wrong, and was.** When no default-branch ref resolves,
 reconcile emits a `no-default-branch` warning whose message asserts that none of five refs
@@ -165,11 +180,39 @@ because two implementations of one predicate is how this drift keeps reappearing
 so a ground-truth test pins the two against each other: the directories the reporter names
 must be exactly the directories the walk lost tickets from.
 
-`classifyGitEntry` distinguishes four shapes rather than reporting "a repository", because a
+`classifyGitEntry` distinguishes five shapes rather than reporting "a repository", because a
 zero-byte `.git` file is not a repository and telling an operator to go looking for one is a
 second wrong claim: `nested-repo` (a `.git` directory), `nested-repo-pointer` (a `gitdir:`
-file, what `git submodule add` writes), `git-file-empty` and `git-file-unrecognised`. A
-directory that could not be listed at all is `directory-unreadable`.
+file, what `git submodule add` writes), `git-file-empty`, `git-file-unrecognised`, and
+`git-entry-not-a-file`. A directory that could not be listed at all is `directory-unreadable`.
+
+**A read path may never block, and that outranks reporting.** The first cut of
+`classifyGitEntry` opened any non-directory `.git` with `readFileSync`. On a FIFO that blocks
+forever — no error, no timeout, no exit — and this predicate sits on the path `blaze audit`,
+`buildIndex`, id resolution, the board view and `reconcile` all share, `blaze serve` included.
+BLZ-430's stat-only predicate could not hang, so this was a regression introduced *by* the fix
+for BLZ-470, in the function whose whole purpose is to stop a board going quiet. A hang is
+strictly worse than a wrong sentence: nothing reports, nothing exits, nothing times out. So
+the rule is `st.isFile()` before any open, the shape is skipped exactly as BLZ-430 skipped it,
+and it is named rather than silent.
+
+**A hang can only be pinned from outside the process, and the first attempt to pin it was
+itself an overstatement.** The tests were written in-process with `node:test`'s `timeout`
+option and a comment claiming that made a reintroduced hang fail rather than wedge the run.
+That is false: `timeout` is enforced on the event loop, and a blocking synchronous
+`readFileSync` never yields to it. Measured directly — a `{ timeout: 2000 }` test reading a
+FIFO had to be killed with SIGTERM from outside, and re-applying the mutant wedged the
+mutation runner for its full 300-second cap. So every case for this shape runs in a **child
+process with a hard wall-clock limit**, and asserts on the child's `signal`: a killed child is
+the hang, reported as a failure rather than as a suite that never finishes.
+
+Two **pre-existing** instances of the same shape were found on the same path while checking
+this and are left for their own tickets rather than fixed as a side effect:
+`walkTickets`'s `readFileSync(file)` for a `.md` entry (a FIFO named `X.md` in a status
+directory hangs the walk on `0c76712`, before this branch) and `audit-runner`'s
+`readFileSync(project.json)` (both confirmed hung at an 8-second timeout). Neither is a
+one-line fix: making them merely skip would reintroduce exactly the silent drop BLZ-470
+exists to close, so each needs a decision about what it reports.
 
 ### 5. The count says which it is
 

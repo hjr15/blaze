@@ -48,6 +48,21 @@ function classifyGitEntry(dirPath) {
   if (st.isDirectory()) {
     return { reason: "nested-repo", detail: "it holds a `.git` DIRECTORY — a repository cloned here" };
   }
+  // BLZ-470 round 2 (REGRESSION, found by review): NEVER OPEN AN ENTRY THAT IS NOT A REGULAR
+  // FILE. `readFileSync` on a FIFO BLOCKS FOREVER — no error, no timeout, no exit — and this
+  // predicate sits on the path `blaze audit`, `buildIndex`, id resolution, the board view and
+  // `reconcile` all share, including a long-lived server. A hang is strictly worse than the
+  // wrong sentence this function exists to prevent: nothing reports at all.
+  //
+  // BLZ-430's stat-only predicate could not hang, and it SKIPPED this shape (any successful
+  // stat counted). Both properties are preserved: still skipped, now named, and never opened.
+  // A socket, a device node and a symlink to any of them land here too.
+  if (!st.isFile()) {
+    return { reason: "git-entry-not-a-file",
+             detail: "it holds a `.git` entry that is neither a directory nor a regular file " +
+               "(a FIFO, socket or device node) — that is not a repository git would recognise, " +
+               "and Blaze will not open it: reading such an entry blocks forever" };
+  }
   let head;
   try { head = readFileSync(p, "utf8").slice(0, GIT_FILE_PROBE_BYTES); }
   catch (e) {

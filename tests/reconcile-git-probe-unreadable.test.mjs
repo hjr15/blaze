@@ -179,3 +179,135 @@ describe("BLZ-484: a git probe that could not RUN is not a git probe that found 
     }
   });
 });
+
+// =============================================================================
+// BLZ-484 round 2 — PROBE FAILURES ARE NOT ALL-OR-NOTHING.
+//
+// Round 1 claimed the FAILED block's fall-through half — print the changes, THEN exit 1 —
+// was unreachable, reasoning that every signal which can become a change comes from `git`,
+// so a `git` that cannot run takes them all down and `changes` is empty by construction.
+//
+// THAT CLAIM WAS FALSE, and falsely in this lane's own defect class: it asserted more than
+// was established. It assumed probe failures are all-or-nothing. They are not — a probe can
+// fail on its own merits while its siblings succeed. A missing commit object breaks the log
+// walk and nothing else: `rev-parse` exits 0, `for-each-ref` exits 0, `git log` exits 128.
+// That is an ordinary real-world state (an interrupted fetch, a partial clone, a damaged
+// object store), reachable with plain git and no spawn manipulation at all.
+//
+// So the guard is reachable, and until now it was unpinned: mutating
+// `if (!r.changes.length) process.exit(1);` to an unconditional `process.exit(1)` left the
+// whole suite green while hiding real work behind a probe failure — the second silence the
+// split exists to prevent.
+// =============================================================================
+
+/** The construction: a repo whose commit-log walk is broken and whose ref probes are fine.
+ *  `withBranch` decides whether the run also has a change to report. */
+function corruptObjectBoard(tmp, { withBranch }) {
+  const repo = join(tmp, "svc");
+  mkdirSync(repo, { recursive: true });
+  for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
+                   ["config", "user.name", "t"]]) {
+    execFileSync("git", ["-C", repo, ...a]);
+  }
+  execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "base"]);
+  const parent = execFileSync("git", ["-C", repo, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  execFileSync("git", ["-C", repo, "commit", "-q", "--allow-empty", "-m", "second"]);
+  // The BRANCH is the change signal, and it is what makes `changes` non-empty while the log
+  // walk is broken — the exact combination round 1 argued could not occur.
+  if (withBranch) execFileSync("git", ["-C", repo, "branch", "INF-1-work"]);
+  rmSync(join(repo, ".git", "objects", parent.slice(0, 2), parent.slice(2)), { force: true });
+
+  const root = join(tmp, "board");
+  const dir = join(root, "projects", "INF", "defined");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "INF-1-t.md"),
+    "---\nid: INF-1\ntype: task\nproject: INF\nestimate: 30\n---\n\nbody\n");
+  writeFileSync(join(root, "projects", "INF", "project.json"),
+    JSON.stringify({ key: "INF", codeRepos: [repo] }));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "INF", projects: ["INF"] }));
+  return root;
+}
+
+describe("BLZ-484: a single probe can fail while its siblings answer", () => {
+  test("the construction is what it claims: ref probes succeed, only the log walk fails", () => {
+    // Without this the tests below could be passing because the whole repo is broken, which
+    // is the state round 1 already covered and is not the one in question.
+    const tmp = mkdtempSync(join(tmpdir(), "blz484-shape-"));
+    try {
+      const root = corruptObjectBoard(tmp, { withBranch: true });
+      const repo = join(tmp, "svc");
+      const st = (args) => spawnSync("git", ["-C", repo, ...args], { encoding: "utf8" }).status;
+      assert.equal(st(["rev-parse", "main"]), 0, "the ref still resolves");
+      assert.equal(st(["for-each-ref", "--format=%(refname:short)", "refs/heads"]), 0,
+        "the refs still list");
+      assert.equal(st(["log", "main", "--format=%x00%B"]), 128,
+        "and ONLY the commit-log walk is broken — that asymmetry is the whole finding");
+      assert.ok(existsSync(join(root, "projects", "INF", "defined", "INF-1-t.md")));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a run that DID find work prints it BEFORE exiting 1 — the second silence", () => {
+    // The pin for the fall-through half. Mutating the guard to an unconditional
+    // `process.exit(1)` removes the `would move` line and turns this red for the reason its
+    // name gives: real work hidden behind a probe failure.
+    const tmp = mkdtempSync(join(tmpdir(), "blz484-fallthrough-"));
+    try {
+      const root = corruptObjectBoard(tmp, { withBranch: true });
+      const res = run(root, ghOnlyBin(tmp), true);
+      assert.match(res.stderr, /GIT UNREADABLE/, "the condition is named…");
+      assert.match(res.stderr, /FAILED — 1 git probe\(s\) could not be completed/, "…and the run is failed…");
+      assert.match(res.stdout, /would move INF-1: defined → in-progress/,
+        "…and the work it DID find is still printed. Exiting before this hides real work behind " +
+        "a probe failure, which is the second silence the split exists to prevent");
+      assert.equal(res.status, 1, "both at once: the changes are reported AND the run is not clean");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-zero exit from the log walk is NOT an answer — BLZ-484's stated AC", () => {
+    // `exitIsAnAnswer: !resolved` on the `git log` probe. `main` resolves here, so the probe
+    // is told its failure is not an answer; mutating that to `true` makes an exit-128 log
+    // walk silent, the shipped set reads as empty, and the run reports a clean board — this
+    // ticket's defect reintroduced through the exit-code door instead of the spawn door, on
+    // a path an ordinary damaged object store reaches.
+    const tmp = mkdtempSync(join(tmpdir(), "blz484-exitisnotananswer-"));
+    const prev = process.env.PATH;
+    try {
+      const root = corruptObjectBoard(tmp, { withBranch: false });
+      // `git` stays REACHABLE here — that is the point. The probe must run, exit 128, and
+      // still be reported; a PATH without `git` would prove only what the suite above proves.
+      process.env.PATH = `${ghOnlyBin(tmp)}:${prev}`;
+      return reconcile({ root, dryRun: true }).then((r) => {
+        const logProbe = r.gitErrors.filter((e) => /^git log main/.test(e.command || ""));
+        assert.equal(logProbe.length, 1,
+          "the log walk failed and must be reported, even though `git` ran and exited");
+        assert.equal(logProbe[0].reason, "git-failed",
+          "reported as a FAILURE, not as an answer — and distinctly from a probe that could not run");
+        assert.equal(logProbe[0].status, 128, "`git` ran and exited 128; that is not `no commits`");
+        assert.equal(logProbe[0].severity, "error");
+        assert.deepEqual(r.changes, [],
+          "with no branch there is genuinely nothing to move — so the ONLY thing standing " +
+          "between this run and a false clean board is the finding above");
+      });
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("…and the CLI refuses to call that a clean board", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz484-nocleanboard-"));
+    try {
+      const root = corruptObjectBoard(tmp, { withBranch: false });
+      const res = run(root, ghOnlyBin(tmp), true);
+      assert.doesNotMatch(res.stdout + res.stderr, /no code-bound change found/);
+      assert.equal(res.status, 1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

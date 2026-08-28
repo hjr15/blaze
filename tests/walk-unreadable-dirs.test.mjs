@@ -22,7 +22,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { unreadableTicketDirs } from "../scripts/model/index.mjs";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
 import { reconcile } from "../scripts/reconcile.mjs";
@@ -66,6 +66,9 @@ const SHAPES = [
   { name: "a PROJECT directory Blaze cannot list at all",
     at: ["BLZ"], make: (p) => chmodSync(p, 0o000), undo: (p) => chmodSync(p, 0o755),
     reason: "directory-unreadable" },
+  // The `.git` FIFO shape is exercised in its own describe block at the foot of this file,
+  // OUT OF PROCESS and never here. Its failure mode is a HANG, and a hang inside this
+  // process would wedge the whole file rather than fail one case — see that block.
 ];
 
 describe("BLZ-470: a skipped directory is REPORTED, not silently dropped", () => {
@@ -181,7 +184,7 @@ describe("BLZ-470: a skipped directory is REPORTED, not silently dropped", () =>
     }
   });
 
-  test("the four `.git` shapes are told apart, not collapsed into one", () => {
+  test("the four openable `.git` shapes are told apart, not collapsed into one", () => {
     // AC-3: "A junk or zero-byte `.git` file is distinguished from a real nested repo, or
     // the finding says it could not tell." They are distinguished, and the two that are not
     // repositories say so in those words rather than accusing a repository that is not there.
@@ -202,7 +205,7 @@ describe("BLZ-470: a skipped directory is REPORTED, not silently dropped", () =>
         assert.equal(f.reason, reason);
         seen.set(reason, f.detail);
       }
-      assert.equal(seen.size, 4, "four distinguishable shapes");
+      assert.equal(seen.size, 4, "four distinguishable shapes that are safe to open");
       assert.match(seen.get("git-file-empty"), /ZERO-BYTE/);
       assert.match(seen.get("git-file-empty"), /cannot tell whether one was meant/);
       assert.match(seen.get("git-file-unrecognised"), /cannot tell a repository from junk/);
@@ -322,6 +325,100 @@ describe("BLZ-470: reconcile reports it too, on every run, filtered or not", () 
     try {
       const r = await reconcile({ root: reconcilableBoard(tmp), dryRun: true });
       assert.deepEqual(r.findings.filter((x) => x.kind === "unreadable-ticket-directory"), []);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// BLZ-470 round 2 — THE READ PATH MUST NOT BLOCK.
+//
+// The first cut of `classifyGitEntry` called `readFileSync` on any `.git` that was not a
+// directory. `readFileSync` on a FIFO blocks forever: no error, no timeout, no exit. That
+// predicate sits on the path `blaze audit`, `buildIndex`, id resolution, the board view and
+// `reconcile` all share — including `blaze serve`, a long-lived process — so one `mkfifo`
+// under `projects/` wedged every reader on the board with nothing on stderr.
+//
+// BLZ-430's stat-only predicate could not hang, so this was a regression introduced by the
+// fix for BLZ-470, in the function whose entire purpose is to stop a board going quiet.
+//
+// EVERY CASE HERE RUNS OUT OF PROCESS, and that is the load-bearing part. An earlier revision
+// of this block ran them in-process with `node:test`'s `timeout` option and claimed that made
+// a reintroduced hang fail rather than wedge the run. THAT CLAIM WAS WRONG, and measured
+// wrong: `timeout` is enforced on the event loop, and a blocking synchronous `readFileSync`
+// never yields to it, so the option cannot fire. Verified directly — a `{ timeout: 2000 }`
+// test reading a FIFO had to be killed with SIGTERM from outside. Re-applying the mutant with
+// those in-process tests wedged the mutation runner itself for its full 300-second cap.
+//
+// So the hang is detected the only way it can be: a CHILD process with a hard `timeout`, and
+// an assertion on `signal` — a killed child is the hang, and it is a failure, not a silence.
+// =============================================================================
+
+/** Run `body` in a child node process with a hard wall-clock limit, and refuse to let a hang
+ *  masquerade as anything else. Returns the JSON the child printed. */
+function probeOutOfProcess(tmp, body, ms = 15000) {
+  const script = join(tmp, "probe.mjs");
+  writeFileSync(script,
+    `import { unreadableTicketDirs } from ${JSON.stringify(join(import.meta.dirname, "..", "scripts", "model", "index.mjs"))};\n` +
+    `import { fsReadStorage } from ${JSON.stringify(join(import.meta.dirname, "..", "scripts", "model", "read-storage.mjs"))};\n` +
+    `${body}\n`);
+  const res = spawnSync(process.execPath, [script], { encoding: "utf8", timeout: ms });
+  assert.equal(res.signal, null,
+    `the child had to be KILLED after ${ms}ms — that is the hang, not a failed assertion. ` +
+    "`readFileSync` on a `.git` FIFO blocks forever and takes every reader on the board with it");
+  assert.equal(res.status, 0, res.stderr);
+  return JSON.parse(res.stdout);
+}
+
+describe("BLZ-470: a `.git` entry that is not a regular file is skipped, named, and NEVER opened", () => {
+  test("unreadableTicketDirs RETURNS rather than blocking on a FIFO", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz470-fifo-"));
+    try {
+      const projects = board(tmp);
+      execFileSync("mkfifo", [join(projects, "BLZ", ".git")]);
+      const found = probeOutOfProcess(tmp,
+        `console.log(JSON.stringify(unreadableTicketDirs(${JSON.stringify(projects)})));`);
+      assert.equal(found.length, 1);
+      assert.equal(found[0].reason, "git-entry-not-a-file");
+      assert.equal(found[0].project, "BLZ");
+      assert.match(found[0].detail, /blocks forever/,
+        "and it says WHY it will not look, because that is the whole reason it is skipped");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the ticket WALK returns too — isNestedRepo shares the predicate", () => {
+    // The walk reaches `classifyGitEntry` through `isNestedRepo`, so the hang was on the
+    // generator every consumer drains, not only on the reporter. BLZ-430's behaviour is
+    // unchanged: the directory is still skipped, so the four OBA tickets are what is left.
+    const tmp = mkdtempSync(join(tmpdir(), "blz470-fifowalk-"));
+    try {
+      const projects = board(tmp);
+      execFileSync("mkfifo", [join(projects, "BLZ", ".git")]);
+      const ids = probeOutOfProcess(tmp,
+        `console.log(JSON.stringify([...fsReadStorage.listTickets(${JSON.stringify(projects)})]` +
+        `.map((t) => t.frontmatter.id).sort()));`);
+      assert.deepEqual(ids, ["OBA-5", "OBA-6", "OBA-7", "OBA-8"],
+        "still skipped, exactly as BLZ-430 skipped it — the fix removes the hang, not the skip");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("`blaze audit` completes and reports it, rather than never returning", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz470-fifoaudit-"));
+    try {
+      const projects = board(tmp);
+      execFileSync("mkfifo", [join(projects, "BLZ", "defined", ".git")]);
+      const res = spawnSync(process.execPath,
+        [join(import.meta.dirname, "..", "scripts", "audit-runner.mjs"), projects],
+        { encoding: "utf8", timeout: 15000 });
+      assert.equal(res.signal, null,
+        "the audit must EXIT — a killed-on-timeout run is the hang, not a failure");
+      assert.match(res.stdout, /\[hard\] unreadable-ticket-directory: 1/);
+      assert.equal(res.status, 1);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

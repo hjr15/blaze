@@ -2292,15 +2292,18 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // The exit is split rather than unconditional because a run that DID find changes must
   // still print them — hiding real work behind a probe failure would be a second silence.
   //
-  // REACHABILITY, STATED RATHER THAN IMPLIED: only the `!r.changes.length` half is pinned by
-  // a test, and the other half is not reachable by any deterministic route. Every signal
-  // reconcile can turn into a change — the merged-commit set, the branch set, and even the
-  // PR list, whose `gatherPrs` reads the remotes with `git config` first — comes from `git`,
-  // so a `git` that is absent or unexecutable takes them ALL down and `changes` is empty by
-  // construction. What can reach the falling-through half is a per-invocation spawn failure
-  // that hits some probes and not others (EAGAIN under resource exhaustion is the realistic
-  // one), and no test can construct that deterministically. So the branch exists because
-  // exiting before printing real work would be wrong, not because a mutation can kill it.
+  // BOTH HALVES ARE REACHABLE, and an earlier revision of this comment said otherwise. It
+  // claimed the falling-through half could not be reached deterministically, on the ground
+  // that every signal which can become a change comes from `git`, so a `git` that cannot run
+  // takes them all down and `changes` is empty by construction. THAT REASONING SILENTLY
+  // ASSUMED PROBE FAILURES ARE ALL-OR-NOTHING, and they are not: a probe fails on its own
+  // merits while its siblings answer. Delete one commit object and `rev-parse` exits 0,
+  // `for-each-ref` exits 0, and `git log` exits 128 — an ordinary damaged object store, an
+  // interrupted fetch, a partial clone. The run then reports a real move AND a failed probe,
+  // which is exactly this split. Caught by review; the claim was this lane's own defect class
+  // — a sentence asserting more than had been established — written into the fix for it.
+  // Both halves are now pinned; see tests/reconcile-git-probe-unreadable.test.mjs, "a run
+  // that DID find work prints it BEFORE exiting 1".
   const unreadableProbes = (r.gitErrors || []).filter((f) => f.severity !== "warning");
   if (unreadableProbes.length) {
     console.error(`reconcile: FAILED — ${unreadableProbes.length} git probe(s) could not be completed, so what this run did NOT find is not evidence of an in-sync board.`);
