@@ -347,12 +347,35 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const diffFiles = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
         { encoding: "utf8" }).trim().split("\n").filter(Boolean);
       const diffIds = new Set(diffFiles.map((f) => (/(ORC-\d+)/.exec(f) || [])[1]).filter(Boolean));
-      const countMatch = /reconcile (\d+) ticket/.exec(subject);
-      assert.ok(countMatch, `applied: the commit subject must state its ticket count, got: ${subject}`);
-      assert.equal(Number(countMatch[1]), diffIds.size,
-        "applied: the commit subject's claimed ticket count must match the number of DISTINCT " +
-        `tickets the commit's OWN diff touches (ground truth: git show), got subject "${subject}" ` +
-        `but the diff touches ${diffIds.size} distinct ticket id(s): ${[...diffIds].join(", ")}`);
+      // BLZ-401: the subject now states TWO quantities — tickets whose STATUS actually
+      // moved, and (only when non-zero) tickets whose file was written without a status
+      // change. A single "reconcile N ticket(s)" claim used to conflate the two, which is
+      // the exact defect BLZ-401 fixes (a `done -> done` resolution backfill inflating the
+      // count of tickets that "moved"). Ground truth for the first quantity is `movedIds`
+      // — real directory changes, already computed above from the filesystem, never from
+      // `reconcile()`'s own return value; ground truth for the second is the remainder of
+      // the diff's distinct ids that did NOT move.
+      const movedMatch = /reconcile (\d+) ticket\(s\) moved/.exec(subject);
+      assert.ok(movedMatch, `applied: the commit subject must state its moved-ticket count, got: ${subject}`);
+      assert.equal(Number(movedMatch[1]), movedIds.size,
+        "applied: the commit subject's claimed MOVED count must match the number of tickets whose " +
+        `directory really changed (ground truth: filesystem snapshot), got subject "${subject}" but ` +
+        `${movedIds.size} ticket(s) really moved: ${[...movedIds].join(", ")}`);
+      bonusClauses += 1;
+      const nonMovedGroundTruth = diffIds.size - movedIds.size;
+      const updatedMatch = /(\d+) ticket\(s\) updated without a status change/.exec(subject);
+      if (nonMovedGroundTruth > 0) {
+        assert.ok(updatedMatch,
+          `applied: the diff touches ${diffIds.size} distinct ticket(s) but only ${movedIds.size} moved — ` +
+          `the subject must name the remaining ${nonMovedGroundTruth} non-moving update(s), got: ${subject}`);
+        assert.equal(Number(updatedMatch[1]), nonMovedGroundTruth,
+          "applied: the commit subject's non-moving-update count must match the diff's real remainder " +
+          `(${nonMovedGroundTruth}), got subject "${subject}"`);
+      } else {
+        assert.equal(updatedMatch, null,
+          `applied: every ticket the diff touches really moved, so the subject must not claim a ` +
+          `non-moving update, got: ${subject}`);
+      }
       bonusClauses += 1;
 
       // BLZ-404 round 2 (blocking 2 — adversarial re-review's M6 mutation): the two clauses

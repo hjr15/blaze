@@ -267,7 +267,9 @@ describe("BLZ-404 (review finding 1): the CLI stays truthful about queued-vs-com
       const { root } = movableBoard(tmp);
       const res = runCli(root);
       assert.equal(res.status, 0, res.stderr);
-      assert.match(res.stdout, /reconcile: committed \d+ change\(s\)\./);
+      // BLZ-401: the summary now names tickets that actually MOVED, not a bare "change"
+      // count that folded in non-moving writes (a resolution backfill, a record clear).
+      assert.match(res.stdout, /reconcile: committed \d+ ticket\(s\) moved\./);
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

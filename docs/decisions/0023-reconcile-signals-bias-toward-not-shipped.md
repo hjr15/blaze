@@ -409,6 +409,79 @@ delivered a ticket — that inference is rejected here for the same reason §1 r
 inference path for the half-recorded case: it is exactly the shape that has already
 failed three times. `pr` is still not in `EDITABLE_FIELDS`, so `OBA-773`'s one
 provably-wrong record must be repaired by hand, or not at all.
+### 6. A change entry is not a claim of a move
+
+**BLZ-401 — `r.changes` conflated "this ticket's file changed" with "this ticket's
+status moved".** The per-ticket loop pushes an entry onto `changes` whenever `dirty`,
+and `dirty` can be set by a resolution backfill or a record clear/fill with the status
+never changing at all — `d.moved` was already computed correctly, but the CLI printed
+every entry as `would move <id>: <from> → <to>` regardless, and `from === to` for a
+non-moving entry, so a `done` ticket with a blank `resolution` read as `would move
+INF-645: done → done` — a status line for a move that never happened. The `--apply`
+commit message compounded it: it counted `changes.length`, so a run that only backfilled
+a resolution on three already-`done` tickets committed a message claiming "3 tickets"
+moved when zero did.
+
+**Decided: keep the entry, stop the renderer conflating it with a move.** Dropping a
+non-moving entry from `changes` was rejected outright — a `cleared` record deletion
+(§1 above, BLZ-398) is *also* `moved: false`, and dropping it would erase the only
+machine-readable account of the one direction reconcile destroys data. `changes` stays
+"what this run did to the file"; `moved` stays "whether the status changed"; the fix is
+in the two READERS (the CLI line, the commit message), not in what gets recorded. A
+non-moving entry now renders as `updated <id> (still <status>): <what changed>` — its
+resolution backfilled, its branch/pr recorded for the first time, and/or (the existing
+`cleared` suffix, unchanged in wording, working in both the move and non-move branches)
+cleared because no single PR delivered it. The `--apply` commit message and the CLI's
+own summary line both state two quantities: tickets whose status actually moved, and —
+only when it is non-zero — tickets updated without a status change. Hiding the second
+number was rejected for the same reason as dropping the entry: a commit touching three
+files that says "1 ticket" replaces an overstatement with an understatement, not with
+the truth.
+
+### 7. A ticket a single-project run cannot reconcile is reported, not resolved
+
+**BLZ-406 — a ticket a single-project run can never reconcile, and nothing said so.**
+`--project <KEY>` (§3 above, BLZ-394) scopes on the ticket's DIRECTORY
+(`keys.includes(t.project)`), because blast radius is a property of the path. The
+signal map that would move a ticket is keyed by its FRONTMATTER `project`
+(`sig.get(t.frontmatter.project)`). A ticket filed at `projects/OBA/defined/INF-2-t.md`
+carrying `project: INF` is therefore reconciled by **neither** single-project run: a
+`--project OBA` run excludes it by directory before the signal is even consulted, and a
+`--project INF` run finds no `INF`-keyed signal for a ticket the scan never scoped in
+under that key (the signal map was built for the projects actually named, and this
+ticket's directory is not one of them). Only an unfiltered run reaches it, through its
+frontmatter key. Exit 0, no finding, no warning — indistinguishable from an in-sync
+board, which is the INF-763 lesson in a new place.
+
+**Decided: the directory wins, and the mismatch is reported, not resolved either way.**
+Two separate questions were at risk of being collapsed into one. *Which key is
+authoritative for where a write lands* is not open for re-litigation: the directory is
+status (ADR-0001), `walkTickets` in `scripts/model/index.mjs` yields it first-class from
+the walk with a BLZ-271 comment stating frontmatter `.project` is "NOT a substitute",
+and BLZ-394's directory-based scoping is UNCHANGED here — deliberately, this ADR is not
+reopening it. *Whether the ticket can be reconciled at all* is the real, separate
+question, and the answer is no: its id is `INF-2`, so the `OBA` project's `idFromRef`
+will never match it, and there is no signal to apply under either key. Un-sticking the
+signal lookup to follow the frontmatter instead would silently launder a filing error
+into a normal reconcile — the corpus is genuinely wrong (a ticket sitting in the wrong
+project's directory), and resolving that silently one way is exactly the shape of wrong
+this ADR's other decisions have already rejected (§1's terminal-sticky veto, §3's
+directory-scoped blast radius). So reconcile emits a `project-mismatch` finding naming
+the ticket, its directory, and its frontmatter key, on **every** run — filtered or not,
+including the one that filters the ticket out of scope entirely — because the silent
+skip is the whole defect this finding exists to close.
+
+**`blaze audit` gets the same check, HARD (BLZ-406 AC-3).** `auditCorpus` is pure over
+frontmatter and cannot see the directory a ticket sits in; the audit RUNNER can, the
+same way it already does for `duplicate-status` and
+`terminal-goal-unverified-requirement`. Decided HARD rather than soft: a misfiled ticket
+is a wrong corpus, not an unfilled one, which is the test `scripts/model/audit.mjs`'s own
+header sets for HARD. Licensed by measurement, per the BLZ-353 lesson that a hard finding
+shipped on an unmeasured assumption fails the live board on day one — re-verified at
+blaze-pm branch `BLZ-305-v4-spine` (`1d172e1e6edfe481465609c9dfd05bd97f6b8930`), across
+2,682 tickets in 11 projects: tickets whose `frontmatter.project` differs from their
+directory, and tickets whose id prefix differs from their directory, both measure
+**zero**. See [`commands.md`](../guide/commands.md#audit).
 
 ## Consequences
 

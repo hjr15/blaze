@@ -272,6 +272,20 @@ describe("BLZ-404 round 2 (blocking 3): the supervisor feed reports 'queued', no
   });
 });
 
+// BLZ-406: `project-mismatch` deliberately NARROWS the invariant this describe block
+// pins. It is raised from the FULL ticket walk — before the `--project` scope guard,
+// unconditionally, on every run mode (see reconcile.mjs) — precisely so a ticket no
+// single-project run can ever reconcile is still reported, not silently dropped. That
+// means an out-of-scope ticket CAN legitimately be named on a scoped run: through its
+// own project-mismatch finding, and nowhere else. `stripProjectMismatchLines` carves
+// those lines out before checking for a scope leak anywhere else in the report, so the
+// blanket "never mention it" claim below is checked in the one place it still holds.
+function stripProjectMismatchLines(output) {
+  return output.split("\n")
+    .filter((l) => !(l.includes("NEEDS ATTENTION") && l.includes("no single-project run")))
+    .join("\n");
+}
+
 describe("BLZ-404 round 3/4/5 (finding 4): --project blast radius covers the REPORT, not just the write", () => {
   test("an in-sync OBA plus a dirty ORC ticket — --project OBA --apply leaves projects/ORC untouched, uncommitted, and unreported", () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz404r5-blast-"));
@@ -311,16 +325,71 @@ describe("BLZ-404 round 3/4/5 (finding 4): --project blast radius covers the REP
         "projects/ORC must be left byte-for-byte as dirty as it started — --project OBA must never see it");
 
       // The REPORT half (finding 4): a run scoped to OBA must never NAME ORC either, on
-      // stdout or stderr, even though it changed nothing there. There is no surviving code
-      // path in reconcile.mjs today that could violate this in this exact scenario —
-      // `scannedProjects`/`findings`/`missingRepos`/`forgeErrors` are all built from `sig`,
-      // which is populated only from `keys` (the `--project` filter) — but the assertion
-      // was previously entirely absent (`void res;`), so a future regression that adds an
-      // unscoped report (not just an unscoped write) would have gone undetected. This
-      // closes that gap; see the PR body for why deleting the cross-pass detector removes
-      // no coverage here (it was already scoped by `keys`, same as everything else).
-      assert.doesNotMatch(res.stdout + res.stderr, /ORC/,
-        "a run scoped to --project OBA must not mention ORC anywhere in its report");
+      // stdout or stderr, even though it changed nothing there — OUTSIDE of its own
+      // project-mismatch finding (BLZ-406), which is deliberately unscoped and is not
+      // this scenario: ORC-1's frontmatter names project: ORC, matching its directory,
+      // so no mismatch is ever raised for it here and the blanket check below holds
+      // without needing to strip anything. `scannedProjects`/`missingRepos`/`forgeErrors`
+      // and every OTHER kind of finding are still built from `sig`, which is populated
+      // only from `keys` (the `--project` filter); `project-mismatch` alone is not, and
+      // the second test below pins that it is the ONLY channel through which a scoped
+      // run may name an out-of-scope ticket. The assertion here was previously entirely
+      // absent (`void res;`), so a future regression that adds an unscoped report (not
+      // just an unscoped write) would have gone undetected. This closes that gap; see the
+      // PR body for why deleting the cross-pass detector removes no coverage here (it was
+      // already scoped by `keys`, same as everything else).
+      assert.doesNotMatch(stripProjectMismatchLines(res.stdout + res.stderr), /ORC/,
+        "a run scoped to --project OBA must not mention ORC anywhere in its report, outside " +
+        "its own project-mismatch finding");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a misfiled ORC-1 (dir ORC, frontmatter project: OBA) — --project OBA --apply names it ONLY via its project-mismatch finding, never elsewhere", () => {
+    // BLZ-406's second, previously-missing case: the ticket the invariant above CANNOT
+    // stay silent about. Unlike the sibling test's ORC-1 (frontmatter matches directory,
+    // so no finding fires and out-of-scope silence is the whole story), this one IS
+    // project-mismatched — the exact condition BLZ-406 exists to surface even on a
+    // single-project run — so the assertion here is the mirror: the finding line MUST
+    // name ORC-1, and nothing else in the report may.
+    const tmp = mkdtempSync(join(tmpdir(), "blz406-mismatch-scoped-"));
+    try {
+      const { root } = movableBoard(tmp);
+
+      // Bring OBA to a genuinely in-sync, fully-committed state first.
+      const seed = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+      assert.equal(seed.status, 0, `test setup: the seeding pass must succeed: ${seed.stderr}`);
+      assert.equal(porcelain(root), "", "test setup: OBA must be fully in sync before ORC is added");
+
+      writeFileSync(join(root, "blaze.config.json"),
+        JSON.stringify({ key: "OBA", projects: ["OBA", "ORC"] }));
+      mkdirSync(join(root, "projects", "ORC", "defined"), { recursive: true });
+      writeFileSync(join(root, "projects", "ORC", "project.json"), JSON.stringify({ key: "ORC", codeRepos: [] }));
+      // Directory ORC, frontmatter claims OBA — a project-mismatch, not merely a ticket
+      // out of --project OBA's scope.
+      writeFileSync(join(root, "projects", "ORC", "defined", "ORC-1.md"),
+        "---\nid: ORC-1\ntitle: t\ntype: task\nproject: OBA\nestimate: 30\n---\n\nbody\n");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "add misfiled ORC-1"]);
+      const before = headSha(root);
+
+      const res = spawnSync(process.execPath, [RECONCILE_BIN, "--project", "OBA", "--apply"],
+        { cwd: root, encoding: "utf8" });
+
+      assert.equal(res.status, 0, `--project OBA --apply must still succeed: ${res.stderr}`);
+      assert.equal(headSha(root), before, "no commit scoped to OBA may touch or land ORC-1's file");
+
+      const mismatchLine = res.stderr.split("\n")
+        .find((l) => l.includes("NEEDS ATTENTION") && l.includes("ORC-1"));
+      assert.ok(mismatchLine,
+        `--project OBA must still report ORC-1's project-mismatch — stderr:\n${res.stderr}`);
+      assert.match(mismatchLine, /no single-project run/,
+        "the finding must say no single-project run reconciles it");
+
+      assert.doesNotMatch(stripProjectMismatchLines(res.stdout + res.stderr), /ORC/,
+        "outside its own project-mismatch finding, --project OBA must not name ORC-1 or " +
+        "projects/ORC anywhere in its report");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

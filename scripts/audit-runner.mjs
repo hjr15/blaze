@@ -155,6 +155,23 @@ for (const [id, files] of filesById) {
     report.findings.push({ ticket: id, kind: "duplicate-status", detail: files.sort().join(", ") });
   }
 }
+// BLZ-406 AC-3: a ticket whose DIRECTORY disagrees with its frontmatter `project` is
+// misfiled — raised HERE for the same reason `duplicate-status` is, since `t.project`
+// (the directory, first-class from `walkTickets`, BLZ-271) is a property of the WALK and
+// `auditCorpus` is a pure function of frontmatter, which carries no path. HARD: see
+// `HARD_KINDS`'s own comment for the decision and the re-measured zero-violation figures.
+// `!= null` (not truthiness) so a project of `""` — which nothing writes, but which would
+// otherwise silently agree with no directory at all — cannot escape the check.
+for (const t of tickets) {
+  const id = t.frontmatter?.id;
+  const fmProject = t.frontmatter?.project;
+  if (id && fmProject != null && fmProject !== t.project) {
+    report.findings.push({
+      ticket: id, kind: "project-mismatch",
+      detail: `directory projects/${t.project}/ vs frontmatter project: ${fmProject}`,
+    });
+  }
+}
 // BLZ-353 / ruling R48: a goal must not be terminal while a requirement beneath it was only
 // ever implemented, never verified. Raised HERE for the same reason `duplicate-status` is —
 // status is the directory, so it is a property of the WALK, and `auditCorpus` is a function
