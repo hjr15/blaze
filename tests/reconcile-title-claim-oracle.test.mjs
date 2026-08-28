@@ -63,8 +63,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, rmSyn
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { claimCorroborated, buildPrMap, decide, betterPr, prTitleClaim, PR_RANK, reconcile }
-  from "../scripts/reconcile.mjs";
+import { claimCorroborated, buildPrMap, decide, betterPr, prTitleClaim, PR_RANK, reconcile,
+         idsFromSubject, idsFromCommitMessage } from "../scripts/reconcile.mjs";
 
 const KEY = "ORC";
 const N = 408;
@@ -106,6 +106,29 @@ const TITLE_SHAPES = [
   { name: "mention-follow-up",    title: `docs: follow-up to ${ID}`,                        claims: false, mentions: true },
   { name: "mention-parenthetical", title: `docs: kickoff brief for the closeout (${ID})`,   claims: false, mentions: true },
   { name: "bare-mention-no-colon", title: `docs successor kickoff ${ID} follow-up lane`,    claims: false, mentions: true },
+  // --- BLZ-455, DECIDED (operator, 2026-08-28), recorded in ADR-0026: an em-dash
+  //     IMMEDIATELY after the id is an unambiguous SEPARATOR, exactly like the colon.
+  //     It covers the 10 real `INF-nnn — desc` deliveries in `docs-central`. This row is
+  //     the whole of the widening: nothing else moved from `claims: false` to `true`.
+  { name: "em-dash-separator",    title: `${ID} — close the retirement epic`,               claims: true,  mentions: true },
+  { name: "em-dash-unspaced",     title: `${ID}— close the retirement epic`,                claims: true,  mentions: true },
+  // --- BLZ-469: the multi-ticket MANIFEST form. The subject claims the id it names and
+  //     nothing else; the squash body's `* KEY-n:` bullets claim the rest (see
+  //     `idsFromCommitMessage`). `15` is a COUNT, not an id — asserted below.
+  { name: "bundle-n-more",        title: `${ID} + 15 more: the oracles are non-vacuous`,    claims: true,  mentions: true },
+  // --- BLZ-455's REJECTED half, and it is the load-bearing half. Every one of these is
+  //     a real merged-PR shape on the live board; admitting any of them readmits BLZ-440.
+  //     `${ID} to ${KEY}-439: …` is `INF-889 to INF-892: corpus landing`, a RANGE.
+  { name: "words-before-colon",   title: `${ID} to ${KEY}-439: corpus landing`,             claims: false, mentions: true },
+  { name: "words-before-colon-2", title: `${ID} backfill + ${KEY}-411: the pair`,           claims: false, mentions: true },
+  { name: "parenthetical-bundle", title: `${ID} (bundle 3/3): the last third`,              claims: false, mentions: true },
+  { name: "en-dash-rejected",     title: `${ID} – close the retirement epic`,               claims: false, mentions: true },
+  { name: "hyphen-rejected",      title: `${ID} - close the retirement epic`,               claims: false, mentions: true },
+  { name: "conventional-scope",   title: `feat(${ID}): the conventional-commits scope`,     claims: false, mentions: true },
+  { name: "bracketed",            title: `[${ID}] the bracketed form`,                      claims: false, mentions: true },
+  { name: "revert-quoted",        title: `Revert "${ID}: close the retirement epic"`,       claims: false, mentions: true },
+  { name: "wip-prefixed",         title: `WIP: ${ID}: close the retirement epic`,           claims: false, mentions: true },
+  { name: "bundle-n-others",      title: `${ID} + 15 others: not the admitted form`,        claims: false, mentions: true },
   // --- no claim on THIS id at all ---
   { name: "prefix-superset",      title: `${ID}1: unrelated work on a longer id`,           claims: false, mentions: false },
   { name: "other-ids-only",       title: `docs: kickoff brief (${KEY}-19, ${KEY}-20)`,      claims: false, mentions: false },
@@ -168,11 +191,11 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
   const cases = buildCases();
 
   test("the cross-product is the size the dimensions declare", () => {
-    assert.equal(TITLE_SHAPES.length, 15, "title shapes");
+    assert.equal(TITLE_SHAPES.length, 28, "title shapes");
     assert.equal(BRANCH_SHAPES.length, 4, "branch shapes");
     assert.equal(PR_STATES.length, 3, "PR states");
     assert.equal(SHIPPED.length, 2, "shipped-commit signal");
-    assert.equal(EXPECTED_CASES, 360);
+    assert.equal(EXPECTED_CASES, 672);
     assert.equal(cases.length, EXPECTED_CASES, "every dimension must reach every case");
     assert.equal(new Set(cases.map((c) => c.name)).size, EXPECTED_CASES, "case names must be distinct");
     // BLZ-440 round 2 added a POOL dimension on top of the single-PR product; BLZ-458
@@ -180,7 +203,7 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
     // deleting one fails this test rather than shrinking the evidence quietly. The
     // figures below are the products the loops below actually run, written as products
     // so a deleted dimension changes them.
-    assert.equal(EXPECTED_CASES * 4, 1440, "single-PR clause budget");
+    assert.equal(EXPECTED_CASES * 4, 2688, "single-PR clause budget");
     assert.equal((9 + 9) * 2 * 2 * 4, 288,
       "pool-matrix clause budget: (9 uncorroborated + 9 corroborated) pairings x 2 number " +
       "directions x 2 orderings x 4 clauses");
@@ -194,9 +217,78 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
     // negative clause below and the file would still be "green" in the wrong direction.
     const discriminating = TITLE_SHAPES.filter((t) => t.mentions && !t.claims);
     const positive = TITLE_SHAPES.filter((t) => t.claims);
-    assert.equal(discriminating.length, 7, "titles where a bare mention disagrees with the house rule");
-    assert.equal(positive.length, 5, "titles that genuinely claim the ticket (the positive control)");
+    assert.equal(discriminating.length, 17, "titles where a bare mention disagrees with the house rule");
+    assert.equal(positive.length, 8, "titles that genuinely claim the ticket (the positive control)");
     assert.ok(discriminating.some((t) => t.name === "range-downstream"), "PR #140's shape must be present");
+  });
+
+  // ===========================================================================
+  // BLZ-453 / BLZ-455 — THE DECIDED BOUNDARY, ASSERTED AS A UNIT.
+  //
+  // BLZ-453's finding: mutating `idsFromSubject`'s lookahead from `(?=\s*:)` to
+  // `(?=\s*[:—])` left ALL 22 BLZ-440 tests green, so the decision not to widen was
+  // pinned by nothing. The operator has since DECIDED to widen it — to the em-dash and
+  // to nothing else (ADR-0026) — which makes the pin MORE necessary, not less: the
+  // widening now has an exact edge, and every neighbour of that edge stays rejected.
+  //
+  // These are unit assertions on `idsFromSubject` itself rather than on the generated
+  // cross-product, because the boundary is a property of the PARSER and the cross-product
+  // can only see it through `claimCorroborated`.
+  // ===========================================================================
+  test("BLZ-455: the separator set is exactly `:` and `—`, and the neighbours stay rejected", () => {
+    // ACCEPTED — the two decided separators, spaced and unspaced.
+    assert.deepEqual(idsFromSubject(`${ID}: desc`, KEY), [ID], "colon");
+    assert.deepEqual(idsFromSubject(`${ID} — desc`, KEY), [ID], "em-dash, spaced");
+    assert.deepEqual(idsFromSubject(`${ID}— desc`, KEY), [ID], "em-dash, unspaced");
+    assert.deepEqual(idsFromSubject(`${ID} : desc`, KEY), [ID], "colon, spaced");
+    // REJECTED — every near neighbour of the em-dash, one code point at a time.
+    for (const [what, sep] of [["en-dash", "–"], ["hyphen", "-"], ["minus", "−"],
+                               ["horizontal-bar", "―"], ["double-hyphen", "--"],
+                               ["semicolon", ";"], ["pipe", "|"]]) {
+      assert.deepEqual(idsFromSubject(`${ID} ${sep} desc`, KEY), [],
+        `${what} (${sep}) must NOT terminate the leading id list`);
+    }
+    // REJECTED — the shapes BLZ-455 names by hand. Words between the id and the colon
+    // are the LOAD-BEARING half: `INF-889 to INF-892: corpus landing` is a real merged
+    // PR title, and admitting it would make it claim INF-889 — a RANGE, which is
+    // BLZ-440's defect readmitted through the front door.
+    for (const bad of [`${ID} to ${KEY}-439: corpus landing`,
+                       `${ID} backfill + ${KEY}-411: the pair`,
+                       `${ID} (bundle 3/3): the last third`,
+                       `${ID} follow-up: more of it`,
+                       `feat(${ID}): scoped`, `[${ID}] bracketed`, `${ID} desc`,
+                       `Revert "${ID}: desc"`, `WIP: ${ID}: desc`,
+                       `${ID} and ${KEY}-409: joined by a word`]) {
+      assert.deepEqual(idsFromSubject(bad, KEY), [], JSON.stringify(bad));
+    }
+    // The em-dash TERMINATES the list; it is not a list SEPARATOR. `KEY-1 — KEY-2: x`
+    // claims the first id only, exactly as `KEY-1: fixes KEY-2` does.
+    assert.deepEqual(idsFromSubject(`${ID} — ${KEY}-999: two ids`, KEY), [ID],
+      "an em-dash ends the list — it does not continue it");
+    // ...and a downstream em-dash is still no claim at all.
+    assert.deepEqual(idsFromSubject(`docs — ${ID} mentioned`, KEY), []);
+  });
+
+  test("BLZ-469: `KEY-n + N more:` claims the id it names and NEVER the count", () => {
+    // The count is a NUMBER sitting exactly where a bare list element sits after `/`.
+    // Reading it as one would claim a ticket that does not exist — the same defect the
+    // bare-number rule already refused for `BLZ-1 + 2026: annual review`.
+    assert.deepEqual(idsFromSubject(`${ID} + 15 more: the oracles are non-vacuous`, KEY), [ID]);
+    assert.deepEqual(idsFromSubject(`${ID} + 1 more: a pair`, KEY), [ID]);
+    assert.deepEqual(idsFromSubject(`${ID} + 15 more — the em-dash form`, KEY), [ID]);
+    // The explicit list form is unchanged and still claims every id it spells.
+    assert.deepEqual(idsFromSubject(`${ID} + ${KEY}-999 + 2 more: a list and a tail`, KEY),
+      [ID, `${KEY}-999`]);
+    // NOT the admitted form — a bundle marker Blaze does not know claims nothing at all,
+    // rather than silently claiming its leading id.
+    for (const bad of [`${ID} + 15 others: no`, `${ID} + more: no`, `${ID} + 15: no`,
+                       `${ID} + fifteen more: no`, `${ID} +15more: no`]) {
+      assert.deepEqual(idsFromSubject(bad, KEY), [], JSON.stringify(bad));
+    }
+    // AND THE RANGE STILL CLAIMS NOTHING — BLZ-469's own acceptance criterion.
+    assert.deepEqual(idsFromSubject(`${ID}..439: the follow-up lane`, KEY), []);
+    assert.deepEqual(idsFromSubject(`${ID}..439 + 15 more: a range wearing a manifest`, KEY), []);
+    assert.deepEqual(idsFromSubject(`${ID}-439: a hyphen range`, KEY), []);
   });
 
   test("every case's corroboration verdict matches the fixture spec", () => {
@@ -565,7 +657,7 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
         clauses += 1;
       }
     }
-    assert.equal(clauses, 5 * 4 * 3 * 2 + 5 * 3 * 3 * 2, "positive-control clause count");
+    assert.equal(clauses, 8 * 4 * 3 * 2 + 8 * 3 * 3 * 2, "positive-control clause count");
   });
 
   test("a malformed id yields no key, and fails closed rather than fabricating one", () => {
@@ -676,6 +768,285 @@ describe("BLZ-440 regression fixture: hjr15/blaze PR #140", () => {
     };
     const map = buildPrMap([PR_140, real], blzFromRef, new Set());
     assert.equal(map.get("BLZ-408")?.number, 200);
+  });
+});
+
+// =============================================================================
+// BLZ-469 — THE SILENT HALF. A merged PR whose BRANCH derives an id its TITLE does not
+// claim moves nothing, and until now said nothing either: PR #144 delivered sixteen
+// tickets, moved none, and the operator found out by noticing the board had not changed.
+//
+// The refusal is CORRECT (BLZ-440) and is not being weakened. What is added is that the
+// run SAYS SO. Scoped deliberately, because `gh pr list --state all --limit 1000` returns
+// the whole history and a finding per historical non-conventional title would bury the
+// findings that matter (the volume argument `fileUnverifiableRecord` already makes):
+//
+//   - MERGED only — an OPEN uncorroborated PR is a VETO, which is a signal working as
+//     designed, not a delivery that failed to register;
+//   - non-terminal tickets only — a done ticket missed nothing;
+//   - and never when a `KEY-n:` commit corroborated it anyway, because then the ticket
+//     moved and the title gap cost nothing.
+// =============================================================================
+describe("BLZ-469: reconcile WARNS when a merged PR's branch derives an id its title does not claim", () => {
+  const WKEY = "WRN";
+
+  function board(tmp, { title, subject, status = "in-progress", type = "task" }) {
+    const repo = join(tmp, "repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", repo, "remote", "add", "origin",
+      "https://github.com/hjr15/warn.git"]);
+    for (const [i, subj] of ["seed", subject].filter(Boolean).entries()) {
+      writeFileSync(join(repo, `f${i}.md`), `x${i}\n`);
+      execFileSync("git", ["-C", repo, "add", "-A"]);
+      execFileSync("git", ["-C", repo, "commit", "-q", "-m", subj]);
+    }
+    const root = join(tmp, "board");
+    const dir = join(root, "projects", WKEY, status);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${WKEY}-7-t.md`),
+      `---\nid: ${WKEY}-7\ntype: ${type}\nproject: ${WKEY}\nestimate: 30\n---\n\nbody\n`);
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: WKEY, projects: [WKEY], codeRepos: [repo] }));
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\ncat <<'JSON'\n` +
+      JSON.stringify([{ number: 144, state: "MERGED", url: "https://example.invalid/pull/144",
+        headRefName: `${WKEY}-7-the-real-work`, title }]) + `\nJSON\n`);
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    return { root, bin };
+  }
+
+  async function run(opts) {
+    const tmp = mkdtempSync(join(tmpdir(), "blz469-warn-"));
+    const prev = process.env.PATH;
+    try {
+      const { root, bin } = board(tmp, opts);
+      process.env.PATH = `${bin}:${prev}`;
+      const r = await reconcile({ root, dryRun: true });
+      return { r, warnings: r.findings.filter((f) => f.kind === "merged-pr-title-claims-nothing") };
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  test("the live shape: `KEY-n + N more` BEFORE the fix claimed nothing — the warning names it", async () => {
+    // `+ 15 others` is deliberately NOT the admitted manifest form, so this reproduces
+    // exactly what PR #144 did before BLZ-469: branch derives the id, title claims
+    // nothing, nothing moves, and nothing said so.
+    const { r, warnings } = await run({ title: `${WKEY}-7 + 15 others: the oracles are non-vacuous` });
+    assert.equal(r.changes.length, 0, "the refusal itself is unchanged — nothing moves");
+    assert.equal(warnings.length, 1, "exactly one warning, naming the ticket");
+    assert.equal(warnings[0].id, `${WKEY}-7`);
+    assert.equal(warnings[0].pr, 144);
+    assert.match(warnings[0].message, new RegExp(`${WKEY}-7`));
+    assert.match(warnings[0].message, /#144/);
+    assert.match(warnings[0].message, /title/i);
+  });
+
+  test("the admitted manifest form does NOT warn — it claims, so the ticket moves", async () => {
+    const { r, warnings } = await run({ title: `${WKEY}-7 + 15 more: the oracles are non-vacuous` });
+    assert.deepEqual(warnings, [], "a title that claims the id has nothing to report");
+    assert.deepEqual(r.changes.map((c) => c.id), [`${WKEY}-7`]);
+    assert.equal(r.changes[0].to, "done");
+  });
+
+  test("an em-dash title does NOT warn either — BLZ-455 admitted it", async () => {
+    const { r, warnings } = await run({ title: `${WKEY}-7 — the real work` });
+    assert.deepEqual(warnings, []);
+    assert.deepEqual(r.changes.map((c) => c.id), [`${WKEY}-7`]);
+  });
+
+  test("a shipped `KEY-n:` commit corroborates the weak title, so there is nothing to warn about", async () => {
+    const { r, warnings } = await run({ title: "chore: tidy the runbook",
+      subject: `${WKEY}-7: the real work` });
+    assert.deepEqual(warnings, [], "the ticket moved — the title gap cost nothing");
+    assert.deepEqual(r.changes.map((c) => c.id), [`${WKEY}-7`]);
+  });
+
+  test("an ALREADY-TERMINAL ticket does not warn — it missed nothing", async () => {
+    const { warnings } = await run({ title: `docs: follow-up to ${WKEY}-7`, status: "done" });
+    assert.deepEqual(warnings, []);
+  });
+
+  test("a non-delivery type does not warn — it never mirrors git state at all", async () => {
+    const { warnings } = await run({ title: `docs: follow-up to ${WKEY}-7`, type: "goal",
+      status: "defined" });
+    assert.deepEqual(warnings, []);
+  });
+
+  test("an OPEN uncorroborated PR does not warn — a veto is a signal, not a missed delivery", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz469-open-"));
+    const prev = process.env.PATH;
+    try {
+      const { root, bin } = board(tmp, { title: `docs: follow-up to ${WKEY}-7` });
+      // Rewrite the stub to answer OPEN instead of MERGED.
+      writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\ncat <<'JSON'\n` +
+        JSON.stringify([{ number: 144, state: "OPEN", url: "u144",
+          headRefName: `${WKEY}-7-the-real-work`, title: `docs: follow-up to ${WKEY}-7` }]) +
+        `\nJSON\n`);
+      execFileSync("chmod", ["+x", join(bin, "gh")]);
+      process.env.PATH = `${bin}:${prev}`;
+      const r = await reconcile({ root, dryRun: true });
+      assert.deepEqual(r.findings.filter((f) => f.kind === "merged-pr-title-claims-nothing"), []);
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// BLZ-455 ROUND 2 — WHAT A WIDER shippedSet CAN AND CANNOT WRITE.
+//
+// The round-1 ADR measured the em-dash widening at 0 additional ids and excused it with
+// "the population lives in `docs-central`, which is a codeRepo of neither" — a CATEGORY
+// ERROR, because the relation is project→codeRepo and `docs-central` is a configured
+// codeRepo of both INF and CRP. Measured properly it harvests **+22 INF ids**, all of
+// them on tickets that are already terminal, **12 of which hold no `pr:` record at all**.
+//
+// ADR-0023 lets a terminal ticket ACQUIRE a record it never had (`recordIfAbsentOnly`),
+// so "can the widening newly write a delivery record onto one of those 12?" is a real
+// question and it is NOT answerable by reading the rules — two different paths reach that
+// write and they give OPPOSITE answers. Both are settled here by running `reconcile`
+// against a real board and reading the file off disk, not by argument:
+//
+//   PATH 1 — shipped alone. REFUTED. `decide`'s `shipped` arm sets neither `branchVal`
+//            nor `prVal`, and on a TERMINAL ticket it is not even reached: with no pr and
+//            no branch the chain falls through to the `skip` return. A bundled child
+//            recovered by a wider shippedSet moves nothing and records nothing.
+//
+//   PATH 2 — shipped as CORROBORATION. REAL. `claimCorroborated`'s first arm is
+//            `shippedSet.has(id)`, so enlarging the set promotes a PR that was previously
+//            uncorroborated — and an uncorroborated claim writes nothing, while a
+//            corroborated MERGED one may fill an absent record on a terminal ticket. The
+//            widening therefore CAN newly write a record, by a route the ADR never named.
+//
+// Each is paired with a control that fails if the mechanism under test never engaged.
+// A "no record was written" assertion is worthless without proof the signal arrived.
+// =============================================================================
+describe("BLZ-455 round 2: a wider shippedSet moves nothing on its own, but it does corroborate", () => {
+  const SKEY = "SHP";
+  const SID = `${SKEY}-9`;
+
+  /** A one-repo board with one ticket, one default-branch commit subject, and a stubbed
+   *  `gh` payload. Everything the two paths differ on is a parameter. */
+  function build(tmp, { subject, status, prs = [], record = null }) {
+    const repo = join(tmp, "repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", repo, "remote", "add", "origin",
+      "https://github.com/hjr15/docs-central.git"]);
+    for (const [i, subj] of ["seed", subject].entries()) {
+      writeFileSync(join(repo, `f${i}.md`), `x${i}\n`);
+      execFileSync("git", ["-C", repo, "add", "-A"]);
+      execFileSync("git", ["-C", repo, "commit", "-q", "-m", subj]);
+    }
+    const root = join(tmp, "board");
+    const dir = join(root, "projects", SKEY, status);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${SID}-t.md`),
+      `---\nid: ${SID}\ntype: task\nproject: ${SKEY}\nestimate: 30\n` +
+      (record ? `branch: ${record.branch}\npr: ${record.pr}\n` : "") +
+      (status === "done" ? "resolution: done\n" : "") + `---\n\nbody\n`);
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: SKEY, projects: [SKEY], codeRepos: [repo] }));
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"),
+      `#!/usr/bin/env bash\ncat <<'JSON'\n` + JSON.stringify(prs) + `\nJSON\n`);
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    return { root, bin };
+  }
+
+  /** Run a real applying reconcile and read the ticket back off disk. */
+  async function apply(label, opts) {
+    const tmp = mkdtempSync(join(tmpdir(), `blz455r2-${label}-`));
+    const prev = process.env.PATH;
+    try {
+      const { root, bin } = build(tmp, opts);
+      process.env.PATH = `${bin}:${prev}`;
+      const r = await reconcile({ root, dryRun: false });
+      const projectDir = join(root, "projects", SKEY);
+      let landed = null, text = null;
+      for (const st of readdirSync(projectDir)) {
+        try { text = readFileSync(join(projectDir, st, `${SID}-t.md`), "utf8"); landed = st; }
+        catch { /* not here */ }
+      }
+      return { r, landed, text };
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  const EM = `${SID} — the work this ticket describes`;   // the newly-qualifying shape
+  const HYPHEN = `${SID} - the work this ticket describes`; // still rejected: the control
+
+  test("PREMISE: an em-dash commit subject really does reach the ticket — it moves a NON-terminal one", async () => {
+    // Without this, every "nothing was written" assertion below could be passing because
+    // the em-dash subject was never harvested at all, which is the opposite of the claim.
+    const { r, landed, text } = await apply("premise", { subject: EM, status: "in-progress" });
+    assert.equal(landed, "done", "the widened shipped signal must actually drive the move");
+    assert.deepEqual(r.changes.map((c) => c.id), [SID]);
+    // ...and even here, where it DID move the ticket, it writes no record: the shipped arm
+    // sets neither field. That is the same fact PATH 1 turns on, seen where the arm runs.
+    assert.doesNotMatch(text, /^pr:/m, "the shipped arm has no record to give");
+    assert.doesNotMatch(text, /^branch:/m);
+  });
+
+  test("CONTROL: the same subject with a HYPHEN moves nothing — the em-dash is what changed", async () => {
+    const { r, landed } = await apply("control", { subject: HYPHEN, status: "in-progress" });
+    assert.equal(landed, "in-progress", "a hyphen is not a terminator and must claim nothing");
+    assert.deepEqual(r.changes, []);
+  });
+
+  test("PATH 1 REFUTED: a TERMINAL record-less ticket recovered by shipped alone acquires NO record", async () => {
+    // This is the live shape: 12 of the 22 newly-harvested INF ids are bundled children
+    // sitting in `done` with no branch and no pr, recovered only from body bullets that an
+    // em-dash subject unlocked. ADR-0023 permits a terminal ticket to acquire an absent
+    // record, so the question is real — and the answer is no.
+    const { r, landed, text } = await apply("path1", { subject: EM, status: "done" });
+    assert.equal(landed, "done");
+    assert.doesNotMatch(text, /^pr:/m, "a shipped-only signal must not write a delivery record");
+    assert.doesNotMatch(text, /^branch:/m);
+    assert.deepEqual(r.changes, [], "and it is not even reported as a change");
+  });
+
+  test("PATH 2 REAL: a wider shippedSet CORROBORATES a weak-titled merged PR, which then fills the absent record", async () => {
+    // `claimCorroborated`'s first arm is `shippedSet.has(id)`. Enlarging the set promotes a
+    // PR whose title claims nothing from uncorroborated (writes nothing, ever) to
+    // corroborated (may fill an absent record on a terminal ticket). The em-dash widening
+    // therefore CAN newly write a record — by this route, not by the shipped arm.
+    const weak = [{ number: 110, state: "MERGED", url: "https://example.invalid/pull/110",
+      headRefName: `${SID}-health`, title: "chore: tidy the runbook" }];
+    const { landed, text } = await apply("path2", { subject: EM, status: "done", prs: weak });
+    assert.equal(landed, "done", "terminal-sticky still holds — this is a RECORD, not a move");
+    assert.match(text, /^pr: '?#110 — https:\/\/example\.invalid\/pull\/110/m,
+      "the newly-corroborated merged PR fills the record the ticket never had");
+
+    // THE DISCRIMINATOR. Identical in every respect except the terminator, so a failure
+    // here can only be the widening. With a hyphen the id is not in the shippedSet, the
+    // same PR stays uncorroborated, and an uncorroborated claim may never write.
+    const before = await apply("path2-control", { subject: HYPHEN, status: "done", prs: weak });
+    assert.doesNotMatch(before.text, /^pr:/m,
+      "without the widening the identical PR is uncorroborated and writes nothing");
+  });
+
+  test("PATH 2 does not become a REWRITE: a record already held is not repointed", async () => {
+    // The other half of ADR-0023: acquire-if-absent, never replace. 10 of the 22 ids
+    // already hold a record, and the widening must not touch them.
+    const other = [{ number: 999, state: "MERGED", url: "https://example.invalid/pull/999",
+      headRefName: `${SID}-later`, title: "chore: a later docs pass" }];
+    const { text } = await apply("path2-writeonce", { subject: EM, status: "done", prs: other,
+      record: { branch: `${SID}-original`, pr: "'#110 — https://example.invalid/pull/110'" } });
+    assert.match(text, /#110/, "the original record must survive");
+    assert.doesNotMatch(text, /#999/, "write-once: a wider shippedSet may not repoint a held record");
   });
 });
 

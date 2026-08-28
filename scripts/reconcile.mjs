@@ -350,21 +350,110 @@ export function idsFromCommitMessage(message, key) {
 // PR delivered, and would have stranded BLZ-131 on the very PR that introduced this
 // function.
 //
-// The list must be CONTIGUOUS and end at the colon, which is what preserves
+// The list must be CONTIGUOUS and end at a TERMINATOR, which is what preserves
 // `idFromSubject`'s rule that a downstream mention is never a claim — `BLZ-1: fixes
 // BLZ-4` still yields only BLZ-1. Separators are the ones the house actually uses.
+//
+// --- BLZ-455, DECIDED (operator, 2026-08-28). ADR-0026. --------------------------
+// THE TERMINATOR SET IS `:` AND `—` (U+2014 EM DASH), AND NOTHING ELSE.
+//
+// An em-dash immediately after the id is an unambiguous SEPARATOR, exactly like the
+// colon: there is no reading of `INF-327 — Author the three diagrams` on which the
+// title is about anything but INF-327. Ten merged PRs in `docs-central` are titled that
+// way and supplied no title signal at all until now; thirteen of the twenty records
+// BLZ-456 flagged become valid under this line.
+//
+// WORDS BETWEEN THE ID AND THE COLON STAY REJECTED, AND THAT IS THE LOAD-BEARING HALF.
+// `INF-889 to INF-892: corpus landing` is a real merged PR title. Admitting
+// words-before-colon would make it claim INF-889 — a RANGE, and therefore precisely the
+// defect BLZ-440 exists to stop, readmitted through the front door. `OBA-809 backfill +
+// OBA-811: …` and `CRP-51 (bundle 3/3): …` are the same shape. Also still rejected:
+// `feat(KEY-n):`, `[KEY-n]`, `KEY-n desc`, `Revert "KEY-n: …"`, `WIP: KEY-n: …`,
+// `KEY-n and KEY-m:`, and every dash that is not U+2014 — en-dash, hyphen, minus,
+// horizontal bar. One code point, decided; its neighbours are not it.
+//
+// BLAST RADIUS, STATED: this is the SAME predicate `idsFromCommitMessage` runs over a
+// commit SUBJECT, so the shipped-commit signal widens by exactly the em-dash case too.
+// That is accepted and intended — an em-dash-separated commit subject claims its ticket
+// as plainly as a colon-separated one.
+//
+// MEASURED (BLZ-353), AND THE FIRST MEASUREMENT WAS WRONG. Round 1 measured `blaze` and
+// `blaze-pm`, found 0 additional ids, and excused it with "the population lives in
+// `docs-central`, which is a codeRepo of neither" — a CATEGORY ERROR. The relation is
+// project→codeRepo, not repo→repo: `docs-central` is a configured codeRepo of BOTH
+// `projects/INF` and `projects/CRP`, so it is squarely inside the blast radius. Two true
+// figures did the rhetorical work of a false conclusion.
+//
+// Redone across every project key and every codeRepo it configures, the way
+// `gatherProject` actually unions them (14 repos, board config at blaze-pm 80dd9ccb):
+//
+//     key    before   after   delta          key    before   after   delta
+//     ACA         6       6      0           KPA        24      24      0
+//     BLZ       237     239     +2 (manifest) NCA       16      16      0
+//     CRP        41      41      0           OBA       465     465      0
+//     FL          1       1      0           OMA        23      23      0
+//     INF       453     475    +22 (em-dash) SN          4       4      0
+//                                            TOTAL    1270    1294    +24
+//
+// So the em-dash widening harvests +22 ids, all under INF, all from `docs-central` at
+// 98f2fa8 (421 commits). CRP: 0. And IT COMPOUNDS, which round 1 never stated: only 10
+// SUBJECTS newly qualify, but a qualifying subject also unlocks the body-manifest reader
+// above for that commit, and its `* KEY-n:` bullets contribute the other 12. The widening
+// is not subject-only.
+//
+// All 22 are already terminal, so nothing moves — but 12 of them hold no `pr:` record,
+// and ADR-0023 lets a terminal ticket ACQUIRE an absent one. Two paths reach that write
+// and they answer differently; both are settled by end-to-end tests in
+// tests/reconcile-title-claim-oracle.test.mjs rather than by argument:
+//   - shipped ALONE cannot write a record (the `shipped` arm sets neither field, and on a
+//     terminal ticket it is not even reached) — REFUTED;
+//   - shipped as CORROBORATION can, because `claimCorroborated`'s first arm is
+//     `shippedSet.has(id)`: a wider set promotes a weak-titled MERGED PR from
+//     uncorroborated to corroborated, and that PR may fill an absent record — REAL. No
+//     such PR exists on `docs-central` today (0 of its 204 PRs has a branch deriving any
+//     of the 12), so the path is live but untriggered. See ADR-0026.
+//
+// --- BLZ-469: the MULTI-TICKET MANIFEST form -------------------------------------
+// `KEY-n + N more: desc` claims KEY-n and NOTHING ELSE from the subject; the squash
+// body's `* KEY-m:` bullets claim the rest (`idsFromCommitMessage`, above). PR #144 —
+// `BLZ-414 + 15 more: the oracles are non-vacuous` — claimed nothing at all, not even
+// BLZ-414, because after `+` the key must be repeated and `15` is not `BLZ-15`; all
+// sixteen tickets had to be hand-moved. `N` is a COUNT and is never read as an id: it
+// sits exactly where a bare list element sits after `/`, and reading it as one would
+// claim a ticket that does not exist — the same trap the bare-number rule already
+// refused for `BLZ-1 + 2026: annual review`. Hence the CAPTURE GROUP: ids come from the
+// id-list alone, never from the whole head.
+//
+// A RANGE STILL CLAIMS NOTHING under this form. `BLZ-408..439 + 15 more:` fails the
+// head match on the `..` before the manifest tail is ever reached, and `BLZ-408 + 15
+// others:` — a bundle marker Blaze does not know — claims nothing rather than silently
+// falling back to its leading id.
+//
+// WHAT THIS DOES AND DOES NOT RECOVER, measured rather than asserted. On `blaze` at
+// 86619d4 the manifest form harvests 2 shipped ids that nothing else named — BLZ-414 and
+// BLZ-458 — from the one commit in 337 whose subject carries it (b318d7b, PR #144); a
+// third, BLZ-427, is recovered too but was already named by PR #146's spelled-out title.
+// On blaze-pm 80dd9ccb it harvests 0, because no board commit uses the form. THREE of
+// #144's SIXTEEN tickets, not sixteen: the body manifest is only ever as complete as the
+// squash's commit list, and #144 squashed five commits naming three tickets. The
+// go-forward contract is therefore a contract on the AUTHOR as much as on the parser —
+// a `+ N more` title is a promise that the bundle's commits each open with their own
+// `KEY-n:` subject, which is already the house commit rule. A title that promises N more
+// and a body that does not name them recovers only what the body actually carries, and
+// the merged-PR warning below is what tells the operator which case they are in.
 export function idsFromSubject(subject, key) {
   // A bare number continues the list only after `/` — `KEY-a/b/c:` is the house's own
   // shorthand. After `+`, `,` or `&` the key must be repeated, which is how the house
   // writes those. Allowing a bare number everywhere let `BLZ-1 + 2026: annual review`
   // claim a ticket BLZ-2026 that does not exist; nothing documented that latitude.
-  const head = new RegExp(
-    "^" + key + "-\\d+(?:(?:\\s*/\\s*(?:" + key + "-)?\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*(?=\\s*:)", "i",
-  ).exec(String(subject || "").trim());
+  const list = key + "-\\d+(?:(?:\\s*/\\s*(?:" + key + "-)?\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*";
+  // The manifest tail is OUTSIDE the captured list, so its count can never become an id.
+  const head = new RegExp("^(" + list + ")(?:\\s*\\+\\s*\\d+\\s+more)?(?=\\s*[:\u2014])", "i")
+    .exec(String(subject || "").trim());
   if (!head) return [];
   const ids = [];
   const each = new RegExp("(?:" + key + "-)?(\\d+)", "gi");
-  for (const m of head[0].matchAll(each)) {
+  for (const m of head[1].matchAll(each)) {
     const id = `${key}-${m[1]}`;
     if (!ids.includes(id)) ids.push(id);
   }
@@ -1176,9 +1265,17 @@ function fileUnverifiableRecord(t, refs, findings, unverifiableRecords) {
 }
 
 // --- the reconcile pass -------------------------------------------------------
+// BLZ-451: the shape a `--ticket` value must have before it can scope anything. STRICT,
+// and deliberately NOT normalising: ADR-0025 rules that a project key is refused, never
+// normalised, and the key half of a ticket id is a project key. `inf-1` is therefore not
+// a lowercase spelling of `INF-1` — it names a project this board does not configure, and
+// it is refused by the scope check below rather than quietly corrected.
+const TICKET_ID_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
+
 export async function reconcile({
   fetch = false, commit = false, dryRun = true, root, projectsDir,
   readStorage = fsReadStorage, storage = fsStorage, writePort = null, projects = null,
+  tickets = null,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
@@ -1215,6 +1312,11 @@ export async function reconcile({
   // change its caller asked for while reporting failure.
   const wanted = projects === null ? null
     : [...new Set((Array.isArray(projects) ? projects : [projects]).map((k) => String(k).trim()).filter(Boolean))];
+  // BLZ-451: normalised exactly as `--project` is — deduped, trimmed, blanks dropped —
+  // so that "the flag was GIVEN" and "the flag yielded a value" stay two different
+  // questions. `null` means unfiltered; `[]` means given-and-empty, which refuses.
+  const wantedTickets = tickets === null ? null
+    : [...new Set((Array.isArray(tickets) ? tickets : [tickets]).map((k) => String(k).trim()).filter(Boolean))];
   if (wanted && !wanted.length) {
     // `configuredRepos: 0`, not `configured.length`: that field counts REPOS, and putting a
     // project count in it was a wrong value in a named field, unreachable or not.
@@ -1224,7 +1326,13 @@ export async function reconcile({
     return { ok: false, error: "--project was given no project key", changes: [], committed: false,
       commitOutcome: "none", commitError: null,
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-      forgeErrors: [], findings: [], scannedProjects: [], dryRun };
+      forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+  }
+  if (wantedTickets && !wantedTickets.length) {
+    return { ok: false, error: "--ticket was given no ticket id", changes: [], committed: false,
+      commitOutcome: "none", commitError: null,
+      pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+      forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
   }
   const unknown = (wanted || []).filter((k) => !configured.includes(k));
   // Checked BEFORE the standalone return below, deliberately. Behind it, a typo'd key on a
@@ -1238,13 +1346,61 @@ export async function reconcile({
         (configured.length ? configured.join(", ") : "no projects at all"),
       changes: [], committed: false, commitOutcome: "none", commitError: null,
       pushed: false, missingRepos: [], scannedRepos: 0,
-      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [], dryRun };
+      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [],
+      scopedTickets: null, dryRun };
+  }
+  // Hoisted ABOVE the standalone return so the ticket-scope check below can use it. A
+  // board with no projects configured has `keys === []`, which is what makes every
+  // `--ticket` id out of scope there — a typo'd scope on an empty board must refuse, not
+  // report the clean successful run the unknown-key check above already refuses to give.
+  const keys = wanted || configured;
+  // --- BLZ-451: `--ticket`, the filter finer than `--project` --------------------
+  // Same rule as `--project`, for the same reason, and it is the rule BLZ-394 had to
+  // learn twice: A FILTER THAT WAS GIVEN AND YIELDED NOTHING REFUSES THE WHOLE RUN. It
+  // never falls back to unfiltered. `--project=$PROJ` with `$PROJ` unset once reconciled
+  // and committed the entire board in silence; a second filter that keeps the fallback
+  // reintroduces that failure through a new door, and a shell script produces it by
+  // accident.
+  //
+  // Why this exists at all: `--apply` is all-or-nothing WITHIN a project, and reconcile
+  // writes `pr`/`branch` records that ADR-0023 makes WRITE-ONCE — `pr` is not in
+  // EDITABLE_FIELDS, so a wrong one has no route back. Live on 2026-08-28 a `--project
+  // BLZ` run proposed four correct moves and one wrong one, and there was no way to take
+  // the four without also writing a false terminal record on the fifth. This is a
+  // blast-radius control, the same kind `--project` is, one level finer.
+  if (wantedTickets) {
+    // MALFORMED IS REFUSED, NOT IGNORED. A value that is not `<KEY>-<n>` can never match
+    // a ticket, so accepting it would reconcile NOTHING and report a clean run — which is
+    // indistinguishable from an in-sync board, the INF-763 lesson that already makes
+    // `--project NOPE` a refusal rather than an empty scan.
+    const malformed = wantedTickets.filter((id) => !TICKET_ID_RE.test(id));
+    if (malformed.length) {
+      return { ok: false,
+        error: `--ticket was given ${malformed.length} value(s) that are not ticket ids: ` +
+          `${malformed.join(", ")}. A ticket id is <KEY>-<number>, e.g. --ticket INF-1.`,
+        changes: [], committed: false, commitOutcome: "none", commitError: null,
+        pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+        forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+    }
+    // An id whose project the run does not cover is REFUSED, not silently dropped. Both
+    // shapes land here: a key this board does not configure at all, and a key it does
+    // configure but that THIS run's `--project` scope excludes. Dropping either would
+    // narrow the run to less than the caller asked for while reporting success.
+    const outside = wantedTickets.filter((id) => !keys.includes(id.slice(0, id.lastIndexOf("-"))));
+    if (outside.length) {
+      return { ok: false,
+        error: `--ticket names ticket(s) outside this run's projects: ${outside.join(", ")}. ` +
+          `This run covers: ${keys.length ? keys.join(", ") : "no projects at all"}` +
+          (wanted ? " (narrowed by --project)." : "."),
+        changes: [], committed: false, commitOutcome: "none", commitError: null,
+        pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+        forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+    }
   }
   if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
     commitOutcome: "none", commitError: null,
     pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [],
-    findings: [], scannedProjects: [], dryRun };
-  const keys = wanted || configured;
+    findings: [], scannedProjects: [], scopedTickets: null, dryRun };
 
   // BLZ-404 (review finding 1): every other board git writer gates its write through
   // `assertWritable` before it touches disk (BLZ-121 defence-in-depth — cli.mjs is the
@@ -1265,7 +1421,28 @@ export async function reconcile({
       return { ok: false, error: e.message, changes: [], committed: false,
         commitOutcome: "none", commitError: null, pushed: false, missingRepos: [],
         scannedRepos: 0, configuredRepos: 0, forgeErrors: [], findings: [],
-        scannedProjects: [], dryRun };
+        scannedProjects: [], scopedTickets: null, dryRun };
+    }
+  }
+
+  // BLZ-451: MATERIALISED, because the existence check below has to run BEFORE anything
+  // is written and the loop has to read the same list it was checked against. Reading the
+  // walk twice would let a concurrent write make the check and the loop disagree.
+  const allTickets = [...readStorage.listTickets(projectsDir)];
+  if (wantedTickets) {
+    // An id naming no ticket on this board is the TYPO case, and it refuses for the same
+    // reason `--project NOPE` does: a scoped run that quietly reconciles nothing is
+    // indistinguishable from an in-sync board. One bad id refuses the WHOLE run — a
+    // partial run writes half of what its caller asked for while reporting failure, which
+    // is the shape the unknown-project-key refusal already rejects.
+    const present = new Set(allTickets.map((t) => t.frontmatter.id));
+    const missing = wantedTickets.filter((id) => !present.has(id));
+    if (missing.length) {
+      return { ok: false,
+        error: `--ticket names ticket(s) that do not exist on this board: ${missing.join(", ")}.`,
+        changes: [], committed: false, commitOutcome: "none", commitError: null,
+        pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+        forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
   }
 
@@ -1286,7 +1463,7 @@ export async function reconcile({
   // (`recordOutsideCandidates`) is rare enough, and important enough, to still name on
   // its own — see the per-ticket push below.
   const unverifiableRecords = [];
-  for (const t of readStorage.listTickets(projectsDir)) {
+  for (const t of allTickets) {
     const type = t.frontmatter.type;
     // BLZ-406: raised BEFORE the scope guard below, and unconditionally — on every
     // run, filtered or not. `t.project` is the DIRECTORY (first-class from the walk,
@@ -1323,6 +1500,12 @@ export async function reconcile({
     // commit that names its scope as (INF) while touching another project's files.
     // Blast radius, which is all this ticket is about, is a property of the path.
     if (wanted && !keys.includes(t.project)) continue;
+    // BLZ-451: the finer scope, applied at the same seam and AFTER the project-mismatch
+    // finding — which BLZ-406 raises unconditionally on every run, filtered or not,
+    // precisely so a narrowed scope can never turn it into the silent skip it exists to
+    // report. Matched on `t.frontmatter.id`, which is the id the operator typed and the
+    // id every refusal above was validated against.
+    if (wantedTickets && !wantedTickets.includes(t.frontmatter.id)) continue;
     const s = sig.get(t.frontmatter.project);
     if (!s) continue;
     const d = decide({
@@ -1331,6 +1514,55 @@ export async function reconcile({
       shipped: s.shippedSet.has(t.frontmatter.id),
       delivererAmbiguous: s.ambiguous ? s.ambiguous.has(t.frontmatter.id) : false,
     }, t.status, type);
+    // --- BLZ-469: SAY IT, DON'T MOVE IT ------------------------------------------
+    // The operator's PR #144 delivered sixteen tickets, reconcile moved none of them,
+    // and NOTHING SAID SO — the failure is silent and in the safe direction, which is
+    // exactly what makes it expensive: all sixteen had to be found by noticing the
+    // board had not changed, then hand-moved through statuses the `blaze` skill
+    // otherwise forbids touching by hand.
+    //
+    // This changes no decision. The refusal above is BLZ-440 working correctly and
+    // stays exactly as it is; what is added is that the run reports the one shape a
+    // person can act on — "your title bought you nothing".
+    //
+    // THREE SCOPE CONDITIONS, and each is volume control with a reason. `gh pr list`
+    // reads `--state all --limit 1000`, so an unscoped version of this finding would
+    // emit a line for every historically non-conventional title in the repo's whole
+    // history — the failure mode `fileUnverifiableRecord` already argues against
+    // ("73 NEEDS ATTENTION lines on every run would bury the findings that matter").
+    //
+    //   MERGED only        — an OPEN uncorroborated PR is BLZ-130's veto, a signal
+    //                        working as designed, not a delivery that failed to land.
+    //   non-terminal only  — a ticket already in a terminal status missed nothing.
+    //   uncorroborated only— if a `KEY-n:` commit corroborated it, the ticket MOVED and
+    //                        the title gap cost nothing. `pr.uncorroborated` is the tag
+    //                        `buildPrMap` already computes, so this asks the SAME
+    //                        question the gate asked rather than a second one that can
+    //                        drift from it (the INF-735 lesson about two implementations
+    //                        of "does this subject claim this ticket").
+    //
+    // Raised from the WINNER, not from every candidate: `decide` reads the top-ranked
+    // PR, so the winner is the PR that actually determined this ticket's (non-)outcome.
+    const winner = s.prMap.get(t.frontmatter.id);
+    if (winner && winner.uncorroborated && winner.state === "MERGED" &&
+        isType(type) && workflowFor(type) === "delivery" && !isTerminal(type, t.status)) {
+      findings.push({
+        kind: "merged-pr-title-claims-nothing",
+        id: t.frontmatter.id,
+        status: t.status,
+        pr: winner.number,
+        title: clean(winner.title) || null,
+        headRefName: clean(winner.headRefName) || null,
+        message: `${t.frontmatter.id} is ${t.status} and ${namePr(winner)} is MERGED on a branch ` +
+          `that derives its id (${clean(winner.headRefName) || "unknown branch"}), but its TITLE ` +
+          `does not claim it: ${JSON.stringify(clean(winner.title) || "")}. A branch name is a ` +
+          `naming convention, not evidence, so reconcile moved nothing and recorded nothing — ` +
+          `this is BLZ-440 working as designed, reported rather than left silent. To make the ` +
+          `title claim the ticket, open it with \`${t.frontmatter.id}:\` or \`${t.frontmatter.id} —\`; ` +
+          `for a bundle, \`${t.frontmatter.id} + N more:\` with the rest as \`* KEY-n:\` bullets in ` +
+          `the squash body. Otherwise move it by hand.`,
+      });
+    }
     if (d.skip) {
       // BLZ-459: THE SKIP SUPPRESSES THE WRITE, NOT THE REPORT.
       //
@@ -1648,7 +1880,8 @@ export async function reconcile({
     const movedCount = changes.filter((c) => c.moved).length;
     const nonMovedCount = changes.length - movedCount;
     const c = commitOrQueue({
-      root, mode: cfg.commitMode, op: "reconcile", id: `reconcile:${keys.join(",")}`,
+      root, mode: cfg.commitMode, op: "reconcile",
+      id: `reconcile:${keys.join(",")}` + (wantedTickets ? `:${wantedTickets.join(",")}` : ""),
       // BLZ-427: one reconcile op covers EVERY ticket this pass wrote. `id` names the
       // op (it has to — a pass has no single ticket), so without this list `blaze
       // commit` counted the whole pass as one and a flush of twelve moved tickets read
@@ -1656,7 +1889,10 @@ export async function reconcile({
       ids: changes.map((ch) => ch.id),
       message: `chore(board): reconcile ${movedCount} ticket(s) moved to git state` +
         (nonMovedCount ? `, ${nonMovedCount} ticket(s) updated without a status change` : "") +
-        (wanted ? ` (${keys.join(", ")})` : ""),
+        (wanted ? ` (${keys.join(", ")})` : "") +
+        // BLZ-451: a ticket-scoped commit says so. The message is what a person reads
+        // months later when asking why this pass moved three tickets and not thirty.
+        (wantedTickets ? ` [--ticket ${wantedTickets.join(", ")}]` : ""),
       files: touched,
     });
     // BLZ-422: the classification lives in reconcile-commit-report.mjs so it can be
@@ -1686,9 +1922,13 @@ export async function reconcile({
   // BLZ-404: `dryRun` travels with the result too — `changes` is a PROPOSAL list on a dry
   // run and a RECORD of writes on an applied run, and until now no consumer could tell
   // which sense it was looking at without already knowing what it had passed in.
+  // BLZ-451: `scopedTickets` is `null` on an unfiltered run and the id list on a scoped
+  // one — never `[]`, because a consumer must be able to tell "looked at everything" from
+  // "looked at these" from the field alone. That is BLZ-394 AC-5's rule, extended to the
+  // second filter rather than restated for it.
   return { ok: true, changes, committed, commitOutcome, commitError, pushed,
            missingRepos, scannedRepos, configuredRepos, forgeErrors, findings,
-           scannedProjects: keys, dryRun };
+           scannedProjects: keys, scopedTickets: wantedTickets, dryRun };
 }
 
 // --- CLI ----------------------------------------------------------------------
@@ -1707,6 +1947,15 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // already refuses an empty list; the CLI simply never reached it.
   let sawProject = false;
   const addKeys = (v) => { for (const k of String(v).split(",")) if (k.trim()) projectKeys.push(k.trim()); };
+  // BLZ-451: `--ticket ID`, repeatable, comma-separated, and `--ticket=ID`. The SAME three
+  // spellings `--project` accepts, deliberately — a filter that silently ignores the
+  // spelling it did not expect is worse than no filter, and a second flag that accepts a
+  // different subset of them is worse again. `sawTicket` tracks whether the flag was
+  // GIVEN, not whether it yielded an id, for the reason spelled out above `sawProject`:
+  // `--ticket=$T` with `$T` unset must refuse, never widen.
+  const ticketIds = [];
+  let sawTicket = false;
+  const addTickets = (v) => { for (const k of String(v).split(",")) if (k.trim()) ticketIds.push(k.trim()); };
   for (let i = 0; i < args.length; i += 1) {
     const a = args[i];
     if (a === "--apply") { apply = true; continue; }
@@ -1721,6 +1970,21 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
       if (!v || v.startsWith("-")) { console.error("--project needs a project key, e.g. --project BLZ"); process.exit(1); }
       sawProject = true; addKeys(v); i += 1; continue;
     }
+    if (a.startsWith("--ticket=")) { sawTicket = true; addTickets(a.slice("--ticket=".length)); continue; }
+    if (a === "--ticket") {
+      // Same trap `--project` has: a missing value must not swallow the next flag. Unlike
+      // `--project`'s, this guard changes only the MESSAGE, not the outcome — and that is
+      // stated here rather than implied, because a mutation run proved it. No flag can
+      // pass `TICKET_ID_RE` (every flag starts with `-`, the pattern starts with a
+      // letter), so `--ticket --apply` is refused by the malformed-id check either way
+      // and the run still exits 1 having written nothing. What this buys is a refusal
+      // that names the typo — "--ticket needs a ticket id" — instead of one reporting
+      // "--apply" as a malformed ticket id, which sends the reader looking for a ticket.
+      // That wording is what the test pins, because it is the only thing this line owns.
+      const v = args[i + 1];
+      if (!v || v.startsWith("-")) { console.error("--ticket needs a ticket id, e.g. --ticket BLZ-451"); process.exit(1); }
+      sawTicket = true; addTickets(v); i += 1; continue;
+    }
     console.error(`unknown flag: ${a}`); process.exit(1);
   }
   // BLZ-402 review finding 3: `reconcile()` -> `loadConfig({ root })` throws `blaze: …` on
@@ -1731,7 +1995,8 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   let r;
   try {
     r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
-      projects: sawProject ? projectKeys : null });
+      projects: sawProject ? projectKeys : null,
+      tickets: sawTicket ? ticketIds : null });
   } catch (e) {
     if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
     throw e;
@@ -1741,6 +2006,13 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // be read as "the board is in sync" when it means "I only looked at one project".
   if (!quiet || projectKeys.length) {
     console.error(`reconcile: scanned project(s): ${(r.scannedProjects || []).join(", ") || "(none)"}`);
+  }
+  // BLZ-451, extending BLZ-394 AC-5 to the finer filter: say what was looked at BEFORE
+  // saying what was found. Unconditional on `--quiet` — `--quiet` means "print only on
+  // change", and a narrowed scope is precisely a reason not to read the absence of a
+  // change as an in-sync board.
+  if (r.scopedTickets) {
+    console.error(`reconcile: scoped to ticket(s): ${r.scopedTickets.join(", ")}`);
   }
   if (r.standalone) { if (!quiet) console.log("reconcile: no projects configured — nothing to reconcile."); process.exit(0); }
   // INF-763: a repo that could not be read is a misconfiguration, not a quiet
