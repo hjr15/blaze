@@ -567,3 +567,268 @@ test("BLZ-436: a scoped run DOES name an out-of-scope directory in a project-mis
     rmSync(tmp, { recursive: true, force: true });
   }
 });
+
+// =============================================================================
+// BLZ-451 — `--ticket`, the filter finer than `--project`.
+//
+// Hit live on 2026-08-28. `blaze reconcile --project BLZ` proposed five moves: four
+// correct and one wrong (BLZ-408, driven to `done` by BLZ-440's defect). `--apply` is
+// all-or-nothing WITHIN a project, so there was no way to take the four without also
+// writing a false, WRITE-ONCE terminal delivery record on the fifth — `pr` is not in
+// EDITABLE_FIELDS (ADR-0023), so there is no route back. The board could not be
+// reconciled at all until BLZ-440 was fixed.
+//
+// This is the same BLAST-RADIUS control BLZ-394 is, one level finer, and it inherits
+// BLZ-394's hard-won rule verbatim: A FILTER THAT WAS GIVEN AND YIELDED NOTHING REFUSES.
+// `--project=$PROJ` with `$PROJ` unset reconciled and committed the whole board, silently;
+// a second filter that falls back to "unfiltered" reintroduces exactly that, and a shell
+// script produces it by accident. Every empty and malformed spelling below is therefore a
+// REFUSAL with nothing written, not a wide run.
+// =============================================================================
+
+/** ONE project, TWO tickets, both of which a merged PR would drive to `done`. The
+ *  two-PROJECT board above cannot show a finer-than-project filter at all: with one
+ *  ticket per project, `--ticket INF-1` and `--project INF` are the same run. */
+function twoTicketBoard(tmp) {
+  const dir = join(tmp, "repo-INF");
+  mkdirSync(dir, { recursive: true });
+  execFileSync("git", ["-C", dir, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", dir, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", dir, "config", "user.name", "t"]);
+  writeFileSync(join(dir, "README.md"), "x\n");
+  execFileSync("git", ["-C", dir, "add", "-A"]);
+  execFileSync("git", ["-C", dir, "commit", "-q", "-m", "seed"]);
+  execFileSync("git", ["-C", dir, "remote", "add", "origin",
+    "https://github.com/hjr15/inf.git"]);
+
+  const root = join(tmp, "board");
+  for (const n of [1, 2]) {
+    const d = join(root, "projects", "INF", "defined");
+    mkdirSync(d, { recursive: true });
+    writeFileSync(join(d, `INF-${n}-t.md`),
+      `---\nid: INF-${n}\ntype: task\nproject: INF\nestimate: 30\n---\n\nbody\n`);
+  }
+  const oba = join(root, "projects", "OBA", "defined");
+  mkdirSync(oba, { recursive: true });
+  writeFileSync(join(oba, "OBA-1-t.md"),
+    "---\nid: OBA-1\ntype: task\nproject: OBA\nestimate: 30\n---\n\nbody\n");
+  writeFileSync(join(root, "projects", "INF", "project.json"),
+    JSON.stringify({ key: "INF", codeRepos: [dir] }));
+  writeFileSync(join(root, "projects", "OBA", "project.json"),
+    JSON.stringify({ key: "OBA", codeRepos: [dir] }));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "INF", projects: ["INF", "OBA"] }));
+
+  const bin = join(tmp, "bin");
+  mkdirSync(bin, { recursive: true });
+  const pr = (id, n) => ({ number: n, state: "MERGED", url: `https://github.com/hjr15/x/pull/${n}`,
+    headRefName: `${id}-work`, title: `${id}: the work` });
+  writeFileSync(join(bin, "gh"), `#!/usr/bin/env bash\ncat <<'JSON'\n` +
+    JSON.stringify([pr("INF-1", 11), pr("INF-2", 12), pr("OBA-1", 22)]) + `\nJSON\n`);
+  execFileSync("chmod", ["+x", join(bin, "gh")]);
+  return root;
+}
+
+const ticketAt = (root, key, n, status) =>
+  existsSync(join(root, "projects", key, status, `${key}-${n}-t.md`));
+
+function runTicketCli(root, tmp, args) {
+  return spawnSync(process.execPath,
+    [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), ...args],
+    { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+}
+
+/** Run `fn` with a fresh two-ticket board and its stubbed `gh` on PATH. */
+async function withBoard(label, fn) {
+  const tmp = mkdtempSync(join(tmpdir(), `blz451-${label}-`));
+  const prev = process.env.PATH;
+  try {
+    const root = twoTicketBoard(tmp);
+    process.env.PATH = `${join(tmp, "bin")}:${prev}`;
+    return await fn(root, tmp);
+  } finally {
+    process.env.PATH = prev;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+}
+
+describe("BLZ-451: --ticket scopes the run finer than --project", () => {
+  test("AC-1: a ticket-scoped run moves exactly the ids named, and no sibling in the same project", async () => {
+    await withBoard("one", async (root) => {
+      const r = await reconcile({ root, dryRun: false, tickets: ["INF-1"] });
+      assert.equal(r.ok, true, r.error);
+      assert.ok(ticketAt(root, "INF", 1, "done"), "the ticket in scope must reconcile");
+      assert.ok(ticketAt(root, "INF", 2, "defined"),
+        "its SIBLING IN THE SAME PROJECT must not be touched — this is the whole ticket");
+      assert.ok(ticketAt(root, "OBA", 1, "defined"));
+      assert.deepEqual(r.changes.map((c) => c.id), ["INF-1"]);
+    });
+  });
+
+  test("AC-1: more than one id can be named, and it composes with --project", async () => {
+    await withBoard("many", async (root) => {
+      const r = await reconcile({ root, dryRun: false, projects: ["INF"], tickets: ["INF-1", "INF-2"] });
+      assert.equal(r.ok, true, r.error);
+      assert.ok(ticketAt(root, "INF", 1, "done"));
+      assert.ok(ticketAt(root, "INF", 2, "done"));
+      assert.ok(ticketAt(root, "OBA", 1, "defined"));
+      assert.deepEqual(r.changes.map((c) => c.id).sort(), ["INF-1", "INF-2"]);
+    });
+  });
+
+  test("AC-4: the result and the report both say what was scoped to", async () => {
+    await withBoard("says", async (root, tmp) => {
+      const r = await reconcile({ root, dryRun: true, tickets: ["INF-1"] });
+      assert.deepEqual(r.scopedTickets, ["INF-1"]);
+      // ...and an UNFILTERED run says `null`, so a consumer can tell the two apart from
+      // the field alone — the BLZ-394 AC-5 lesson, which an empty array would lose.
+      const wide = await reconcile({ root, dryRun: true });
+      assert.equal(wide.scopedTickets, null);
+      const res = runTicketCli(root, tmp, ["--ticket", "INF-1"]);
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stderr, /scoped to ticket\(s\): INF-1/);
+    });
+  });
+
+  test("AC-4: --quiet does not hide the ticket scope", async () => {
+    // Same rule as `--project`: `--quiet` means "print only on change", and a narrowed
+    // scope is precisely a reason not to trust the ABSENCE of one.
+    await withBoard("quiet", async (root, tmp) => {
+      const res = runTicketCli(root, tmp, ["--ticket", "INF-1", "--quiet"]);
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stderr, /scoped to ticket\(s\): INF-1/);
+    });
+  });
+
+  test("AC-5: a scoped --apply commit files only the ticket the pass decided", async () => {
+    await withBoard("commit", async (root, tmp) => {
+      execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+      execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+      execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed board"]);
+      const res = runTicketCli(root, tmp, ["--ticket", "INF-1", "--apply"]);
+      assert.equal(res.status, 0, res.stderr + res.stdout);
+      const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+        { encoding: "utf8" }).split("\n").filter(Boolean);
+      assert.ok(files.every((f) => f.includes("INF-1")),
+        `the commit filed something outside the scope: ${files.join(", ")}`);
+      assert.ok(ticketAt(root, "INF", 2, "defined"));
+    });
+  });
+
+  test("the CLI accepts a repeated flag, a comma-separated list and the `=` form alike", async () => {
+    await withBoard("spelling", async (root, tmp) => {
+      for (const args of [["--ticket", "INF-1"], ["--ticket=INF-1"],
+                          ["--ticket", "INF-1,INF-2"], ["--ticket", "INF-1", "--ticket", "INF-2"]]) {
+        const res = runTicketCli(root, tmp, args);
+        assert.equal(res.status, 0, `${args.join(" ")}: ${res.stderr}`);
+        assert.match(res.stderr, /scoped to ticket\(s\):/, args.join(" "));
+        assert.match(res.stderr, /INF-1/, args.join(" "));
+      }
+    });
+  });
+});
+
+describe("BLZ-451: a --ticket that yields no usable id REFUSES, it does not go wide", () => {
+  // BLZ-394's failure, which this filter must not reintroduce. Every one of these was a
+  // silent whole-board reconcile the first time round.
+  for (const args of [["--ticket="], ["--ticket=,,"], ["--ticket", ","], ["--ticket", ",,"],
+                      ["--ticket", " "], ["--ticket", ""]]) {
+    test(`\`${args.join(" ")}\` is refused, not treated as unfiltered`, async () => {
+      await withBoard("empty", async (root, tmp) => {
+        const res = runTicketCli(root, tmp, [...args, "--apply"]);
+        assert.notEqual(res.status, 0,
+          "an empty --ticket must not silently reconcile every ticket on the board");
+        assert.match(res.stderr, /--ticket/);
+        assert.ok(ticketAt(root, "INF", 1, "defined"), "and must write nothing at all");
+        assert.ok(ticketAt(root, "INF", 2, "defined"));
+        assert.ok(ticketAt(root, "OBA", 1, "defined"));
+      });
+    });
+  }
+
+  test("--ticket with no value is refused BY NAME, not read as the next flag", async () => {
+    // The OUTCOME here is over-determined and this test says so: with the CLI's own guard
+    // removed, `--ticket --apply` still refuses, because `--apply` is not a ticket id and
+    // the library's malformed check catches it. A mutation run proved exactly that — the
+    // guard survived a test asserting only `status !== 0` and `/--ticket/`.
+    //
+    // So what is pinned is the one thing the guard alone produces: a refusal that names
+    // the TYPO rather than reporting "--apply" as a malformed ticket id, which sends the
+    // reader hunting for a ticket. Assert the wording, or do not claim the line is pinned.
+    await withBoard("noval", async (root, tmp) => {
+      const res = runTicketCli(root, tmp, ["--ticket", "--apply"]);
+      assert.notEqual(res.status, 0,
+        "`--ticket --apply` must not scope the run to a ticket named '--apply'");
+      assert.match(res.stderr, /--ticket needs a ticket id/,
+        "the missing-value refusal must name the missing value, not blame the next flag");
+      assert.doesNotMatch(res.stderr, /not ticket ids/,
+        "the malformed-id refusal is the WRONG diagnosis for a missing value");
+      assert.ok(ticketAt(root, "INF", 1, "defined"));
+    });
+    // ...and the same for the last-argument case, where there is no next flag at all.
+    await withBoard("noval-tail", async (root, tmp) => {
+      const res = runTicketCli(root, tmp, ["--ticket"]);
+      assert.notEqual(res.status, 0);
+      assert.match(res.stderr, /--ticket needs a ticket id/);
+    });
+  });
+
+  test("the library refuses an empty list directly, too", async () => {
+    await withBoard("emptylib", async (root) => {
+      const r = await reconcile({ root, dryRun: false, commit: true, tickets: [] });
+      assert.equal(r.ok, false);
+      assert.match(r.error, /--ticket/);
+      assert.equal(r.scopedTickets, null, "a refusal scoped to nothing, not to everything");
+      assert.ok(ticketAt(root, "INF", 1, "defined"));
+      assert.ok(ticketAt(root, "INF", 2, "defined"));
+    });
+  });
+
+  test("AC-2: a MALFORMED id is refused — it is not a ticket id, so it cannot scope anything", async () => {
+    // A value that is not `<KEY>-<n>` cannot match any ticket, so accepting it would
+    // reconcile NOTHING while reporting a clean run — indistinguishable from an in-sync
+    // board, the INF-763 lesson this file already applies to `--project`.
+    await withBoard("malformed", async (root) => {
+      for (const bad of ["INF", "1", "INF-", "-1", "INF-1x", "INF 1", "inf-1x", "INF-01a"]) {
+        const r = await reconcile({ root, dryRun: false, tickets: [bad] });
+        assert.equal(r.ok, false, `${bad} must be refused`);
+        assert.match(r.error, /--ticket/, bad);
+        assert.match(r.error, /INF-1|malformed|not a ticket id/i, bad);
+      }
+      assert.ok(ticketAt(root, "INF", 1, "defined"), "nothing may be written by a refused run");
+    });
+  });
+
+  test("AC-3: an id OUTSIDE the run's projects is refused, not silently ignored", async () => {
+    await withBoard("outside", async (root) => {
+      // Out by --project scope: OBA is configured, but this run is scoped to INF.
+      const scoped = await reconcile({ root, dryRun: false, projects: ["INF"], tickets: ["OBA-1"] });
+      assert.equal(scoped.ok, false);
+      assert.match(scoped.error, /OBA-1/);
+      assert.match(scoped.error, /INF/, "the refusal must name the projects the run covers");
+      // Out by the BOARD's own configuration: no such project key at all.
+      const unknown = await reconcile({ root, dryRun: false, tickets: ["ZZZ-1"] });
+      assert.equal(unknown.ok, false);
+      assert.match(unknown.error, /ZZZ-1/);
+      assert.ok(ticketAt(root, "OBA", 1, "defined"));
+      assert.ok(ticketAt(root, "INF", 1, "defined"));
+    });
+  });
+
+  test("AC-3: an id naming NO ticket on the board is refused, not a clean empty run", async () => {
+    // The typo case. `--ticket INF-9999` that quietly reconciles nothing is
+    // indistinguishable from an in-sync board — the same reason `--project NOPE` refuses.
+    await withBoard("nosuch", async (root) => {
+      const r = await reconcile({ root, dryRun: true, tickets: ["INF-9999"] });
+      assert.equal(r.ok, false);
+      assert.match(r.error, /INF-9999/);
+      // ...and a mix of one good and one bad id still refuses the WHOLE run: a partial
+      // run writes half of what its caller asked for while reporting failure.
+      const mixed = await reconcile({ root, dryRun: false, tickets: ["INF-1", "INF-9999"] });
+      assert.equal(mixed.ok, false);
+      assert.ok(ticketAt(root, "INF", 1, "defined"), "no partial application");
+    });
+  });
+});
