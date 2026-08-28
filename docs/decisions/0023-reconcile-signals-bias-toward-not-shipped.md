@@ -438,7 +438,7 @@ number was rejected for the same reason as dropping the entry: a commit touching
 files that says "1 ticket" replaces an overstatement with an understatement, not with
 the truth.
 
-### 6. A ticket a single-project run cannot reconcile is reported, not resolved
+### 7. A ticket a single-project run cannot reconcile is reported, not resolved
 
 **BLZ-406 — a ticket a single-project run can never reconcile, and nothing said so.**
 `--project <KEY>` (§3 above, BLZ-394) scopes on the ticket's DIRECTORY

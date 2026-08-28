@@ -147,7 +147,7 @@ run — naming its directory excludes it before the signal is even consulted, an
 its frontmatter key finds no signal keyed by the directory it is actually filed under.
 Reconcile emits a `project-mismatch` finding for it on **every** run, filtered or not,
 naming the ticket, its directory, and its frontmatter key, rather than silently picking
-a side. See [ADR-0023 §6](../decisions/0023-reconcile-signals-bias-toward-not-shipped.md).
+a side. See [ADR-0023 §7](../decisions/0023-reconcile-signals-bias-toward-not-shipped.md).
 
 ## groom
 
