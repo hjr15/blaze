@@ -180,11 +180,17 @@ because two implementations of one predicate is how this drift keeps reappearing
 so a ground-truth test pins the two against each other: the directories the reporter names
 must be exactly the directories the walk lost tickets from.
 
-`classifyGitEntry` distinguishes five shapes rather than reporting "a repository", because a
+`classifyGitEntry` distinguishes **six** shapes rather than reporting "a repository", because a
 zero-byte `.git` file is not a repository and telling an operator to go looking for one is a
 second wrong claim: `nested-repo` (a `.git` directory), `nested-repo-pointer` (a `gitdir:`
-file, what `git submodule add` writes), `git-file-empty`, `git-file-unrecognised`, and
-`git-entry-not-a-file`. A directory that could not be listed at all is `directory-unreadable`.
+file, what `git submodule add` writes), `git-file-empty`, `git-file-unrecognised`,
+`git-file-unreadable` (a regular `.git` file the process may not read — `chmod 000`, EACCES)
+and `git-entry-not-a-file`. A directory that could not be listed at all is
+`directory-unreadable`.
+
+An earlier draft of this section said *five* and omitted `git-file-unreadable`, and no test
+references it. It is reachable, so the gap is coverage rather than dead code — recorded as its
+own ticket rather than quietly renumbered here.
 
 **A read path may never block, and that outranks reporting.** The first cut of
 `classifyGitEntry` opened any non-directory `.git` with `readFileSync`. On a FIFO that blocks

@@ -382,7 +382,10 @@ describe("BLZ-470: a `.git` entry that is not a regular file is skipped, named, 
       assert.equal(found.length, 1);
       assert.equal(found[0].reason, "git-entry-not-a-file");
       assert.equal(found[0].project, "BLZ");
-      assert.match(found[0].detail, /blocks forever/,
+      // Pinned on the FIFO-specific wording, not the old blanket "blocks forever": a socket
+      // throws ENXIO in 0ms and a device node reads 0 bytes, so the general claim was false
+      // for two of the three types the sentence names.
+      assert.match(found[0].detail, /a FIFO with no writer would block the read forever/,
         "and it says WHY it will not look, because that is the whole reason it is skipped");
     } finally {
       rmSync(tmp, { recursive: true, force: true });

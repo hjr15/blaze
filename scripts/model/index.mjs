@@ -58,10 +58,15 @@ function classifyGitEntry(dirPath) {
   // stat counted). Both properties are preserved: still skipped, now named, and never opened.
   // A socket, a device node and a symlink to any of them land here too.
   if (!st.isFile()) {
+    // The reason is stated per TYPE, not generalised. Measured, not assumed: a FIFO with no
+    // writer blocks forever; a socket throws ENXIO immediately; a device node such as
+    // /dev/null reads 0 bytes. Only the FIFO hangs — so claiming all three "block forever"
+    // would be this lane's own defect in the sentence the operator actually reads.
     return { reason: "git-entry-not-a-file",
              detail: "it holds a `.git` entry that is neither a directory nor a regular file " +
                "(a FIFO, socket or device node) — that is not a repository git would recognise, " +
-               "and Blaze will not open it: reading such an entry blocks forever" };
+               "and Blaze will not open it: a FIFO with no writer would block the read forever, " +
+               "and the others cannot hold a git pointer" };
   }
   let head;
   try { head = readFileSync(p, "utf8").slice(0, GIT_FILE_PROBE_BYTES); }
