@@ -222,16 +222,37 @@ gap cost nothing.
   | | marker OFF | marker ON |
   |---|---|---|
   | **gate OFF** | 1,323 | 110 |
-  | **gate ON** | 65 | **3** (BLZ-259, INF-672, INF-701) |
+  | **gate ON** | 63 | **3** (BLZ-259, INF-672, INF-701) |
 
-  The three named ids reproduce exactly, and 65 lands within 2 of the comment's 63. So:
-  the **subject gate** is worth **1,323 → 65** and the **column-0 marker** a further
-  **65 → 3**. Dropping the gate would readmit roughly **1,258** ids — the board carries
+  The three named ids reproduce exactly, and the gate-ON/marker-OFF cell is **63** — the
+  figure `reconcile.mjs`'s own comment has carried all along. An earlier draft of this ADR
+  put 65 there and explained the gap as landing "within 2" of the comment. That was wrong,
+  and wrong in the way this whole record is about: it presented a **definitional
+  divergence as measurement noise.** 65 is reachable only under a marker-OFF rule that
+  drops the bullet requirement entirely (`^(?:[*+-]\s+)?KEY-n:`), which admits two
+  *wrapped prose lines* that are not bullets at all — `INF-707: CronJobLastRunFailed pages
+  for a suspended CronJob (pre-existing to the` and `INF-708: guard the
+  annotation-vs-expr invariant in CI. I2 (a widened selector whose`, both under subject
+  `INF-693: deploy-path observability epic (board) (#24)`. **Every bullet-based definition
+  gives 63.** The marker-OFF rule is therefore stated here explicitly: a body line counts
+  only as a column-0 bullet.
+
+  So: the **subject gate** is worth **1,323 → 63** and the **column-0 marker** a further
+  **63 → 3**. Dropping the gate would readmit **1,260** ids — the board carries
   squashed PRs of ticket-*body* edits (`blaze: … board + ticket work`) whose bullets are
   real `KEY-n:` subjects describing an edit rather than a delivery. The conclusion is
   therefore *better* supported than the misattributed figure suggested, and it is robust
   across every basis computed (totals rather than marginals, and "any mention" rather than
-  `KEY-n:` for the loose body rule, all give the same ordering). The manifest form unblocks
+  `KEY-n:` for the loose body rule, all give the same ordering). **Two paths reach that write, and a third is blocked only by a guard
+  worth naming.** `claimCorroborated`'s `shippedSet.has(id)` arm is one; `decide`'s
+  shipped-alone arm is not (it sets neither field, and on a terminal ticket is unreachable).
+  The third is `buildBranchMap`'s own `shippedSet && shippedSet.has(id)` corroboration: a
+  wider set newly admits a *branch*. On a terminal ticket that is blocked by terminal-sticky
+  nulling both fields, which is why the conclusion for the twelve holds — but on a
+  NON-terminal ticket the same arm writes `branch:` and moves the ticket to `in-progress`.
+  The enumeration above is safe because of that guard, not in spite of needing it.
+
+  The manifest form unblocks
   the early return the way the return was designed to be unblocked: by making the bundle
   subject claim its leading id.
 
