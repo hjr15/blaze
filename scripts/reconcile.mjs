@@ -355,9 +355,38 @@ export function idsFromSubject(subject, key) {
 // shippedSet we already compute). Fail closed — an uncorroborated claim is dropped
 // rather than trusted, so a misnamed branch costs a missed signal, not a corrupted
 // ticket.
+//
+// BLZ-440: the title arm used to be `new RegExp("\\b" + id + "\\b", "i").test(title)` —
+// a bare MENTION anywhere in the title. That is not the house rule, and it re-opened
+// the very hole INF-735 closed one axis over. `\bBLZ-408\b` matches inside
+// `BLZ-408..439` (the `.` is a non-word character, so the right-hand boundary holds),
+// so PR #140 — branch `docs-successor-kickoff-blz-408-439`, title `docs: successor
+// kickoff for the BLZ-408..439 follow-up lane` — corroborated its own range expression
+// and proposed `BLZ-408: defined → done` for a ticket that had never been worked.
+// A range, a `supersedes KEY-n`, a `follow-up to KEY-n`: all mentions, none claims.
+//
+// The house already decides this question, once, in `idsFromSubject`: a subject claims
+// a ticket only when it OPENS with `KEY-n` followed by `:` (with the `+` `,` `&` `/`
+// list forms), because "a downstream mention is never a claim". That rule reached
+// commit subjects and `prTitleClaim`'s RANKING but never this GATE, and two
+// implementations of "does this subject claim this ticket" is precisely how the two
+// paths drifted apart. So the gate now calls the same function rather than carrying a
+// second regex. The key is derived from the id, not taken as a parameter, so a caller
+// cannot silently degrade this by forgetting to pass it — the same guard `prTitleClaim`
+// uses, for the same reason.
+//
+// The shippedSet arm above is UNCHANGED: it is built from `idsFromCommitMessage`, which
+// is already strict, and it is what lets a legitimately non-conventional title still
+// corroborate when a real `KEY-n:` commit shipped.
 export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
   if (shippedSet && shippedSet.has(id)) return true;
-  return new RegExp("\\b" + id + "\\b", "i").test(title || "");
+  const dash = String(id || "").lastIndexOf("-");
+  // No `-` means no key to parse a claim with. Fail closed rather than slicing a
+  // negative index into a plausible-looking key (`id.slice(0, -1)`), which would send
+  // a garbage key into a RegExp constructor.
+  if (dash <= 0) return false;
+  const key = id.slice(0, dash);
+  return idsFromSubject(title, key).includes(id);
 }
 
 // --- resolve a repo's default-branch LOG REF, preferring the remote-tracking ---

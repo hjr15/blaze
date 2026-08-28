@@ -286,6 +286,34 @@ claim whose PR title never names the ticket can now be corroborated by a bullet.
 is a real widening, it is the price of the fix, and the two conditions above are what
 keep it narrow.
 
+**BLZ-440 narrowed the gate's OTHER arm, and it is worth reading beside the widening
+above.** INF-735's title arm tested `new RegExp("\\b" + id + "\\b", "i")` against the PR
+title — a bare **mention**. `\bBLZ-408\b` matches inside `BLZ-408..439` (the `.` is a
+non-word character, so the right-hand boundary holds), so a PR named for a ticket RANGE
+corroborated its own first element. Live on 2026-08-28, `blaze reconcile --project BLZ`
+proposed `BLZ-408: defined → done` from PR #140 — branch
+`docs-successor-kickoff-blz-408-439`, title `docs: successor kickoff for the
+BLZ-408..439 follow-up lane` — for a ticket that had never been worked. This ADR's own
+asymmetry names the cost: a `pr` naming the wrong PR **overstates and is false**, and
+write-once then locks it in permanently.
+
+The title arm now calls `idsFromSubject` — the same predicate the shipped signal's
+second condition already used, and the same one `prTitleClaim` ranks with. The house
+rule reaches all three paths from one implementation, because two implementations of
+"does this subject claim this ticket" is exactly how these two drifted apart. A title
+must OPEN with `<KEY>-<n>` followed by `:`, list forms included; `supersedes BLZ-408`,
+`follow-up to BLZ-408`, `(BLZ-408)` and `BLZ-408..439` all corroborate nothing.
+
+**The `shippedSet` arm is untouched** — it is built from `idsFromCommitMessage`, which is
+already strict, and it stays the route by which a legitimately non-conventional title is
+corroborated by a real commit. The narrowing is therefore only on the arm that trusted
+the forge's prose.
+
+**Stated cost, in this ADR's own direction of bias:** a PR whose branch names a ticket
+and whose title does not claim it now supplies **no** signal, so the ticket sits where it
+is until someone moves it. That is an understatement, and understatement is the side this
+record deliberately errs on.
+
 **Rejected: matching on the merged PR's body.** BLZ-131 lists it first and calls it
 cheapest, and it was still declined. It widens trust to the forge for a claim that
 moves a ticket to `done`, and a PR body naming a ticket is weaker evidence than a

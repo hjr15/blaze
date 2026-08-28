@@ -133,10 +133,10 @@ legitimate setup, but `in-review` is just as unreachable there, so it is reporte
 on the same terms rather than being treated as a special quiet case. If that is
 your deliberate configuration, the line is expected and harmless.
 
-## Two rules that keep the board honest
+## Three rules that keep the board honest
 
-Both were bugs before they were rules, and both are about the same thing: the board
-must not say shipped when it is not, and must not say untouched when it is.
+All three were bugs before they were rules, and all three are about the same thing: the
+board must not say shipped when it is not, and must not say untouched when it is.
 
 ### An open pull request vetoes `done` (BLZ-130)
 
@@ -165,6 +165,43 @@ last PR carrying its key closes.
 > carrying *either* `branch` or `pr` already has a record, so neither half is topped up
 > later — otherwise a follow-up PR could fill a blank `pr` beside a `branch` that names
 > a different PR, and the record would name two.
+
+### A branch or PR that MENTIONS a ticket has not claimed it (INF-735, BLZ-440)
+
+Reconcile finds a ticket id in a branch or PR head ref with an unanchored
+`\b<KEY>-<n>` match, run over every ref in every one of a project's `codeRepos`. That
+is deliberately loose, because ref names are: `feature/blz-408-work`,
+`BLZ-408-a-mention-is-not-a-claim`, `docs-successor-kickoff-blz-408-439` all carry a key.
+
+**A ref name is a naming convention, not evidence.** So a ref-derived claim needs a
+second signal before it counts, and the second signal must describe the WORK:
+
+1. the PR **title CLAIMS the ticket** — it opens with `<KEY>-<n>:`, in the same
+   leading-id-list form as a commit subject (`<KEY>-a/b/c:`, `<KEY>-a + <KEY>-b:`); or
+2. a `<KEY>-<n>:` commit for it is **reachable from the default branch** (the shipped
+   signal of the previous rule).
+
+Neither is satisfied by a *mention*. `docs: successor kickoff for the BLZ-408..439
+follow-up lane` names BLZ-408, and claims nothing — it is a range. So do
+`supersedes BLZ-408`, `follow-up to BLZ-408`, and a bare `(BLZ-408)` in parentheses. This
+is the same rule the shipped signal already applies to commit subjects, stated once: **a
+downstream mention is never a claim.**
+
+Until BLZ-440 the title arm tested `\bBLZ-408\b` against the title — a bare mention
+anywhere. `\bBLZ-408\b` matches *inside* `BLZ-408..439`, because `.` is a non-word
+character and the boundary holds, so a range corroborated its own first element. On the
+real board that proposed `BLZ-408: defined → done` for a ticket that had never been
+worked, on the evidence of a PR whose branch and title both named the range 408..439.
+
+**The gate fails closed.** An uncorroborated claim is *dropped*, not downgraded and not
+out-ranked — so it can no longer beat a corroborated PR from the ticket's real repo, and
+it writes no delivery record at all. The cost is stated and accepted: **a misnamed branch
+costs a missed signal, not a corrupted ticket.** If you name a branch for a ticket and
+title the PR something else, reconcile will not move that ticket — which is the right way
+round, because a terminal status is sticky and a terminal delivery record is write-once.
+
+**Naming a branch after a range stays safe and ordinary.** It just is not read as
+delivery.
 
 ### A squash merge's body is read, not just its subject (BLZ-131)
 

@@ -92,6 +92,38 @@ const SETS = subsets(POOL, 3);
 const RANK = (state) => PR_RANK[state] || 0;
 const label = (s) => s.map((p) => p.name).join(" + ");
 
+// BLZ-440: this file's subject is SELECTION AMONG CORROBORATED CANDIDATES — which of
+// several admissible PRs supplies the status and the record. Corroboration itself (may a
+// ref-derived claim speak at all) is INF-735's gate and BLZ-440's oracle, one layer up.
+//
+// The pool deliberately contains weak-titled PRs (`chore: tidy the runbook after INF-645`)
+// because the claim tier is one of the five concerns being ordered here. Until BLZ-440
+// those entered `buildPrMap` on a bare title MENTION, which is the defect BLZ-440 removed;
+// with `shippedSet: null` they are now dropped before selection and half these invariants
+// lose their pool. They are admitted the way a weak-titled PR is legitimately admitted
+// today — by a real `KEY-n:` commit on the default branch, the strict `shippedSet` arm
+// BLZ-440 did not touch — so the selection invariants keep exercising the same shapes for
+// a reason that is still true.
+const CORROBORATED = new Set([ID]);
+
+describe("BLZ-440: CORROBORATED is load-bearing, not a way to keep old assertions green", () => {
+  test("without a shipped signal, the pool's weak-titled PRs are dropped before selection", () => {
+    // If this went green, `CORROBORATED` would be papering over a lost gate rather than
+    // supplying the legitimate corroboration these invariants assume. A title that merely
+    // MENTIONS the id — `chore: tidy the runbook after INF-645` — is not a claim.
+    const weak = POOL.filter((p) => prTitleClaim(p, ID) === 1);
+    assert.equal(weak.length, 2, "the pool must still contain weak-titled PRs to select among");
+    for (const p of weak) {
+      assert.equal(buildPrMap([p], idFromRef, null).size, 0,
+        `${p.name} corroborates nothing on its own — its title only mentions ${ID}`);
+    }
+    // ...and the strong ones need no help.
+    for (const p of POOL.filter((x) => prTitleClaim(x, ID) === 2)) {
+      assert.equal(buildPrMap([p], idFromRef, null).get(ID)?.name, p.name, p.name);
+    }
+  });
+});
+
 describe("BLZ-398: the selection is a function of the SET, not of the order it arrived in", () => {
   test("every candidate set picks the same winner under every permutation", () => {
     // Round 4's defect and round 5's were both order-sensitive in effect: the winner
@@ -101,7 +133,7 @@ describe("BLZ-398: the selection is a function of the SET, not of the order it a
     for (const set of SETS) {
       const winners = new Set();
       for (const perm of permutations(set)) {
-        const w = buildPrMap(perm, idFromRef, null).get(ID);
+        const w = buildPrMap(perm, idFromRef, CORROBORATED).get(ID);
         winners.add(w ? w.name : "(none)");
       }
       assert.equal(winners.size, 1,
@@ -149,7 +181,7 @@ describe("BLZ-130: the STATUS depends on the winning state, and on nothing else"
     for (const set of SETS) {
       const top = Math.max(...set.map((p) => RANK(p.state)));
       const expected = top === 3 ? "in-review" : top === 2 ? "done" : "in-progress";
-      const w = buildPrMap(set, idFromRef, null).get(ID);
+      const w = buildPrMap(set, idFromRef, CORROBORATED).get(ID);
       assert.ok(w, `no winner for [${label(set)}]`);
       assert.equal(decide({ pr: w }, "defined", "epic").target, expected,
         `[${label(set)}] should reach ${expected}`);
@@ -162,7 +194,7 @@ describe("BLZ-130: the STATUS depends on the winning state, and on nothing else"
     // did not exist yet.
     for (const set of SETS) {
       if (!set.some((p) => p.state === "OPEN")) continue;
-      const w = buildPrMap(set, idFromRef, null).get(ID);
+      const w = buildPrMap(set, idFromRef, CORROBORATED).get(ID);
       assert.notEqual(decide({ pr: w }, "defined", "epic").target, "done",
         `[${label(set)}] contains an OPEN PR and must not reach done`);
     }
@@ -172,7 +204,7 @@ describe("BLZ-130: the STATUS depends on the winning state, and on nothing else"
 describe("BLZ-398: the record is never written from something Blaze cannot name", () => {
   test("an unrecordable winner writes NEITHER field", () => {
     for (const set of SETS) {
-      const w = buildPrMap(set, idFromRef, null).get(ID);
+      const w = buildPrMap(set, idFromRef, CORROBORATED).get(ID);
       if (recordablePr(w)) continue;
       const d = decide({ pr: w }, "in-review", "epic");
       assert.equal(d.prVal, null, `[${label(set)}] wrote a pr from an unnumberable PR`);
@@ -185,7 +217,7 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     // The direction that stops every test above from passing on an engine that records
     // nothing at all.
     for (const set of SETS) {
-      const w = buildPrMap(set, idFromRef, null).get(ID);
+      const w = buildPrMap(set, idFromRef, CORROBORATED).get(ID);
       if (!recordablePr(w)) continue;
       // MERGED only: `decide` clamps the record on a terminal ticket unless the winning PR
       // is merged, so a non-merged winner proves nothing about the write here.
@@ -203,7 +235,7 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     // ticket lost a record that was sitting right there. Demoting the tier below the claim
     // (round 5) must not have demoted it out of existence.
     for (const set of SETS) {
-      const w = buildPrMap(set, idFromRef, null).get(ID);
+      const w = buildPrMap(set, idFromRef, CORROBORATED).get(ID);
       const peers = set.filter((p) =>
         RANK(p.state) === RANK(w.state) && prTitleClaim(p, ID) === prTitleClaim(w, ID));
       if (!peers.some((p) => recordablePr(p))) continue;
@@ -216,7 +248,7 @@ describe("BLZ-398: the record is never written from something Blaze cannot name"
     // Round 5's defect as an invariant: within one rank, the ticket-titled PR wins, and
     // being unrecordable makes it write NOTHING rather than hand the record to a chore.
     for (const set of SETS) {
-      const w = buildPrMap(set, idFromRef, null).get(ID);
+      const w = buildPrMap(set, idFromRef, CORROBORATED).get(ID);
       // `prTitleClaim`, the SHIPPED predicate — not a regex twin of it. Review found the
       // twin diverges on two house-legal titles (`INF-645, INF-646: joint work` and a
       // lowercase id), so this invariant would have raised false failures the moment
