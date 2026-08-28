@@ -19,20 +19,24 @@
 // be the hazard itself; the runner is behind a CLI guard for that reason.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, symlinkSync, rmSync, existsSync }
+  from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { createSandbox, MUTATIONS, SANDBOX_CONTENTS } from "../scripts/ci/mutate-schedule.mjs";
+import { createSandbox, discardSandbox, MUTATIONS, SANDBOX_CONTENTS }
+  from "../scripts/ci/mutate-schedule.mjs";
 
-/** Teardown for a directory this file did not create itself. Guarded, because the thing
- *  under test is a function that RETURNS a path we then recursively delete: if
- *  `createSandbox` ever returned the checkout — which is exactly the regression the first
- *  test exists to catch — an unguarded `rmSync` would delete the repository rather than
- *  fail the test. A safe teardown is what makes that mutation runnable. */
+/** Teardown for a directory this file did not create itself, through the RUNNER's own
+ *  guard rather than a second copy of it (BLZ-485). The thing under test is a function
+ *  that RETURNS a path we then recursively delete: if `createSandbox` ever returned the
+ *  checkout — which is exactly the regression the first test exists to catch — an
+ *  unguarded `rmSync` would delete the repository rather than fail the test. A safe
+ *  teardown is what makes that mutation runnable.
+ *
+ *  This used to hold its own `assert.notEqual(sandbox, repo)`, which is why BLZ-485
+ *  exists: the guard lived here and not in the runner, and it compared strings. */
 function discard(sandbox, repo) {
-  assert.notEqual(sandbox, repo,
-    "createSandbox returned the checkout itself — refusing to remove it. This IS the failure: " +
-    "the runner would mutate the shared working tree in place");
-  rmSync(sandbox, { recursive: true, force: true });
+  discardSandbox(sandbox, repo);
 }
 
 const REPO = join(import.meta.dirname, "..");
@@ -112,5 +116,123 @@ describe("BLZ-472: the mutation runner mutates a COPY, never the shared working 
     assert.match(src, /const src = join\(sandbox, m\.file \?\? SOLVE\);/,
       "`src` must be joined onto the sandbox — a bare relative path resolves against the " +
       "caller's cwd, which is the shared checkout");
+  });
+});
+
+// BLZ-485: the teardown guard belongs to the RUNNER, and it compares resolved real paths.
+//
+// BLZ-472 left the runner's teardown a bare `rmSync(sandbox, {recursive:true, force:true})`
+// and put the "refusing to remove the checkout" guard in this file's `discard` helper only.
+// So the safety belonged to the tests, not to the thing that ships: `runMutations` would
+// recursively delete whatever `createSandbox` handed it, and a refactor that made
+// `createSandbox` return the checkout — the precise regression the tests above exist to
+// catch — would have deleted the repository before any test could report it.
+//
+// NOT REACHABLE TODAY, and stated as such rather than implied to be pinned: `createSandbox`
+// always returns a fresh `mkdtempSync(join(tmpdir(), "blz-mutate-"))` path, and the tests
+// above pin that it is neither the checkout nor a copy of HEAD. No current call path can
+// reach the refusal, so NO MUTATION OF THE GUARD CAN BE KILLED THROUGH `runMutations`. It is
+// pinned by direct call, below, against a STAND-IN repository — never the real checkout,
+// because a test whose failure mode is "the repository is gone" is not a test anyone can
+// run twice.
+//
+// The old helper's compare was `sandbox !== repo` on the raw strings, which is defeated by
+// every other spelling of the same directory: a symlink into the checkout, or a `..`
+// segment. The tests below are written against those spellings specifically — a string
+// compare passes the first of them and fails the rest.
+describe("BLZ-485: the runner refuses to delete the checkout, on resolved real paths", () => {
+  /** A throwaway stand-in for "the checkout". Every path this block hands to
+   *  `discardSandbox` is under `tmpdir()`; the real repository is never an argument to it
+   *  here, deliberately. */
+  const scratch = () => mkdtempSync(join(tmpdir(), "blz-485-"));
+  /** Cleanup for this block's own scratch trees. Not `discardSandbox` — the point of half
+   *  these tests is that `discardSandbox` REFUSES the path we need to remove. Narrowed to
+   *  the prefix `scratch()` mints so it can never name anything else. */
+  const cleanup = (dir) => {
+    assert.ok(dir.startsWith(join(tmpdir(), "blz-485-")), `refusing to clean up ${dir}`);
+    rmSync(dir, { recursive: true, force: true });
+  };
+
+  test("it refuses when the sandbox IS the repo, and leaves the repo on disk", () => {
+    const repo = scratch();
+    try {
+      assert.throws(() => discardSandbox(repo, repo), /refusing to remove it/);
+      assert.ok(existsSync(repo), "the repo was deleted — the guard did not hold");
+    } finally { cleanup(repo); }
+  });
+
+  test("it refuses a SYMLINK to the repo — a string compare passes this and deletes it", () => {
+    // The exact case the old helper's `assert.notEqual(sandbox, repo)` could not see: two
+    // different strings naming one directory.
+    const base = scratch();
+    try {
+      const repo = join(base, "checkout");
+      mkdirSync(repo);
+      writeFileSync(join(repo, "canary.txt"), "still here\n");
+      const link = join(base, "link-to-checkout");
+      symlinkSync(repo, link, "dir");
+      assert.notEqual(link, repo, "the premise: these are different strings");
+      assert.throws(() => discardSandbox(link, repo), /refusing to remove it/);
+      assert.ok(existsSync(join(repo, "canary.txt")),
+        "the checkout was deleted through a symlink — the compare is not on real paths");
+    } finally { cleanup(base); }
+  });
+
+  test("it refuses a NON-NORMALISED path naming the repo (a `..` segment)", () => {
+    const base = scratch();
+    try {
+      const repo = join(base, "checkout");
+      mkdirSync(repo);
+      writeFileSync(join(repo, "canary.txt"), "still here\n");
+      const roundabout = `${base}/./sibling/../checkout`;
+      assert.notEqual(roundabout, repo, "the premise: these are different strings");
+      mkdirSync(join(base, "sibling"));
+      assert.throws(() => discardSandbox(roundabout, repo), /refusing to remove it/);
+      assert.ok(existsSync(join(repo, "canary.txt")), "the checkout was deleted via `..`");
+    } finally { cleanup(base); }
+  });
+
+  test("it refuses an ANCESTOR of the repo — deleting it takes the checkout with it", () => {
+    const base = scratch();
+    try {
+      const repo = join(base, "nested", "checkout");
+      mkdirSync(repo, { recursive: true });
+      writeFileSync(join(repo, "canary.txt"), "still here\n");
+      assert.throws(() => discardSandbox(base, repo), /refusing to remove it/);
+      assert.ok(existsSync(join(repo, "canary.txt")),
+        "an ancestor was removed recursively, which deletes the checkout inside it");
+    } finally { cleanup(base); }
+  });
+
+  test("it DOES remove a genuine sandbox — the guard is not simply refusing everything", () => {
+    // Non-vacuity. Without this, a `discardSandbox` that threw unconditionally would pass
+    // every test above and leave a temp directory behind on every mutation run.
+    const repo = scratch();
+    const sandbox = scratch();
+    try {
+      writeFileSync(join(sandbox, "f.txt"), "x");
+      discardSandbox(sandbox, repo);
+      assert.ok(!existsSync(sandbox), "a real sandbox must actually be removed");
+      assert.ok(existsSync(repo), "and the repo must be untouched");
+    } finally { cleanup(repo); cleanup(sandbox); }
+  });
+
+  test("the runner's teardown goes through the guard — there is no bare rmSync left", () => {
+    // A source check, and stated as what it is. The guard is unreachable from
+    // `runMutations` today (see the header), so no behavioural test can prove the runner
+    // calls it; what CAN be proved is that the runner contains exactly one `rmSync`, that
+    // it sits inside `discardSandbox`, and that the `finally` delegates to it. That is the
+    // property BLZ-485 is about: the safety is in the shipped runner, not in this file.
+    const src = readFileSync(join(REPO, "scripts", "ci", "mutate-schedule.mjs"), "utf8");
+    assert.equal(src.split("rmSync(").length - 1, 1,
+      "more than one rmSync call in the runner — every recursive delete must go through " +
+      "discardSandbox, which is the only place allowed to name a path to remove");
+    const guardAt = src.indexOf("export function discardSandbox");
+    assert.notEqual(guardAt, -1, "discardSandbox is not exported from the runner");
+    assert.ok(src.slice(guardAt).includes("rmSync("),
+      "the runner's single rmSync is not inside discardSandbox");
+    assert.match(src, /\}\s*finally\s*\{\s*\n\s*discardSandbox\(sandbox\);/,
+      "runMutations' finally must delegate to discardSandbox — a bare rmSync there is the " +
+      "defect BLZ-485 closes");
   });
 });

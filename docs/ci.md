@@ -81,6 +81,24 @@ mutation runs against each other — never the failure — and nothing else.
 checkout byte-identical, and every `writeFileSync` in the runner goes through the
 sandbox-joined path.
 
+The teardown is guarded too, in the runner rather than in the tests (BLZ-485).
+`discardSandbox` is the only place in `mutate-schedule.mjs` allowed to remove anything, and
+it refuses when the path it is given resolves to the checkout, or to any directory
+containing it — an ancestor deleted recursively takes the checkout with it. The compare is
+on **resolved real paths** (`realpathSync`), not on the strings, because a symlink or a
+`..` segment names the same directory under a different spelling and a string compare lets
+it through. Two things to be clear about:
+
+- **No current call path can reach the refusal.** `createSandbox` is the sole producer of
+  the argument and always returns a fresh `mkdtempSync` directory under the system temp
+  dir. The guard is defence in depth against a future refactor, not a live check, and no
+  mutation of it can be killed through the gate. It is pinned by direct call against a
+  stand-in repository — never the real checkout, since a test whose failure mode is "the
+  repository is gone" is not one you can run twice.
+- The guard used to live in the test helper instead, where it protected the test run and
+  not the thing that ships. A mutation runner that can delete the working tree on a bad
+  refactor is worse than the race BLZ-472 removed.
+
 ## Triage: is a red gate real or transient?
 
 The job is structured so the failing **step** tells you which:
