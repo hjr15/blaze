@@ -14,6 +14,16 @@ import { claimedNumbers, readCutover, claimPath } from "./claims.mjs";
 function safeReaddir(p) { try { return readdirSync(p); } catch { return []; } }
 function isDir(p) { try { return statSync(p).isDirectory(); } catch { return false; } }
 
+// BLZ-430: a directory that is itself a git repository — a submodule, or a plain clone
+// left under `projects/`. `git submodule add` writes `.git` as a FILE holding a
+// `gitdir:` pointer; a clone writes it as a directory. Either one is the whole signal,
+// and it is deliberately a STAT rather than a `git` call: this runs once per candidate
+// directory on a read path that already walks ~2,700 files.
+//
+// It is checked with `existsSync`-shaped semantics (a stat that does not care what kind
+// of entry it found) because both shapes must count and neither is a ticket.
+function isNestedRepo(p) { try { statSync(join(p, ".git")); return true; } catch { return false; } }
+
 // Per-file parse cache: path → { mtimeMs, size, frontmatter, body }.
 // Validated by stat on every walk (same freshness semantics as re-reading —
 // the board stays a pure view over files); hits skip readFileSync+parse.
@@ -35,6 +45,20 @@ export function* walkTickets(projectsDir) {
   for (const project of safeReaddir(projectsDir)) {
     const projPath = join(projectsDir, project);
     if (!isDir(projPath)) continue;
+    // BLZ-430: a NESTED REPOSITORY is another repository's working tree, not a project.
+    // Skipped at both levels because the walk reaches a `.md` at both: as a project its
+    // subdirectories are read as statuses, and as a status (below) its top-level files
+    // are read as tickets. A vendored `README.md` then hits `parseTicket`, which THROWS
+    // "missing frontmatter" — and the throw escapes this generator, so it does not
+    // degrade one ticket, it takes the whole walk down and with it `blaze audit`,
+    // `buildIndex`, the board view, id resolution and `reconcile`. One neighbouring
+    // directory made a whole board unreadable.
+    //
+    // Narrow ON PURPOSE. The alternative — skipping any `.md` that fails to parse —
+    // would make a genuinely CORRUPTED TICKET vanish from the board, the index and the
+    // audit in silence, which is a worse defect than this one. A malformed ticket must
+    // still throw, and a test pins that it does.
+    if (isNestedRepo(projPath)) continue;
     for (const status of safeReaddir(projPath)) {
       // BLZ-136: `.ids/` holds the allocation ledger, not tickets. Dot-dirs were
       // previously skipped only because claim files carry no .md extension — an
@@ -42,6 +66,7 @@ export function* walkTickets(projectsDir) {
       if (status.startsWith(".")) continue;
       const statusPath = join(projPath, status);
       if (!isDir(statusPath)) continue;
+      if (isNestedRepo(statusPath)) continue;   // BLZ-430, see above
       for (const f of safeReaddir(statusPath)) {
         if (!f.endsWith(".md")) continue;
         const file = join(statusPath, f);

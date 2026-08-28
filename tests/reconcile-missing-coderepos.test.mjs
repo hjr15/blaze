@@ -1,10 +1,17 @@
 // INF-763 — reconcile must not report success after scanning nothing.
 //
 // `gatherRepo` returns an empty sentinel for a codeRepo path that isn't a git
-// repo. With every path unresolvable (the worktree case) that produced
-// "already in sync — nothing to do" and exit 0, having scanned zero repos —
-// indistinguishable from a genuine no-op, and the reason a wrong board state
-// looked correct for a whole session.
+// repo. With every path unresolvable (the worktree case) that produced a clean
+// success and exit 0, having scanned zero repos — indistinguishable from a
+// genuine no-op, and the reason a wrong board state looked correct for a whole
+// session.
+//
+// BLZ-433: the sentence INF-763 quoted for that success — "already in sync —
+// nothing to do." — is no longer anything the product emits. BLZ-404 round 5
+// removed it as a claim about the whole board's git tree that reconcile cannot
+// support; a clean pass now says "no code-bound change found — nothing to do."
+// and this case exits 1 with "FAILED — none of the N configured codeRepo(s)
+// could be read". What the test asserts is the OUTCOME, not that wording.
 //
 // Resolution is fixed separately (codeRepos now resolve against the main working
 // tree). This is the belt-and-braces half: a misconfigured or missing repo must

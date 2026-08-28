@@ -127,6 +127,15 @@ function loadPathRefuses(config, project) {
   return false;
 }
 
+// BLZ-416: a PROJECT-layer problem is attributed to its project in the finding's own detail
+// text — the top layer is not, because that block belongs to no one project. The fixture's
+// only project key is "P". Written out here as a literal rather than imported from
+// `scripts/model/audit.mjs`, because an oracle that reads the subject under test for its
+// ground truth is exactly what BLZ-423 and BLZ-431 exist to forbid.
+const attributed = (message) => (message.startsWith("project.json:")
+  ? `projects/P/${message}`
+  : `projects/P: ${message}`);
+
 /** What `auditCorpus` SHOULD produce for the schema layer, computed independently of it: the
  *  same top-then-project walk with cross-layer dedup by message, but built here from
  *  `collectSchemaProblems` directly rather than by calling `auditCorpus` and trusting its own
@@ -142,7 +151,7 @@ function expectedPartition(config, project) {
     .filter((p) => !topByMsg.has(p.message));
   const hard = new Set(), soft = new Set();
   for (const [msg, isHard] of topByMsg) (isHard ? hard : soft).add(msg);
-  for (const p of projProblems) (p.hard ? hard : soft).add(p.message);
+  for (const p of projProblems) (p.hard ? hard : soft).add(attributed(p.message));
   return { hard, soft };
 }
 
@@ -157,7 +166,8 @@ function expectedDetailSetViaValidateSchema(config, project) {
   const topSet = new Set(topMsgs);
   const resolved = { ...resolveSchema({ config, project }), linkTypes: topResolved.linkTypes };
   const projMsgs = validateSchema({ ...resolved, config, project, endpointTypes })
-    .filter((m) => !topSet.has(m));
+    .filter((m) => !topSet.has(m))
+    .map(attributed);
   return new Set([...topSet, ...projMsgs]);
 }
 
