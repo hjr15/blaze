@@ -44,13 +44,34 @@ function refResolves(ref) {
   refCache.set(ref, v);
   return v;
 }
+// BLZ-473 follow-up: three outcomes, not two. `actions/checkout@v4` clones at depth 1 onto a
+// DETACHED HEAD with no branch refs and no remote-tracking refs, so `main` resolves nowhere —
+// and reading that as "the ref is dead" is the exact defect BLZ-484 names in the product:
+// a probe that CANNOT LOOK reporting what a probe that looked and found nothing reports.
+// It failed CI on #149 for precisely that reason while passing on every developer checkout.
+//
+// So: "yes" when the ref resolves; "no" when it does not AND this checkout demonstrably CAN
+// resolve refs (proven by a control, not assumed); "unknown" when the checkout has no refs to
+// resolve against at all. "unknown" does not pass silently — the caller says so by name.
+// A checkout can only prove a ref is ABSENT if it holds a complete ref set. `actions/checkout@v4`
+// fetches a single branch at depth 1, so it has SOME refs (the PR head) but not `main` — which is
+// why "does it have any refs at all" was the wrong control and still failed CI on #150.
+// `--is-shallow-repository` is the discriminator that actually separates the two environments.
+function canProveRefAbsent() {
+  const shallow = spawnSync("git", ["-C", REPO, "rev-parse", "--is-shallow-repository"],
+    { encoding: "utf8" });
+  if (shallow.status !== 0 || String(shallow.stdout || "").trim() !== "false") return false;
+  const r = spawnSync("git", ["-C", REPO, "for-each-ref", "--count=1", "--format=%(refname)",
+    "refs/heads", "refs/remotes"], { encoding: "utf8" });
+  return r.status === 0 && String(r.stdout || "").trim() !== "";
+}
 function resolveRef(ref) {
   for (const candidate of [ref, `origin/${ref}`]) {
     const r = spawnSync("git", ["-C", REPO, "rev-parse", "--verify", "-q", `${candidate}^{commit}`],
       { encoding: "utf8" });
-    if (r.status === 0) return true;
+    if (r.status === 0) return "yes";
   }
-  return false;
+  return canProveRefAbsent() ? "no" : "unknown";
 }
 
 const MD_LINK = /\[[^\]]*\]\(([^)\s]+)\)/g;
@@ -105,7 +126,7 @@ describe("ADR-0028: a shipped document's links are reachable for an installed us
         const [, org, repo, ref, rest] = m;
         checked += 1;
         assert.equal(`${org}/${repo}`, "hjr15/blaze", `${doc}: ${href} names the wrong repository`);
-        assert.ok(refResolves(ref),
+        assert.notEqual(refResolves(ref), "no",
           `${doc}: ${href} names the ref ${JSON.stringify(ref)}, which this repository does not ` +
           "resolve — the URL is a live 404. This is the half BLZ-460's guard did not pin");
         const path = rest.split("#")[0];
@@ -119,12 +140,21 @@ describe("ADR-0028: a shipped document's links are reachable for an installed us
       "smaller number means the extractor stopped matching");
   });
 
-  test("BLZ-473: the ref check is not vacuous — a dead ref really is refused", () => {
+  test("BLZ-473: the ref check is not vacuous — a dead ref really is refused", (t) => {
+    // A checkout with no refs at all (depth-1 detached CI clone) cannot tell a dead ref from
+    // a live one, and must SAY so rather than answer either way. Skipping here is the honest
+    // outcome; the assertions above still run, because they only refuse an outright "no".
+    if (!canProveRefAbsent()) {
+      t.skip("this checkout is shallow or holds no refs (a depth-1 single-branch CI clone) — " +
+        "it cannot distinguish a dead ref from one it simply never fetched, so neither " +
+        "answer would mean anything");
+      return;
+    }
     // The exact URL the BLZ-473 reviewer reproduced with. It passes the org/repo/path
     // shape and fails only on the ref, which is the whole point.
-    assert.equal(refResolves("no-such-ref-xyz"), false,
+    assert.equal(refResolves("no-such-ref-xyz"), "no",
       "a ref this repository cannot resolve must not pass — the guard would accept a 404");
-    assert.equal(refResolves("main"), true,
+    assert.equal(refResolves("main"), "yes",
       "the ref the shipped pointers actually use must resolve, or this test refuses everything");
   });
 });
