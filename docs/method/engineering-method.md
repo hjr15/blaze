@@ -126,6 +126,56 @@ verified by one of those three methods is reachable the moment the work
 lands, regardless of whether the `story` type's design (deferred elsewhere)
 has shipped. `test`-method requirements are the ones that wait.
 
+### When the evidence is an oracle
+
+A `test`-method requirement is often verified by an **oracle**: a generated
+cross-product of inputs, each compared against ground truth. An oracle is
+stronger evidence than hand-picked examples — and it fails in ways an example
+does not, because it is cited as proof while proving nothing. Three failures
+have been found in this repo's own oracles, and every one of them was silent:
+
+1. **The oracle does not assert its own size.** It PRINTS a case or clause
+   count instead of asserting it, so deleting a dimension shrinks the evidence
+   and the run still reads green. Deleting one value from one dimension of the
+   reconcile feed oracle took it from 336 tickets to 224 and dropped 520
+   clauses, at 3/3 pass (BLZ-415, BLZ-420, BLZ-437).
+2. **The oracle reads the subject under test for its ground truth.** A
+   de-vacuity guard that asks the thing under test whether it did anything is
+   satisfied by that thing's own word: reconcile reporting
+   `commitOutcome: "committed"` with an empty `git log` kept its guard green
+   (BLZ-423, BLZ-431).
+3. **The test is named for something it does not exercise.** A guard named for
+   reconcile's ledger entry that never invokes `reconcile` stays green when the
+   production line it names is deleted (BLZ-442, BLZ-443).
+
+So:
+
+- **Assert the size, and derive it from the cross-product's shape** — not from
+  a figure read off a passing run. A fitted constant is a change-detector: it
+  tells a reviewer the number is STABLE, never that it is RIGHT, and two
+  compensating edits pass it. Assert it PER CELL where the cross-product has
+  cells, so a deleted assertion names the coordinate it was deleted from
+  rather than surfacing as a wrong grand total (BLZ-444).
+- **Never accumulate the size through data-dependent conditionals.** A count
+  that depends on which branches the data happened to take can go red for a
+  reason that has nothing to do with the assertions, which trains a reader to
+  re-run instead of investigate (BLZ-452).
+- **Ground truth comes from somewhere the subject cannot reach** — the
+  filesystem, `git log`, a ledger file on disk, or the fixture's own
+  declaration of what it planted. A dry run's own before/after snapshot is not
+  ground truth for what it PREDICTS; the only honest grader of a preview is an
+  apply pass over the same board (BLZ-421).
+- **Every finding needs a negative side.** A clause asserting the finding fires
+  for the misfiled ticket is equally satisfied by a guard that fires for every
+  ticket on the board (BLZ-435).
+- **State reachability plainly.** A guard no current call path can reach cannot
+  be killed by any mutation, and must be described that way rather than implied
+  to be pinned (BLZ-414's non-array link-type endpoint branch is one).
+- **Prove it by reverting, not by asserting.** Revert the production hunk the
+  test claims to pin and watch THAT NAMED test go red for the reason its name
+  gives. A test that stays green under that revert is not evidence, whatever it
+  is called.
+
 ## Approval, stated honestly
 
 `approved` is the requirement workflow's second status, and it's worth being

@@ -68,6 +68,15 @@ const HARD_SHAPES = [
 const SOFT_SHAPES = [
   ["an inert per-project linkTypes block", { linkTypes: { Precedes: { source_kinds: ["task"], target_kinds: ["task"] } } }],
   ["a malformed top-level schema.linkTypes entry", { linkTypes: { Precedes: { source_kinds: "nope", target_kinds: [] } } }],
+  // BLZ-414. The header claims one shape per soft call site; two link-type sites had
+  // none. This is the reachable one: a WELL-FORMED override entry (so `mergeLinkTypes`
+  // keeps it) whose endpoint names a type that is not declared — the BLZ-392 typo that
+  // leaves a type silently unschedulable. Without it, `collectSchemaProblems`'s
+  // "names ... which is not a declared type" branch was never executed by this oracle at
+  // either layer. The other site is unreachable through the config layering and is
+  // pinned separately, by name, at the foot of this file.
+  ["a link type naming an undeclared endpoint kind (BLZ-392)",
+    { linkTypes: { Precedes: { source_kinds: ["ghost"], target_kinds: ["task"] } } }],
   ["a deliberately narrowed requirement workflow (BLZ-361)", { workflows: { requirement: {
     statuses: ["proposed", "implemented", "rejected", "obsolete"],
     terminal: ["implemented", "rejected", "obsolete"],
@@ -189,14 +198,130 @@ describe("BLZ-407 oracle: blaze audit's ok agrees with the load path's refusal, 
     }
   }
 
-  test("the oracle's own scale — reported so it cannot silently shrink", () => {
+  // BLZ-415. Six clauses per case is a property of the loop body's SHAPE, not a figure
+  // read off a passing run: 2 ok-agreement directions, 2 partition-set comparisons, 1
+  // no-overlap check, 1 union-vs-validateSchema comparison. Count them in the source
+  // above, not in a console line.
+  const CLAUSES_PER_CASE = 6;
+
+  test("the oracle's own scale — ASSERTED, not merely printed (BLZ-415)", () => {
+    // The dimension sizes first. `cases === SHAPES.length ** 2` alone is self-referential
+    // — deleting a shape shrinks both sides of it — so the shape lists' own lengths are
+    // pinned, one entry per branch of `collectSchemaProblems` plus the two controls.
+    assert.equal(HARD_SHAPES.length, 26, "the hard-shape dimension changed size");
+    assert.equal(SOFT_SHAPES.length, 4, "the soft-shape dimension changed size");
+    assert.equal(CONTROL_SHAPES.length, 2, "the control dimension changed size");
+    assert.equal(SHAPES.length, 32, "the shape list is not the three dimensions concatenated");
+
     const expectedCases = SHAPES.length * SHAPES.length;
     assert.equal(cases, expectedCases,
       `expected ${SHAPES.length} shapes squared; the loop above enumerated something else`);
-    // 6 clauses per case: 2 ok-agreement directions, 2 partition-set comparisons, 1
-    // no-overlap check, 1 union-vs-validateSchema comparison. Printed rather than only
-    // asserted, so a run's real count reaches the PR body verbatim.
+    // BLZ-415: the count is ASSERTED. Before this ticket it was only PRINTED, so
+    // deleting one of the six clauses from the loop body dropped 961 assertions and the
+    // file still reported 962/962 pass — the evidence shrank in silence.
+    assert.equal(clauses, expectedCases * CLAUSES_PER_CASE,
+      `the oracle executed ${clauses} clauses; ${expectedCases} cases x ${CLAUSES_PER_CASE} `
+      + "clauses per case is what the loop body above contains. A clause was added or "
+      + "removed — change CLAUSES_PER_CASE deliberately rather than letting the oracle shrink");
     console.log(`BLZ-407 oracle: ${cases} cases (${SHAPES.length} shapes squared), `
-      + `${clauses} clauses checked so far this run`);
+      + `${clauses} clauses asserted (${CLAUSES_PER_CASE} per case)`);
+  });
+});
+
+// =============================================================================
+// BLZ-414 — the header's "one shape per hard/soft call site" claim, MADE TRUE.
+//
+// The claim was never checked: a shape that had stopped reaching its branch, or a
+// branch with no shape at all, cost nothing. Two soft link-type branches had no shape
+// at all. Both halves are pinned below.
+// =============================================================================
+describe("BLZ-414: every shape reaches its branch, and every soft link-type branch has a shape", () => {
+  /** The problems one shape produces at EITHER layer — config-with-no-project, and
+   *  project-with-no-config. A shape may be inert at one layer by design (a per-project
+   *  `linkTypes` block is inert at the project layer; a top-level one is inert when it
+   *  is the project's), so coverage is the union, not either half. */
+  function problemsForShape(value) {
+    const out = [];
+    for (const [config, project] of [
+      [buildConfig(value), buildProject(undefined)],
+      [buildConfig(undefined), buildProject(value)],
+    ]) {
+      const topResolved = resolveSchema({ config });
+      const endpointTypes = { ...topResolved.types, ...resolveSchema({ config, project }).types };
+      out.push(...collectSchemaProblems({ ...topResolved, config, endpointTypes }));
+      const resolved = { ...resolveSchema({ config, project }), linkTypes: topResolved.linkTypes };
+      out.push(...collectSchemaProblems({ ...resolved, config, project, endpointTypes }));
+    }
+    return out;
+  }
+
+  for (const [name, value] of HARD_SHAPES) {
+    test(`hard shape reaches a hard branch: ${name}`, () => {
+      const problems = problemsForShape(value);
+      assert.ok(problems.some((p) => p.hard),
+        `the shape [${name}] produced no HARD problem at either layer — it no longer `
+        + "exercises the call site the shape list says it stands for");
+    });
+  }
+
+  for (const [name, value] of SOFT_SHAPES) {
+    test(`soft shape reaches a soft branch and no hard one: ${name}`, () => {
+      const problems = problemsForShape(value);
+      assert.ok(problems.some((p) => !p.hard),
+        `the shape [${name}] produced no SOFT problem at either layer`);
+      assert.deepEqual(problems.filter((p) => p.hard).map((p) => p.message), [],
+        `the shape [${name}] is listed as SOFT but produced a hard problem`);
+    });
+  }
+
+  for (const [name, value] of CONTROL_SHAPES) {
+    test(`control shape produces nothing at all: ${name}`, () => {
+      assert.deepEqual(problemsForShape(value).map((p) => p.message), [],
+        `the control shape [${name}] produced a problem — it is no longer a control`);
+    });
+  }
+
+  test("the undeclared-endpoint-kind soft branch is reached BY THE CROSS-PRODUCT", () => {
+    // The first of the two link-type branches BLZ-414 found unexercised. It is
+    // reachable through the config layering, so it is a shape in SOFT_SHAPES above and
+    // this names the message the cross-product must therefore be producing.
+    const problems = problemsForShape(
+      { linkTypes: { Precedes: { source_kinds: ["ghost"], target_kinds: ["task"] } } });
+    const hit = problems.filter((p) => !p.hard
+      && /link type "Precedes" names "ghost" in source_kinds/.test(p.message));
+    assert.ok(hit.length > 0,
+      `the undeclared-endpoint-kind branch produced nothing: ${JSON.stringify(problems)}`);
+  });
+
+  test("the non-array-endpoint soft branch is UNREACHABLE through the config layering, and is pinned by a direct call", () => {
+    // The second branch. Stated plainly rather than implied (work order section 3): NO
+    // config-shaped override can reach it, because `mergeLinkTypes` drops an entry whose
+    // `source_kinds`/`target_kinds` is not an array and keeps the shipped default, so
+    // every array `resolveSchema` ever returns has array endpoints. It therefore cannot
+    // be killed by any mutation driven through a config, and this file must not imply
+    // that the cross-product pins it.
+    for (const [, value] of SHAPES) {
+      const resolved = resolveSchema({ config: buildConfig(value), project: buildProject(value) });
+      for (const lt of resolved.linkTypes) {
+        for (const side of ["source_kinds", "target_kinds"]) {
+          assert.ok(Array.isArray(lt[side]),
+            `resolveSchema returned a non-array ${side} — the unreachability claim above is `
+            + "no longer true and this branch needs a cross-product shape after all");
+        }
+      }
+    }
+    // It IS reachable by a direct caller, which is what the branch's own comment says it
+    // exists for ("validateSchema is a pure function anyone may call with anything"), so
+    // it is pinned there: deleting the branch turns THIS test red.
+    const problems = collectSchemaProblems({
+      types: { task: { level: 0, workflow: "delivery", parentTypes: [], required: [] } },
+      workflows: {},
+      linkTypes: [{ name: "Precedes", source_kinds: "task", target_kinds: ["task"] }],
+      config: {},
+    });
+    const hit = problems.filter((p) => !p.hard
+      && /link type "Precedes" has a source_kinds that is not an array \(string\)/.test(p.message));
+    assert.equal(hit.length, 1,
+      `the non-array-endpoint branch produced nothing: ${JSON.stringify(problems)}`);
   });
 });

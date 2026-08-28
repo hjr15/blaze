@@ -62,8 +62,10 @@ test("reconcile dry-run makes no file moves", async () => {
 // is exactly what the comment above claims "proves nothing". Fixed by giving the fixture a
 // real code repo with a `<KEY>-<n>: shipped work` commit on the default branch (BLZ-131's
 // shipped-commit signal — genuinely drives `defined` -> `done`, no PR/branch fixture
-// needed) and a real git repo at `root` so the commit can actually land, then asserting
-// `changes`/`committed`/`commitOutcome` directly rather than trusting the test's own prose.
+// needed) and a real git repo at `root` so the commit can actually land, then asserting the
+// precondition rather than trusting the test's own prose. BLZ-423 then replaced THAT
+// assertion's source: it read `r.changes`/`r.committed`/`r.commitOutcome`, which is the
+// subject certifying itself, and now reads the filesystem and `git log`.
 test("pushed stays false on an applied, committing run — the contract push once contradicted", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-rec-push-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-rec-push-code-"));
@@ -87,13 +89,40 @@ test("pushed stays false on an applied, committing run — the contract push onc
   execFileSync("git", ["-C", root, "add", "-A"]);
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed board"]);
 
+  // BLZ-423. GROUND TRUTH FOR "this run really applied and really committed" IS THE
+  // FILESYSTEM AND `git log`, NOT `reconcile()`'S OWN RETURN. The de-vacuity guard used
+  // to read `r.changes.length`, `r.committed` and `r.commitOutcome` — three fields of
+  // the very object under test — so the test trusted the subject to certify that the
+  // subject had done something. Measured: with reconcile's commit block wired to stage
+  // NOTHING while still setting `commitOutcome = "committed"`, this named test stayed
+  // green with an empty `git log`. The whole sentence it exists to pin ("on an applied,
+  // committing run") was then supplied by the thing being asked about.
+  //
+  // `r.pushed` / `r.dryRun` are still read from the return, and must be: they ARE the
+  // contract statement under test. What has moved off the return is the PRECONDITION.
+  const commitsBefore = Number(execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"],
+    { encoding: "utf8" }).trim());
   const r = await reconcile({ fetch: false, commit: true, dryRun: false, root });
-  // The distinction the sentence draws, proven rather than asserted only in prose: this
-  // run really moved a ticket and really committed — not the `changes: 0, committed: false`
-  // shape the reviewer measured on the old fixture.
-  assert.ok(r.changes.length >= 1, "the fixture must produce a real move, or this is a dry run in disguise");
-  assert.equal(r.committed, true, "this must be a genuinely COMMITTING run, not merely an applied one");
-  assert.equal(r.commitOutcome, "committed");
+
+  // (1) the filesystem: the ticket really left `defined/` and really arrived in `done/`.
+  assert.equal(existsSync(join(projects, "OBA", "defined", "OBA-1.md")), false,
+    "the fixture must produce a real move — OBA-1 is still in defined/, so this is a dry run in disguise");
+  assert.ok(existsSync(join(projects, "OBA", "done", "OBA-1.md")),
+    "the fixture must produce a real move — OBA-1 never arrived in done/");
+
+  // (2) git log: a commit really exists, and its diff really carries the moved ticket.
+  const commitsAfter = Number(execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"],
+    { encoding: "utf8" }).trim());
+  assert.equal(commitsAfter, commitsBefore + 1,
+    "this must be a genuinely COMMITTING run: `git log` must hold exactly one new commit");
+  const diffFiles = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+    { encoding: "utf8" }).split("\n").filter(Boolean);
+  assert.ok(diffFiles.some((f) => f.includes("OBA-1")),
+    `the new commit's diff must carry the moved ticket, it carries ${JSON.stringify(diffFiles)}`);
+  assert.equal(execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim(), "",
+    "the applied run must leave the board's tree fully committed");
+
+  // Only now is the contract statement itself worth reading off the return.
   assert.equal(r.pushed, false, "an applied, committing run must still never report a push");
   assert.equal(r.dryRun, false);
   rmSync(root, { recursive: true, force: true });

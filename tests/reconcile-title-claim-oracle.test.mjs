@@ -41,6 +41,14 @@
 // every uncorroborated PR state x every corroborated PR state, both orderings, with the
 // winner AND the resulting target AND the record asserted from a hand-declared table.
 //
+// BLZ-458 widened it twice more, because "every state x every state" was about STATES
+// only. The uncorroborated PR always carried the LOWER number (140 against 200) — the
+// easy direction, since the number tiebreak is the LAST tier the comparator runs — and
+// no pool ever held more than two PRs, so the fold in `buildPrMap` was only ever asked
+// one question. Both gaps are now dimensions: the subject's number runs 140 AND 300, and
+// a hand-declared eight-row table builds pools of THREE (two uncorroborated, one
+// corroborated) over all six orderings.
+//
 // The POSITIVE CONTROL is load-bearing: shapes 1-5 are genuine `KEY-n: desc` claims
 // and MUST still corroborate. A "fix" that fails them has broken every legitimate
 // reconcile on the board, which is a far worse defect than the one being fixed.
@@ -162,12 +170,18 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
     assert.equal(EXPECTED_CASES, 360);
     assert.equal(cases.length, EXPECTED_CASES, "every dimension must reach every case");
     assert.equal(new Set(cases.map((c) => c.name)).size, EXPECTED_CASES, "case names must be distinct");
-    // BLZ-440 round 2 added a POOL dimension on top of the single-PR product. Both
-    // halves are pinned, so deleting either one fails this test rather than shrinking
-    // the evidence quietly. 360 single-PR cases x 4 clauses + 18 pool pairings x 2
-    // orderings x 4 clauses.
+    // BLZ-440 round 2 added a POOL dimension on top of the single-PR product; BLZ-458
+    // added the uncorroborated PR's NUMBER and a pool of three. Every half is pinned, so
+    // deleting one fails this test rather than shrinking the evidence quietly. The
+    // figures below are the products the loops below actually run, written as products
+    // so a deleted dimension changes them.
     assert.equal(EXPECTED_CASES * 4, 1440, "single-PR clause budget");
-    assert.equal((9 + 9) * 2 * 4, 144, "pool-matrix clause budget");
+    assert.equal((9 + 9) * 2 * 2 * 4, 288,
+      "pool-matrix clause budget: (9 uncorroborated + 9 corroborated) pairings x 2 number " +
+      "directions x 2 orderings x 4 clauses");
+    assert.equal(8 * 6 * 4, 192,
+      "three-PR clause budget: 8 pools x 6 orderings x 4 clauses");
+    assert.equal(2 * 3 * 2 * 2, 24, "equal-rank clause budget: 2 numbers x 3 states x 2 orderings x 2 clauses");
   });
 
   test("the fixture set discriminates: mention-but-not-a-claim shapes exist, and so do genuine claims", () => {
@@ -257,77 +271,123 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
   // `betterPr`, `buildPrMap` or `decide`.
   // ===========================================================================
   const CURRENT = "in-review";
-  const uncorroboratedSubject = (state) => ({
-    number: 140, state, url: "u140", headRefName: `${ID.toLowerCase()}-a`,
-    title: `docs: successor kickoff for the ${ID}..439 lane`,   // a RANGE: mention, not claim
+  // BLZ-458. THE UNCORROBORATED PR'S NUMBER IS NOW A DIMENSION. Round 2's matrix always
+  // gave it 140 against the companion's 200 — the LOWER number, and therefore the easy
+  // direction: the comparator's number tiebreak is the last tier that runs, so a defect
+  // that lets an uncorroborated PR through only when it carries the HIGHER number was
+  // invisible to every pool case. Measured: with `betterPr`'s corroboration tier skipped
+  // whenever the uncorroborated candidate is the higher-numbered CLOSED one, the whole
+  // reconcile suite — 318 tests, this file's 18 included — stayed green.
+  const COMPANION_NUMBER = 200;
+  const SUBJECT_NUMBERS = [140, 300];   // one below the companion, one above it
+  const pr = (number, state, suffix, title) => ({
+    number, state, url: `u${number}`, headRefName: `${ID.toLowerCase()}-${suffix}`, title,
   });
-  const corroboratedSubject = (state) => ({
-    number: 140, state, url: "u140", headRefName: `${ID.toLowerCase()}-a`,
-    title: `${ID}: the subject's own work`,
-  });
-  const companion = (state) => ({
-    number: 200, state, url: "u200", headRefName: `${ID.toLowerCase()}-b`,
-    title: `${ID}: the real work`,                              // always corroborated
-  });
+  const uncorroboratedSubject = (state, number = 140) =>
+    // a RANGE: mention, not claim
+    pr(number, state, "a", `docs: successor kickoff for the ${ID}..439 lane`);
+  const corroboratedSubject = (state, number = 140) =>
+    pr(number, state, "a", `${ID}: the subject's own work`);
+  const companion = (state, number = COMPANION_NUMBER) =>
+    pr(number, state, "b", `${ID}: the real work`);          // always corroborated
+  /** The record a winning PR writes, formatted the way `decide` formats one. */
+  const recordOf = (p) => `#${p.number} — u${p.number}`;
 
-  // subjectState | companionState | winning PR number | target | recorded PR (or null)
+  // subjectState | companionState | winner | target | does the winner write its record?
+  //
+  // The winner is named "subject"/"companion" rather than by number, because it is the
+  // SAME in both number directions: at equal rank the corroboration tier decides, and it
+  // sits above the number tiebreak; at unequal rank the rank decides. That invariance is
+  // itself the claim BLZ-458 adds, and it is asserted by running the table twice.
   const UNCORROBORATED_POOL = [
-    ["OPEN",   "OPEN",   200, "in-review",   "#200 — u200"],
-    ["OPEN",   "MERGED", 140, "in-review",   null], // THE REVIEW'S FINDING: veto held
-    ["OPEN",   "CLOSED", 140, "in-review",   null],
-    ["MERGED", "OPEN",   200, "in-review",   "#200 — u200"],
-    ["MERGED", "MERGED", 200, "done",        "#200 — u200"],
-    ["MERGED", "CLOSED", 140, "in-review",   null],
-    ["CLOSED", "OPEN",   200, "in-review",   "#200 — u200"],
-    ["CLOSED", "MERGED", 200, "done",        "#200 — u200"],
-    ["CLOSED", "CLOSED", 200, "in-progress", "#200 — u200"],
+    ["OPEN",   "OPEN",   "companion", "in-review",   true],
+    ["OPEN",   "MERGED", "subject",   "in-review",   false], // THE REVIEW'S FINDING: veto held
+    ["OPEN",   "CLOSED", "subject",   "in-review",   false],
+    ["MERGED", "OPEN",   "companion", "in-review",   true],
+    ["MERGED", "MERGED", "companion", "done",        true],
+    ["MERGED", "CLOSED", "subject",   "in-review",   false],
+    ["CLOSED", "OPEN",   "companion", "in-review",   true],
+    ["CLOSED", "MERGED", "companion", "done",        true],
+    ["CLOSED", "CLOSED", "companion", "in-progress", true],
   ];
 
   // Both corroborated: the comparator's ordinary behaviour, unchanged by BLZ-440.
-  // Ties at equal rank fall to the LOWER number, which is the subject (140).
-  const CORROBORATED_POOL = [
-    ["OPEN",   "OPEN",   140, "in-review",   "#140 — u140"],
-    ["OPEN",   "MERGED", 140, "in-review",   "#140 — u140"],
-    ["OPEN",   "CLOSED", 140, "in-review",   "#140 — u140"],
-    ["MERGED", "OPEN",   200, "in-review",   "#200 — u200"],
-    ["MERGED", "MERGED", 140, "done",        "#140 — u140"],
-    ["MERGED", "CLOSED", 140, "done",        "#140 — u140"],
-    ["CLOSED", "OPEN",   200, "in-review",   "#200 — u200"],
-    ["CLOSED", "MERGED", 200, "done",        "#200 — u200"],
-    ["CLOSED", "CLOSED", 140, "in-progress", "#140 — u140"],
+  // Ties at equal rank fall to the LOWER number, so THIS table is the one the number
+  // direction moves — three of its nine rows change winner when the subject is 300.
+  // Hand-declared per direction; nothing here is computed by calling the comparator.
+  const CORROBORATED_POOL_SUBJECT_LOWER = [
+    ["OPEN",   "OPEN",   "subject",   "in-review"],
+    ["OPEN",   "MERGED", "subject",   "in-review"],
+    ["OPEN",   "CLOSED", "subject",   "in-review"],
+    ["MERGED", "OPEN",   "companion", "in-review"],
+    ["MERGED", "MERGED", "subject",   "done"],
+    ["MERGED", "CLOSED", "subject",   "done"],
+    ["CLOSED", "OPEN",   "companion", "in-review"],
+    ["CLOSED", "MERGED", "companion", "done"],
+    ["CLOSED", "CLOSED", "subject",   "in-progress"],
+  ];
+  const CORROBORATED_POOL_SUBJECT_HIGHER = [
+    ["OPEN",   "OPEN",   "companion", "in-review"],   // tie -> the LOWER number, now 200
+    ["OPEN",   "MERGED", "subject",   "in-review"],   // rank decides, number irrelevant
+    ["OPEN",   "CLOSED", "subject",   "in-review"],
+    ["MERGED", "OPEN",   "companion", "in-review"],
+    ["MERGED", "MERGED", "companion", "done"],        // tie -> 200
+    ["MERGED", "CLOSED", "subject",   "done"],
+    ["CLOSED", "OPEN",   "companion", "in-review"],
+    ["CLOSED", "MERGED", "companion", "done"],
+    ["CLOSED", "CLOSED", "companion", "in-progress"], // tie -> 200
   ];
 
-  test("the pool matrix covers every uncorroborated state x every corroborated state", () => {
+  test("the pool matrix covers every uncorroborated state x every corroborated state, in both number directions", () => {
     assert.equal(UNCORROBORATED_POOL.length, 9, "3 subject states x 3 companion states");
-    assert.equal(CORROBORATED_POOL.length, 9);
-    for (const table of [UNCORROBORATED_POOL, CORROBORATED_POOL]) {
+    assert.equal(CORROBORATED_POOL_SUBJECT_LOWER.length, 9);
+    assert.equal(CORROBORATED_POOL_SUBJECT_HIGHER.length, 9);
+    // BLZ-458: the number dimension is declared, and it really is a dimension — one
+    // subject number below the companion's and one above it.
+    assert.equal(SUBJECT_NUMBERS.length, 2, "the uncorroborated PR's number is a dimension");
+    assert.ok(SUBJECT_NUMBERS.some((n) => n < COMPANION_NUMBER)
+      && SUBJECT_NUMBERS.some((n) => n > COMPANION_NUMBER),
+      "both number directions must be exercised, or the tiebreak's easy side is the only side");
+    for (const table of [UNCORROBORATED_POOL, CORROBORATED_POOL_SUBJECT_LOWER,
+                         CORROBORATED_POOL_SUBJECT_HIGHER]) {
       assert.equal(new Set(table.map(([a, b]) => `${a}|${b}`)).size, 9, "no duplicate pairing");
       for (const [a, b] of table) {
         assert.ok(PR_STATES.includes(a) && PR_STATES.includes(b), `${a}|${b}`);
       }
     }
+    // The two corroborated tables must genuinely DISAGREE, or the added direction is
+    // decorative: exactly the three equal-rank rows change winner.
+    const flipped = CORROBORATED_POOL_SUBJECT_LOWER
+      .filter((row, i) => row[2] !== CORROBORATED_POOL_SUBJECT_HIGHER[i][2]);
+    assert.equal(flipped.length, 3,
+      "the number tiebreak must change the winner on exactly the three equal-rank rows, " +
+      `it changes ${flipped.length}`);
   });
 
   test("an uncorroborated claim in a POOL holds the ticket back and never advances it", () => {
     // Two orderings each, because `gh` decides which PR it lists first and a comparator
-    // that is not a strict weak ordering makes the winner depend on that.
+    // that is not a strict weak ordering makes the winner depend on that. And BLZ-458:
+    // two NUMBER directions each, because the tiebreak is the last tier that runs.
     let clauses = 0;
-    for (const [sState, cState, wantWinner, wantTarget, wantRecord] of UNCORROBORATED_POOL) {
-      const subject = uncorroboratedSubject(sState);
-      const comp = companion(cState);
-      for (const pool of [[subject, comp], [comp, subject]]) {
-        const won = buildPrMap(pool, idFromRef, new Set()).get(ID);
-        const label = `uncorroborated ${sState} + corroborated ${cState}`;
-        assert.equal(won?.number, wantWinner, `${label}: winner`);
-        const d = decide({ pr: won }, CURRENT, "epic");
-        assert.equal(d.target, wantTarget, `${label}: target`);
-        assert.equal(d.prVal, wantRecord, `${label}: record`);
-        // The write-once trap: a terminal target takes a resolution with it.
-        assert.equal(d.resolution, wantTarget === "done" ? "done" : undefined, `${label}: resolution`);
-        clauses += 4;
+    for (const subjectNumber of SUBJECT_NUMBERS) {
+      for (const [sState, cState, wantWinner, wantTarget, wantRecord] of UNCORROBORATED_POOL) {
+        const subject = uncorroboratedSubject(sState, subjectNumber);
+        const comp = companion(cState);
+        const winner = wantWinner === "subject" ? subject : comp;
+        for (const pool of [[subject, comp], [comp, subject]]) {
+          const won = buildPrMap(pool, idFromRef, new Set()).get(ID);
+          const label = `uncorroborated ${sState} (#${subjectNumber}) + corroborated ${cState}`;
+          assert.equal(won?.number, winner.number, `${label}: winner`);
+          const d = decide({ pr: won }, CURRENT, "epic");
+          assert.equal(d.target, wantTarget, `${label}: target`);
+          assert.equal(d.prVal, wantRecord ? recordOf(winner) : null, `${label}: record`);
+          // The write-once trap: a terminal target takes a resolution with it.
+          assert.equal(d.resolution, wantTarget === "done" ? "done" : undefined, `${label}: resolution`);
+          clauses += 4;
+        }
       }
     }
-    assert.equal(clauses, 9 * 2 * 4);
+    assert.equal(clauses, SUBJECT_NUMBERS.length * 9 * 2 * 4);
   });
 
   test("an uncorroborated MERGED PR never promotes itself past a corroborated OPEN one", () => {
@@ -339,36 +399,111 @@ describe("BLZ-440 oracle: a ticket mention in a PR title is not a delivery claim
     assert.equal(decide({ pr: won }, "defined", "epic").target, "in-review");
   });
 
-  test("POOL CONTROL: two corroborated PRs rank exactly as they always did", () => {
+  test("POOL CONTROL: two corroborated PRs rank exactly as they always did, in both number directions", () => {
     let clauses = 0;
-    for (const [sState, cState, wantWinner, wantTarget, wantRecord] of CORROBORATED_POOL) {
-      for (const pool of [[corroboratedSubject(sState), companion(cState)],
-                          [companion(cState), corroboratedSubject(sState)]]) {
+    for (const [subjectNumber, table] of [[140, CORROBORATED_POOL_SUBJECT_LOWER],
+                                          [300, CORROBORATED_POOL_SUBJECT_HIGHER]]) {
+      for (const [sState, cState, wantWinner, wantTarget] of table) {
+        const subject = corroboratedSubject(sState, subjectNumber);
+        const comp = companion(cState);
+        const winner = wantWinner === "subject" ? subject : comp;
+        for (const pool of [[subject, comp], [comp, subject]]) {
+          const won = buildPrMap(pool, idFromRef, new Set()).get(ID);
+          const label = `corroborated ${sState} (#${subjectNumber}) + corroborated ${cState}`;
+          assert.equal(won?.number, winner.number, `${label}: winner`);
+          assert.equal(Boolean(won.uncorroborated), false, `${label}: neither is uncorroborated`);
+          const d = decide({ pr: won }, CURRENT, "epic");
+          assert.equal(d.target, wantTarget, `${label}: target`);
+          assert.equal(d.prVal, recordOf(winner), `${label}: record`);
+          clauses += 4;
+        }
+      }
+    }
+    assert.equal(clauses, SUBJECT_NUMBERS.length * 9 * 2 * 4);
+  });
+
+  test("at EQUAL rank a corroborated PR always beats an uncorroborated one — whichever number it carries", () => {
+    // BLZ-458: run in both number directions. With the uncorroborated PR always at the
+    // LOWER number, the corroboration tier and the number tiebreak agree on the answer,
+    // so this test could not tell which of the two produced it.
+    let clauses = 0;
+    for (const subjectNumber of SUBJECT_NUMBERS) {
+      for (const state of PR_STATES) {
+        for (const pool of [[uncorroboratedSubject(state, subjectNumber), companion(state)],
+                            [companion(state), uncorroboratedSubject(state, subjectNumber)]]) {
+          const won = buildPrMap(pool, idFromRef, new Set()).get(ID);
+          assert.equal(won.number, COMPANION_NUMBER,
+            `${state}: corroborated #${COMPANION_NUMBER} must beat uncorroborated #${subjectNumber}`);
+          assert.equal(Boolean(won.uncorroborated), false, `${state} #${subjectNumber}`);
+          clauses += 2;
+        }
+      }
+    }
+    assert.equal(clauses, SUBJECT_NUMBERS.length * 3 * 2 * 2);
+  });
+
+  // ===========================================================================
+  // BLZ-458 — POOLS OF THREE. Every pool above holds exactly TWO PRs, so the fold in
+  // `buildPrMap` (`for (const pr of candidates) if (betterPr(pr, best, id)) best = pr`)
+  // was only ever asked one question. A comparator that is not a strict weak ordering
+  // shows itself on the THIRD element, and a veto that survives one rival but not two is
+  // a different claim from the one the two-PR matrix makes.
+  //
+  // Every expectation is hand-declared from the documented comparator order (RANK, then
+  // CORROBORATED, then CLAIM, then RECORDABLE, then LOWER NUMBER) and the rule that an
+  // uncorroborated winner moves nothing. Nothing is computed by calling `betterPr`.
+  // ===========================================================================
+  // uncorroborated #140 | uncorroborated #300 | corroborated #200 | winner | target | record?
+  const THREE_PR_POOL = [
+    // all OPEN: equal rank throughout, so the corroborated one takes it.
+    ["OPEN",   "OPEN",   "OPEN",   "corroborated", "in-review",   true],
+    // the low-numbered uncorroborated OPEN outranks both MERGED rivals and vetoes.
+    ["OPEN",   "MERGED", "MERGED", "uncorroboratedLow", "in-review", false],
+    // the HIGH-numbered uncorroborated OPEN does the same — the veto is not a number.
+    ["MERGED", "OPEN",   "MERGED", "uncorroboratedHigh", "in-review", false],
+    // two uncorroborated MERGED rivals cannot out-rank a corroborated MERGED one.
+    ["MERGED", "MERGED", "MERGED", "corroborated", "done",        true],
+    // a corroborated OPEN outranks two uncorroborated MERGED PRs on RANK alone.
+    ["MERGED", "MERGED", "OPEN",   "corroborated", "in-review",   true],
+    // all CLOSED: equal rank, corroboration decides, and the record is still written.
+    ["CLOSED", "CLOSED", "CLOSED", "corroborated", "in-progress", true],
+    // the high-numbered uncorroborated MERGED outranks two CLOSED rivals and vetoes.
+    ["CLOSED", "MERGED", "CLOSED", "uncorroboratedHigh", "in-review", false],
+    // the low-numbered uncorroborated OPEN outranks a CLOSED pair and vetoes.
+    ["OPEN",   "CLOSED", "CLOSED", "uncorroboratedLow", "in-review", false],
+  ];
+
+  /** Every ordering of a three-element pool — `gh` fixes none of them. */
+  function permutations(xs) {
+    if (xs.length <= 1) return [xs];
+    return xs.flatMap((x, i) =>
+      permutations([...xs.slice(0, i), ...xs.slice(i + 1)]).map((rest) => [x, ...rest]));
+  }
+
+  test("a POOL OF THREE mixing corroborated and uncorroborated claims ranks the same in every ordering", () => {
+    let clauses = 0;
+    assert.equal(THREE_PR_POOL.length, 8, "the three-PR table changed size");
+    assert.equal(permutations([1, 2, 3]).length, 6, "a three-element pool has six orderings");
+    for (const [lowState, highState, corrState, wantWinner, wantTarget, wantRecord] of THREE_PR_POOL) {
+      const low = uncorroboratedSubject(lowState, 140);
+      const high = uncorroboratedSubject(highState, 300);
+      const corr = companion(corrState);
+      const winner = { uncorroboratedLow: low, uncorroboratedHigh: high, corroborated: corr }[wantWinner];
+      assert.ok(winner, `unknown winner name ${wantWinner}`);
+      for (const pool of permutations([low, high, corr])) {
+        const label = `pool-of-3 [unc#140 ${lowState}, unc#300 ${highState}, corr#200 ${corrState}]` +
+          ` order ${pool.map((p) => p.number).join(">")}`;
         const won = buildPrMap(pool, idFromRef, new Set()).get(ID);
-        const label = `corroborated ${sState} + corroborated ${cState}`;
-        assert.equal(won?.number, wantWinner, `${label}: winner`);
-        assert.equal(Boolean(won.uncorroborated), false, `${label}: neither is uncorroborated`);
+        assert.equal(won?.number, winner.number, `${label}: winner`);
+        assert.equal(Boolean(won.uncorroborated), wantWinner !== "corroborated",
+          `${label}: the winner's corroboration flag`);
         const d = decide({ pr: won }, CURRENT, "epic");
         assert.equal(d.target, wantTarget, `${label}: target`);
-        assert.equal(d.prVal, wantRecord, `${label}: record`);
+        assert.equal(d.prVal, wantRecord ? recordOf(winner) : null, `${label}: record`);
         clauses += 4;
       }
     }
-    assert.equal(clauses, 9 * 2 * 4);
-  });
-
-  test("at EQUAL rank a corroborated PR always beats an uncorroborated one", () => {
-    let clauses = 0;
-    for (const state of PR_STATES) {
-      for (const pool of [[uncorroboratedSubject(state), companion(state)],
-                          [companion(state), uncorroboratedSubject(state)]]) {
-        const won = buildPrMap(pool, idFromRef, new Set()).get(ID);
-        assert.equal(won.number, 200, `${state}: corroborated 200 must beat uncorroborated 140`);
-        assert.equal(Boolean(won.uncorroborated), false, state);
-        clauses += 2;
-      }
-    }
-    assert.equal(clauses, 3 * 2 * 2);
+    assert.equal(clauses, THREE_PR_POOL.length * 6 * 4);
   });
 
   test("CROSS-REPO: a shipped-corroborated weak title beats an uncorroborated weak title at equal rank", () => {

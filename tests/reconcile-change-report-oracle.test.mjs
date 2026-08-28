@@ -199,8 +199,28 @@ const QUEUED_LINE_RE = /reconcile: queued \(commitMode: batch\) — run `blaze c
 /** Asserts a two-quantity summary line (dry-run tail, --apply committed, or --apply
  *  queued) states exactly the ground-truth moved/non-moved counts — including the
  *  absence of the second clause when there is nothing non-moving to report, the same
- *  rule the commit-message check below already enforces. */
+ *  rule the commit-message check below already enforces.
+ *
+ *  BLZ-438: EXACTLY ONE line may match. `re.exec` returns only the FIRST match of an
+ *  unanchored pattern, so a second, contradictory summary line — the same reader
+ *  printed twice, the second one claiming a different number — was entirely unpinned:
+ *  verified by making reconcile print a duplicate tail claiming 999 moves and a
+ *  duplicate committed line claiming 999 tickets, under which this whole file stayed
+ *  5/5 green. Uniqueness is checked before the contents, because "the first one is
+ *  right" is not the claim these readers make.
+ *
+ *  BLZ-437: RETURNS the number of assert.* calls it executed, so the caller adds the
+ *  real figure. It used to be counted as ONE, understating the file's banner by 2 per
+ *  call site (8 across the four of them: a printed 1,494 against a real 1,502). */
 function assertSummaryLine({ label, what, re, text, movedGT, nonMovedGT }) {
+  const all = String(text).match(new RegExp(re.source, `${re.flags}g`)) || [];
+  assert.equal(all.length, 1,
+    `${label}: expected exactly ONE ${what} line, found ${all.length} — ` +
+    (all.length === 0
+      ? "the reader printed no such line at all"
+      : "a doubled summary line states the quantity twice and a reader has no way to know " +
+        "which is meant") +
+    `: ${JSON.stringify(all)}\nfull text: ${JSON.stringify(text)}`);
   const m = re.exec(text);
   assert.ok(m, `${label}: no ${what} line matched the expected shape in: ${JSON.stringify(text)}`);
   assert.equal(Number(m[1]), movedGT, `${label}: the ${what} line's moved count must equal the real directory-change count (${movedGT})`);
@@ -209,6 +229,7 @@ function assertSummaryLine({ label, what, re, text, movedGT, nonMovedGT }) {
   } else {
     assert.equal(m[2], undefined, `${label}: the ${what} line claims non-moving updates that did not really happen`);
   }
+  return 4;   // BLZ-437: uniqueness, shape, moved count, non-moved count.
 }
 
 /** Parses the CLI's stdout into the two shapes of line it emits: a claimed MOVE
@@ -311,6 +332,15 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
       // stdout instead of `git log`.
       { label: "--apply (unfiltered, commitMode: batch — queued)", args: ["--apply"], commit: true, apply: true,
         queued: true, cfgExtra: { commitMode: "batch" } },
+      // BLZ-439: the queued branch was exercised ONLY on an unfiltered run. `--project`
+      // and `commitMode: "batch"` are independent switches and the queue is built from
+      // `keys` — the very list `--project` narrows — so "queued" and "scoped" is a cell
+      // nothing covered. Verified vacuous: making `commitOrQueue` fall back to "per-op"
+      // whenever a `--project` filter is present (so a scoped batch board COMMITS
+      // instead of queueing) left this whole file 5/5 green.
+      { label: "--apply --project ZZZ (commitMode: batch — queued, scoped)",
+        args: ["--project", "ZZZ", "--apply"], commit: true, apply: true,
+        queued: true, cfgExtra: { commitMode: "batch" } },
     ];
 
     for (const mode of modes) {
@@ -359,6 +389,36 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
           `${mode.label}: the finding must say no single-project run reconciles it`);
         totalChecked += 1;
 
+        // BLZ-435: the NEGATIVE side. Until this ticket the only clause was "the
+        // misfiled ticket IS named", which a guard that fired for every one of the 113
+        // tickets on this board satisfies just as well — the finding had no way to be
+        // caught over-firing in its own suite. Ground truth is the FILESYSTEM: a
+        // ticket is mismatched exactly when its directory project and its frontmatter
+        // `project:` are both present and disagree, read off the snapshot, never from
+        // anything reconcile reported.
+        const mismatchedGT = [...before.entries()]
+          .filter(([, t]) => {
+            const fm = /^project:\s*(\S+)\s*$/m.exec(t.raw);
+            return fm && fm[1] !== t.project;
+          })
+          .map(([id]) => id).sort();
+        const mismatchReported = [...new Set(res.stderr.split("\n")
+          .filter((l) => l.includes("NEEDS ATTENTION"))
+          .map((l) => (/(\b[A-Z][A-Z0-9]*-\d+) sits under projects\//.exec(l) || [])[1])
+          .filter(Boolean))].sort();
+        assert.deepEqual(mismatchReported, mismatchedGT,
+          `${mode.label}: the set of tickets reported as project-mismatched must be exactly ` +
+          `the set that really is one on disk (${JSON.stringify(mismatchedGT)}), not ` +
+          `${JSON.stringify(mismatchReported)} — a finding that fires for a WELL-FILED ticket ` +
+          "is as wrong as one that misses a misfiled one");
+        totalChecked += 1;
+        // Non-vacuity for the clause above: an empty ground-truth set would make the
+        // equality hold for a guard that never fires at all.
+        assert.equal(mismatchedGT.length, 1,
+          `${mode.label}: the fixture must contain exactly one genuinely misfiled ticket, ` +
+          `it contains ${mismatchedGT.length}`);
+        totalChecked += 1;
+
         // Ground truth for every aggregate-count reader below (the dry-run tail, the
         // --apply commit message, and the --apply/queued summary line): the SAME two
         // quantities the per-ticket oracle above already checked line-by-line, computed
@@ -378,9 +438,8 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
         // either count being wrong, left the whole suite green. Pinned here against the
         // same ground truth as every other reader.
         if (mode.dryRunTail) {
-          assertSummaryLine({ label: mode.label, what: "dry-run tail", re: DRYRUN_TAIL_RE,
-            text: res.stdout, movedGT, nonMovedGT });
-          totalChecked += 1;
+          totalChecked += assertSummaryLine({ label: mode.label, what: "dry-run tail",
+            re: DRYRUN_TAIL_RE, text: res.stdout, movedGT, nonMovedGT });
         }
 
         if (mode.commit) {
@@ -408,13 +467,12 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
           // line — committed or queued — states the identical two quantities and was
           // just as unpinned as the dry-run tail; the queued branch in particular was
           // not exercised by any test before this round.
-          assertSummaryLine({
+          totalChecked += assertSummaryLine({
             label: mode.label,
             what: mode.queued ? "queued summary" : "committed summary",
             re: mode.queued ? QUEUED_LINE_RE : COMMITTED_LINE_RE,
             text: res.stdout, movedGT, nonMovedGT,
           });
-          totalChecked += 1;
         }
       });
     }

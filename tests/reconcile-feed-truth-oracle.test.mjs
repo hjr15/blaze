@@ -57,6 +57,49 @@ const RESOLUTIONS = [null, "done"];
 // same as truly absent.
 const RECORDS = ["none", "hasRecord", "emptyString"];
 
+// BLZ-420: the cross-product's SIZE, declared here and asserted in every half below.
+// Before this ticket the size was only printed, so deleting a dimension value — say
+// "emptyString" from RECORDS — shrank the board from 336 tickets to 224 and dropped 520
+// clauses while the file still reported 3/3 pass. The product is written out rather than
+// hard-coded so a deleted VALUE fails here and a deleted DIMENSION fails too.
+const DIMENSIONS = { STATUSES, FORGES, TYPES, RESOLUTIONS, RECORDS };
+const EXPECTED_DIMENSION_SIZES = { STATUSES: 4, FORGES: 7, TYPES: 2, RESOLUTIONS: 2, RECORDS: 3 };
+const EXPECTED_TICKETS =
+  STATUSES.length * FORGES.length * TYPES.length * RESOLUTIONS.length * RECORDS.length;
+
+/** Asserts the board really is the whole declared cross-product: every dimension is the
+ *  size it declares, every VALUE of every dimension is actually present in the manifest,
+ *  and the ticket count is the product. `manifest` is the fixture's own record of what it
+ *  wrote; `snapshot` is the filesystem. Both are checked, because a manifest entry whose
+ *  file failed to land would otherwise pass. */
+function assertCrossProductSize(manifest, snapshot, label) {
+  for (const [name, values] of Object.entries(DIMENSIONS)) {
+    assert.equal(values.length, EXPECTED_DIMENSION_SIZES[name],
+      `${label}: the ${name} dimension changed size — ${values.length} values, ` +
+      `${EXPECTED_DIMENSION_SIZES[name]} declared`);
+    assert.equal(new Set(values.map(String)).size, values.length,
+      `${label}: the ${name} dimension has a duplicate value, so it is narrower than it looks`);
+  }
+  const field = { STATUSES: "status", FORGES: "forge", TYPES: "type",
+    RESOLUTIONS: "resolution", RECORDS: "record" };
+  for (const [name, values] of Object.entries(DIMENSIONS)) {
+    const seen = new Set(manifest.map((m) => String(m[field[name]])));
+    for (const v of values) {
+      assert.ok(seen.has(String(v)),
+        `${label}: no ticket in the fixture carries ${name}=${String(v)} — the dimension is ` +
+        "declared but not generated");
+    }
+  }
+  assert.equal(manifest.length, EXPECTED_TICKETS,
+    `${label}: the fixture must generate ${EXPECTED_TICKETS} tickets ` +
+    `(${Object.values(DIMENSIONS).map((d) => d.length).join(" x ")}), it generated ${manifest.length}`);
+  assert.equal(snapshot.size, EXPECTED_TICKETS,
+    `${label}: ${snapshot.size} ticket(s) are on disk but the cross-product declares ` +
+    `${EXPECTED_TICKETS} — a dimension was deleted, or a file did not land`);
+  assert.equal(new Set(manifest.map((m) => m.id)).size, EXPECTED_TICKETS,
+    `${label}: the manifest holds duplicate ids`);
+}
+
 // =============================================================================
 // The fixture: one board, one code repo, one `gh` stub, a generated cross-product of
 // tickets. Follows the `twoProjectBoard`/`stubGh` idiom in
@@ -296,10 +339,11 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
     const prevPath = process.env.PATH;
     let app;
     try {
-      const { root, bin } = buildOracleBoard(tmp);
+      const { root, bin, manifest } = buildOracleBoard(tmp);
       process.env.PATH = `${bin}:${prevPath}`;
 
       const before = snapshotBoard(root);
+      assertCrossProductSize(manifest, before, "applied");   // BLZ-420
       const commitCountBefore = Number(
         execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
 
@@ -415,10 +459,11 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
     const prevPath = process.env.PATH;
     let app;
     try {
-      const { root, bin } = buildOracleBoard(tmp);
+      const { root, bin, manifest } = buildOracleBoard(tmp);
       process.env.PATH = `${bin}:${prevPath}`;
 
       const before = snapshotBoard(root);
+      assertCrossProductSize(manifest, before, "preview");   // BLZ-420
 
       const { loadConfig } = await import("../scripts/config.mjs");
       const { createApp } = await import("../scripts/supervisor.mjs");
@@ -460,13 +505,95 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
     }
   });
 
+  // ===========================================================================
+  // BLZ-421 — the preview half's `cleared` flag, graded against a REALISATION.
+  //
+  // The preview half could not detect an OVERSTATED `cleared`. Its only clearing clause
+  // was `some(e => e.cleared === true)`, which a production change setting `cleared: true`
+  // on every entry satisfies trivially — verified: with `cleared: true` hard-coded into
+  // reconcile's change entry, the preview test above stayed green while the applied test
+  // went red. The preview's own before/after snapshot cannot supply ground truth (a dry
+  // run writes nothing, so `after` always equals `before` and every id looks uncleared).
+  //
+  // The ground truth used here is still the FILESYSTEM, not the subject: preview and
+  // apply run over the SAME board, in that order, and the preview's PROPOSAL is compared
+  // to what the apply pass then really does to the files on disk. A preview is a promise
+  // about what `--apply` would do; the only honest grader is `--apply` doing it. Nothing
+  // reads `reconcile()`'s return, `decide()`, or the applied run's own events.
+  // ===========================================================================
+  test("preview run: the moves and clears it PROPOSES are exactly the ones an applied pass really performs", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz421-oracle-equiv-"));
+    const prevPath = process.env.PATH;
+    let app;
+    try {
+      const { root, bin, manifest } = buildOracleBoard(tmp);
+      process.env.PATH = `${bin}:${prevPath}`;
+
+      const before = snapshotBoard(root);
+      assertCrossProductSize(manifest, before, "equivalence");   // BLZ-420
+
+      const { loadConfig } = await import("../scripts/config.mjs");
+      const { createApp } = await import("../scripts/supervisor.mjs");
+      app = createApp(loadConfig({ root }), { root });
+      const events = [];
+      const unsubscribe = app.bus.subscribe((e) => events.push(e));
+
+      await app.runReconcile({ dryRun: true });
+      const proposed = events.filter((e) => e.type === "reconcile");
+      const midway = snapshotBoard(root);
+      assert.deepEqual([...midway.keys()].sort(), [...before.keys()].sort(),
+        "equivalence: the dry run changed the set of files on disk — it must write nothing");
+
+      // Same board, same starting state, now for real.
+      events.length = 0;
+      await app.runReconcile();
+      const after = snapshotBoard(root);
+      if (unsubscribe) unsubscribe();
+
+      // Ground truth: the filesystem, before vs after the APPLY pass.
+      const reallyMoved = new Set();
+      const reallyCleared = new Set();
+      for (const [id, b] of before) {
+        const a = after.get(id);
+        assert.ok(a, `equivalence: ${id} must still exist on disk after the applied pass`);
+        if (b.status !== a.status) reallyMoved.add(id);
+        if (hasRecord(b) && !hasRecord(a)) reallyCleared.add(id);
+      }
+
+      const proposedMoved = new Set(proposed.filter((e) => e.moved === true).map((e) => e.id));
+      const proposedCleared = new Set(proposed.filter((e) => e.cleared === true).map((e) => e.id));
+
+      // Non-vacuity FIRST: an empty proposal set would satisfy every equality below.
+      assert.ok(reallyMoved.size > 0, "equivalence: the applied pass must really move something");
+      assert.ok(reallyCleared.size > 0,
+        "equivalence: the applied pass must really clear at least one branch/pr on disk");
+
+      assert.deepEqual([...proposedCleared].sort(), [...reallyCleared].sort(),
+        "equivalence: the preview PROPOSED a different set of branch/pr clears than the " +
+        "applied pass then really performed on disk — a preview that over- or under-states " +
+        "`cleared` is exactly BLZ-421's hole");
+      assert.deepEqual([...proposedMoved].sort(), [...reallyMoved].sort(),
+        "equivalence: the preview PROPOSED a different set of moves than the applied pass " +
+        "then really performed on disk");
+
+      console.log(`ORACLE (equivalence): ${before.size} tickets; preview proposed ` +
+        `${proposedMoved.size} move(s) and ${proposedCleared.size} clear(s); the applied pass ` +
+        `really made ${reallyMoved.size} and ${reallyCleared.size}, 0 mismatches`);
+      totalClauses += before.size + 6;
+    } finally {
+      if (app) app.server.close();
+      process.env.PATH = prevPath;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("ORACLE TOTAL", () => {
     // Reported so the PR body can quote an exact figure, not a range. REVIEW (finding
     // 4.2): this number is now a count of assertions actually EXECUTED (see
     // `checkGroundTruth`'s header comment), not of loop iterations — it is smaller than
     // the previously-claimed total, and it is smaller because the previous total was
     // wrong, not because less is now checked.
-    console.log(`ORACLE TOTAL: ${totalClauses} clauses checked across both runs, 0 mismatches`);
+    console.log(`ORACLE TOTAL: ${totalClauses} clauses checked across the applied, preview and equivalence runs, 0 mismatches`);
     assert.ok(totalClauses > 0);
   });
 });

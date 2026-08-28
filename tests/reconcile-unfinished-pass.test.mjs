@@ -319,6 +319,29 @@ describe("BLZ-404 round 3/4/5 (finding 4): --project blast radius covers the REP
       const res = spawnSync(process.execPath, [RECONCILE_BIN, "--project", "OBA", "--apply"],
         { cwd: root, encoding: "utf8" });
 
+      // BLZ-431: THE RUN RESULT, no longer voided. The report half below is a
+      // `doesNotMatch`, and a `doesNotMatch` is satisfied by silence — so until this
+      // ticket the test could not tell "the run reported nothing about ORC" from "the
+      // run did not report at all". Measured: with a `process.exit(1)` inserted ahead of
+      // every line of output whenever `--project` is passed, this named test stayed
+      // GREEN. The write half survives that mutation for its own reason (a run that
+      // never starts also never commits), which is exactly why the finding said it kills
+      // an unscoped WRITE but not an unscoped REPORT.
+      //
+      // Three clauses, in the order that makes the fourth meaningful: the run succeeded,
+      // it produced a report at all, and that report is about the project it was scoped
+      // to. Only then does "and it never mentions ORC" carry any weight.
+      assert.equal(res.status, 0,
+        `--project OBA --apply must succeed, it exited ${res.status} — stdout:\n${res.stdout}\n` +
+        `stderr:\n${res.stderr}`);
+      const report = res.stdout + res.stderr;
+      assert.notEqual(report.trim(), "",
+        "--project OBA --apply printed nothing at all — an empty report trivially satisfies " +
+        "the out-of-scope silence clause below without proving any scoping happened");
+      assert.match(report, /scanned project\(s\): OBA\b/,
+        "--project OBA --apply must state the scope it actually looked at, so the silence " +
+        `about ORC below is a scoped report rather than an absent one — got:\n${report}`);
+
       // The WRITE half (kills an unscoped commit that touches ORC's file).
       assert.equal(headSha(root), before, "no commit scoped to OBA may touch or land ORC's file");
       assert.equal(porcelain(root, join(root, "projects", "ORC")), orcDirtyBefore,
@@ -378,6 +401,11 @@ describe("BLZ-404 round 3/4/5 (finding 4): --project blast radius covers the REP
         { cwd: root, encoding: "utf8" });
 
       assert.equal(res.status, 0, `--project OBA --apply must still succeed: ${res.stderr}`);
+      // BLZ-431, the sibling half: this test already read the run's status, and its
+      // mismatch clause below is a positive `assert.ok`, so an absent report fails it.
+      // The scope line is pinned here anyway so both tests state the same premise.
+      assert.match(res.stdout + res.stderr, /scanned project\(s\): OBA\b/,
+        "--project OBA --apply must state the scope it actually looked at");
       assert.equal(headSha(root), before, "no commit scoped to OBA may touch or land ORC-1's file");
 
       const mismatchLine = res.stderr.split("\n")
