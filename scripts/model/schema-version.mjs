@@ -66,15 +66,32 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
   // branch its own `kind`, `loadConfig` throws a plain Error for it rather than
   // `IncompatibleSchemaVersionError`, which is what turned it from a failure `blaze audit`
   // TOLERATED (config = null, ok=true) into a HARD `config-unloadable` — a severity flip
-  // that PR body never enumerated. MEASURED before leaving it as it is, read-only on
-  // 2026-08-28 across every `blaze.config.json` on this machine outside node_modules
-  // (14 distinct boards: 9 in the blaze-pm family, 5 fixtures under tests/): a NULL-valued
-  // removed key appears on ZERO boards and ZERO keys, so this spelling newly refuses
-  // nothing. (Any-valued: 7 of the 9 blaze-pm checkouts carry `provider: "github"`, a
-  // string; the live working branch BLZ-305-v4-spine at 2535a6ae is clean.) KEPT, because
-  // reading null as "absent" would create a second spelling of "set and silently ignored",
-  // which is the precise defect BLZ-298 removed these keys to end — a JSON null is a value,
-  // not an absence, and "delete it" is the right remedy for both spellings.
+  // that PR body never enumerated.
+  //
+  // BLZ-479: THE MEASUREMENT AND THE VERDICT ARE TWO DIFFERENT SCOPES, and the earlier
+  // wording ran them together. "This spelling newly refuses nothing" is true, and it is a
+  // claim about the `null` SPELLING only — what BLZ-429 changed. It says nothing about the
+  // BRANCH, which refuses a removed key at ANY value and has since BLZ-298. Re-measured
+  // read-only on 2026-08-29 across every `blaze.config.json` under ~/Documents/Code outside
+  // node_modules — 24 files:
+  //
+  //   null-valued removed key ......  0 files.        <- what BLZ-429's spelling added
+  //   any-valued removed key ....... 10 files, all `provider: "github"` (a string):
+  //        7 real blaze-pm-family checkouts, 3 engine fixtures under tests/fixtures/
+  //        (board-gate-removed-key, one per worktree — deliberate).
+  //   the live working checkout blaze-pm-worktrees/v4-spine (branch BLZ-305-v4-spine):
+  //        CLEAN, no removed key.
+  //
+  // So `loadConfig` really does refuse those 7 checkouts today — verified by calling it:
+  // blaze-pm/ and blaze-pm-worktrees/board-main/ both throw "sets a key this engine no
+  // longer reads", while v4-spine loads. That is BLZ-298's intent working, not a
+  // regression, and the remedy is the one the message gives: delete the key. It is NOT
+  // fixed here, per the work order — blaze-pm's `provider` self-resolves at the flush.
+  //
+  // KEPT, because reading null as "absent" would create a second spelling of "set and
+  // silently ignored", which is the precise defect BLZ-298 removed these keys to end — a
+  // JSON null is a value, not an absence, and "delete it" is the right remedy for both
+  // spellings.
   const present = Object.keys(removed).filter((k) => cfg && cfg[k] !== undefined);
   if (present.length) {
     const lines = present.map((k) => `  ${k} — ${removed[k]}`).join("\n");

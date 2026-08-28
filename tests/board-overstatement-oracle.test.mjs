@@ -68,6 +68,13 @@
 //     `blaze link` / `POST /api/ac` all write an idempotent, byte-identical file —
 //     and it is pinned there, by a real `git commit` that really has nothing to
 //     commit, in the commit-outcome-report consumer below.
+//   - BLZ-468: FOUR SHAPES CARRY THEIR WHOLE DELIVERY SIGNAL IN THE `gh` STUB —
+//     `moves-only`, `cleared`, `findings`, `non-moving-update` all plant merged PRs and
+//     nothing else, so a single transient failure of that spawned process makes the pass
+//     legitimately decide nothing, exit ZERO, and queue nothing. That is the mechanism
+//     behind this file's recorded `executed 678 clauses, expected 682` flake, reproduced
+//     deterministically; it is checked in the reconcile-cli consumer, where the full
+//     working is written out beside the clause.
 //     BLZ-445: because of that, the `no-op` COLUMN means something different at the
 //     reconcile-cli consumer, and it now says so and has its own arm. There it is a
 //     SECOND apply pass with nothing left to decide — it used to fall through to the
@@ -103,13 +110,23 @@ import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 // assertion still satisfies proves nothing about that cell, which is this lane's own
 // thesis failing in this lane's own file.
 //
-// These wrappers are now the ONLY way the counter moves — the same binding the sibling
-// oracle uses (`tests/schema-audit-load-agreement-oracle.test.mjs`'s `check()`/
-// `sameSet()`). Deleting a clause deletes its count with it, so the cell's own budget
-// assertion names it. The bare `assert.` calls that remain are deliberately NOT clauses:
-// fixture preconditions (the ground-truth apply run exited 0, the competing lock was
-// really taken) and meta-assertions about the budget itself (`assertCellBudget`, the
-// dimension sizes, the grand total).
+// These wrappers — `eq`, `ok`, `matches`, `notMatches`, `deepEq`, all five of them — are
+// now the ONLY way the counter moves. The binding was first used in
+// `tests/schema-audit-load-agreement-oracle.test.mjs` (`check()`/`sameSet()`) and is now
+// shared by `tests/reconcile-change-report-oracle.test.mjs` and
+// `tests/reconcile-feed-truth-oracle.test.mjs` as well. Deleting a clause deletes its
+// count with it, so the cell's own budget assertion names it.
+//
+// BLZ-483: THE INVENTORY BELOW USED TO BE SHORT BY A WHOLE CATEGORY, which is the same
+// defect in miniature that this file exists to catch. The bare `assert.` calls that
+// remain are deliberately NOT clauses, and they are of THREE kinds, not two:
+//   1. fixture preconditions — the ground-truth apply run exited 0, the competing lock
+//      was really taken;
+//   2. meta-assertions about the counting itself — `assertCellBudget`, the three
+//      dimension sizes, `CELLS.length`, `cellsEvaluated`, and the grand total;
+//   3. every assertion in the second top-level test in this file, `BLZ-446: a REACHABLE
+//      non-ok body …`. Those are real oracle clauses, but they are not cells of the
+//      cross-product and must not move its budget — that test says so at its own head.
 //
 // THE BINDING IS ONE-DIRECTIONAL, and saying otherwise would be the exact defect this
 // oracle exists to catch. A DELETED clause is caught: its count goes with it and the
@@ -236,8 +253,10 @@ function budgetFor(shape, outcome, consumer) {
   }
   if (consumer === "reconcile-cli") {
     if (shape.refused) return 4;                  // biconditional + exit 1 + reason + no commit
-    let n = 2;                                    // the BLZ-422 biconditional + the exit code
-    if (outcome === "queued") return n + 2;       // no commit + the ledger biconditional
+    // BLZ-468: +1 on every non-refused cell for the run's own SIGNAL INTEGRITY — see the
+    // clause itself for the mechanism it exists to catch.
+    let n = 3;                                    // BLZ-422 biconditional + exit code + forge integrity
+    if (outcome === "queued") return n + 3;       // no commit + ledger-vs-stdout + BLZ-468 ledger-vs-shape
     if (outcome === "no-op") return n + 3;        // BLZ-445's own arm, below
     if (changes && (outcome === "locked" || outcome === "failed")) return n + 2;
     if (changes && outcome === "committed") return n + 2;
@@ -674,6 +693,38 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
               eq(res.status, expectExit,
                 `${shape.name}/${outcome}: expected exit ${expectExit}, got ${res.status} — ` +
                 `output was ${JSON.stringify(out)}`);
+
+              // BLZ-468: THE RUN'S OWN SIGNAL, checked against what this fixture declared.
+              //
+              // BLZ-452 made the recorded flake legible and this is the mechanism underneath
+              // it, reproduced deterministically rather than waited for. Four of the nine
+              // shapes — `moves-only`, `cleared`, `findings`, `non-moving-update` — plant
+              // their entire delivery signal in the `gh` stub's payload: no branch, no
+              // commit naming the id. So ONE transient failure of that spawned process (the
+              // shape `execFileSync` reports when a fork fails under load: `ok:false`,
+              // `status:null`) empties the PR map, reconcile legitimately decides nothing,
+              // and the run prints `no code-bound change found — nothing to do.` and exits
+              // ZERO with an empty ledger.
+              //
+              // Demonstrated on the `moves-only` fixture: with a healthy stub, exit 0,
+              // `reconcile: queued …`, 1 ledger entry; with a stub that exits 1, exit 0,
+              // no queued line, 0 ledger entries. Every clause in this cell still PASSED —
+              // the committed biconditional is false/false, the exit code is 0, nothing was
+              // committed, and the ledger biconditional is false/false. The cell that
+              // degraded was `blaze-commit-subject`, which took its empty-ledger arm and
+              // executed 2 clauses instead of 6: MINUS FOUR, which is exactly the
+              // `executed 678 clauses, expected 682` this file flaked with.
+              //
+              // So BLZ-452's stated signature is wrong and this corrects it: the run does
+              // not exit 1, it exits 0, and no exit-code assertion can see this. What can
+              // is the run's own account of its forge, which reconcile already prints on
+              // stderr on every run regardless of --quiet — checked here against the
+              // fixture's declaration (ground-truth source (4), presence only).
+              eq(/^reconcile: FORGE (UNREADABLE|DATA) —/m.test(res.stderr), Boolean(shape.expectForge),
+                `${shape.name}/${outcome}: this fixture declares expectForge=${Boolean(shape.expectForge)} ` +
+                `but the run ${/^reconcile: FORGE /m.test(res.stderr) ? "reported" : "reported no"} forge ` +
+                "problem. A transient failure of the spawned `gh` empties this shape's only delivery " +
+                `signal and the pass silently decides nothing — output was ${JSON.stringify(out)}`);
             }
 
             if (shape.refused) {
@@ -706,6 +757,16 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
               const ledger = readEntries(cliRoot, "oracle");
               eq(/reconcile: queued /.test(res.stdout), ledger.length > 0,
                 `${shape.name}/${outcome}: the CLI's "queued" claim must match the ledger file on disk`);
+              // BLZ-468: …and the ledger against the SHAPE, not only against stdout. The
+              // biconditional above is satisfied by a run that said nothing and queued
+              // nothing, which is precisely the degraded run. This is the clause that fails
+              // when the signal collapses for a reason the forge line above does not name —
+              // a git probe, whose failure `sh()` deliberately launders into "no signal".
+              eq(ledger.length > 0, shapeChanges(shape),
+                `${shape.name}/${outcome}: the ledger holds ${ledger.length} op(s) but this board ` +
+                `${shapeChanges(shape) ? "has" : "has no"} change to queue. A batch-mode pass that ` +
+                "decided nothing on a board that changes means the run's delivery signal was empty " +
+                `— output was ${JSON.stringify(out)}`);
             } else if ((outcome === "locked" || outcome === "failed") && shapeChanges(shape)) {
               eq(headMoved, false,
                 `${shape.name}/${outcome}: nothing may be committed when the commit could not run`);
@@ -915,9 +976,11 @@ function countCleared(tmp, shape, fixture, env) {
 // bodies, so the ONLY thing standing between them and a false in-sync claim is the
 // `ok !== true` branch.
 //
-// The asserts here are deliberately BARE `assert.` calls, not the `eq`/`ok`/`matches`
-// wrappers: they are not cells of the cross-product and must not move its clause
-// budget. (Same convention the fixture preconditions above follow.)
+// The asserts here are deliberately BARE `assert.` calls, not the counting wrappers
+// (`eq`/`ok`/`matches`/`notMatches`/`deepEq` — BLZ-483: this list named three of the five,
+// which reads as though the other two were available here and were not chosen): they are
+// not cells of the cross-product and must not move its clause budget. (Kind 3 in the
+// inventory at the head of this file.)
 //
 // NOT COVERED, stated plainly: a 500 from `/api/reconcile-preview` itself. The route
 // body is `json(200, await reconcilePreview(...))` with no throwing path between the

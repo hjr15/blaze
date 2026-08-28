@@ -62,10 +62,23 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
   // sentence — in `git log`, or on a terminal scrolled back to hours later — read
   // alone, with no move count beside it to make "other" mean anything. Measured: 4
   // sites, 2 vocabularies, and the split is exactly this one; no site is on the wrong
-  // side of it. All four are pinned by name, so the rule cannot lapse silently — these
-  // two by tests/board-overstatement-guards.test.mjs, reconcile.mjs's two by
-  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, COMMITTED_LINE_RE
-  // and QUEUED_LINE_RE.
+  // side of it. The ruling is ADR-0027 (BLZ-482) — it used to live only here and in a
+  // guard, which is not where a rule that governs four sites in three files belongs.
+  //
+  // BLZ-477 CORRECTS THE ATTRIBUTION BELOW, which named the wrong constants. Every site
+  // IS pinned, so the rule could not lapse; what was wrong was which test pins which:
+  //
+  //   this line (applySummary)          tests/board-overstatement-guards.test.mjs
+  //   reconcile-summary.mjs's toast     tests/board-overstatement-guards.test.mjs
+  //   reconcile.mjs's dry-run tail      reconcile-change-report-oracle's DRYRUN_TAIL_RE
+  //   reconcile.mjs's commit subject    reconcile-change-report-oracle's
+  //                                     COMMIT_SUBJECT_MOVED_RE / _NONMOVED_RE
+  //
+  // COMMITTED_LINE_RE and QUEUED_LINE_RE were credited with pinning reconcile.mjs's two
+  // sites. They do not: both match `res.stdout`, which is THIS function's line — the
+  // oracle drives it through the CLI, so it is a second, independent pin on
+  // `applySummary`, not a pin on reconcile.mjs. The commit subject was pinned by an
+  // inline unnamed regex until BLZ-477 gave it the two named constants above.
   const suffix = nonMovedCount
     ? `, ${nonMovedCount} ticket(s) updated without a status change`
     : "";
@@ -85,10 +98,18 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
       text: `reconcile: NO COMMIT CREATED — the ${movedCount} ticket(s) moved${suffix} already ` +
         "matched HEAD, so git had nothing to commit. Nothing was added to `git log`." };
   }
+  // BLZ-481: the two quantities, on THESE arms too. Every other arm states
+  // `${movedCount} ticket(s) moved${suffix}`; these two named neither, so the one outcome
+  // where a person has to go and look at the tree by hand was the one that did not tell
+  // them how much of it to look at. "Ticket file(s) were already written to disk" with no
+  // number is the same understatement `changes.length` used to make one line lower. Same
+  // vocabulary as the other three arms, deliberately: these are WRITE-RECORD surfaces
+  // (ADR-0027), so the non-moving quantity is spelled out rather than called "other".
+  const written = `${movedCount} ticket(s) moved${suffix}`;
   if (outcome === "locked") {
     return { stream: "err", exit: 1,
-      text: `reconcile: FAILED TO COMMIT — ${error}. Ticket file(s) were already ` +
-        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
+      text: `reconcile: FAILED TO COMMIT — ${error}. ${written} — already ` +
+        "written to disk and now UNCOMMITTED (a dirty tree), not merely un-applied. " +
         "Re-run once the lock clears, or commit the tree manually." };
   }
   if (outcome === "failed") {
@@ -97,8 +118,8 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
     // hook or a detached HEAD — outcomes that reach "failed", never "locked", and carry
     // no lock at all. Each outcome gets advice that is true for it.
     return { stream: "err", exit: 1,
-      text: `reconcile: FAILED TO COMMIT — ${error}. Ticket file(s) were already ` +
-        "written to disk and are now UNCOMMITTED (a dirty tree), not merely un-applied. " +
+      text: `reconcile: FAILED TO COMMIT — ${error}. ${written} — already ` +
+        "written to disk and now UNCOMMITTED (a dirty tree), not merely un-applied. " +
         "No lock is involved in this failure — check for a failing pre-commit hook, a detached " +
         "HEAD, or another reason `git commit` itself refuses, fix it, then commit the tree " +
         "manually or re-run." };

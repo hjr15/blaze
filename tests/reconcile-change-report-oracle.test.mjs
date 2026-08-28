@@ -233,6 +233,14 @@ const NONMOVE_RE = /^(?:updated|would update) (\S+) \(still (\S+)\)/;
 const DRYRUN_TAIL_RE = /\(dry-run: (\d+) move\(s\)(?:, (\d+) other update\(s\))?; rerun with --apply to write locally — reconcile never pushes\)/;
 const COMMITTED_LINE_RE = /reconcile: committed (\d+) ticket\(s\) moved(?:, (\d+) ticket\(s\) updated without a status change)?\./;
 const QUEUED_LINE_RE = /reconcile: queued \(commitMode: batch\) — run `blaze commit` to flush (\d+) ticket\(s\) moved(?:, (\d+) ticket\(s\) updated without a status change)?\./;
+// BLZ-477: reconcile.mjs's COMMIT SUBJECT, named. It was pinned only by an inline regex
+// built at the call site, which is why `reconcile-commit-report.mjs` and
+// `reconcile-summary.mjs` could both credit the wrong constants with pinning it — the two
+// above match `res.stdout`, which is `applySummary`'s line, i.e. those modules' OWN site.
+// A factory rather than a literal because the count is ground truth from the filesystem.
+const COMMIT_SUBJECT_MOVED_RE = (moved) => new RegExp(`\\b${moved} ticket\\(s\\) moved`);
+const COMMIT_SUBJECT_NONMOVED_RE = (nonMoved) =>
+  new RegExp(`\\b${nonMoved} ticket\\(s\\) updated without a status change`);
 
 /** Asserts a two-quantity summary line (dry-run tail, --apply committed, or --apply
  *  queued) states exactly the ground-truth moved/non-moved counts — including the
@@ -513,10 +521,10 @@ test("BLZ-401 + BLZ-406: the change report matches the filesystem, across the cr
           // to read; that outcome is pinned via the CLI's own stdout instead, below.
           if (!mode.queued) {
             const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%B"], { encoding: "utf8" });
-            matches(subject, new RegExp(`\\b${movedGT} ticket\\(s\\) moved`),
+            matches(subject, COMMIT_SUBJECT_MOVED_RE(movedGT),
               `${mode.label}: commit message's moved count must equal the real directory-change count (${movedGT})`);
             if (nonMovedGT > 0) {
-              matches(subject, new RegExp(`\\b${nonMovedGT} ticket\\(s\\) updated without a status change`),
+              matches(subject, COMMIT_SUBJECT_NONMOVED_RE(nonMovedGT),
                 `${mode.label}: commit message must also state the real non-moving write count (${nonMovedGT})`);
             } else {
               notMatches(subject, /updated without a status change/,
