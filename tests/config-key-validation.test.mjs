@@ -458,11 +458,27 @@ test("BLZ-460: every operator-facing pointer at the key rule resolves from an IN
     // nothing answers to still fails, which is the case that used to slip through.
     const resolves = (r) => spawnSync("git", ["-C", REPO, "rev-parse", "--verify", "-q", `${r}^{commit}`],
       { encoding: "utf8" }).status === 0;
-    assert.ok(resolves(ref) || resolves(`origin/${ref}`),
-      `KEY_RULE_DOC names the ref ${JSON.stringify(ref)}, which this repository does not resolve ` +
-      "— the pointer returns a live 404 for anyone who follows it");
-    assert.equal(resolves("no-such-ref-xyz"), false,
-      "the ref check accepts a ref that cannot exist — it would bless a 404");
+    // BLZ-473 follow-up: a checkout with NO refs at all cannot tell a dead ref from a live
+    // one. `actions/checkout@v4` clones at depth 1 onto a detached HEAD, so `main` resolves
+    // nowhere and the original form failed CI on #149 while passing on every developer
+    // machine. Reading "cannot look" as "found nothing" is the defect BLZ-484 names in the
+    // product; it must not be repeated in the guard that polices it.
+    // A checkout can only prove a ref ABSENT if it holds a complete ref set.
+    // `actions/checkout@v4` fetches ONE branch at depth 1, so it has some refs (the PR head)
+    // but not `main` — "has any refs" was the wrong control and still failed CI on #150.
+    const shallow = spawnSync("git", ["-C", REPO, "rev-parse", "--is-shallow-repository"],
+      { encoding: "utf8" });
+    const complete = shallow.status === 0 && String(shallow.stdout || "").trim() === "false";
+    const anyRef = spawnSync("git", ["-C", REPO, "for-each-ref", "--count=1",
+      "--format=%(refname)", "refs/heads", "refs/remotes"], { encoding: "utf8" });
+    const canCheckRefs = complete && anyRef.status === 0 && String(anyRef.stdout || "").trim() !== "";
+    if (canCheckRefs) {
+      assert.ok(resolves(ref) || resolves(`origin/${ref}`),
+        `KEY_RULE_DOC names the ref ${JSON.stringify(ref)}, which this repository does not resolve ` +
+        "— the pointer returns a live 404 for anyone who follows it");
+      assert.equal(resolves("no-such-ref-xyz"), false,
+        "the ref check accepts a ref that cannot exist — it would bless a 404");
+    }
     inRepo = path;
   }
   assert.ok(existsSync(join(REPO, inRepo)), `${inRepo} does not exist — the pointer is dangling`);
