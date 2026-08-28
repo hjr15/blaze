@@ -307,22 +307,22 @@ describe("BLZ-403: a record naming a PR outside the tied set is named on its own
   // BLZ-403 (round 2 review, the blocking defect): `samePr` deliberately returns
   // `false` when a url is absent — its own comment says an identity decision must not
   // turn on the PRESENCE of a forge-supplied field. `recordMatchesCandidate` routes
-  // through it, so a tied candidate whose url is unusable (control-characters-only, or
-  // the field absent entirely — the ordinary degraded-forge payload `sanitisePr`/
-  // `namePr` exist for) makes EVERY candidate look like a non-match, including the one
-  // that is really the same PR as the frozen record. `recordOutsideCandidates` then
-  // converts that "unproven" into "not even among the tied candidates" — a report that
-  // NAMES #40 in the tied set while ASSERTING the record is not in it. Two variants of
-  // the same input class, both reaching `sanitisePr`'s `url: null` marker by a
-  // different route:
+  // through it, so a tied candidate whose url is unusable (control-characters-only, the
+  // field absent entirely, or a string `sanitisePr` leaves NON-empty despite being
+  // unusable — the ordinary degraded-forge payload `sanitisePr`/`namePr` exist for)
+  // makes EVERY candidate look like a non-match, including the one that is really the
+  // same PR as the frozen record. `recordOutsideCandidates` then converts that
+  // "unproven" into "not even among the tied candidates" — a report that NAMES #40 in
+  // the tied set while ASSERTING the record is not in it. Three variants of the same
+  // input class:
   test("a tied candidate whose url is control-characters-only sanitises to null — aggregate, not accused", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz403-ctrlurl-"));
     const root = fixture(tmp, [["INF-645", "epic", "done",
       "branch: INF-645-docs\npr: '#40 — u40'\nresolution: done\n"]]);
-    // `clean()` strips control characters, so this url sanitises to "" then `null` —
-    // exactly the untrusted/GHES shape `sanitisePr` exists for. It is NOT the same PR
-    // as the record by any provable test, but it is also not PROVEN different: it is
-    // #40, the very PR the record names.
+    // Two control characters with NO separating character — `clean()` strips both,
+    // leaving `""`, so `sanitisePr`'s `url || null` reduces it to `null`. Contrast the
+    // sibling test below, where a SPACE survives between the control characters and
+    // the url stays truthy.
     const DOCS_MERGED_CTRL_URL = { ...DOCS_MERGED, url: "" };
     const restore = stubGh(tmp, [WORK, DOCS_MERGED_CTRL_URL]);
     try {
@@ -331,6 +331,39 @@ describe("BLZ-403: a record naming a PR outside the tied set is named on its own
       const aggregate = r.findings.filter((f) => f.kind === "terminal-record-unverifiable" && !f.id);
       assert.equal(perTicket.length, 0,
         "#40 IS in the tied set; an unusable url is unknowable, not disproof");
+      assert.equal(aggregate.length, 1, "it belongs in the aggregate like any other unresolvable-but-plausible record");
+      assert.deepEqual(aggregate[0].ids, ["INF-645"]);
+      // Untouched on disk either way — this finding never mutates the record.
+      assert.match(readTicket(root, "INF-645", "done"), /pr: '?#40 — u40'?/);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  // BLZ-403 (round 3 fix-brief): the load-bearing shape neither variant above
+  // exercises. `clean()` strips control characters but NEVER whitespace, so a forge
+  // url of one control character, a space, and another control character has only its
+  // two control bytes removed, leaving a single space — a string that is non-empty and
+  // therefore TRUTHY, so `sanitisePr`'s `url || null` does NOT reduce it to `null`. It
+  // survives into `refs[i].url` as " ", and only `allCandidatesComparable`'s
+  // `.trim().length > 0` (not the weaker `.length > 0`) recognises it as unusable.
+  test("a tied candidate whose url is control-space-control sanitises to a bare space — aggregate, not accused", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz403-ctrlspacectrl-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done",
+      "branch: INF-645-docs\npr: '#40 — u40'\nresolution: done\n"]]);
+    // Built via `String.fromCharCode` rather than a literal control byte or a `\u`
+    // escape typed into this source file, per this round's own instruction: the fixture
+    // must exist without ever putting a raw control byte on disk.
+    const CONTROL_SPACE_CONTROL_URL = String.fromCharCode(1) + " " + String.fromCharCode(2);
+    const DOCS_MERGED_CTRL_SPACE_URL = { ...DOCS_MERGED, url: CONTROL_SPACE_CONTROL_URL };
+    const restore = stubGh(tmp, [WORK, DOCS_MERGED_CTRL_SPACE_URL]);
+    try {
+      const r = await reconcile({ root, dryRun: false });
+      const perTicket = r.findings.filter((f) => f.kind === "terminal-record-unverifiable" && f.id);
+      const aggregate = r.findings.filter((f) => f.kind === "terminal-record-unverifiable" && !f.id);
+      assert.equal(perTicket.length, 0,
+        "#40 IS in the tied set; a bare-space url is unknowable, not disproof");
       assert.equal(aggregate.length, 1, "it belongs in the aggregate like any other unresolvable-but-plausible record");
       assert.deepEqual(aggregate[0].ids, ["INF-645"]);
       // Untouched on disk either way — this finding never mutates the record.
