@@ -4,11 +4,20 @@
 // three surfaces agree with the filesystem and `git log` over 160 generated cells.
 // This file is the mutation-verification companion: one NAMED test per defect, so
 // re-introducing the defect turns a test red whose name says what broke, rather than
-// a cell coordinate. Each was proven by reverting its production hunk on a committed
+// a cell coordinate. Each is proven by reverting its production hunk on a committed
 // tree and watching exactly the named test below fail (recorded in the PR body).
+//
+// BLZ-442 corrected that claim, which was not true of every guard here. The test named
+// for reconcile's ledger ids never invoked `reconcile` — it called `commitOrQueue` with a
+// hand-written `ids` array — so deleting the `ids:` hunk from reconcile.mjs left this
+// whole file 14/14 GREEN and only the oracle noticed, at a cell coordinate. That test is
+// now two: one that says plainly it pins `commitOrQueue`'s ledger SHAPE and reverts
+// nothing in reconcile, and one that drives the real `reconcile()` and reads the ledger
+// file it actually wrote. Where a guard pins a seam rather than a production hunk, it
+// says so in its own name.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -83,6 +92,35 @@ describe("BLZ-426: the dashboard never renders a refusal as an in-sync board", (
     const fn = new Function(`${html.slice(i + SUMMARY_FN_BEGIN.length, j)}; return reconcileSummary;`)();
     const body = { ok: false, error: "unknown project key: NOPE", changes: [] };
     assert.equal(fn(body), reconcileSummary(body));
+  });
+
+  test("the served page's reconcile button CALLS the injected function, not a lookalike of its own", () => {
+    // BLZ-443. The test above proves the injected source is PRESENT, delimited, defined
+    // exactly once, and behaviourally identical to the module. None of that says the
+    // button handler USES it. Measured: with the injection left intact and the handler
+    // rewritten to call an inline duplicate under a different name, this file and the
+    // 160-cell oracle both stayed green (55/55) — only the self-regenerating
+    // page-golden.html snapshot noticed, and its own failure message tells the reader to
+    // delete and regenerate it.
+    const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
+    const end = html.indexOf(SUMMARY_FN_END);
+    assert.ok(end !== -1, "the injected definition is not delimited, so the handler cannot be located after it");
+    // Everything the page runs OUTSIDE the injected definition. A call found here is the
+    // page's own wiring, not part of the function's source.
+    const wiring = html.slice(end + SUMMARY_FN_END.length);
+
+    const handler = /getElementById\("reconcileBtn"\)[\s\S]{0,600}?\n\s*\}\);/.exec(wiring);
+    assert.ok(handler,
+      "the served page has no #reconcileBtn click handler after the injected definition");
+    assert.match(handler[0], /toast\(\s*reconcileSummary\(/,
+      "the reconcile button's handler must pass the preview response through the INJECTED " +
+      "reconcileSummary — a handler that summarises the response itself, under any name, is " +
+      "the hand-kept duplicate the injection exists to prevent, and it can render a refusal " +
+      "as an in-sync board (BLZ-426) while the injected copy sits unused beside it. Handler " +
+      `source was:\n${handler[0]}`);
+    assert.equal((wiring.match(/reconcileSummary\(/g) || []).length, 1,
+      "reconcileSummary must be called exactly once outside its own definition — the button " +
+      "handler, and nowhere else");
   });
 
   test("a non-moving update is not counted as a code-bound move", () => {
@@ -210,7 +248,11 @@ describe("BLZ-427: `blaze commit`'s subject counts tickets and names every op", 
     assert.equal(summarizeEntries([{ op: "teleport", id: "Z-1" }]), "1 teleport");
   });
 
-  test("reconcile's ledger entry really carries every ticket the pass wrote", () => {
+  // BLZ-442: RENAMED to say what it actually pins. It calls `commitOrQueue` with a
+  // hand-written `ids` array, so it pins the LEDGER'S SHAPE — dedup, and no `ids` field on
+  // a one-ticket op — and nothing at all about whether reconcile passes that array. It
+  // has no production hunk in reconcile.mjs to revert; the test below does.
+  test("commitOrQueue's ledger entry dedupes its ids, and a one-ticket op grows none", () => {
     const root = gitRepo();
     const prev = process.env.BLAZE_SESSION;
     process.env.BLAZE_SESSION = "guards";
@@ -230,6 +272,78 @@ describe("BLZ-427: `blaze commit`'s subject counts tickets and names every op", 
     } finally {
       if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
       rmSync(root, { recursive: true, force: true });
+    }
+  });
+
+  // BLZ-442: the test the name above used to promise. It drives the REAL `reconcile()`
+  // over a real board on a `commitMode: "batch"` config, then reads the ledger FILE
+  // reconcile itself wrote and compares its `ids` to the tickets that really changed on
+  // disk. Ground truth is the filesystem, never `r.changes`. Measured: with the `ids:`
+  // hunk deleted from reconcile.mjs, the old test — and this whole file — stayed green.
+  test("reconcile's ledger entry really carries every ticket the pass wrote", async () => {
+    const { reconcile } = await import("../scripts/reconcile.mjs");
+    const root = mkdtempSync(join(tmpdir(), "blz442-reconcile-ledger-"));
+    const codeRepo = mkdtempSync(join(tmpdir(), "blz442-code-"));
+    const prev = process.env.BLAZE_SESSION;
+    process.env.BLAZE_SESSION = "guards442";
+    try {
+      for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
+                       ["config", "user.name", "t"]]) {
+        execFileSync("git", ["-C", codeRepo, ...a]);
+      }
+      writeFileSync(join(codeRepo, "README.md"), "x\n");
+      execFileSync("git", ["-C", codeRepo, "add", "-A"]);
+      execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
+      // BLZ-131's shipped-commit signal: three tickets that genuinely move defined -> done.
+      const moving = ["ZZZ-1", "ZZZ-2", "ZZZ-3"];
+      for (const id of moving) {
+        execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", `${id}: shipped work`]);
+      }
+
+      const projects = join(root, "projects");
+      mkdirSync(join(projects, "ZZZ", "defined"), { recursive: true });
+      writeFileSync(join(root, "blaze.config.json"),
+        JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], commitMode: "batch" }));
+      writeFileSync(join(projects, "ZZZ", "project.json"),
+        JSON.stringify({ key: "ZZZ", codeRepos: [codeRepo] }));
+      // A fourth ticket with no signal at all: it must NOT appear on the ledger, or the
+      // assertion below would pass for a reconcile that simply listed the whole board.
+      for (const id of [...moving, "ZZZ-4"]) {
+        writeFileSync(join(projects, "ZZZ", "defined", `${id}-t.md`),
+          `---\nid: ${id}\ntitle: t\ntype: task\nproject: ZZZ\nestimate: 30\n---\n\nbody\n`);
+      }
+      for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
+                       ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "seed board"]]) {
+        execFileSync("git", ["-C", root, ...a]);
+      }
+
+      const at = (id) => ["defined", "done", "in-progress", "in-review"]
+        .find((st) => existsSync(join(projects, "ZZZ", st, `${id}-t.md`)));
+      const before = Object.fromEntries([...moving, "ZZZ-4"].map((id) => [id, at(id)]));
+
+      await reconcile({ fetch: false, commit: true, dryRun: false, root });
+
+      // (1) the filesystem: which tickets really changed status.
+      const reallyMoved = [...moving, "ZZZ-4"].filter((id) => at(id) !== before[id]).sort();
+      assert.deepEqual(reallyMoved, moving,
+        `the fixture must move exactly ${moving.join(", ")} and leave ZZZ-4 alone, it moved ` +
+        `${JSON.stringify(reallyMoved)}`);
+
+      // (2) the ledger FILE reconcile wrote, read off disk.
+      const entries = readEntries(root, sessionId(process.env));
+      const reconcileOps = entries.filter((e) => e.op === "reconcile");
+      assert.equal(reconcileOps.length, 1,
+        `reconcile must queue exactly one op on a batch board, it queued ${reconcileOps.length}`);
+      assert.deepEqual([...(reconcileOps[0].ids || [])].sort(), reallyMoved,
+        "reconcile's queued ledger entry must name every ticket the pass really wrote — " +
+        "without the `ids:` hunk the entry carries none and `blaze commit` counts the whole " +
+        "pass as one ticket, which is exactly BLZ-427's defect");
+      assert.equal(summarizeEntries(reconcileOps), `${reallyMoved.length} reconciled`,
+        "the flush subject must count the tickets the filesystem says really moved");
+    } finally {
+      if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
+      rmSync(root, { recursive: true, force: true });
+      rmSync(codeRepo, { recursive: true, force: true });
     }
   });
 });
