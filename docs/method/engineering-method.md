@@ -156,10 +156,19 @@ So:
   compensating edits pass it. Assert it PER CELL where the cross-product has
   cells, so a deleted assertion names the coordinate it was deleted from
   rather than surfacing as a wrong grand total (BLZ-444).
-- **Never accumulate the size through data-dependent conditionals.** A count
-  that depends on which branches the data happened to take can go red for a
-  reason that has nothing to do with the assertions, which trains a reader to
-  re-run instead of investigate (BLZ-452).
+- **Bind the counter to the assertion, never to a line beside it.** A count
+  accumulated by hand next to each clause outlives the clause it counts:
+  delete the assertion, leave the `count += 1`, and the total still balances
+  while the evidence is gone. Increment INSIDE the assertion helper so the two
+  cannot be separated (BLZ-427). Note the binding is one-directional — it
+  catches a deleted clause, not an added one written as a bare `assert.`
+  (BLZ-444).
+- **A count that varies with the data is a weak invariant.** If accumulation
+  depends on which branches the data happened to take, it can go red for a
+  reason unrelated to the assertions, training a reader to re-run rather than
+  investigate. Where it cannot be avoided, validate it per cell against a
+  budget derived from that cell's coordinates, so the failure names what is
+  actually missing (BLZ-452).
 - **Ground truth comes from somewhere the subject cannot reach** — the
   filesystem, `git log`, a ledger file on disk, or the fixture's own
   declaration of what it planted. A dry run's own before/after snapshot is not
@@ -168,6 +177,15 @@ So:
 - **Every finding needs a negative side.** A clause asserting the finding fires
   for the misfiled ticket is equally satisfied by a guard that fires for every
   ticket on the board (BLZ-435).
+- **A coverage assertion must name its OWN branch.** "Some problem of the
+  right kind was produced" is satisfied by a co-occurring passenger from an
+  unrelated branch, so the shape it claims to cover can be deleted outright
+  while the test stays green (BLZ-414).
+- **A tier is only pinned where it is REACHABLE.** Cases added where a
+  comparison cannot arise prove nothing, however many of them there are — the
+  corroboration tier is unreachable within a single repo, because corroboration
+  and the claim tier are the same question there, so it can only be pinned
+  across repos (BLZ-458).
 - **State reachability plainly.** A guard no current call path can reach cannot
   be killed by any mutation, and must be described that way rather than implied
   to be pinned (BLZ-414's non-array link-type endpoint branch is one).

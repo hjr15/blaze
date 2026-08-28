@@ -97,8 +97,14 @@ import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 // assertion names it. The bare `assert.` calls that remain are deliberately NOT clauses:
 // fixture preconditions (the ground-truth apply run exited 0, the competing lock was
 // really taken) and meta-assertions about the budget itself (`assertCellBudget`, the
-// dimension sizes, the grand total). A new oracle clause written as a bare `assert.`
-// would be uncounted, and would fail the same budget from the other side.
+// dimension sizes, the grand total).
+//
+// THE BINDING IS ONE-DIRECTIONAL, and saying otherwise would be the exact defect this
+// oracle exists to catch. A DELETED clause is caught: its count goes with it and the
+// cell's budget names the gap. An ADDED clause written as a bare `assert.` is NOT
+// caught — it is simply uncounted, and the file stays green. Verified: a real bare
+// `assert.` oracle clause added inside the reconcile-cli cell left the file 41/41.
+// So: write new clauses through the wrappers. Nothing here will remind you.
 // =============================================================================
 let clauses = 0;
 const eq = (a, b, msg) => { clauses += 1; assert.equal(a, b, msg); };
