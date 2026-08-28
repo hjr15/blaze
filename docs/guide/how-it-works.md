@@ -133,10 +133,10 @@ legitimate setup, but `in-review` is just as unreachable there, so it is reporte
 on the same terms rather than being treated as a special quiet case. If that is
 your deliberate configuration, the line is expected and harmless.
 
-## Two rules that keep the board honest
+## Three rules that keep the board honest
 
-Both were bugs before they were rules, and both are about the same thing: the board
-must not say shipped when it is not, and must not say untouched when it is.
+All three were bugs before they were rules, and all three are about the same thing: the
+board must not say shipped when it is not, and must not say untouched when it is.
 
 ### An open pull request vetoes `done` (BLZ-130)
 
@@ -165,6 +165,64 @@ last PR carrying its key closes.
 > carrying *either* `branch` or `pr` already has a record, so neither half is topped up
 > later — otherwise a follow-up PR could fill a blank `pr` beside a `branch` that names
 > a different PR, and the record would name two.
+
+### A branch or PR that MENTIONS a ticket has not claimed it (INF-735, BLZ-440)
+
+Reconcile finds a ticket id in a branch or PR head ref with an unanchored
+`\b<KEY>-<n>` match, run over every ref in every one of a project's `codeRepos`. That
+is deliberately loose, because ref names are: `feature/blz-408-work`,
+`BLZ-408-a-mention-is-not-a-claim`, `docs-successor-kickoff-blz-408-439` all carry a key.
+
+**A ref name is a naming convention, not evidence.** So a ref-derived claim needs a
+second signal before it counts, and the second signal must describe the WORK:
+
+1. the PR **title CLAIMS the ticket** — it opens with `<KEY>-<n>:`, in the same
+   leading-id-list form as a commit subject (`<KEY>-a/b/c:`, `<KEY>-a + <KEY>-b:`); or
+2. a `<KEY>-<n>:` commit for it is **reachable from the default branch** (the shipped
+   signal of the previous rule).
+
+Neither is satisfied by a *mention*. `docs: successor kickoff for the BLZ-408..439
+follow-up lane` names BLZ-408, and claims nothing — it is a range. So do
+`supersedes BLZ-408`, `follow-up to BLZ-408`, and a bare `(BLZ-408)` in parentheses. This
+is the same rule the shipped signal already applies to commit subjects, stated once: **a
+downstream mention is never a claim.**
+
+Until BLZ-440 the title arm tested `\bBLZ-408\b` against the title — a bare mention
+anywhere. `\bBLZ-408\b` matches *inside* `BLZ-408..439`, because `.` is a non-word
+character and the boundary holds, so a range corroborated its own first element. On the
+real board that proposed `BLZ-408: defined → done` for a ticket that had never been
+worked, on the evidence of a PR whose branch and title both named the range 408..439.
+
+**An uncorroborated claim is neutered, not dropped.** The rule is:
+
+> **An uncorroborated claim may only ever hold a ticket BACK. It may never advance one.**
+
+It stays among the candidate pull requests, so it keeps whatever veto its **state** earns
+under the rule above — an uncorroborated *open* PR still stops `done`. What it cannot do
+is supply a **delivery record** or a **forward status**. Reaching the top of the ranking
+buys it the power to withhold a move, and nothing else.
+
+**Dropping it instead would be a substitution, not a subtraction**, and that is a real
+bug rather than a theoretical one. Reconcile reads the top-ranked PR, and an open PR
+outranks a merged one — so deleting an uncorroborated open PR *promotes* the merged PR
+behind it. A ticket in `in-review` then goes to `done`, takes `resolution: done`, and
+writes a write-once `pr:` record naming the wrong pull request, while the open PR
+carrying the real work is still open. Nothing reports it, and `pr` cannot be edited
+afterwards. That is worse than the bug this rule was written to fix.
+
+**The cost runs in both directions, and only one of them is safe.** Withholding a move
+costs a missed signal, and the ticket sits where it is until someone moves it by hand —
+recoverable, and the direction this design deliberately errs in. Granting a move on
+uncorroborated evidence costs a *corrupted* ticket: terminal status is sticky and a
+terminal delivery record is write-once, so there is no route back. The rule above is what
+keeps every uncorroborated claim on the recoverable side.
+
+One consequence worth naming: an uncorroborated PR also masks a corroborated **branch**
+signal for the same ticket, because the pull-request signal is read first. That is another
+missed advance rather than a wrong one, so it falls on the safe side of the same rule.
+
+**Naming a branch after a range stays safe and ordinary.** It just is not read as
+delivery.
 
 ### A squash merge's body is read, not just its subject (BLZ-131)
 
