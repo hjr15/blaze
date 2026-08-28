@@ -4,7 +4,7 @@ import { applyNew } from "./new.mjs";
 import { derivedFieldRefusal } from "./model/fields.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -118,4 +118,4 @@ for (const w of r.warnings) console.error(`warning: ${w}`);
 
 const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile] });
 if (!c.ok) { console.error(`blaze new: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`created ${r.id} → ${r.file}${c.queued ? " (queued for blaze commit)" : ""}`);
+console.log(`created ${r.id} → ${r.file}${commitSuffix(c)}`);

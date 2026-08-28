@@ -85,6 +85,18 @@ flowchart TB
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
+  `commitFile` reports `{ ok, committed, … }`: `ok` answers "did this go wrong",
+  `committed` answers "is there a new commit". They differ on the benign empty-diff
+  no-op — an idempotent re-write whose staged tree already matches HEAD — which is
+  `ok: true, committed: false, noop: true` and must never be reported as a commit
+  (BLZ-422). Every verb's success line names that outcome via `commitSuffix`, the
+  same way it already named `(queued for blaze commit)`.
+  `blaze commit`'s subject line is composed in `commit-summary.mjs`: one clause per
+  op, counting **distinct tickets** rather than ops, through `OP_LABEL`. Every
+  queueable op has an entry there and `commit-or-queue.mjs` refuses to queue one that
+  does not, so the subject can never print a raw op name. A queued `reconcile` op
+  records the full `ids` list of the tickets that pass wrote, because one reconcile op
+  covers many tickets while every other verb covers exactly one (BLZ-427).
   `cli.mjs`'s `SUBCOMMANDS` table is the single dispatch point (no separate
   switch) and the only place a verb's `mutates` classification lives:
   `BLAZE_READONLY=1` (AGENTS.md "Read-only mode") makes it refuse to spawn any
@@ -281,9 +293,9 @@ Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member
 | GET | `/api/sync` | `read` | Unsynced-commit count for the `⇧ N ahead` badge |
 | GET | `/api/live` | `read` | Live agent-activity feed (`model/activity.mjs`) |
 | GET | `/api/panel?id=` | `read` | Detail-panel HTML for one ticket |
-| GET | `/api/reconcile-preview` | `read` | Dry-run of the code-bound moves reconcile would make — `{ ok, changes, forgeErrors, findings }`, or `{ ok: false, error, changes: [] }` on a refused run (BLZ-405) |
+| GET | `/api/reconcile-preview` | `read` | Dry-run of the code-bound moves reconcile would make — `{ ok, changes, forgeErrors, findings }`, or `{ ok: false, error, changes: [] }` on a refused run (BLZ-405). The dashboard renders it through `views/reconcile-summary.mjs`, whose source page.mjs injects verbatim so the served page and the tested function cannot drift; a body that does not say `ok: true` renders as REFUSED, never as an in-sync board (BLZ-426) |
 | GET | `/api/matrix` · `/api/coverage` | `read` | v4 traceability matrix and coverage (BLZ-323) |
-| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push) |
+| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push). The response carries `committed` and `queued` alongside `ok`: an idempotent re-write (editing a field to the value it already holds, re-checking a checked box) is a benign no-op that creates no commit, and `ok: true` alone never meant one existed (BLZ-422) |
 | POST | `/api/artifact` · `/api/link` · `/api/baseline` | `write` | v4 artifact model mutations (BLZ-323) |
 | POST | `/api/field` | `admin` | Defining a filterable field emits `ALTER TABLE` and spends the install-wide field budget ADR-0018 shares across every project — an administrative act, not an ordinary write |
 | *anything else under* `/api/` | — | **`404 unknown endpoint`** — unclassified is denied |

@@ -590,25 +590,56 @@
       const id = cb.closest("[data-ticket]").dataset.ticket;
       blazePost("/api/ac", { id, index: Number(cb.dataset.acIndex), checked: cb.checked });
     });
+    // BLZ-426: the summary sentence is NOT written here. Its one definition lives in
+    // scripts/views/reconcile-summary.mjs and its source is injected verbatim below,
+    // between the two marker comments, so the served page and the tested function are
+    // the same text by construction — a hand-kept duplicate here could drift from the
+    // API (which is exactly how BLZ-405's fix failed to reach this consumer).
+    /* BLAZE_RECONCILE_SUMMARY_BEGIN */
+function reconcileSummary(j) {
+  var body = j || {};
+  // STRICTLY `ok === true`. `reconcilePreview` sets `ok` on every path it takes, so
+  // anything else is either one of its two refusals (an unknown --project key, or
+  // --project given no key at all — both carry `changes: []`, which is byte-identical
+  // to a genuinely clean board) or a response this consumer does not understand at
+  // all (a 500's `{errors:[…]}`, a proxy's error page). Neither is an in-sync board,
+  // and neither may be rendered as one.
+  if (body.ok !== true) {
+    var why = body.error
+      || (body.errors && body.errors.length ? body.errors.join("; ") : "")
+      || "the server did not say why";
+    return "reconcile REFUSED: " + why
+      + " — the board was NOT checked, so this says nothing about whether it is in sync";
+  }
+  var changes = body.changes || [];
+  // BLZ-401's distinction, carried to this consumer: `changes` also carries entries
+  // where a resolution was backfilled or a delivery record cleared/filled with
+  // `from === to`. Counting all of them as "code-bound move(s)" overstates how many
+  // tickets would actually change status — the same overstatement BLZ-401 removed
+  // from reconcile's own CLI tail line.
+  var moved = 0;
+  var other = 0;
+  var cleared = 0;
+  for (var i = 0; i < changes.length; i += 1) {
+    var c = changes[i] || {};
+    if (c.moved) moved += 1; else other += 1;
+    if (c.cleared) cleared += 1;
+  }
+  var findings = (body.findings || []).length;
+  var forge = (body.forgeErrors || []).length;
+  var parts = [];
+  if (moved) parts.push(moved + " code-bound move(s) — apply via 'blaze reconcile --apply'");
+  if (other) parts.push(other + " other update(s)");
+  if (!moved && !other) parts.push("no code-bound changes");
+  if (cleared) parts.push(cleared + " would have their branch/pr CLEARED");
+  if (findings) parts.push(findings + " need attention");
+  if (forge) parts.push(forge + " forge problem(s)");
+  return parts.join(" · ");
+}
+/* BLAZE_RECONCILE_SUMMARY_END */
     document.getElementById("reconcileBtn")?.addEventListener("click", async () => {
       const j = await (await fetch("/api/reconcile-preview")).json();
-      // The preview must not say less than the run knows. It reported the move count and
-      // silently discarded three things: cleared (BLZ-398 — reconcile now DELETES a
-      // delivery record, and this said only "done to done"), findings (BLZ-395 — it
-      // could read "no code-bound changes" with a NEEDS ATTENTION conflict live), and
-      // forgeErrors (BLZ-350 — a thin preview and an unreadable forge look identical).
-      // No backticks in here: this block lives inside a template literal.
-      const moves = (j.changes || []).length;
-      const cleared = (j.changes || []).filter((c) => c.cleared).length;
-      const findings = (j.findings || []).length;
-      const forge = (j.forgeErrors || []).length;
-      const parts = [];
-      parts.push(moves ? moves + " code-bound move(s) — apply via 'blaze reconcile --apply'"
-                       : "no code-bound changes");
-      if (cleared) parts.push(cleared + " would have their branch/pr CLEARED");
-      if (findings) parts.push(findings + " need attention");
-      if (forge) parts.push(forge + " forge problem(s)");
-      toast(parts.join(" · "));
+      toast(reconcileSummary(j));
     });
   </script>
   <script>

@@ -588,11 +588,17 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         else json(500, { errors: [`written but commit failed (status ${c.status})`] });
         return true;
       };
+      // BLZ-422: `ok: true` answers "the request succeeded"; it never answered
+      // "a commit exists". `commitFile`'s benign empty-diff no-op (an idempotent
+      // re-write — `/api/edit` to the value already there, `/api/ac` re-checking a
+      // box) returned the same shape as a real commit, so this body said the same
+      // thing for both. `committed` and `queued` name the git outcome, alongside it.
+      const gitOutcome = (c) => ({ committed: Boolean(c.committed), queued: Boolean(c.queued) });
       const done = (r, msg, op, extra = {}) => {
         if (!r.ok) return json(422, { errors: r.errors });
         const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
-        return json(200, { ok: true, ...extra });
+        return json(200, { ok: true, ...gitOutcome(c), ...extra });
       };
 
       // BLZ-301: the viewer's handlers wrote through the verbs' DEFAULT port, so a
@@ -619,7 +625,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
         const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
-        return json(200, { ok: true, resolution: r.resolution });
+        return json(200, { ok: true, ...gitOutcome(c), resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {
         const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today, writePort, actor, source: "api" });

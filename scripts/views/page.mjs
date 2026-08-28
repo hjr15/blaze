@@ -7,6 +7,7 @@ import { dirname } from "node:path";
 import { loadConfig, resolveRoots } from "../config.mjs";
 import { PRIORITIES } from "../model/schema.mjs";
 import { esc } from "./render-lib.mjs";
+import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "./reconcile-summary.mjs";
 import { activeStatuses } from "../model/filters.mjs";
 import { boardModel } from "./data.mjs";
 import { metricsModel } from "../model/metrics.mjs";
@@ -38,6 +39,15 @@ const cfgFor = (pDir) => {
 };
 
 export const CSRF = randomUUID();
+
+// BLZ-426: the client-side copy of `reconcileSummary` IS the module's own source,
+// stringified — never a transcription. `Function.prototype.toString` returns the
+// exact text of the declaration, so the browser runs the same bytes the unit tests
+// call, and there is no second place for the logic to drift into. The markers let a
+// test recover the definition from the served HTML and evaluate THAT copy.
+function reconcileSummarySource() {
+  return `${SUMMARY_FN_BEGIN}\n${String(reconcileSummary)}\n${SUMMARY_FN_END}`;
+}
 
 // ---- view registry --------------------------------------------------------
 
@@ -435,25 +445,15 @@ export function pageHtml({
       const id = cb.closest("[data-ticket]").dataset.ticket;
       blazePost("/api/ac", { id, index: Number(cb.dataset.acIndex), checked: cb.checked });
     });
+    // BLZ-426: the summary sentence is NOT written here. Its one definition lives in
+    // scripts/views/reconcile-summary.mjs and its source is injected verbatim below,
+    // between the two marker comments, so the served page and the tested function are
+    // the same text by construction — a hand-kept duplicate here could drift from the
+    // API (which is exactly how BLZ-405's fix failed to reach this consumer).
+    ${reconcileSummarySource()}
     document.getElementById("reconcileBtn")?.addEventListener("click", async () => {
       const j = await (await fetch("/api/reconcile-preview")).json();
-      // The preview must not say less than the run knows. It reported the move count and
-      // silently discarded three things: cleared (BLZ-398 — reconcile now DELETES a
-      // delivery record, and this said only "done to done"), findings (BLZ-395 — it
-      // could read "no code-bound changes" with a NEEDS ATTENTION conflict live), and
-      // forgeErrors (BLZ-350 — a thin preview and an unreadable forge look identical).
-      // No backticks in here: this block lives inside a template literal.
-      const moves = (j.changes || []).length;
-      const cleared = (j.changes || []).filter((c) => c.cleared).length;
-      const findings = (j.findings || []).length;
-      const forge = (j.forgeErrors || []).length;
-      const parts = [];
-      parts.push(moves ? moves + " code-bound move(s) — apply via 'blaze reconcile --apply'"
-                       : "no code-bound changes");
-      if (cleared) parts.push(cleared + " would have their branch/pr CLEARED");
-      if (findings) parts.push(findings + " need attention");
-      if (forge) parts.push(forge + " forge problem(s)");
-      toast(parts.join(" · "));
+      toast(reconcileSummary(j));
     });
   </script>
   <script>
