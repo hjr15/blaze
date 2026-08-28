@@ -6,24 +6,34 @@
 
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildPrMap } from "../scripts/reconcile.mjs";
+import { buildPrMap, decide } from "../scripts/reconcile.mjs";
 
 const idFromRef = (ref) => {
   const m = /\bZZZ-(\d+)/i.exec(ref || "");
   return m ? `ZZZ-${m[1]}` : null;
 };
 
-test("buildPrMap: an uncorroborated merged PR does not claim the ticket", () => {
+test("buildPrMap: an uncorroborated merged PR cannot deliver the ticket", () => {
   // The live regression: a board-repo PR named for a ticket it never touched
   // drove that ticket to `done`.
+  //
+  // BLZ-440 round 2 CHANGED WHAT THIS ASSERTS, and the change is the point. This used to
+  // assert `map.size === 0` — that the claim was DROPPED. Dropping is a SUBSTITUTION:
+  // `decide` reads the top-ranked PR and OPEN outranks MERGED, so removing a candidate
+  // promotes the next one. The claim is now NEUTERED instead: it stays in the pool and
+  // is refused a record and a forward target, which is what "must not claim the ticket"
+  // was always trying to say.
   const prs = [{
     number: 37, state: "MERGED", url: "u37",
     headRefName: "ZZZ-28-docs-kickoff-brief",
     title: "docs: kickoff brief for the closeout (ZZZ-19, ZZZ-20)",
   }];
   const map = buildPrMap(prs, idFromRef, new Set());
-  assert.equal(map.has("ZZZ-28"), false, "ZZZ-28 must not be claimed by a ref name alone");
-  assert.equal(map.size, 0);
+  assert.equal(map.get("ZZZ-28").uncorroborated, true, "a ref name alone is not evidence");
+  const d = decide({ pr: map.get("ZZZ-28") }, "defined", "epic");
+  assert.equal(d.target, "defined", "ZZZ-28 must not be moved by a ref name alone");
+  assert.equal(d.prVal, null);
+  assert.equal(d.branchVal, null);
 });
 
 test("buildPrMap: a corroborated PR still claims the ticket", () => {
@@ -59,8 +69,8 @@ test("buildPrMap: an OPEN PR beats a MERGED one — work outstanding is not work
   assert.equal(map.get("ZZZ-500").state, "OPEN");
 });
 
-test("buildPrMap: an uncorroborated claim cannot outrank a corroborated one", () => {
-  // THE STATES ARE DELIBERATELY THIS WAY ROUND, and an adversarial review is why.
+test("buildPrMap: an uncorroborated OPEN claim keeps its veto but delivers nothing", () => {
+  // THE STATES ARE DELIBERATELY THIS WAY ROUND, and two adversarial reviews are why.
   //
   // This test used to put the bogus claim on MERGED and the real one on OPEN. That
   // was the original bug's shape, and under BLZ-130's reversed rank (OPEN 3, MERGED 2)
@@ -68,9 +78,13 @@ test("buildPrMap: an uncorroborated claim cannot outrank a corroborated one", ()
   // the rank alone now picks OPEN. A control that passes with the control removed is
   // not a control.
   //
-  // Inverted, it discriminates again. The bogus claim is OPEN, so rank alone would
-  // hand it the ticket; only the gate can drop it and leave the corroborated MERGED
-  // one standing. Delete the `claimCorroborated` line in buildPrMap and this goes red.
+  // BLZ-440 round 2 then inverted the EXPECTATION, not the fixture. Round 1 asserted the
+  // corroborated MERGED PR wins here — which is only true because the uncorroborated
+  // OPEN one was DROPPED, and dropping it is exactly how an `in-review` ticket got taken
+  // to `done` with a write-once record naming the wrong PR. The uncorroborated OPEN PR
+  // now WINS the rank, because that is BLZ-130's veto doing its job, and is then refused
+  // any power to move the ticket or write the record. Blank and true, instead of filled
+  // and false.
   const prs = [
     { number: 37, state: "OPEN", url: "u37", headRefName: "ZZZ-28-docs-kickoff-brief",
       title: "docs: kickoff brief for the closeout" },
@@ -78,8 +92,12 @@ test("buildPrMap: an uncorroborated claim cannot outrank a corroborated one", ()
       title: "ZZZ-28: the work this ticket actually describes" },
   ];
   const map = buildPrMap(prs, idFromRef, new Set());
-  assert.equal(map.get("ZZZ-28").number, 40);
-  assert.equal(map.get("ZZZ-28").state, "MERGED");
+  assert.equal(map.get("ZZZ-28").number, 37, "the OPEN PR keeps the veto its state earns");
+  assert.equal(map.get("ZZZ-28").uncorroborated, true);
+  const d = decide({ pr: map.get("ZZZ-28") }, "in-review", "epic");
+  assert.equal(d.target, "in-review", "no promotion of the merged PR behind it");
+  assert.equal(d.prVal, null);
+  assert.equal(d.resolution, undefined);
 });
 
 test("buildPrMap: a ref with no id is still ignored", () => {

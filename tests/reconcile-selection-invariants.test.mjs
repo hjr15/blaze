@@ -98,28 +98,55 @@ const label = (s) => s.map((p) => p.name).join(" + ");
 //
 // The pool deliberately contains weak-titled PRs (`chore: tidy the runbook after INF-645`)
 // because the claim tier is one of the five concerns being ordered here. Until BLZ-440
-// those entered `buildPrMap` on a bare title MENTION, which is the defect BLZ-440 removed;
-// with `shippedSet: null` they are now dropped before selection and half these invariants
-// lose their pool. They are admitted the way a weak-titled PR is legitimately admitted
-// today — by a real `KEY-n:` commit on the default branch, the strict `shippedSet` arm
-// BLZ-440 did not touch — so the selection invariants keep exercising the same shapes for
-// a reason that is still true.
+// those entered `buildPrMap` on a bare title MENTION, which is the defect BLZ-440 removed.
+// With `shippedSet: null` they are still POOLED (round 2: an uncorroborated claim is
+// neutered, not dropped) but they are refused a record and a forward target, so every
+// invariant below — each of which asserts a WINNER and what it writes — would be
+// asserting the neutering rather than the selection it exists to check.
+//
+// They are therefore admitted the way a weak-titled PR is legitimately admitted today —
+// by a real `KEY-n:` commit on the default branch, the strict `shippedSet` arm BLZ-440
+// did not touch — so the selection invariants keep exercising the same shapes for a
+// reason that is still true. The `BLZ-440` describe-block directly below proves this
+// substitution is load-bearing rather than a way to keep old assertions green.
 const CORROBORATED = new Set([ID]);
 
 describe("BLZ-440: CORROBORATED is load-bearing, not a way to keep old assertions green", () => {
-  test("without a shipped signal, the pool's weak-titled PRs are dropped before selection", () => {
+  test("without a shipped signal, the pool's weak-titled PRs are neutered — pooled, but delivering nothing", () => {
     // If this went green, `CORROBORATED` would be papering over a lost gate rather than
     // supplying the legitimate corroboration these invariants assume. A title that merely
     // MENTIONS the id — `chore: tidy the runbook after INF-645` — is not a claim.
+    //
+    // Round 1 asserted `buildPrMap([p], …).size === 0` here, PR BY PR. That is a
+    // subtraction test, and the defect it missed was a SUBSTITUTION — which is why the
+    // second half of this test uses a POOL and asserts the resulting TARGET.
     const weak = POOL.filter((p) => prTitleClaim(p, ID) === 1);
     assert.equal(weak.length, 2, "the pool must still contain weak-titled PRs to select among");
     for (const p of weak) {
-      assert.equal(buildPrMap([p], idFromRef, null).size, 0,
+      const won = buildPrMap([p], idFromRef, null).get(ID);
+      assert.equal(won?.uncorroborated, true,
         `${p.name} corroborates nothing on its own — its title only mentions ${ID}`);
+      const d = decide({ pr: won }, "in-review", "epic");
+      assert.equal(d.target, "in-review", `${p.name} must not move the ticket`);
+      assert.equal(d.prVal, null, `${p.name} must not write a record`);
     }
-    // ...and the strong ones need no help.
+    // ...the strong ones need no help...
     for (const p of POOL.filter((x) => prTitleClaim(x, ID) === 2)) {
-      assert.equal(buildPrMap([p], idFromRef, null).get(ID)?.name, p.name, p.name);
+      const won = buildPrMap([p], idFromRef, null).get(ID);
+      assert.equal(won?.name, p.name, p.name);
+      assert.equal(Boolean(won.uncorroborated), false, p.name);
+    }
+    // ...and a weak OPEN one must not be dropped out from in front of a strong MERGED
+    // one, which is the substitution that took an `in-review` ticket to `done`.
+    const weakOpen = POOL.find((p) => p.name === "open/weak/null");
+    const strongMerged = POOL.find((p) => p.name === "merged/strong/10");
+    for (const order of [[strongMerged, weakOpen], [weakOpen, strongMerged]]) {
+      const won = buildPrMap(order, idFromRef, null).get(ID);
+      assert.equal(won.name, "open/weak/null", "the OPEN veto survives");
+      const d = decide({ pr: won }, "in-review", "epic");
+      assert.equal(d.target, "in-review");
+      assert.equal(d.resolution, undefined);
+      assert.equal(d.prVal, null);
     }
   });
 });

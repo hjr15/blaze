@@ -88,6 +88,35 @@ export function decide({ pr, branch, shipped, delivererAmbiguous = false }, curr
              resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false,
              recordAmbiguous: false };
   }
+  // BLZ-440 round 2: AN UNCORROBORATED CLAIM MAY ONLY EVER HOLD A TICKET BACK.
+  //
+  // `buildPrMap` deliberately keeps uncorroborated claims in the ranking pool so they
+  // keep whatever veto their STATE earns — dropping them is a SUBSTITUTION that promotes
+  // the next-ranked PR (see the comment there). The other half of that bargain is here:
+  // a claim that never corroborated may supply neither a delivery RECORD nor a forward
+  // TARGET, so reaching the top of the rank buys it the power to WITHHOLD a move and
+  // nothing else.
+  //
+  // Returning `skip` rather than falling through to the `branch`/`shipped` arms is
+  // deliberate and is the point of the rule. Falling through would let `shipped` drive
+  // `done` while an OPEN PR sits in the pool, which is precisely the BLZ-130 veto this
+  // is meant to preserve. Masking a corroborated BRANCH signal is the accepted cost: a
+  // missed advance, in the not-shipped direction ADR-0023 biases toward.
+  //
+  // Both required cases fall out of this one clause:
+  //   - PR #140 (MERGED, uncorroborated) for BLZ-408 in `defined` → no record, no move.
+  //   - an uncorroborated OPEN PR out-ranking a corroborated MERGED one on an
+  //     `in-review` ticket → the merged PR never becomes the winner, and the winner
+  //     moves nothing, so the ticket stays `in-review`.
+  if (pr && pr.uncorroborated) {
+    // `openPrOnTerminal` stays FALSE here, which keeps the doctrine below true as
+    // written: the finding reports on the veto, and it must not be noisier than the
+    // veto is. An uncorroborated claim moves nothing, so there is no wrong move to
+    // report — only a signal deliberately not taken.
+    return { target: currentStatus, branchVal: null, prVal: null, moved: false, skip: true,
+             resolution: undefined, recordIfAbsentOnly: false, openPrOnTerminal: false,
+             recordAmbiguous: false };
+  }
   let target, branchVal = null, prVal = null;
   if (pr) {
     // Delivery workflow middle statuses ("in-review"/"in-progress") are intentional literals here;
@@ -173,10 +202,11 @@ export function decide({ pr, branch, shipped, delivererAmbiguous = false }, curr
   // of wrong) is the argument for not adding a fourth inference path. Reporting
   // surfaces the conflict, moves nothing, and leaves the correction to a person.
   //
-  // `pr` here has already passed INF-735's corroboration gate in `buildPrMap`, so this
-  // is "a CORROBORATED open PR" — an uncorroborated claim is not visible to the veto
-  // and must not be visible to this finding either, or the report would be noisier
-  // than the veto it is reporting on.
+  // `pr` here is always CORROBORATED, so this is "a CORROBORATED open PR" — an
+  // uncorroborated claim must not be visible to this finding, or the report would be
+  // noisier than the veto it is reporting on. Since BLZ-440 round 2 that is no longer
+  // true of `buildPrMap`, which keeps uncorroborated claims in the pool; it is the
+  // early return at the top of this function that guarantees it here.
   const openPrOnTerminal = Boolean(pr) && pr.state === "OPEN" && isTerminal(type, currentStatus);
   const moved = target !== currentStatus;
   const resolution = isTerminal(type, target) ? resolutionForTerminal(type, target) : undefined;
@@ -406,20 +436,34 @@ function defaultBranchRef(repoPath) {
   return "main";
 }
 
-// --- rank a repo's PRs into id → best-PR, gated on corroboration (INF-735) -----
-// Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
-// an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
-// no longer beat a corroborated OPEN PR from the ticket's real repo.
-function corroboratedByTicket(prs, idFromRef, shippedSet) {
+// --- group a repo's PRs by the ticket their ref claims --------------------------
+// `includeUncorroborated` is the difference between the two questions asked of this
+// grouping, and they are NOT the same question:
+//
+//   - DELIVERER candidates (`ambiguousDeliverers`, and the `candidates` that travel
+//     upward for the cross-repo ambiguity check) must be CORROBORATED. "Which of these
+//     PRs delivered the ticket" is meaningless for a PR that never claimed it, and
+//     admitting one would invent ambiguity out of an unrelated branch name.
+//   - The RANKING pool (`buildPrMap`) must include uncorroborated claims — see the
+//     comment on `buildPrMap`. They are tagged, not silently mixed in.
+//
+// The tag goes on a COPY. The originals flow into `samePr`/`namePr`/the activity feed,
+// and marking a shared object would leak this run's verdict into all of them.
+function claimantsByTicket(prs, idFromRef, shippedSet, { includeUncorroborated = false } = {}) {
   const byId = new Map();
   for (const pr of prs || []) {
     const id = idFromRef(pr.headRefName);
     if (!id) continue;
-    if (!claimCorroborated(id, { title: pr.title, shippedSet })) continue;
+    const corroborated = claimCorroborated(id, { title: pr.title, shippedSet });
+    if (!corroborated && !includeUncorroborated) continue;
     if (!byId.has(id)) byId.set(id, []);
-    byId.get(id).push(pr);
+    byId.get(id).push(corroborated ? pr : { ...pr, uncorroborated: true });
   }
   return byId;
+}
+
+function corroboratedByTicket(prs, idFromRef, shippedSet) {
+  return claimantsByTicket(prs, idFromRef, shippedSet);
 }
 
 // --- BLZ-398: how strongly a PR's TITLE claims to have delivered this ticket ---
@@ -438,10 +482,37 @@ export function prTitleClaim(pr, id) {
   return idsFromSubject(pr && pr.title, key).includes(id) ? 2 : 1;
 }
 
-// --- rank a repo's PRs into id → best-PR, gated on corroboration (INF-735) -----
-// Ranking is unchanged for claims that survive the gate; the gate runs FIRST, so
-// an uncorroborated MERGED PR is dropped rather than merely out-ranked — it can
-// no longer beat a corroborated OPEN PR from the ticket's real repo.
+// --- rank a repo's PRs into id → best-PR, uncorroborated claims INCLUDED --------
+// AN UNCORROBORATED PR IS NEUTERED, NOT DROPPED. This is the same lesson the
+// unnumberable-PR block below states in capitals, re-learned here: `decide` reads the
+// TOP-RANKED PR and `PR_RANK` puts OPEN above MERGED, so removing a candidate is not a
+// subtraction, it is a SUBSTITUTION — the next-ranked PR is promoted.
+//
+// BLZ-440's first cut dropped uncorroborated claims here, on INF-735's reasoning that
+// "an uncorroborated claim is dropped rather than trusted, so a misnamed branch costs a
+// missed signal, not a corrupted ticket". That reasoning is FALSE in this direction, and
+// review caught it: dropping an uncorroborated OPEN PR deletes BLZ-130's veto and hands
+// the ticket to an earlier merged one. Measured on this repo's own test pool,
+// `in-review` went to `done` with `resolution: done` and a WRITE-ONCE `pr:` record naming
+// the wrong PR, while the open PR carrying the real work was still open — and
+// `openPrOnTerminal` was false, so nothing reported it. `pr` is not in EDITABLE_FIELDS;
+// there is no route back.
+//
+// The rule, which satisfies both directions at once:
+//
+//   AN UNCORROBORATED CLAIM MAY ONLY EVER HOLD A TICKET BACK. IT MAY NEVER ADVANCE ONE.
+//
+// So it stays in the pool and keeps whatever veto its STATE earns (BLZ-130), and
+// `decide` refuses to take either a delivery RECORD or a forward TARGET from it. Note
+// that neutering as the unnumberable case does it (`number: null`, record suppressed)
+// is necessary but NOT sufficient here: that PR genuinely belongs to the ticket and
+// merely has a broken number, so its state signal is still real. An uncorroborated PR
+// does not belong to the ticket at all, so its MERGED state must not drive anything
+// either — otherwise PR #140 still takes BLZ-408 to `done`, just without a `pr:` line,
+// which is no better.
+//
+// This is ADR-0023's own bias made explicit: uncorroborated evidence pushes only
+// toward NOT-shipped.
 //
 // BLZ-398 changed the EQUAL-RANK tie-break from "higher PR number" to "stronger title
 // claim, then LOWER number". That is safe to change and it is worth stating why,
@@ -456,7 +527,18 @@ export function prTitleClaim(pr, id) {
  *  `buildPrMap` within a repo and by `gatherProject` across repos — they had drifted,
  *  and the cross-repo half was deciding by `codeRepos` scan order.
  *
- *  Order: RANK, then TITLE CLAIM, then RECORDABLE, then lower number.
+ *  Order: RANK, then CORROBORATED, then TITLE CLAIM, then RECORDABLE, then lower number.
+ *
+ *  CORROBORATED sits directly under RANK and above everything else, and the position is
+ *  load-bearing in BOTH directions (BLZ-440 round 2). Under it, because rank is the ONLY
+ *  thing an uncorroborated claim is allowed to win on — that is its BLZ-130 veto, the
+ *  whole reason it is still in the pool. Above the claim tier, because within one rank
+ *  there is no reason to prefer it: an uncorroborated PR always scores `prTitleClaim` 1
+ *  (a title that CLAIMED the id would have corroborated it), so without this tier it
+ *  ties with a shippedSet-corroborated weak-titled peer and the tie falls through to
+ *  LOWER NUMBER — handing the selection to the claim that cannot record, and suppressing
+ *  a delivery record that was sitting right there. That is the unnumberable-PR defect
+ *  the recordable tier exists for, re-entered on the corroboration axis.
  *
  *  The claim tier sits ABOVE recordable, and review found out why the hard way. With
  *  recordable first, a *weak* claimant that happens to carry a number beat a *strong*
@@ -479,7 +561,9 @@ export function betterPr(pr, best, id) {
   if (!best) return true;
   const rank = (x) => PR_RANK[x.state] || 0;
   const recordable = (x) => (recordablePr(x) ? 1 : 0);
+  const corroborated = (x) => (x.uncorroborated ? 0 : 1);
   if (rank(pr) !== rank(best)) return rank(pr) > rank(best);
+  if (corroborated(pr) !== corroborated(best)) return corroborated(pr) > corroborated(best);
   const claim = [prTitleClaim(pr, id), prTitleClaim(best, id)];
   if (claim[0] !== claim[1]) return claim[0] > claim[1];
   if (recordable(pr) !== recordable(best)) return recordable(pr) > recordable(best);
@@ -488,7 +572,8 @@ export function betterPr(pr, best, id) {
 
 export function buildPrMap(prs, idFromRef, shippedSet) {
   const prMap = new Map();
-  for (const [id, candidates] of corroboratedByTicket(prs, idFromRef, shippedSet)) {
+  for (const [id, candidates] of claimantsByTicket(prs, idFromRef, shippedSet,
+    { includeUncorroborated: true })) {
     let best = null;
     for (const pr of candidates) {
       if (betterPr(pr, best, id)) best = pr;

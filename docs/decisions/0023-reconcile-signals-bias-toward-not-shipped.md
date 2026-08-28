@@ -310,9 +310,67 @@ corroborated by a real commit. The narrowing is therefore only on the arm that t
 the forge's prose.
 
 **Stated cost, in this ADR's own direction of bias:** a PR whose branch names a ticket
-and whose title does not claim it now supplies **no** signal, so the ticket sits where it
-is until someone moves it. That is an understatement, and understatement is the side this
-record deliberately errs on.
+and whose title does not claim it may no longer **advance** the ticket, so it sits where
+it is until someone moves it. That is an understatement, and understatement is the side
+this record deliberately errs on. See the round-2 section below before reading that as
+"the claim is discarded" — it is not, and the difference is a shipped bug.
+
+### BLZ-440 round 2: an uncorroborated claim is NEUTERED, not DROPPED
+
+The first cut of BLZ-440 **dropped** uncorroborated claims out of the candidate pool, on
+INF-735's reasoning that "an uncorroborated claim is dropped rather than trusted, so a
+misnamed branch costs a missed signal, not a corrupted ticket". Adversarial review refuted
+that, and this record already contained the refutation: `PR_RANK` puts `OPEN` above
+`MERGED`, and `decide` reads the **top-ranked** PR, so removing a candidate is not a
+subtraction — it is a **substitution**, and the next-ranked PR is promoted. This is the
+same lesson the unnumberable-PR case learned, on a second axis.
+
+Measured on the repo's own selection-invariant pool, with no shipped signal:
+
+```
+BEFORE  winner=open/weak/null    target=in-review  record=#41  resolution=undefined
+ROUND 1 winner=merged/strong/10  target=done       record=#10  resolution=done
+```
+
+Dropping the uncorroborated **open** PR deleted BLZ-130's veto and handed the ticket to an
+earlier merged one: `in-review` to `done`, with `resolution: done` and a **write-once**
+`pr:` record naming the wrong pull request, while the PR carrying the real work was still
+open. `openPrOnTerminal` was `false`, so no finding fired. Silent, permanent, overstating —
+this record's own worst shape, reached through the door opened by fixing the other one.
+
+**The rule, which satisfies both directions at once:**
+
+> **An uncorroborated claim may only ever hold a ticket BACK. It may never advance one.**
+> It stays in the pool so it keeps whatever veto its STATE earns (BLZ-130), and it can
+> supply neither a delivery RECORD nor a TERMINAL target.
+
+Neutering as the unnumberable case does it — `number: null`, record suppressed — is
+**necessary but not sufficient here**, and copying it would have been wrong. That PR
+genuinely belongs to the ticket and merely has a broken number, so keeping its state
+signal is right. A BLZ-440 PR does not belong to the ticket at all, so its MERGED state
+must not drive anything either; otherwise PR #140 still takes BLZ-408 to `done`, just
+without a `pr:` line, which is no better.
+
+Two consequences, both recorded because they are behaviour, not implementation:
+
+- `betterPr` gains a **CORROBORATED tier directly under RANK** and above the claim tier.
+  Rank is the only thing an uncorroborated claim may win on — that is its veto. Within a
+  rank there is no reason to prefer it, and without the tier an uncorroborated claim ties
+  with a shippedSet-corroborated weak-titled peer and takes the tie on **lower number**,
+  suppressing a record that was available. That is the unnumberable-PR defect re-entered
+  on the corroboration axis.
+- An uncorroborated PR **masks a corroborated branch signal** for the same ticket, since
+  `decide` reads the PR arm first. Falling through to the branch arm was rejected: it
+  would also expose the `shipped` arm, which could then drive `done` while an open PR sat
+  in the pool — destroying the very BLZ-130 veto this rule exists to preserve. A missed
+  advance is the acceptable cost; a granted one is not.
+
+**The cost is bidirectional and the two directions are not symmetric.** Withholding a
+move is recoverable by hand. Granting one is not: terminal status is sticky, `pr` is not
+in `EDITABLE_FIELDS`, and the record is write-once. Round 1's cost sentence — "a missed
+signal, not a corrupted ticket" — was true of the rule it described and false of the code
+it shipped, and both this file and `docs/guide/how-it-works.md` said so. They now say what
+is actually true.
 
 **Rejected: matching on the merged PR's body.** BLZ-131 lists it first and calls it
 cheapest, and it was still declined. It widens trust to the forge for a claim that

@@ -193,12 +193,33 @@ character and the boundary holds, so a range corroborated its own first element.
 real board that proposed `BLZ-408: defined → done` for a ticket that had never been
 worked, on the evidence of a PR whose branch and title both named the range 408..439.
 
-**The gate fails closed.** An uncorroborated claim is *dropped*, not downgraded and not
-out-ranked — so it can no longer beat a corroborated PR from the ticket's real repo, and
-it writes no delivery record at all. The cost is stated and accepted: **a misnamed branch
-costs a missed signal, not a corrupted ticket.** If you name a branch for a ticket and
-title the PR something else, reconcile will not move that ticket — which is the right way
-round, because a terminal status is sticky and a terminal delivery record is write-once.
+**An uncorroborated claim is neutered, not dropped.** The rule is:
+
+> **An uncorroborated claim may only ever hold a ticket BACK. It may never advance one.**
+
+It stays among the candidate pull requests, so it keeps whatever veto its **state** earns
+under the rule above — an uncorroborated *open* PR still stops `done`. What it cannot do
+is supply a **delivery record** or a **forward status**. Reaching the top of the ranking
+buys it the power to withhold a move, and nothing else.
+
+**Dropping it instead would be a substitution, not a subtraction**, and that is a real
+bug rather than a theoretical one. Reconcile reads the top-ranked PR, and an open PR
+outranks a merged one — so deleting an uncorroborated open PR *promotes* the merged PR
+behind it. A ticket in `in-review` then goes to `done`, takes `resolution: done`, and
+writes a write-once `pr:` record naming the wrong pull request, while the open PR
+carrying the real work is still open. Nothing reports it, and `pr` cannot be edited
+afterwards. That is worse than the bug this rule was written to fix.
+
+**The cost runs in both directions, and only one of them is safe.** Withholding a move
+costs a missed signal, and the ticket sits where it is until someone moves it by hand —
+recoverable, and the direction this design deliberately errs in. Granting a move on
+uncorroborated evidence costs a *corrupted* ticket: terminal status is sticky and a
+terminal delivery record is write-once, so there is no route back. The rule above is what
+keeps every uncorroborated claim on the recoverable side.
+
+One consequence worth naming: an uncorroborated PR also masks a corroborated **branch**
+signal for the same ticket, because the pull-request signal is read first. That is another
+missed advance rather than a wrong one, so it falls on the safe side of the same rule.
 
 **Naming a branch after a range stays safe and ordinary.** It just is not read as
 delivery.
