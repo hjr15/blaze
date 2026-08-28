@@ -23,7 +23,14 @@ export async function applyMove(projectsDir, id, toStatus, opts = {}) {
   let requireWorklog = opts.requireWorklog;
   if (requireWorklog === undefined) {
     try {
-      const proj = loadProject(found.frontmatter.project, { root: dirname(projectsDir), projectsDir });
+      // BLZ-408: same source as edit.mjs's equivalent call. This one's message is not
+      // reachable today — the `catch` below swallows every failure, including a malformed
+      // key — but the two calls must not drift, and the day that catch narrows this is
+      // already right.
+      const proj = loadProject(found.frontmatter.project, {
+        root: dirname(projectsDir), projectsDir,
+        source: `ticket ${id}'s 'project' field`,
+      });
       requireWorklog = proj.requireWorklogBeforeTerminal;
     } catch { requireWorklog = false; }
   }

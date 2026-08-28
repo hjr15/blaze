@@ -482,10 +482,22 @@ directory, never edit code or any file outside the tracker.
 `blaze.config.json` (data-repo root): `key`, `projects` (array of project keys the
 board renders), `commitMode`, `port`, and more.
 
-`key` (and each `--project`/`BLAZE_KEY` value) must be upper-case letters and digits,
-starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — it is interpolated into the
-regexes that match ticket ids and filenames, so a value outside that shape is refused
-rather than silently accepted, even when it happens to be valid regex.
+`key` (and each `--project`/`BLAZE_KEY` value, and each `projects[]` entry) must be
+upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — it is
+interpolated into the regexes that match ticket ids and filenames, so a value outside that
+shape is refused rather than silently accepted, even when it happens to be valid regex.
+
+**A project key is refused, never normalised — `blaze init` included.** `blaze init
+--project acme` used to upper-case its answer and build the board while every other verb
+refused the same string; it now refuses too, naming `ACME` as the fix. See
+[ADR-0025](docs/decisions/0025-a-project-key-is-refused-never-normalised.md) for why
+normalising is the wrong direction (the key is also a path segment and an id prefix, so
+rewriting it makes the configured key and the effective key two different strings).
+
+**An EMPTY `BLAZE_KEY` is a caller error, not an absent override** (BLZ-410).
+`BLAZE_KEY=""` used to be discarded, so `blaze.config.json`'s key silently won and a shell
+script with an unset variable ran against a different board than it asked for, with no
+message. Only an unset `BLAZE_KEY` means "no override".
 
 `schemaVersion` (top-level, optional integer): which schema contract the board
 was written against. Absent = `1` (the pre-versioning baseline). The engine

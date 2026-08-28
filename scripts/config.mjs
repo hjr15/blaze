@@ -104,17 +104,31 @@ export class IncompatibleSchemaVersionError extends Error {
 /**
  * Throws InvalidProjectKeyError unless `key` is a valid project-key shape. `source`
  * names where the value came from, for the refusal message — e.g. "blaze.config.json's
- * 'key' field", "the BLAZE_KEY environment variable", "a --project argument".
+ * 'key' field", "the BLAZE_KEY environment variable", "a --project argument", "ticket
+ * ENG-1's 'project' field".
+ *
+ * BLZ-408: `source` is the CALLER'S to supply and must describe what the caller actually
+ * holds. `loadProject` used to hardcode "a --project argument" for every one of its
+ * callers, and most of them hold no such thing — `edit.mjs` and `move.mjs` pass a ticket's
+ * own `project:` frontmatter, `cli.mjs`'s preflight passes a directory name off a disk
+ * listing. An operator with one corrupt ticket file was told to fix a flag they never
+ * typed, which sends them to the wrong file.
+ *
+ * BLZ-409: the message was 70 words, and ~50 of them explained why a regex shape check is
+ * the right mechanism. That is the reasoning behind the rule, not the rule, and it is
+ * almost never what the reader needs: the overwhelmingly common cause of landing here is a
+ * typo or a lower-case key. The refusal now states WHICH value, WHERE it came from, and
+ * WHAT shape is expected, and points at ADR-0025 for everything else. The reasoning is not
+ * deleted — it is one link away, and the KEY_RE comment above still carries it in full.
  */
+export const KEY_RULE_DOC = "docs/decisions/0025-a-project-key-is-refused-never-normalised.md";
+
 export function assertValidKey(key, { source }) {
   if (typeof key !== "string" || !KEY_RE.test(key)) {
     throw new InvalidProjectKeyError(
-      `blaze: ${source} ${JSON.stringify(key)} is not a valid project key. `
-      + `A project key is interpolated directly into a regular expression that matches `
-      + `ticket ids and filenames, so its SHAPE must be exact, not merely valid regex — `
-      + `a key that is valid regex but not this shape (e.g. "A.*") would silently match `
-      + `more than it should. Expected upper-case letters and digits, starting with a `
-      + `letter (e.g. ENG, OBA, BLZ2).`,
+      `blaze: ${source} ${JSON.stringify(key)} is not a valid project key. Expected `
+      + `upper-case letters and digits, starting with a letter (e.g. ENG, OBA, BLZ2). `
+      + `Why the shape is exact, and why it is never auto-corrected: ${KEY_RULE_DOC}`,
     );
   }
 }
@@ -192,7 +206,16 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
 
   // Env overrides (highest precedence).
   let keySource = "blaze.config.json's 'key' field";
-  if (env.BLAZE_KEY) { cfg.key = env.BLAZE_KEY; keySource = "the BLAZE_KEY environment variable"; }
+  // BLZ-410: PRESENCE, not truthiness. `if (env.BLAZE_KEY)` discarded `BLAZE_KEY=""` as
+  // though no override had been given, so the file key silently won and the run used a
+  // different board than the caller asked for, with no message on any stream. The shape
+  // that produces it is ordinary: `BLAZE_KEY="$SOMETHING_UNSET" blaze move ...` in a shell
+  // script. An empty override is a CALLER ERROR — BLZ-394 settled exactly this for an empty
+  // `--project=` — so it now reaches `assertValidKey` below and is refused by name.
+  // `undefined` (genuinely absent) is the only value that still means "no override".
+  if (env.BLAZE_KEY !== undefined) {
+    cfg.key = env.BLAZE_KEY; keySource = "the BLAZE_KEY environment variable";
+  }
   if (env.BLAZE_PORT) cfg.port = Number(env.BLAZE_PORT);
   if (env.BLAZE_AGENT_COMMAND) cfg.agentCommand = env.BLAZE_AGENT_COMMAND;
   if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;
@@ -368,12 +391,20 @@ export function listProjects(cfg, { root = ROOT } = {}) {
 // first ticket. Every other caller (move/edit/log/resolve/reconcile) is acting
 // on a ticket that already exists, so a missing project dir there is a real
 // misconfiguration and must throw.
-export function loadProject(key, { root = ROOT, projectsDir = join(root, "projects"), allowMissing = false } = {}) {
+// BLZ-408: `source` names where THIS caller's key came from, and defaults to a phrase true
+// of every caller rather than to one caller's flag. It used to be hardcoded to "a --project
+// argument", which is accurate only for `new.mjs`; `edit.mjs`/`move.mjs` pass a ticket's own
+// `project:` frontmatter and `cli.mjs`'s preflight passes a directory name, so the refusal
+// pointed those operators at a flag they never typed.
+export function loadProject(key, {
+  root = ROOT, projectsDir = join(root, "projects"), allowMissing = false,
+  source = "a project key",
+} = {}) {
   const cfg = loadConfig({ root });
   // BLZ-402: shape-check BEFORE anything else — a malformed key is refused up front
   // rather than surfacing later as "unknown project" (directory-existence) or a raw
   // regex-engine crash once `merged.idRegex` is built from it below.
-  assertValidKey(key, { source: "a --project argument" });
+  assertValidKey(key, { source });
   // BLZ-140: a missing project DIRECTORY is a misconfiguration (typo'd --project,
   // an unscaffolded key), not an empty taxonomy. Returning PROJECT_DEFAULTS for it
   // is a false-empty fail-open: the caller reads "exists, declares nothing" and

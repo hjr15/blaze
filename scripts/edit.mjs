@@ -70,7 +70,14 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
     }
   }
   if (fm.project) {
-    const project_cfg = loadProject(fm.project, { root: dirname(projectsDir), projectsDir });
+    // BLZ-408: this call is the reproduced case. The key here is the TICKET'S OWN stored
+    // `project:` value, and the refusal used to say "a --project argument" — sending an
+    // operator with one hand-edited ticket file to a flag they never typed, and to
+    // blaze.config.json instead of to the file that is actually wrong.
+    const project_cfg = loadProject(fm.project, {
+      root: dirname(projectsDir), projectsDir,
+      source: `ticket ${id}'s 'project' field`,
+    });
     errors.push(...validateTaxonomy(fm, project_cfg));
   }
   const { sprints } = loadSprints({ root: dirname(projectsDir) });

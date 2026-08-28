@@ -41,6 +41,8 @@ to use. Answer every question by flag, or be prompted when run at a terminal.
 
   --dir=PATH            where the board lives            (required)
   --project=KEY         first project key, e.g. ENG      (required)
+                        Upper-case letters and digits, starting with a letter.
+                        Refused, never auto-corrected — see ADR-0025.
   --project-name=NAME   human name for that project
   --db=${OFFERED_DRIVERS.join("|")}       database driver                  (default: sqlite)
   --title=NAME          board title, shown in the viewer (default: Blaze)

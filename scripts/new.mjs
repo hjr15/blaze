@@ -84,7 +84,13 @@ export async function applyNew(projectsDir, opts = {}) {
   const errors = validateTicket({ frontmatter, body }, (pid) => all.get(pid) || null, { types });
   // allowMissing: creating a project's FIRST ticket is how a project comes into
   // existence, so its directory legitimately may not exist yet (BLZ-140).
-  const project_cfg = loadProject(project, { root: dirname(projectsDir), projectsDir, allowMissing: true });
+  // BLZ-408: `source` is passed explicitly because this is the one caller whose key really
+  // did come from `--project`. `loadProject`'s default no longer says so on every caller's
+  // behalf, so the accurate case has to claim it rather than inherit it.
+  const project_cfg = loadProject(project, {
+    root: dirname(projectsDir), projectsDir, allowMissing: true,
+    source: "a --project argument",
+  });
   errors.push(...validateTaxonomy(frontmatter, project_cfg));
   const { sprints } = loadSprints({ root: dirname(projectsDir) });
   errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
