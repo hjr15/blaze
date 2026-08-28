@@ -52,6 +52,12 @@ const audit = (root, ...args) => spawnSync(process.execPath, [runner, ...args],
  *  per-kind count, so the wording — the whole subject of F1 — is only visible under --json.
  *  A container-shape problem is HARD (BLZ-407): `assertSchemaValid` already refuses on it, so
  *  it is filed under the hard kind, not the soft `schema-invalid`. */
+// BLZ-416: a per-project schema finding names its project IN THE DETAIL TEXT, so the
+// project layer's messages now read `projects/<KEY>/project.json: …` rather than a bare
+// `project.json: …`. The board fixture below has one project, ENG. What these tests pin —
+// which schema layer the message says is still in force — is unchanged.
+const PROJECT_LAYER = /^projects\/ENG\/project\.json:/;
+
 function schemaDetails(root) {
   const r = audit(root, "--json");
   const parsed = JSON.parse(r.stdout);
@@ -130,7 +136,7 @@ describe("BLZ-396 review F1: audit names the layer that is ACTUALLY still in for
     const root = board(`${BASE},${SPIKE}}`, '{"schema":{"types":"notanobject"}}');
     try {
       const details = schemaDetails(root);
-      const line = details.find((d) => /^project\.json:/.test(d));
+      const line = details.find((d) => PROJECT_LAYER.test(d));
       assert.ok(line, `no project-layer schema-invalid finding: ${JSON.stringify(details)}`);
       assert.doesNotMatch(line, /built-in/,
         `the blaze.config.json spike override IS in force, so this is untrue:\n${line}`);
@@ -145,7 +151,7 @@ describe("BLZ-396 review F1: audit names the layer that is ACTUALLY still in for
     // pointing them at a file with no schema block in it.
     const root = board(`${BASE}}`, '{"schema":"a string"}');
     try {
-      const line = schemaDetails(root).find((d) => /^project\.json:/.test(d));
+      const line = schemaDetails(root).find((d) => PROJECT_LAYER.test(d));
       assert.ok(line, "no project-layer finding");
       assert.doesNotMatch(line, /the blaze\.config\.json layer is still in force/,
         `there is no such layer on this board:\n${line}`);

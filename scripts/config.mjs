@@ -380,8 +380,13 @@ const PROJECT_DEFAULTS = {
 // --- INF-763: resolve relative codeRepos against the MAIN working tree --------
 // `codeRepos` are stored relative (`../service-platform`). Resolved against the
 // invoking root they break in a linked worktree: every path becomes a sibling of
-// the WORKTREE, which does not exist, so reconcile silently scans nothing and
-// still reports "already in sync". The board-main worktree is the documented
+// the WORKTREE, which does not exist, so reconcile scans nothing. BLZ-433: it no
+// longer claims the board is in sync when that happens — INF-763 made the repo
+// counts travel with the result, and a run that could read none of its configured
+// repos now FAILS with `none of the N configured codeRepo(s) could be read` and a
+// non-zero exit. A run that genuinely scanned everything and found nothing says
+// `no code-bound change found — nothing to do.` The old "already in sync" wording,
+// which conflated the two, is gone. The board-main worktree is the documented
 // INF-673 workaround, so this is the normal path, not an exotic one.
 //
 // `git rev-parse --git-common-dir` names the shared .git for any worktree —

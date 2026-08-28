@@ -112,6 +112,19 @@ const LABEL_EXEMPT = new Set(["requirement", "architecture", "risk"]);
 
 const keyOf = (id) => String(id ?? "").split("-")[0];
 
+/** BLZ-416: put the project into a per-project schema problem's own sentence.
+ *
+ *  A message that already names `project.json:` gets the DIRECTORY it is missing, so the
+ *  result is a path an operator can open (`projects/OBA/project.json: …`). Anything else —
+ *  a problem read off the merged type/workflow registry, which names no file at all — is
+ *  prefixed with the project instead. One helper rather than two call sites, so the two
+ *  shapes cannot drift apart. */
+function attributeToProject(key, message) {
+  return message.startsWith("project.json:")
+    ? `projects/${key}/${message}`
+    : `projects/${key}: ${message}`;
+}
+
 /**
  * @param tickets   [{ frontmatter, body }] — the whole corpus
  * @param projects  { KEY: projectJson } — taxonomy and optional per-project schema block
@@ -200,8 +213,21 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
     // here would be unreachable.
     for (const p of collectSchemaProblems({ ...resolved, config, project, endpointTypes })) {
       if (topByMessage.has(p.message)) continue;   // already reported against the top layer
-      if (p.hard) add(key, "schema-malformed", p.message);
-      else add(key, "schema-invalid", p.message);
+      // BLZ-416: NAME THE PROJECT IN THE SENTENCE. This loop deliberately does not
+      // deduplicate across projects — "two projects with the same broken block are two
+      // things to fix" — and the consequence was two byte-identical `project.json:
+      // schema.types must be an object …` findings, with the key travelling only in the
+      // `ticket` field, which is named for ticket ids, and a plain report that prints
+      // nothing but a per-kind count. An operator was told a project.json is broken and
+      // not told whose.
+      //
+      // Decorated HERE, at the `add` site, and never in the message itself: the same
+      // problem strings are also produced against the TOP layer, where they belong to no
+      // one project and attributing them to one would be false. That also keeps the
+      // `topByMessage` comparison above on the RAW message, which is what makes the
+      // cross-layer skip still work.
+      if (p.hard) add(key, "schema-malformed", attributeToProject(key, p.message));
+      else add(key, "schema-invalid", attributeToProject(key, p.message));
     }
   }
 

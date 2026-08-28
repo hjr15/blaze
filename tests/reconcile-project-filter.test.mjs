@@ -75,6 +75,27 @@ esac
 const at = (root, key, status) =>
   existsSync(join(root, "projects", key, status, `${key}-1-t.md`));
 
+// BLZ-436. The out-of-scope key must not appear in what the run SAYS ABOUT ITS OWN WORK —
+// what it scanned, what it moved, what it committed. It may legitimately appear in ONE
+// channel: `reconcile: NEEDS ATTENTION`, the findings stream.
+//
+// BLZ-406 raises `project-mismatch` BEFORE the scope guard and UNCONDITIONALLY, on every
+// run, filtered or not, and `scripts/reconcile.mjs` spells out why: a ticket whose
+// directory and frontmatter disagree is reconcilable by NO single-project run — a
+// `--project <directory>` run has no signal keyed by its frontmatter's project, and a
+// `--project <frontmatter>` run excludes it by directory — so gating the finding on scope
+// "would make it exactly the silent skip this finding exists to report". Its message names
+// `projects/<directory>/` by construction, which for such a ticket is a project the run is
+// NOT scoped to.
+//
+// So the PRODUCT is right here and the blanket assertion was wrong: it demanded a property
+// BLZ-406 deliberately does not hold. This narrows it to the claim BLZ-394 is actually
+// about, and the sibling test below pins the exception positively so the narrowing is a
+// statement rather than a weakening.
+const exceptFindings = (out) => out.split("\n")
+  .filter((l) => !l.includes("reconcile: NEEDS ATTENTION"))
+  .join("\n");
+
 describe("BLZ-394: --project restricts BOTH the scan and the write", () => {
   test("AC-1: a filtered run moves exactly the project named, and no other", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz394-one-"));
@@ -331,7 +352,7 @@ describe("BLZ-394: a --project that yields no key REFUSES, it does not go wide",
       const res = runCli(root, tmp, ["--project", "INF", "--quiet"]);
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /scanned project\(s\): INF/);
-      assert.doesNotMatch(res.stderr, /OBA/);
+      assert.doesNotMatch(exceptFindings(res.stderr), /OBA/);   // BLZ-436, see exceptFindings
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });
@@ -459,8 +480,9 @@ test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => 
       [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
       { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
     assert.equal(res.status, 0, res.stderr);
-    assert.doesNotMatch(res.stdout + res.stderr, /OBA/,
-      "an INF-scoped run must not mention OBA anywhere in its output");
+    assert.doesNotMatch(exceptFindings(res.stdout + res.stderr), /OBA/,
+      "an INF-scoped run must not mention OBA in its account of its own work — see " +
+      "exceptFindings for the one channel BLZ-406 deliberately exempts");
     assert.ok(at(root, "OBA", "defined"), "nor move it");
   } finally {
     restore();
@@ -502,6 +524,46 @@ test("BLZ-394: a board with no projects says so, rather than trailing off", asyn
     assert.match(r.error, /no projects at all/);
     assert.doesNotMatch(r.error, /configures: *$/);
   } finally {
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-436: a scoped run DOES name an out-of-scope directory in a project-mismatch finding", async () => {
+  // The positive half of the narrowing above, and the reason the narrowing is not a
+  // weakening: BLZ-406's finding is raised before the scope guard and unconditionally,
+  // precisely because NO single-project run can reconcile a misfiled ticket, so a filtered
+  // run that stayed silent about it would be the silent skip the finding exists to report.
+  //
+  // It is asserted here as a REQUIREMENT: an INF-scoped run must say that INF-2 sits under
+  // projects/OBA/ — while still writing nothing there, which is what BLZ-394 is about.
+  const tmp = mkdtempSync(join(tmpdir(), "blz436-mismatch-"));
+  const root = twoProjectBoard(tmp);
+  writeFileSync(join(root, "projects", "OBA", "defined", "INF-2-t.md"),
+    "---\nid: INF-2\ntype: task\nproject: INF\nestimate: 30\n---\n\nbody\n");
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  const restore = stubGh(tmp);
+  try {
+    const res = spawnSync(process.execPath,
+      [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
+      { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+    assert.equal(res.status, 0, res.stderr);
+    assert.match(res.stderr, /NEEDS ATTENTION — INF-2 sits under projects\/OBA\//,
+      "an INF-scoped run must still report a ticket no single-project run can reconcile");
+    // …and everything BLZ-394 asserts is unchanged: nothing under OBA moved or was
+    // committed, and no other channel names it.
+    assert.ok(at(root, "OBA", "defined"), "the out-of-scope project must not move");
+    assert.ok(existsSync(join(root, "projects", "OBA", "defined", "INF-2-t.md")),
+      "nor may the misfiled ticket be written or moved by a run that is not scoped to it");
+    assert.doesNotMatch(exceptFindings(res.stdout + res.stderr), /OBA/,
+      "OBA must appear in the findings channel and NOWHERE else");
+    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+      { encoding: "utf8" });
+    assert.doesNotMatch(files, /projects\/OBA/);
+  } finally {
+    restore();
     rmSync(tmp, { recursive: true, force: true });
   }
 });

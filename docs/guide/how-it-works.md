@@ -30,6 +30,15 @@ See the [engine/data-split diagram](../diagrams/engine-data-split.md) for the
 resolution order, and [`docs/architecture.md`](../architecture.md) for the
 full as-built picture.
 
+**A nested git repository under `projects/` is skipped, not read (BLZ-430).** The walk
+treats every directory under a project as a status directory and every `.md` inside it as a
+ticket, so a submodule (or a plain clone) checked out there would have its `README.md`
+parsed as a ticket — and a file with no frontmatter *throws*, which takes the whole walk
+down and with it the board, the index, `blaze audit` and `reconcile`. One neighbouring
+directory made a whole board unreadable. A directory carrying a `.git` entry is therefore
+passed over. **A malformed ticket is still loud**: this skips other repositories, never
+files that fail to parse.
+
 ## Types and workflows, at a glance
 
 Work items come in a handful of types — `goal`, `requirement`, `architecture`,
@@ -177,7 +186,7 @@ is deliberately loose, because ref names are: `feature/blz-408-work`,
 second signal before it counts, and the second signal must describe the WORK:
 
 1. the PR **title CLAIMS the ticket** — it opens with `<KEY>-<n>:`, in the same
-   leading-id-list form as a commit subject (`<KEY>-a/b/c:`, `<KEY>-a + <KEY>-b:`); or
+   leading-id-list form as a commit subject (see [the separators](#the-leading-id-list-and-its-separators)); or
 2. a `<KEY>-<n>:` commit for it is **reachable from the default branch** (the shipped
    signal of the previous rule).
 
@@ -193,14 +202,43 @@ character and the boundary holds, so a range corroborated its own first element.
 real board that proposed `BLZ-408: defined → done` for a ticket that had never been
 worked, on the evidence of a PR whose branch and title both named the range 408..439.
 
+#### The leading id list, and its separators
+
+Both rules above read the same **leading id list**, parsed by `idsFromSubject`
+(`scripts/reconcile.mjs`). It starts at column 0 with `<KEY>-<n>`, and it **ends at the
+colon** — `BLZ-1: fixes BLZ-4` claims only `BLZ-1`.
+
+**Four separators are accepted, and no others:**
+
+| Separator | Example | Bare number continues the list? |
+|---|---|---|
+| `/` | `BLZ-286/287/288: config projection` | **yes** — `<KEY>-a/b/c:` is the house shorthand |
+| `+` | `BLZ-96 + BLZ-97: close batch-mode bypasses` | no — the key must be repeated |
+| `,` | `BLZ-1, BLZ-2: two tickets` | no — the key must be repeated |
+| `&` | `BLZ-1 & BLZ-2: two tickets` | no — the key must be repeated |
+
+A bare number continues the list only after `/`. Allowing it everywhere let
+`BLZ-1 + 2026: annual review` claim a `BLZ-2026` that does not exist.
+
+`tests/how-it-works-claim-list.test.mjs` runs this table against `idsFromSubject` in both
+directions — every separator this page documents is accepted, and no separator it omits
+is — so the two cannot drift apart again.
+
 **An uncorroborated claim is neutered, not dropped.** The rule is:
 
 > **An uncorroborated claim may only ever hold a ticket BACK. It may never advance one.**
 
-It stays among the candidate pull requests, so it keeps whatever veto its **state** earns
-under the rule above — an uncorroborated *open* PR still stops `done`. What it cannot do
-is supply a **delivery record** or a **forward status**. Reaching the top of the ranking
-buys it the power to withhold a move, and nothing else.
+It stays in the **ranking pool** — the set `buildPrMap` picks a winner from — so it keeps
+whatever veto its **state** earns under the rule above, and an uncorroborated *open* PR
+still stops `done`. What it cannot do is supply a **delivery record** or a **forward
+status**. Reaching the top of the ranking buys it the power to withhold a move, and
+nothing else.
+
+It does **not** stay among the `candidates`: in the code that name is the
+**corroborated-only DELIVERER set** (`corroboratedByTicket`, which feeds the tied-deliverer
+check), and the ranking pool is the separate, wider set built with
+`includeUncorroborated: true`. The one collection an uncorroborated claim is not in is the
+one it would be natural to call it by.
 
 **Dropping it instead would be a substitution, not a subtraction**, and that is a real
 bug rather than a theoretical one. Reconcile reads the top-ranked PR, and an open PR
@@ -217,9 +255,20 @@ uncorroborated evidence costs a *corrupted* ticket: terminal status is sticky an
 terminal delivery record is write-once, so there is no route back. The rule above is what
 keeps every uncorroborated claim on the recoverable side.
 
-One consequence worth naming: an uncorroborated PR also masks a corroborated **branch**
-signal for the same ticket, because the pull-request signal is read first. That is another
-missed advance rather than a wrong one, so it falls on the safe side of the same rule.
+One consequence worth naming: an uncorroborated PR masks the OTHER signals for the same
+ticket, because the pull-request arm is read first and returns without falling through.
+Two are masked, not one:
+
+* the corroborated **branch** signal — reachable within a single repo;
+* the **shipped** signal — masked by the same clause, but reachable only **across
+  repos**. Within one repo it cannot arise: `shippedSet` is what corroborates a claimant,
+  so a PR for a ticket that repo has shipped is corroborated by definition. Across repos
+  it can: `gatherProject` **unions** every repo's `shippedSet` while corroboration is
+  computed per repo, so a ticket shipped in repo B can carry an uncorroborated PR in
+  repo A and the union's `shipped` never gets a hearing.
+
+Both are missed advances rather than wrong ones, so both fall on the safe side of the
+same rule.
 
 **Naming a branch after a range stays safe and ordinary.** It just is not read as
 delivery.
@@ -236,8 +285,8 @@ recovers **28** ticket ids that no subject at that ref mentions.
 **Two conditions must both hold, and each one is load-bearing.**
 
 1. The marker is `* ` — what GitHub writes, and what nothing else here writes.
-2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …`, or the
-   multi-ticket forms `<KEY>-a/b/c:` and `<KEY>-a + <KEY>-b:`. A bundled child lives
+2. The commit's own subject must open with a ticket-id list — `<KEY>-<n>: …`, or one of
+   the multi-ticket forms below. A bundled child lives
    inside a *feature's* PR, titled that way by convention; a commit whose subject names
    no ticket is not a bundle manifest, whatever its body lists. Every id in the leading
    list counts, and the list ends at the colon — `BLZ-1: fixes BLZ-4` claims only BLZ-1.
@@ -298,6 +347,13 @@ reachable from the default branch, so an open PR strands nothing.
 
 Both loops write through the same git-commit path every other verb uses.
 See [`commands.md`](commands.md) for the verbs themselves.
+
+**A persistent failure is stated once, not once per tick (BLZ-425).** The reconcile loop's
+forge errors, its findings, and its own run failures are each deduplicated before they
+reach the activity feed. Under `BLAZE_READONLY` every pass returns the same refusal, and at
+the default 60-second interval that would be 1,440 identical error events a day in the feed
+that is the operator's whole account of the run. A run failure is remembered only until a
+healthy pass, so a condition that returns after you fix it is reported again.
 
 ## Commit model
 

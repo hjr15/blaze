@@ -45,13 +45,36 @@ export const REMOVED_KEYS = {
  *  itself (missing, malformed, or outside `min..current`) is the problem (BLZ-402
  *  round-3). These are unrelated failures — a removed key says nothing about the version
  *  stamp — which is exactly why the caller (`loadConfig`) must not throw the same
- *  "incompatible schemaVersion" error class for both. */
+ *  "incompatible schemaVersion" error class for both.
+ *
+ *  BLZ-428: the `kind` on the two `v < min` branches below is REACHABLE ONLY THROUGH AN
+ *  INJECTED `min`. At the shipped `MIN_SCHEMA_VERSION === 1` no input reaches them — an
+ *  absent or null stamp resolves to the literal 1, and anything below 1 is refused one
+ *  branch earlier as `invalid schemaVersion` — so no production call path can execute
+ *  them and no mutation of them can be killed through `loadConfig`. They are pinned by
+ *  direct call in tests/schema-version-kind-tags.test.mjs and are stated there as
+ *  unreachable rather than implied to be covered; the day `MIN_SCHEMA_VERSION` rises is
+ *  the day the tag has to already be right. */
 export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SCHEMA_VERSION,
                                           removed = REMOVED_KEYS } = {}) {
   // Checked before the version, and on the RAW parsed file: a board carrying a key this
   // engine no longer honours must be told, not quietly obeyed in part. This is NOT a
   // schemaVersion problem — the stamp itself may be perfectly in-window — so it gets its
   // own `kind`, distinct from every branch below.
+  //
+  // BLZ-429: `!== undefined`, so `"provider": null` counts as SET. Since #135 gave this
+  // branch its own `kind`, `loadConfig` throws a plain Error for it rather than
+  // `IncompatibleSchemaVersionError`, which is what turned it from a failure `blaze audit`
+  // TOLERATED (config = null, ok=true) into a HARD `config-unloadable` — a severity flip
+  // that PR body never enumerated. MEASURED before leaving it as it is, read-only on
+  // 2026-08-28 across every `blaze.config.json` on this machine outside node_modules
+  // (14 distinct boards: 9 in the blaze-pm family, 5 fixtures under tests/): a NULL-valued
+  // removed key appears on ZERO boards and ZERO keys, so this spelling newly refuses
+  // nothing. (Any-valued: 7 of the 9 blaze-pm checkouts carry `provider: "github"`, a
+  // string; the live working branch BLZ-305-v4-spine at 2535a6ae is clean.) KEPT, because
+  // reading null as "absent" would create a second spelling of "set and silently ignored",
+  // which is the precise defect BLZ-298 removed these keys to end — a JSON null is a value,
+  // not an absence, and "delete it" is the right remedy for both spellings.
   const present = Object.keys(removed).filter((k) => cfg && cfg[k] !== undefined);
   if (present.length) {
     const lines = present.map((k) => `  ${k} — ${removed[k]}`).join("\n");

@@ -532,3 +532,139 @@ describe("BLZ-403: an aggregate finding (no `id`) reaches the activity feed corr
     assert.equal(newFindingEvents([perTicket, agg], said).length, 2);
   });
 });
+
+// =============================================================================
+// BLZ-459 — an UNCORROBORATED WINNER must not also suppress the finding
+// =============================================================================
+//
+// `reconcile.mjs`'s `if (d.skip) continue;` runs before the `unverifiableRecords`
+// collection, so BLZ-440's uncorroborated-claim rule silenced this finding as well as the
+// write. The neighbouring `openPrOnTerminal` suppression HAS a soundness argument — that
+// finding reports on the VETO, and an uncorroborated claim takes no veto, so there is no
+// wrong move to report. THIS finding has no such argument available: it reports on the
+// STATE (a terminal ticket holding a record git cannot tie to a deliverer), the state is
+// decided by the corroborated tied set and is entirely unaffected by which PR happens to
+// rank top, and it is still exactly as true. Suppressing it hid a real condition.
+//
+// Review measured ZERO live incidence — all 8 board tickets with an uncorroborated
+// top-ranked PR have a single candidate — which is why the shape is CONSTRUCTED here: a
+// tied corroborated MERGED deliverer set plus an uncorroborated OPEN PR out-ranking it.
+// PR_RANK puts OPEN above MERGED, so the uncorroborated claim wins the rank.
+
+// Titled for the ticket, so `claimCorroborated` accepts it and `prTitleClaim` scores 2 —
+// two of these tie, which is what makes the deliverer unresolvable.
+const WORK_B = { number: 41, state: "MERGED", url: "u41",
+  headRefName: "INF-645-more", title: "INF-645: the other half" };
+// MENTIONS the id in its ref and NEVER claims it in the title — a range, exactly the
+// BLZ-440 shape. So it is uncorroborated, and being OPEN it still out-ranks both merges.
+const RANGE_OPEN = { number: 50, state: "OPEN", url: "u50",
+  headRefName: "docs-INF-645-notes", title: "docs: successor kickoff for the INF-640..650 lane" };
+
+describe("BLZ-459: an uncorroborated winner suppresses the WRITE, never the finding", () => {
+  test("the shape is real: the uncorroborated OPEN PR wins the rank and makes decide() skip", () => {
+    // Reachability first, at the pure function — so a failure below is about the loop,
+    // not about the fixture failing to build the state at all.
+    const d = decide({ pr: { ...RANGE_OPEN, uncorroborated: true }, delivererAmbiguous: true },
+      "done", "epic");
+    assert.equal(d.skip, true, "BLZ-440: an uncorroborated claim moves nothing");
+    assert.equal(d.recordAmbiguous, false,
+      "and it reports no ambiguity, which is what used to take the finding down with it");
+  });
+
+  test("a terminal ticket's unverifiable record is still reported when the winner is uncorroborated", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz459-agg-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done",
+      "resolution: done\nbranch: INF-645-tier1\npr: '#10 — u10'\n"]]);
+    const restore = stubGh(tmp, [WORK, WORK_B, RANGE_OPEN]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.equal(r.ok, true);
+      const agg = r.findings.filter((f) => f.kind === "terminal-record-unverifiable");
+      assert.equal(agg.length, 1,
+        `the finding must survive the uncorroborated winner: ${JSON.stringify(r.findings)}`);
+      assert.deepEqual(agg[0].ids, ["INF-645"]);
+      assert.equal(agg[0].count, 1);
+      // …and BLZ-440's rule is untouched: nothing moved, and no record was written.
+      assert.deepEqual(r.changes, [],
+        "an uncorroborated claim may only hold a ticket back — reporting must not move it");
+      const text = readTicket(root, "INF-645", "done");
+      assert.match(text, /pr: '#10 — u10'/, "the write-once record is unchanged");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the provably-wrong case is still named per ticket, not swallowed into the aggregate", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz459-outside-"));
+    // The recorded PR is not one of the tied candidates {u10, u41} — the OBA-773 shape.
+    const root = fixture(tmp, [["INF-645", "epic", "done",
+      "resolution: done\nbranch: INF-645-old\npr: '#99 — u99'\n"]]);
+    const restore = stubGh(tmp, [WORK, WORK_B, RANGE_OPEN]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      const perTicket = r.findings.filter(
+        (f) => f.kind === "terminal-record-unverifiable" && f.id === "INF-645");
+      assert.equal(perTicket.length, 1, JSON.stringify(r.findings));
+      assert.equal(perTicket[0].recordOutsideCandidates, true);
+      assert.match(perTicket[0].message, /not even among the tied candidates/);
+      assert.equal(r.findings.some((f) => f.kind === "terminal-record-unverifiable" && f.ids),
+        false, "…and it must not ALSO appear in the aggregate");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a NON-terminal ticket with an uncorroborated winner reports nothing", async () => {
+    // The negative side. This finding is about a WRITE-ONCE record on a terminal ticket;
+    // firing it wherever an uncorroborated claim wins would be a new over-report, and the
+    // BLZ-440 rule already covers "moved nothing".
+    const tmp = mkdtempSync(join(tmpdir(), "blz459-neg-"));
+    const root = fixture(tmp, [["INF-645", "epic", "in-review",
+      "branch: INF-645-tier1\npr: '#10 — u10'\n"]]);
+    const restore = stubGh(tmp, [WORK, WORK_B, RANGE_OPEN]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.equal(r.findings.some((f) => f.kind === "terminal-record-unverifiable"), false,
+        JSON.stringify(r.findings));
+      assert.deepEqual(r.changes, []);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a terminal ticket with NO record and an uncorroborated winner reports nothing", async () => {
+    // The other negative side: the finding is on an already-held record. A blank one is
+    // not unverifiable, it is absent, and write-once protects nothing.
+    const tmp = mkdtempSync(join(tmpdir(), "blz459-norecord-"));
+    const root = fixture(tmp, [["INF-645", "epic", "done", "resolution: done\n"]]);
+    const restore = stubGh(tmp, [WORK, WORK_B, RANGE_OPEN]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.equal(r.findings.some((f) => f.kind === "terminal-record-unverifiable"), false,
+        JSON.stringify(r.findings));
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a GOAL is untouched — the skip for a non-delivery type stays a full skip", async () => {
+    // `decide` skips goal/risk before it looks at any git signal at all. That skip must
+    // not acquire a delivery finding through this door.
+    const tmp = mkdtempSync(join(tmpdir(), "blz459-goal-"));
+    const root = fixture(tmp, [["INF-645", "goal", "achieved",
+      "resolution: done\nbranch: INF-645-tier1\npr: '#10 — u10'\n"]]);
+    const restore = stubGh(tmp, [WORK, WORK_B, RANGE_OPEN]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.equal(r.findings.some((f) => f.kind === "terminal-record-unverifiable"), false,
+        JSON.stringify(r.findings));
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

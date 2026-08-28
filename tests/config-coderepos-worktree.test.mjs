@@ -4,11 +4,18 @@
 // `codeRepos` are stored relative (`../service-platform`, …) and resolved against
 // the board root the command ran from. Run from a linked worktree and every path
 // resolves to a sibling of the WORKTREE, which does not exist — so `gatherRepo`
-// returns its empty sentinel for each, and `reconcile` prints
-// "already in sync — nothing to do" with exit 0, having scanned zero repos.
+// returns its empty sentinel for each, and `reconcile` reports a clean pass with
+// exit 0, having scanned zero repos.
 //
 // That is indistinguishable from a genuine no-op, and the documented INF-673
 // workaround ("run blaze from the board-main worktree") walks straight into it.
+//
+// BLZ-433: this comment used to quote reconcile's output for that clean pass as
+// "already in sync — nothing to do". The product stopped emitting that sentence at
+// BLZ-404 round 5 — it asserted a state of the whole git tree that reconcile never
+// knows — and now prints "no code-bound change found — nothing to do." instead,
+// while the all-repos-unreadable case exits 1 outright (INF-763's own half of the
+// fix). Neither wording is what this file asserts: it pins path RESOLUTION.
 
 import { test } from "node:test";
 import assert from "node:assert/strict";

@@ -186,6 +186,38 @@ export function newFindingEvents(findings, said) {
   return out;
 }
 
+/** BLZ-425: the reconcile loop's OWN failure → at most one activity-feed event, deduped.
+ *
+ *  The two functions above dedupe because the loop runs on a timer and the conditions
+ *  they report persist until a person acts. A failed RUN is the same shape and had no
+ *  such memory: the `else if (r && !r.ok)` arm (and the `catch`) published one
+ *  `type: "error"` per tick, forever. `BLAZE_READONLY` makes that certain rather than
+ *  theoretical — a direct `supervisor` run under it returns reconcile's `assertWritable`
+ *  refusal, a byte-identical message, on a condition only an operator can clear. At the
+ *  shipped `loops.reconcile.intervalSec: 60` that is 60 identical events an hour and
+ *  1,440 a day, in the feed this file's own comments call "the operator's whole account
+ *  of the run".
+ *
+ *  THE MEMORY IS DELIBERATELY NOT A GROWING `said` SET. `forgeSaid`/`findingSaid` never
+ *  forget, so a condition that clears and returns is never re-announced — right for a
+ *  board fact, wrong for the loop's own health, which an operator fixes and needs to hear
+ *  about if it breaks again. So this remembers only the LAST message and a healthy pass
+ *  clears it: a persistent refusal is stated once, a NEW failure is always stated, and a
+ *  recurrence after a good pass is news again.
+ *
+ *  Pure and exported for the same reason its two siblings are — the "say it once" rule is
+ *  testable without a live loop and without waiting out a timer.
+ *
+ *  @param message  the failure message, or null/undefined for a healthy pass
+ *  @param state    the caller's memory: `{ last }`, mutated here
+ */
+export function newRunErrorEvent(message, state) {
+  if (!message) { state.last = null; return null; }
+  if (state.last === message) return null;
+  state.last = message;
+  return { type: "error", loop: "reconcile", message };
+}
+
 export function createApp(cfg, { root = resolveRoots().dataRoot, identity = loadIdentity(root) } = {}) {
   // BLZ-359. A DAMAGED ROSTER IS A REFUSAL, NOT "NOBODY IS CONFIGURED". Reading only
   // `hasIdentity` here would reintroduce, in this server, the exact bug BLZ-348 shipped
@@ -213,6 +245,10 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   // BLZ-395: separate memory from forgeSaid. They are different populations and a
   // shared Set would let one silence the other on a message collision.
   const findingSaid = new Set();
+  // BLZ-425: separate again, and a different SHAPE — `{ last }`, not a Set. See
+  // `newRunErrorEvent` for why the loop's own health must be forgettable while the two
+  // board facts above must not be.
+  const runErrorSaid = { last: null };
 
   // Mirrors serve.mjs's aheadCount() so the client's sync badge works the same
   // under supervisor mode.
@@ -321,10 +357,19 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // those apart needs the pending ledger, not `git status`, so nothing here attempts
         // it any more — the supervisor, like the CLI, reports only what THIS pass decided.
       } else if (r && !r.ok) {
-        bus.publish({ type: "error", loop: "reconcile", message: r.error, ts: today() });
+        // BLZ-425: deduped, exactly like the forge errors and findings above and for the
+        // same reason — this arm is where reconcile's `assertWritable` refusal under
+        // `BLAZE_READONLY` lands, and it is a permanent condition on a 60-second timer.
+        const evt = newRunErrorEvent(r.error, runErrorSaid);
+        if (evt) bus.publish({ ...evt, ts: today() });
       }
+      // BLZ-425: a HEALTHY pass clears the memory, so the same failure returning after an
+      // operator fixed it is news again. Outside the branches above rather than inside the
+      // first, because `r.ok` with no `changes` array takes neither of them.
+      if (r && r.ok) newRunErrorEvent(null, runErrorSaid);
     } catch (e) {
-      bus.publish({ type: "error", loop: "reconcile", message: e.message, ts: today() });
+      const evt = newRunErrorEvent(e.message, runErrorSaid);
+      if (evt) bus.publish({ ...evt, ts: today() });
     } finally {
       loops.reconcile.busy = false;
     }
