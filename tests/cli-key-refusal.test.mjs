@@ -23,6 +23,7 @@ import { fileURLToPath } from "node:url";
 const CLI = fileURLToPath(new URL("../scripts/cli.mjs", import.meta.url));
 const NEW_RUNNER = fileURLToPath(new URL("../scripts/new-runner.mjs", import.meta.url));
 const MOVE_RUNNER = fileURLToPath(new URL("../scripts/move-runner.mjs", import.meta.url));
+const script = (rel) => fileURLToPath(new URL(`../scripts/${rel}`, import.meta.url));
 
 function board({ key = "ENG", projects = ["ENG"] } = {}) {
   const root = mkdtempSync(join(tmpdir(), "blz402-cli-refusal-"));
@@ -59,6 +60,10 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
         { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
       assertCleanRefusal(r, "blaze new --project 'A('");
       assert.match(r.stderr, /"A\("/, "the offending key must be named");
+      // BLZ-408's other half: making the message honest for the ticket-frontmatter callers
+      // must not cost the one caller that really does hold a --project argument its accuracy.
+      assert.match(r.stderr, /a --project argument/,
+        `this invocation DID pass --project; the refusal must still say so:\n${r.stderr}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -192,6 +197,13 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
       const r = spawnSync(process.execPath, [CLI, "edit", "ENG-1", "title", "new title"],
         { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
       assertCleanRefusal(r, "blaze edit on a ticket with a corrupt project field");
+      // BLZ-408: and it must send the operator to the FILE that is wrong. Before this the
+      // refusal read "a --project argument" — a flag this invocation does not carry — so the
+      // one message the operator gets named the wrong thing to fix.
+      assert.match(r.stderr, /ticket ENG-1's 'project' field/,
+        `the refusal must name the ticket's own field:\n${r.stderr}`);
+      assert.doesNotMatch(r.stderr, /--project/,
+        `no --project argument was passed; the refusal must not claim one:\n${r.stderr}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -222,5 +234,90 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
         { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
       assertCleanRefusal(r, "direct node move-runner.mjs on a board with key 'eng'");
     } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+});
+
+// --- BLZ-419: the eight per-runner key-refusal guards nothing pinned ----------------------
+//
+// BLZ-402 added a local `catch (e) { if (e instanceof InvalidProjectKeyError) ... }` to
+// ELEVEN runner files. Three of them were pinned by the describe above — `new-runner`
+// (`--project 'A('`), `move-runner` (a direct invocation on a bad board key), and
+// `edit-runner` (a corrupt ticket's `project:` field). The other eight had no test at all,
+// on any board, which is how a guard becomes decoration.
+//
+// EVERY ONE OF THE EIGHT IS REACHABLE, and reachability was checked before the tests were
+// written rather than assumed — each was driven to its refusal by hand on a board with
+// `key: "eng"` before a line of this block existed. They are all the same shape: the
+// runner's own top-level `loadConfig({ root: dataRoot })`, which `cli.mjs`'s preflight
+// covers for the normal `blaze <verb>` path and which a DIRECT `node <runner>.mjs`
+// bypasses entirely. That is exactly the invocation these guards exist for, so that is the
+// invocation each test uses.
+//
+// ONE GUARD IN THOSE ELEVEN FILES IS NOT REACHABLE, and it is not covered here rather than
+// covered badly: `scripts/move-runner.mjs`'s catch around `applyMove` (the second guard in
+// that file). `move.mjs`'s only `loadProject` call sits inside its own
+// `try { ... } catch { requireWorklog = false; }`, so `applyMove` cannot raise an
+// `InvalidProjectKeyError` at all. Verified on `df13824` with the exact input that fires
+// `edit-runner`'s equivalent guard — a healthy board, one ticket whose frontmatter reads
+// `project: A(` — and `node move-runner.mjs ENG-1 defined` completed successfully
+// (`ENG-1: backlog → defined`), never entering the catch. No mutation can kill that guard,
+// so nothing below claims it is pinned. That file's own comment already says the wrap is
+// defence-in-depth kept for symmetry with `edit-runner.mjs`; this note records that the
+// symmetry is all it is.
+describe("BLZ-419: every REACHABLE per-runner key-refusal guard is pinned by a test", () => {
+  // `blaze audit` is deliberately absent: it is preflight-EXEMPT and must keep reporting
+  // rather than refusing, which tests/audit-config-unloadable.test.mjs pins instead.
+  const CASES = [
+    ["log-runner.mjs", ["ENG-1", "30"]],
+    ["link-runner.mjs", ["ENG-1", "Blocks", "ENG-2"]],
+    ["resolve-runner.mjs", ["ENG-1", "done"]],
+    ["sprint-runner.mjs", ["list"]],
+    ["migrate-runner.mjs", ["--dry-run"]],
+    ["db-runner.mjs", ["init"]],
+    ["loops/groomer.mjs", []],
+    ["reconcile.mjs", []],
+  ];
+  for (const [rel, args] of CASES) {
+    test(`direct node ${rel} on a board with key 'eng' refuses cleanly, naming the key`, () => {
+      const root = board({ key: "eng" });
+      try {
+        const r = spawnSync(process.execPath, [script(rel), ...args], {
+          env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") },
+          encoding: "utf8", timeout: 30000,
+        });
+        assert.notEqual(r.signal, "SIGTERM", `${rel}: timed out instead of refusing`);
+        assertCleanRefusal(r, `direct node ${rel}`);
+        assert.match(r.stderr, /"eng"/, `${rel}: the offending key must be named:\n${r.stderr}`);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  }
+
+  test("control: each of the same eight runners is unaffected on a HEALTHY board — the guard "
+    + "refuses a bad key, it does not refuse everything", () => {
+    // Without this, every test above would still pass if a runner had simply been made to
+    // exit 1 with a `blaze: ` line unconditionally. What is asserted is only the ABSENCE of
+    // the key refusal: these runners legitimately exit non-zero for their own reasons
+    // (`blaze link` on a missing ENG-2, `blaze resolve` on a non-terminal ticket), and this
+    // block is not the place to pin those.
+    //
+    // BLAZE_AGENT_COMMAND is pinned to `true` for the same reason the refusal tests do not
+    // need it: on a HEALTHY board `loops/groomer.mjs` gets past the guard and runs a real
+    // grooming pass, which spawns the configured agent (`claude -p` by default). Measured:
+    // 40s and still running. The guard under test fires long before that, so the agent is
+    // replaced with a no-op rather than the pass being skipped.
+    for (const [rel, args] of CASES) {
+      const root = board({ key: "ENG" });
+      try {
+        const r = spawnSync(process.execPath, [script(rel), ...args], {
+          env: {
+            ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects"),
+            BLAZE_COMMIT_MODE: "batch", BLAZE_AGENT_COMMAND: "true",
+          },
+          encoding: "utf8", timeout: 30000,
+        });
+        assert.doesNotMatch(`${r.stdout}${r.stderr}`, /is not a valid project key/,
+          `${rel} refused a VALID board key:\nstdout:${r.stdout}\nstderr:${r.stderr}`);
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    }
   });
 });

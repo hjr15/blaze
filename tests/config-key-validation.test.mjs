@@ -37,10 +37,16 @@ test("BLZ-402: a non-string key (e.g. a bare JSON number in blaze.config.json) i
   // JSON.parse happily turns `"key": 123` into a number; nothing upstream of assertValidKey
   // coerces it back to a string, so the shape check must reject non-strings outright rather
   // than letting one reach `KEY_RE.test` (which would coerce and could mislead).
+  //
+  // BLZ-412: the class alone used to be the whole assertion here, so a refusal that stopped
+  // being a `blaze: ` line and stopped naming the offending value kept this green. What the
+  // name promises is a REFUSAL, and a refusal the operator cannot read is not one.
   const dir = withConfig({ key: 123 });
   assert.throws(
     () => loadConfig({ root: dir, env: {} }),
-    (e) => e instanceof InvalidProjectKeyError,
+    (e) => e instanceof InvalidProjectKeyError
+      && e.message.startsWith("blaze: ")
+      && e.message.includes("123"),
   );
   rmSync(dir, { recursive: true, force: true });
 });
@@ -71,17 +77,41 @@ test("BLZ-402: loadConfig refuses a metacharacter key from the config file, not 
 });
 
 // --- Consequence 2: the over-broad-but-valid-regex key ------------------------------------
-// First, prove the danger this prevents: `idsFromSubject` builds its matcher straight from
-// whatever key it is given, with no shape check of its own. Fed a regex-metacharacter key
-// unchecked, it lets a subject belonging to a DIFFERENT project's ticket read as a match.
-test("BLZ-402: unchecked, an over-broad key lets idsFromSubject claim another project's ticket", () => {
-  // idsFromSubject has no shape check of its own — it builds its matcher straight from
-  // whatever key it is handed. A key of ".*" (which assertValidKey refuses outright, since
-  // it doesn't even start with a letter) makes it match a subject that plainly belongs to
-  // a DIFFERENT project (ZZZ), which is the exact over-broad-match danger the refusal at
-  // load time exists to prevent from ever reaching this function.
-  assert.deepEqual(idsFromSubject("ZZZ-9: fix the thing", ".*"), [".*-9"],
-    "this is the exact over-broad-match danger assertValidKey exists to refuse before it reaches here");
+//
+// BLZ-411: this block used to open with a test that asserted ONLY
+// `idsFromSubject("ZZZ-9: …", ".*")`. That is a demonstration of the DANGER, and it names
+// no guard at all — deleting `assertValidKey`'s body outright left it green, so NO mutation
+// of the thing it was filed under could kill it. Measured on `df13824`: with
+// `assertValidKey` reduced to a no-op, 11 of the 15 tests in this file went red and that
+// one stayed green.
+//
+// It now asserts the GUARD — that ".*" is refused before any caller can hand it to a
+// matcher builder — and keeps the demonstration as the REASON, below the assertion it
+// justifies.
+//
+// The demonstration deliberately does not pin `idsFromSubject`'s subject GRAMMAR. BLZ-455
+// widens it to admit `KEY-n — desc` beside `KEY-n:`; this asserts only that an over-broad
+// key claims an id that belongs to another project, which is true of either grammar.
+test("BLZ-402/BLZ-411: the over-broad key '.*' is REFUSED at every load path, so idsFromSubject"
+  + " can never be reached with it", () => {
+  assert.throws(
+    () => assertValidKey(".*", { source: "test" }),
+    (e) => e instanceof InvalidProjectKeyError
+      && e.message.startsWith("blaze: ")
+      && e.message.includes('".*"'),
+    "the GUARD is what this test exists to pin — not the danger it prevents");
+  const dir = withConfig({ key: ".*" });
+  assert.throws(
+    () => loadConfig({ root: dir, env: {} }),
+    (e) => e instanceof InvalidProjectKeyError && e.message.includes('".*"'),
+    "and it must be refused on the path a board actually takes, not only by the helper");
+  rmSync(dir, { recursive: true, force: true });
+  // WHY it is refused, demonstrated rather than asserted about: `idsFromSubject` builds its
+  // matcher straight from whatever key it is handed, with no shape check of its own. Handed
+  // ".*" it claims a subject that plainly belongs to a DIFFERENT project (ZZZ). The refusal
+  // above is what makes that unreachable.
+  assert.ok(idsFromSubject("ZZZ-9: fix the thing", ".*").includes(".*-9"),
+    "unchecked, an over-broad key claims another project's ticket — which is why it is refused above");
 });
 
 test("BLZ-402: an over-broad-but-valid-regex key ('A.*') is REFUSED, not silently built into idRegex", () => {
@@ -94,14 +124,21 @@ test("BLZ-402: an over-broad-but-valid-regex key ('A.*') is REFUSED, not silentl
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("BLZ-402: loadProject refuses the same over-broad key", () => {
+// BLZ-412: this test's NAME promises a refusal — the `blaze: ` line an operator reads — and
+// it asserted only `e instanceof InvalidProjectKeyError`. Measured on `df13824`: strip the
+// `blaze: ` prefix and the `${JSON.stringify(key)}` out of `assertValidKey`'s message and
+// this test stayed green while the two tests that DO assert the message went red. A test
+// that names a refusal must assert the refusal.
+test("BLZ-402/BLZ-412: loadProject refuses the same over-broad key with a blaze: refusal that NAMES it", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-keyval-"));
   const projectsDir = join(root, "projects");
   mkdirSync(join(projectsDir, "A.*"), { recursive: true });
   assert.throws(
     () => loadProject("A.*", { root, projectsDir, allowMissing: true }),
-    (e) => e instanceof InvalidProjectKeyError,
-  );
+    (e) => e instanceof InvalidProjectKeyError
+      && e.message.startsWith("blaze: ")
+      && e.message.includes('"A.*"'),
+    "the operator must be told WHICH key was refused, not merely that something threw");
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -123,6 +160,106 @@ test("BLZ-402: a good BLAZE_KEY still overrides a fine file key (no false refusa
   const cfg = loadConfig({ root: dir, env: { BLAZE_KEY: "OPS2" } });
   assert.equal(cfg.key, "OPS2");
   rmSync(dir, { recursive: true, force: true });
+});
+
+// --- BLZ-410: an EMPTY override is a caller error, not an absent one ----------------------
+//
+// `loadConfig` tested `env.BLAZE_KEY` for TRUTHINESS, so `BLAZE_KEY=""` was discarded and
+// the file key silently won. The shape that produces it is ordinary and silent: a shell
+// script that does `BLAZE_KEY="$SOME_UNSET_VAR" blaze move ...` asks for one board and
+// gets another, with no message on any stream. BLZ-394 settled exactly this shape for
+// `--project=` — an empty value is a caller error — and the same reasoning applies to an
+// env override.
+test("BLZ-410: an EMPTY BLAZE_KEY is REFUSED, not discarded so the file key silently wins", () => {
+  const dir = withConfig({ key: "OK" });
+  assert.throws(
+    () => loadConfig({ root: dir, env: { BLAZE_KEY: "" } }),
+    (e) => e instanceof InvalidProjectKeyError
+      && e.message.startsWith("blaze: ")
+      && e.message.includes("BLAZE_KEY")
+      && e.message.includes('""'),
+    "an empty override is a caller error (an unset shell variable), not an absent override",
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-410: a whitespace-only BLAZE_KEY is refused too — it is not a key, and it is not absent", () => {
+  const dir = withConfig({ key: "OK" });
+  assert.throws(
+    () => loadConfig({ root: dir, env: { BLAZE_KEY: "  " } }),
+    (e) => e instanceof InvalidProjectKeyError && e.message.includes("BLAZE_KEY"),
+  );
+  rmSync(dir, { recursive: true, force: true });
+});
+
+test("BLZ-410 control: an ABSENT BLAZE_KEY still falls back to the file key", () => {
+  // The whole point of the change is that ABSENT and EMPTY stop being the same thing. This
+  // is the half that must NOT move.
+  const dir = withConfig({ key: "OK" });
+  assert.equal(loadConfig({ root: dir, env: {} }).key, "OK");
+  assert.equal(loadConfig({ root: dir, env: { BLAZE_PORT: "8080" } }).key, "OK");
+  rmSync(dir, { recursive: true, force: true });
+});
+
+// --- BLZ-408: the refusal names the source it was actually given -------------------------
+//
+// `loadProject` hardcoded `source: "a --project argument"` for every caller. Its callers
+// include `edit.mjs` and `move.mjs`, which pass a TICKET'S OWN `project:` frontmatter, and
+// `cli.mjs`'s preflight, which passes a directory name off a disk listing. An operator with
+// one corrupt ticket file was told to fix a `--project` argument they never typed.
+test("BLZ-408: loadProject's refusal names the SOURCE it was given, and does not invent a --project argument", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-keyval-src-"));
+  const projectsDir = join(root, "projects");
+  assert.throws(
+    () => loadProject("A(", {
+      root, projectsDir, allowMissing: true, source: "ticket ENG-1's 'project' field",
+    }),
+    (e) => e instanceof InvalidProjectKeyError
+      && e.message.includes("ticket ENG-1's 'project' field")
+      && !e.message.includes("--project"),
+    "a caller passing ticket frontmatter must not be told to fix a --project argument",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-408: the DEFAULT source is neutral — it never claims a --project argument either", () => {
+  // cli.mjs's preflight and reconcile.mjs pass no source; the default must be true for them.
+  const root = mkdtempSync(join(tmpdir(), "blaze-keyval-src2-"));
+  const projectsDir = join(root, "projects");
+  assert.throws(
+    () => loadProject("A(", { root, projectsDir, allowMissing: true }),
+    (e) => e instanceof InvalidProjectKeyError && !e.message.includes("--project"),
+    "the default must describe what every caller has in common, not what one of them has",
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-408: the ONE caller that really does hold a --project argument still says so", () => {
+  const root = mkdtempSync(join(tmpdir(), "blaze-keyval-src3-"));
+  const projectsDir = join(root, "projects");
+  assert.throws(
+    () => loadProject("A(", {
+      root, projectsDir, allowMissing: true, source: "a --project argument",
+    }),
+    (e) => e instanceof InvalidProjectKeyError && e.message.includes("a --project argument"),
+  );
+  rmSync(root, { recursive: true, force: true });
+});
+
+// --- BLZ-409: the refusal is short enough to read at 2am ---------------------------------
+test("BLZ-409: the invalid-key refusal is short, still states the rule, and keeps the rest discoverable", () => {
+  let msg = "";
+  try { assertValidKey("eng", { source: "blaze.config.json's 'key' field" }); }
+  catch (e) { msg = e.message; }
+  const words = msg.trim().split(/\s+/).length;
+  // 70 words on `df13824`, almost all of it regex rationale for what is nearly always a
+  // typo. The ceiling is the point of the ticket, so it is asserted, not described.
+  assert.ok(words <= 40, `the refusal is ${words} words and must stay under 40:\n${msg}`);
+  assert.match(msg, /upper-case letters and digits, starting with a letter/,
+    "the RULE itself must survive the shortening — that is the actionable half");
+  assert.match(msg, /docs\/decisions\/0025-a-project-key-is-refused-never-normalised\.md/,
+    "the reasoning must stay DISCOVERABLE from the refusal, not merely deleted");
+  assert.match(msg, /"eng"/, "and the offending value must still be named");
 });
 
 // --- BLZ-402 review finding 2: cfg.projects[] members are keys too, and were unchecked ---

@@ -24,6 +24,12 @@ import { join } from "node:path";
 // predicate form (`KEY_RE.test`) because it COLLECTS errors rather than throwing on
 // the first one ("a wizard that reports one problem per run is a wizard people run
 // four times"), so the throwing `assertValidKey` form doesn't fit here.
+//
+// BLZ-413 / ADR-0025: sharing the DEFINITION was only half of it. This wizard also
+// upper-cased its answer before testing it, so it accepted keys the shared definition
+// refuses everywhere else — the same string, two answers, and nothing documenting which
+// one was intended. It no longer normalises: see the `project` assignment below and
+// docs/decisions/0025-a-project-key-is-refused-never-normalised.md.
 import { KEY_RE } from "./config.mjs";
 
 /** Drivers this engine will offer. Derived intent, per ADR-0012: a driver is offered
@@ -40,15 +46,29 @@ export const OFFERED_DRIVERS = ["sqlite", "postgres"];
 export function planInit(answers = {}) {
   const errors = [];
   const dir = String(answers.dir ?? "").trim();
-  const project = String(answers.project ?? "").trim().toUpperCase();
+  // BLZ-413 / ADR-0025: NOT `.toUpperCase()`. This wizard used to silently rewrite `acme`
+  // into `ACME` and build the board, while `blaze new --project acme` — and `BLAZE_KEY`,
+  // and `blaze.config.json`'s own `key`, and every `projects[]` entry — refuse the exact
+  // same string. The operator learned the rule at their SECOND command, from a refusal,
+  // about a value this one had accepted. A project key is refused, never normalised.
+  //
+  // `.trim()` stays, and the line ADR-0025 draws is "which characters the key is made of":
+  // ` ENG ` is `ENG` badly quoted, `eng` is a different key.
+  const project = String(answers.project ?? "").trim();
   const driver = String(answers.driver ?? "sqlite").trim();
 
   if (!dir) errors.push("--dir is required: the directory this board will live in");
   if (!project) {
     errors.push("--project is required: a key for the first project, e.g. ENG");
   } else if (!KEY_RE.test(project)) {
+    // The refusal has to be actionable at the one moment the operator is choosing the key,
+    // so when case is the ONLY thing wrong it names the replacement. It is withheld when
+    // the upper-cased form is invalid too (`9eng` → `9ENG`), because a suggestion that
+    // would itself be refused sends the operator in a circle.
+    const upper = project.toUpperCase();
     errors.push(`--project ${JSON.stringify(project)} is not a valid key — `
-      + "upper-case letters and digits, starting with a letter (e.g. ENG, OBA, BLZ2)");
+      + "upper-case letters and digits, starting with a letter (e.g. ENG, OBA, BLZ2)"
+      + (KEY_RE.test(upper) ? ` — did you mean ${JSON.stringify(upper)}?` : ""));
   }
   if (!OFFERED_DRIVERS.includes(driver)) {
     errors.push(`--db ${JSON.stringify(driver)} is not a supported driver — `

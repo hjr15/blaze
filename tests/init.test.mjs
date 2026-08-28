@@ -50,12 +50,38 @@ describe("planInit — the questions that earn a prompt", () => {
     assert.match(r.errors.join("\n"), /--project is required/);
   });
 
-  test("a project key is upper-cased, and a bad one is refused with an example", () => {
-    assert.equal(planInit({ dir: "/b", project: "eng" }).plan.config.projects[0], "ENG");
+  // BLZ-413 / ADR-0025. This test asserted the OPPOSITE until 2026-08-28: that
+  // `planInit` upper-cased `eng` into `ENG` and created the board. `blaze new --project
+  // eng` refuses the same string, so the wizard accepted a key every other verb rejects
+  // and the operator learned the rule at their SECOND command, from a refusal, on a board
+  // that already existed. ADR-0025 converges the two on refusal rather than on
+  // normalisation — a project key is refused, never rewritten — and this is the artifact
+  // that enforces it.
+  test("BLZ-413: a lower-case project key is REFUSED, not silently upper-cased", () => {
+    const r = planInit({ dir: "/b", project: "acme" });
+    assert.equal(r.ok, false, "the wizard must not accept a key `blaze new` will refuse");
+    assert.equal(r.plan, null, "nothing is planned, so nothing is written");
+    assert.match(r.errors.join("\n"), /not a valid key/);
+    // The refusal has to be actionable at the one moment the operator is choosing the key,
+    // so it names the replacement rather than only the rule.
+    assert.match(r.errors.join("\n"), /did you mean "ACME"\?/);
+  });
+
+  test("BLZ-413: a key that no amount of case-folding could fix is refused WITHOUT a bogus suggestion", () => {
     const bad = planInit({ dir: "/b", project: "9ENG" });
     assert.equal(bad.ok, false);
     assert.match(bad.errors[0], /not a valid key/);
     assert.match(bad.errors[0], /e\.g\. ENG/);
+    assert.doesNotMatch(bad.errors[0], /did you mean/,
+      "'9ENG' is invalid upper-cased too — suggesting it would send the operator in a circle");
+  });
+
+  test("BLZ-413: surrounding whitespace is still trimmed — that is not a rewrite of the key", () => {
+    // ADR-0025 draws the line at "which characters the key is made of". ` ENG ` is `ENG`
+    // badly quoted; `eng` is a different key.
+    const r = planInit({ dir: "/b", project: "  ENG  " });
+    assert.equal(r.ok, true, r.errors.join("\n"));
+    assert.equal(r.plan.config.projects[0], "ENG");
   });
 
   test("sqlite needs nothing further, and writes no connection file", () => {
@@ -199,13 +225,28 @@ describe("nothing is written until every check passes", () => {
 describe("the board it makes actually works", () => {
   test("sqlite: writes config and the project, and gitignores .blaze", async () => {
     const d = dir();
-    assert.equal(0, await runInit([`--dir=${d}`, "--project=eng", "--yes", "--no-git"], silent));
+    // `--project=ENG`, not `--project=eng`: BLZ-413 / ADR-0025 stopped the wizard
+    // upper-casing its answer, and this test read `eng` here purely to exercise that
+    // rewrite. The end-to-end refusal it used to hide is asserted in its own test below.
+    assert.equal(0, await runInit([`--dir=${d}`, "--project=ENG", "--yes", "--no-git"], silent));
     assert.deepEqual(JSON.parse(readFileSync(join(d, "blaze.config.json"), "utf8")).projects, ["ENG"]);
     assert.ok(existsSync(join(d, "projects", "ENG", "project.json")));
     // ADR-0012 puts the connection in .blaze/ BECAUSE .blaze/ is untracked. A brand new
     // board has no .gitignore at all, so without this the file would be committed on
     // the first `git add .` — the exact outcome the ADR exists to prevent.
     assert.match(readFileSync(join(d, ".gitignore"), "utf8"), /^\.blaze\/$/m);
+  });
+
+  test("BLZ-413: end to end — blaze init on a lower-case key refuses, writes nothing, and "
+    + "names the key to use", async () => {
+    const d = dir();
+    const { io, out } = capture();
+    assert.notEqual(0, await runInit([`--dir=${d}`, "--project=acme", "--yes", "--no-git"], io),
+      "the wizard must exit non-zero on a key every other verb refuses");
+    assert.match(out.join("\n"), /did you mean "ACME"\?/, out.join("\n"));
+    assert.equal(existsSync(join(d, "blaze.config.json")), false,
+      "planInit is pure and collects errors, so a refused init leaves no half-board");
+    assert.equal(existsSync(join(d, "projects")), false, "and no project directory either");
   });
 
   test("an existing .gitignore is appended to, never replaced", async () => {
