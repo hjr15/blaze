@@ -171,7 +171,8 @@ the shipped signal exists for.
 **There IS a second dedup, and an earlier draft of this section denied it.** The raw
 body-bullet harvest is **15** distinct ids, of which **3 — INF-193, INF-231, INF-241 — also
 appear as subject ids**: `69607d34` names INF-231 in its subject *and* carries 33
-`* INF-231:` bullets, and `a4511002` / `e15b854c` do the same for INF-241 and INF-193. So the
+`* INF-231:` bullets; `a4511002` carries **1** for INF-241 and `e15b854c` **1** for INF-193
+(the shape repeats, the count does not — 33 / 1 / 1). So the
 12 is the residue of deduplicating 15 against the 10, not two naturally disjoint sets. The
 `+22`, the `12` and both id lists are unaffected; the reassurance was wrong. It is recorded
 here rather than deleted because the sentence it replaces was the same defect this ADR exists
@@ -182,17 +183,9 @@ paragraph after the correction.
 
 All 22 are terminal (`done`), so **no ticket moves**. But ADR-0023 permits a terminal
 ticket to *acquire* a record it never had, and 12 hold none — so the question is real.
-Two of them reach that write and they answer **differently**; a third is blocked by a guard
-named below. The first two are settled by running
+Two paths reach that write and they answer **differently**. Both are settled by running
 `reconcile` against a real board and reading the ticket back off disk
 (`tests/reconcile-title-claim-oracle.test.mjs`), not by reasoning from the rules:
-
-**A third path exists and is blocked only by a guard worth naming.** `buildBranchMap` carries
-its own `shippedSet && shippedSet.has(id)` corroboration, so a wider set newly admits a
-*branch*. On a terminal ticket that is blocked by terminal-sticky nulling both fields — which
-is why the conclusion for the twelve holds — but on a NON-terminal ticket the same arm writes
-`branch:` and moves the ticket to `in-progress`. The enumeration below is safe **because of**
-that guard, not in spite of needing it.
 
 - **Shipped alone — REFUTED.** `decide`'s `shipped` arm sets neither `branchVal` nor
   `prVal`, and on a terminal ticket it is not even reached: with no pr and no branch the
@@ -223,6 +216,13 @@ supply no title signal and fall back to `shippedSet`, which is the correct answe
 every one of them — each either names a range, or names a parent while delivering a child.
 BLZ-456's 13 near-miss records become valid under this decision, and its 7 true downstream
 mentions are adjudicated separately in ADR-0027.
+
+**A third write path exists, and it is blocked only by a guard worth naming.**
+`buildBranchMap` carries its own `shippedSet && shippedSet.has(id)` corroboration, so a wider
+set newly admits a *branch*. On a terminal ticket that is blocked by terminal-sticky nulling
+both fields — which is why the conclusion for the twelve above holds — but on a NON-terminal
+ticket the same arm writes `branch:` and moves the ticket to `in-progress`. The two-path
+enumeration above is safe **because of** that guard, not in spite of needing one.
 
 ## The silent half, and what now says it
 

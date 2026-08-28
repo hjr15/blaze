@@ -204,6 +204,44 @@ describe("BLZ-485: the runner refuses to delete the checkout, on resolved real p
     } finally { cleanup(base); }
   });
 
+  // The ancestor test above passes under BOTH the correct predicate and the broken
+  // `rel.startsWith("..")` one, because `nested/checkout` starts with neither. This case is
+  // the one that separates them, and it is why it exists: `relative(base, repo)` here is
+  // `..cache/checkout` — a DESCENT whose first component merely begins with `..`. Read as a
+  // climb-out, the guard accepts, and `rm -rf base` takes the working tree with it. That is
+  // the round-1 defect, reproduced end to end by review; without this test it could return
+  // silently, since `discardSandbox` has exactly one consumer and `.c8rc.json` excludes
+  // `scripts/ci/**` from coverage.
+  test("it refuses an ancestor whose next component NAMES itself `..something` — a descent " +
+       "is not a climb-out", () => {
+    const base = scratch();
+    try {
+      const repo = join(base, "..cache", "checkout");
+      mkdirSync(repo, { recursive: true });
+      writeFileSync(join(repo, "canary.txt"), "still here\n");
+      assert.throws(() => discardSandbox(base, repo), /refusing to remove it/,
+        "`..cache/checkout` is a descent into a directory named `..cache`, not a climb out " +
+        "of `base` — a guard that reads it as a climb deletes the checkout");
+      assert.ok(existsSync(join(repo, "canary.txt")),
+        "the checkout was deleted through a `..`-prefixed directory NAME");
+    } finally { cleanup(base); }
+  });
+
+  test("a genuine sibling sandbox is still removed — the `..` rule did not over-refuse", () => {
+    const base = scratch();
+    try {
+      const repo = join(base, "checkout");
+      const sbx = join(base, "sandbox");
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(sbx, { recursive: true });
+      writeFileSync(join(repo, "canary.txt"), "still here\n");
+      writeFileSync(join(sbx, "junk.txt"), "delete me\n");
+      discardSandbox(sbx, repo);
+      assert.equal(existsSync(sbx), false, "a real sibling sandbox must still be removed");
+      assert.ok(existsSync(join(repo, "canary.txt")), "and the checkout must survive it");
+    } finally { cleanup(base); }
+  });
+
   test("it DOES remove a genuine sandbox — the guard is not simply refusing everything", () => {
     // Non-vacuity. Without this, a `discardSandbox` that threw unconditionally would pass
     // every test above and leave a temp directory behind on every mutation run.
