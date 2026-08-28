@@ -900,6 +900,157 @@ describe("BLZ-469: reconcile WARNS when a merged PR's branch derives an id its t
 });
 
 // =============================================================================
+// BLZ-455 ROUND 2 — WHAT A WIDER shippedSet CAN AND CANNOT WRITE.
+//
+// The round-1 ADR measured the em-dash widening at 0 additional ids and excused it with
+// "the population lives in `docs-central`, which is a codeRepo of neither" — a CATEGORY
+// ERROR, because the relation is project→codeRepo and `docs-central` is a configured
+// codeRepo of both INF and CRP. Measured properly it harvests **+22 INF ids**, all of
+// them on tickets that are already terminal, **12 of which hold no `pr:` record at all**.
+//
+// ADR-0023 lets a terminal ticket ACQUIRE a record it never had (`recordIfAbsentOnly`),
+// so "can the widening newly write a delivery record onto one of those 12?" is a real
+// question and it is NOT answerable by reading the rules — two different paths reach that
+// write and they give OPPOSITE answers. Both are settled here by running `reconcile`
+// against a real board and reading the file off disk, not by argument:
+//
+//   PATH 1 — shipped alone. REFUTED. `decide`'s `shipped` arm sets neither `branchVal`
+//            nor `prVal`, and on a TERMINAL ticket it is not even reached: with no pr and
+//            no branch the chain falls through to the `skip` return. A bundled child
+//            recovered by a wider shippedSet moves nothing and records nothing.
+//
+//   PATH 2 — shipped as CORROBORATION. REAL. `claimCorroborated`'s first arm is
+//            `shippedSet.has(id)`, so enlarging the set promotes a PR that was previously
+//            uncorroborated — and an uncorroborated claim writes nothing, while a
+//            corroborated MERGED one may fill an absent record on a terminal ticket. The
+//            widening therefore CAN newly write a record, by a route the ADR never named.
+//
+// Each is paired with a control that fails if the mechanism under test never engaged.
+// A "no record was written" assertion is worthless without proof the signal arrived.
+// =============================================================================
+describe("BLZ-455 round 2: a wider shippedSet moves nothing on its own, but it does corroborate", () => {
+  const SKEY = "SHP";
+  const SID = `${SKEY}-9`;
+
+  /** A one-repo board with one ticket, one default-branch commit subject, and a stubbed
+   *  `gh` payload. Everything the two paths differ on is a parameter. */
+  function build(tmp, { subject, status, prs = [], record = null }) {
+    const repo = join(tmp, "repo");
+    mkdirSync(repo, { recursive: true });
+    execFileSync("git", ["-C", repo, "init", "-q", "-b", "main"]);
+    execFileSync("git", ["-C", repo, "config", "user.email", "t@t.t"]);
+    execFileSync("git", ["-C", repo, "config", "user.name", "t"]);
+    execFileSync("git", ["-C", repo, "remote", "add", "origin",
+      "https://github.com/hjr15/docs-central.git"]);
+    for (const [i, subj] of ["seed", subject].entries()) {
+      writeFileSync(join(repo, `f${i}.md`), `x${i}\n`);
+      execFileSync("git", ["-C", repo, "add", "-A"]);
+      execFileSync("git", ["-C", repo, "commit", "-q", "-m", subj]);
+    }
+    const root = join(tmp, "board");
+    const dir = join(root, "projects", SKEY, status);
+    mkdirSync(dir, { recursive: true });
+    writeFileSync(join(dir, `${SID}-t.md`),
+      `---\nid: ${SID}\ntype: task\nproject: ${SKEY}\nestimate: 30\n` +
+      (record ? `branch: ${record.branch}\npr: ${record.pr}\n` : "") +
+      (status === "done" ? "resolution: done\n" : "") + `---\n\nbody\n`);
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: SKEY, projects: [SKEY], codeRepos: [repo] }));
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"),
+      `#!/usr/bin/env bash\ncat <<'JSON'\n` + JSON.stringify(prs) + `\nJSON\n`);
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    return { root, bin };
+  }
+
+  /** Run a real applying reconcile and read the ticket back off disk. */
+  async function apply(label, opts) {
+    const tmp = mkdtempSync(join(tmpdir(), `blz455r2-${label}-`));
+    const prev = process.env.PATH;
+    try {
+      const { root, bin } = build(tmp, opts);
+      process.env.PATH = `${bin}:${prev}`;
+      const r = await reconcile({ root, dryRun: false });
+      const projectDir = join(root, "projects", SKEY);
+      let landed = null, text = null;
+      for (const st of readdirSync(projectDir)) {
+        try { text = readFileSync(join(projectDir, st, `${SID}-t.md`), "utf8"); landed = st; }
+        catch { /* not here */ }
+      }
+      return { r, landed, text };
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  }
+
+  const EM = `${SID} — the work this ticket describes`;   // the newly-qualifying shape
+  const HYPHEN = `${SID} - the work this ticket describes`; // still rejected: the control
+
+  test("PREMISE: an em-dash commit subject really does reach the ticket — it moves a NON-terminal one", async () => {
+    // Without this, every "nothing was written" assertion below could be passing because
+    // the em-dash subject was never harvested at all, which is the opposite of the claim.
+    const { r, landed, text } = await apply("premise", { subject: EM, status: "in-progress" });
+    assert.equal(landed, "done", "the widened shipped signal must actually drive the move");
+    assert.deepEqual(r.changes.map((c) => c.id), [SID]);
+    // ...and even here, where it DID move the ticket, it writes no record: the shipped arm
+    // sets neither field. That is the same fact PATH 1 turns on, seen where the arm runs.
+    assert.doesNotMatch(text, /^pr:/m, "the shipped arm has no record to give");
+    assert.doesNotMatch(text, /^branch:/m);
+  });
+
+  test("CONTROL: the same subject with a HYPHEN moves nothing — the em-dash is what changed", async () => {
+    const { r, landed } = await apply("control", { subject: HYPHEN, status: "in-progress" });
+    assert.equal(landed, "in-progress", "a hyphen is not a terminator and must claim nothing");
+    assert.deepEqual(r.changes, []);
+  });
+
+  test("PATH 1 REFUTED: a TERMINAL record-less ticket recovered by shipped alone acquires NO record", async () => {
+    // This is the live shape: 12 of the 22 newly-harvested INF ids are bundled children
+    // sitting in `done` with no branch and no pr, recovered only from body bullets that an
+    // em-dash subject unlocked. ADR-0023 permits a terminal ticket to acquire an absent
+    // record, so the question is real — and the answer is no.
+    const { r, landed, text } = await apply("path1", { subject: EM, status: "done" });
+    assert.equal(landed, "done");
+    assert.doesNotMatch(text, /^pr:/m, "a shipped-only signal must not write a delivery record");
+    assert.doesNotMatch(text, /^branch:/m);
+    assert.deepEqual(r.changes, [], "and it is not even reported as a change");
+  });
+
+  test("PATH 2 REAL: a wider shippedSet CORROBORATES a weak-titled merged PR, which then fills the absent record", async () => {
+    // `claimCorroborated`'s first arm is `shippedSet.has(id)`. Enlarging the set promotes a
+    // PR whose title claims nothing from uncorroborated (writes nothing, ever) to
+    // corroborated (may fill an absent record on a terminal ticket). The em-dash widening
+    // therefore CAN newly write a record — by this route, not by the shipped arm.
+    const weak = [{ number: 110, state: "MERGED", url: "https://example.invalid/pull/110",
+      headRefName: `${SID}-health`, title: "chore: tidy the runbook" }];
+    const { landed, text } = await apply("path2", { subject: EM, status: "done", prs: weak });
+    assert.equal(landed, "done", "terminal-sticky still holds — this is a RECORD, not a move");
+    assert.match(text, /^pr: '?#110 — https:\/\/example\.invalid\/pull\/110/m,
+      "the newly-corroborated merged PR fills the record the ticket never had");
+
+    // THE DISCRIMINATOR. Identical in every respect except the terminator, so a failure
+    // here can only be the widening. With a hyphen the id is not in the shippedSet, the
+    // same PR stays uncorroborated, and an uncorroborated claim may never write.
+    const before = await apply("path2-control", { subject: HYPHEN, status: "done", prs: weak });
+    assert.doesNotMatch(before.text, /^pr:/m,
+      "without the widening the identical PR is uncorroborated and writes nothing");
+  });
+
+  test("PATH 2 does not become a REWRITE: a record already held is not repointed", async () => {
+    // The other half of ADR-0023: acquire-if-absent, never replace. 10 of the 22 ids
+    // already hold a record, and the widening must not touch them.
+    const other = [{ number: 999, state: "MERGED", url: "https://example.invalid/pull/999",
+      headRefName: `${SID}-later`, title: "chore: a later docs pass" }];
+    const { text } = await apply("path2-writeonce", { subject: EM, status: "done", prs: other,
+      record: { branch: `${SID}-original`, pr: "'#110 — https://example.invalid/pull/110'" } });
+    assert.match(text, /#110/, "the original record must survive");
+    assert.doesNotMatch(text, /#999/, "write-once: a wider shippedSet may not repoint a held record");
+  });
+});
+
+// =============================================================================
 // BLZ-458 ROUND 2 — THE NUMBER DIMENSION, PUT WHERE THE CORROBORATION TIER IS
 // ACTUALLY REACHABLE.
 //

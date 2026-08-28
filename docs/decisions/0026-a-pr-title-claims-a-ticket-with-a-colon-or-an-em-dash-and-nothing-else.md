@@ -80,31 +80,105 @@ subject, so this widens that signal by exactly the em-dash case too. That is acc
 intended: an em-dash-separated commit subject claims its ticket as plainly as a
 colon-separated one.
 
-Measured before the flip (BLZ-353's rule), by running the old and new predicates over
-every commit message on each default branch and diffing the harvested id sets:
+### Round 1 measured the wrong repositories, and the excuse was a category error
 
-| Repository | Ref | Commits | Keys | Shipped ids before | after the em-dash | after em-dash + manifest |
-|---|---|---|---|---|---|---|
-| `blaze` | 86619d4 | 337 | BLZ | 237 | **237** | **239** |
-| `blaze-pm` | 80dd9ccb | 333 | all 11 configured | 99 | **99** | **99** |
+The first version of this ADR measured `blaze` (237 → 237) and `blaze-pm` (99 → 99),
+found no change, and excused it with *"the population it exists for lives in
+`docs-central`, which is a codeRepo of neither."* **Both figures reproduce. The excusing
+clause is false.** The relation is project→codeRepo, not repo→repo, and on the live board:
 
-- **The em-dash widening harvests 0 additional ids on either repository.** The population
-  it exists for lives in `docs-central`, which is a codeRepo of neither.
-- **The manifest form harvests 2**, both from the one commit in 337 whose subject carries
-  it (b318d7b, PR #144): BLZ-414 and BLZ-458. A third, BLZ-427, is recovered too but was
-  already named by PR #146's spelled-out title.
-- That is **three of PR #144's sixteen tickets, not sixteen.** The body manifest is only
-  ever as complete as the squash's commit list, and #144 squashed five commits naming
-  three tickets. The go-forward contract is therefore a contract on the **author** as
-  much as on the parser: a `+ N more` title is a promise that the bundle's commits each
-  open with their own `KEY-n:` subject, which is already the house commit rule.
+```
+projects/INF/project.json → codeRepos: [service-platform, online-broker-agent, form-lab,
+                                        claude-config, docs-central, blaze-pm, howman-cloud-site]
+projects/CRP/project.json → codeRepos: [docs-central, howman-cloud-site]
+```
+
+`docs-central` is a configured codeRepo of **two live projects**. "Neither" was only ever
+true of the two *repositories* that had been measured, and reading it as "no project is
+affected" is what let two true figures carry a false conclusion. This is recorded rather
+than quietly corrected because the failure was in the *scope* of the measurement, not in
+its arithmetic — the same shape of error the engine's own comments keep warning about.
+
+### The measurement, redone across every project and every codeRepo
+
+Harvested exactly the way `gatherProject` unions them: for each project key, over each
+codeRepo it configures, at each repo's default-branch ref. 14 repositories, board config
+at blaze-pm `80dd9ccb`.
+
+| Key | before | after | Δ | | Key | before | after | Δ |
+|---|---|---|---|---|---|---|---|---|
+| ACA | 6 | 6 | 0 | | KPA | 24 | 24 | 0 |
+| BLZ | 237 | 239 | **+2** (manifest) | | NCA | 16 | 16 | 0 |
+| CRP | 41 | 41 | 0 | | OBA | 465 | 465 | 0 |
+| FL | 1 | 1 | 0 | | OMA | 23 | 23 | 0 |
+| INF | 453 | 475 | **+22** (em-dash) | | SN | 4 | 4 | 0 |
+| | | | | | **TOTAL** | **1270** | **1294** | **+24** |
+
+- **The em-dash widening harvests +22 ids, all under INF**, every one of them from
+  `docs-central` at `98f2fa8` (421 commits). CRP: **+0**, despite also configuring
+  `docs-central` — none of those subjects carries a CRP key.
+- Measured against `docs-central` in isolation the same delta reads **INF 210 → 232**;
+  against INF's full seven-repo union it reads **453 → 475**. Same +22, two denominators,
+  and the union is the one `gatherProject` actually computes.
+- The manifest form's **+2** on `blaze` (BLZ-414, BLZ-458) is unchanged from round 1.
+
+### It compounds — the widening is not subject-only
+
+Only **10 subjects** newly qualify. They yield **22 ids**, because a qualifying subject
+also unlocks `idsFromCommitMessage`'s body-manifest reader for that commit, and its
+column-0 `* KEY-n:` bullets supply the other **12**. Round 1 described the widening as
+though it stopped at the subject line. It does not, and the split is exactly:
+
+| | count |
+|---|---|
+| subjects newly qualifying (`INF-231 — Tag taxonomy…`, `INF-326 — Diagram quick-wins…`, `INF-208 — Health subject…`, …) | 10 |
+| ids from those subjects | 10 |
+| **further ids unlocked from those commits' body bullets** | **12** |
+| total | **22** |
+
+The two halves map cleanly onto the board: **the 10 subject ids are exactly the 10 that
+already hold a `pr:` record** (INF-193, 208, 226, 231, 232, 238, 241, 318, 319, 326 — each
+has its own branch and merged PR), and **the 12 body-bullet ids are exactly the 12 that
+hold none** (INF-194, 209–213, 320–325) — bundled children with no branch or PR of their
+own, which is the case the shipped signal exists for.
+
+### Can the widening newly WRITE a record? One path no, one path yes
+
+All 22 are terminal (`done`), so **no ticket moves**. But ADR-0023 permits a terminal
+ticket to *acquire* a record it never had, and 12 hold none — so the question is real.
+Two paths reach that write and they answer **differently**. Both are settled by running
+`reconcile` against a real board and reading the ticket back off disk
+(`tests/reconcile-title-claim-oracle.test.mjs`), not by reasoning from the rules:
+
+- **Shipped alone — REFUTED.** `decide`'s `shipped` arm sets neither `branchVal` nor
+  `prVal`, and on a terminal ticket it is not even reached: with no pr and no branch the
+  chain falls through to the `skip` return. A bundled child recovered by a wider
+  `shippedSet` moves nothing and records nothing. Pinned by *"PATH 1 REFUTED: a TERMINAL
+  record-less ticket recovered by shipped alone acquires NO record"*, with a premise test
+  proving the em-dash signal really did arrive (it moves the same ticket when it is
+  non-terminal) so the assertion cannot pass vacuously.
+- **Shipped as corroboration — REAL.** `claimCorroborated`'s *first* arm is
+  `shippedSet.has(id)`. Enlarging that set promotes a weak-titled MERGED PR from
+  uncorroborated — which may never write — to corroborated, which may fill an *absent*
+  record on a terminal ticket. So the widening **can** newly write a delivery record, by
+  a route round 1 never named. Pinned by *"PATH 2 REAL: a wider shippedSet CORROBORATES a
+  weak-titled merged PR, which then fills the absent record"*, with a hyphen-instead-of-
+  em-dash control that is identical in every other respect.
+- Write-once still holds: a wider `shippedSet` may fill an absent record, never repoint a
+  held one. Pinned separately.
+
+**Live exposure of path 2 today: none.** Of `docs-central`'s **204** pull requests, **0**
+have a head ref deriving any of the 12 record-less ids, so there is no PR for the enlarged
+`shippedSet` to promote. The path is live but untriggered, and that is a fact about
+today's forge state rather than a property of the design — a future PR on a branch named
+for one of those 12 would trigger it.
 
 **On the ~64 existing merged PRs:** nothing is rewritten. Going forward, the 10 em-dash
-titles supply a title claim where they previously supplied none; the other ~54 continue
-to supply no title signal and fall back to `shippedSet`, which is the correct answer for
-every one of them — each either names a range, or names a parent while delivering a
-child. BLZ-456's 13 near-miss records become valid under this decision, and its 7 true
-downstream mentions are adjudicated separately in ADR-0027.
+titles supply a title claim where they previously supplied none; the other ~54 continue to
+supply no title signal and fall back to `shippedSet`, which is the correct answer for
+every one of them — each either names a range, or names a parent while delivering a child.
+BLZ-456's 13 near-miss records become valid under this decision, and its 7 true downstream
+mentions are adjudicated separately in ADR-0027.
 
 ## The silent half, and what now says it
 
@@ -134,12 +208,32 @@ gap cost nothing.
   naming a ticket is weaker evidence than a commit demonstrably on the default branch.
   The squash **commit** body is read instead, which is git.
 - **Drop `idsFromCommitMessage`'s early return** so a body manifest works under any
-  subject. Rejected on measurement: at blaze-pm ff5f36c2 the subject gate is what takes
-  the harvested id count from **63 to 3** — the board carries squashed PRs of ticket-*body*
-  edits (`blaze: … board + ticket work`) whose bullets are real `KEY-n:` subjects
-  describing an edit rather than a delivery. The manifest form unblocks the early return
-  the way the return was designed to be unblocked: by making the bundle subject claim its
-  leading id.
+  subject. Rejected on measurement — and the measurement was cited wrongly in round 1,
+  which said the subject gate "takes the harvested id count from **63 to 3**". It does
+  not. `reconcile.mjs`'s own comment reads *1,323 ids ungated, 63 with the subject gate
+  alone, 3 with both*, so **63 → 3 is the column-0 marker's contribution with the gate
+  already on**; the gate's own contribution is **1,323 → 63**.
+
+  Re-derived here as a full 2×2 at blaze-pm `ff5f36c2` (156 commits, all 11 keys), on the
+  basis that makes those three figures self-consistent — they are **marginal** counts, ids
+  the *body* contributes beyond what the subjects already named, which is why the original
+  names exactly three ids for the "both" cell:
+
+  | | marker OFF | marker ON |
+  |---|---|---|
+  | **gate OFF** | 1,323 | 110 |
+  | **gate ON** | 65 | **3** (BLZ-259, INF-672, INF-701) |
+
+  The three named ids reproduce exactly, and 65 lands within 2 of the comment's 63. So:
+  the **subject gate** is worth **1,323 → 65** and the **column-0 marker** a further
+  **65 → 3**. Dropping the gate would readmit roughly **1,258** ids — the board carries
+  squashed PRs of ticket-*body* edits (`blaze: … board + ticket work`) whose bullets are
+  real `KEY-n:` subjects describing an edit rather than a delivery. The conclusion is
+  therefore *better* supported than the misattributed figure suggested, and it is robust
+  across every basis computed (totals rather than marginals, and "any mention" rather than
+  `KEY-n:` for the loose body rule, all give the same ordering). The manifest form unblocks
+  the early return the way the return was designed to be unblocked: by making the bundle
+  subject claim its leading id.
 
 ## Consequences
 
@@ -153,6 +247,11 @@ gap cost nothing.
   `(?=\s*[:—])` left all 22 BLZ-440 tests green; the widening now has an exact edge, and
   every neighbour of that edge is pinned.
 - Because the shipped signal shares the predicate, an em-dash commit subject now also
-  moves a bundled child. Measured at 0 additional ids on both repositories today.
+  moves a bundled child, and unlocks the body manifest for its own commit. Measured at
+  **+22 ids under INF** (10 subjects, 12 compounded body bullets) and +0 everywhere else;
+  all 22 already terminal, so nothing moves today.
+- A wider `shippedSet` is also a wider *corroboration* set, which is the one way this
+  decision can newly write a write-once record. Tested, not assumed — see the two paths
+  above.
 - This supersedes nothing. It refines the convention ADR-0023 depends on and leaves
   ADR-0023's write-once and not-shipped-bias rules exactly as they are.

@@ -52,14 +52,30 @@ values, so the same PR is recorded as the deliverer of two different tickets, an
 worklog note says plainly: *"Backport into OBA-159 investigation doc shipped
 (online-broker-agent PR #17)."*
 
-The six others share one shape: the title leads with a **parent or sibling** (`OBA-91`,
-`OBA-6`, or in OBA-625's case nothing at all) while the head ref names the child the
-record was written on, and the PR body names that child as delivered. The record went to
-the right ticket; only the *evidence path* is one the gate no longer accepts. Under
-ADR-0026 they still supply no title claim — every one of them is a
-words-before-colon or leading-non-id shape, which stays rejected for the reason that
-decision spells out — so reconcile would not write these records today. It would also not
-*re*-write them: they are terminal and the record is write-once.
+The six others share one shape: the title leads with a **parent or sibling** while the
+head ref names the child the record was written on, and the PR body names that child as
+delivered. The record went to the right ticket; only the *evidence path* is one the gate
+no longer accepts.
+
+**Precisely why each supplies no claim on the record's ticket** — and round 1 got this
+wrong, calling all of them "words-before-colon or leading-non-id". Five of the six are
+nothing of the kind:
+
+- `OBA-91:`, `OBA-94:`, `OBA-93:`, `OBA-92:` and `OBA-6:` are **valid
+  leading-id-with-colon titles that DO claim a ticket** under ADR-0026 — in fact the
+  canonical house shape. They simply claim the *parent*, not the child the record sits on.
+  The sub-task ids appear only after an em-dash (`— OBA-204/205/206`) or in parentheses
+  (`(OBA-42, OBA-45)`), and a downstream mention is never a claim — which is the rule
+  ADR-0026 preserves, not one it bends.
+- Only **#284** (`S1 final unblock: OBA-625 rels drift migration + …`) is leading-non-id.
+- **None** of the six is a words-before-colon shape. That population exists on the board
+  (`INF-889 to INF-892: corpus landing`) and is why ADR-0026 rejects the form, but it is
+  not what these six are.
+
+The operative conclusion is unchanged: reconcile would not write these records today,
+because on each the *branch*-derived id is corroborated by neither the title (which claims
+a different ticket) nor a `KEY-n:` commit. It would also not *re*-write them: they are
+terminal and the record is write-once.
 
 ## Decision
 

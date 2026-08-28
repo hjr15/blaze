@@ -375,11 +375,43 @@ export function idsFromCommitMessage(message, key) {
 // BLAST RADIUS, STATED: this is the SAME predicate `idsFromCommitMessage` runs over a
 // commit SUBJECT, so the shipped-commit signal widens by exactly the em-dash case too.
 // That is accepted and intended — an em-dash-separated commit subject claims its ticket
-// as plainly as a colon-separated one, and MEASURED (BLZ-353) before it was flipped: the
-// em-dash widening ALONE harvests 0 additional shipped ids on `blaze` at 86619d4 (337
-// commits, key BLZ: 237 before, 237 after) and 0 on the board at blaze-pm 80dd9ccb (333
-// commits, all eleven configured keys: 99 before, 99 after). The population it exists for
-// lives in `docs-central`, which is a codeRepo of neither. See ADR-0026.
+// as plainly as a colon-separated one.
+//
+// MEASURED (BLZ-353), AND THE FIRST MEASUREMENT WAS WRONG. Round 1 measured `blaze` and
+// `blaze-pm`, found 0 additional ids, and excused it with "the population lives in
+// `docs-central`, which is a codeRepo of neither" — a CATEGORY ERROR. The relation is
+// project→codeRepo, not repo→repo: `docs-central` is a configured codeRepo of BOTH
+// `projects/INF` and `projects/CRP`, so it is squarely inside the blast radius. Two true
+// figures did the rhetorical work of a false conclusion.
+//
+// Redone across every project key and every codeRepo it configures, the way
+// `gatherProject` actually unions them (14 repos, board config at blaze-pm 80dd9ccb):
+//
+//     key    before   after   delta          key    before   after   delta
+//     ACA         6       6      0           KPA        24      24      0
+//     BLZ       237     239     +2 (manifest) NCA       16      16      0
+//     CRP        41      41      0           OBA       465     465      0
+//     FL          1       1      0           OMA        23      23      0
+//     INF       453     475    +22 (em-dash) SN          4       4      0
+//                                            TOTAL    1270    1294    +24
+//
+// So the em-dash widening harvests +22 ids, all under INF, all from `docs-central` at
+// 98f2fa8 (421 commits). CRP: 0. And IT COMPOUNDS, which round 1 never stated: only 10
+// SUBJECTS newly qualify, but a qualifying subject also unlocks the body-manifest reader
+// above for that commit, and its `* KEY-n:` bullets contribute the other 12. The widening
+// is not subject-only.
+//
+// All 22 are already terminal, so nothing moves — but 12 of them hold no `pr:` record,
+// and ADR-0023 lets a terminal ticket ACQUIRE an absent one. Two paths reach that write
+// and they answer differently; both are settled by end-to-end tests in
+// tests/reconcile-title-claim-oracle.test.mjs rather than by argument:
+//   - shipped ALONE cannot write a record (the `shipped` arm sets neither field, and on a
+//     terminal ticket it is not even reached) — REFUTED;
+//   - shipped as CORROBORATION can, because `claimCorroborated`'s first arm is
+//     `shippedSet.has(id)`: a wider set promotes a weak-titled MERGED PR from
+//     uncorroborated to corroborated, and that PR may fill an absent record — REAL. No
+//     such PR exists on `docs-central` today (0 of its 204 PRs has a branch deriving any
+//     of the 12), so the path is live but untriggered. See ADR-0026.
 //
 // --- BLZ-469: the MULTI-TICKET MANIFEST form -------------------------------------
 // `KEY-n + N more: desc` claims KEY-n and NOTHING ELSE from the subject; the squash
