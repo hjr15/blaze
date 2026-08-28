@@ -42,6 +42,39 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
+// =============================================================================
+// BLZ-465: THE COUNTER IS THE ASSERTION, AND THE TOTAL IS ASSERTED.
+//
+// BLZ-420 closed the CROSS-PRODUCT size here (`assertCrossProductSize`), which is a
+// different quantity from the CLAUSE count — and the clause count was only ever
+// PRINTED. `ORACLE TOTAL` asserted `totalClauses > 0`, which every possible run
+// satisfies, so a deleted clause and its hand-written `clauses += 1` left this file
+// 4/4 green with a smaller banner. The equivalence run's own share was hand-fitted at
+// `before.size + 6` when the code executes `before.size + 5` — an overstatement by one
+// that nothing could catch, which is the failure mode in miniature.
+//
+// The pattern is `tests/board-overstatement-oracle.test.mjs`'s (BLZ-414/444/452):
+//   1. these wrappers are the ONLY way the counter moves, so a deleted clause takes its
+//      count with it and there is no separate counter left to delete;
+//   2. each of the three runs asserts its own executed count against a budget DERIVED
+//      from the cross-product's declared size and the FILESYSTEM ground truth (how many
+//      tickets really moved, really cleared), never from a figure read off a passing
+//      run; and `ORACLE TOTAL` asserts the sum.
+//
+// THE BINDING IS ONE-DIRECTIONAL. A DELETED clause is caught — its count vanishes and
+// the run's budget names the gap. An ADDED clause written as a bare `assert.` is NOT
+// caught: it is simply uncounted and the file stays green. Claiming otherwise would be
+// this file's own defect. Write new clauses through the wrappers.
+//
+// The bare `assert.` calls that remain are deliberately NOT clauses: the fixture
+// preconditions in `assertCrossProductSize` (the board really is the whole declared
+// cross-product) and the budget meta-assertions themselves.
+// =============================================================================
+let clauses = 0;
+const eq = (a, b, msg) => { clauses += 1; assert.equal(a, b, msg); };
+const ok = (c, msg) => { clauses += 1; assert.ok(c, msg); };
+const deepEq = (a, b, msg) => { clauses += 1; assert.deepEqual(a, b, msg); };
+
 const KEY = "ORC";
 const STATUSES = ["defined", "in-progress", "in-review", "done"];
 // "ambiguous-merged": two MERGED PRs, equally titled `<id>: the work` — BLZ-398's tie,
@@ -249,89 +282,94 @@ const hasRecord = (snap) => Boolean(snap && (snap.branch || snap.pr));
 // =============================================================================
 // The clauses. Every comparison reads ONLY `before`/`after` (the filesystem) and the
 // raw published events — never `reconcile()`'s return, `decide()`, or anything derived
-// from either. "Presents a completed move" is `moved === true && applied !== false` —
-// an event with NO `applied` field at all (every event this feed published before this
-// ticket) is read as claiming completion, which is exactly the ambient, unqualified
-// claim BLZ-404 exists to stop.
+// from either.
 //
-// REVIEW (finding 4.2): `clauses` now counts assertions actually EXECUTED, not loop
-// iterations — a clause whose body is gated (`if (...)`) increments the counter INSIDE
-// the gate, at the point the assert.* call actually runs, so an iteration that never
-// reaches an assertion is not counted as one. Applied to (a), (b) and (d) below; (c) was
-// already gated correctly (it iterates `movedIds`, which IS the real ground truth).
+// BLZ-465 REPLACES THE LOOP STRUCTURE, not the assertions. Clauses (a), (b), (c) and
+// (d) used to iterate `reconcileEvents` — the SUBJECT's own output — so the number of
+// clauses this function executed depended on how many events the subject chose to
+// publish, and no budget derived from the fixture could state it in advance. They are
+// now driven by the FILESYSTEM: one pass over `before`, with the events for each id
+// looked up. What each clause asserts is unchanged or stronger:
+//
+//   (a)+(b)+(c) become, per ticket, "the number of events presenting a COMPLETED move
+//     for this ticket is exactly 1 if its directory really changed and 0 if it did not",
+//     plus (for a ticket that really moved) "there is exactly ONE event about it at all"
+//     and the from/to pair. A completed-move claim naming a ticket that is not on the
+//     board at all — which (a) used to catch by finding `before.get(e.id)` undefined —
+//     is caught by the one whole-set clause after the loop.
+//   (d) becomes, per ticket, "every REALISATION event for it claims `cleared` if the
+//     branch/pr really disappeared from disk, and none of them do if it did not", which
+//     is exactly the per-event equality it replaces, quantified over the same events.
+//
+// "Presents a completed move" is still `moved === true && applied !== false` — an event
+// with NO `applied` field at all (every event this feed published before BLZ-404) is
+// read as claiming completion, which is exactly the ambient, unqualified claim BLZ-404
+// exists to stop.
 // =============================================================================
+const presentsCompletedMove = (e) => e.moved === true && e.applied !== false;
+
 function checkGroundTruth(before, after, reconcileEvents, label) {
-  let clauses = 0;
   const movedIds = new Set();
   const clearedIds = new Set();
   for (const [id, b] of before) {
     const a = after.get(id);
-    clauses += 1;
-    assert.ok(a, `${label}: ${id} must still exist on disk after the run`);
-    if (b.status !== a.status) movedIds.add(id);
-    if (hasRecord(b) && !hasRecord(a)) clearedIds.add(id);
+    if (a && b.status !== a.status) movedIds.add(id);
+    if (a && hasRecord(b) && !hasRecord(a)) clearedIds.add(id);
   }
 
-  // (a) every event presenting a COMPLETED move names a ticket that really moved.
-  for (const e of reconcileEvents) {
-    if (!(e.moved === true && e.applied !== false)) continue; // not a completed-move claim
-    clauses += 1;
-    const b = before.get(e.id), a = after.get(e.id);
-    assert.ok(b && a && b.status !== a.status,
-      `${label}: ${e.id} — event claims a completed move ${e.from} -> ${e.to}, ` +
-      `but the directory on disk did not change`);
-    assert.equal(b.status, e.from,
-      `${label}: ${e.id} — event 'from' (${e.from}) does not match the real before-directory (${b.status})`);
-    assert.equal(a.status, e.to,
-      `${label}: ${e.id} — event 'to' (${e.to}) does not match the real after-directory (${a.status})`);
+  for (const [id, b] of before) {
+    const a = after.get(id);
+    ok(a, `${label}: ${id} must still exist on disk after the run`);
+
+    const evs = reconcileEvents.filter((e) => e.id === id);
+    const done = evs.filter(presentsCompletedMove);
+    const reallyMoved = movedIds.has(id);
+
+    // (a)+(b): a completed-move claim exists for exactly the tickets that really moved.
+    eq(done.length, reallyMoved ? 1 : 0,
+      `${label}: ${id} — the directory on disk ${reallyMoved ? "really changed" : "did not change"} ` +
+      `but ${done.length} event(s) present it as a completed move: ${JSON.stringify(done)}`);
+
+    if (reallyMoved) {
+      // (c): one account of one ticket, and its from/to are the real directories.
+      eq(evs.length, 1,
+        `${label}: ${id} — directory changed on disk but ${evs.length} event(s) describe it`);
+      eq(done[0].from, b.status,
+        `${label}: ${id} — event 'from' (${done[0].from}) does not match the real before-directory (${b.status})`);
+      eq(done[0].to, a.status,
+        `${label}: ${id} — event 'to' (${done[0].to}) does not match the real after-directory (${a.status})`);
+    }
+
+    // (d) `cleared` is true of a REALISATION exactly when branch/pr really disappeared.
+    //
+    // REVIEW (finding 3): gated on `applied !== false`. A PREVIEW event PROPOSES what
+    // would happen; nothing on disk moves during a dry run (the write port is never
+    // called), so `after` trivially equals `before` for every ticket and `clearedIds` is
+    // always empty regardless of what the run proposed. Comparing a preview event's
+    // `cleared` against that necessarily-unchanged snapshot is comparing a PROPOSAL to a
+    // REALISATION that never occurred. The preview half's PROPOSAL is instead graded
+    // against a real applied pass, in the equivalence test below (BLZ-421).
+    const realisations = evs.filter((e) => e.applied !== false);
+    const reallyCleared = clearedIds.has(id);
+    eq(realisations.filter((e) => Boolean(e.cleared)).length, reallyCleared ? realisations.length : 0,
+      `${label}: ${id} — branch/pr on disk ${reallyCleared ? "did" : "did not"} disappear, but the ` +
+      `realisation events for it say ${JSON.stringify(realisations.map((e) => Boolean(e.cleared)))}`);
   }
 
-  // (b) no ticket whose directory did NOT change has any event presenting it as completed.
-  for (const id of before.keys()) {
-    if (movedIds.has(id)) continue; // covered by (c) below instead
-    clauses += 1;
-    const bad = reconcileEvents.find((e) => e.id === id && e.moved === true && e.applied !== false);
-    assert.equal(bad, undefined,
-      `${label}: ${id} — directory did not change on disk, but ${JSON.stringify(bad)} presents it as a completed move`);
-  }
+  // (a), for the case a per-ticket loop over the board cannot see: an event naming a
+  // ticket that is not on this board at all.
+  deepEq(reconcileEvents.filter((e) => !before.has(e.id)).map((e) => e.id).sort(), [],
+    `${label}: the feed published event(s) for id(s) that are not on the board`);
 
-  // (c) every ticket whose directory DID change has exactly one event describing it,
-  //     with from/to equal to the real before/after directories.
-  for (const id of movedIds) {
-    clauses += 1;
-    const matches = reconcileEvents.filter((e) => e.id === id);
-    assert.equal(matches.length, 1,
-      `${label}: ${id} — directory changed on disk but ${matches.length} event(s) describe it`);
-    const [e] = matches;
-    const b = before.get(id), a = after.get(id);
-    assert.equal(e.from, b.status, `${label}: ${id} — event 'from' does not match the real before-directory`);
-    assert.equal(e.to, a.status, `${label}: ${id} — event 'to' does not match the real after-directory`);
-  }
-
-  // (d) e.cleared === true iff branch/pr really disappeared from disk.
-  //
-  // REVIEW (finding 3): gated on `e.applied !== false`. A PREVIEW event PROPOSES what
-  // would happen; nothing on disk moves during a dry run (the write port is never called),
-  // so `after` trivially equals `before` for every ticket and `clearedIds` is always empty
-  // regardless of what the run proposed. Comparing a preview event's `cleared` against
-  // that necessarily-unchanged snapshot is comparing a PROPOSAL to a REALISATION that
-  // never occurred — exactly the shape the file's own header warns "would fail spuriously
-  // once the fixture gains a clearable ticket" once one exists (it now does: the
-  // ambiguous-merged + hasRecord dimension). The preview half's PROPOSAL is instead
-  // checked directly against `movedIds`/`clearedIds`-independent non-vacuity assertions in
-  // the test body below (`cleared === true` must still be PROPOSED by at least one event).
-  for (const e of reconcileEvents) {
-    if (e.applied === false) continue; // proposal, not a realisation — nothing on disk to check it against
-    clauses += 1;
-    const reallyCleared = clearedIds.has(e.id);
-    assert.equal(Boolean(e.cleared), reallyCleared,
-      `${label}: ${e.id} — event.cleared=${e.cleared} but branch/pr on disk ${reallyCleared ? "did" : "did not"} disappear`);
-  }
-
-  return { clauses, movedIds, clearedIds };
+  return { movedIds, clearedIds };
 }
 
-let totalClauses = 0;
+/** How many clauses `checkGroundTruth` executes — three per ticket on the board, three
+ *  more for each ticket that really moved, and the one whole-set clause. Derived from
+ *  the cross-product's declared size and the FILESYSTEM, never from a run. */
+const groundTruthBudget = (before, movedIds) => 3 * before.size + 3 * movedIds.size + 1;
+
+let expectedTotal = 0;
 
 describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the filesystem", () => {
   test("applied run: every event's claim about a move matches a real directory change on disk", async () => {
@@ -357,24 +395,23 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const after = snapshotBoard(root);
       const reconcileEvents = events.filter((e) => e.type === "reconcile");
 
-      const { clauses, movedIds, clearedIds } = checkGroundTruth(before, after, reconcileEvents, "applied");
-      let bonusClauses = 2;
+      const runStart = clauses;
+      const { movedIds, clearedIds } = checkGroundTruth(before, after, reconcileEvents, "applied");
       // Non-vacuity: an applied run that moves nothing proves nothing about whether the
       // feed's claims track reality — and is exactly what the permanent-dry-run defect
       // (D1) produces. The generated cross-product across many forge signals guarantees
       // real candidates; assert the run actually acted on some of them.
-      assert.ok(movedIds.size > 0,
+      ok(movedIds.size > 0,
         "applied: the fixture must produce at least one real directory move — 0 means the run never really applied");
-      assert.ok(reconcileEvents.length > 0, "applied: the run must publish at least one reconcile event");
+      ok(reconcileEvents.length > 0, "applied: the run must publish at least one reconcile event");
 
       // Non-vacuity for the added dimension (review finding 3): a run that never clears a
       // record proves nothing about whether `cleared` is reported honestly. The
       // ambiguous-merged + hasRecord + non-terminal-status combination is DESIGNED to
       // clear — assert it actually did, on disk, independent of the event.
-      assert.ok(clearedIds.size > 0,
+      ok(clearedIds.size > 0,
         "applied: the fixture must produce at least one REAL branch/pr clear on disk — 0 means " +
         "the added ambiguous-merged + pre-existing-record dimension is not actually exercised");
-      bonusClauses += 1;
 
       // BLZ-404 (review finding 3): a commit-existence clause, ground truth from
       // `git log`/`git show` alone — never from `reconcile()`'s return value. This board's
@@ -383,9 +420,8 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       // DISTINCT tickets the commit's diff actually touches.
       const commitCountAfter = Number(
         execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
-      assert.equal(commitCountAfter, commitCountBefore + 1,
+      eq(commitCountAfter, commitCountBefore + 1,
         "applied: a run with real moves, on a per-op-mode board, must create exactly one new commit");
-      bonusClauses += 1;
 
       const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
       const diffFiles = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
@@ -400,27 +436,25 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       // `reconcile()`'s own return value; ground truth for the second is the remainder of
       // the diff's distinct ids that did NOT move.
       const movedMatch = /reconcile (\d+) ticket\(s\) moved/.exec(subject);
-      assert.ok(movedMatch, `applied: the commit subject must state its moved-ticket count, got: ${subject}`);
-      assert.equal(Number(movedMatch[1]), movedIds.size,
+      ok(movedMatch, `applied: the commit subject must state its moved-ticket count, got: ${subject}`);
+      eq(Number(movedMatch[1]), movedIds.size,
         "applied: the commit subject's claimed MOVED count must match the number of tickets whose " +
         `directory really changed (ground truth: filesystem snapshot), got subject "${subject}" but ` +
         `${movedIds.size} ticket(s) really moved: ${[...movedIds].join(", ")}`);
-      bonusClauses += 1;
       const nonMovedGroundTruth = diffIds.size - movedIds.size;
       const updatedMatch = /(\d+) ticket\(s\) updated without a status change/.exec(subject);
       if (nonMovedGroundTruth > 0) {
-        assert.ok(updatedMatch,
+        ok(updatedMatch,
           `applied: the diff touches ${diffIds.size} distinct ticket(s) but only ${movedIds.size} moved — ` +
           `the subject must name the remaining ${nonMovedGroundTruth} non-moving update(s), got: ${subject}`);
-        assert.equal(Number(updatedMatch[1]), nonMovedGroundTruth,
+        eq(Number(updatedMatch[1]), nonMovedGroundTruth,
           "applied: the commit subject's non-moving-update count must match the diff's real remainder " +
           `(${nonMovedGroundTruth}), got subject "${subject}"`);
       } else {
-        assert.equal(updatedMatch, null,
+        eq(updatedMatch, null,
           `applied: every ticket the diff touches really moved, so the subject must not claim a ` +
           `non-moving update, got: ${subject}`);
       }
-      bonusClauses += 1;
 
       // BLZ-404 round 2 (blocking 2 — adversarial re-review's M6 mutation): the two clauses
       // above collapse a move to a SET of distinct ticket ids and survive a mutation that
@@ -439,13 +473,21 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const boardTreeDirty = execFileSync("git",
         ["-C", root, "status", "--porcelain", "--", join(root, "projects", KEY)],
         { encoding: "utf8" }).trim();
-      assert.equal(boardTreeDirty, "",
+      eq(boardTreeDirty, "",
         "applied: the board's own project tree must be FULLY committed after an applied run — " +
         `git status --porcelain reports uncommitted change(s) it must not:\n${boardTreeDirty}`);
-      bonusClauses += 1;
 
-      totalClauses += clauses + bonusClauses;
-      console.log(`ORACLE (applied): ${clauses + bonusClauses} clauses checked over ${before.size} tickets and ` +
+      // BLZ-465: this run's own budget. Everything above the per-ticket loop is a fixed
+      // count for this run's coordinates; the loop's share is derived from the declared
+      // cross-product size and the filesystem measurement. `nonMovedGroundTruth` comes
+      // from `git show`, an independent source, not from anything the feed said.
+      const budget = groundTruthBudget(before, movedIds) + 7 + (nonMovedGroundTruth > 0 ? 2 : 1);
+      assert.equal(clauses - runStart, budget,
+        `applied: this run executed ${clauses - runStart} clause(s); its declared cross-product ` +
+        `and the filesystem budget ${budget}. A clause was added or removed — update ` +
+        "groundTruthBudget or this run's constant to match the code, deliberately");
+      expectedTotal += budget;
+      console.log(`ORACLE (applied): ${budget} clauses checked over ${before.size} tickets and ` +
         `${reconcileEvents.length} events (${movedIds.size} real moves, ${clearedIds.size} real clears), 0 mismatches`);
     } finally {
       if (app) app.server.close();
@@ -475,13 +517,13 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const after = snapshotBoard(root);
       const reconcileEvents = events.filter((e) => e.type === "reconcile");
 
-      const { clauses, movedIds } = checkGroundTruth(before, after, reconcileEvents, "preview");
-      let bonusClauses = 2;
+      const runStart = clauses;
+      const { movedIds } = checkGroundTruth(before, after, reconcileEvents, "preview");
       // (e) in preview mode, NO ticket's path changed on disk at all.
-      assert.equal(movedIds.size, 0, "preview: dryRun must not move any ticket's directory on disk");
+      eq(movedIds.size, 0, "preview: dryRun must not move any ticket's directory on disk");
       // Non-vacuity for this half: a preview that finds nothing to propose cannot prove
       // that a genuine proposal is rendered honestly.
-      assert.ok(reconcileEvents.some((e) => e.moved === true),
+      ok(reconcileEvents.some((e) => e.moved === true),
         "preview: the run must have proposed at least one move, or this half of the oracle is vacuous");
 
       // Non-vacuity for the added dimension (review finding 3), preview half: the run must
@@ -490,13 +532,19 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       // never touches disk, so there is nothing real to compare a PROPOSAL against). This
       // still proves the ambiguous-merged + hasRecord dimension reaches the clearing code
       // path in preview, rather than the dimension only ever being reachable when applied.
-      assert.ok(reconcileEvents.some((e) => e.cleared === true),
+      ok(reconcileEvents.some((e) => e.cleared === true),
         "preview: the run must have PROPOSED at least one clear, or the added ambiguous-merged + " +
         "pre-existing-record dimension is not exercised in preview at all");
-      bonusClauses += 1;
 
-      totalClauses += clauses + bonusClauses;
-      console.log(`ORACLE (preview): ${clauses + bonusClauses} clauses checked over ${before.size} tickets and ` +
+      // BLZ-465. `movedIds` is empty by construction here (a dry run writes nothing), so
+      // the loop's moved-ticket share is 0 — asserted rather than assumed by the clause
+      // above it.
+      const budget = groundTruthBudget(before, movedIds) + 3;
+      assert.equal(clauses - runStart, budget,
+        `preview: this run executed ${clauses - runStart} clause(s); its declared cross-product ` +
+        `and the filesystem budget ${budget}`);
+      expectedTotal += budget;
+      console.log(`ORACLE (preview): ${budget} clauses checked over ${before.size} tickets and ` +
         `${reconcileEvents.length} events (${movedIds.size} real moves), 0 mismatches`);
     } finally {
       if (app) app.server.close();
@@ -531,6 +579,7 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
 
       const before = snapshotBoard(root);
       assertCrossProductSize(manifest, before, "equivalence");   // BLZ-420
+      const runStart = clauses;
 
       const { loadConfig } = await import("../scripts/config.mjs");
       const { createApp } = await import("../scripts/supervisor.mjs");
@@ -541,7 +590,7 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       await app.runReconcile({ dryRun: true });
       const proposed = events.filter((e) => e.type === "reconcile");
       const midway = snapshotBoard(root);
-      assert.deepEqual([...midway.keys()].sort(), [...before.keys()].sort(),
+      deepEq([...midway.keys()].sort(), [...before.keys()].sort(),
         "equivalence: the dry run changed the set of files on disk — it must write nothing");
 
       // Same board, same starting state, now for real.
@@ -555,7 +604,7 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const reallyCleared = new Set();
       for (const [id, b] of before) {
         const a = after.get(id);
-        assert.ok(a, `equivalence: ${id} must still exist on disk after the applied pass`);
+        ok(a, `equivalence: ${id} must still exist on disk after the applied pass`);
         if (b.status !== a.status) reallyMoved.add(id);
         if (hasRecord(b) && !hasRecord(a)) reallyCleared.add(id);
       }
@@ -564,22 +613,30 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
       const proposedCleared = new Set(proposed.filter((e) => e.cleared === true).map((e) => e.id));
 
       // Non-vacuity FIRST: an empty proposal set would satisfy every equality below.
-      assert.ok(reallyMoved.size > 0, "equivalence: the applied pass must really move something");
-      assert.ok(reallyCleared.size > 0,
+      ok(reallyMoved.size > 0, "equivalence: the applied pass must really move something");
+      ok(reallyCleared.size > 0,
         "equivalence: the applied pass must really clear at least one branch/pr on disk");
 
-      assert.deepEqual([...proposedCleared].sort(), [...reallyCleared].sort(),
+      deepEq([...proposedCleared].sort(), [...reallyCleared].sort(),
         "equivalence: the preview PROPOSED a different set of branch/pr clears than the " +
         "applied pass then really performed on disk — a preview that over- or under-states " +
         "`cleared` is exactly BLZ-421's hole");
-      assert.deepEqual([...proposedMoved].sort(), [...reallyMoved].sort(),
+      deepEq([...proposedMoved].sort(), [...reallyMoved].sort(),
         "equivalence: the preview PROPOSED a different set of moves than the applied pass " +
         "then really performed on disk");
 
-      console.log(`ORACLE (equivalence): ${before.size} tickets; preview proposed ` +
+      // BLZ-465. This run's share used to be the hand-written `before.size + 6`; the code
+      // executes `before.size + 5` — the dry-run-wrote-nothing clause, one existence
+      // clause per ticket, two non-vacuity clauses and the two set equalities. Nothing
+      // could catch the extra 1, because nothing compared the figure to anything.
+      const budget = before.size + 5;
+      assert.equal(clauses - runStart, budget,
+        `equivalence: this run executed ${clauses - runStart} clause(s); the declared ` +
+        `cross-product budgets ${budget}`);
+      expectedTotal += budget;
+      console.log(`ORACLE (equivalence): ${budget} clauses over ${before.size} tickets; preview proposed ` +
         `${proposedMoved.size} move(s) and ${proposedCleared.size} clear(s); the applied pass ` +
         `really made ${reallyMoved.size} and ${reallyCleared.size}, 0 mismatches`);
-      totalClauses += before.size + 6;
     } finally {
       if (app) app.server.close();
       process.env.PATH = prevPath;
@@ -588,12 +645,16 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
   });
 
   test("ORACLE TOTAL", () => {
-    // Reported so the PR body can quote an exact figure, not a range. REVIEW (finding
-    // 4.2): this number is now a count of assertions actually EXECUTED (see
-    // `checkGroundTruth`'s header comment), not of loop iterations — it is smaller than
-    // the previously-claimed total, and it is smaller because the previous total was
-    // wrong, not because less is now checked.
-    console.log(`ORACLE TOTAL: ${totalClauses} clauses checked across the applied, preview and equivalence runs, 0 mismatches`);
-    assert.ok(totalClauses > 0);
+    // BLZ-465: ASSERTED, not merely printed, and asserted against the SUM OF THE THREE
+    // RUNS' OWN BUDGETS — each derived from the declared cross-product size and the
+    // filesystem, none read off a passing run. This used to be `assert.ok(totalClauses >
+    // 0)`, which every possible run satisfies. Each run already checked its own share, so
+    // a mismatch HERE means a clause was added or removed outside one of the three.
+    console.log(`ORACLE TOTAL: ${clauses} clauses checked and ASSERTED across the applied, ` +
+      "preview and equivalence runs, 0 mismatches");
+    assert.equal(expectedTotal > 0, true,
+      "ORACLE TOTAL ran before the three runs did — it must be the last test in this file");
+    assert.equal(clauses, expectedTotal,
+      `the oracle executed ${clauses} clause(s); the three runs' own budgets sum to ${expectedTotal}`);
   });
 });

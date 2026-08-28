@@ -519,11 +519,46 @@
       el.textContent = msg; el.classList.add("show");
       clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 4000);
     }
+    // BLZ-449: the sentence a WRITE gets. Not written here either — its one definition
+    // lives in scripts/views/write-outcome.mjs and its source is injected verbatim
+    // between the two marker comments below, exactly as reconcileSummary is, so the
+    // served page and the tested function are the same text by construction.
+    /* BLAZE_WRITE_OUTCOME_BEGIN */
+function writeOutcome(j) {
+  var body = j || {};
+  // Only a 200 reaches here; a non-ok body is already toasted as an error by the
+  // caller. `ok !== true` is still checked rather than assumed, for the same reason
+  // reconcileSummary checks it (BLZ-446): a body this consumer does not understand
+  // must produce no sentence at all rather than a confident one.
+  if (body.ok !== true) return "";
+  // ORDER MATTERS. A queued write is `committed: false` too, and it is not a no-op —
+  // the commit is deferred to `blaze commit`, not absent because there was nothing to
+  // commit. Testing `committed` first would report a real pending write as an
+  // idempotent one.
+  if (body.queued === true) return "saved (queued for blaze commit) — nothing is in git log yet";
+  if (body.committed === false) {
+    return "saved (no commit created — the file already matched HEAD) — nothing was added to git log";
+  }
+  // A real commit needs no sentence: the board's model is one op, one commit, and
+  // saying so on every click is noise the operator learns to ignore.
+  return "";
+}
+/* BLAZE_WRITE_OUTCOME_END */
     async function blazePost(path, body) {
       try {
         const res = await fetch(path, { method: "POST",
           headers: { "content-type": "application/json", "x-blaze-csrf": CSRF }, body: JSON.stringify(body) });
-        if (res.ok) { window.blazeSwapView(document.documentElement.dataset.view); return true; }
+        if (res.ok) {
+          // BLZ-449: the 200 body carries committed/queued (serve.mjs's gitOutcome,
+          // added by BLZ-422) and this consumer used to discard it. A queued write and an
+          // idempotent re-write that git had nothing to commit both looked identical to a
+          // real commit from here — on a board whose model is one op, one commit.
+          const j = await res.json().catch(() => null);
+          const note = writeOutcome(j);
+          if (note) toast(note);
+          window.blazeSwapView(document.documentElement.dataset.view);
+          return true;
+        }
         const j = await res.json().catch(() => ({ errors: [res.statusText] }));
         toast((j.errors || ["error"]).join("; ")); return false;
       } catch (e) { toast("network error: " + e.message); return false; }
@@ -598,12 +633,35 @@
     /* BLAZE_RECONCILE_SUMMARY_BEGIN */
 function reconcileSummary(j) {
   var body = j || {};
-  // STRICTLY `ok === true`. `reconcilePreview` sets `ok` on every path it takes, so
-  // anything else is either one of its two refusals (an unknown --project key, or
-  // --project given no key at all — both carry `changes: []`, which is byte-identical
-  // to a genuinely clean board) or a response this consumer does not understand at
-  // all (a 500's `{errors:[…]}`, a proxy's error page). Neither is an in-sync board,
-  // and neither may be rendered as one.
+  // STRICTLY `ok === true`, and the reason is NOT only a contract one.
+  //
+  // BLZ-446 — the reachability of this branch, stated plainly, because BLZ-426 was
+  // documented as a CONTRACT-ONLY fix and that understated it:
+  //
+  //   UNREACHABLE through the route. `reconcilePreview`'s own two refusals (an
+  //   unknown --project key, and --project given no key at all) both require
+  //   `projects !== null`, and serve.mjs's `/api/reconcile-preview` never passes
+  //   one. Those two bodies are reachable only through `reconcile` the CLI. For
+  //   them this really is a contract gap, tested as one.
+  //
+  //   REACHABLE through the route, today, with no code change at all. This
+  //   consumer `fetch`es one URL and parses whatever comes back, and the route
+  //   can answer with a body that is not `{ok:true}` on paths that have nothing
+  //   to do with `projects`:
+  //     - 401 `{errors:[…]}` from `gate()` — no credential, or an expired,
+  //       revoked or unknown bearer token, on any board with users configured;
+  //     - 503 `{errors:["authentication is temporarily unavailable"]}` when the
+  //       gate itself throws (a locked or unreadable identity.db);
+  //     - 503 `{errors:[…]}` before first-run setup completes;
+  //     - 500 `{errors:[…]}`, or a reverse proxy's own error page.
+  //   Under the pre-BLZ-426 inline code every one of those left `j.changes`
+  //   undefined, so `moves` was 0 and the toast read "no code-bound changes" —
+  //   an in-sync board reported on an AUTH FAILURE. That was a live production
+  //   bug, not a contract gap, and it is what this branch stops.
+  //
+  // So: anything that is not `ok === true` is either a refusal or a response
+  // this consumer does not understand. Neither is an in-sync board, and neither
+  // may be rendered as one.
   if (body.ok !== true) {
     var why = body.error
       || (body.errors && body.errors.length ? body.errors.join("; ") : "")
@@ -629,8 +687,37 @@ function reconcileSummary(j) {
   var forge = (body.forgeErrors || []).length;
   var parts = [];
   if (moved) parts.push(moved + " code-bound move(s) — apply via 'blaze reconcile --apply'");
+  // BLZ-447: "other update(s)" here, "N ticket(s) updated without a status change"
+  // in reconcile-commit-report.mjs, for the same quantity. The split is DELIBERATE
+  // and it is the preview/write-record line, not an accident: the two PREVIEW
+  // surfaces (this toast, and reconcile.mjs's `(dry-run: N move(s), M other
+  // update(s); …)` tail) both say "other update(s)"; the two WRITE-RECORD surfaces
+  // (`applySummary`'s post-apply line, and the commit subject reconcile.mjs writes)
+  // both say "N ticket(s) updated without a status change". A preview is a short
+  // parenthetical about what WOULD happen and is read next to its own move count; a
+  // write record is a durable sentence about what DID happen, read later and alone,
+  // where "other" names nothing. All four sites are pinned — the two here and in
+  // reconcile-commit-report.mjs by tests/board-overstatement-guards.test.mjs, the
+  // two in reconcile.mjs by tests/reconcile-change-report-oracle.test.mjs's
+  // DRYRUN_TAIL_RE / COMMITTED_LINE_RE / QUEUED_LINE_RE — so this rule cannot lapse
+  // on one side without a named failure.
   if (other) parts.push(other + " other update(s)");
-  if (!moved && !other) parts.push("no code-bound changes");
+  if (!moved && !other) {
+    // BLZ-450: "no code-bound changes" is an IN-SYNC CLAIM, and it used to sit
+    // beside "N forge problem(s)" in the same sentence — asserting the board is in
+    // sync in the same breath as saying the check was degraded. Reproduced end to
+    // end before it was changed: one `defined` ticket, a `gh` that exits 1, and the
+    // real `reconcilePreview` returns `{ok:true, changes:[], forgeErrors:[1]}`,
+    // which composed exactly "no code-bound changes · 1 forge problem(s)".
+    // PRE-EXISTING — the pre-BLZ-426 inline code composed it identically, so
+    // BLZ-426 did not introduce it. An unreadable forge means candidates were never
+    // examined, so "nothing to do" is not a thing this run is entitled to say; it
+    // may only report what it could decide.
+    parts.push(forge
+      ? "no code-bound change was DECIDABLE, but the forge could not be read — this says "
+        + "nothing about whether the board is in sync"
+      : "no code-bound changes");
+  }
   if (cleared) parts.push(cleared + " would have their branch/pr CLEARED");
   if (findings) parts.push(findings + " need attention");
   if (forge) parts.push(forge + " forge problem(s)");
