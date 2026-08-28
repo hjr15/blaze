@@ -396,10 +396,10 @@ test("BLZ-402 review finding 2: an over-broad projects entry ('A.*') would let s
 //
 // BLZ-478 CORRECTS WHAT THAT DISJUNCTION IS WORTH, because the original comment implied
 // both arms were live and only one is. The tarball arm is UNREACHABLE BY POLICY, not by
-// coincidence: ADR-0026 keeps `docs/` out of the package and `tests/package.test.mjs`
+// coincidence: ADR-0028 keeps `docs/` out of the package and `tests/package.test.mjs`
 // hard-asserts it on every run (`assert.ok(!f.startsWith("docs/"))`), so no input can make
 // `packed.includes(pointer)` true for a `docs/` path while both hold. It is kept anyway,
-// and this is the reason: it is what makes ADR-0026 reversible in a single edit — ship
+// and this is the reason: it is what makes ADR-0028 reversible in a single edit — ship
 // `docs/` in `package.json`'s `files`, drop that assertion, and a repo-relative pointer is
 // legal again with nothing here rewritten. It is a contract, stated as one, exactly as
 // BLZ-405's unreachable refusals are.

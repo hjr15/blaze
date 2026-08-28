@@ -95,7 +95,7 @@ cross-origin to `http://localhost:<port>/control/revert` without one.
 ## reconcile
 
 ```
-blaze reconcile [--apply] [--fetch] [--quiet]
+blaze reconcile [--apply] [--fetch] [--quiet] [--project KEY] [--ticket ID]
 ```
 
 Mirrors board status onto git/PR state for delivery-workflow tickets
@@ -106,6 +106,8 @@ what it would change and writes nothing.
 |---|---|---|
 | `--apply` | Commit the mirrored changes locally (or queue them, in batch mode — see [Commit modes](../../AGENTS.md#commit-modes)), through the same advisory-lock-serialised path every other mutating verb uses. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
+| `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not author a commit moving fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile and commit the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
+| `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. A ticket-scoped `--apply` says so in the commit message (`… [--ticket BLZ-451]`), because that message is what a person reads months later asking why the pass moved three tickets and not thirty. | all tickets in scope |
 | `--quiet` | *Print only on change.* It gates whole-run lines only — never per-ticket output. Suppressed on a pass that decided nothing: `reconcile: no code-bound change found — nothing to do.`, `reconcile: no projects configured — nothing to reconcile.`, and `reconcile: scanned project(s): …` (that last one is printed anyway whenever `--project` was given, because a filtered run must never read as a whole-board one). Per-ticket `moved` / `would move` lines, the dry-run tail, and every `WARNING` / `FORGE UNREADABLE` / `FORGE DATA` / `NEEDS ATTENTION` line on stderr are printed under `--quiet` exactly as without it. | off |
 
 PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub

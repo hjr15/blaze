@@ -1,4 +1,4 @@
-# ADR-0027 — preview surfaces and write-record surfaces use different vocabularies
+# ADR-0029 — preview surfaces and write-record surfaces use different vocabularies
 
 - **Status:** Accepted
 - **Date:** 2026-08-29

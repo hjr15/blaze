@@ -92,7 +92,7 @@ export function reconcileSummary(j) {
   // both say "N ticket(s) updated without a status change". A preview is a short
   // parenthetical about what WOULD happen and is read next to its own move count; a
   // write record is a durable sentence about what DID happen, read later and alone,
-  // where "other" names nothing. The ruling is ADR-0027 (BLZ-482).
+  // where "other" names nothing. The ruling is ADR-0029 (BLZ-482).
   //
   // All four sites are pinned, so the rule cannot lapse on one side without a named
   // failure — but BLZ-477 corrects WHICH test pins which, because this sentence named

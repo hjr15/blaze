@@ -1,4 +1,4 @@
-# ADR-0026 — shipped documents link out by URL; `docs/` stays unshipped
+# ADR-0028 — shipped documents link out by URL; `docs/` stays unshipped
 
 - **Status:** Accepted
 - **Date:** 2026-08-29

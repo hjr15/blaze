@@ -62,7 +62,7 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
   // sentence — in `git log`, or on a terminal scrolled back to hours later — read
   // alone, with no move count beside it to make "other" mean anything. Measured: 4
   // sites, 2 vocabularies, and the split is exactly this one; no site is on the wrong
-  // side of it. The ruling is ADR-0027 (BLZ-482) — it used to live only here and in a
+  // side of it. The ruling is ADR-0029 (BLZ-482) — it used to live only here and in a
   // guard, which is not where a rule that governs four sites in three files belongs.
   //
   // BLZ-477 CORRECTS THE ATTRIBUTION BELOW, which named the wrong constants. Every site
@@ -104,7 +104,7 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
   // them how much of it to look at. "Ticket file(s) were already written to disk" with no
   // number is the same understatement `changes.length` used to make one line lower. Same
   // vocabulary as the other three arms, deliberately: these are WRITE-RECORD surfaces
-  // (ADR-0027), so the non-moving quantity is spelled out rather than called "other".
+  // (ADR-0029), so the non-moving quantity is spelled out rather than called "other".
   const written = `${movedCount} ticket(s) moved${suffix}`;
   if (outcome === "locked") {
     return { stream: "err", exit: 1,

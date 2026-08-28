@@ -1,6 +1,6 @@
-// tests/shipped-doc-links.test.mjs — BLZ-474 and BLZ-473 (ADR-0026).
+// tests/shipped-doc-links.test.mjs — BLZ-474 and BLZ-473 (ADR-0028).
 //
-// ADR-0026: every outbound link in a document the npm tarball SHIPS is an absolute URL,
+// ADR-0028: every outbound link in a document the npm tarball SHIPS is an absolute URL,
 // and `docs/` stays unshipped. Two failures this pins, both already seen in this repo:
 //
 //   BLZ-460/BLZ-474 — a RELATIVE link to a path the tarball does not carry. Measured
@@ -64,7 +64,7 @@ const linksIn = (text) => [...text.matchAll(MD_LINK)].map((m) => m[1]);
 
 const SHIPPED_DOCS = ["AGENTS.md", "README.md"];
 
-describe("ADR-0026: a shipped document's links are reachable for an installed user", () => {
+describe("ADR-0028: a shipped document's links are reachable for an installed user", () => {
   const packed = packedFiles();
 
   test("the tarball really ships the documents this file is about — otherwise it is vacuous", () => {
@@ -73,7 +73,7 @@ describe("ADR-0026: a shipped document's links are reachable for an installed us
       assert.ok(packed.includes(doc), `${doc} is not in the tarball; this file pins nothing`);
     }
     assert.equal(packed.filter((f) => f.startsWith("docs/")).length, 0,
-      "ADR-0026 keeps docs/ out of the tarball — if that changed, the decision changed and " +
+      "ADR-0028 keeps docs/ out of the tarball — if that changed, the decision changed and " +
       "this file plus tests/package.test.mjs must change with it, deliberately");
   });
 
@@ -87,7 +87,7 @@ describe("ADR-0026: a shipped document's links are reachable for an installed us
         if (path === "") continue;   // a bare fragment into this same file
         assert.ok(packed.includes(path),
           `${doc} links to ${JSON.stringify(href)}, which the tarball does not ship — dead for ` +
-          "anyone who installed @hjr15/blaze-board. ADR-0026: use an absolute URL instead");
+          "anyone who installed @hjr15/blaze-board. ADR-0028: use an absolute URL instead");
       }
     }
     assert.ok(checked > 0,
