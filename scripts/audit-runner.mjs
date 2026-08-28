@@ -6,6 +6,7 @@
 import { readFileSync } from "node:fs";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fsReadStorage } from "./model/read-storage.mjs";
+import { unreadableTicketDirs } from "./model/index.mjs";
 import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
@@ -138,6 +139,19 @@ for (const t of fsReadStorage.listTickets(projectsDir)) {
 }
 
 const report = auditCorpus({ tickets, projects, config });
+
+// BLZ-470: WHAT THIS RUN COULD NOT READ, before anything it did read. BLZ-430 stopped a
+// submodule under `projects/` from crashing the whole walk by skipping any directory that
+// carries a `.git` entry — silently, so a repo-shaped directory takes its tickets off the
+// board with no finding and no counter (measured: 8 ids to 4 for a project directory, 8 to
+// 6 for a status directory). `safeReaddir` swallows a directory it cannot list the same way.
+//
+// Raised HERE rather than in `auditCorpus` for the same reason `duplicate-status` is: which
+// directories exist and which of them could be read is a property of the WALK.
+const unreadable = unreadableTicketDirs(projectsDir);
+for (const u of unreadable) {
+  report.findings.push({ ticket: null, kind: "unreadable-ticket-directory", detail: u.message });
+}
 
 // BLZ-402 review finding 1: name the config-load failure as a first-class, HARD finding —
 // not a swallowed exception. `report.ok` is recomputed below from `report.findings`
@@ -300,7 +314,13 @@ if (opts.json) {
   // `config-unloadable`) would see the count go up with no way to learn which key caused
   // it short of re-running with --json.
   if (configLoadError) console.log(`  config failed to load: ${configLoadError.message}`);
-  console.log(`  ${tickets.length} tickets across ${keys.length} project(s)`);
+  // BLZ-470 AC-2: the count says what it IS. `tickets.length` counts what the walk
+  // returned, and a walk that skipped a directory returned fewer than the board holds —
+  // a total and a floor rendered in the same sentence is the whole defect.
+  console.log(unreadable.length
+    ? `  ${tickets.length} tickets across ${keys.length} project(s) — a FLOOR, not a total: ` +
+      `${unreadable.length} director${unreadable.length === 1 ? "y" : "ies"} could not be read`
+    : `  ${tickets.length} tickets across ${keys.length} project(s)`);
   if (opts.kind) {
     for (const f of findings) console.log(`  ${f.ticket}  ${f.kind}  ${f.detail}`);
     if (!findings.length) console.log(`  no '${opts.kind}' findings`);

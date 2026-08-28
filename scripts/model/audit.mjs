@@ -87,6 +87,24 @@ export const HARD_KINDS = new Set([
   // 2,682 tickets in 11 projects, BOTH `frontmatter.project != directory` and
   // `id-prefix != directory` measure ZERO. Shipping this hard fails no existing board.
   "project-mismatch",
+  // BLZ-470: a directory under `projects/` whose tickets this run COULD NOT READ. Raised by
+  // the RUNNER, for the same reason the three kinds above are: which directories exist and
+  // which of them could be listed is a property of the WALK, and this pure function is a
+  // function of frontmatter, which carries no path.
+  //
+  // HARD, and it is the one severity that matches what the finding means. Every other kind
+  // here says "a ticket in the corpus is wrong"; this one says "the corpus you just audited
+  // is not the corpus". A soft finding cannot change `ok`, so `blaze audit` would exit 0
+  // over a board whose ticket count it had no way to compute — reporting a clean gate on a
+  // corpus it could not finish reading, which is precisely the defect class this finding
+  // exists to end. It is also not a fill queue: there is nothing to work through, only a
+  // directory to move out from under `projects/` or a stray `.git` entry to delete.
+  //
+  // Licensed by measurement, per BLZ-353: at blaze-pm branch BLZ-305-v4-spine on
+  // 2026-08-29, 0 of the 103 project and status directories holding its 2,736 tickets carry
+  // a `.git` entry of any shape, and 0 are unlistable. Shipping this hard fails no existing
+  // board.
+  "unreadable-ticket-directory",
 ]);
 
 // BLZ-353 / R48. Deliberately NOT in HARD_KINDS, and the reason is load-bearing.

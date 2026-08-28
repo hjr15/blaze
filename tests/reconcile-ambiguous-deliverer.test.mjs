@@ -1091,3 +1091,124 @@ test("BLZ-398: how a url is MISSING never changes the order rivals are named in"
   assert.equal(orders.size, 1,
     `the naming order must not depend on how a url is missing; got ${[...orders].join(" vs ")}`);
 });
+
+// =============================================================================
+// BLZ-475 — the OTHER finding the uncorroborated-winner skip was silencing.
+//
+// BLZ-459 established the rule on the terminal side: an uncorroborated winner must not
+// suppress `terminal-record-unverifiable`, because that finding reports on the STATE — what
+// the board holds — and not on the veto. The `if (d.skip) continue;` beside it still
+// silenced `ambiguous-deliverer` on a NON-TERMINAL ticket, and such a run reported nothing
+// at all: not the tie, not the veto, not a move.
+//
+// The state is the same one BLZ-398 built this whole file for — two merged PRs tied for
+// having delivered the ticket, and reconcile unable to say which. Whether some THIRD PR
+// happens to outrank both is not a fact about that tie. `s.ambiguous` is built from
+// `corroboratedByTicket`, which never sees the uncorroborated winner at all.
+//
+// Zero live incidence (the BLZ-440 review measured all 8 board tickets with an
+// uncorroborated top-ranked PR as having a single candidate), so the shape is constructed.
+// =============================================================================
+
+/** An OPEN PR whose BRANCH carries the id but whose TITLE claims nothing — the
+ *  uncorroborated claim BLZ-440 refuses to act on. OPEN outranks MERGED (PR_RANK), so it
+ *  becomes the winner `decide` reads, and `decide` returns `skip`. */
+const PR_99_OPEN_UNCORROBORATED = {
+  number: 99, state: "OPEN", url: "u99", headRefName: "INF-645-wip",
+  title: "wip: poking at the alert pipeline",
+};
+
+describe("BLZ-475: an uncorroborated winner does not silence the ambiguous-deliverer finding", () => {
+  test("the fixture really is the skip path — the winner is the uncorroborated OPEN PR", () => {
+    // Without this the tests below could be passing through the ORDINARY branch, which has
+    // never been in doubt, and would prove nothing about the suppression.
+    const prs = [PR_99_OPEN_UNCORROBORATED, PR_10_WORK, PR_40_DOCS];
+    const winner = buildPrMap(prs, idFromRef, null).get("INF-645");
+    assert.equal(winner.number, 99, "an OPEN PR outranks a MERGED one — BLZ-130's veto");
+    assert.equal(winner.uncorroborated, true);
+    assert.equal(decide({ pr: winner }, "in-progress", "task").skip, true,
+      "and BLZ-440 returns `skip`, which is the branch that used to swallow the finding");
+    assert.ok(ambiguousDeliverers(prs, idFromRef, null).has("INF-645"),
+      "while the tie between #10 and #40 is real and entirely unaffected by #99");
+  });
+
+  test("a NON-TERMINAL ticket held back by the veto still reports the tie", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz475-report-"));
+    const root = fixture(tmp, [["INF-645", "task", "in-progress"]]);
+    const restore = stubGh(tmp, [PR_99_OPEN_UNCORROBORATED, PR_10_WORK, PR_40_DOCS]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      const f = r.findings.filter((x) => x.kind === "ambiguous-deliverer");
+      assert.equal(f.length, 1,
+        "before BLZ-475 this run produced NO finding of any kind — it reported nothing at all");
+      assert.equal(f[0].id, "INF-645");
+      assert.equal(f[0].vetoed, true);
+      assert.deepEqual(f[0].prs.map((p) => p.number), [10, 40],
+        "and it names the tied CORROBORATED candidates, not the winner that outranked them");
+      assert.deepEqual(r.changes, [], "the veto still moves nothing — BLZ-440 is unchanged");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the vetoed sentence does not claim the ordinary path's action", async () => {
+    // The ordinary path CLEARS the record and says "Reconcile recorded NO branch/pr". On
+    // this path `write()`/`keep()` are never consulted: nothing is written and nothing is
+    // cleared. Reusing that sentence here would assert more than the run did, which is the
+    // defect class this whole programme exists to end — reproduced inside its own fix.
+    const tmp = mkdtempSync(join(tmpdir(), "blz475-wording-"));
+    const root = fixture(tmp, [["INF-645", "task", "in-progress",
+      "branch: INF-645-old\npr: \"#7 — u7\"\n"]]);
+    const restore = stubGh(tmp, [PR_99_OPEN_UNCORROBORATED, PR_10_WORK, PR_40_DOCS]);
+    try {
+      const r = await reconcile({ root, dryRun: false });
+      const [f] = r.findings.filter((x) => x.kind === "ambiguous-deliverer");
+      assert.match(f.message, /took no delivery decision on this ticket at all/);
+      assert.match(f.message, /Nothing was written and nothing was cleared/);
+      assert.doesNotMatch(f.message, /recorded NO branch\/pr/,
+        "that sentence describes the OTHER path's action and would be false here");
+      const text = readTicket(root, "in-progress");
+      assert.match(text, /^pr: "#7 — u7"$/m,
+        "and the ticket's own record is untouched — the sentence is checked against the file");
+      assert.match(text, /^branch: INF-645-old$/m);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a TERMINAL ticket on the same path keeps BLZ-459's finding, not this one", async () => {
+    // The two halves of the same suppression must not start firing over each other. A
+    // terminal ticket holding an unverifiable record is BLZ-403's report; only the
+    // non-terminal case is BLZ-475's.
+    const tmp = mkdtempSync(join(tmpdir(), "blz475-terminal-"));
+    const root = fixture(tmp, [["INF-645", "task", "done", "pr: \"#7 — u7\"\n"]]);
+    const restore = stubGh(tmp, [PR_99_OPEN_UNCORROBORATED, PR_10_WORK, PR_40_DOCS]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      const kinds = r.findings.map((f) => f.kind).sort();
+      assert.equal(kinds.filter((k) => k === "ambiguous-deliverer").length, 0,
+        "a terminal ticket's record is write-once protected; the tie is reported as BLZ-403's finding");
+      assert.ok(kinds.includes("terminal-record-unverifiable"),
+        "which BLZ-459 already unsuppressed on this same branch");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("a non-terminal ticket with NO tie reports nothing — the finding is not a fill queue", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz475-negative-"));
+    const root = fixture(tmp, [["INF-645", "task", "in-progress"]]);
+    const restore = stubGh(tmp, [PR_99_OPEN_UNCORROBORATED, PR_10_WORK]);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.deepEqual(r.findings.filter((f) => f.kind === "ambiguous-deliverer"), [],
+        "one corroborated merged PR is not a tie, and a veto alone is not a finding");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});

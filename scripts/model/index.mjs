@@ -14,15 +14,158 @@ import { claimedNumbers, readCutover, claimPath } from "./claims.mjs";
 function safeReaddir(p) { try { return readdirSync(p); } catch { return []; } }
 function isDir(p) { try { return statSync(p).isDirectory(); } catch { return false; } }
 
+// The same read, with the failure kept instead of dropped. `safeReaddir` above is the
+// walk's own lossy form and stays exactly as it was — `unreadableTicketDirs` below is
+// what turns the dropped error into something an operator is told about (BLZ-470).
+function readdirOrError(p) {
+  try { return { entries: readdirSync(p), error: null }; }
+  catch (e) { return { entries: [], error: e }; }
+}
+
 // BLZ-430: a directory that is itself a git repository — a submodule, or a plain clone
 // left under `projects/`. `git submodule add` writes `.git` as a FILE holding a
 // `gitdir:` pointer; a clone writes it as a directory. Either one is the whole signal,
 // and it is deliberately a STAT rather than a `git` call: this runs once per candidate
 // directory on a read path that already walks ~2,700 files.
 //
-// It is checked with `existsSync`-shaped semantics (a stat that does not care what kind
-// of entry it found) because both shapes must count and neither is a ticket.
-function isNestedRepo(p) { try { statSync(join(p, ".git")); return true; } catch { return false; } }
+// BLZ-470: WHAT the `.git` entry is, not merely THAT one exists, because "a nested
+// repository" and "a zero-byte file named .git" are different facts and a report that
+// collapses them tells an operator to go looking for a repository that is not there.
+// Measured on the live board (blaze-pm BLZ-305-v4-spine, 2026-08-29): 0 of 103 project
+// and status directories carry a `.git` entry of any shape, so this reads one extra
+// file on exactly no directories there.
+//
+// Returns `null` when there is nothing to say — including when the stat itself fails,
+// which is deliberately UNCHANGED from BLZ-430's `existsSync`-shaped semantics: a stat
+// that throws meant "not a nested repo, walk it" then and means the same now. The
+// condition that actually loses tickets in that case is the parent's `readdir` failing,
+// and `unreadableTicketDirs` reports THAT, once, rather than twice from two layers.
+const GIT_FILE_PROBE_BYTES = 256;
+function classifyGitEntry(dirPath) {
+  const p = join(dirPath, ".git");
+  let st;
+  try { st = statSync(p); } catch { return null; }
+  if (st.isDirectory()) {
+    return { reason: "nested-repo", detail: "it holds a `.git` DIRECTORY — a repository cloned here" };
+  }
+  let head;
+  try { head = readFileSync(p, "utf8").slice(0, GIT_FILE_PROBE_BYTES); }
+  catch (e) {
+    return { reason: "git-file-unreadable",
+             detail: "it holds a `.git` FILE that could not be read " +
+               `(${(e && e.code) || e}), so Blaze cannot tell a submodule pointer from junk` };
+  }
+  if (/^gitdir:\s*\S/.test(head)) {
+    return { reason: "nested-repo-pointer",
+             detail: "it holds a `.git` FILE containing " +
+               `${JSON.stringify(head.split("\n")[0].trim())} — the pointer \`git submodule add\` ` +
+               "and `git worktree add` write" };
+  }
+  if (st.size === 0) {
+    return { reason: "git-file-empty",
+             detail: "it holds a ZERO-BYTE `.git` file — git would not recognise that as a " +
+               "repository, and Blaze cannot tell whether one was meant" };
+  }
+  return { reason: "git-file-unrecognised",
+           detail: `it holds a ${st.size}-byte \`.git\` file that is not a \`gitdir:\` pointer — ` +
+             "Blaze cannot tell a repository from junk" };
+}
+
+// The walk's own predicate, unchanged in behaviour: every shape `classifyGitEntry` names
+// is skipped, and a stat that throws is not one of them.
+function isNestedRepo(p) { return classifyGitEntry(p) !== null; }
+
+/** BLZ-470: every directory under `projectsDir` whose tickets this board CANNOT read,
+ *  and why — the report half of BLZ-430's skip.
+ *
+ *  BLZ-430 fixed a real crash (a submodule's `README.md` reached `parseTicket`, which
+ *  threw, and the throw escaped `walkTickets`'s generator and took down `blaze audit`,
+ *  `buildIndex`, the board view, id resolution and `reconcile` together). Its fix skips
+ *  any directory carrying a `.git` entry — SILENTLY. Measured on a constructed 8-ticket
+ *  board: a zero-byte `.git` file in a PROJECT directory takes 8 ids to 4, and one in a
+ *  STATUS directory takes 8 to 6, with no finding and no counter. A `chmod 000` project
+ *  directory loses the same 4 through `safeReaddir`'s swallowed error, which is the same
+ *  defect arriving by a different route and is reported here too.
+ *
+ *  WHY THIS IS A SEPARATE FUNCTION AND NOT A PARAMETER ON `walkTickets`. `walkTickets` has
+ *  five call sites — `fsReadStorage`'s `getTicket`, `listChildren`, `blockersOf` and
+ *  `listTickets`, plus `buildIndex` — and a generator has no out-of-band return channel a
+ *  `for…of` can see. The alternatives are recorded in ADR-0030; the short version is that a
+ *  sentinel yielded among the tickets is silently dropped by the three operations that
+ *  filter on frontmatter (so id resolution, the drill and the blocker check would still say
+ *  "nothing there") and lands as a garbage row in the two that do not, and that an `onSkip`
+ *  callback would have to be threaded through all four driver operations to serve two
+ *  callers. What a skipped directory actually is — a fact about the CORPUS, not about any
+ *  ticket in it — is a NAMED QUESTION, which is the shape ADR-0009 says a read must take.
+ *
+ *  It reads DIRECTORIES only and opens no `.md`, so it costs one `readdir` per project plus
+ *  one per status directory — 103 of them on the live board — against the ~2,700 files the
+ *  ticket walk itself reads.
+ *
+ *  It shares `classifyGitEntry` with the walk rather than re-deriving "is this skipped",
+ *  because two implementations of one predicate is how the same drift keeps reappearing
+ *  here (INF-735, and `gatherPrs`'s `recordablePr` counter one layer up). The traversal is
+ *  still written twice, so a test pins the two against each other on ground truth: the
+ *  directories this function names must be exactly the directories the walk lost tickets
+ *  from.
+ *
+ *  KNOWN GAP, stated rather than implied: this belongs on the read seam as a sixth named
+ *  operation (`fsReadStorage.unreadableTicketDirs`), so a database driver could answer it
+ *  with the empty list it structurally is, and `scripts/views/data.mjs` could report it on
+ *  the board page. Neither file was in the set this change was scoped to. Until it moves, a
+ *  database-fed board reports nothing here — which is the right answer for a database and
+ *  wrong only in that it is decided by which module you called, not by the driver.
+ *
+ *  @returns Array<{ project, status, path, reason, detail, message }>
+ */
+export function unreadableTicketDirs(projectsDir) {
+  const out = [];
+  const label = (project, status) =>
+    project === null ? String(projectsDir) : `projects/${project}${status ? `/${status}` : ""}`;
+  const push = (project, status, path, reason, detail) => out.push({
+    project, status, path, reason, detail,
+    message: `${label(project, status)} was NOT read: ${detail}. Every ticket under it is ` +
+      "missing from this run, so the ticket count is a floor, not a total. Move the " +
+      "directory out from under projects/, or remove the stray `.git` entry if it is not " +
+      "a repository.",
+  });
+  const root = readdirOrError(projectsDir);
+  if (root.error) {
+    // A projects directory that is simply absent is not a board with unread tickets — it
+    // is a board with no tickets, which every caller already handles. Anything else (a
+    // permission, an I/O error) hid a corpus this run could not see.
+    if (root.error.code !== "ENOENT") {
+      push(null, null, projectsDir, "directory-unreadable",
+        `Blaze could not list it (${root.error.code || root.error})`);
+    }
+    return out;
+  }
+  for (const project of root.entries) {
+    const projPath = join(projectsDir, project);
+    if (!isDir(projPath)) continue;
+    const g = classifyGitEntry(projPath);
+    if (g) { push(project, null, projPath, g.reason, g.detail); continue; }
+    const sub = readdirOrError(projPath);
+    if (sub.error) {
+      push(project, null, projPath, "directory-unreadable",
+        `Blaze could not list it (${sub.error.code || sub.error})`);
+      continue;
+    }
+    for (const status of sub.entries) {
+      if (status.startsWith(".")) continue;
+      const statusPath = join(projPath, status);
+      if (!isDir(statusPath)) continue;
+      const gs = classifyGitEntry(statusPath);
+      if (gs) { push(project, status, statusPath, gs.reason, gs.detail); continue; }
+      const files = readdirOrError(statusPath);
+      if (files.error) {
+        push(project, status, statusPath, "directory-unreadable",
+          `Blaze could not list it (${files.error.code || files.error})`);
+      }
+    }
+  }
+  return out;
+}
 
 // Per-file parse cache: path → { mtimeMs, size, frontmatter, body }.
 // Validated by stat on every walk (same freshness semantics as re-reading —

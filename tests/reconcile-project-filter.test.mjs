@@ -92,9 +92,31 @@ const at = (root, key, status) =>
 // BLZ-406 deliberately does not hold. This narrows it to the claim BLZ-394 is actually
 // about, and the sibling test below pins the exception positively so the narrowing is a
 // statement rather than a weakening.
-const exceptFindings = (out) => out.split("\n")
-  .filter((l) => !l.includes("reconcile: NEEDS ATTENTION"))
+//
+// BLZ-486: …AND THE NARROWING WAS ITSELF TOO WIDE. It excepted every line on the
+// `NEEDS ATTENTION` channel while its rationale covers exactly one finding kind, so the
+// BLZ-394 scope-leak assertions — the ones that exist to prove a scoped run does not name
+// an out-of-scope project — were blind on every OTHER kind. An out-of-scope key leaking
+// through `ambiguous-deliverer`, `terminal-record-unverifiable`,
+// `merged-pr-title-claims-nothing`, `open-pr-on-terminal` or `unreadable-ticket-directory`
+// went uncaught. `project-mismatch` is the only kind BLZ-406 argues for, so it is the only
+// kind excepted — matched on the SENTENCE it emits, which the positive sibling test below
+// pins against the real product output so this pattern cannot quietly stop matching.
+const PROJECT_MISMATCH_LINE = /NEEDS ATTENTION — \S+ sits under projects\//;
+const exceptProjectMismatch = (out) => out.split("\n")
+  .filter((l) => !PROJECT_MISMATCH_LINE.test(l))
   .join("\n");
+
+// Every finding kind `scripts/reconcile.mjs` can raise, read FROM THE SOURCE rather than
+// listed by hand — a hand-written roster is how the filter came to cover kinds nobody had
+// re-read it for. A new kind turns this red, which is the point: whoever adds one has to
+// decide whether the scope-leak assertions may go blind on it.
+const RECONCILE_FINDING_KINDS = readFileSync(
+  join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "utf8")
+  .split("\n")
+  .map((l) => /^\s+kind: "([a-z-]+)",$/.exec(l))
+  .filter(Boolean)
+  .map((m) => m[1]);
 
 describe("BLZ-394: --project restricts BOTH the scan and the write", () => {
   test("AC-1: a filtered run moves exactly the project named, and no other", async () => {
@@ -352,7 +374,7 @@ describe("BLZ-394: a --project that yields no key REFUSES, it does not go wide",
       const res = runCli(root, tmp, ["--project", "INF", "--quiet"]);
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /scanned project\(s\): INF/);
-      assert.doesNotMatch(exceptFindings(res.stderr), /OBA/);   // BLZ-436, see exceptFindings
+      assert.doesNotMatch(exceptProjectMismatch(res.stderr), /OBA/);   // BLZ-436, see exceptProjectMismatch
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });
@@ -480,9 +502,9 @@ test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => 
       [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
       { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
     assert.equal(res.status, 0, res.stderr);
-    assert.doesNotMatch(exceptFindings(res.stdout + res.stderr), /OBA/,
+    assert.doesNotMatch(exceptProjectMismatch(res.stdout + res.stderr), /OBA/,
       "an INF-scoped run must not mention OBA in its account of its own work — see " +
-      "exceptFindings for the one channel BLZ-406 deliberately exempts");
+      "exceptProjectMismatch for the one kind BLZ-406 deliberately exempts");
     assert.ok(at(root, "OBA", "defined"), "nor move it");
   } finally {
     restore();
@@ -557,8 +579,13 @@ test("BLZ-436: a scoped run DOES name an out-of-scope directory in a project-mis
     assert.ok(at(root, "OBA", "defined"), "the out-of-scope project must not move");
     assert.ok(existsSync(join(root, "projects", "OBA", "defined", "INF-2-t.md")),
       "nor may the misfiled ticket be written or moved by a run that is not scoped to it");
-    assert.doesNotMatch(exceptFindings(res.stdout + res.stderr), /OBA/,
-      "OBA must appear in the findings channel and NOWHERE else");
+    assert.doesNotMatch(exceptProjectMismatch(res.stdout + res.stderr), /OBA/,
+      "OBA must appear in the project-mismatch finding and NOWHERE else");
+    // BLZ-486: the filter is keyed on a SENTENCE, so it has to be checked against the
+    // sentence the product actually emits, on real output, or it silently stops matching
+    // and the exception silently becomes an assertion.
+    assert.ok(!exceptProjectMismatch(res.stderr).includes("sits under projects/"),
+      "exceptProjectMismatch must actually remove the project-mismatch line it exists to except");
     const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
       { encoding: "utf8" });
     assert.doesNotMatch(files, /projects\/OBA/);
@@ -830,5 +857,78 @@ describe("BLZ-451: a --ticket that yields no usable id REFUSES, it does not go w
       assert.equal(mixed.ok, false);
       assert.ok(ticketAt(root, "INF", 1, "defined"), "no partial application");
     });
+  });
+});
+
+// =============================================================================
+// BLZ-486 — the exception is one KIND, not the whole channel.
+//
+// `exceptFindings` stripped every `reconcile: NEEDS ATTENTION` line before asserting that a
+// scoped run never names an out-of-scope project, while the rationale beside it covers only
+// BLZ-406's unconditional `project-mismatch`. Measured on the parent commit, reconcile could
+// raise five kinds on that channel; four of them were therefore invisible to the BLZ-394
+// scope-leak assertions, so a key leaking through any of them went uncaught.
+//
+// This suite is what stops that returning. It reads the kind roster from the source, so a
+// sixth kind cannot be added without someone deciding what the filter does with it.
+// =============================================================================
+
+describe("BLZ-486: only the project-mismatch finding is excepted from the scope-leak assertions", () => {
+  test("the kind roster is read from reconcile.mjs and is not empty", () => {
+    // An extractor that silently stops matching would make every assertion below vacuous —
+    // the same "prints a count it never asserts" failure the oracles were built against.
+    assert.ok(RECONCILE_FINDING_KINDS.length >= 6,
+      `expected at least six finding kinds in reconcile.mjs; got ${JSON.stringify(RECONCILE_FINDING_KINDS)}`);
+    assert.ok(RECONCILE_FINDING_KINDS.includes("project-mismatch"));
+    assert.deepEqual([...new Set(RECONCILE_FINDING_KINDS)].sort(), [
+      "ambiguous-deliverer",
+      "merged-pr-title-claims-nothing",
+      "open-pr-on-terminal",
+      "project-mismatch",
+      "terminal-record-unverifiable",
+      "unreadable-ticket-directory",
+    ], "a new finding kind must be classified here deliberately, not inherited silently");
+  });
+
+  test("a leak through any OTHER kind survives the filter — one line per kind, all still visible", () => {
+    // The heart of the ticket. Each of these is a real `NEEDS ATTENTION` line carrying an
+    // out-of-scope key; only the project-mismatch one may be removed.
+    const lines = {
+      "project-mismatch":
+        "reconcile: NEEDS ATTENTION — INF-2 sits under projects/OBA/ but its frontmatter names project: INF.",
+      "ambiguous-deliverer":
+        "reconcile: NEEDS ATTENTION — OBA-1 has 2 merged PRs claiming it (the pull request #10 — u10), and none claims it more strongly than the rest.",
+      "terminal-record-unverifiable":
+        "reconcile: NEEDS ATTENTION — OBA-1 is done and already holds a delivery record (#7 — u7), but git now shows 2 merged PRs tied for having delivered it.",
+      "merged-pr-title-claims-nothing":
+        "reconcile: NEEDS ATTENTION — OBA-1 is defined and the pull request #10 is MERGED on a branch that derives its id (OBA-1-work), but its TITLE does not claim it.",
+      "open-pr-on-terminal":
+        "reconcile: NEEDS ATTENTION — OBA-1 is done, but the pull request #10 carrying its key is still OPEN.",
+      "unreadable-ticket-directory":
+        "reconcile: NEEDS ATTENTION — projects/OBA/defined was NOT read: it holds a ZERO-BYTE `.git` file.",
+    };
+    assert.deepEqual(Object.keys(lines).sort(), [...new Set(RECONCILE_FINDING_KINDS)].sort(),
+      "every kind reconcile can raise needs a line here, or this test is blind on the new one");
+
+    const kept = exceptProjectMismatch(Object.values(lines).join("\n")).split("\n").filter(Boolean);
+    assert.equal(kept.length, Object.keys(lines).length - 1,
+      "exactly one line — the project-mismatch one — may be removed");
+    assert.ok(!kept.some((l) => l.includes("sits under projects/")));
+    for (const [kind, line] of Object.entries(lines)) {
+      if (kind === "project-mismatch") continue;
+      assert.ok(kept.includes(line),
+        `a leak through ${kind} must survive the filter, or the scope-leak assertion is blind on it`);
+      assert.match(exceptProjectMismatch(line), /OBA/,
+        `…and must still carry the out-of-scope key that the assertion greps for (${kind})`);
+    }
+  });
+
+  test("the filter removes the project-mismatch line and nothing that merely resembles it", () => {
+    const other = "reconcile: NEEDS ATTENTION — OBA-9 sits in projects/OBA/ with no record";
+    assert.equal(exceptProjectMismatch(other), other,
+      "only the sentence BLZ-406 actually emits is excepted");
+    assert.equal(exceptProjectMismatch("reconcile: WARNING — codeRepo not found, skipped: /x/OBA"),
+      "reconcile: WARNING — codeRepo not found, skipped: /x/OBA",
+      "and no other channel is touched — WARNING, FORGE and GIT lines all stay asserted");
   });
 });
