@@ -163,12 +163,25 @@ So:
   cannot be separated (BLZ-427). Note the binding is one-directional — it
   catches a deleted clause, not an added one written as a bare `assert.`
   (BLZ-444).
-- **A count that varies with the data is a weak invariant.** If accumulation
-  depends on which branches the data happened to take, it can go red for a
-  reason unrelated to the assertions, training a reader to re-run rather than
-  investigate. Where it cannot be avoided, validate it per cell against a
-  budget derived from that cell's coordinates, so the failure names what is
-  actually missing (BLZ-452).
+- **A count that varies with the data is a weak invariant — so validate it,
+  don't ban it.** An earlier draft of this section said never to accumulate the
+  size through data-dependent conditionals. That is not what this repo's
+  oracles do, and a method rule the codebase contradicts will be followed by
+  neither (BLZ-467). Every clause count here is still incremented inside
+  `if (shape.refused) / else if (outcome === "queued") / …`. What makes it
+  evidence is the two things layered on top:
+  **(a)** the total is validated PER CELL against a budget derived from that
+  cell's own coordinates, never from a figure read off a passing run, so a
+  failure names the coordinate that is short rather than an arithmetic
+  mismatch 700 clauses later — `budgetFor(shape, outcome, consumer)` in
+  `tests/board-overstatement-oracle.test.mjs`, and the four clause budgets in
+  `tests/reconcile-title-claim-oracle.test.mjs`, each written as the product of
+  its own dimensions;
+  **(b)** the counter is bound to the assertion (the bullet above), so a
+  deleted clause takes its own count with it.
+  The thing to avoid is accumulation whose *budget* depends on which branches
+  the data took — a budget computed from the run is a change-detector, not an
+  invariant (BLZ-452).
 - **Ground truth comes from somewhere the subject cannot reach** — the
   filesystem, `git log`, a ledger file on disk, or the fixture's own
   declaration of what it planted. A dry run's own before/after snapshot is not

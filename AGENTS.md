@@ -58,9 +58,18 @@ through the tagged `collectSchemaProblems` and splits them: a MALFORMED override
 the class the load path's `assertSchemaValid` already refuses on — is a hard
 `schema-malformed` finding and fails `blaze audit`; a legal-but-inert or
 deliberately narrowed configuration is a soft `schema-invalid` finding and does not
-(BLZ-392, BLZ-407, ADR-0024) — for years nothing called either path in production,
-which is why ADR-0002 warns that relying on it buys "a well-tested no-op: green in
-CI, absent in production".
+(BLZ-392, BLZ-407, ADR-0024).
+
+ADR-0002's warning that relying on this buys "a well-tested no-op: green in CI, absent in
+production" applies to **`validateSchema`, and not to `assertSchemaValid`** (BLZ-418 — an
+earlier version of this paragraph said "for years nothing called either path", which is
+wrong twice over; this repo's first commit is `9a8cae3`, 2026-06-27). `validateSchema`
+landed on 2026-07-09 (`9960a84`) with tests as its only callers and stayed that way for
+**47 days**, until BLZ-392 (`d8549b5`, 2026-08-25) made `auditCorpus` its first
+production caller — that gap is what ADR-0002 predicted and what BLZ-392 walked into.
+`assertSchemaValid` has no such gap: it was created by BLZ-56 (`6ce5c3a`, 2026-08-26)
+already wired into `cli.mjs`'s preflight, in the same commit, and has never existed
+uncalled.
 
 The model above is what earlier docs called the **`engineering` preset**. Since
 BLZ-231 it is no longer a preset a board opts into — it is what the engine
@@ -490,14 +499,25 @@ shape is refused rather than silently accepted, even when it happens to be valid
 **A project key is refused, never normalised — `blaze init` included.** `blaze init
 --project acme` used to upper-case its answer and build the board while every other verb
 refused the same string; it now refuses too, naming `ACME` as the fix. See
-[ADR-0025](docs/decisions/0025-a-project-key-is-refused-never-normalised.md) for why
+[ADR-0025](https://github.com/hjr15/blaze/blob/main/docs/decisions/0025-a-project-key-is-refused-never-normalised.md)
+for why
 normalising is the wrong direction (the key is also a path segment and an id prefix, so
 rewriting it makes the configured key and the effective key two different strings).
 
 **An EMPTY `BLAZE_KEY` is a caller error, not an absent override** (BLZ-410).
-`BLAZE_KEY=""` used to be discarded, so `blaze.config.json`'s key silently won and a shell
-script with an unset variable ran against a different board than it asked for, with no
-message. Only an unset `BLAZE_KEY` means "no override".
+`BLAZE_KEY=""` used to be discarded, so `blaze.config.json`'s key silently won with no
+message on any stream. Only an unset `BLAZE_KEY` means "no override".
+
+The refusal is **defensive, not a fix for a misbehaving verb** (BLZ-461). An earlier
+version of this paragraph said an unset shell variable made `blaze move` run "against a
+different board than it asked for", and that does not reproduce: `move-runner.mjs` reads
+`cfg` only for `cfg.commitMode`, and `blaze new`'s prefix comes from `--project`, not
+`cfg.key`. `cfg.key`'s derived matchers have exactly one consumer in the engine —
+`scripts/loops/groomer.mjs`'s legacy flat-layout branch, which is reachable only on a board
+whose status directories sit at the repo root, never on the `projects/<KEY>/<status>/`
+layout — so the blast radius of the old behaviour was one call path on one legacy layout,
+not `move`, `new` or `reconcile`. What the refusal buys is that an empty override cannot
+start silently becoming the file key for a consumer added later.
 
 `schemaVersion` (top-level, optional integer): which schema contract the board
 was written against. Absent = `1` (the pre-versioning baseline). The engine

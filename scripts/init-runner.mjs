@@ -9,6 +9,13 @@ import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
 import { planInit, questions, testConnection, OFFERED_DRIVERS } from "./init.mjs";
+// BLZ-460: `--help` used to say "see ADR-0025" and give no path at all, which is the
+// worst of the three variants of this defect — the reader cannot even guess wrong. The
+// pointer is imported rather than retyped so `--help`, the refusal in `assertValidKey`
+// and `AGENTS.md` cannot drift into three different answers, and so that it stays a URL:
+// `docs/` ships zero files in the npm package, so a repo-relative path here resolves to
+// nothing for the installed operator this usage text is written for.
+import { KEY_RULE_DOC } from "./config.mjs";
 import { addUser } from "./model/user-admin.mjs";
 
 const FLAGS = {
@@ -42,7 +49,8 @@ to use. Answer every question by flag, or be prompted when run at a terminal.
   --dir=PATH            where the board lives            (required)
   --project=KEY         first project key, e.g. ENG      (required)
                         Upper-case letters and digits, starting with a letter.
-                        Refused, never auto-corrected — see ADR-0025.
+                        Refused, never auto-corrected (ADR-0025):
+                        ${KEY_RULE_DOC}
   --project-name=NAME   human name for that project
   --db=${OFFERED_DRIVERS.join("|")}       database driver                  (default: sqlite)
   --title=NAME          board title, shown in the viewer (default: Blaze)

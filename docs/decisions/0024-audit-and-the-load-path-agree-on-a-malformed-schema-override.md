@@ -86,10 +86,17 @@ have a habit on.
 ### Measured before shipping, per BLZ-353's lesson
 
 BLZ-353 shipped a severity on a prediction, and the prediction was wrong. So this one was
-measured first. At `blaze-pm` on branch `BLZ-305-v4-spine`: the top-level `schema` block
-resolves with **0** problems, hard or soft, and **no** `project.json` on the board carries
-a `schema` block at all — across 2,655 tickets in 11 projects. Promoting this class to
-hard fails **0** boards that exist today.
+measured first. At `blaze-pm` `2535a6ae` — named as a sha, not as a branch, because
+`BLZ-305-v4-spine` moves and every figure here self-invalidates the moment it does
+(ADR-0023 §2 states the same rule, and BLZ-417 is this ADR having broken it): the
+top-level `schema` block resolves with **0** problems, hard or soft, and **no**
+`project.json` on the board carries a `schema` block at all — across **2,717** tickets in
+**11** projects. Promoting this class to hard fails **0** boards that exist today.
+
+*(Re-measured at `2535a6ae` when the branch reference was replaced. The original
+measurement, taken on the same branch two days earlier, read 2,655 tickets — the ticket
+count is the one figure here that moves, which is precisely why the ref has to be a sha.
+The **0**s did not move.)*
 
 The same check was run against every checked-in fixture board in this repo
 (`tests/fixtures/board-gate-bad-schema-version`, `board-gate-good`, `board-gate-real-shape`,

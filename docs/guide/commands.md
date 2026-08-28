@@ -125,8 +125,14 @@ tree. Telling a genuinely failed prior commit apart from a `commitMode:
 "batch"` board that queued by design, or from a human's own uncommitted edit
 under `projects/`, needs the pending ledger, not `git status` — that is a
 separate, unbuilt feature. If a run reports nothing to do but `git status`
-still shows changes under `projects/`, run `blaze commit`, or commit the tree
-by hand.
+still shows changes under `projects/`, the remedy depends on which of those three
+states you are in, and **`blaze commit` only addresses one of them** (BLZ-434). It
+flushes the pending queue, so it helps only on a `commitMode: "batch"` board that
+queued by design — on a `per-op` board there is no queue and it has nothing to
+flush, and it will not pick up a failed prior commit or your own in-flight edit
+either, because it stages only the files recorded against queued ops (never
+`git add -A`). Check `commitMode` first: on `batch`, run `blaze commit`; otherwise,
+or for anything it leaves behind, commit the tree by hand.
 
 **A change line only ever claims a move it can prove (BLZ-401).** A ticket can be
 written without its status changing — a blank `resolution` backfilled on an already-
@@ -393,6 +399,28 @@ queue rather than risk taking another session's work.
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
 
+### The subject line counts TICKETS, and used to count ops
+
+`blaze commit` writes one commit whose subject reads
+`blaze: <date> board update (2 new, 3 logged, 1 moved)` — one clause per op kind, in
+first-seen order.
+
+**Each number is a count of distinct tickets, not of operations** — so "3 logged"
+means three *tickets* had time logged against them, and two `blaze edit` calls
+against one ticket render as `1 edited`, not `2 edited`. The full per-op detail is
+still in the commit body, which lists every queued entry's message.
+
+**This is a change of meaning, and the words did not change with it** (BLZ-448).
+Before BLZ-427 the same clauses counted queued ops. For every per-ticket verb
+(`new`, `move`, `log`, `resolve`, `edit`, `link`, `ac`, `sprint`) one op is one
+ticket and the two readings coincide, so those subjects mean what they always did.
+`reconcile` is what broke the identity: one queued reconcile op covers every ticket
+that pass wrote, and under the old rule a pass that moved a dozen tickets rendered
+as `1 reconcile`. Counting tickets is the safe direction — it can only understate
+op volume, never overstate ticket impact — but a reader who learned the old
+vocabulary should know the unit moved under it. Commits written before BLZ-427 are
+in the old units and are not restated.
+
 ## rollup
 
 ```
@@ -521,7 +549,7 @@ this page is the reference.
 | Variable | Controls | Default |
 |---|---|---|
 | `BLAZE_PROJECTS_DIR` | Explicit path to the data repo's `projects/` directory. Lets the engine run from anywhere. | none — falls back to a `projects/` dir under the current working directory |
-| `BLAZE_KEY` | Ticket id prefix override. Same shape rule as `key` in `blaze.config.json` (BLZ-402): upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — refused, not silently accepted, otherwise, and never auto-corrected ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)). Setting it to the **empty string** is a caller error and is refused (BLZ-410) — it used to be discarded, so an unset shell variable silently ran against the file key's board instead. Only an *unset* `BLAZE_KEY` means "no override". | the `key` in `blaze.config.json` |
+| `BLAZE_KEY` | Ticket id prefix override. Same shape rule as `key` in `blaze.config.json` (BLZ-402): upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — refused, not silently accepted, otherwise, and never auto-corrected ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)). Setting it to the **empty string** is a caller error and is refused (BLZ-410) — it used to be discarded, so `blaze.config.json`'s key silently won with no message on any stream. Only an *unset* `BLAZE_KEY` means "no override". The refusal is **defensive** (BLZ-461): `blaze move` reads only `commitMode` from the config and `blaze new`'s prefix comes from `--project`, so neither changes behaviour on `BLAZE_KEY` at all, and `key`'s derived matchers have exactly one consumer — the groomer's legacy flat-layout branch, reachable only on a board whose status directories sit at the repo root. It buys that an empty override cannot silently become the file key for a consumer added later. | the `key` in `blaze.config.json` |
 | `BLAZE_PORT` | Board port. | 4321, unless overridden (see below) |
 | `PORT` | Board port; takes precedence over `BLAZE_PORT` and config. | — |
 | `HOST` | Bind host for `blaze board`. `blaze start` / bare `blaze` always binds `127.0.0.1`. **A non-loopback value on a board with no users refuses to start** — see [`board`](#board) and [`user`](#user). | `127.0.0.1` |

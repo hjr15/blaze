@@ -1,5 +1,13 @@
 // Applies each of BLZ-360 §11's mutations to the solve, runs the suite, restores.
 // A mutation that does NOT break a test is a hole in the suite and is reported as one.
+//
+// BLZ-441: THIS GATE IS SCOPED, and its output now says so on every run. It mutates two
+// files — `scripts/model/schedule.mjs` and `scripts/model/audit.mjs` — against two suites,
+// and it says nothing whatever about any other module. "17/17 mutations killed" has been
+// quoted as lane-wide evidence beside changes to files this harness never opens, where it
+// is not evidence of anything. A lane touching other modules must mutation-verify those
+// separately, by reverting each production hunk and watching the NAMED test that claims to
+// pin it go red. See docs/ci.md, "Mutation testing is scoped".
 import { readFileSync, writeFileSync } from "node:fs";
 import { execSync } from "node:child_process";
 
@@ -82,10 +90,20 @@ for (const m of MUTATIONS) {
   results.push({ ...m, status: killed ? "KILLED" : "SURVIVED", detail });
 }
 
+// BLZ-441: the SCOPE is printed with the result, not left to the reader's memory, and it
+// is derived from the constants above rather than restated — a file added to MUTATIONS
+// under a new `file:` shows up here without anyone remembering to edit a banner.
+const covered = [...new Set(MUTATIONS.map((m) => m.file ?? SOLVE))].sort();
 console.log("\n=== BLZ-360 §11 mutation results ===");
+console.log(`  scope: ${MUTATIONS.length} mutations of ${covered.join(" + ")}`);
+console.log(`         judged by ${SUITES}`);
+console.log("         SCOPED GATE — it says nothing about any other module. A change");
+console.log("         elsewhere must be mutation-verified separately (docs/ci.md).");
 for (const r of results) console.log(`  #${r.n}  ${r.status.padEnd(15)} ${r.name}  ${r.detail}`);
 const bad = results.filter((r) => r.status !== "KILLED");
-console.log(bad.length ? `\n${bad.length} mutation(s) NOT killed — these are holes in the suite.` : "\nAll mutations killed.");
+console.log(bad.length
+  ? `\n${bad.length} mutation(s) NOT killed — these are holes in the suite.`
+  : `\nAll ${MUTATIONS.length} mutations killed, in ${covered.join(" + ")} only.`);
 // Exit non-zero on a survivor. Reporting a hole and exiting 0 is a gate that cannot gate — the
 // same defect audit-runner.mjs already calls out for `blaze audit`.
 process.exitCode = bad.length ? 1 : 0;

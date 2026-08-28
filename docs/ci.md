@@ -29,6 +29,27 @@ Set `tests` as a required status check in branch protection so a red run blocks
 merge (honour-system on free-private repos — see the repo's branch-protection
 note; irrelevant once this repo is public, where required checks work normally).
 
+## Mutation testing is scoped
+
+`node scripts/ci/mutate-schedule.mjs` is **not** a whole-repo mutation gate, and reading
+it as one has produced false evidence more than once (BLZ-441). It applies BLZ-360 §11's
+17 mutations to two files — `scripts/model/schedule.mjs` and `scripts/model/audit.mjs` —
+and judges them against `tests/model/schedule.test.mjs` and
+`tests/model/schedule-findings.test.mjs`. It opens no other file, so on a change anywhere
+else it is silent, and a silent gate is not a green one.
+
+It is a *regression* check: run it to confirm the scheduler's own suite still kills what
+it used to kill. **"All 17 mutations killed" is evidence about the scheduler and the audit
+findings, and about nothing else** — quoting it beside a change to `reconcile.mjs`,
+`serve.mjs`, `config.mjs` or a test file asserts coverage this harness never measured. Its
+banner now prints its own scope on every run for that reason.
+
+**A lane that touches other modules must mutation-verify those separately**, by hand and
+per hunk: revert the production change a test claims to pin, run that named test, and
+confirm it goes red *for the reason its name gives*. A test that stays green under that
+revert is not evidence, whatever it is called — see
+[the engineering method](method/engineering-method.md#when-the-evidence-is-an-oracle).
+
 ## Triage: is a red gate real or transient?
 
 The job is structured so the failing **step** tells you which:

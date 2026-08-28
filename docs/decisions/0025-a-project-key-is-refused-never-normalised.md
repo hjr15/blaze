@@ -95,11 +95,30 @@ Stated plainly, because it is a real cost and it is the whole cost.
   `blaze.config.json`, the directory under `projects/`, the prefix on every ticket id, and
   the value every later `--project` argument must match — one string, everywhere, chosen
   by them.
+- **On the INTERACTIVE path the cost is a whole prompt loop, not one keystroke**
+  (BLZ-463 — the two bullets above describe the flag path `blaze init --project acme`,
+  and an earlier draft of this section described only that). `runInit` calls `planInit`
+  *after* every question has been answered, and after `askHidden("Postgres password: ")`.
+  The project key is the SECOND prompt, so an operator who types `acme` there goes on to
+  answer the driver and the admin email — and, on Postgres, the host, port, database,
+  user and password-env, then to type the password itself — before seeing the refusal,
+  and there is no re-prompt: the run exits 1 and the whole loop is retyped. That is a
+  larger cost than "one keystroke", and it is stated here because cost accounting is the
+  part of an ADR that has to be honest.
 
-Three things keep the cost small, and none of them is a reason the cost is not real:
+  It is **not recorded as a defect**, because it is how the wizard treats every other
+  answer: `planInit` is pure and collects all errors at once, deliberately, so that "a
+  wizard that reports one problem per run is a wizard people run four times". Validating
+  the key at its own prompt would be a real improvement and a real inconsistency — the
+  only answer checked early — and it is left as a separate question rather than decided
+  here. Nothing in this ADR depends on which way it goes.
+
+Three things keep the cost small on the FLAG path, and none of them is a reason the cost
+is not real:
 
 1. The refusal names the exact replacement — `--project "acme" is not a valid key … did
-   you mean "ACME"?` — so the fix is a re-run, not an investigation.
+   you mean "ACME"?` — so the fix is a re-run, not an investigation. (On the interactive
+   path the re-run is the whole prompt loop; see the bullet above.)
 2. `planInit` is pure and collects every error before anything is written (`{ ok, errors,
    plan }`), so a refused `blaze init` leaves no half-board behind. Re-running is safe.
 3. It is paid once per board, ever.
@@ -113,16 +132,25 @@ and whitespace does not.
 
 ### Measured before shipping, per BLZ-353's lesson
 
-- Live board `blaze-pm` on branch `BLZ-305-v4-spine`: **11** project keys
-  (`ACA BLZ CRP FL INF KPA NCA OBA OMA SN STA`), across **2,707** tickets. All 11 conform
-  to `KEY_RE`, and so do all 11 directory names under `projects/`.
+- Live board `blaze-pm` at `2535a6ae` — a sha, not the `BLZ-305-v4-spine` branch it sits
+  on, because the branch moves and the ticket count with it (BLZ-417): **11** project keys
+  (`ACA BLZ CRP FL INF KPA NCA OBA OMA SN STA`), across **2,717** tickets. All 11 conform
+  to `KEY_RE`, and so do all 11 directory names under `projects/`. (The figure read
+  **2,707** when first taken on that branch two days earlier; the 11 keys did not change.)
 - Every checked-in fixture board in this repo (`board-gate-good`,
   `board-gate-bad-schema-version`, `board-gate-removed-key`, `board-gate-real-shape`,
   `legacy-board`): **0** carry a key or a `projects[]` entry this refusal would reject.
-- Exactly **one** test in the suite pinned the uppercasing
-  (`tests/init.test.mjs`, "a project key is upper-cased, and a bad one is refused with an
-  example"). It is rewritten by this decision rather than deleted, so the ruling stays
-  pinned in the artifact that enforces it.
+- **Two** tests in the suite pinned the uppercasing, both in `tests/init.test.mjs` at
+  `9f8c467~1` (BLZ-462 — this ADR said "exactly one", and named only the first):
+  - `:54`, "a project key is upper-cased, and a bad one is refused with an example" —
+    `planInit({ project: "eng" }).plan.config.projects[0] === "ENG"`, the explicit pin.
+  - `:202`, "sqlite: writes config and the project, and gitignores .blaze" — passed
+    `--project=eng` end to end and asserted `projects` deep-equals `["ENG"]`, which pinned
+    the same rewrite incidentally while testing something else.
+
+  Both are rewritten by this decision rather than deleted, so the ruling stays pinned in
+  the artifact that enforces it, and the second no longer exercises a normalisation that
+  is now a refusal.
 
 **0** boards that exist today are refused by this change.
 
