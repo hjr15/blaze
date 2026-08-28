@@ -65,9 +65,24 @@ const HARD_SHAPES = [
   ["whole schema is an array", ["x"]],
 ];
 
+// BLZ-414 round 2. THE THIRD ELEMENT IS THE SHAPE'S OWN BRANCH, and it is load-bearing.
+//
+// The coverage test used to assert only `problems.some((p) => !p.hard)` — ANY soft
+// problem — and review measured what that is worth: deleting BOTH soft link-type
+// branches from `scripts/model/schema-config.mjs` left `soft shape reaches a soft
+// branch: a link type naming an undeclared endpoint kind (BLZ-392)` GREEN, satisfied by
+// the co-occurring "per-project linkTypes block is inert" problem that a `linkTypes`
+// shape raises at the project layer whatever else it says. Two of the four shapes here
+// carry that passenger, so for them the old assertion could never fail.
+//
+// Each shape now names the message its OWN `soft(...)` call site emits, so "this shape
+// reaches its branch" is what is actually checked — which is what the describe below
+// has always claimed.
 const SOFT_SHAPES = [
-  ["an inert per-project linkTypes block", { linkTypes: { Precedes: { source_kinds: ["task"], target_kinds: ["task"] } } }],
-  ["a malformed top-level schema.linkTypes entry", { linkTypes: { Precedes: { source_kinds: "nope", target_kinds: [] } } }],
+  ["an inert per-project linkTypes block", { linkTypes: { Precedes: { source_kinds: ["task"], target_kinds: ["task"] } } },
+    /schema\.linkTypes does not reach the scheduler/],
+  ["a malformed top-level schema.linkTypes entry", { linkTypes: { Precedes: { source_kinds: "nope", target_kinds: [] } } },
+    /schema\.linkTypes\["Precedes"\]\.source_kinds must be an array of type names, got string/],
   // BLZ-414. The header claims one shape per soft call site; two link-type sites had
   // none. This is the reachable one: a WELL-FORMED override entry (so `mergeLinkTypes`
   // keeps it) whose endpoint names a type that is not declared — the BLZ-392 typo that
@@ -76,7 +91,8 @@ const SOFT_SHAPES = [
   // either layer. The other site is unreachable through the config layering and is
   // pinned separately, by name, at the foot of this file.
   ["a link type naming an undeclared endpoint kind (BLZ-392)",
-    { linkTypes: { Precedes: { source_kinds: ["ghost"], target_kinds: ["task"] } } }],
+    { linkTypes: { Precedes: { source_kinds: ["ghost"], target_kinds: ["task"] } },
+    }, /link type "Precedes" names "ghost" in source_kinds, which is not a declared type/],
   ["a deliberately narrowed requirement workflow (BLZ-361)", { workflows: { requirement: {
     statuses: ["proposed", "implemented", "rejected", "obsolete"],
     terminal: ["implemented", "rejected", "obsolete"],
@@ -84,7 +100,7 @@ const SOFT_SHAPES = [
                   ["implemented", "obsolete"]],
     reopenTo: "proposed",
     resolutionOnTerminal: { implemented: "done", rejected: "wont-do", obsolete: "wont-do" },
-  } } }],
+  } } }, /workflow "requirement" omits "verified", which the goal:achieved gate requires/],
 ];
 
 const CONTROL_SHAPES = [
@@ -234,6 +250,12 @@ describe("BLZ-407 oracle: blaze audit's ok agrees with the load path's refusal, 
 // The claim was never checked: a shape that had stopped reaching its branch, or a
 // branch with no shape at all, cost nothing. Two soft link-type branches had no shape
 // at all. Both halves are pinned below.
+//
+// ROUND 2 made the soft half mean what it says. `problems.some((p) => !p.hard)` accepted
+// ANY soft problem, and a `linkTypes` shape always raises a second, unrelated one (the
+// per-project block is inert at the project layer) — so deleting BOTH soft link-type
+// branches from `schema-config.mjs` left the BLZ-392 shape's own test green. Each soft
+// shape now declares the message its own call site emits, and that is what is asserted.
 // =============================================================================
 describe("BLZ-414: every shape reaches its branch, and every soft link-type branch has a shape", () => {
   /** The problems one shape produces at EITHER layer — config-with-no-project, and
@@ -264,11 +286,19 @@ describe("BLZ-414: every shape reaches its branch, and every soft link-type bran
     });
   }
 
-  for (const [name, value] of SOFT_SHAPES) {
-    test(`soft shape reaches a soft branch and no hard one: ${name}`, () => {
+  for (const [name, value, branch] of SOFT_SHAPES) {
+    test(`soft shape reaches ITS OWN soft branch and no hard one: ${name}`, () => {
       const problems = problemsForShape(value);
-      assert.ok(problems.some((p) => !p.hard),
-        `the shape [${name}] produced no SOFT problem at either layer`);
+      // The shape's own branch, named — not "some soft problem happened". A `linkTypes`
+      // shape always ALSO raises the inert-per-project-block problem at the project
+      // layer, so the weaker form stayed green with both link-type branches deleted.
+      assert.ok(branch instanceof RegExp,
+        `the shape [${name}] declares no branch message — every soft shape must name the `
+        + "call site it stands for, or this test is back to accepting any soft problem");
+      assert.ok(problems.some((p) => !p.hard && branch.test(p.message)),
+        `the shape [${name}] produced no soft problem matching ${branch} at either layer `
+        + `— it no longer reaches the call site the shape list says it stands for. `
+        + `Soft problems seen: ${JSON.stringify(problems.filter((p) => !p.hard).map((p) => p.message))}`);
       assert.deepEqual(problems.filter((p) => p.hard).map((p) => p.message), [],
         `the shape [${name}] is listed as SOFT but produced a hard problem`);
     });
