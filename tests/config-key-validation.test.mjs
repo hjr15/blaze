@@ -7,11 +7,11 @@
 // which is why the fix here is a SHAPE check (`KEY_RE`/`assertValidKey`), not quoting.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
-  loadConfig, loadProject, KEY_RE, assertValidKey, InvalidProjectKeyError,
+  loadConfig, loadProject, KEY_RE, assertValidKey, InvalidProjectKeyError, KEY_RULE_DOC,
 } from "../scripts/config.mjs";
 import { idsFromSubject } from "../scripts/reconcile.mjs";
 import { matchersFor, selectNextTicket } from "../scripts/loops/groomer.mjs";
@@ -223,7 +223,26 @@ test("BLZ-408: loadProject's refusal names the SOURCE it was given, and does not
 });
 
 test("BLZ-408: the DEFAULT source is neutral — it never claims a --project argument either", () => {
-  // cli.mjs's preflight and reconcile.mjs pass no source; the default must be true for them.
+  // BLZ-464: this comment used to name `cli.mjs`'s preflight and `reconcile.mjs` as the
+  // beneficiaries. NEITHER CAN SURFACE THE DEFAULT, and the claim is withdrawn rather than
+  // repaired — BLZ-408 was scrupulous about exactly this honesty for `move-runner`'s
+  // unreachable guard, and a test rationale that overstates its own reach is the same
+  // defect one layer up.
+  //
+  //   - `cli.mjs:194` is the only production caller that omits `source`, and it SWALLOWS
+  //     the throw (`catch { projects[k] = null }`) — deliberately, and permanently: the
+  //     BLZ-402 round-2 comment there records that re-throwing bricked every verb on any
+  //     board with a non-project folder under `projects/`.
+  //   - `reconcile.mjs:1190` also omits `source`, but only ever receives keys `loadConfig`
+  //     has already validated: `configured` is `listProjects(cfg)` off `cfg.projects`, and
+  //     `wanted` is refused up front unless it is a subset of `configured`.
+  //   - Every other call site passes an explicit source: `new.mjs` ("a --project
+  //     argument"), `edit.mjs` and `move.mjs` ("ticket <id>'s 'project' field").
+  //
+  // So NO current call path can surface this default, and no mutation of the default string
+  // can be killed by any test. What is asserted below is a CONTRACT on the next caller that
+  // omits `source` — the default must describe what every caller has in common — not
+  // protection of a caller that exists today.
   const root = mkdtempSync(join(tmpdir(), "blaze-keyval-src2-"));
   const projectsDir = join(root, "projects");
   assert.throws(
@@ -257,7 +276,11 @@ test("BLZ-409: the invalid-key refusal is short, still states the rule, and keep
   assert.ok(words <= 40, `the refusal is ${words} words and must stay under 40:\n${msg}`);
   assert.match(msg, /upper-case letters and digits, starting with a letter/,
     "the RULE itself must survive the shortening — that is the actionable half");
-  assert.match(msg, /docs\/decisions\/0025-a-project-key-is-refused-never-normalised\.md/,
+  // BLZ-460: asserted through the CONSTANT, not a copy of the string, so this cannot keep
+  // passing against a path the shipped package no longer resolves. Whether that constant is
+  // itself reachable from an installed package is the separate BLZ-460 test at the foot of
+  // this file; here the claim is only that the refusal still carries it.
+  assert.ok(msg.includes(KEY_RULE_DOC),
     "the reasoning must stay DISCOVERABLE from the refusal, not merely deleted");
   assert.match(msg, /"eng"/, "and the offending value must still be named");
 });
@@ -353,4 +376,66 @@ test("BLZ-402 review finding 2: an over-broad projects entry ('A.*') would let s
   assert.equal(found?.id, "ABC-7",
     "unchecked, the over-broad key claims a ticket outside its own project — the load-time refusal prevents this cfg from ever being built");
   rmSync(root, { recursive: true, force: true });
+});
+
+// --- BLZ-460: the pointer has to resolve for an INSTALLED user ---------------------------
+//
+// BLZ-409 replaced 34 words of regex rationale with ONE pointer, which makes that pointer
+// load-bearing: it is now the only route from the refusal to the reasoning. It was emitted
+// as the repo-relative path `docs/decisions/0025-…md`, and `docs/` ships ZERO files in the
+// npm package — so for anyone who ran `npm i -g @hjr15/blaze-board` the pointer resolved to
+// nothing, and being a bare path rather than a URL it was not clickable either.
+//
+// This is verified against the PACKED FILE LIST, not the working tree, and that is the
+// whole point of the test: the working tree always has the ADR, so a working-tree check
+// (`existsSync(join(REPO, KEY_RULE_DOC))`) passes on exactly the tree where the defect
+// exists. `npm pack --dry-run --json` is what an installer actually receives.
+//
+// The invariant is a disjunction, not "must be a URL": a pointer is reachable if the
+// tarball contains it, OR if it is an absolute URL that needs no tarball. Today no `docs/`
+// path ships, so the URL arm is the one taken; if `package.json`'s `files` ever ships
+// `docs/decisions/`, a repo-relative pointer becomes legal again and this test says so
+// without being edited.
+test("BLZ-460: every operator-facing pointer at the key rule resolves from an INSTALLED package", async () => {
+  const { execFileSync } = await import("node:child_process");
+  const { readFileSync: read } = await import("node:fs");
+  const { fileURLToPath } = await import("node:url");
+  const { dirname } = await import("node:path");
+  const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+  const { USAGE } = await import("../scripts/init-runner.mjs");
+
+  const packed = JSON.parse(execFileSync("npm", ["pack", "--dry-run", "--json"],
+    { cwd: REPO, encoding: "utf8", stdio: ["ignore", "pipe", "ignore"] }))[0]
+    .files.map((f) => f.path);
+  assert.ok(packed.length > 0, "npm pack listed no files at all — the check below would be vacuous");
+
+  const reachable = (pointer) => /^https:\/\/\S+$/.test(pointer) || packed.includes(pointer);
+  assert.ok(reachable(KEY_RULE_DOC),
+    `KEY_RULE_DOC ${JSON.stringify(KEY_RULE_DOC)} is neither an absolute URL nor a file the `
+    + `tarball ships (${packed.filter((p) => p.startsWith("docs/")).length} docs/ files packed) `
+    + "— an installed user following the refusal reaches nothing");
+
+  // The refusal itself, `AGENTS.md` (which DOES ship, so its dead relative link was the
+  // second half of the same defect) and `blaze init --help` must all carry that same
+  // reachable pointer, rather than three different ways of not saying where the rule is.
+  let refusal = "";
+  try { assertValidKey("eng", { source: "blaze.config.json's 'key' field" }); }
+  catch (e) { refusal = e.message; }
+  assert.ok(refusal.includes(KEY_RULE_DOC), "the refusal must emit the reachable pointer");
+  assert.ok(read(join(REPO, "AGENTS.md"), "utf8").includes(KEY_RULE_DOC),
+    "AGENTS.md ships in the tarball, so its link to the key rule must be reachable too");
+  assert.ok(USAGE.includes(KEY_RULE_DOC),
+    "`blaze init --help` said 'see ADR-0025' with no path at all — name the reachable pointer");
+
+  // And whichever arm is taken, the pointer is not a typo: it names a file that exists.
+  // A working-tree check, deliberately, and only as a supplement — it is `reachable()`
+  // above that pins the property an installed user depends on. Written per-arm so the
+  // disjunction stays live: shipping `docs/decisions/` in `package.json`'s `files` makes
+  // a repo-relative pointer legal again and this test follows without being edited.
+  const inRepo = KEY_RULE_DOC.startsWith("https://")
+    ? KEY_RULE_DOC.replace(/^https:\/\/github\.com\/hjr15\/blaze\/blob\/[^/]+\//, "")
+    : KEY_RULE_DOC;
+  assert.notEqual(inRepo, KEY_RULE_DOC.startsWith("https://") ? KEY_RULE_DOC : null,
+    "a URL pointer must be the canonical github blob form, so its repo path is recoverable");
+  assert.ok(existsSync(join(REPO, inRepo)), `${inRepo} does not exist — the pointer is dangling`);
 });

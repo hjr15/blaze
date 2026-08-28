@@ -120,8 +120,19 @@ export class IncompatibleSchemaVersionError extends Error {
  * typo or a lower-case key. The refusal now states WHICH value, WHERE it came from, and
  * WHAT shape is expected, and points at ADR-0025 for everything else. The reasoning is not
  * deleted — it is one link away, and the KEY_RE comment above still carries it in full.
+ *
+ * BLZ-460: that link is a URL, not a repo-relative path. `package.json`'s `files`
+ * whitelist ships `scripts/`, `AGENTS.md`, `LICENSE` and `README.md` — `docs/` ships ZERO files
+ * (`npm pack --dry-run --json`: 149 files, 0 of them under `docs/`). BLZ-409 made this
+ * pointer load-bearing by deleting the 34 words of rationale it replaced, so for anyone
+ * who installed `@hjr15/blaze-board` the one route from the refusal to the reasoning
+ * resolved to nothing — and a bare path is not clickable in a terminal either. The same
+ * constant is what `AGENTS.md` links and what `blaze init --help` prints, so the three
+ * cannot drift apart. `tests/config-key-validation.test.mjs` pins reachability against
+ * the PACKED FILE LIST rather than the working tree, which always has the file.
  */
-export const KEY_RULE_DOC = "docs/decisions/0025-a-project-key-is-refused-never-normalised.md";
+export const KEY_RULE_DOC =
+  "https://github.com/hjr15/blaze/blob/main/docs/decisions/0025-a-project-key-is-refused-never-normalised.md";
 
 export function assertValidKey(key, { source }) {
   if (typeof key !== "string" || !KEY_RE.test(key)) {
@@ -207,12 +218,32 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   // Env overrides (highest precedence).
   let keySource = "blaze.config.json's 'key' field";
   // BLZ-410: PRESENCE, not truthiness. `if (env.BLAZE_KEY)` discarded `BLAZE_KEY=""` as
-  // though no override had been given, so the file key silently won and the run used a
-  // different board than the caller asked for, with no message on any stream. The shape
-  // that produces it is ordinary: `BLAZE_KEY="$SOMETHING_UNSET" blaze move ...` in a shell
-  // script. An empty override is a CALLER ERROR — BLZ-394 settled exactly this for an empty
+  // though no override had been given, so the file key silently won with no message on any
+  // stream. An empty override is a CALLER ERROR — BLZ-394 settled exactly this for an empty
   // `--project=` — so it now reaches `assertValidKey` below and is refused by name.
   // `undefined` (genuinely absent) is the only value that still means "no override".
+  //
+  // BLZ-461: the harm this used to claim — `BLAZE_KEY="$UNSET_VAR" blaze move …` running
+  // "against a different board than it asked for" — DOES NOT REPRODUCE, and the correction
+  // is recorded here rather than quietly dropped. Measured on identical boards:
+  // `BLAZE_KEY=OPS blaze move ENG-1 in-progress` and the same command with no `BLAZE_KEY`
+  // both print `ENG-1: defined → in-progress`; `move-runner.mjs` reads `cfg` only for
+  // `cfg.commitMode` and `applyMove` never sees it. `blaze new`'s prefix comes from
+  // `--project`, not `cfg.key` (`BLAZE_KEY=OPS blaze new --project ENG` created `ENG-3`),
+  // and `loadProject` derives its own matchers from the per-project key.
+  //
+  // `cfg.key`'s derived matchers below have exactly ONE consumer in the engine:
+  // `scripts/loops/groomer.mjs:70`, `matchersFor(cfg, null)`, reached only from that
+  // file's legacy flat-layout branch — which `statusDirs` takes only on a board whose
+  // status directories sit at the ROOT (`<root>/backlog/`). On the `projects/<KEY>/
+  // <status>/` layout every board here uses, no call path reaches it at all.
+  // `cfg.idRegex` and `cfg.idFromRef` have no consumer on any layout — reconcile derives
+  // its own per project from `loadProject`.
+  //
+  // So this flip is DEFENSIVE. It is correct, and the blast radius of the behaviour it
+  // replaced was one call path on one legacy layout — not `move`, not `new`, not
+  // reconcile. Its value is that an empty override cannot silently become the file key
+  // for a consumer added tomorrow, not that a verb is misbehaving now.
   if (env.BLAZE_KEY !== undefined) {
     cfg.key = env.BLAZE_KEY; keySource = "the BLAZE_KEY environment variable";
   }
