@@ -449,8 +449,8 @@ export function idsFromCommitMessage(message, key) {
 // is not subject-only.
 //
 // All 22 are already terminal, so nothing moves — but 12 of them hold no `pr:` record,
-// and ADR-0023 lets a terminal ticket ACQUIRE an absent one. Two paths reach that write
-// and they answer differently; both are settled by end-to-end tests in
+// and ADR-0023 lets a terminal ticket ACQUIRE an absent one. THREE paths reach that write
+// and they answer differently. The first two are settled by end-to-end tests in
 // tests/reconcile-title-claim-oracle.test.mjs rather than by argument:
 //   - shipped ALONE cannot write a record (the `shipped` arm sets neither field, and on a
 //     terminal ticket it is not even reached) — REFUTED;
@@ -459,6 +459,21 @@ export function idsFromCommitMessage(message, key) {
 //     uncorroborated to corroborated, and that PR may fill an absent record — REAL. No
 //     such PR exists on `docs-central` today (0 of its 204 PRs has a branch deriving any
 //     of the 12), so the path is live but untriggered. See ADR-0026.
+//   - BLZ-489, THE THIRD, which this comment enumerated as two until ADR-0026 named it:
+//     `buildBranchMap` carries its OWN `shippedSet && shippedSet.has(id)` corroboration,
+//     one layer below `claimCorroborated`, so a wider set newly admits a BRANCH rather
+//     than a PR. It is GUARDED, not absent — on a terminal ticket, terminal-sticky nulls
+//     `branchVal` and `prVal` for anything whose top-ranked PR is not MERGED, and a
+//     branch recovered by the shipped set brings no PR at all. On a NON-terminal ticket
+//     the same arm writes `branch:` and moves the ticket to `in-progress`. The arm itself
+//     is pinned by "buildBranchMap: shippedSet corroborates a branch with no matching
+//     commit subject" in tests/reconcile-branchmap-corroboration.test.mjs.
+//
+// So the two-path answer for the 22 holds BECAUSE OF terminal-sticky, not in spite of
+// needing it: every one of the 22 is already `done`, which is a fact about THAT
+// population and not a property of the widening. A future widening that reaches a
+// non-terminal id makes the third path live, and it moves a ticket rather than merely
+// recording one — which is the louder of the two outcomes, not the quieter.
 //
 // --- BLZ-469: the MULTI-TICKET MANIFEST form -------------------------------------
 // `KEY-n + N more: desc` claims KEY-n and NOTHING ELSE from the subject; the squash

@@ -1287,3 +1287,54 @@ esac
     }
   }
 });
+
+// =============================================================================
+// BLZ-489 — the comment and the ADR must enumerate the SAME paths.
+//
+// `scripts/reconcile.mjs` said "Two paths reach that write and they answer differently"
+// and listed two. ADR-0026 documents a THIRD: `buildBranchMap`'s own
+// `shippedSet && shippedSet.has(id)` corroboration, which a wider set newly admits. On a
+// terminal ticket it is blocked by terminal-sticky nulling both fields — which is why the
+// conclusion for the twelve holds — and on a NON-terminal ticket the same arm writes
+// `branch:` and moves the ticket to `in-progress`.
+//
+// The two texts had drifted apart, and the comment is the one an engineer reads at the
+// moment they are changing the code. This is the pin that keeps them together: it is not
+// prose-checking for its own sake, it is the specific disagreement BLZ-489 recorded.
+// =============================================================================
+
+const FLAT = (s) => s.replace(/\s+/g, " ");
+// The comment markers have to come off before the text is flattened, or every sentence
+// that wraps across two comment lines carries a `//` through the middle of it and no
+// assertion below can match a sentence longer than one line.
+const UNCOMMENT = (s) => FLAT(s.split("\n").map((l) => l.replace(/^\s*\/\/ ?/, "")).join("\n"));
+const RECONCILE_SRC = UNCOMMENT(readFileSync(
+  join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "utf8"));
+const ADR_0026 = FLAT(readFileSync(join(import.meta.dirname, "..", "docs", "decisions",
+  "0026-a-pr-title-claims-a-ticket-with-a-colon-or-an-em-dash-and-nothing-else.md"), "utf8"));
+
+describe("BLZ-489: reconcile's write-path comment enumerates the same paths ADR-0026 does", () => {
+  test("the ADR really does document a third, guarded path — the premise, read from the ADR", () => {
+    // Without this the assertions below could pass against an ADR that had quietly lost the
+    // third path, which would make the comment right by accident and this file vacuous.
+    assert.match(ADR_0026, /A third write path exists, and it is blocked only by a guard worth naming/);
+    assert.match(ADR_0026, /`buildBranchMap` carries its own `shippedSet && shippedSet\.has\(id\)` corroboration/);
+    assert.match(ADR_0026, /on a NON-terminal ticket the same arm writes `branch:` and moves the ticket to `in-progress`/);
+    assert.match(ADR_0026, /safe \*\*because of\*\* that guard, not in spite of needing one/);
+  });
+
+  test("the comment enumerates THREE paths, and names the third one's arm", () => {
+    assert.match(RECONCILE_SRC, /THREE paths reach that write/);
+    assert.doesNotMatch(RECONCILE_SRC, /Two paths reach that write/,
+      "the stale two-path enumeration is the defect BLZ-489 recorded");
+    assert.match(RECONCILE_SRC, /`buildBranchMap` carries its OWN `shippedSet && shippedSet\.has\(id\)`/,
+      "the third path must be named by its arm, not alluded to");
+    assert.match(RECONCILE_SRC, /writes `branch:` and moves the ticket to `in-progress`/,
+      "…including what it does on a NON-terminal ticket, which is the half that is not blocked");
+  });
+
+  test("…and it says the two-path conclusion holds BECAUSE of terminal-sticky", () => {
+    assert.match(RECONCILE_SRC, /BECAUSE OF terminal-sticky, not in spite of needing it/,
+      "AC-2: a guarded conclusion that does not name its guard reads as an unconditional one");
+  });
+});
