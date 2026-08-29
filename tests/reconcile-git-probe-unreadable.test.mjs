@@ -25,6 +25,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { reconcile } from "../scripts/reconcile.mjs";
 
 const CLI = join(import.meta.dirname, "..", "scripts", "reconcile.mjs");
+const git = (cwd, ...args) => execFileSync("git", ["-C", cwd, ...args], { encoding: "utf8" }).trim();
 
 /** A board with one project, one `defined` ticket, and a code repo whose default branch
  *  already carries the `INF-1:` commit that should drive it to `done`. */
@@ -306,6 +307,100 @@ describe("BLZ-484: a single probe can fail while its siblings answer", () => {
       const res = run(root, ghOnlyBin(tmp), true);
       assert.doesNotMatch(res.stdout + res.stderr, /no code-bound change found/);
       assert.equal(res.status, 1);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
+
+// =============================================================================
+// BLZ-494 — the failed-fetch severity, which survived mutation.
+//
+// `severity: "warning"` on the `--fetch` probe is what stops a failed fetch from becoming
+// exit 1. Mutating it to `"error"` left the whole suite green, so nothing was holding it.
+//
+// IT IS LOAD-BEARING, AND HERE IS THE MEASUREMENT. Instrumented across the reconcile suite
+// at 1b00f3a (`tests/reconcile*.test.mjs`, 371 tests), `git fetch --prune --quiet` runs 9
+// times and EXITS 128 FOUR OF THEM — in `blz404-oracle-applied`, `blz404-oracle-preview`
+// and twice in `blz421-oracle-equiv`, every one a fixture whose `origin` points at a
+// repository that does not exist. Under `severity: "error"` each of those four lands in
+// `unreadableProbes`, prints `GIT UNREADABLE` and `FAILED — N git probe(s) could not be
+// completed`, and exits 1. The same figure re-derives unchanged after BLZ-492: 9 and 4.
+//
+// And warning is the RIGHT answer, not merely the convenient one. A failed fetch does not
+// make the run wrong about anything it read; it makes it no more current than a run without
+// `--fetch` at all, which is the ordinary state of every default run. That is precisely the
+// DEGRADED tier: correct about what it could see, and saying what it could not.
+// =============================================================================
+
+/** `board`, plus an `origin` pointing at a path that does not exist — so `git fetch` fails
+ *  by exit code, immediately, with no network involved and nothing to be flaky about. */
+function boardWithDanglingRemote(tmp) {
+  const root = board(tmp);
+  git(join(tmp, "repo-INF"), "remote", "add", "origin", join(tmp, "no-such-repo.git"));
+  return root;
+}
+
+
+describe("BLZ-494: a failed --fetch DEGRADES the run, and never fails it", () => {
+  test("the construction is what it claims: the fetch fails by exit code, off the network", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz494-fetch-shape-"));
+    try {
+      boardWithDanglingRemote(tmp);
+      const r = spawnSync("git", ["-C", join(tmp, "repo-INF"), "fetch", "--prune", "--quiet"],
+        { encoding: "utf8" });
+      assert.equal(r.status, 128, "the fetch must RAN-and-failed, not could-not-run");
+      assert.equal(existsSync(join(tmp, "no-such-repo.git")), false,
+        "…because the remote is a path that does not exist — no DNS, no credentials, no flake");
+      // The default branch still resolves locally, so nothing else on this board can raise a
+      // git condition and the assertions below cannot pass on someone else's finding.
+      assert.equal(spawnSync("git", ["-C", join(tmp, "repo-INF"), "rev-parse", "--verify", "--quiet", "main"],
+        { encoding: "utf8" }).status, 0);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the condition travels as severity: warning — the field the whole exit code turns on", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz494-fetch-result-"));
+    const prev = process.env.PATH;
+    try {
+      const root = boardWithDanglingRemote(tmp);
+      process.env.PATH = `${ghOnlyBin(tmp)}:${prev}`;
+      const r = await reconcile({ root, dryRun: true, fetch: true });
+      assert.equal(r.gitErrors.length, 1, JSON.stringify(r.gitErrors));
+      assert.equal(r.gitErrors[0].command, "git fetch --prune --quiet");
+      assert.equal(r.gitErrors[0].reason, "git-failed");
+      assert.equal(r.gitErrors[0].severity, "warning",
+        "`error` here makes the four failing fetches in this suite exit 1 — see the header");
+      assert.deepEqual(r.changes.map((c) => c.id), ["INF-1"],
+        "and the run is still correct about everything it COULD read");
+    } finally {
+      process.env.PATH = prev;
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the CLI says GIT DEGRADED, exits 0, and still reports the move it found", () => {
+    // The half the operator sees. Under `severity: "error"` this run prints GIT UNREADABLE
+    // and `FAILED — 1 git probe(s) could not be completed` and exits 1, on a board whose
+    // only fault is that a remote it was told to refresh is unreachable.
+    const tmp = mkdtempSync(join(tmpdir(), "blz494-fetch-cli-"));
+    try {
+      const root = boardWithDanglingRemote(tmp);
+      const res = spawnSync(process.execPath, [CLI, "--fetch"], {
+        cwd: root, encoding: "utf8",
+        env: { ...process.env, PATH: `${ghOnlyBin(tmp)}:${process.env.PATH}` },
+      });
+      assert.equal(res.status, 0, `a stale fetch is not a failed run\n${res.stderr}`);
+      assert.match(res.stderr, /GIT DEGRADED — `git fetch --prune --quiet` failed/);
+      assert.match(res.stderr, /as stale as the last successful fetch/,
+        "the consequence must be stated, or DEGRADED is just a word");
+      assert.doesNotMatch(res.stderr, /GIT UNREADABLE/,
+        "a fetch that RAN and failed is not a probe that could not be completed");
+      assert.doesNotMatch(res.stderr, /FAILED — /);
+      assert.match(res.stdout, /would move INF-1: defined → done/,
+        "and the signal the fetch was meant to refresh is still read and still reported");
     } finally {
       rmSync(tmp, { recursive: true, force: true });
     }

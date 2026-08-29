@@ -1091,9 +1091,17 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // the run reconciled against a tree it believed was fresh and was not. A warning rather
   // than an error: the run is still correct about what it CAN see (an unfetched remote is
   // the ordinary state of every run without `--fetch`), it is just not as current as the
-  // flag promised. Measured: 4 of the 330 reconcile tests hit a failing fetch today, all
-  // `remote: Repository not found` on a fixture with a dangling remote, and none of them
-  // said a word about it.
+  // flag promised.
+  //
+  // BLZ-494: THE SEVERITY IS LOAD-BEARING AND WAS UNPINNED — mutating it to `error` left
+  // the whole suite green. Re-measured at 1b00f3a by instrumenting every `git` invocation
+  // across `tests/reconcile*.test.mjs` (371 tests): `fetch --prune --quiet` runs 9 times
+  // and exits 128 on FOUR of them — `blz404-oracle-applied`, `blz404-oracle-preview`, and
+  // twice in `blz421-oracle-equiv`, each a fixture whose `origin` does not exist. At
+  // `error` those four land in `unreadableProbes`, print `GIT UNREADABLE` and `FAILED`,
+  // and exit 1. Now pinned by "the condition travels as severity: warning" and "the CLI
+  // says GIT DEGRADED, exits 0, and still reports the move it found" in
+  // tests/reconcile-git-probe-unreadable.test.mjs.
   if (fetch) {
     gitProbe(gitErrors, repoPath, ["fetch", "--prune", "--quiet"], {
       timeout: 30000, severity: "warning",
