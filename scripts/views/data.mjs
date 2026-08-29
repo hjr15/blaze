@@ -1,5 +1,5 @@
 // scripts/views/data.mjs — pure, read-only board/live models.
-import { readFileSync } from "node:fs";
+import { readRegularFileSync } from "../model/regular-file.mjs";
 import { fsReadStorage } from "../model/read-storage.mjs";
 import { join, basename } from "node:path";
 import { buildIndex } from "../model/index.mjs";
@@ -119,11 +119,28 @@ export function contentHash({ projectsDir = resolveRoots().projectsDir, project 
 // Live-activity model: tail <dataRoot>/.blaze/activity.jsonl, group by ticket,
 // attach each ticket's current column from the board index. Missing/empty file
 // degrades to no groups. Read-only; the feed is written by the claude-config hook.
+//
+// BLZ-493: this is the one site of the ten that REPORTS rather than refuses, and the reason
+// is that it is `serve.mjs`'s `/api/live` route on a LONG-LIVED process — the site whose hang
+// was reproduced as exit 137. A throw would take a route down over an optional feed, so the
+// guard degrades as before. But `groups: []` ALONE IS THE BUG: `views/live.mjs` renders
+// exactly `No recent activity.` for it, a sentence about the world produced by a run that
+// never looked at the world. So what could not be read travels out WITH the model, the way
+// `forgeErrors` and `gitErrors` do (ADR-0030 §2), and the view says so instead.
+//
+// A MISSING feed stays silent. Nearly every board has none, and a banner that is permanent
+// furniture is the gate people learn to skip. ADR-0031.
 export function liveModel(dataRoot, projectsDir, { now = Date.now() } = {}) {
+  const feed = join(dataRoot, ".blaze", "activity.jsonl");
   let text = "";
-  try { text = readFileSync(join(dataRoot, ".blaze", "activity.jsonl"), "utf8"); } catch { text = ""; }
+  let unreadable = null;
+  try { text = readRegularFileSync(feed); }
+  catch (e) {
+    text = "";
+    if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") unreadable = { path: feed, detail: e.message };
+  }
   const events = parseActivity(text);
   const statusByKey = {};
   for (const r of buildIndex(projectsDir).rows) if (r.id) statusByKey[r.id] = r.status;
-  return { groups: groupByTicket(events, { now, statusByKey }) };
+  return { groups: groupByTicket(events, { now, statusByKey }), unreadable };
 }

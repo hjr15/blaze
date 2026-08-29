@@ -7,7 +7,8 @@
 // No import from views/ or serve.mjs — this module is a pure data source.
 
 import { execFileSync } from "node:child_process";
-import { readFileSync, writeFileSync, mkdirSync } from "node:fs";
+import { mkdirSync } from "node:fs";
+import { readRegularFileSync, writeRegularFileSync } from "./regular-file.mjs";
 import { join } from "node:path";
 
 const NUL = "\0";
@@ -76,8 +77,15 @@ export function buildTransitions({ root }) {
 // --- cache read/write ----------------------------------------------------------
 export function loadTransitions({ root }) {
   const cachePath = join(root, ".blaze", "transitions.json");
+  // BLZ-493: the ONLY one of the ten sites allowed to fall through in silence, and the
+  // reason is written here rather than left implied. Every other site's fallback is a claim
+  // about the board — no sprints, no cutover, an empty taxonomy — made by a run that never
+  // looked. This one's fallback is `buildTransitions`, which LOOKS, at git, and returns the
+  // true answer; the cache is a pure optimisation over `git log`. ADR-0030's rule is about a
+  // run that could not look reporting what a looking run reports, and this run looks. So it
+  // must not BLOCK, and it owes no report. ADR-0031.
   let cached = null;
-  try { cached = JSON.parse(readFileSync(cachePath, "utf8")); } catch { cached = null; }
+  try { cached = JSON.parse(readRegularFileSync(cachePath)); } catch { cached = null; }
 
   const head = sh(root, ["rev-parse", "HEAD"]);
   if (head === null) return { head: null, transitions: [] };
@@ -88,7 +96,11 @@ export function loadTransitions({ root }) {
   const built = buildTransitions({ root });
   try {
     mkdirSync(join(root, ".blaze"), { recursive: true });
-    writeFileSync(cachePath, JSON.stringify(built));
+    // BLZ-493: guarding only the read moves the hang three lines down. `writeFileSync` on a
+    // FIFO with no reader blocks exactly as the read does (measured at 1b00f3a), and a
+    // try/catch around a blocking call catches nothing. `writeRegularFileSync` opens
+    // non-blocking, so this best-effort write fails fast into the catch below instead.
+    writeRegularFileSync(cachePath, JSON.stringify(built));
   } catch { /* cache is best-effort */ }
   return built;
 }

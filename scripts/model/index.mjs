@@ -4,6 +4,7 @@
 // The Index interface is storage-agnostic — a future node:sqlite implementation
 // must satisfy the same shape (spec §13, revised), so the swap stays contained.
 import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
 import { parseTicket } from "./ticket.mjs";
 import { lintLinks } from "./links.mjs";
@@ -240,7 +241,17 @@ export function* walkTickets(projectsDir) {
           yield { frontmatter: hit.frontmatter, body: hit.body, project, status, file };
           continue;
         }
-        const { frontmatter, body } = parseTicket(readFileSync(file, "utf8"));
+        // BLZ-493: REFUSE a `.md` that is not a regular file, rather than opening it.
+        // `readFileSync` on a FIFO named `X.md` blocks forever and takes the whole walk —
+        // and with it `blaze audit`, `buildIndex`, id resolution, the board view and
+        // `reconcile` — down in silence. A SKIP here was rejected: it would make a
+        // ticket-shaped entry vanish from every consumer with no finding and no counter,
+        // which is the exact drop BLZ-470 exists to close and which BLZ-430 refused to
+        // introduce for malformed `.md` files. Those still throw from `parseTicket`, and a
+        // `.md` that is a DIRECTORY already threw EISDIR from this very line (measured at
+        // 1b00f3a) — so this is the walk applying one rule to all three unreadable shapes,
+        // not a new refusal. ADR-0031.
+        const { frontmatter, body } = parseTicket(readRegularFileSync(file));
         parseCache.set(file, { mtimeMs: s.mtimeMs, size: s.size, frontmatter, body });
         yield { frontmatter, body, project, status, file };
       }

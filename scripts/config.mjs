@@ -1,6 +1,7 @@
 // config.mjs — load blaze.config.json with defaults + env overrides, and derive
 // the key-based regexes that reconcile.mjs and new-runner.mjs share.
-import { readFileSync, existsSync } from "node:fs";
+import { existsSync } from "node:fs";
+import { readRegularFileSync } from "./model/regular-file.mjs";
 import { join, dirname, isAbsolute, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
@@ -165,9 +166,17 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   const path = join(root, fileName);
   let file = {};
   if (existsSync(path)) {
+    // BLZ-493: `existsSync` is SATISFIED BY A FIFO, and this guard sits on nearly every entry
+    // point Blaze has — so one `mkfifo blaze.config.json` used to block every verb forever.
+    // The refusal is a PLAIN Error and deliberately NOT a `ConfigParseError`: BLZ-392's
+    // tolerance in `audit-runner.mjs` keys off that class to CONTINUE past a config it could
+    // not load, and continuing past a config this run never read is the laundering itself. A
+    // plain Error lands in the `config-unloadable` HARD finding instead — named, `ok=false`,
+    // exit 1. ADR-0031.
     try {
-      file = JSON.parse(readFileSync(path, "utf8"));
+      file = JSON.parse(readRegularFileSync(path));
     } catch (e) {
+      if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;
       throw new ConfigParseError(`blaze: cannot parse ${fileName}: ${e.message}`);
     }
   }
@@ -465,8 +474,14 @@ export function loadProject(key, {
   const path = join(dir, "project.json");
   let file = {};
   if (existsSync(path)) {
-    try { file = JSON.parse(readFileSync(path, "utf8")); }
-    catch (e) { throw new Error(`blaze: cannot parse projects/${key}/project.json: ${e.message}`); }
+    // BLZ-493: the same `existsSync`-satisfied-by-a-FIFO hole as `loadConfig` above, on the
+    // path every verb that names a project takes. The refusal is passed through rather than
+    // reworded as a parse failure — Blaze never got as far as parsing. ADR-0031.
+    try { file = JSON.parse(readRegularFileSync(path)); }
+    catch (e) {
+      if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;
+      throw new Error(`blaze: cannot parse projects/${key}/project.json: ${e.message}`);
+    }
   }
   const merged = { ...PROJECT_DEFAULTS, ...file, key };
   const repos = merged.codeRepos.length ? merged.codeRepos : (cfg.codeRepos || []);
