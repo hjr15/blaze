@@ -62,6 +62,38 @@ function trackedTicket(root, rel, body = "one\n") {
   execFileSync("git", ["-C", root, "commit", "-q", "-m", `add ${rel}`]);
 }
 
+/** A batch-mode board whose `projects/` is a SYMLINK, the fixture BLZ-404 round 3/4 died
+ *  on and the one review round 1 used to refute this verb's first implementation. */
+function symlinkBoard() {
+  const root = mkdtempSync(join(tmpdir(), "blaze-symlinkboard-"));
+  cpSync(join(REPO, "scripts"), join(root, "scripts"), { recursive: true });
+  mkdirSync(join(root, "real", "projects", "ZZZ", "defined"), { recursive: true });
+  symlinkSync("real/projects", join(root, "projects"));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify(
+    { projects: ["ZZZ"], boardTitle: "t", codeRepos: [], commitMode: "batch" }, null, 2));
+  execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
+  execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
+  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
+  writeFileSync(join(root, "seed"), "seed");
+  execFileSync("git", ["-C", root, "add", "seed"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+  return root;
+}
+
+/** Queue a real `blaze new` through the REAL runner, and return the ticket path exactly as
+ *  the verb recorded it in the ledger. Driving the verb rather than hand-writing the ledger
+ *  is the whole point: the recorded spelling IS the thing under test. */
+function newTicket(root, session, title = "a ticket") {
+  const r = spawnSync(process.execPath,
+    [join(root, "scripts", "new-runner.mjs"), "--project", "ZZZ", "--type", "task", "--estimate", "30", title],
+    { cwd: root, encoding: "utf8", env: { ...process.env, BLAZE_SESSION: session } });
+  assert.equal(r.status, 0, `blaze new failed: ${r.stderr}`);
+  const entries = readFileSync(ledgerPath(root, session), "utf8").trim().split("\n").map((l) => JSON.parse(l));
+  const md = entries.at(-1).files.find((f) => f.endsWith(".md"));
+  assert.ok(md, "the `new` op must record a ticket file");
+  return md;
+}
+
 function runStatus(root, { session, harnessId = HARNESS_ID, env: extra = {}, args = ["--status"] } = {}) {
   const env = { ...process.env, ...extra };
   if (session) env.BLAZE_SESSION = session; else delete env.BLAZE_SESSION;
@@ -117,25 +149,54 @@ describe("outstandingFiles — the ledger is the oracle, and only an exit code c
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  // T4 pins: design 2's specific UNDER-fire. Reproduced in phase 1 against real git.
-  test("T4: `projects/` as a symlink does not silence the report", () => {
-    const root = board();
+  // T4. REBUILT after review round 1. The first version hand-wrote the ledger with the
+  // REAL path and then asserted, in prose, a production property that was FALSE: on a
+  // symlinked board the real verb records the THROUGH-SYMLINK path, git indexes the real
+  // one, and every op came back `outstanding` forever — including the already-filed ones.
+  // That test pinned its own fixture premise, not the product, in the most consequential
+  // place in the change. It now queues through the ACTUAL verb and asserts both directions.
+  test("T4: on a symlinked `projects/`, an already-filed op is ORPHANED, not falsely outstanding", () => {
+    const root = symlinkBoard();
     try {
-      const rel = "real/projects/ZZZ/defined/ZZZ-5.md";
-      mkdirSync(join(root, "real", "projects", "ZZZ", "defined"), { recursive: true });
-      trackedTicket(root, rel);
-      rmSync(join(root, "projects"), { recursive: true, force: true });
-      symlinkSync("real/projects", join(root, "projects"));
-      writeFileSync(join(root, rel), "one\nDIRTY BEHIND A SYMLINK\n");
+      const rel = newTicket(root, "sess");
+      // The ledger records the through-symlink path; git will index the real one.
+      assert.ok(rel.startsWith("projects/"), `the verb recorded ${rel}`);
+      // File it by hand at its real path — the exact 185-orphan condition on the live board.
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "hand commit at the real path"]);
+      assert.ok(gitIn(root, "ls-files").includes("real/projects/"),
+        "fixture check: git really did index the ticket under its REAL path");
 
-      // The probe BLZ-404 round 3/4 used, proving the fixture really is the failing case:
-      const porcelain = gitIn(root, "status", "--porcelain", "--", "projects/").trim();
-      assert.equal(porcelain, "",
-        "fixture check: `git status --porcelain -- projects/` really does go blind through the symlink");
+      // Design 2's probe, on this same fixture, to keep its UNDER-fire on the record:
+      assert.equal(gitIn(root, "status", "--porcelain", "--", "projects/").trim(), "",
+        "fixture check: `git status --porcelain -- projects/` goes blind through the symlink");
 
       const r = outstandingFiles(root, [rel]);
-      assert.deepEqual(r.outstanding, [rel],
-        "the ledger records the real path, so the symlink is never on the probe's path at all");
+      assert.deepEqual(r.outstanding, [],
+        "reporting a filed op as outstanding is the OVER-fire twin of design 2's under-fire");
+      assert.deepEqual(r.settled, [rel]);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("T4b: on a symlinked `projects/`, a genuinely unfiled op is still OUTSTANDING", () => {
+    const root = symlinkBoard();
+    try {
+      const rel = newTicket(root, "sess"); // queued, never committed
+      assert.deepEqual(outstandingFiles(root, [rel]).outstanding, [rel],
+        "fixing the over-fire must not silence the case the verb exists for");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  test("T4c: the whole `--status` report is correct end-to-end on a symlinked board", () => {
+    const root = symlinkBoard();
+    try {
+      newTicket(root, "sess");
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "hand commit"]);
+      const out = runStatus(root, { session: "sess" }).stdout;
+      assert.match(out, /outstanding: 0 file\(s\)/,
+        `the verb still over-fires end-to-end:\n${out}`);
+      assert.match(out, /orphaned: {4}2 file\(s\)/);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
@@ -181,6 +242,40 @@ describe("outstandingFiles — the ledger is the oracle, and only an exit code c
         () => outstandingFiles(root, [rel], { gitBin: join(bin, "git") }),
         /could not answer|git/i,
         "an unanswerable probe must not be read as `settled` — that is exactly ADR-0030's rule");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // T8b. ADDED after review round 1. T8's blanket-failing stub is intercepted by the FIRST
+  // probe (`ls-files`), so it only ever exercised the tracked-check's throw — the diff
+  // probe's throw was discriminated by NO test, and replacing it with a raw
+  // `spawnSync(...).status === 1` left the suite fully green. A two-mode stub is what
+  // separates them: `ls-files` answers 0/1 normally, `diff` cannot answer.
+  test("T8b: a `git diff` that cannot answer FAILS even when `ls-files` answered fine", () => {
+    const root = board();
+    try {
+      const rel = "projects/ZZZ/defined/ZZZ-9.md";
+      trackedTicket(root, rel);
+      const bin = join(root, "fakebin");
+      mkdirSync(bin, { recursive: true });
+      // Mode 1: ls-files delegates to the real git, so tracked/untracked is answered
+      // honestly. Mode 2: diff exits 129, the shape of a git that could not look.
+      writeFileSync(join(bin, "git"),
+        '#!/bin/sh\nfor a in "$@"; do\n  if [ "$a" = "diff" ]; then exit 129; fi\ndone\nexec ' +
+        execFileSync("sh", ["-c", "command -v git"], { encoding: "utf8" }).trim() + ' "$@"\n');
+      chmodSync(join(bin, "git"), 0o755);
+
+      // Prove mode 1 really does answer, so a throw cannot be coming from the tracked check.
+      assert.equal(spawnSync(join(bin, "git"),
+        ["-C", root, "ls-files", "--error-unmatch", "--", rel], { stdio: "ignore" }).status, 0,
+        "fixture check: the stub answers ls-files normally");
+      assert.equal(spawnSync(join(bin, "git"),
+        ["-C", root, "diff", "--quiet", "HEAD", "--", rel], { stdio: "ignore" }).status, 129,
+        "fixture check: the stub cannot answer diff");
+
+      assert.throws(
+        () => outstandingFiles(root, [rel], { gitBin: join(bin, "git") }),
+        /could not answer/,
+        "the DIFF probe's ADR-0030 throw must be its own pinned guard, not a shadow of ls-files'");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

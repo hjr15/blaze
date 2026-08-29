@@ -125,8 +125,10 @@ reports only what *it* found (no code-bound change, most likely, since the
 prior pass already wrote the files), never a claim about the state of the git
 tree. Telling a genuinely failed prior commit apart from a `commitMode:
 "batch"` board that queued by design, or from a human's own uncommitted edit
-under `projects/`, needs the pending ledger, not `git status` — that is a
-separate, unbuilt feature. If a run reports nothing to do but `git status`
+under `projects/`, needs the pending ledger, not `git status`. That ledger read
+is now built: [`blaze commit --status`](#commit) reports the queued-by-design
+state. It cannot report the other two — neither leaves a ledger entry — and it
+says so in its own output (ADR-0032). If a run reports nothing to do but `git status`
 still shows changes under `projects/`, the remedy depends on which of those three
 states you are in, and **`blaze commit` only addresses one of them** (BLZ-434) —
 run [`blaze commit --status`](#commit) to see which of your queues, if any, still

@@ -2,9 +2,9 @@
 // for batch commit mode. One queue per session (keyed by BLAZE_SESSION) under
 // .blaze/pending/, plus the legacy shared fallback .blaze/pending-commit.jsonl
 // for callers with no session set. All gitignored; drained by `blaze commit`.
-import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
 import { spawnSync } from "node:child_process";
-import { join, dirname } from "node:path";
+import { join, dirname, relative, isAbsolute } from "node:path";
 import { assertWritable } from "./readonly.mjs";
 
 // Sanitized BLAZE_SESSION, else an id derived from the agent harness's own
@@ -138,6 +138,41 @@ export function listQueues(root) {
  *  A probe that could not be run is never read as "settled" (ADR-0030): git exiting
  *  anything other than 0 or 1, or failing to spawn at all, throws. Reachable — an absent
  *  or unforkable `git` is an ordinary environment state, not a theoretical branch. */
+/** The path GIT knows a ledger-recorded path by.
+ *
+ *  BLZ-499 review round 1. `commitOrQueue` records `relative(root, f)` and nothing in
+ *  `config.mjs` calls `realpath`, so on a board whose `projects/` is a SYMLINK the ledger
+ *  holds the through-symlink path (`projects/ZZZ/…`) while git's index holds the real one
+ *  (`real/projects/ZZZ/…`). `ls-files --error-unmatch` then never matches, the file reports
+ *  untracked-but-present, and EVERY op on that board is reported `outstanding` forever —
+ *  including the already-filed ones this verb exists to find. That is the over-fire twin of
+ *  the under-fire that killed BLZ-404 round 3/4, on the same fixture, and it corrupts the
+ *  one distinction the verb is for.
+ *
+ *  Resolving the LONGEST EXISTING PREFIX and re-appending the remainder, rather than
+ *  `realpathSync` on the whole path, is what makes this work for a move's old path: that
+ *  file is already gone, so the full realpath throws, but its parent directory still
+ *  resolves and the answer is still the one git indexed it under.
+ *
+ *  A recorded path that is absolute, or that resolves OUTSIDE the board, is returned
+ *  unchanged. Out-of-board paths are BLZ-503's problem; this must not quietly widen what
+ *  the probe reaches while fixing something else. */
+function gitPath(root, rel) {
+  if (isAbsolute(rel)) return rel;
+  let realRoot;
+  try { realRoot = realpathSync(root); } catch { return rel; }
+  const segs = rel.split("/").filter((s) => s !== "" && s !== ".");
+  for (let i = segs.length; i >= 0; i -= 1) {
+    let head;
+    try { head = realpathSync(join(root, ...segs.slice(0, i))); } catch { continue; }
+    const full = i === segs.length ? head : join(head, ...segs.slice(i));
+    const out = relative(realRoot, full);
+    if (out === "" || out.startsWith("..") || isAbsolute(out)) return rel;
+    return out;
+  }
+  return rel;
+}
+
 export function outstandingFiles(root, paths, { gitBin = "git" } = {}) {
   // ADR-0030: a probe that could not look does not report what a probe that looked
   // reports. BOTH probes below are two-valued by contract, so any third answer — and a
@@ -154,12 +189,15 @@ export function outstandingFiles(root, paths, { gitBin = "git" } = {}) {
   };
   const out = { outstanding: [], settled: [], absent: [] };
   for (const rel of [...new Set(paths)]) {
+    // Ask git about the path GIT indexed, not the one the ledger happens to spell.
+    // Report under the RECORDED spelling, which is what the operator has on disk.
+    const probe = gitPath(root, rel);
     const onDisk = existsSync(join(root, rel));
-    const tracked = ask(rel, ["ls-files", "--error-unmatch", "--", rel], "is tracked") === 0;
+    const tracked = ask(rel, ["ls-files", "--error-unmatch", "--", probe], "is tracked") === 0;
     if (!onDisk && !tracked) { out.absent.push(rel); continue; }
     // Written but never committed (a `new` op): git diff cannot see it, so decide here.
     if (onDisk && !tracked) { out.outstanding.push(rel); continue; }
-    if (ask(rel, ["diff", "--quiet", "HEAD", "--", rel], "is committed") === 1) out.outstanding.push(rel);
+    if (ask(rel, ["diff", "--quiet", "HEAD", "--", probe], "is committed") === 1) out.outstanding.push(rel);
     else out.settled.push(rel);
   }
   return out;
