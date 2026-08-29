@@ -1,355 +1,212 @@
-# Blaze — next session kickoff (written 2026-08-29)
+# blaze — next-session kickoff (2026-08-29)
 
-**If you are a session reading this, your task is §3 — review, merge and close out three
-open PRs, in the stated order.** You need no further instruction to begin. Supersedes
-`2026-08-28-blaze-next-session-kickoff.md`, whose lane (BLZ-130+131, BLZ-358, BLZ-56) is
-**built and green but NOT merged** — merging it is your job.
+Successor to `2026-08-28-blaze-followup-lane-successor.md`, which is now **fully discharged**.
+**This document is the work order.** It is self-contained and authoritative: where it
+contradicts a chat instruction, follow this.
 
----
-
-## 0. Continuity contract
-
-A usage, context or API limit is a **pause, not completion.** Do not stop, do not mark
-anything Done, do not hand back early. Commit after every sub-step, keep a running
-checklist in the ticket you are on, and resume from branch + checklist.
-
-**Do not narrow the lane on your own.** If you run out of room, leave the next item
-untouched and say which one it is.
+`main` is at **`69776b4`**. Suite **4,174 pass / 0 fail** (347 suites), hygiene clean, coverage
+~98.7 / 88.0 / 97.4. **Zero open PRs. Zero worktrees.** Board audit `ok=true` over 2,736 tickets.
 
 ---
 
-## 1. First ten minutes — verify, do not trust
+## 1. What happened, in one paragraph
 
-**This document asserts repo and PR state. Re-verify before acting.**
+The BLZ-408..439 successor lane closed all 32 of its tickets and, in doing so, generated 58 more
+by review. Those were worked too. **12 PRs merged (#141–#152), 73 tickets closed**, the suite grew
+from 3,811 to 4,174, and the theme that emerged is worth naming because it is what the remaining
+work is about:
 
-```bash
-export PATH=/home/rnamwoh/.local/node24/bin:$PATH   # Node 20 lacks node:sqlite — mandatory
-cd /home/rnamwoh/Documents/Code/blaze
-git fetch origin && git status --short && git log --oneline -1 HEAD && git log origin/main --oneline -2
-for n in 123 124 125; do printf "#%s: " "$n"; gh pr checks $n | awk '{printf "%s=%s ", $1,$2}'; echo; done
-for n in 123 124 125; do printf "#%s: " "$n"; gh pr view $n --json mergeable,mergeStateStatus -q '.mergeable+" "+.mergeStateStatus'; done
-```
+> **A run that could not look must not report what a run that looked and found nothing reports.**
 
-Expected on 2026-08-29: `origin/main` at `7a5ddb0`, and **all three PRs `pass` on all four
-checks and `MERGEABLE CLEAN`**. If a PR is not clean, `git fetch && git rebase origin/main`
-in its worktree — do not force past a red gate.
+That sentence now has an ADR (0030), a production fix (`sh()` no longer launders a git spawn
+failure), and a track record of catching itself: the same defect was found in a CI guard I wrote,
+in an oracle's own header, in a method doc, and in the operator-facing sentence of the branch whose
+subject it was.
 
-Baseline suite (worktrees already exist and have `node_modules` symlinked):
+## 2. State of the board
 
-```bash
-docker rm -f blzpg 2>/dev/null
-docker run --rm -d -e POSTGRES_PASSWORD=x -p 55455:5432 --name blzpg postgres:17-alpine
-for i in $(seq 1 60); do docker exec blzpg psql -U postgres -c 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-```
+**10 tickets open, 345 minutes estimated.** Everything else under BLZ-408..497 is `done`.
 
-**Three Postgres traps, each of which cost real time:**
-
-- **Wait on a real query, never `pg_isready`.** It returns while the server still answers
-  *"the database system is starting up"*.
-- **A stale container is the most likely false failure you will hit.** One cost a full
-  cycle last session: a warm container failed `tests/model/view-schema.test.mjs`
-  ("both foreign keys enforce") and a fresh one passed 16/16. Recreate before believing a
-  Postgres failure.
-- **`rm -rf coverage` before every coverage run.**
-- **Do not reuse one container across two worktrees on the same port.** Killing `blzchk`
-  and starting `blzpg` on 55455 without removing the first spun a wait loop for 10 minutes.
-
-Board, read-only:
-
-```bash
-cd /home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine
-git status -sb && node /home/rnamwoh/Documents/Code/blaze/scripts/cli.mjs audit | tail -2
-```
-
-Expect `BLZ-305-v4-spine`, **129 or more commits unpushed — correct, do not push**, and
-`ok=true`.
-
----
-
-## 2. What is open, and where it lives
-
-| PR | Ticket(s) | Branch | Worktree | Commits |
-|---|---|---|---|---|
-| [#123](https://github.com/hjr15/blaze/pull/123) | BLZ-130 + BLZ-131 (bundled) | `BLZ-130-131-reconcile-delivery-truth` | `blaze-worktrees/reconcile-delivery-truth` | 10 |
-| [#124](https://github.com/hjr15/blaze/pull/124) | BLZ-358 | `BLZ-358-first-run-setup` | `blaze-worktrees/first-run-setup` | 2 |
-| [#125](https://github.com/hjr15/blaze/pull/125) | BLZ-56 | `BLZ-56-validate-schema-on-load` | `blaze-worktrees/validate-schema-on-load` | 2 |
-
-All four board tickets are in **`in-review` with worklogs already logged** (120 + 150 +
-240 + 180 = 690 min). They need `blaze move <id> done` after merge, nothing else.
-
-**Every PR's most recent round of fixes is UNREVIEWED.** That is the whole reason this
-lane is handed over rather than merged: across six adversarial review rounds on these
-three PRs, **six returned REFUTED and every one found a real defect**. Merging the last
-round on green CI alone is not justified by that record.
-
----
-
-## 3. The lane — review, merge, close out, in this order
-
-### 3.1 One adversarial review per PR, on the LAST round only
-
-Dispatch three `adversarial-verifier` agents (**`opus`, set explicitly — never inherit**),
-one per PR, each scoped to the commits its previous review did not see:
-
-| PR | Review only these commits | The previous round's verdict |
-|---|---|---|
-| #123 | `ac2734f` | REFUTED — the write-once rule was described but never shipped |
-| #124 | `4a31486` | REFUTED — remote process kill + committable token |
-| #125 | `b2e509e` | REFUTED — preflight bricked a board class audit calls clean |
-
-**Tell each reviewer the repo's actual pattern, because it has held six times out of six:
-the PREVIOUS round's fix is where the next defect comes from.** Point it at the new
-commit, not the whole branch.
-
-Setup line every reviewer needs, verbatim:
-
-```
-export PATH=/home/rnamwoh/.local/node24/bin:$PATH
-BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55455/postgres
-```
-
-Without that env var the suite runs **70 fewer tests** and coverage reads ~1pp lower — a
-reviewer measured 92.06 once and it did not reproduce, which cost a round to resolve.
-
-**Two specific things to ask for, because both were missed until late:**
-
-1. **Does every construct the commit message and PR body name actually EXIST in the tree?**
-   `57f2313` on #123 shipped a comment ending "Hence also the write-once rule below" with
-   no rule below — a commit-split reverted the hunk and the branch carried on from the
-   reverted tree. Every gate was green. Nothing re-checked the claim against the code.
-2. **Which tests are vacuous?** Revert each production hunk and name any test that does
-   not go red. Three separate rounds shipped assertions loose enough to match a *different*
-   check's message, and one truncation test passed with the bug still present because
-   `spawnSync` does not reproduce piped truncation (it needs `sh -c '… | cat'`).
-
-### 3.2 Merge, in this order
-
-Merge **#123 first** (largest, most reviewed, and the other two are disjoint from it),
-then **#124**, then **#125**. `strict: true` means each merge invalidates the others'
-branch-up-to-date status; after each merge, update the next:
-
-```bash
-cd /home/rnamwoh/Documents/Code/blaze-worktrees/<next-worktree>
-git fetch origin && git rebase origin/main && git push --force-with-lease
-```
-
-Files are disjoint — `reconcile.mjs` vs `serve.mjs` vs `cli.mjs`/`schema-config.mjs` —
-so expect no textual conflicts. **Re-run the full gate after each rebase anyway**: `strict`
-exists to catch the semantic conflict a clean textual merge hides.
-
-Merge with `gh pr merge <n> --squash --delete-branch`. **`--delete-branch` fails when
-another worktree holds the branch** — remove the worktree first
-(`git worktree remove <path>`), or delete the branch separately.
-
-> **The squash SUBJECT matters now, because of what this very lane shipped.** BLZ-131
-> makes reconcile read a squash body's `* KEY-n:` bullets **only when the commit's own
-> subject opens with a ticket-id list**. `BLZ-130 + BLZ-131: …` parses correctly (the
-> multi-id form was added in `0e17c15` precisely because this PR's own title would
-> otherwise have stranded BLZ-131). Keep each PR title in `KEY-n: description` or
-> `KEY-a + KEY-b: description` form when you merge.
-
-### 3.3 Close out
-
-Reconcile is **disabled** on this board; move tickets by hand. Worklogs are already
-logged, so each is a single move:
-
-```bash
-cd /home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine
-BLZ="node /home/rnamwoh/Documents/Code/blaze/scripts/cli.mjs"
-$BLZ move BLZ-130 done && $BLZ move BLZ-131 done && $BLZ move BLZ-358 done && $BLZ move BLZ-56 done
-git add -A -- projects/BLZ/ && git commit -m "BLZ-130, BLZ-131, BLZ-358, BLZ-56: move to done — PRs #123, #124, #125 merged"
-$BLZ audit | tail -2      # expect ok=true
-```
-
-**Do not push `blaze-pm`.** The `blaze-flush` CronJob (23:50 Australia/Sydney) is the sole
-merger. Work there ends at a local commit.
-
-### 3.4 One deferred edit, after #123 merges and not before
-
-`~/.claude/skills/feature-pr-bundling/SKILL.md` says *"Children are never auto-moved"*.
-BLZ-131 makes that **false** for a bundled child whose `* KEY-n:` bullet survives in the
-squash body of a `KEY-n:`-titled feature PR. Update that section, and add the repository
-setting it now depends on: GitHub's *Default commit message for squash merges* must be
-**"Default message"** or **"Pull request title and commit details"** — set to "Pull request
-title", the bullets are never written and children need a manual move as before.
-
-Deliberately deferred until merge: editing a skill for behaviour that has not landed is
-how stale guidance gets written.
-
----
-
-## 4. What remains after this lane
-
-| Ticket | Type | Est. | Why it exists |
+| Ticket | Pri | Est | What |
 |---|---|---|---|
-| **BLZ-395** | bug, medium | 120 | Terminal-stickiness keeps a wrongly-`done` ticket `done`, so BLZ-130's veto narrows the window without closing it. Recommends "report, don't move" over un-sticking. **Read ADR-0023 §1 first.** |
-| **BLZ-394** | bug, medium | 90 | `reconcile --apply` has no `--project` filter, so a session commits ticket moves it does not own. ADR-0023 §3 already ruled OUT session-scoping — do not re-propose it. |
+| **BLZ-493** | **high** | 50 | **Four pre-existing `readFileSync` sites block forever on a FIFO** — plus a sixth that is server-reachable |
+| BLZ-432 | medium | 120 | reconcile does not notice a ticket tree left uncommitted by an earlier pass (**the design question**) |
+| BLZ-492 | medium | 40 | `inspect()` strips `origin/`, so a remote-only branch corroborates nothing |
+| BLZ-495 | medium | 25 | an unreadable out-of-scope directory is a second BLZ-394 exception no test constructs |
+| BLZ-490 | medium | 25 | `discardSandbox` refuses ancestors but not descendants; `rmSync` follows a symlink to its target |
+| BLZ-494 | medium | 20 | two reconcile guards survive mutation |
+| BLZ-489 | medium | 15 | `reconcile.mjs`'s write-path comment enumerates two paths where ADR-0026 documents three |
+| BLZ-491 | low | 20 | board-overstatement guards leak `/tmp/blz-guards-board-*` |
+| BLZ-496 | low | 15 | the finding-kind roster extractor misses inline declarations |
+| BLZ-497 | low | 15 | `classifyGitEntry`'s `git-file-unreadable` is reachable but untested |
 
-Both were spawned from BLZ-130's review rather than bundled into it, and both are
-**actionable now**. BLZ-395 is the better next lane: it closes the residual this lane
-knowingly left open.
+**The board is 30 commits unpushed on `BLZ-305-v4-spine` and that is correct** — see §5.
 
-Lower-priority bugs after those: BLZ-128, BLZ-248, BLZ-250 (medium); BLZ-23, BLZ-124 (low).
+## 3. Lanes, in order
 
----
+### Lane A — BLZ-493, its own PR: the read path may never block (50 min, **high**)
 
-## 5. Blocked vs actionable — so a bare "continue" needs no questions back
+Five `readFileSync` sites open a path without checking `st.isFile()`, so a FIFO blocks them
+forever — no error, no timeout, no exit — on the path `blaze audit`, `buildIndex`, id resolution,
+the board view and `reconcile` all share.
 
-| Item | State | Why |
+| Site | Reached from | Status |
 |---|---|---|
-| **#123, #124, #125** | **ACTIONABLE — start here**, in that order | Green, clean, last round unreviewed |
-| **BLZ-395** | **ACTIONABLE** after the merges | Residual from this lane; ADR-0023 §1 has the options |
-| **BLZ-394** | **ACTIONABLE** after the merges | Decision already recorded; only the `--project` filter is left |
-| BLZ-355 | **BLOCKED — needs the operator interactively** | Do not queue it for an agent session |
-| BLZ-324 | **BLOCKED** | Needs a week of dual-write soak. Elapsed time, not agent work |
-| BLZ-309 | **BLOCKED** | Cannot start until BLZ-254's db-primary cutover lands |
-| BLZ-253, BLZ-282, BLZ-305, BLZ-345 | containers | Parent goals; nothing to do directly |
+| `scripts/model/index.mjs:238` | `walkTickets`'s `.md` read | reproduced |
+| `scripts/audit-runner.mjs:121` | `project.json` | reproduced |
+| `scripts/views/data.mjs:124` | `liveModel` → `serve.mjs:516` — **the running server**, exit 137 | reproduced |
+| `scripts/model/claims.mjs:70`, `scripts/model/sprints.mjs:44` | `buildIndex` / `reindex` | same shape |
+| `views/panel-content.mjs:84`, `model/transitions.mjs:80`, `config.mjs:169` | flagged, **not** independently reproduced | verify first |
 
----
+**This is not a one-line fix, and that is why it was deferred.** Making them skip silently would
+reintroduce exactly the drop BLZ-470 exists to close, so **each needs a decision about what it
+reports**. `config.mjs:169` is guarded only by `existsSync` — which a FIFO satisfies — on nearly
+every entry point.
 
-## 6. Out of scope
+**Any test for this shape must run in a CHILD PROCESS with a hard wall-clock limit.** `node:test`'s
+`timeout` is an event-loop timer and a synchronous `readFileSync` never yields to it: a
+`{timeout: 2000}` test had to be SIGTERMed externally, and a mutant wedged the mutation runner for
+its full 300 s cap. Verified across six variants. `tests/walk-unreadable-dirs.test.mjs` has the
+working harness — copy it.
 
-- **There are no parallel sessions and no sibling lanes to fence.** If that changes, fence
-  them here by ticket key before starting.
-- **Do not push `blaze-pm`.** 129 unpushed is correct.
-- **Do not run `blaze schedule migrate-dates --write` against the live board.** The real
-  write is the operator's to run.
-- **Do not touch the NCA project.** Parked by the operator on 2026-08-23.
-- **Do not build the Gantt view.** Spec 3 specifies it; separate lane.
-- **Do not reopen** ADR-0001, ADR-0014's *ruling*, ADR-0021, ADR-0022's decision, or
-  **ADR-0023** (new — BLZ-130/BLZ-131's decisions, including the two the ACs asked for by
-  name).
-- **Do not implement `activeByProject`.** Unticketed, not this lane.
-- **Do not re-litigate terminal-stickiness casually** — BLZ-395 owns that decision.
-- **Do not chase line-number citations through `docs/superpowers/specs/` and `plans/`.**
-  Many drifted when BLZ-386 landed. Cite by symbol.
+### Lane B — BLZ-432, its own PR: the uncommitted-tree monitor (120 min, `type: story`)
 
----
+**A design question, not a fix**, and the largest single item. `reconcile` files only the current
+pass's decisions; leftover uncommitted ticket writes from an earlier pass are invisible to it.
 
-## 7. Process
+**Three designs were tried and rejected. Do not re-propose 1 or 2.**
+1. A `dirtyTicketPaths` recovery sweep — swept a human's `NOTES.md` and another project's files
+   into a reconcile commit (violating BLZ-394's blast radius) and reintroduced a porcelain path
+   parser BLZ-347 deliberately deleted.
+2. A detect-and-report boolean — conflated a failed prior commit, a batch-queued-by-design state,
+   and a human's own in-flight file; under-fired when `projects/` was a symlink.
+3. A cross-pass detector — deleted entirely; only the over-claiming "already in sync" wording was
+   corrected, which is why BLZ-433 existed.
 
-- One PR per ticket — the exception, BLZ-130 + BLZ-131 as one PR, is already merged-shaped.
-- Branch `KEY-n-slug`; every commit `KEY-n: description`; PR title `KEY-n: description`.
-- **`hygiene.yml` rejects `Co-Authored-By` trailers** and runs only on `pull_request`.
-  Check with `node scripts/ci/hygiene-check.mjs origin/main`.
-- **Write commit bodies to a file and use `git commit -F`.** A backtick inside a
-  double-quoted shell string gets command-substituted. It bit again last session inside a
-  **template literal** in `init-runner.mjs`'s USAGE string — backticks in help text break
-  the parse. Same rule for `python3 -c`; use a heredoc.
-- **Commit with an EXPLICIT pathspec, always.** A bare `git commit` swept a half-move: the
-  `defined/` deletions were left behind because the pathspec named only `in-review/`.
-- **Splitting one change into per-ticket commits is where a fix gets silently reverted.**
-  If you rebuild an intermediate tree to split a commit, **re-verify the final tree against
-  what you tested** (`diff` each file against a saved copy) before pushing. This is not
-  hypothetical — it cost round 6 on #123.
-- `blaze commit` takes **no message flag** — stage explicit pathspecs and `git commit -m`.
-  Run `blaze` commands **from the board directory**.
-- `blaze log` before any terminal move. Delivery is `defined → in-progress → in-review →
-  done` and you cannot jump. **Reconcile is disabled** — move tickets by hand.
-- **Move tickets with `blaze move`, re-parent with `blaze edit parent`**, never by editing
-  frontmatter. **A ticket's status comes from its DIRECTORY.**
-- **`gh pr merge --delete-branch` fails** when another worktree holds the branch.
-- **Set `model` explicitly on every subagent dispatch; never inherit:**
+Whatever is chosen **must distinguish the three states in design 2** and must not widen the commit's
+blast radius. "reconcile should not detect this at all" is a legitimate outcome — but then say what
+the operator does instead, and make the product stop implying otherwise.
 
-  | Job | Model |
-  |---|---|
-  | Read-only recon / codebase fan-out | `haiku` (`sonnet` across many files) |
-  | Mechanical, already-designed implementation | `sonnet` |
-  | Complex or subtle implementation | `opus` |
-  | Judgement-heavy review, adversarial verify | `opus` |
-  | Design / brainstorm / architecture decision | `fable`, `opus` fallback |
+**Measure first, read-only:** how often does the live board actually carry leftover uncommitted
+ticket writes? A monitor for a condition that never occurs is a different proposal from one for a
+weekly occurrence. Record the decision in an ADR (next free is **0031**).
 
----
+### Lane C — BLZ-492 + BLZ-495 + BLZ-489 + BLZ-494, ONE PR: reconcile's remaining honesty gaps (100 min)
 
-## 8. Verification before merge
+All four touch `scripts/reconcile.mjs` or its tests, so they cannot be split across lanes.
 
-Run in each PR's worktree after any rebase:
+- **BLZ-492** — `inspect()` asks about branches by a name with `origin/` **already stripped**, so a
+  remote-only branch is queried by a name no local ref answers to: **52 occurrences each** on two
+  probes across the reconcile suite, after which `buildBranchMap` reads `own: []` and silently
+  declines to corroborate. Reconcile's own bug, not the environment's. **Fixing the ref name changes
+  which branches corroborate — measure that before shipping it** (BLZ-353's rule), and re-derive the
+  52 afterwards. Note `exitIsAnAnswer: true` at those sites is load-bearing: without it every board
+  with remote-only branches exits 1 on all 52.
+- **BLZ-495** — a scoped run naming an unreadable out-of-scope directory, and `blaze audit --projects
+  INF` returning `ok=false` on it. **The behaviour is right** (a misfiled INF ticket could be under
+  that directory; audit filters on id prefix, not directory) — it is a second deliberate BLZ-394
+  exception that nothing excepts and no test constructs.
+- **BLZ-489** and **BLZ-494** — a comment enumerating two write paths where ADR-0026 documents
+  three, and two guards that survive mutation (the failed-`--fetch` warning severity, and
+  `model/index.mjs`'s status-directory unreadable route). The fetch severity is load-bearing:
+  `fetch --prune` exits 128 four times in the suite today, so flipping it to `error` makes those
+  runs exit 1.
 
-```bash
-cd /home/rnamwoh/Documents/Code/blaze-worktrees/<slug>
-export PATH=/home/rnamwoh/.local/node24/bin:$PATH
-node scripts/ci/hygiene-check.mjs origin/main
-docker rm -f blzpg 2>/dev/null
-docker run --rm -d -e POSTGRES_PASSWORD=x -p 55455:5432 --name blzpg postgres:17-alpine
-for i in $(seq 1 60); do docker exec blzpg psql -U postgres -c 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-rm -rf coverage
-BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55455/postgres npm run test:coverage
-BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55455/postgres npm test
-node scripts/ci/mutate-schedule.mjs        # must print "All mutations killed" and exit 0
-```
+### Lane D — BLZ-490 + BLZ-491 + BLZ-496 + BLZ-497, ONE PR: the residue (75 min)
 
-Expected after all three merge: **~2,380 pass / 0 fail** (2,336 on `7a5ddb0`), coverage
-comfortably above gates 91 / 77 / 93 / 91.
+Disjoint from Lane C. `discardSandbox`'s descendant gap and symlink-target deletion; the
+`/tmp/blz-guards-board-*` leak (300+ present, and it makes a real leak indistinguishable from
+noise — which matters now that the mutation runner asserts **0** leftover `/tmp/blz-mutate-*` as
+evidence); the roster extractor; the untested `git-file-unreadable` shape.
 
-> **Coverage is nondeterministic — quote it loosely.** Functions came back 690/711,
-> 691/713 and 692/714 across runs of the same trees. Do not "correct" a last-decimal
-> difference and do not treat a 0.14pp move as a regression.
+**Lanes C and D can run concurrently. Lane A can run alongside either.** Lane B must own
+`reconcile.mjs` alone, so it runs after Lane C.
 
-**`test.yml` runs only `npm run test:coverage` (`--test-concurrency=1`).** `npm test` runs
-files concurrently and catches things coverage does not. Run both.
+## 4. How to work — this is what produced the results above
 
----
+**Every PR gets an adversarial review before merge, scoped to PRODUCT BEHAVIOUR** — correctness,
+vacuous tests, the board overstating, the pre-auth surface. Record wording, figures and
+test-machinery findings in the PR body and **ticket them; do not fix-and-re-review**. Of 12 PRs, 5
+were REFUTED on the first round, and every refutation was a real defect that would otherwise have
+shipped.
 
-## 9. The review bar — updated with this lane's data
+**The rule that keeps earning its keep:** *revert the production hunk the test claims to pin, and
+watch THAT NAMED test go red for the reason its name gives.* A test that stays green under that
+revert is not evidence, whatever it is called. **This caught a catastrophic bug returning silently
+in my own fix**: `discardSandbox`'s guard was correct but unpinned, and reinstating the defect left
+all ten tests green.
 
-**Every agent PR gets an adversarial review before merge, and the reviewer must try to
-make the check FAIL.** Across **six rounds on three PRs this lane, six returned REFUTED and
-CI caught none of it.**
+**When a change makes the product ASSERT something, test it against ground truth over a GENERATED
+CROSS-PRODUCT**, take ground truth from somewhere the subject cannot reach (filesystem, `git log`,
+the fixture's own declaration), **assert the oracle's own size**, and **bind the clause counter to
+the assertion** so a deleted clause takes its count with it. Note the binding is one-directional —
+it catches a deleted clause, not an added bare `assert.`.
 
-What the six rounds actually found, because the pattern is not the one you would guess:
+**State reachability plainly.** A guard no current call path can reach cannot be killed by any
+mutation, and must be described that way rather than implied to be pinned.
 
-1. **A fix can be described and not shipped.** Commit-splitting reverted a hunk; the
-   message, the ADR and the guide all asserted a behaviour the code did not have.
-2. **A "safety argument" can fail to reproduce.** One was withdrawn outright: re-measured
-   under the shipped rule it added **zero** ids, having been measured under an earlier one.
-3. **Figures drift by noun and by ref.** "104 commits" meant 104 *lines*; a table was
-   quoted without saying which ref it came from; "945 of 1,479" came from a stale checkout
-   on an unrelated branch. **Name the ref, and re-derive with the shipped function.**
-4. **A fix in one direction over-corrects into the other.** The terminal delivery record
-   was wrong three times: overwrite-anything, then write-nothing, then overwrite-with-the-
-   latest-merge. Pin **both** directions.
-5. **A new check can be worse than the bug.** BLZ-56's first preflight refused every
-   non-exempt verb on a board `blaze audit` calls clean.
-6. **A security fix can open a bigger hole.** BLZ-358's setup branch was the one place in
-   the request handler without a `try`, and `{"token":{"toString":null}}` killed the
-   process pre-auth.
+**Measure before any severity or behaviour change** (BLZ-353), and **pin every figure to a SHA**
+(ADR-0024) — three different ticket counts were quoted from the same moving branch before that rule
+was applied.
 
-Practices, all cheap:
+**Do not quote `mutate-schedule.mjs` as evidence for anything outside `schedule.mjs`/`audit.mjs`.**
+`docs/ci.md` says so and BLZ-441 is why.
 
-1. **Grep, don't reason, about blast radius.**
-2. **Measure, don't transcribe** — and re-measure after your own correction.
-3. **After any correction, grep the *unchanged* body for the claim's negation.**
-4. **Prove every regression test discriminates by reverting the fix and watching it go red.**
-5. **Do not guard a runtime property by scanning source text.**
-6. **A `doesNotMatch` on the output of a command that failed proves nothing.**
-7. **Say plainly when a mutation is equivalent.** Claiming a test kills something it cannot
-   is worse than not having the test.
-8. **NEW — assert the wiring, not just the guard.** A gitignore test called its helper
-   directly, so deleting the call from `startServer` killed nothing. Boot the real thing.
-9. **NEW — a test harness can hide the bug.** `spawnSync` does not reproduce 64 KiB piped
-   truncation; `sh -c '… | cat'` does. If a control passes with the fix reverted, the
-   harness is wrong, not the finding.
+Standing rules: `blaze` skill for every tracked item (ticket at create with parent and estimate;
+branch `KEY-n-slug`; commits and PR title `KEY-n: description`; `blaze log` before a terminal move —
+bare number, not `90m`). One commit per body of work. Docs update in the same effort.
 
-And keep in every implementation dispatch: *if a mutation does not break a test, say so
-plainly.*
+## 5. Constraints — non-negotiable
 
----
+- **Do NOT push `blaze-pm`.** The `blaze-flush` CronJob (23:50 Australia/Sydney) is the sole merger.
+  Work there ends at a **local commit**. **30 unpushed is correct.**
+- **The board's working branch is `BLZ-305-v4-spine`**, in the worktree
+  `/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine` — not `main`, and not the
+  `blaze-pm` checkout itself, which sits on a stale `BLZ-143-…` branch with uncommitted deletions.
+  A tree on the wrong branch shows every BLZ-4xx ticket as missing.
+- **Do NOT run `blaze schedule migrate-dates --write`** against the live board.
+- **Do NOT touch the NCA project** (parked by the operator 2026-08-23).
+- **Do NOT "fix" `provider`** in `blaze-pm/blaze.config.json` — it self-resolves at the flush.
+  Seven blaze-pm-family checkouts carry it and are refused by `loadConfig` today; that is known.
+- **Do NOT reopen** ADR-0001, ADR-0014's ruling, ADR-0021, ADR-0022's decision, ADR-0023,
+  ADR-0024, **ADR-0025** (a project key is refused, never normalised), **ADR-0026** (a PR title
+  claims with a colon or an em-dash and nothing else), **ADR-0027**, **ADR-0028** (shipped
+  documents link out by URL), **ADR-0029**, or **ADR-0030**. Build ON them.
+- The setup token's **PATH** may be logged; its **VALUE** never is, anywhere, ever.
+- Never accept a secret pasted into chat; never base64-decode a Kubernetes secret value.
+- One agent per worktree. **Never let a reviewer and a fix agent share one.** Every concurrent agent
+  gets its own Postgres container and port.
+- **Never `git stash`** — it is repo-wide and shared across worktrees.
 
-## 10. The one lesson worth more than the rest
+## 6. Environment
 
-**A warm Postgres hides idempotency bugs, and CI is always cold.**
+- Node 24 is **not** on the default PATH: `export PATH=/home/rnamwoh/.local/node24/bin:$PATH`.
+  Omitting it makes every test file fail to load, which a naive runner scores as success.
+- Postgres containers are `blzpg-<port>`, password **`x`**:
+  `docker run --rm -d -e POSTGRES_PASSWORD=x -p <port>:5432 --name blzpg-<port> postgres:17-alpine`
+  then **block until `docker exec blzpg-<port> pg_isready -U postgres` succeeds** before exporting
+  `BLAZE_TEST_PG_URL`. `pg_isready` is **not** on the host PATH. A red suite whose total test count
+  is unchanged is the signature of an unreachable Postgres — it has cost time twice.
+- **CI checkouts are shallow, single-branch and detached.** A guard that resolves a git ref locally
+  will pass on every developer machine and fail in CI. A checkout can only prove a ref *absent* if
+  its ref set is complete — key on `--is-shallow-repository`.
+- Gate before every push: full suite, `node scripts/ci/hygiene-check.mjs origin/main`,
+  `npm run test:coverage`. `hygiene-check.mjs` fails on `Co-Authored-By:` trailers and on absolute
+  `/home/...` paths in added non-Markdown lines.
+- **When merging, assert on the check RESULT, not the absence of `pending`.** I merged #149 over a
+  failing check with `until ! gh pr checks | grep -q pending` and `main` was red for ~20 minutes.
+- Squash subjects must be a real claim: `KEY-a + KEY-b: desc` works; **`KEY-n + N more: desc` now
+  works too** (BLZ-469 reads the squash body's `* KEY-m:` bullets as a manifest), but a RANGE
+  (`KEY-408..439`) claims nothing, by design.
 
-Every CI run provisions a fresh `postgres:17-alpine`. A warm local container hid a
-`view-schema` failure last session that a cold one reproduces as passing — the inverse
-direction, and just as misleading. If you touch schema creation, seeds, or anything
-writing to `blaze_config`:
+## 7. Definition of done
 
-```bash
-docker rm -f blzcold 2>/dev/null
-docker run --rm -d -e POSTGRES_PASSWORD=x -p 55456:5432 --name blzcold postgres:17-alpine
-for i in $(seq 1 60); do docker exec blzcold psql -U postgres -c 'SELECT 1' >/dev/null 2>&1 && break; sleep 1; done
-BLAZE_TEST_PG_URL=postgres://postgres:x@localhost:55456/postgres \
-  node --test --test-concurrency=1 tests/model/config-schema.test.mjs tests/model/driver-conformance.test.mjs
-```
+All 10 tickets `done`; the decisions in Lane B (and any in Lane A) recorded in an ADR, not only in
+chat; `main` green on the full gate; and a successor kickoff written if anything is left.
 
-That pairing (51 tests) is the cheapest reproduction of the whole class.
+**Do not narrow the lane on your own.** If you run out of room, leave the next lane untouched and
+say which one it is.
+
+**Expect the count to grow.** Every review round in the last session produced roughly as many
+tickets as it closed. That is the process working, not failing — but it means "finished" is a
+judgement about the remaining tickets' severity, not about reaching zero.
