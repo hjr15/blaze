@@ -21,6 +21,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
+import { unreadableTicketDirs } from "./model/index.mjs";
 import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
@@ -78,6 +79,52 @@ export function shResult(cmd, args, opts = {}) {
 function sh(cmd, args, opts = {}) {
   const r = shResult(cmd, args, opts);
   return r.ok ? r.stdout : null;
+}
+
+// --- BLZ-484: A PROBE THAT COULD NOT LOOK IS NOT A PROBE THAT LOOKED AND FOUND NOTHING ---
+//
+// The comment above says every `sh` call site is a git probe "whose failure is either
+// meaningless or already handled". That was measured wrong, and the review demonstrated it
+// end to end: with the `git log --format=%x00%B` probe below unable to RUN, reconcile went
+// from `moved ZZZ-1: defined -> done` to `no code-bound change found - nothing to do.` —
+// exit 0, and not one word on stderr. An empty commit log and a `git` that could not be
+// forked produced the same sentence.
+//
+// This is the production sibling of the defect shipped in PR #150 one layer up, where a
+// test guard resolved a git ref locally and read CI's shallow, ref-less checkout as "the
+// ref does not exist". Its fix is the shape reused here: THREE OUTCOMES, NOT TWO.
+//
+//   ran, exit 0          — the answer.
+//   ran, exit non-zero   — an answer ONLY where the question is "does this ref exist";
+//                          `exitIsAnAnswer` is that opt-in, and it is per call site
+//                          because it is a property of the QUESTION, not of `git`.
+//   did not run          — never an answer. `shResult` reports `status: null` for exactly
+//                          this: ENOENT (no `git`), EAGAIN (cannot fork), ETIMEDOUT, a
+//                          signal. It is the discriminator the whole ticket turns on.
+//
+// The forge half of this file has been loud since BLZ-350 (`FORGE UNREADABLE`, INF-763):
+// the condition travels with the result in `forgeErrors` and the CLI prints it every run.
+// This is the same mechanism for git — `gitErrors`, same per-repo collection, same journey
+// up through `gatherProject` to `reconcile()`'s result — plus the one thing the forge half
+// does not need: a run that could not complete a probe DOES NOT GET TO REPORT A CLEAN
+// BOARD. See the CLI's `GIT UNREADABLE` block.
+function gitProbe(errors, repoPath, args, opts = {}) {
+  const { exitIsAnAnswer = false, severity = "error", what = "", consequence = "", ...spawnOpts } = opts;
+  const r = shResult("git", ["-C", repoPath, ...args], spawnOpts);
+  if (r.ok) return r.stdout;
+  const ran = r.status !== null;
+  if (ran && exitIsAnAnswer) return null;
+  const detail = (r.stderr || "").split("\n").filter(Boolean)[0] || (ran ? `exit ${r.status}` : "the process produced no output at all");
+  const cmd = `git ${args.join(" ")}`;
+  errors.push({
+    repo: repoPath, reason: ran ? "git-failed" : "git-unrunnable", severity,
+    command: cmd, status: r.status, detail,
+    message: (ran
+      ? `\`${cmd}\` failed in ${repoPath}: ${detail}.`
+      : `\`${cmd}\` COULD NOT RUN in ${repoPath}: ${detail}. Blaze never got an answer — this is not \`git\` saying no.`) +
+      (what ? ` ${what}` : "") + (consequence ? ` ${consequence}` : ""),
+  });
+  return null;
 }
 
 // --- pure decision: git signal + current status + type → target status --------
@@ -516,13 +563,29 @@ export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
 // otherwise be missed while a solo merged-PR ticket flips to done: asymmetric
 // under-reporting. Order: origin/HEAD → origin/main|master → local main|master
 // (remote-less repos: fixtures + blaze-pm itself) → "main" fallback.
-function defaultBranchRef(repoPath) {
-  const head = sh("git", ["-C", repoPath, "rev-parse", "--abbrev-ref", "origin/HEAD"]);
-  if (head && head !== "origin/HEAD") return head; // e.g. "origin/main" — keep the remote-tracking ref verbatim
+//
+// BLZ-484: `resolved` is the CONTROL, and it is what lets the probes below tell an answer
+// from a silence. Every candidate here is asked "does this ref exist", and for THAT question
+// a non-zero exit is the answer — measured across the 330 reconcile tests, `rev-parse
+// --verify --quiet` exits 1 on 474 occasions and `rev-parse --abbrev-ref origin/HEAD` exits
+// 128 on 239, every one of them an ordinary "no such ref" on a fixture repo. So those exits
+// stay silent (`exitIsAnAnswer`), and only a probe that could not RUN is reported.
+//
+// What must NOT stay silent is the fall-through. Returning the bare string "main" told every
+// caller "the default branch is main" when what happened is that nothing resolved — so
+// `git log main` then failed, `|| ""` turned that into an empty commit log, and the run
+// reported no shipped tickets. `resolved: false` is that distinction, carried instead of
+// laundered.
+function defaultBranchRef(repoPath, gitErrors = []) {
+  const asks = { exitIsAnAnswer: true, what: "This probe asks whether a ref exists, and a non-zero exit is its answer; no answer is not." };
+  const head = gitProbe(gitErrors, repoPath, ["rev-parse", "--abbrev-ref", "origin/HEAD"], asks);
+  if (head && head !== "origin/HEAD") return { ref: head, resolved: true }; // e.g. "origin/main" — keep the remote-tracking ref verbatim
   for (const b of ["origin/main", "origin/master", "main", "master"]) {
-    if (sh("git", ["-C", repoPath, "rev-parse", "--verify", "--quiet", b]) !== null) return b;
+    if (gitProbe(gitErrors, repoPath, ["rev-parse", "--verify", "--quiet", b], asks) !== null) {
+      return { ref: b, resolved: true };
+    }
   }
-  return "main";
+  return { ref: "main", resolved: false };
 }
 
 // --- group a repo's PRs by the ticket their ref claims --------------------------
@@ -1002,22 +1065,74 @@ function sanitisePr(pr) {
 
 // --- gather one repo's PR + branch signal, keyed by a project's idFromRef ------
 function gatherRepo(repoPath, idFromRef, key, { fetch }) {
-  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(), forgeErrors: [],
-                  candidates: new Map() };
+  const empty = { prMap: new Map(), branchMap: new Map(), shippedSet: new Set(),
+                  forgeErrors: [], gitErrors: [], candidates: new Map() };
   if (!existsSync(repoPath) || !existsSync(join(repoPath, ".git"))) return empty;
-  if (fetch) sh("git", ["-C", repoPath, "fetch", "--prune", "--quiet"], { timeout: 30000 });
+  // BLZ-484: the git half of `forgeErrors`. Same shape, same journey, same rule — the
+  // condition travels with the result instead of being laundered into an empty signal.
+  const gitErrors = [];
+  // A fetch whose result was DISCARDED ENTIRELY: `sh(...)` with no assignment. `--fetch`
+  // exists to make the branch and merged-commit signals current, so a failed fetch means
+  // the run reconciled against a tree it believed was fresh and was not. A warning rather
+  // than an error: the run is still correct about what it CAN see (an unfetched remote is
+  // the ordinary state of every run without `--fetch`), it is just not as current as the
+  // flag promised. Measured: 4 of the 330 reconcile tests hit a failing fetch today, all
+  // `remote: Repository not found` on a fixture with a dangling remote, and none of them
+  // said a word about it.
+  if (fetch) {
+    gitProbe(gitErrors, repoPath, ["fetch", "--prune", "--quiet"], {
+      timeout: 30000, severity: "warning",
+      what: "`--fetch` asked for a current view of the remote and did not get one.",
+      consequence: "Branch and merged-commit signals below are as stale as the last successful fetch.",
+    });
+  }
 
   // Default-branch commit signal: a <KEY>-<n>: commit reachable from the code
   // repo's default-branch HEAD means that ticket shipped (used for bundled
   // epic-children that have no branch/PR of their own). Computed FIRST because
   // buildPrMap corroborates against it (INF-735).
   const shippedSet = new Set();
-  const ref = defaultBranchRef(repoPath);
+  const probesBefore = gitErrors.length;
+  const { ref, resolved } = defaultBranchRef(repoPath, gitErrors);
+  // BLZ-484: nothing resolved, so `ref` is a GUESS. Said once, here, rather than left to
+  // surface as a mystified `git log` failure below — and the dependent probes are told the
+  // ref may not exist (`exitIsAnAnswer: !resolved`) so one condition produces one line.
+  //
+  // GATED ON HAVING BEEN ABLE TO LOOK, and that gate is this ticket in miniature. The
+  // message below asserts that none of five refs EXISTS. A run whose `rev-parse` calls
+  // could not fork has established nothing of the kind, and saying it anyway would be the
+  // same overstatement one layer in from the one being fixed — a report that could not
+  // look, saying what a report that looked and found nothing says. When the probes
+  // themselves failed to run they have already said so, by name, and this stays quiet.
+  if (!resolved && gitErrors.length === probesBefore) {
+    gitErrors.push({
+      repo: repoPath, reason: "no-default-branch", severity: "warning",
+      command: "git rev-parse --verify --quiet origin/HEAD|origin/main|origin/master|main|master",
+      status: null, detail: "no candidate resolved",
+      message: `no default branch could be resolved in ${repoPath} — none of origin/HEAD, ` +
+        `origin/main, origin/master, main or master exists there. Blaze reads that branch's ` +
+        `commit log to learn which tickets shipped, so the merged-commit signal for this repo ` +
+        `is UNAVAILABLE, not empty: a bundled child whose only evidence is a \`KEY-n:\` commit ` +
+        `will not move, and this run's silence about it is not evidence that it did not ship.`,
+    });
+  }
   // BLZ-131: read whole messages, not subjects. `%x00%B` prefixes each commit with
   // a NUL, which is the one byte a commit message cannot contain — so splitting on
   // it recovers exact commit boundaries, and boundaries are what make line 1 (the
   // subject, unbulleted) distinguishable from a body line (bullet required).
-  const log = sh("git", ["-C", repoPath, "log", ref, "--format=%x00%B"]) || "";
+  // BLZ-484: THE PROBE THE REVIEW DEMONSTRATED THE DEFECT WITH. `|| ""` turned every kind
+  // of failure into "this repo has shipped nothing", and `decide` reads `shipped` to move a
+  // bundled child to `done` — so a `git` that could not fork produced a board that looked
+  // in sync. A non-zero exit is NOT an answer here: "I could not enumerate the commits on
+  // this ref" is never "this ref has no commits". Measured across the 330 reconcile tests,
+  // this probe fails zero times today, so nothing in the suite relied on the laundering.
+  // The one expected failure — `ref` is the "main" guess because nothing resolved — is
+  // already reported above, so it is not reported twice.
+  const log = gitProbe(gitErrors, repoPath, ["log", ref, "--format=%x00%B"], {
+    exitIsAnAnswer: !resolved,
+    what: "Blaze reads the default branch's whole commit log to learn which tickets shipped.",
+    consequence: "That signal is UNKNOWN for this repo, not empty — a ticket that shipped will not move, and this run's silence is not evidence.",
+  }) || "";
   for (const record of log.split("\u0000")) {
     if (!record.trim()) continue;
     for (const id of idsFromCommitMessage(record, key)) shippedSet.add(id);
@@ -1033,8 +1148,14 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // asks once. That also deletes the cross-repo special case that had drifted twice.
   const candidates = corroboratedByTicket(prs, idFromRef, shippedSet);
 
-  const refs = (sh("git", ["-C", repoPath, "for-each-ref", "--format=%(refname:short)",
-    "refs/heads", "refs/remotes/origin"]) || "")
+  // BLZ-484: same rule. "I could not list the refs" is never "this repo has no branches",
+  // and an empty branch set is what makes every branch-derived signal disappear. Zero
+  // failures across the 330 reconcile tests.
+  const refs = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname:short)",
+    "refs/heads", "refs/remotes/origin"], {
+    what: "Blaze lists every local and origin ref to find the branches carrying ticket ids.",
+    consequence: "The branch set is UNKNOWN for this repo, not empty — no branch signal reaches `decide`, and the absence of one is not evidence.",
+  }) || "")
     .split("\n")
     .map((r) => r.replace(/^origin\//, "").trim())
     .filter((r) => r && r !== "HEAD");
@@ -1042,16 +1163,35 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // What the branch itself says: the subjects unique to it (not already on the
   // default branch), plus whether its tip IS the default tip — the fresh-vs-stale
   // discriminator, since both have zero unique subjects.
-  const defaultTip = sh("git", ["-C", repoPath, "rev-parse", ref]);
+  const defaultTip = gitProbe(gitErrors, repoPath, ["rev-parse", ref], {
+    exitIsAnAnswer: !resolved,
+    what: "Blaze resolves the default branch's tip to tell a fresh branch from a stale one.",
+    consequence: "Every branch is treated as NOT sharing the default tip, which is a guess, not a reading.",
+  });
+  // BLZ-484, STATED RATHER THAN FIXED. These two probes are the only `git` calls in this
+  // file whose non-zero exits are laundered and are NOT reported, and the reason is that
+  // the failure is reconcile's OWN, not the environment's: `refs` above has had `origin/`
+  // stripped, so a branch that exists only on the remote is asked about by a name no local
+  // ref answers to. Measured across the 330 reconcile tests: `git log <branch> ^<ref>`
+  // exits 128 on 52 occasions and `git rev-parse <branch>` on the same 52, every one of
+  // them `ambiguous argument` on a stripped remote-only ref. `buildBranchMap` then reads
+  // `own: []` and `sameTipAsDefault: false` and falls back to the shipped set, so such a
+  // branch is silently never corroborated on its own evidence.
+  //
+  // Reporting that as an unreadable repo would blame the environment for a bug in this
+  // file, and fixing the ref name changes which branches corroborate — a behaviour change
+  // outside this ticket, raised for its own. What IS reported here is the case this ticket
+  // is about: a probe that could not RUN.
   const inspect = (branchRef) => ({
-    own: (sh("git", ["-C", repoPath, "log", `${branchRef}`, `^${ref}`, "--format=%s"]) || "")
+    own: (gitProbe(gitErrors, repoPath, ["log", `${branchRef}`, `^${ref}`, "--format=%s"],
+      { exitIsAnAnswer: true }) || "")
       .split("\n").filter(Boolean),
     sameTipAsDefault: Boolean(defaultTip) &&
-      sh("git", ["-C", repoPath, "rev-parse", branchRef]) === defaultTip,
+      gitProbe(gitErrors, repoPath, ["rev-parse", branchRef], { exitIsAnAnswer: true }) === defaultTip,
   });
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
-  return { prMap, branchMap, shippedSet, forgeErrors, candidates };
+  return { prMap, branchMap, shippedSet, forgeErrors, gitErrors, candidates };
 }
 
 /** Can this PR supply a delivery record? BOTH halves or neither — the record is
@@ -1147,7 +1287,7 @@ function recordMatchesCandidate(recordedUrl, ref) {
 // the sentence it used to be reported through has gone.
 function gatherProject(project, { fetch }) {
   const prMap = new Map(), branchMap = new Map(), shippedSet = new Set();
-  const missingRepos = [], forgeErrors = [];
+  const missingRepos = [], forgeErrors = [], gitErrors = [];
   const allCandidates = new Map();
   let scannedRepos = 0;
   for (const repo of project.codeRepoPaths) {
@@ -1174,6 +1314,8 @@ function gatherProject(project, { fetch }) {
     for (const [id, b] of r.branchMap) if (!branchMap.has(id)) branchMap.set(id, b);
     for (const id of r.shippedSet) shippedSet.add(id);
     for (const f of r.forgeErrors || []) forgeErrors.push(f);
+    // BLZ-484: the git conditions travel exactly the way BLZ-350's forge conditions do.
+    for (const f of r.gitErrors || []) gitErrors.push(f);
   }
   // Asked ONCE, over every repo's candidates at once. Deciding per repo and merging the
   // verdicts is what let an unrecordable PR promoted into the running best shield every
@@ -1185,7 +1327,7 @@ function gatherProject(project, { fetch }) {
     if (tied) ambiguous.set(id, tied);
   }
   return {
-    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors, ambiguous,
+    prMap, branchMap, shippedSet, missingRepos, scannedRepos, forgeErrors, gitErrors, ambiguous,
     configuredRepos: project.codeRepoPaths.length,
   };
 }
@@ -1264,6 +1406,50 @@ function fileUnverifiableRecord(t, refs, findings, unverifiableRecords) {
   else unverifiableRecords.push(entry.id);
 }
 
+/** BLZ-398 / BLZ-475: file the `ambiguous-deliverer` report for ONE ticket whose merged
+ *  candidates are tied.
+ *
+ *  Extracted for the same reason `fileUnverifiableRecord` above was: TWO states reach it and
+ *  they must build the SAME finding rather than two that drift — the ordinary
+ *  `d.recordAmbiguous && !keep()` branch, which clears the record and says so, and the
+ *  uncorroborated-winner case (BLZ-475) that the loop's `if (d.skip) continue;` carried past
+ *  it entirely.
+ *
+ *  `vetoed` is not decoration: THE TWO RUNS DID DIFFERENT THINGS and one sentence cannot
+ *  honestly describe both. On the ordinary path reconcile refused to guess and CLEARED the
+ *  record. On the vetoed path BLZ-440 held the run back before it ever reached the record,
+ *  so nothing was cleared and whatever the ticket already held is still there. Saying
+ *  "reconcile recorded NO branch/pr" on that path would be the thing this programme keeps
+ *  finding: a sentence asserting more than the run did.
+ */
+function fileAmbiguousDeliverer(t, refs, findings, { vetoed = false } = {}) {
+  // Named through `namePr`, exactly like the sibling finding. This site had its own
+  // formatter, and round 6 gave `refs` a shape it had never seen — an entry whose `number`
+  // is null — so it printed `#null`, and suppressed the url in precisely the case where the
+  // url is the only identifier there is. Three places in this file turn a PR into
+  // operator-facing text; unifying the three DECIDERS and leaving the three RENDERERS apart
+  // is how the same drift reappeared one layer down.
+  const named = refs.map((r) => namePr(r));
+  findings.push({
+    kind: "ambiguous-deliverer",
+    id: t.frontmatter.id,
+    status: t.status,
+    prs: refs,
+    vetoed,
+    message: `${t.frontmatter.id} has ${refs.length || "more than one"} merged PRs claiming it` +
+      (named.length ? ` (${named.join(", ")})` : "") +
+      `, and none claims it more strongly than the rest. ` +
+      (vetoed
+        ? `Reconcile took no delivery decision on this ticket at all: the top-ranked PR's ` +
+          `title does not claim it, so BLZ-440's rule held the run back before it reached ` +
+          `the record. Nothing was written and nothing was cleared — whatever branch/pr this ` +
+          `ticket already held is exactly as it was. The tie is real and reconcile cannot ` +
+          `settle it; set the record by hand if it matters.`
+        : `Reconcile recorded NO branch/pr rather than guess which one delivered it — a ` +
+          `wrong delivery record is permanent, a blank one is not. Set it by hand if it matters.`),
+  });
+}
+
 // --- the reconcile pass -------------------------------------------------------
 // BLZ-451: the shape a `--ticket` value must have before it can scope anything. STRICT,
 // and deliberately NOT normalising: ADR-0025 rules that a project key is refused, never
@@ -1326,13 +1512,13 @@ export async function reconcile({
     return { ok: false, error: "--project was given no project key", changes: [], committed: false,
       commitOutcome: "none", commitError: null,
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-      forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+      forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
   }
   if (wantedTickets && !wantedTickets.length) {
     return { ok: false, error: "--ticket was given no ticket id", changes: [], committed: false,
       commitOutcome: "none", commitError: null,
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-      forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+      forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
   }
   const unknown = (wanted || []).filter((k) => !configured.includes(k));
   // Checked BEFORE the standalone return below, deliberately. Behind it, a typo'd key on a
@@ -1346,7 +1532,7 @@ export async function reconcile({
         (configured.length ? configured.join(", ") : "no projects at all"),
       changes: [], committed: false, commitOutcome: "none", commitError: null,
       pushed: false, missingRepos: [], scannedRepos: 0,
-      configuredRepos: 0, forgeErrors: [], findings: [], scannedProjects: [],
+      configuredRepos: 0, forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [],
       scopedTickets: null, dryRun };
   }
   // Hoisted ABOVE the standalone return so the ticket-scope check below can use it. A
@@ -1380,7 +1566,7 @@ export async function reconcile({
           `${malformed.join(", ")}. A ticket id is <KEY>-<number>, e.g. --ticket INF-1.`,
         changes: [], committed: false, commitOutcome: "none", commitError: null,
         pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-        forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+        forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
     // An id whose project the run does not cover is REFUSED, not silently dropped. Both
     // shapes land here: a key this board does not configure at all, and a key it does
@@ -1394,12 +1580,12 @@ export async function reconcile({
           (wanted ? " (narrowed by --project)." : "."),
         changes: [], committed: false, commitOutcome: "none", commitError: null,
         pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-        forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+        forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
   }
   if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
     commitOutcome: "none", commitError: null,
-    pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [],
+    pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [], gitErrors: [],
     findings: [], scannedProjects: [], scopedTickets: null, dryRun };
 
   // BLZ-404 (review finding 1): every other board git writer gates its write through
@@ -1420,7 +1606,7 @@ export async function reconcile({
     } catch (e) {
       return { ok: false, error: e.message, changes: [], committed: false,
         commitOutcome: "none", commitError: null, pushed: false, missingRepos: [],
-        scannedRepos: 0, configuredRepos: 0, forgeErrors: [], findings: [],
+        scannedRepos: 0, configuredRepos: 0, forgeErrors: [], gitErrors: [], findings: [],
         scannedProjects: [], scopedTickets: null, dryRun };
     }
   }
@@ -1442,7 +1628,7 @@ export async function reconcile({
         error: `--ticket names ticket(s) that do not exist on this board: ${missing.join(", ")}.`,
         changes: [], committed: false, commitOutcome: "none", commitError: null,
         pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
-        forgeErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
+        forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
   }
 
@@ -1456,6 +1642,27 @@ export async function reconcile({
   // run is healthy, the board is not — and it is emitted on dry runs too, because a
   // dry run is exactly where someone would look before believing the board.
   const findings = [];
+  // BLZ-470: WHAT THIS RUN COULD NOT READ, raised before a word about what it did read —
+  // and unconditionally, on every run, filtered or not, for exactly the reason BLZ-406's
+  // `project-mismatch` is: a directory the walk skipped is invisible to EVERY scope, so
+  // gating this on `wanted` would make it the silent skip the finding exists to report.
+  //
+  // `--ticket` makes that sharper rather than softer. `--ticket BLZ-9` on a board whose
+  // BLZ status directory was skipped refuses with "names ticket(s) that do not exist on
+  // this board" (see above) — a run that could not look, reporting what a run that looked
+  // and found nothing reports. This finding is what turns that refusal from a lie into a
+  // half-truth beside an explanation.
+  for (const u of unreadableTicketDirs(projectsDir)) {
+    findings.push({
+      kind: "unreadable-ticket-directory",
+      id: null,
+      project: u.project,
+      status: u.status,
+      path: u.path,
+      reason: u.reason,
+      message: u.message,
+    });
+  }
   // BLZ-403: ids of terminal tickets whose FROZEN record is unverifiable but IS one of
   // the tied candidates — the common case (72 of 73 measured at blaze-pm 57212799).
   // Collected here rather than pushed straight into `findings` so the volume can be
@@ -1587,11 +1794,39 @@ export async function reconcile({
       // Live incidence measured at ZERO by the BLZ-440 review (all 8 board tickets with
       // an uncorroborated top-ranked PR have a single candidate), so the shape is
       // constructed in tests rather than sampled.
-      if (isType(type) && workflowFor(type) === "delivery" && isTerminal(type, t.status) &&
-          (t.frontmatter.branch || t.frontmatter.pr) &&
+      //
+      // BLZ-475: AND THE OTHER HALF OF THE SAME SUPPRESSION. BLZ-459 closed the terminal
+      // case; the `continue` still carried a NON-TERMINAL ticket past the
+      // `ambiguous-deliverer` finding, and such a run reported nothing at all — not the
+      // tie, not the veto, not a move. The argument is the one BLZ-459 already made and it
+      // does not weaken on this side: the tie is decided by the CORROBORATED candidate set
+      // (`s.ambiguous`, built by `corroboratedByTicket`), which is entirely unaffected by
+      // which PR happens to rank top, so the condition stays exactly as true when the
+      // winner is uncorroborated. Only the report vanished.
+      //
+      // The contrast is `openPrOnTerminal`, and it is the one suppression here that IS
+      // sound: `decide` returns `openPrOnTerminal: false` on this path deliberately,
+      // because that finding reports on the VETO — a signal reconcile declined to act on —
+      // and an uncorroborated claim takes no veto, so there is no wrong move to report.
+      // These two report on the STATE, which is why they must survive the skip.
+      //
+      // The finding says what the run actually did (`vetoed: true`), which is NOT what the
+      // ordinary path does: nothing is written and nothing is CLEARED here, because
+      // `write()`/`keep()` are never consulted on this branch.
+      //
+      // Live incidence measured at ZERO by the BLZ-440 review (all 8 board tickets with an
+      // uncorroborated top-ranked PR have a single candidate), so the shape is constructed
+      // in tests rather than sampled.
+      if (isType(type) && workflowFor(type) === "delivery" &&
           s.ambiguous && s.ambiguous.has(t.frontmatter.id)) {
-        fileUnverifiableRecord(t, s.ambiguous.get(t.frontmatter.id), findings,
-          unverifiableRecords);
+        if (isTerminal(type, t.status)) {
+          if (t.frontmatter.branch || t.frontmatter.pr) {
+            fileUnverifiableRecord(t, s.ambiguous.get(t.frontmatter.id), findings,
+              unverifiableRecords);
+          }
+        } else {
+          fileAmbiguousDeliverer(t, s.ambiguous.get(t.frontmatter.id), findings, { vetoed: true });
+        }
       }
       continue;
     }
@@ -1722,24 +1957,7 @@ export async function reconcile({
         cleared = true;
       }
       const refs = (s.ambiguous && s.ambiguous.get(t.frontmatter.id)) || [];
-      // Named through `namePr`, exactly like the sibling finding. This site had its own
-      // formatter, and round 6 gave `refs` a shape it had never seen — an entry whose
-      // `number` is null — so it printed `#null`, and suppressed the url in precisely the
-      // case where the url is the only identifier there is. Three places in this file turn
-      // a PR into operator-facing text; unifying the three DECIDERS and leaving the three
-      // RENDERERS apart is how the same drift reappeared one layer down.
-      const named = refs.map((r) => namePr(r));
-      findings.push({
-        kind: "ambiguous-deliverer",
-        id: t.frontmatter.id,
-        status: t.status,
-        prs: refs,
-        message: `${t.frontmatter.id} has ${refs.length || "more than one"} merged PRs claiming it` +
-          (named.length ? ` (${named.join(", ")})` : "") +
-          `, and none claims it more strongly than the rest. Reconcile recorded NO ` +
-          `branch/pr rather than guess which one delivered it — a wrong delivery record ` +
-          `is permanent, a blank one is not. Set it by hand if it matters.`,
-      });
+      fileAmbiguousDeliverer(t, refs, findings);
     } else if (d.recordAmbiguous && keep()) {
       // BLZ-403 — the residual ADR-0023's "residual" paragraph named and left open. The
       // clear and the finding above are both gated on write-once NOT applying; `keep()`
@@ -1916,6 +2134,9 @@ export async function reconcile({
   // BLZ-350: the forge outcome travels with the result. An empty prMap now means
   // "no pull requests"; anything else that happened is named here instead.
   const forgeErrors = [...sig.values()].flatMap((g) => g.forgeErrors || []);
+  // BLZ-484: and so does the git outcome. An empty `shippedSet` or `branchMap` now means
+  // "git said so"; a probe that never got an answer is named here instead of vanishing.
+  const gitErrors = [...sig.values()].flatMap((g) => g.gitErrors || []);
   // BLZ-394 AC-5: a filtered run must not be mistakable for an in-sync board, so the result
   // says which projects it looked at — on every run, not only filtered ones, because the
   // caller cannot tell the difference from a `changes: []` alone.
@@ -1927,7 +2148,7 @@ export async function reconcile({
   // "looked at these" from the field alone. That is BLZ-394 AC-5's rule, extended to the
   // second filter rather than restated for it.
   return { ok: true, changes, committed, commitOutcome, commitError, pushed,
-           missingRepos, scannedRepos, configuredRepos, forgeErrors, findings,
+           missingRepos, scannedRepos, configuredRepos, forgeErrors, gitErrors, findings,
            scannedProjects: keys, scopedTickets: wantedTickets, dryRun };
 }
 
@@ -2033,6 +2254,18 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
       ? `reconcile: FORGE DATA — ${f.message}`
       : `reconcile: FORGE UNREADABLE — ${f.message}`);
   }
+  // BLZ-484: the git half of the block above, and it obeys the same rule for the same
+  // reason — stderr, every run, regardless of `--quiet`, because `--quiet` means "print
+  // only on change" and an unreadable probe is precisely a reason not to trust the absence
+  // of one. `GIT DEGRADED` is the warning tier (a stale fetch, a repo with no default
+  // branch): the run is correct about what it could see and says what it could not.
+  // `GIT UNREADABLE` is the other tier, and unlike the forge it is NOT survivable — see
+  // the FAILED block below.
+  for (const f of r.gitErrors || []) {
+    console.error(f.severity === "warning"
+      ? `reconcile: GIT DEGRADED — ${f.message}`
+      : `reconcile: GIT UNREADABLE — ${f.message}`);
+  }
   // BLZ-395: a conflict reconcile can see and deliberately will not act on. Same rule
   // as the two warnings above — stderr, every run, regardless of --quiet, because
   // `--quiet` means "print only on change" and this is precisely a reason not to trust
@@ -2046,6 +2279,36 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     console.error(`reconcile: FAILED — none of the ${r.configuredRepos} configured codeRepo(s) could be read, so NOTHING was scanned.`);
     console.error("reconcile: this is a misconfiguration, not an in-sync board. If you are in a git worktree, relative codeRepos may be resolving against the wrong parent.");
     process.exit(1);
+  }
+  // BLZ-484 AC-3: A RUN THAT COULD NOT COMPLETE ITS PROBES DOES NOT REPORT A CLEAN BOARD.
+  //
+  // This is the half the forge does not have, and the difference is deliberate. An
+  // unsupported forge is a PERMANENT property of the repo, so exiting non-zero on it every
+  // run would be a nuisance the operator learns to ignore. A `git` that could not fork, or
+  // is not installed, or timed out, is an ENVIRONMENT failure — transient, actionable, and
+  // the exact state in which "nothing to do" is a lie. So it takes the same shape as the
+  // missing-codeRepo FAILED line directly above: named, and non-zero.
+  //
+  // The exit is split rather than unconditional because a run that DID find changes must
+  // still print them — hiding real work behind a probe failure would be a second silence.
+  //
+  // BOTH HALVES ARE REACHABLE, and an earlier revision of this comment said otherwise. It
+  // claimed the falling-through half could not be reached deterministically, on the ground
+  // that every signal which can become a change comes from `git`, so a `git` that cannot run
+  // takes them all down and `changes` is empty by construction. THAT REASONING SILENTLY
+  // ASSUMED PROBE FAILURES ARE ALL-OR-NOTHING, and they are not: a probe fails on its own
+  // merits while its siblings answer. Delete one commit object and `rev-parse` exits 0,
+  // `for-each-ref` exits 0, and `git log` exits 128 — an ordinary damaged object store, an
+  // interrupted fetch, a partial clone. The run then reports a real move AND a failed probe,
+  // which is exactly this split. Caught by review; the claim was this lane's own defect class
+  // — a sentence asserting more than had been established — written into the fix for it.
+  // Both halves are now pinned; see tests/reconcile-git-probe-unreadable.test.mjs, "a run
+  // that DID find work prints it BEFORE exiting 1".
+  const unreadableProbes = (r.gitErrors || []).filter((f) => f.severity !== "warning");
+  if (unreadableProbes.length) {
+    console.error(`reconcile: FAILED — ${unreadableProbes.length} git probe(s) could not be completed, so what this run did NOT find is not evidence of an in-sync board.`);
+    process.exitCode = 1;
+    if (!r.changes.length) process.exit(1);
   }
   // BLZ-404 round 5: "already in sync" was a positive claim about the WHOLE board's git
   // tree — more than reconcile ever knows. Rounds 2 through 4 each tried to make that
