@@ -3,6 +3,7 @@
 // .blaze/pending/, plus the legacy shared fallback .blaze/pending-commit.jsonl
 // for callers with no session set. All gitignored; drained by `blaze commit`.
 import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync } from "node:fs";
+import { spawnSync } from "node:child_process";
 import { join, dirname } from "node:path";
 import { assertWritable } from "./readonly.mjs";
 
@@ -102,4 +103,64 @@ export function listQueues(root) {
     for (const s of sessions) queues.push({ session: s, path: join(dir, `${s}.jsonl`) });
   }
   return queues;
+}
+
+/** Which of these ledger-recorded paths still carry work that git has not filed.
+ *
+ *  BLZ-499 / ADR-0032. BLZ-404 rounds 2-4 each asked GIT what the working tree looks
+ *  like, and that question has no useful answer: a dirty ticket file looks identical
+ *  whether a verb wrote it, a verb wrote it and failed to commit, or a person wrote it.
+ *  This asks a different question — WHAT DID BLAZE RECORD THAT IT WROTE? — of blaze's own
+ *  ledger, and then asks git only whether each recorded path is still outstanding.
+ *
+ *  `paths` are repo-relative, exactly as `commitOrQueue` recorded them
+ *  (`files: unique.map((f) => relative(root, f))`). They are passed to git as ARGUMENTS,
+ *  after `--`, and only an EXIT CODE is read back. Nothing parses a path out of git's
+ *  output, so the porcelain path parser BLZ-347 deliberately deleted is not reintroduced
+ *  and a filename with a space or a non-ASCII character cannot mangle the answer. Nothing
+ *  walks `projects/` either, so a symlinked `projects/` cannot silence this the way it
+ *  silenced round 3/4's `git status --porcelain -- <projectsDir>` detector.
+ *
+ *  Three buckets, because two would lie:
+ *    - `outstanding` — the recorded write is still not in HEAD. Real work.
+ *    - `settled`     — the file already matches HEAD. The write was filed by SOMETHING
+ *                      ELSE (on blaze-pm at 70197405, 118 of these had been filed by 61
+ *                      hand-written commits) and the ledger entry is a leftover.
+ *    - `absent`      — neither on disk nor tracked. A path created and relocated again
+ *                      inside one batch: `commit-runner.mjs` drops exactly these when it
+ *                      stages, so counting them as outstanding would invent work.
+ *
+ *  `git diff --quiet HEAD` alone is NOT sufficient and the tracked/exists check is not
+ *  decoration: it is BLIND to an untracked file, so a `blaze new` op's brand-new ticket —
+ *  written, queued, never committed — would come back "settled". That is the common case,
+ *  not an edge one.
+ *
+ *  A probe that could not be run is never read as "settled" (ADR-0030): git exiting
+ *  anything other than 0 or 1, or failing to spawn at all, throws. Reachable — an absent
+ *  or unforkable `git` is an ordinary environment state, not a theoretical branch. */
+export function outstandingFiles(root, paths, { gitBin = "git" } = {}) {
+  // ADR-0030: a probe that could not look does not report what a probe that looked
+  // reports. BOTH probes below are two-valued by contract, so any third answer — and a
+  // spawn that never ran (`status === null`) — is an absence of evidence, never evidence
+  // of a settled queue. Applied to `ls-files` as well as `diff`, because a `git` that
+  // cannot answer the first question cannot be trusted on the second either.
+  const ask = (rel, args, what) => {
+    const r = spawnSync(gitBin, ["-C", root, ...args], { stdio: "ignore" });
+    if (r.status === 0 || r.status === 1) return r.status;
+    const why = r.status === null ? (r.error?.code ?? "the process never ran") : `exit ${r.status}`;
+    throw new Error(
+      `blaze: git could not answer whether "${rel}" ${what} (${args[0]} ${args[1]}: ${why}) `
+      + "— refusing to report a queue as settled on a probe that did not run");
+  };
+  const out = { outstanding: [], settled: [], absent: [] };
+  for (const rel of [...new Set(paths)]) {
+    const onDisk = existsSync(join(root, rel));
+    const tracked = ask(rel, ["ls-files", "--error-unmatch", "--", rel], "is tracked") === 0;
+    if (!onDisk && !tracked) { out.absent.push(rel); continue; }
+    // Written but never committed (a `new` op): git diff cannot see it, so decide here.
+    if (onDisk && !tracked) { out.outstanding.push(rel); continue; }
+    if (ask(rel, ["diff", "--quiet", "HEAD", "--", rel], "is committed") === 1) out.outstanding.push(rel);
+    else out.settled.push(rel);
+  }
+  return out;
 }

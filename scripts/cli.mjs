@@ -49,7 +49,11 @@ const SUBCOMMANDS = {
   link: { file: "link-runner.mjs", desc: "add/remove a link between tickets", mutates: true },
   resolve: { file: "resolve-runner.mjs", desc: "set a ticket's resolution", mutates: true },
   log: { file: "log-runner.mjs", desc: "log worked minutes against a ticket", mutates: true },
-  commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true },
+  // BLZ-499: `--status` is a pure read of the pending ledgers (it prints and exits before
+  // the branch guard, the lock and the git add/commit), so it is exempted from the BLZ-121
+  // gate below by `readOnlyFlags` rather than by declaring the whole verb read-only — the
+  // flush itself very much mutates.
+  commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true, readOnlyFlags: ["--status"] },
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
   migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
   publish: { file: "publish-runner.mjs", desc: "sweep local queues and trigger the flush", mutates: true },
@@ -95,7 +99,13 @@ if (!sub) { printUsage(); process.exit(1); }
 // later (e.g. at commitOrQueue) is too late: move.mjs and friends write/rename
 // the ticket file before they ever reach a commit decision, so declining only
 // the commit would leave a relocated-but-uncommitted file in a shared tree.
-if (isReadonly() && sub.mutates) {
+//
+// BLZ-499: a verb may carry a flag that makes THIS INVOCATION a pure read — today only
+// `blaze commit --status`. The exemption is per-invocation and opt-in per verb, never a
+// blanket "read-only unless it looks like a write": the verb stays `mutates: true`, so
+// every other spelling of it is still refused here.
+const readOnlyInvocation = (sub.readOnlyFlags ?? []).some((f) => rest.includes(f));
+if (isReadonly() && sub.mutates && !readOnlyInvocation) {
   console.error(`blaze: read-only mode (BLAZE_READONLY=1) — refusing to run a mutating command: ${key}`);
   process.exit(1);
 }
