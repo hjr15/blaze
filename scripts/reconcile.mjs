@@ -1151,14 +1151,50 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // BLZ-484: same rule. "I could not list the refs" is never "this repo has no branches",
   // and an empty branch set is what makes every branch-derived signal disappear. Zero
   // failures across the 330 reconcile tests.
-  const refs = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname:short)",
+  const listed = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname:short)",
     "refs/heads", "refs/remotes/origin"], {
     what: "Blaze lists every local and origin ref to find the branches carrying ticket ids.",
     consequence: "The branch set is UNKNOWN for this repo, not empty — no branch signal reaches `decide`, and the absence of one is not evidence.",
   }) || "")
-    .split("\n")
-    .map((r) => r.replace(/^origin\//, "").trim())
-    .filter((r) => r && r !== "HEAD");
+    .split("\n").map((r) => r.trim()).filter(Boolean);
+  // BLZ-492: A NAME AND A QUESTION ARE NOT THE SAME STRING.
+  //
+  // `origin/` is stripped because the stripped form is the BRANCH'S NAME: it is what
+  // `decide` writes into a ticket's `branch:` field, and it is what makes a branch that
+  // exists both locally and on the remote one branch rather than two. That is right, and it
+  // is unchanged. What was wrong is that the same stripped string was then handed to `git`
+  // as a REVISION, and no local ref answers to it for a branch that exists only under
+  // `refs/remotes/origin`: `git log INF-1-work ^origin/main` and `git rev-parse INF-1-work`
+  // both exit 128, `ambiguous argument`. Measured across the reconcile suite at 1b00f3a: 52
+  // occurrences each, and `buildBranchMap` read the resulting `own: []` /
+  // `sameTipAsDefault: false` as evidence about the BRANCH rather than as the failure to
+  // ask that it was.
+  //
+  // So the two are kept apart. `refs` carries the names, in the order `for-each-ref`
+  // produced them — which sorts `refs/heads/…` before `refs/remotes/…`, so a branch present
+  // in both namespaces is asked about through its LOCAL ref, and the remote copy of the
+  // same name is the duplicate that is dropped. `askable` carries, per name, the ref `git`
+  // will actually answer about.
+  //
+  // MEASURED BEFORE IT SHIPPED (BLZ-353), because this changes WHICH branches corroborate.
+  // Every `buildBranchMap` result across the reconcile suite, at 1b00f3a and at the fix:
+  // 344 -> 354 corroborated (id -> branch) entries, and on the PRE-EXISTING suite exactly
+  // ONE branch changes — `INF-574 -> INF-574-blaze-config-and-chart`, in the two fixtures
+  // that really fetch a remote. Nothing loses corroboration; the change is one-directional
+  // by construction, since the old code could only ever read `own: []` and
+  // `sameTipAsDefault: false`. The other 25 remote-only branches in that fixture were
+  // already corroborated by `shippedSet`, which is exactly why the defect stayed invisible:
+  // the one branch whose work had not landed on the default branch is the one the silence
+  // cost. The ref list for that repo also goes 33 -> 32 — `refs/heads/main` and
+  // `refs/remotes/origin/main` both stripped to `main`, and the old list carried it twice.
+  const refs = [];
+  const askable = new Map();
+  for (const raw of listed) {
+    const name = raw.replace(/^origin\//, "");
+    if (!name || name === "HEAD" || askable.has(name)) continue;
+    askable.set(name, raw);
+    refs.push(name);
+  }
 
   // What the branch itself says: the subjects unique to it (not already on the
   // default branch), plus whether its tip IS the default tip — the fresh-vs-stale
@@ -1168,27 +1204,41 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
     what: "Blaze resolves the default branch's tip to tell a fresh branch from a stale one.",
     consequence: "Every branch is treated as NOT sharing the default tip, which is a guess, not a reading.",
   });
-  // BLZ-484, STATED RATHER THAN FIXED. These two probes are the only `git` calls in this
-  // file whose non-zero exits are laundered and are NOT reported, and the reason is that
-  // the failure is reconcile's OWN, not the environment's: `refs` above has had `origin/`
-  // stripped, so a branch that exists only on the remote is asked about by a name no local
-  // ref answers to. Measured across the 330 reconcile tests: `git log <branch> ^<ref>`
-  // exits 128 on 52 occasions and `git rev-parse <branch>` on the same 52, every one of
-  // them `ambiguous argument` on a stripped remote-only ref. `buildBranchMap` then reads
-  // `own: []` and `sameTipAsDefault: false` and falls back to the shipped set, so such a
-  // branch is silently never corroborated on its own evidence.
+  // BLZ-492 (was BLZ-484's "stated rather than fixed"): both probes ask about `askable`,
+  // the ref `for-each-ref` actually listed, not the display name derived from it. The 52
+  // laundered exits above are gone — re-measured at the fix: 0 of each across the reconcile
+  // suite — and `buildBranchMap` now reads a remote-only branch's own commits.
   //
-  // Reporting that as an unreadable repo would blame the environment for a bug in this
-  // file, and fixing the ref name changes which branches corroborate — a behaviour change
-  // outside this ticket, raised for its own. What IS reported here is the case this ticket
-  // is about: a probe that could not RUN.
-  const inspect = (branchRef) => ({
-    own: (gitProbe(gitErrors, repoPath, ["log", `${branchRef}`, `^${ref}`, "--format=%s"],
-      { exitIsAnAnswer: true }) || "")
-      .split("\n").filter(Boolean),
-    sameTipAsDefault: Boolean(defaultTip) &&
-      gitProbe(gitErrors, repoPath, ["rev-parse", branchRef], { exitIsAnAnswer: true }) === defaultTip,
-  });
+  // `exitIsAnAnswer: true` STAYS, and it is not vestigial. `git log <branch> ^<ref>` names
+  // `ref`, so it is a DEPENDENT probe on the default-branch resolution, exactly like
+  // `defaultTip` and the `%x00%B` walk above which are told `exitIsAnAnswer: !resolved` for
+  // that reason. When nothing resolved, `ref` is the guess "main", no such ref exists, and
+  // every branch on the repo fails this probe for the ONE condition `no-default-branch` has
+  // already reported by name — one condition, one line. Without the opt-in a repo whose
+  // default branch is called `trunk` raises a `git-failed` ERROR per branch and exits 1;
+  // pinned by "an unresolved default branch is ONE warning, not one warning plus a
+  // git-failed per branch".
+  //
+  // REACHABILITY, STATED: the opt-in on the `rev-parse` half is a different case. It only
+  // runs when `defaultTip` resolved, and it is asked about a ref `for-each-ref` listed in
+  // the same run, so no construction in this suite makes it fire; mutating that one alone
+  // is not killable by any test here. It is kept because the listing and the probe are two
+  // separate `git` invocations and a ref can be pruned between them — a race no test can
+  // stage deterministically. Said plainly rather than left to look pinned.
+  //
+  // `askable.get(name) || name` falls back to the name itself for a ref that was never
+  // listed. `buildBranchMap` only ever passes names from `refs`, so that fallback is not
+  // reached today.
+  const inspect = (branchRef) => {
+    const rev = askable.get(branchRef) || branchRef;
+    return {
+      own: (gitProbe(gitErrors, repoPath, ["log", rev, `^${ref}`, "--format=%s"],
+        { exitIsAnAnswer: true }) || "")
+        .split("\n").filter(Boolean),
+      sameTipAsDefault: Boolean(defaultTip) &&
+        gitProbe(gitErrors, repoPath, ["rev-parse", rev], { exitIsAnAnswer: true }) === defaultTip,
+    };
+  };
   const branchMap = buildBranchMap(refs, idFromRef, { key, shippedSet, inspect });
 
   return { prMap, branchMap, shippedSet, forgeErrors, gitErrors, candidates };
