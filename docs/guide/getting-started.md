@@ -163,8 +163,8 @@ See [Driving Blaze with an AI agent](driving-with-an-ai-agent.md).
 ## Next steps
 
 - [How it works](how-it-works.md) — the concepts behind directory-as-status,
-  including mirror mode (`blaze reconcile`), which syncs board status from a
-  linked code repo's branch/PR state.
+  including mirror mode (`blaze reconcile`), which proposes ticket moves from a
+  linked code repo's branch/PR state (a dry run unless `--apply`).
 - [Full command reference](commands.md) — every subcommand and flag.
 - [Schema and customisation](schema.md) — types, workflows, taxonomies, and
   what in `blaze.config.json` / `project.json` is actually load-bearing.

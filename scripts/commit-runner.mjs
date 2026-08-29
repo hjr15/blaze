@@ -10,30 +10,49 @@
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
-import { readForDrain, clearLedger, listQueues, sessionId } from "./pending-ledger.mjs";
+import { readForDrain, clearLedger, listQueues, sessionId, readEntries, outstandingFiles } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 import { assertWritable } from "./readonly.mjs";
 import { checkBranch } from "./branch-guard.mjs";
-import { summarizeEntries } from "./commit-summary.mjs";
+import { summarizeEntries, renderQueueStatus } from "./commit-summary.mjs";
 
 const { dataRoot } = resolveRoots();
 const argv = process.argv.slice(2);
 let all = false;
 let shared = false;
 let branchOk = false;
+let status = false;
 for (const a of argv) {
   switch (a) {
     case "--all": all = true; break;
     case "--shared": shared = true; break;
     case "--branch-ok": branchOk = true; break;
+    case "--status": status = true; break;
     case "--help": case "-h":
-      console.log("usage: blaze commit [--all] [--shared] [--branch-ok]  (--shared drains ONLY the shared fallback queue, never the caller's own; --branch-ok overrides the INF-673 foreign-branch refusal)");
+      console.log("usage: blaze commit [--all] [--shared] [--branch-ok] [--status]  (--shared drains ONLY the shared fallback queue, never the caller's own; --branch-ok overrides the INF-673 foreign-branch refusal; --status REPORTS every queue and flushes nothing)");
       process.exit(0);
     default:
       console.error(`unknown flag: ${a}`);
       process.exit(1);
   }
+}
+
+// BLZ-499 / ADR-0032: the read. Placed HERE — after flag parsing, before the
+// BLZ-121 write gate, before `checkBranch`, before `acquireLock`, and before the
+// `git add`/`git commit` — for the same reason `checkBranch` sits where it does: a
+// path that writes nothing must leave nothing half-made, and must not be refused by
+// a gate on a write it never performs. It reports EVERY queue, deliberately: the
+// measurement behind ADR-0032 found 185 ops stranded across 8 sessions, none of them
+// the caller's own, and a report scoped to `mySession` would have shown a clean board
+// on every one of the five days they sat there.
+if (status) {
+  const queues = listQueues(dataRoot).map((q) => {
+    const entries = readEntries(dataRoot, q.session);
+    return { session: q.session, entries, files: outstandingFiles(dataRoot, entries.flatMap((e) => e.files)) };
+  });
+  console.log(renderQueueStatus(queues));
+  process.exit(0);
 }
 
 // BLZ-121 defence-in-depth, hoisted here for the same reason as

@@ -125,10 +125,14 @@ reports only what *it* found (no code-bound change, most likely, since the
 prior pass already wrote the files), never a claim about the state of the git
 tree. Telling a genuinely failed prior commit apart from a `commitMode:
 "batch"` board that queued by design, or from a human's own uncommitted edit
-under `projects/`, needs the pending ledger, not `git status` — that is a
-separate, unbuilt feature. If a run reports nothing to do but `git status`
+under `projects/`, needs the pending ledger, not `git status`. That ledger read
+is now built: [`blaze commit --status`](#commit) reports the queued-by-design
+state. It cannot report the other two — neither leaves a ledger entry — and it
+says so in its own output (ADR-0032). If a run reports nothing to do but `git status`
 still shows changes under `projects/`, the remedy depends on which of those three
-states you are in, and **`blaze commit` only addresses one of them** (BLZ-434). It
+states you are in, and **`blaze commit` only addresses one of them** (BLZ-434) —
+run [`blaze commit --status`](#commit) to see which of your queues, if any, still
+holds outstanding work. It
 flushes the pending queue, so it helps only on a `commitMode: "batch"` board that
 queued by design — on a `per-op` board there is no queue and it has nothing to
 flush, and it will not pick up a failed prior commit or your own in-flight edit
@@ -385,7 +389,7 @@ Appends a worklog entry to a ticket.
 ## commit
 
 ```
-blaze commit [--all] [--shared]
+blaze commit [--all] [--shared] [--branch-ok] [--status]
 ```
 
 Flushes queued ops into one git commit. Only meaningful when
@@ -400,6 +404,24 @@ queue rather than risk taking another session's work.
 |---|---|---|
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
+| `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
+| `--status` | **Report every queue and flush nothing.** Read-only: prints each queue's op count and age, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). Runs under `BLAZE_READONLY=1`. | off |
+
+### `--status`, and the one question the ledger can answer
+
+A queue is abandoned the moment its session ends: `blaze commit` drains only the
+caller's own queue, and a new agent session gets a new auto-derived id, so the
+previous queue becomes invisible to it. Measured on this project's own board at
+`70197405`, **185 ops were stranded across 8 sessions for up to five days** while
+every file they named had already been filed by hand-written commits. `--status`
+is the surface that makes that visible on the day it happens; `blaze commit --all`
+is the remedy.
+
+It answers exactly **one** of the three states described under
+[reconcile](#reconcile) above — a write blaze queued by design. It cannot see a
+failed prior commit or your own in-flight edit, because neither leaves a ledger
+entry, and it says so in its own output rather than letting a clean report be read
+as a clean tree. See `docs/decisions/0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`.
 
 ### The subject line counts TICKETS, and used to count ops
 

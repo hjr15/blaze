@@ -29,7 +29,11 @@ const SUBCOMMANDS = {
   init: { file: "init-runner.mjs", desc: "set up a new board (first-run wizard)", mutates: true },
   start: { file: "supervisor.mjs", desc: "run the reconcile/groomer loops (default)", mutates: true, noArgs: true },
   board: { file: "serve.mjs", desc: "serve the board viewer", mutates: false, noArgs: true },
-  reconcile: { file: "reconcile.mjs", desc: "sync board status to git/PR state", mutates: true },
+  // BLZ-432 / ADR-0032 §5: this read "sync board status to git/PR state" — the last
+  // unqualified survivor of the whole-board claim BLZ-404 round 5 removed everywhere else.
+  // It named THE BOARD, promised a settled two-way state, and omitted that the verb is a
+  // dry run unless `--apply` is given. Pinned by tests/cli.test.mjs so it cannot drift back.
+  reconcile: { file: "reconcile.mjs", desc: "propose ticket moves from branch/PR state (dry run unless --apply)", mutates: true },
   groom: { file: "loops/groomer.mjs", desc: "run one groomer pass", mutates: true },
   new: { file: "new-runner.mjs", desc: "create a ticket", mutates: true },
   sprint: { file: "sprint-runner.mjs", desc: "create/list/activate sprints", mutates: true },
@@ -45,7 +49,11 @@ const SUBCOMMANDS = {
   link: { file: "link-runner.mjs", desc: "add/remove a link between tickets", mutates: true },
   resolve: { file: "resolve-runner.mjs", desc: "set a ticket's resolution", mutates: true },
   log: { file: "log-runner.mjs", desc: "log worked minutes against a ticket", mutates: true },
-  commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true },
+  // BLZ-499: `--status` is a pure read of the pending ledgers (it prints and exits before
+  // the branch guard, the lock and the git add/commit), so it is exempted from the BLZ-121
+  // gate below by `readOnlyFlags` rather than by declaring the whole verb read-only — the
+  // flush itself very much mutates.
+  commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true, readOnlyFlags: ["--status"] },
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
   migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
   publish: { file: "publish-runner.mjs", desc: "sweep local queues and trigger the flush", mutates: true },
@@ -91,7 +99,13 @@ if (!sub) { printUsage(); process.exit(1); }
 // later (e.g. at commitOrQueue) is too late: move.mjs and friends write/rename
 // the ticket file before they ever reach a commit decision, so declining only
 // the commit would leave a relocated-but-uncommitted file in a shared tree.
-if (isReadonly() && sub.mutates) {
+//
+// BLZ-499: a verb may carry a flag that makes THIS INVOCATION a pure read — today only
+// `blaze commit --status`. The exemption is per-invocation and opt-in per verb, never a
+// blanket "read-only unless it looks like a write": the verb stays `mutates: true`, so
+// every other spelling of it is still refused here.
+const readOnlyInvocation = (sub.readOnlyFlags ?? []).some((f) => rest.includes(f));
+if (isReadonly() && sub.mutates && !readOnlyInvocation) {
   console.error(`blaze: read-only mode (BLAZE_READONLY=1) — refusing to run a mutating command: ${key}`);
   process.exit(1);
 }

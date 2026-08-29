@@ -53,3 +53,48 @@ export function summarizeEntries(entries) {
     .map(([op, ids]) => `${ids.size} ${OP_LABEL[op] || op}`)
     .join(", ");
 }
+
+/** The body of `blaze commit --status`.
+ *
+ *  BLZ-499 / ADR-0032. It lives here, next to `summarizeEntries`, for the reason BLZ-427
+ *  moved that function here: `commit-runner.mjs` is a script with top-level side effects
+ *  (it resolves roots, parses argv and exits), so nothing in it can be imported and no test
+ *  can reach its text. This is pure and importable, so the wording is drivable directly.
+ *
+ *  `queues` is `[{ session, entries, files: { outstanding, settled, absent } }]`.
+ *
+ *  WHAT THIS DELIBERATELY DOES NOT SAY. The ledger answers exactly one of the three board
+ *  states BLZ-404 round 4 conflated: a write blaze queued BY DESIGN. It cannot distinguish
+ *  a genuinely failed prior commit from a human's own in-flight file, because neither
+ *  leaves anything in the ledger — on a `per-op` board there is no ledger at all, and on a
+ *  `batch` board a failed flush KEEPS a queue byte-identical to a healthy one. Round 4's
+ *  detector claimed to separate three states and separated none; this one names its own
+ *  blind spot in its own output instead, which is what ADR-0030 and BLZ-433 ask for. */
+export function renderQueueStatus(queues) {
+  const L = ["blaze commit --status: read-only — nothing was committed, queued or cleared."];
+  const ops = queues.reduce((n, q) => n + q.entries.length, 0);
+  if (ops === 0) {
+    L.push("", "  Nothing queued — 0 op(s) on 0 queue(s).");
+  } else {
+    L.push("", `  ${queues.length} queue(s) holding ${ops} op(s).`, "");
+    for (const q of queues) {
+      const name = q.session === null ? "(shared fallback queue — no session identity)" : q.session;
+      const stamps = q.entries.map((e) => e.ts).filter(Boolean).sort();
+      const when = stamps.length ? `  oldest ${stamps[0]}` : "";
+      L.push(`  ${name}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
+      const { outstanding, settled, absent } = q.files;
+      L.push(`      outstanding: ${outstanding.length} file(s) still differ from HEAD`);
+      L.push(`      orphaned:    ${settled.length} file(s) already match HEAD — filed by something else`);
+      if (absent.length) L.push(`      superseded:  ${absent.length} file(s) relocated again within a batch`);
+      L.push("");
+    }
+    const tot = (k) => queues.reduce((n, q) => n + q.files[k].length, 0);
+    L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${queues.length} queue(s).`);
+    L.push("  Flush your own queue with `blaze commit`, or every queue with `blaze commit --all`.");
+  }
+  L.push("",
+    "  This reports ONLY what blaze recorded that it queued. It does not report a failed",
+    "  prior commit, and it does not report your own in-flight edit under projects/ —",
+    "  neither leaves a ledger entry, so neither is visible here. Use `git status` for those.");
+  return L.join("\n");
+}
