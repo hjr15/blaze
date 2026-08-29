@@ -229,7 +229,7 @@ test("pageHtml renders inline-edit affordances", () => {
 test("pageHtml renders live AC checkboxes and a sync badge", () => {
   // Use a dedicated fixture directory so AC checkbox rendering is deterministic.
   // Only AC-section checkboxes here so doesNotMatch(disabled) is unambiguous.
-  const fixDir = mkdtempSync(join(tmpdir(), "blaze-ac-"));
+  const fixDir = mkdtempSync(join(tmpdir(), "blaze-endpoint-ac-"));
   mkdirSync(join(fixDir, "T", "todo"), { recursive: true });
   writeFileSync(join(fixDir, "T", "todo", "T-1.md"),
     "---\nid: T-1\ntitle: ac test\ntype: task\nproject: T\nestimate: 5\n---\n## Acceptance Criteria\n- [ ] first ac\n- [x] second ac\n");

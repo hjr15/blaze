@@ -15,7 +15,7 @@
 // nothing in reconcile, and one that drives the real `reconcile()` and reads the ledger
 // file it actually wrote. Where a guard pins a seam rather than a production hunk, it
 // says so in its own name.
-import { test, describe } from "node:test";
+import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -31,8 +31,24 @@ import { commitOutcomeFrom, applySummary, COMMIT_OUTCOMES } from "../scripts/rec
 import { OP_LABEL, entryIds, summarizeEntries } from "../scripts/commit-summary.mjs";
 import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 
+/** Every scratch directory this file mints, removed once the file is done with them
+ *  (BLZ-491). `tinyBoard()` had no teardown at all — four call sites, four
+ *  `/tmp/blz-guards-board-*` directories per run, 356 of them on the machine where this was
+ *  written — and `gitRepo()`'s callers each clean up in their own `finally`, which is one
+ *  forgotten `finally` away from the same leak. Registering here means the teardown belongs
+ *  to the helper rather than to every caller of it.
+ *
+ *  The litter was harmless on its own. What it cost is that `/tmp` noise could not be told
+ *  from a real leak, and BLZ-485's mutation runner now asserts ZERO leftover
+ *  `/tmp/blz-mutate-*` as the evidence its teardown works. `tests/tmp-scratch-attribution.test.mjs`
+ *  runs this suite under a redirected `TMPDIR` and asserts the directory is empty after it,
+ *  so removing this hook turns that test red by name. */
+const SCRATCH = [];
+after(() => { for (const dir of SCRATCH) rmSync(dir, { recursive: true, force: true }); });
+const scratch = (dir) => { SCRATCH.push(dir); return dir; };
+
 function gitRepo() {
-  const root = mkdtempSync(join(tmpdir(), "blz-guards-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz-guards-")));
   execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
@@ -44,7 +60,7 @@ function gitRepo() {
 const head = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 function tinyBoard() {
-  const dir = mkdtempSync(join(tmpdir(), "blz-guards-board-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blz-guards-board-")));
   mkdirSync(join(dir, "T", "defined"), { recursive: true });
   writeFileSync(join(dir, "T", "defined", "T-1.md"),
     "---\nid: T-1\ntitle: one\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");

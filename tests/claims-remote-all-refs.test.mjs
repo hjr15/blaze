@@ -39,7 +39,7 @@ function commitClaim(repo, key, n, slug, msg) {
 }
 
 function cloneOf(origin, label) {
-  const c = mkdtempSync(join(tmpdir(), label));
+  const c = mkdtempSync(join(tmpdir(), `inf682-clone-${label}`));
   rmSync(c, { recursive: true, force: true });
   execFileSync("git", ["clone", "-q", origin, c]);
   return c;

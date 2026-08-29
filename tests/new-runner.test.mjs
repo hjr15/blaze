@@ -15,7 +15,7 @@ const runner = fileURLToPath(new URL("../scripts/new-runner.mjs", import.meta.ur
 
 // throwaway DATA repo: git + blaze.config.json (batch mode → no commits) + projects/<KEY>
 function dataRepo({ key = "OBA", project = null } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "blaze-data-"));
+  const root = mkdtempSync(join(tmpdir(), "blaze-newrunner-data-"));
   execFileSync("git", ["-C", root, "init", "-q"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
