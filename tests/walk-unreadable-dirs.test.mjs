@@ -66,6 +66,16 @@ const SHAPES = [
   { name: "a PROJECT directory Blaze cannot list at all",
     at: ["BLZ"], make: (p) => chmodSync(p, 0o000), undo: (p) => chmodSync(p, 0o755),
     reason: "directory-unreadable" },
+  // BLZ-494: THE STATUS-LEVEL TWIN OF THE ROW ABOVE, which nothing constructed. The two
+  // routes are separate `if (…​.error)` branches in `unreadableTicketDirs` — one on the
+  // project readdir, one on the status readdir — and only the project one was pinned:
+  // mutating the status branch to `if (false)` left the whole suite green. A `chmod 000`
+  // status directory is the shape that reaches it, and `safeReaddir`'s swallowed error is
+  // the very silence BLZ-470 exists to end, so the untested half was the half that could
+  // regress unnoticed.
+  { name: "a STATUS directory Blaze cannot list at all",
+    at: ["BLZ", "defined"], make: (p) => chmodSync(p, 0o000), undo: (p) => chmodSync(p, 0o755),
+    reason: "directory-unreadable" },
   // The `.git` FIFO shape is exercised in its own describe block at the foot of this file,
   // OUT OF PROCESS and never here. Its failure mode is a HANG, and a hang inside this
   // process would wedge the whole file rather than fail one case — see that block.
@@ -143,7 +153,7 @@ describe("BLZ-470: a skipped directory is REPORTED, not silently dropped", () =>
     }
     assert.equal(checked, SHAPES.length,
       `the oracle must cover every shape; a smaller number means SHAPES shrank (${SHAPES.length})`);
-    assert.equal(SHAPES.length, 6, "six shapes make a directory unreadable — see the table above");
+    assert.equal(SHAPES.length, 7, "seven shapes make a directory unreadable — see the table above");
   });
 
   test("a healthy board reports nothing — the finding is not a fill queue", () => {
