@@ -38,9 +38,16 @@ const REPO = join(import.meta.dirname, "..");
 const HARNESS_ID = "test-harness-uuid";
 
 /** A temp board carrying its own copy of scripts/, so the copied runner resolves its
- *  script-relative root to the fixture and never to this worktree. */
-function board(prefix = "blaze-commitstatus-") {
-  const root = mkdtempSync(join(tmpdir(), prefix));
+ *  script-relative root to the fixture and never to this worktree.
+ *
+ *  BLZ-491: the prefix is a LITERAL at the `mkdtempSync` call, not a parameter. It used to
+ *  be `board(prefix = "blaze-commitstatus-")`, which reads identically at every one of the
+ *  15 call sites but is invisible to `tests/tmp-scratch-attribution.test.mjs` — that scan
+ *  is static, so a variable prefix drops this suite out of the attribution buckets and a
+ *  leaked /tmp directory could no longer be traced back here. The parameter was never once
+ *  overridden, so inlining it loses nothing. */
+function board() {
+  const root = mkdtempSync(join(tmpdir(), "blaze-commitstatus-"));
   cpSync(join(REPO, "scripts"), join(root, "scripts"), { recursive: true });
   mkdirSync(join(root, "projects", "ZZZ", "defined"), { recursive: true });
   execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
