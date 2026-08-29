@@ -11,11 +11,12 @@
 // BLAST RADIUS, not correctness, and the fix is a `--project` filter on the verb.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
 import { reconcile } from "../scripts/reconcile.mjs";
+import { unreadableTicketDirs } from "../scripts/model/index.mjs";
 
 /** A board with TWO projects, each pointed at its own code repo, each with one ticket
  *  that a merged PR should drive to `done`. */
@@ -103,9 +104,34 @@ const at = (root, key, status) =>
 // kind excepted — matched on the SENTENCE it emits, which the positive sibling test below
 // pins against the real product output so this pattern cannot quietly stop matching.
 const PROJECT_MISMATCH_LINE = /NEEDS ATTENTION — \S+ sits under projects\//;
-const exceptProjectMismatch = (out) => out.split("\n")
-  .filter((l) => !PROJECT_MISMATCH_LINE.test(l))
+// BLZ-495: THE SECOND ONE, and it is a second EXCEPTION rather than a second oversight.
+//
+// `unreadable-ticket-directory` is raised by the same mechanism, in the same place, for the
+// same stated reason: `scripts/reconcile.mjs` raises it "unconditionally, on every run,
+// filtered or not, for exactly the reason BLZ-406's `project-mismatch` is". BLZ-470 argues
+// it — a misfiled INF ticket could be sitting under the unreadable OBA directory, and
+// `blaze audit` filters on ID PREFIX, not on directory, so neither verb can honestly scope
+// this finding away. A directory the walk skipped is invisible to EVERY scope.
+//
+// So an INF-scoped run on a board with a zero-byte `.git` under `projects/OBA/defined`
+// legitimately names OBA, and the BLZ-394 scope-leak assertions must not read that as a
+// leak. It is excepted here the way BLZ-406's is — on the SENTENCE, not on the channel —
+// and pinned positively against real product output by the BLZ-495 suite at the foot of
+// this file, so the pattern cannot quietly stop matching.
+//
+// That leaves FOUR of the six kinds asserted. `ambiguous-deliverer`,
+// `terminal-record-unverifiable`, `merged-pr-title-claims-nothing` and `open-pr-on-terminal`
+// are all raised BEHIND the scope guard and have no argument for naming an out-of-scope
+// key, so a leak through any of them is still a leak.
+const UNREADABLE_DIR_LINE = /NEEDS ATTENTION — \S+ was NOT read:/;
+
+/** Strip the finding kinds no single-project run can scope, and nothing else. */
+const exceptUnscopeable = (out) => out.split("\n")
+  .filter((l) => !PROJECT_MISMATCH_LINE.test(l) && !UNREADABLE_DIR_LINE.test(l))
   .join("\n");
+
+/** The two kinds above, named once so the roster test and the suites agree by construction. */
+const UNSCOPEABLE_KINDS = new Set(["project-mismatch", "unreadable-ticket-directory"]);
 
 // Every finding kind `scripts/reconcile.mjs` can raise, read FROM THE SOURCE rather than
 // listed by hand — a hand-written roster is how the filter came to cover kinds nobody had
@@ -374,7 +400,7 @@ describe("BLZ-394: a --project that yields no key REFUSES, it does not go wide",
       const res = runCli(root, tmp, ["--project", "INF", "--quiet"]);
       assert.equal(res.status, 0, res.stderr);
       assert.match(res.stderr, /scanned project\(s\): INF/);
-      assert.doesNotMatch(exceptProjectMismatch(res.stderr), /OBA/);   // BLZ-436, see exceptProjectMismatch
+      assert.doesNotMatch(exceptUnscopeable(res.stderr), /OBA/);   // BLZ-436, see exceptUnscopeable
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });
@@ -502,9 +528,9 @@ test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => 
       [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
       { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
     assert.equal(res.status, 0, res.stderr);
-    assert.doesNotMatch(exceptProjectMismatch(res.stdout + res.stderr), /OBA/,
+    assert.doesNotMatch(exceptUnscopeable(res.stdout + res.stderr), /OBA/,
       "an INF-scoped run must not mention OBA in its account of its own work — see " +
-      "exceptProjectMismatch for the one kind BLZ-406 deliberately exempts");
+      "exceptUnscopeable for the two kinds no single-project run can scope");
     assert.ok(at(root, "OBA", "defined"), "nor move it");
   } finally {
     restore();
@@ -579,13 +605,13 @@ test("BLZ-436: a scoped run DOES name an out-of-scope directory in a project-mis
     assert.ok(at(root, "OBA", "defined"), "the out-of-scope project must not move");
     assert.ok(existsSync(join(root, "projects", "OBA", "defined", "INF-2-t.md")),
       "nor may the misfiled ticket be written or moved by a run that is not scoped to it");
-    assert.doesNotMatch(exceptProjectMismatch(res.stdout + res.stderr), /OBA/,
+    assert.doesNotMatch(exceptUnscopeable(res.stdout + res.stderr), /OBA/,
       "OBA must appear in the project-mismatch finding and NOWHERE else");
     // BLZ-486: the filter is keyed on a SENTENCE, so it has to be checked against the
     // sentence the product actually emits, on real output, or it silently stops matching
     // and the exception silently becomes an assertion.
-    assert.ok(!exceptProjectMismatch(res.stderr).includes("sits under projects/"),
-      "exceptProjectMismatch must actually remove the project-mismatch line it exists to except");
+    assert.ok(!exceptUnscopeable(res.stderr).includes("sits under projects/"),
+      "exceptUnscopeable must actually remove the project-mismatch line it exists to except");
     const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
       { encoding: "utf8" });
     assert.doesNotMatch(files, /projects\/OBA/);
@@ -890,6 +916,20 @@ describe("BLZ-486: only the project-mismatch finding is excepted from the scope-
     ], "a new finding kind must be classified here deliberately, not inherited silently");
   });
 
+  test("BLZ-495: exactly two kinds are excepted, and they are the two raised BEFORE the scope guard", () => {
+    // The classification the roster test exists to force. Both excepted kinds are raised
+    // unconditionally by `scripts/reconcile.mjs`, ahead of the `wanted` guard, each with its
+    // own argued reason for being unscopeable; the other four are raised behind it.
+    assert.deepEqual([...UNSCOPEABLE_KINDS].sort(),
+      ["project-mismatch", "unreadable-ticket-directory"]);
+    for (const kind of UNSCOPEABLE_KINDS) {
+      assert.ok(RECONCILE_FINDING_KINDS.includes(kind),
+        `${kind} is excepted but reconcile no longer raises it — the exception is now a dead filter`);
+    }
+    assert.equal([...new Set(RECONCILE_FINDING_KINDS)].filter((k) => !UNSCOPEABLE_KINDS.has(k)).length, 4,
+      "four kinds stay asserted; a fifth appearing means someone widened the channel again");
+  });
+
   test("a leak through any OTHER kind survives the filter — one line per kind, all still visible", () => {
     // The heart of the ticket. Each of these is a real `NEEDS ATTENTION` line carrying an
     // out-of-scope key; only the project-mismatch one may be removed.
@@ -910,25 +950,181 @@ describe("BLZ-486: only the project-mismatch finding is excepted from the scope-
     assert.deepEqual(Object.keys(lines).sort(), [...new Set(RECONCILE_FINDING_KINDS)].sort(),
       "every kind reconcile can raise needs a line here, or this test is blind on the new one");
 
-    const kept = exceptProjectMismatch(Object.values(lines).join("\n")).split("\n").filter(Boolean);
-    assert.equal(kept.length, Object.keys(lines).length - 1,
-      "exactly one line — the project-mismatch one — may be removed");
+    const kept = exceptUnscopeable(Object.values(lines).join("\n")).split("\n").filter(Boolean);
+    assert.equal(kept.length, Object.keys(lines).length - UNSCOPEABLE_KINDS.size,
+      "exactly the two unscopeable lines — and no others — may be removed");
     assert.ok(!kept.some((l) => l.includes("sits under projects/")));
+    assert.ok(!kept.some((l) => l.includes("was NOT read:")));
     for (const [kind, line] of Object.entries(lines)) {
-      if (kind === "project-mismatch") continue;
+      if (UNSCOPEABLE_KINDS.has(kind)) continue;
       assert.ok(kept.includes(line),
         `a leak through ${kind} must survive the filter, or the scope-leak assertion is blind on it`);
-      assert.match(exceptProjectMismatch(line), /OBA/,
+      assert.match(exceptUnscopeable(line), /OBA/,
         `…and must still carry the out-of-scope key that the assertion greps for (${kind})`);
     }
   });
 
-  test("the filter removes the project-mismatch line and nothing that merely resembles it", () => {
+  test("the filter removes the two excepted lines and nothing that merely resembles them", () => {
     const other = "reconcile: NEEDS ATTENTION — OBA-9 sits in projects/OBA/ with no record";
-    assert.equal(exceptProjectMismatch(other), other,
+    assert.equal(exceptUnscopeable(other), other,
       "only the sentence BLZ-406 actually emits is excepted");
-    assert.equal(exceptProjectMismatch("reconcile: WARNING — codeRepo not found, skipped: /x/OBA"),
+    const nearly = "reconcile: NEEDS ATTENTION — projects/OBA/defined was not read carefully";
+    assert.equal(exceptUnscopeable(nearly), nearly,
+      "and only the sentence BLZ-470 actually emits — `was NOT read:` — is the second");
+    assert.equal(exceptUnscopeable("reconcile: WARNING — codeRepo not found, skipped: /x/OBA"),
       "reconcile: WARNING — codeRepo not found, skipped: /x/OBA",
       "and no other channel is touched — WARNING, FORGE and GIT lines all stay asserted");
+  });
+});
+
+// =============================================================================
+// BLZ-495 — the second exception, CONSTRUCTED.
+//
+// BLZ-486 narrowed `exceptUnscopeable` to the one sentence BLZ-406 argues for, and the
+// narrowing was right. What it left is a shape nothing in this suite had ever built: a
+// scoped run over a board where an OUT-OF-SCOPE project's status directory cannot be read.
+//
+// `reconcile --project INF` prints `NEEDS ATTENTION — projects/OBA/defined was NOT read…`,
+// and `blaze audit --projects INF` returns ok=false and exits 1, on a project each was told
+// to ignore. THAT BEHAVIOUR IS RIGHT and BLZ-470 argues it deliberately: a misfiled INF
+// ticket could be sitting under that unreadable OBA directory, and audit's filter is on ID
+// PREFIX, not on directory, so neither verb can honestly scope the finding away. Silencing
+// it would be exactly the silent skip the finding exists to report.
+//
+// It was, until this suite, an exception that nothing excepted and no test constructed — so
+// the next test board with an unreadable out-of-scope directory would have failed the
+// BLZ-394 scope-leak assertion for a reason nobody could see. It is now a NAMED CASE.
+// =============================================================================
+
+const AUDIT_RUNNER = join(import.meta.dirname, "..", "scripts", "audit-runner.mjs");
+
+/** `twoProjectBoard`, plus a zero-byte `.git` under the OUT-OF-SCOPE project's status
+ *  directory — the shape BLZ-470 measured, which takes every ticket under it off the board.
+ *  The board repo is initialised BEFORE the `.git` file is written: git refuses to track a
+ *  path with a `.git` component, and this fixture is about the filesystem, not the index. */
+function unreadableOutOfScopeBoard(tmp) {
+  const root = twoProjectBoard(tmp);
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  writeFileSync(join(root, "projects", "OBA", "defined", ".git"), "");
+  return root;
+}
+
+const auditRun = (projectsDir, extra) => spawnSync(process.execPath,
+  [AUDIT_RUNNER, ...extra, projectsDir], { encoding: "utf8" });
+
+describe("BLZ-495: an unreadable OUT-OF-SCOPE directory is named on purpose, not leaked", () => {
+  test("the construction is what it claims: a zero-byte `.git` that hides a real ticket", () => {
+    // Ground truth from the filesystem and from the model, not from reconcile's output.
+    const tmp = mkdtempSync(join(tmpdir(), "blz495-shape-"));
+    try {
+      const root = unreadableOutOfScopeBoard(tmp);
+      const dotgit = join(root, "projects", "OBA", "defined", ".git");
+      assert.equal(statSync(dotgit).size, 0, "the entry must be the ZERO-BYTE shape BLZ-470 names");
+      assert.ok(existsSync(join(root, "projects", "OBA", "defined", "OBA-1-t.md")),
+        "…and a real ticket must be underneath it, or nothing has been hidden");
+      const found = unreadableTicketDirs(join(root, "projects"));
+      assert.equal(found.length, 1, JSON.stringify(found));
+      assert.equal(found[0].project, "OBA");
+      assert.equal(found[0].status, "defined");
+      assert.equal(found[0].reason, "git-file-empty");
+      // The INF half of the board is still perfectly readable — this is a scoped run's
+      // problem with ANOTHER project, which is the whole point.
+      assert.ok(existsSync(join(root, "projects", "INF", "defined", "INF-1-t.md")));
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("an INF-scoped run NAMES projects/OBA/defined — and still writes nothing there", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz495-reconcile-"));
+    const root = unreadableOutOfScopeBoard(tmp);
+    const restore = stubGh(tmp);
+    try {
+      const res = spawnSync(process.execPath,
+        [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
+        { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+      assert.equal(res.status, 0, res.stderr);
+      assert.match(res.stderr, /NEEDS ATTENTION — projects\/OBA\/defined was NOT read/,
+        "a run that could not read a directory says so whatever it was scoped to — BLZ-470");
+      assert.ok(at(root, "INF", "done"), "the project in scope still reconciles normally");
+      assert.ok(at(root, "OBA", "defined"), "and the out-of-scope project is still not moved");
+      const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+        { encoding: "utf8" });
+      assert.doesNotMatch(files, /projects\/OBA/, "nor committed");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("…and the BLZ-394 scope-leak assertion does not fire on it", () => {
+    // The half this ticket exists for. Without `UNREADABLE_DIR_LINE` in `exceptUnscopeable`
+    // this goes red, and it goes red for a reason a future reader would have had to
+    // reverse-engineer: a deliberate finding read as a leak.
+    const tmp = mkdtempSync(join(tmpdir(), "blz495-leak-"));
+    const root = unreadableOutOfScopeBoard(tmp);
+    const restore = stubGh(tmp);
+    try {
+      const res = spawnSync(process.execPath,
+        [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF", "--apply"],
+        { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+      assert.equal(res.status, 0, res.stderr);
+      assert.doesNotMatch(exceptUnscopeable(res.stdout + res.stderr), /OBA/,
+        "OBA may appear in the unreadable-directory finding and NOWHERE else");
+      assert.ok(!exceptUnscopeable(res.stderr).includes("was NOT read:"),
+        "exceptUnscopeable must actually remove the line it exists to except — checked " +
+        "against the sentence the product emits, not against a hand-written copy of it");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("blaze audit --projects INF fails on it too, because audit filters on ID PREFIX", () => {
+    // The other verb, and the reason the finding cannot be scoped away in either: `wanted`
+    // is a set of KEYS matched against `id.split("-")[0]`. A misfiled INF-n ticket under
+    // projects/OBA/ would pass that filter — if the walk could see it. It cannot, so a run
+    // that reported ok=true would be claiming a corpus it never read.
+    const tmp = mkdtempSync(join(tmpdir(), "blz495-audit-"));
+    const root = unreadableOutOfScopeBoard(tmp);
+    try {
+      const projectsDir = join(root, "projects");
+      const scoped = auditRun(projectsDir, ["--projects", "INF", "--json"]);
+      const report = JSON.parse(scoped.stdout);
+      assert.equal(report.ok, false, "an INF-scoped audit may not report a corpus it could not read");
+      const f = report.findings.filter((x) => x.kind === "unreadable-ticket-directory");
+      assert.equal(f.length, 1, JSON.stringify(report.findings));
+      assert.match(f[0].detail, /projects\/OBA\/defined was NOT read/);
+      assert.equal(auditRun(projectsDir, ["--projects", "INF"]).status, 1,
+        "…and it exits 1, which is the behaviour BLZ-470 argues for and this ticket does not change");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("THE CONTROL: with the directory readable, the same scoped run says nothing about OBA", () => {
+    // Without this the assertions above could be passing on a board where OBA is named for
+    // some entirely different reason, and the exception would be excusing a real leak.
+    const tmp = mkdtempSync(join(tmpdir(), "blz495-control-"));
+    const root = twoProjectBoard(tmp);
+    const restore = stubGh(tmp);
+    try {
+      const res = spawnSync(process.execPath,
+        [join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "--project", "INF"],
+        { cwd: root, encoding: "utf8", env: { ...process.env, PATH: `${join(tmp, "bin")}:${process.env.PATH}` } });
+      assert.equal(res.status, 0, res.stderr);
+      assert.doesNotMatch(res.stdout + res.stderr, /was NOT read/,
+        "a readable board raises no unreadable-directory finding at all…");
+      assert.doesNotMatch(res.stdout + res.stderr, /OBA/,
+        "…and then the scoped run does not name the out-of-scope project on ANY channel");
+      const report = JSON.parse(auditRun(join(root, "projects"), ["--projects", "INF", "--json"]).stdout);
+      assert.deepEqual(report.findings.filter((x) => x.kind === "unreadable-ticket-directory"), []);
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
   });
 });
