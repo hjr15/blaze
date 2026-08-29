@@ -64,7 +64,7 @@ describe("BLZ-425: a persistent reconcile refusal is stated once, not once per t
   /** A board the reconcile loop can run against. Returned as a teardown-carrying handle so
    *  the two loop tests below build it the same way. */
   function loopBoard(name) {
-    const dir = mkdtempSync(join(tmpdir(), name));
+    const dir = mkdtempSync(join(tmpdir(), `blz-suploop-${name}`));
     mkdirSync(join(dir, "projects", "TASK", "defined"), { recursive: true });
     writeFileSync(join(dir, "projects", "TASK", "project.json"),
       JSON.stringify({ key: "TASK", codeRepos: [] }));

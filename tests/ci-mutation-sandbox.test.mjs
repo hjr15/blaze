@@ -274,3 +274,148 @@ describe("BLZ-485: the runner refuses to delete the checkout, on resolved real p
       "defect BLZ-485 closes");
   });
 });
+
+// =============================================================================
+// BLZ-490 — the two gaps review found in BLZ-485's guard, both outside that ticket.
+//
+//   1. DESCENDANTS WERE NOT REFUSED. The guard above refuses the checkout and every
+//      ANCESTOR of it, because a recursive delete of an ancestor takes the checkout with
+//      it. It said nothing about a path INSIDE the checkout: `discardSandbox(join(REPO,
+//      "scripts"), REPO)` was accepted and deleted the directory. Reproduced before this
+//      block was written. A refactor that returns a path inside the tree — a `.sandbox/`
+//      under the repo, a `TMPDIR` pointed at the checkout — is as plausible as one that
+//      returns the tree itself, and it is the same failure at a smaller radius.
+//
+//   2. `rmSync(s)` DELETED THE RESOLVED SYMLINK TARGET, NOT THE LINK. BLZ-485 made the
+//      comparison run on real paths, which was right, and then handed the RESOLVED path to
+//      `rmSync`. That widened the blast radius over the `rmSync(sandbox)` it replaced: a
+//      symlink sandbox pointing anywhere outside the checkout now destroys the tree at the
+//      far end of the link, which passes both containment checks because the link's target
+//      genuinely is neither the checkout nor an ancestor of it. Also reproduced.
+//
+// SAME REACHABILITY AS EVERY OTHER CLAUSE IN THIS GUARD, and said plainly rather than
+// implied: `createSandbox` is the sole producer of the argument on today's call paths and
+// always returns a fresh `mkdtempSync(join(tmpdir(), "blz-mutate-"))` directory — never a
+// descendant of the checkout, never a symlink. NO CURRENT CALL PATH REACHES EITHER REFUSAL,
+// so no mutation of either can be killed through `runMutations`, and neither is claimed to
+// be mutation-pinned. Both are defence in depth on a function whose failure mode is
+// deleting a working tree, and both are pinned by direct call below, against a stand-in
+// repository.
+// =============================================================================
+
+describe("BLZ-490: the guard refuses a path INSIDE the checkout, and never follows a symlink", () => {
+  const scratch = () => mkdtempSync(join(tmpdir(), "blz-490-"));
+  const cleanup = (dir) => {
+    assert.ok(dir.startsWith(join(tmpdir(), "blz-490-")), `refusing to clean up ${dir}`);
+    rmSync(dir, { recursive: true, force: true });
+  };
+
+  test("it refuses a DESCENDANT of the repo — a directory inside the checkout is not a sandbox", () => {
+    const repo = scratch();
+    try {
+      const inside = join(repo, "scripts");
+      mkdirSync(inside, { recursive: true });
+      writeFileSync(join(inside, "canary.txt"), "still here\n");
+      assert.throws(() => discardSandbox(inside, repo), /refusing to remove it/,
+        "`<repo>/scripts` is INSIDE the checkout — deleting it recursively removes part of " +
+        "the working tree, which is the same defect as deleting all of it");
+      assert.ok(existsSync(join(inside, "canary.txt")),
+        "a directory inside the checkout was deleted — the guard only looked upwards");
+    } finally { cleanup(repo); }
+  });
+
+  test("it refuses a DESCENDANT reached through a `..` segment — the check is on real paths", () => {
+    // The descendant rule has to survive the same spellings the ancestor rule does, or it
+    // is a string compare wearing a `relative()` costume.
+    const repo = scratch();
+    try {
+      const inside = join(repo, "scripts");
+      mkdirSync(join(repo, "sibling"), { recursive: true });
+      mkdirSync(inside, { recursive: true });
+      writeFileSync(join(inside, "canary.txt"), "still here\n");
+      const roundabout = `${repo}/sibling/../scripts`;
+      assert.notEqual(roundabout, inside, "the premise: these are different strings");
+      assert.throws(() => discardSandbox(roundabout, repo), /refusing to remove it/);
+      assert.ok(existsSync(join(inside, "canary.txt")), "the descendant was deleted via `..`");
+    } finally { cleanup(repo); }
+  });
+
+  test("it refuses a SYMLINK sandbox rather than deleting the tree it points at", () => {
+    // The widening BLZ-485 introduced. `victim` is neither the checkout nor an ancestor of
+    // it, so both containment checks pass; the only thing standing between a symlinked
+    // sandbox and `rm -rf` on someone else's directory is that the link is not followed.
+    const base = scratch();
+    try {
+      const repo = join(base, "checkout");
+      const victim = join(base, "victim");
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(victim, { recursive: true });
+      writeFileSync(join(victim, "canary.txt"), "still here\n");
+      const link = join(base, "link-to-victim");
+      symlinkSync(victim, link, "dir");
+      assert.throws(() => discardSandbox(link, repo), /refusing to remove it/,
+        "a symlink is a name for a directory somebody else owns; `createSandbox` never " +
+        "returns one, so there is nothing to lose by refusing it");
+      assert.ok(existsSync(join(victim, "canary.txt")),
+        "the SYMLINK TARGET was deleted — `rmSync` on the resolved path follows the link, " +
+        "which is strictly wider than the `rmSync(sandbox)` this replaced");
+      assert.ok(existsSync(link), "and the link itself must survive a refusal too");
+    } finally { cleanup(base); }
+  });
+
+  test("it refuses a SYMLINK sandbox SPELLED with a trailing separator or `/.` — the " +
+       "spelling must not defeat the check", () => {
+    // The hole review found in the first cut of the clause above, and the reason that clause
+    // is now written against a NORMALISED path. `lstat` does not follow the last component —
+    // unless the caller writes a trailing separator, which forces the OS to resolve it:
+    //
+    //   "<T>/link"    isSymbolicLink: true    realpath: <T>/victim
+    //   "<T>/link/"   isSymbolicLink: false   realpath: <T>/victim
+    //   "<T>/link/."  isSymbolicLink: false   realpath: <T>/victim
+    //
+    // Measured directly, both spellings. With `isSymbolicLink()` false the guard fell
+    // through to `rmSync(s)`, where `s` is the REALPATH — the victim tree — and review
+    // reproduced the whole deletion end to end. The containment checks above never had this
+    // hole because they run on `s`, which normalises both spellings; only this clause read
+    // the raw argument, and that asymmetry was the entire defect.
+    for (const suffix of ["/", "/."]) {
+      const base = scratch();
+      try {
+        const repo = join(base, "checkout");
+        const victim = join(base, "victim");
+        mkdirSync(repo, { recursive: true });
+        mkdirSync(victim, { recursive: true });
+        writeFileSync(join(victim, "canary.txt"), "still here\n");
+        const link = join(base, "link-to-victim");
+        symlinkSync(victim, link, "dir");
+        assert.throws(() => discardSandbox(link + suffix, repo), /refusing to remove it/,
+          `\`link${suffix}\` names the same symlink as \`link\`, and a guard a trailing ` +
+          "separator switches off is not a guard");
+        assert.ok(existsSync(join(victim, "canary.txt")),
+          `the symlink TARGET was deleted through the \`link${suffix}\` spelling`);
+      } finally { cleanup(base); }
+    }
+  });
+
+  test("a real directory whose PARENT is a symlink is still removed — the check is the last component only", () => {
+    // Non-vacuity for the symlink rule, and the case that decides whether it over-refuses:
+    // on a machine where `tmpdir()` is itself a symlink (macOS `/tmp` → `/private/tmp`),
+    // every genuine sandbox is reached through one. Refusing those would break the runner
+    // on exactly that machine, which is worse than the gap this closes.
+    const base = scratch();
+    try {
+      const real = join(base, "real");
+      const repo = join(base, "checkout");
+      mkdirSync(repo, { recursive: true });
+      mkdirSync(join(real, "sandbox"), { recursive: true });
+      const viaLink = join(base, "link-to-real");
+      symlinkSync(real, viaLink, "dir");
+      const sandbox = join(viaLink, "sandbox");
+      writeFileSync(join(sandbox, "junk.txt"), "delete me\n");
+      discardSandbox(sandbox, repo);
+      assert.equal(existsSync(join(real, "sandbox")), false,
+        "a genuine sandbox reached through a symlinked parent must still be removed");
+      assert.ok(existsSync(viaLink), "and the parent link itself is not what was removed");
+    } finally { cleanup(base); }
+  });
+});

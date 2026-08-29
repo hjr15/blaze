@@ -19,7 +19,7 @@
 // GROUND TRUTH — the ids the walk actually lost.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, chmodSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -76,6 +76,26 @@ const SHAPES = [
   { name: "a STATUS directory Blaze cannot list at all",
     at: ["BLZ", "defined"], make: (p) => chmodSync(p, 0o000), undo: (p) => chmodSync(p, 0o755),
     reason: "directory-unreadable" },
+  // BLZ-497. `git-file-unreadable` is the one shape `classifyGitEntry` names that no test
+  // referenced. It is REACHABLE, and reachable by construction rather than by assertion: a
+  // `.git` REGULAR FILE that `stat` can see and `open` cannot. `chmod 000` on the file is
+  // the shape — `statSync` needs only search permission on the parent, `readFileSync` needs
+  // read permission on the file, and the two are different bits.
+  //
+  // The content is a VALID `gitdir:` pointer on purpose. If the read ever succeeded this
+  // case would classify as `nested-repo-pointer`, so asserting `git-file-unreadable` here
+  // is asserting that the read genuinely failed — the case cannot pass for the wrong reason.
+  //
+  // Like the `chmod 000` PROJECT shape above it, this assumes the suite does not run as
+  // root, for whom the mode bits do not apply.
+  { name: "a `.git` FILE that stat can see and Blaze cannot open",
+    at: ["BLZ", "defined"],
+    make: (p) => {
+      writeFileSync(join(p, ".git"), "gitdir: ../../../.git/modules/vendor\n");
+      chmodSync(join(p, ".git"), 0o000);
+    },
+    undo: (p) => chmodSync(join(p, ".git"), 0o644),
+    reason: "git-file-unreadable" },
   // The `.git` FIFO shape is exercised in its own describe block at the foot of this file,
   // OUT OF PROCESS and never here. Its failure mode is a HANG, and a hang inside this
   // process would wedge the whole file rather than fail one case — see that block.
@@ -153,7 +173,10 @@ describe("BLZ-470: a skipped directory is REPORTED, not silently dropped", () =>
     }
     assert.equal(checked, SHAPES.length,
       `the oracle must cover every shape; a smaller number means SHAPES shrank (${SHAPES.length})`);
-    assert.equal(SHAPES.length, 7, "seven shapes make a directory unreadable — see the table above");
+    assert.equal(SHAPES.length, 8,
+      "eight shapes make a directory unreadable — see the table above. BLZ-494 added the " +
+      "status-level `directory-unreadable` twin and BLZ-497 added `git-file-unreadable`; " +
+      "neither had ever been run through this oracle");
   });
 
   test("a healthy board reports nothing — the finding is not a fill queue", () => {
@@ -222,6 +245,51 @@ describe("BLZ-470: a skipped directory is REPORTED, not silently dropped", () =>
       assert.match(seen.get("nested-repo"), /DIRECTORY/);
       assert.match(seen.get("nested-repo-pointer"), /gitdir/);
     } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("BLZ-497: a `.git` FILE that stat sees and open refuses is REACHABLE, and names the errno", () => {
+    // The shape `classifyGitEntry` names and nothing referenced. REACHABILITY IS ESTABLISHED
+    // BY CONSTRUCTION, NOT BY ASSERTION: the branch needs `statSync` to succeed, `isFile()`
+    // to be true, and `readFileSync` to throw, and all three are checked here directly
+    // before anything is concluded about what the reporter says. No private hook and no
+    // stubbed `fs` — a `chmod 000` regular file satisfies all three at once, because search
+    // permission on the parent and read permission on the file are different bits.
+    const tmp = mkdtempSync(join(tmpdir(), "blz497-unreadable-"));
+    try {
+      const projects = board(tmp);
+      const at = join(projects, "BLZ", "defined");
+      const dotgit = join(at, ".git");
+      writeFileSync(dotgit, "gitdir: ../../../.git/modules/vendor\n");
+      chmodSync(dotgit, 0o000);
+
+      const st = statSync(dotgit);
+      assert.equal(st.isFile(), true, "the branch is only reached for a REGULAR file");
+      assert.throws(() => readFileSync(dotgit, "utf8"), /EACCES/,
+        "…and only when the read of it fails. If this read succeeds the suite is running as " +
+        "root, and the shape is unreachable for that user rather than unreachable in general");
+
+      const [f] = unreadableTicketDirs(projects);
+      assert.equal(f.reason, "git-file-unreadable");
+      assert.match(f.detail, /EACCES/,
+        "the finding must name the errno that hid the file — `could not be read` alone " +
+        "sends an operator looking for the wrong thing");
+      assert.match(f.detail, /cannot tell a submodule pointer from junk/);
+      // The content IS a valid `gitdir:` pointer, so a read that succeeded would classify
+      // this as `nested-repo-pointer`. Asserting it does not is what makes the case above
+      // evidence that the read failed rather than evidence that the file was odd.
+      assert.notEqual(f.reason, "nested-repo-pointer");
+
+      // …and it reaches a CONSUMER, not only the predicate: this is a real call path, which
+      // is the half of the ticket that "referenced by no test" left open.
+      const res = spawnSync(process.execPath,
+        [join(import.meta.dirname, "..", "scripts", "audit-runner.mjs"), projects],
+        { encoding: "utf8" });
+      assert.match(res.stdout, /\[hard\] unreadable-ticket-directory: 1/);
+      assert.equal(res.status, 1);
+    } finally {
+      try { chmodSync(join(tmp, "projects", "BLZ", "defined", ".git"), 0o644); } catch { /* already gone */ }
       rmSync(tmp, { recursive: true, force: true });
     }
   });

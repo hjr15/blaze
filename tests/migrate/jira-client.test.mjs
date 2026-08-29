@@ -6,7 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { cacheFile, writeRawCache, readRawCache } from "../../scripts/migrate/jira-client.mjs";
 
-function tmp() { return mkdtempSync(join(tmpdir(), "blaze-cache-")); }
+function tmp() { return mkdtempSync(join(tmpdir(), "blaze-jiraclient-cache-")); }
 
 test("writeRawCache then readRawCache round-trips the issues array", () => {
   const dir = tmp();

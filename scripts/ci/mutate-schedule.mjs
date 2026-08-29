@@ -35,7 +35,7 @@
 // A lock was considered and rejected: the thing that has to respect it is `node --test`,
 // which knows nothing about this harness, so a lock here would serialise mutation runs
 // against each other — which was never the failure — and nothing else.
-import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync, realpathSync, existsSync }
+import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync, realpathSync, lstatSync, existsSync }
   from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
@@ -75,11 +75,25 @@ export function createSandbox(repo = REPO) {
  *  repository on exactly that refactor, before any test could report it. The guard belongs
  *  here; the helper now calls this.
  *
- *  UNREACHABLE ON TODAY'S CALL PATHS, and said plainly rather than implied to be pinned:
- *  `createSandbox` is the sole producer of the argument and always returns a fresh
- *  `mkdtempSync` path under `tmpdir()`, so nothing `runMutations` can pass reaches the
- *  refusal and no mutation of it can be killed through the gate. It is defence in depth
- *  against a future refactor, pinned by direct call against a stand-in repository.
+ *  BLZ-490 added the two cases that refusal did not cover, both found by review:
+ *  a path INSIDE the checkout (refusing only ancestors leaves `<repo>/scripts` acceptable,
+ *  which is the same defect at a smaller radius), and a SYMLINK sandbox (whose target
+ *  `rmSync` would follow and destroy, which is wider than the delete of the raw argument
+ *  BLZ-485 replaced). Both were reproduced before the clauses were written.
+ *
+ *  THE SYMLINK REFUSAL IS ON A NORMALISED PATH, AND THAT IS LOAD-BEARING. Its first cut
+ *  called `lstat` on the raw argument, which a trailing separator defeats: `link/` and
+ *  `link/.` name the same symlink and make `lstat` report the TARGET, so the guard fell
+ *  through and the far end of the link was deleted. Refuted by adversarial review, which
+ *  reproduced the deletion. Every check in this function now runs on a normalised path.
+ *
+ *  UNREACHABLE ON TODAY'S CALL PATHS — every clause here, the two BLZ-490 added included —
+ *  and said plainly rather than implied to be pinned: `createSandbox` is the sole producer
+ *  of the argument and always returns a fresh `mkdtempSync` path under `tmpdir()`, never a
+ *  descendant of the checkout and never a symlink, so nothing `runMutations` can pass
+ *  reaches any refusal and NO MUTATION OF ONE CAN BE KILLED THROUGH THE GATE. They are
+ *  defence in depth against a future refactor, pinned by direct call against a stand-in
+ *  repository.
  *
  *  COMPARED ON RESOLVED REAL PATHS, not on the strings. The helper's compare was
  *  `sandbox !== repo`, which two spellings of one directory defeat: a symlink into the
@@ -109,6 +123,61 @@ export function discardSandbox(sandbox, repo = REPO) {
       `mutate-schedule: ${sandbox} resolves to ${s}, which ${rel === "" ? "IS" : "CONTAINS"} `
       + `the checkout ${r} — refusing to remove it. createSandbox must return a throwaway `
       + "directory; a runner that deletes the working tree is worse than the race it fixed");
+  }
+  // BLZ-490, gap 1: the mirror of the check above. That one asks "does the checkout sit
+  // inside what we were told to delete"; this one asks "does what we were told to delete
+  // sit inside the checkout". `discardSandbox(join(REPO, "scripts"), REPO)` passed the
+  // first and removed the directory — reproduced. Deleting PART of a working tree is the
+  // same class of failure as deleting all of it, and a refactor that returns a path inside
+  // the tree (a `.sandbox/` under the repo, a `TMPDIR` pointed at the checkout) is as
+  // plausible as one that returns the tree. The climb-out test is spelled the same way and
+  // for the same reason as above: a directory NAMED `..something` is a descent.
+  const inward = relative(r, s);
+  const inwardClimbs = inward === ".." || inward.startsWith(`..${sep}`);
+  if (inward !== "" && !inwardClimbs && !isAbsolute(inward)) {
+    throw new Error(
+      `mutate-schedule: ${sandbox} resolves to ${s}, which is INSIDE the checkout ${r} — `
+      + "refusing to remove it. A sandbox is a throwaway directory outside the tree; "
+      + "recursively deleting part of the working tree is the same defect as deleting all of it");
+  }
+  // BLZ-490, gap 2: NEVER FOLLOW THE LINK. The comparison above must run on resolved real
+  // paths — that is what BLZ-485 fixed — but handing the RESOLVED path to `rmSync` widened
+  // what gets deleted: a symlink sandbox pointing anywhere outside the checkout passes both
+  // containment checks, because its target genuinely is neither the checkout nor an
+  // ancestor of it, and `rmSync` then destroys that target tree. Reproduced. `createSandbox`
+  // never returns a symlink, so refusing one costs nothing and is narrower than unlinking
+  // it: this function's only job is to remove a directory IT was told is throwaway, and a
+  // symlink is a name for a directory somebody else owns.
+  //
+  // ON A NORMALISED PATH, NOT ON THE RAW ARGUMENT. `lstat` leaves the last component
+  // unresolved — UNLESS the caller writes a trailing separator, which forces the OS to
+  // resolve it. Measured: `lstat("<T>/link")` reports a symlink, `lstat("<T>/link/")` and
+  // `lstat("<T>/link/.")` report the TARGET's directory, while `realpathSync` returns the
+  // target for all three. So the first cut of this clause, which read the raw `sandbox`,
+  // was switched off by one character: `isSymbolicLink()` came back false, control fell
+  // through, and the recursive delete below took the victim tree. Review reproduced that
+  // end to end.
+  //
+  // `resolve` is what fixes it and `realpathSync` is what must NOT be used here: `resolve`
+  // strips trailing separators and `.` segments lexically, leaving the FINAL SYMLINK
+  // COMPONENT intact, which is the exact property this check needs. `realpathSync` would
+  // resolve the link and defeat the check on every spelling.
+  //
+  // The containment checks above never had this hole — they run on `s`, which normalises
+  // both spellings — and reading the raw argument HERE while comparing the resolved one
+  // THERE was the whole asymmetry. This is now the only place the raw `sandbox` appears
+  // outside an error message.
+  //
+  // Ancestors are still resolved by `lstat`, so a genuine sandbox reached through a
+  // symlinked parent (macOS `/tmp` → `/private/tmp`, so every sandbox on that machine) is
+  // still removed. That case is pinned by its own test.
+  let named;
+  try { named = lstatSync(resolve(sandbox)); } catch { named = null; }
+  if (named && named.isSymbolicLink()) {
+    throw new Error(
+      `mutate-schedule: ${sandbox} is a SYMLINK to ${s} — refusing to remove it. Removing `
+      + "the resolved path would delete the tree at the far end of the link, which no "
+      + "containment check on the target can catch; createSandbox never returns a symlink");
   }
   rmSync(s, { recursive: true, force: true });
 }

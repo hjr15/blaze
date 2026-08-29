@@ -457,7 +457,7 @@ describe("BLZ-397: the undo restores the operator's file, byte for byte", () => 
   test("a symlinked .gitignore is left alone, and said to be left alone", () => {
     // `existsSync` follows a symlink, so a dangling one read as "absent": the append
     // created the link's TARGET and the undo deleted the LINK, orphaning the file.
-    const root = mkdtempSync(join(tmpdir(), "blaze-link-"));
+    const root = mkdtempSync(join(tmpdir(), "blaze-residual-link-"));
     execFileSync("git", ["-C", root, "init", "-q"]);
     mkdirSync(join(root, ".blaze"), { recursive: true });
     symlinkSync(join(root, "nowhere-at-all"), join(root, ".gitignore"));
