@@ -81,6 +81,12 @@ export function createSandbox(repo = REPO) {
  *  `rmSync` would follow and destroy, which is wider than the delete of the raw argument
  *  BLZ-485 replaced). Both were reproduced before the clauses were written.
  *
+ *  THE SYMLINK REFUSAL IS ON A NORMALISED PATH, AND THAT IS LOAD-BEARING. Its first cut
+ *  called `lstat` on the raw argument, which a trailing separator defeats: `link/` and
+ *  `link/.` name the same symlink and make `lstat` report the TARGET, so the guard fell
+ *  through and the far end of the link was deleted. Refuted by adversarial review, which
+ *  reproduced the deletion. Every check in this function now runs on a normalised path.
+ *
  *  UNREACHABLE ON TODAY'S CALL PATHS — every clause here, the two BLZ-490 added included —
  *  and said plainly rather than implied to be pinned: `createSandbox` is the sole producer
  *  of the argument and always returns a fresh `mkdtempSync` path under `tmpdir()`, never a
@@ -143,11 +149,30 @@ export function discardSandbox(sandbox, repo = REPO) {
   // it: this function's only job is to remove a directory IT was told is throwaway, and a
   // symlink is a name for a directory somebody else owns.
   //
-  // `lstatSync` does not follow the LAST component only — ancestors are still resolved — so
-  // a genuine sandbox reached through a symlinked parent (macOS `/tmp` → `/private/tmp`, so
-  // every sandbox on that machine) is still removed. That case is pinned by its own test.
+  // ON A NORMALISED PATH, NOT ON THE RAW ARGUMENT. `lstat` leaves the last component
+  // unresolved — UNLESS the caller writes a trailing separator, which forces the OS to
+  // resolve it. Measured: `lstat("<T>/link")` reports a symlink, `lstat("<T>/link/")` and
+  // `lstat("<T>/link/.")` report the TARGET's directory, while `realpathSync` returns the
+  // target for all three. So the first cut of this clause, which read the raw `sandbox`,
+  // was switched off by one character: `isSymbolicLink()` came back false, control fell
+  // through, and the recursive delete below took the victim tree. Review reproduced that
+  // end to end.
+  //
+  // `resolve` is what fixes it and `realpathSync` is what must NOT be used here: `resolve`
+  // strips trailing separators and `.` segments lexically, leaving the FINAL SYMLINK
+  // COMPONENT intact, which is the exact property this check needs. `realpathSync` would
+  // resolve the link and defeat the check on every spelling.
+  //
+  // The containment checks above never had this hole — they run on `s`, which normalises
+  // both spellings — and reading the raw argument HERE while comparing the resolved one
+  // THERE was the whole asymmetry. This is now the only place the raw `sandbox` appears
+  // outside an error message.
+  //
+  // Ancestors are still resolved by `lstat`, so a genuine sandbox reached through a
+  // symlinked parent (macOS `/tmp` → `/private/tmp`, so every sandbox on that machine) is
+  // still removed. That case is pinned by its own test.
   let named;
-  try { named = lstatSync(sandbox); } catch { named = null; }
+  try { named = lstatSync(resolve(sandbox)); } catch { named = null; }
   if (named && named.isSymbolicLink()) {
     throw new Error(
       `mutate-schedule: ${sandbox} is a SYMLINK to ${s} — refusing to remove it. Removing `

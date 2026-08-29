@@ -363,6 +363,40 @@ describe("BLZ-490: the guard refuses a path INSIDE the checkout, and never follo
     } finally { cleanup(base); }
   });
 
+  test("it refuses a SYMLINK sandbox SPELLED with a trailing separator or `/.` — the " +
+       "spelling must not defeat the check", () => {
+    // The hole review found in the first cut of the clause above, and the reason that clause
+    // is now written against a NORMALISED path. `lstat` does not follow the last component —
+    // unless the caller writes a trailing separator, which forces the OS to resolve it:
+    //
+    //   "<T>/link"    isSymbolicLink: true    realpath: <T>/victim
+    //   "<T>/link/"   isSymbolicLink: false   realpath: <T>/victim
+    //   "<T>/link/."  isSymbolicLink: false   realpath: <T>/victim
+    //
+    // Measured directly, both spellings. With `isSymbolicLink()` false the guard fell
+    // through to `rmSync(s)`, where `s` is the REALPATH — the victim tree — and review
+    // reproduced the whole deletion end to end. The containment checks above never had this
+    // hole because they run on `s`, which normalises both spellings; only this clause read
+    // the raw argument, and that asymmetry was the entire defect.
+    for (const suffix of ["/", "/."]) {
+      const base = scratch();
+      try {
+        const repo = join(base, "checkout");
+        const victim = join(base, "victim");
+        mkdirSync(repo, { recursive: true });
+        mkdirSync(victim, { recursive: true });
+        writeFileSync(join(victim, "canary.txt"), "still here\n");
+        const link = join(base, "link-to-victim");
+        symlinkSync(victim, link, "dir");
+        assert.throws(() => discardSandbox(link + suffix, repo), /refusing to remove it/,
+          `\`link${suffix}\` names the same symlink as \`link\`, and a guard a trailing ` +
+          "separator switches off is not a guard");
+        assert.ok(existsSync(join(victim, "canary.txt")),
+          `the symlink TARGET was deleted through the \`link${suffix}\` spelling`);
+      } finally { cleanup(base); }
+    }
+  });
+
   test("a real directory whose PARENT is a symlink is still removed — the check is the last component only", () => {
     // Non-vacuity for the symlink rule, and the case that decides whether it over-refuses:
     // on a machine where `tmpdir()` is itself a symlink (macOS `/tmp` → `/private/tmp`),
