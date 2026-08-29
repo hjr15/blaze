@@ -29,7 +29,11 @@ const SUBCOMMANDS = {
   init: { file: "init-runner.mjs", desc: "set up a new board (first-run wizard)", mutates: true },
   start: { file: "supervisor.mjs", desc: "run the reconcile/groomer loops (default)", mutates: true, noArgs: true },
   board: { file: "serve.mjs", desc: "serve the board viewer", mutates: false, noArgs: true },
-  reconcile: { file: "reconcile.mjs", desc: "sync board status to git/PR state", mutates: true },
+  // BLZ-432 / ADR-0032 §5: this read "sync board status to git/PR state" — the last
+  // unqualified survivor of the whole-board claim BLZ-404 round 5 removed everywhere else.
+  // It named THE BOARD, promised a settled two-way state, and omitted that the verb is a
+  // dry run unless `--apply` is given. Pinned by tests/cli.test.mjs so it cannot drift back.
+  reconcile: { file: "reconcile.mjs", desc: "propose ticket moves from branch/PR state (dry run unless --apply)", mutates: true },
   groom: { file: "loops/groomer.mjs", desc: "run one groomer pass", mutates: true },
   new: { file: "new-runner.mjs", desc: "create a ticket", mutates: true },
   sprint: { file: "sprint-runner.mjs", desc: "create/list/activate sprints", mutates: true },

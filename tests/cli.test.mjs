@@ -234,3 +234,18 @@ test("the schema-preflight comment's arithmetic matches the code beneath it", ()
     "the bullets and SCHEMA_PREFLIGHT_EXEMPT must name the SAME verbs — a missing bullet "
     + "hides a real exemption, an extra one claims an exemption the code does not grant");
 });
+
+// BLZ-432 / ADR-0032 §5. `reconcile`'s help line read "sync board status to git/PR state".
+// That is the last unqualified survivor of the whole-board claim BLZ-404 round 5 removed
+// everywhere else: it names THE BOARD, promises a settled two-way state, and omits that
+// the verb is a dry run by default. Nothing pinned it, so it was free to drift back.
+test("BLZ-432: the reconcile help line makes no unqualified whole-board `sync` claim", () => {
+  const r = spawnSync(process.execPath, [cli, "reconcile", "--help"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.doesNotMatch(r.stdout, /sync board status/,
+    "an unqualified `sync board status` asserts more than reconcile can know — ADR-0030, BLZ-433");
+  // It must still describe the verb, and must name the two things the old line omitted.
+  assert.match(r.stdout, /usage: blaze reconcile — /);
+  assert.match(r.stdout, /dry run|dry-run/i, "the default being a dry run is load-bearing and was missing");
+  assert.match(r.stdout, /branch|PR/i, "it must still say what evidence it reads");
+});

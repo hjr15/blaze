@@ -266,7 +266,10 @@ engine tree.
 ### `scripts/reconcile.mjs`
 Delta from the original:
 - `WEB` → `config.codeRepo` (absolute-resolved, `BLAZE_CODE_REPO` override). If
-  `null`, reconcile is a clean no-op (`"standalone board — nothing to reconcile"`).
+  `null`, reconcile is a clean no-op (`"reconcile: no projects configured — nothing to
+  reconcile."`). BLZ-501: this line used to quote a wording the CLI stopped emitting long
+  ago; the quote above is read from the live verb and is pinned by
+  tests/commit-status.test.mjs so it cannot drift again.
 - id matchers, `DIRS`/`TERMINAL` → driven by config.
 - **Refactor:** extract the pure decision `decide(state, currentDir, config) →
   { target, branchVal, prVal, moved }`; this is what the tests exercise. The
