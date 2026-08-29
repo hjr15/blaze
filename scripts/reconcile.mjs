@@ -1194,29 +1194,59 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // ask that it was.
   //
   // So the two are kept apart. `refs` carries the names, in the order `for-each-ref`
-  // produced them — which sorts `refs/heads/…` before `refs/remotes/…`, so a branch present
-  // in both namespaces is asked about through its LOCAL ref, and the remote copy of the
-  // same name is the duplicate that is dropped. `askable` carries, per name, the ref `git`
-  // will actually answer about.
+  // produced them; `askable` carries, per name, the ref `git` will actually answer about.
+  //
+  // ROUND 2 — AND THE FIRST VERSION OF THIS PARAGRAPH WAS WRONG IN A WAY THAT COST A
+  // BRANCH ITS CORROBORATION. It said a branch present in both namespaces is asked about
+  // through its LOCAL ref "because `for-each-ref` sorts `refs/heads/…` before
+  // `refs/remotes/…`", and took the FIRST raw ref to claim each stripped name. The sort is
+  // on the FULL refname, so `refs/heads/origin/task/…` sorts before `refs/heads/task/…` —
+  // before ANY local head whose name starts after `o`. A stale local branch literally
+  // called `origin/task/INF-1-work` therefore captured the slot for `task/INF-1-work`, and
+  // the real branch was probed through the wrong ref and silently stopped corroborating:
+  // `[["INF-1","in-progress"]]` at 1b00f3a, `[]` with `ok: true` and `gitErrors: []` under
+  // round 1. Precisely the class of failure this file exists to end.
+  //
+  // The rule is therefore ordering-independent: AN EXACT LOCAL HEAD OUTRANKS A STRIPPED
+  // COLLISION for the same name. `raw === name` identifies one, because a ref under
+  // `refs/remotes/origin` always renders with the prefix.
+  //
+  // RESIDUAL, STATED RATHER THAN IMPLIED FIXED: a local head named `origin/<x>` sitting
+  // beside a remote-tracking `origin/<x>` renders ONE string for two different refs, and
+  // `%(refname:short)` cannot separate them at all. That needs the full namespace split
+  // (`%(refname)`), which is BLZ-506's job and not this ticket's.
   //
   // MEASURED BEFORE IT SHIPPED (BLZ-353), because this changes WHICH branches corroborate.
-  // Every `buildBranchMap` result across the reconcile suite, at 1b00f3a and at the fix:
-  // 344 -> 354 corroborated (id -> branch) entries, and on the PRE-EXISTING suite exactly
+  // Every `buildBranchMap` result across the reconcile suite, at 1b00f3a and at round 2:
+  // 344 -> 356 corroborated (id -> branch) entries, and on the PRE-EXISTING suite exactly
   // ONE branch changes — `INF-574 -> INF-574-blaze-config-and-chart`, in the two fixtures
-  // that really fetch a remote. Nothing loses corroboration; the change is one-directional
-  // by construction, since the old code could only ever read `own: []` and
-  // `sameTipAsDefault: false`. The other 25 remote-only branches in that fixture were
+  // that really fetch a remote. The other 25 remote-only branches in that fixture were
   // already corroborated by `shippedSet`, which is exactly why the defect stayed invisible:
   // the one branch whose work had not landed on the default branch is the one the silence
   // cost. The ref list for that repo also goes 33 -> 32 — `refs/heads/main` and
   // `refs/remotes/origin/main` both stripped to `main`, and the old list carried it twice.
+  //
+  // WHAT THAT MEASUREMENT COULD NOT SEE, said here because round 1 let an ARGUMENT stand
+  // where BLZ-353 asks for a measurement. Round 1 read the delta as one-directional "by
+  // construction", on the ground that the old code could only ever read `own: []` and
+  // `sameTipAsDefault: false`. That is true of a REMOTE-ONLY branch and false in general:
+  // where a real local `<x>` existed the old code probed it correctly, and round 1
+  // redirected that probe. ZERO of the 259 `buildBranchMap` invocations in the suite at
+  // 1b00f3a involve a branch named `origin/*` — no fixture created one — so the suite-wide
+  // figure was structurally incapable of showing the regression, and a suite-wide figure is
+  // not a proof about shapes the suite does not contain. The shape is measured directly
+  // instead, on the construction below: 1b00f3a moves INF-1, round 1 moves nothing, round 2
+  // moves INF-1 again. Pinned by the "BLZ-492 round 2" suite.
   const refs = [];
   const askable = new Map();
   for (const raw of listed) {
     const name = raw.replace(/^origin\//, "");
-    if (!name || name === "HEAD" || askable.has(name)) continue;
-    askable.set(name, raw);
-    refs.push(name);
+    if (!name || name === "HEAD") continue;
+    if (!askable.has(name)) { askable.set(name, raw); refs.push(name); }
+    // ROUND 2 (review). `raw === name` means nothing was stripped, and a ref under
+    // `refs/remotes/origin` always renders WITH the prefix — so this raw ref is an exact
+    // local head, and it outranks any stripped ref that claimed the same slot before it.
+    else if (raw === name) askable.set(name, raw);
   }
 
   // What the branch itself says: the subjects unique to it (not already on the

@@ -278,3 +278,175 @@ describe("BLZ-492: exitIsAnAnswer on the branch-inspect probes is load-bearing, 
     }
   });
 });
+
+// =============================================================================
+// BLZ-492 ROUND 2 — THE FIX REGRESSED A NEIGHBOUR, AND REVIEW CAUGHT IT.
+//
+// `%(refname:short)` renders `refs/heads/origin/<x>` and `refs/remotes/origin/<x>`
+// IDENTICALLY, so stripping `origin/` cannot tell them apart. Round 1's `askable` loop took
+// the FIRST raw ref to claim each stripped name, on the stated ground that `for-each-ref`
+// sorts `refs/heads/…` before `refs/remotes/…` so a local ref always wins. That ground is
+// false for a whole class of names: the sort is on the FULL refname, so
+// `refs/heads/origin/task/…` sorts before `refs/heads/task/…` — before ANY local head whose
+// name begins with a character after `o`. A stale local branch literally called
+// `origin/task/INF-1-work` therefore captured the slot for `task/INF-1-work`, `inspect`
+// probed the wrong ref, and the real branch lost its corroboration.
+//
+// Measured on the reviewer's construction: at 1b00f3a the board reports
+// `[["INF-1","in-progress"]]`; at round 1 it reports `[]` — `ok: true`, `gitErrors: []`, not
+// one word. That is the BLZ-470 / ADR-0030 failure class exactly, introduced by a change
+// whose whole subject is that class, and round 1's "nothing loses corroboration, the change
+// is one-directional BY CONSTRUCTION" was an argument standing where BLZ-353 requires a
+// measurement — taken over a suite that contains no `refs/heads/origin/*` and so could not
+// have seen it.
+//
+// The rule now: an EXACT local head outranks a stripped collision for the same name.
+// Residual, stated: a local head named `origin/<x>` sitting beside a remote-tracking
+// `origin/<x>` renders one string for two refs and is still ambiguous. That is the full
+// namespace split, which is BLZ-506, not this ticket.
+// =============================================================================
+
+/** The reviewer's construction, widened to BOTH sides of the ordering boundary.
+ *
+ *  Two real work branches, each carrying a commit that claims its own ticket, each shadowed
+ *  by a STALE local branch literally named `origin/<same name>`:
+ *
+ *    feature/INF-2-work   — `f` sorts BEFORE `o`, so the real head is listed FIRST
+ *    task/INF-1-work      — `t` sorts AFTER  `o`, so the SHADOW is listed first
+ *
+ *  Round 1 got the first one right by accident of ordering and the second one wrong. Having
+ *  both is what makes the rule ORDERING-INDEPENDENT rather than "reversed the tie-break". */
+function shadowedByOriginNamedLocalBranch(tmp, { withRealBranches = true } = {}) {
+  const repo = join(tmp, "repo-INF");
+  mkdirSync(repo, { recursive: true });
+  for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
+                   ["config", "user.name", "t"]]) {
+    git(repo, ...a);
+  }
+  git(repo, "commit", "-q", "--allow-empty", "-m", "seed");
+  const seed = git(repo, "rev-parse", "HEAD");
+  if (withRealBranches) {
+    for (const [branch, id] of SHADOWED) {
+      git(repo, "checkout", "-q", "-b", branch, "main");
+      writeFileSync(join(repo, `${id}.txt`), "x\n");
+      git(repo, "add", "-A");
+      git(repo, "commit", "-q", "-m", `${id}: the work`);
+    }
+    git(repo, "checkout", "-q", "main");
+  }
+  git(repo, "commit", "-q", "--allow-empty", "-m", "second on main");
+  for (const [branch] of SHADOWED) git(repo, "branch", `origin/${branch}`, seed);
+
+  const root = join(tmp, "board");
+  const dir = join(root, "projects", "INF", "defined");
+  mkdirSync(dir, { recursive: true });
+  for (const [, id] of SHADOWED) {
+    writeFileSync(join(dir, `${id}-t.md`),
+      `---\nid: ${id}\ntype: task\nproject: INF\nestimate: 30\n---\n\nbody\n`);
+  }
+  writeFileSync(join(root, "projects", "INF", "project.json"),
+    JSON.stringify({ key: "INF", codeRepos: [repo] }));
+  writeFileSync(join(root, "blaze.config.json"),
+    JSON.stringify({ key: "INF", projects: ["INF"] }));
+  return { root, repo };
+}
+
+/** branch name -> the ticket its own commit claims. Sorted here the way the assertions read
+ *  them, not the way `for-each-ref` lists them — that ordering is the thing under test. */
+const SHADOWED = [["feature/INF-2-work", "INF-2"], ["task/INF-1-work", "INF-1"]];
+
+describe("BLZ-492 round 2: a local branch named `origin/<x>` must not shadow the real `<x>`", () => {
+  test("the construction is what it claims: BOTH listing orders are present, and both strip to one name", () => {
+    // The precondition the whole defect rests on, taken from `git` rather than assumed, and
+    // the oracle's own size asserted with it: if `for-each-ref`'s ordering ever changed, or
+    // if a name were dropped from SHADOWED, this says so rather than the suite quietly
+    // ceasing to exercise the half that regressed.
+    const tmp = mkdtempSync(join(tmpdir(), "blz492r2-shape-"));
+    try {
+      const { repo } = shadowedByOriginNamedLocalBranch(tmp);
+      const listed = git(repo, "for-each-ref", "--format=%(refname:short)",
+        "refs/heads", "refs/remotes/origin").split("\n").filter(Boolean);
+      assert.deepEqual(listed, [
+        "feature/INF-2-work", "main", "origin/feature/INF-2-work",
+        "origin/task/INF-1-work", "task/INF-1-work",
+      ], "the exact listing is the premise — read it, do not assume it");
+
+      let shadowFirst = 0, realFirst = 0;
+      for (const [branch] of SHADOWED) {
+        assert.ok(listed.indexOf(branch) >= 0 && listed.indexOf(`origin/${branch}`) >= 0);
+        if (listed.indexOf(`origin/${branch}`) < listed.indexOf(branch)) shadowFirst += 1;
+        else realFirst += 1;
+        assert.equal(`origin/${branch}`.replace(/^origin\//, ""), branch,
+          "…and both refs strip to ONE name, which is why the stripped form cannot pick between them");
+        assert.notEqual(git(repo, "rev-parse", branch), git(repo, "rev-parse", `origin/${branch}`),
+          `${branch}: the shadow must be STALE, or probing the wrong one would cost nothing`);
+      }
+      assert.equal(SHADOWED.length, 2, "two names, one either side of the `o` boundary");
+      assert.equal(shadowFirst, 1, "exactly one case must list the SHADOW first — that is the one round 1 broke");
+      assert.equal(realFirst, 1, "…and exactly one the REAL head first — the one it got right by accident");
+
+      // Both are local heads. Neither is a remote-tracking ref — there is no remote at all.
+      assert.equal(git(repo, "for-each-ref", "--format=%(refname)", "refs/remotes"), "");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("BOTH real branches still corroborate, whichever order they were listed in", async () => {
+    // The regression, stated as the product behaviour it costs. At 1b00f3a the reviewer's
+    // single-branch construction reports [["INF-1","in-progress"]]; under round 1 it reports
+    // [] with `ok: true` and `gitErrors: []` — not one word.
+    const tmp = mkdtempSync(join(tmpdir(), "blz492r2-shadow-"));
+    const { root } = shadowedByOriginNamedLocalBranch(tmp);
+    const restore = noPrBin(tmp);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.equal(r.ok, true);
+      assert.deepEqual(r.changes.map((c) => [c.id, c.to]).sort(),
+        [["INF-1", "in-progress"], ["INF-2", "in-progress"]],
+        "an origin-named local branch must not capture the slot the real branch answers for");
+      assert.deepEqual(r.gitErrors, [],
+        "…and losing it was SILENT, which is the half that makes this the BLZ-470 class");
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the record names the real branch, not the shadow", async () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz492r2-record-"));
+    const { root } = shadowedByOriginNamedLocalBranch(tmp);
+    const restore = noPrBin(tmp);
+    try {
+      await reconcile({ root, dryRun: false });
+      for (const [branch, id] of SHADOWED) {
+        const written = readFileSync(
+          join(root, "projects", "INF", "in-progress", `${id}-t.md`), "utf8");
+        assert.match(written, new RegExp(`^branch: ${branch}$`, "m"));
+        assert.doesNotMatch(written, /^branch: origin\//m);
+      }
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("THE CONTROL: with no real branches, the origin-named ones alone corroborate nothing", async () => {
+    // The upgrade rule must prefer an exact local head, not manufacture one. With the real
+    // branches absent, the only refs carrying the ids are the stale shadows — no unique
+    // commits, tip behind the default — and neither ticket may move.
+    const tmp = mkdtempSync(join(tmpdir(), "blz492r2-control-"));
+    const { root } = shadowedByOriginNamedLocalBranch(tmp, { withRealBranches: false });
+    const restore = noPrBin(tmp);
+    try {
+      const r = await reconcile({ root, dryRun: true });
+      assert.deepEqual(r.changes, []);
+      for (const [, id] of SHADOWED) {
+        assert.ok(existsSync(join(root, "projects", "INF", "defined", `${id}-t.md`)));
+      }
+    } finally {
+      restore();
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
