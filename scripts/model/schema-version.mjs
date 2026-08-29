@@ -71,16 +71,39 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
   // BLZ-479: THE MEASUREMENT AND THE VERDICT ARE TWO DIFFERENT SCOPES, and the earlier
   // wording ran them together. "This spelling newly refuses nothing" is true, and it is a
   // claim about the `null` SPELLING only — what BLZ-429 changed. It says nothing about the
-  // BRANCH, which refuses a removed key at ANY value and has since BLZ-298. Re-measured
-  // read-only on 2026-08-29 across every `blaze.config.json` under ~/Documents/Code outside
-  // node_modules — 24 files:
+  // BRANCH, which refuses a removed key at ANY value and has since BLZ-298.
   //
-  //   null-valued removed key ......  0 files.        <- what BLZ-429's spelling added
-  //   any-valued removed key ....... 10 files, all `provider: "github"` (a string):
-  //        7 real blaze-pm-family checkouts, 3 engine fixtures under tests/fixtures/
-  //        (board-gate-removed-key, one per worktree — deliberate).
-  //   the live working checkout blaze-pm-worktrees/v4-spine (branch BLZ-305-v4-spine):
-  //        CLEAN, no removed key.
+  // BLZ-487: AND THE CENSUS BEHIND IT HAS TWO HALVES, one reproducible and one not. The
+  // original stated a flat "24 files", and it was stale before its own review finished —
+  // the reviewer counted 34, because every extra `blaze` worktree they had checked out put
+  // this repository's whole fixture corpus into the population again. Neither count is
+  // wrong. The population is the reader's disk. ADR-0024's rule is that a figure which
+  // self-invalidates must name a basis that reproduces; a board measurement names a sha,
+  // and a measurement of somebody's home directory can only name a date and a command. So:
+  //
+  //   PER CHECKOUT — reproducible, DERIVED, and pinned by
+  //   tests/schema-version-fixture-census.test.mjs, which fails if this sentence and the
+  //   files disagree: 5 fixture boards, of which 1 sets a removed key
+  //   (`board-gate-removed-key`, `provider: "github"` — a string) and 0 set one to null.
+  //   That is this repository's entire contribution, and it repeats once per checkout,
+  //   which is the whole of why the number below moves.
+  //
+  //   WHOLE DISK — NOT REPRODUCIBLE, and recorded as one observation of one machine at one
+  //   moment rather than as a property. Taken read-only on 2026-08-29 with
+  //   `find ~/Documents/Code -name blaze.config.json -not -path '*/node_modules/*'`,
+  //   which found 24 files: 3 blaze checkouts (15 fixtures) + 9 blaze-pm-family checkouts.
+  //
+  //     null-valued removed key ......  0 files.      <- what BLZ-429's spelling added
+  //     any-valued removed key ....... 10 files, every one `provider: "github"` (a string):
+  //          7 blaze-pm-family checkouts + 3 `board-gate-removed-key` fixtures (one per
+  //          blaze checkout, deliberate — see the per-checkout half above).
+  //     the live working checkout blaze-pm-worktrees/v4-spine (branch BLZ-305-v4-spine):
+  //          CLEAN, no removed key.
+  //
+  //   Re-run it and the totals will differ; what should NOT differ is the shape — 0
+  //   null-valued anywhere, and every carrier a string `provider`. The 0 is the figure this
+  //   comment exists for, and it is the one the reader is most likely to misread as
+  //   "0 boards affected", which is why the any-valued line sits directly beneath it.
   //
   // So `loadConfig` really does refuse those 7 checkouts today — verified by calling it:
   // blaze-pm/ and blaze-pm-worktrees/board-main/ both throw "sets a key this engine no

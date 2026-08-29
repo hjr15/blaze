@@ -105,14 +105,23 @@ Harvested exactly the way `gatherProject` unions them: for each project key, ove
 codeRepo it configures, at each repo's default-branch ref. 14 repositories, board config
 at blaze-pm `80dd9ccb`.
 
+The board has **eleven** project keys and only **ten** of them are measurable here
+(BLZ-488). `projects/STA/project.json` configures **no `codeRepos` key at all**, so
+`gatherProject` unions nothing for it: it is 0 → 0 under both rules, and it could not have
+moved whatever the decision had been. It carried no row at all in the version this ADR
+shipped with, which left the reader to reconcile ten rows against the "all 11 keys" that
+appears further down; it now carries an explicit **`no codeRepos`** row rather than a
+0 → 0 one, because a zero would claim a repository was searched and nothing found. The
+TOTAL is a sum over the ten keys that configure a repo, and STA changes it by nothing.
+
 | Key | before | after | Δ | | Key | before | after | Δ |
 |---|---|---|---|---|---|---|---|---|
-| ACA | 6 | 6 | 0 | | KPA | 24 | 24 | 0 |
-| BLZ | 237 | 239 | **+2** (manifest) | | NCA | 16 | 16 | 0 |
-| CRP | 41 | 41 | 0 | | OBA | 465 | 465 | 0 |
-| FL | 1 | 1 | 0 | | OMA | 23 | 23 | 0 |
-| INF | 453 | 475 | **+22** (em-dash) | | SN | 4 | 4 | 0 |
-| | | | | | **TOTAL** | **1270** | **1294** | **+24** |
+| ACA | 6 | 6 | 0 | | NCA | 16 | 16 | 0 |
+| BLZ | 237 | 239 | **+2** (manifest) | | OBA | 465 | 465 | 0 |
+| CRP | 41 | 41 | 0 | | OMA | 23 | 23 | 0 |
+| FL | 1 | 1 | 0 | | SN | 4 | 4 | 0 |
+| INF | 453 | 475 | **+22** (em-dash) | | STA | — | — | no codeRepos |
+| KPA | 24 | 24 | 0 | | **TOTAL** | **1270** | **1294** | **+24** |
 
 - **The em-dash widening harvests +22 ids, all under INF**, every one of them from
   `docs-central` at `98f2fa8` (421 commits). CRP: **+0**, despite also configuring
@@ -132,17 +141,45 @@ though it stopped at the subject line. It does not, and the split is exactly:
 | | count |
 |---|---|
 | subjects newly qualifying (`INF-231 — Tag taxonomy…`, `INF-326 — Diagram quick-wins…`, `INF-208 — Health subject…`, …) | 10 |
-| ids from those subjects | 10 |
+| id-slots those subjects name | 11 |
+| **distinct** ids from those subjects (INF-231 is named twice) | 10 |
 | **further ids unlocked from those commits' body bullets** | **12** |
 | total | **22** |
 
-The two halves map cleanly onto the board: **the 10 subject ids are exactly the 10 that
-already hold a `pr:` record** (INF-193, 208, 226, 231, 232, 238, 241, 318, 319, 326 — each
-has its own branch and merged PR), and **the 12 body-bullet ids are exactly the 12 that
-hold none** (INF-194, 209–213, 320–325) — bundled children with no branch or PR of their
-own, which is the case the shipped signal exists for.
+**"10 subjects, 10 ids" is not an identity, and reading it as one is the mistake this row
+now prevents** (BLZ-488). The subject→id relation is not 1:1 in either direction, and the
+10 = 10 is an arithmetic coincidence of two offsetting facts:
 
-### Can the widening newly WRITE a record? One path no, one path yes
+- `93306cbf` — `INF-319 + INF-231 — diagram audit + tag taxonomy proposal (#116)` — is a
+  **list** subject and claims **two** ids, so ten subjects name eleven id-slots.
+- `69607d34` — `INF-231 — Tag taxonomy: ADR-0002 + full personal-notes tagging sweep
+  (#118)` — claims **INF-231** independently, so one of those eleven slots is a repeat and
+  the distinct count falls back to ten.
+
+The `+22` is unaffected either way: `idsFromCommitMessage` already dedupes within a commit,
+and the harvest is a set across commits. The point is that a future reader must not infer
+"one subject, one ticket" from the row, because the em-dash rule inherits the whole `/ + , &`
+list grammar and a bundle subject claiming several ids is the normal case, not the odd one.
+
+The two halves map cleanly onto the board: **the 10 distinct subject ids are exactly the 10
+that already hold a `pr:` record** (INF-193, 208, 226, 231, 232, 238, 241, 318, 319, 326 —
+each has its own branch and merged PR; INF-231's record points at #118, the PR whose subject
+claims it alone), and **the 12 body-bullet ids are exactly the 12 that hold none** (INF-194,
+209–213, 320–325) — bundled children with no branch or PR of their own, which is the case
+the shipped signal exists for.
+
+**There IS a second dedup, and an earlier draft of this section denied it.** The raw
+body-bullet harvest is **15** distinct ids, of which **3 — INF-193, INF-231, INF-241 — also
+appear as subject ids**: `69607d34` names INF-231 in its subject *and* carries 33
+`* INF-231:` bullets; `a4511002` carries **1** for INF-241 and `e15b854c` **1** for INF-193
+(the shape repeats, the count does not — 33 / 1 / 1). So the
+12 is the residue of deduplicating 15 against the 10, not two naturally disjoint sets. The
+`+22`, the `12` and both id lists are unaffected; the reassurance was wrong. It is recorded
+here rather than deleted because the sentence it replaces was the same defect this ADR exists
+to remove — an unverifiable claim of tidiness attached to a correct figure — restated one
+paragraph after the correction.
+
+### Can the widening newly WRITE a record? Two paths answer differently, and a third is guarded
 
 All 22 are terminal (`done`), so **no ticket moves**. But ADR-0023 permits a terminal
 ticket to *acquire* a record it never had, and 12 hold none — so the question is real.
@@ -179,6 +216,13 @@ supply no title signal and fall back to `shippedSet`, which is the correct answe
 every one of them — each either names a range, or names a parent while delivering a child.
 BLZ-456's 13 near-miss records become valid under this decision, and its 7 true downstream
 mentions are adjudicated separately in ADR-0027.
+
+**A third write path exists, and it is blocked only by a guard worth naming.**
+`buildBranchMap` carries its own `shippedSet && shippedSet.has(id)` corroboration, so a wider
+set newly admits a *branch*. On a terminal ticket that is blocked by terminal-sticky nulling
+both fields — which is why the conclusion for the twelve above holds — but on a NON-terminal
+ticket the same arm writes `branch:` and moves the ticket to `in-progress`. The two-path
+enumeration above is safe **because of** that guard, not in spite of needing one.
 
 ## The silent half, and what now says it
 
@@ -243,16 +287,7 @@ gap cost nothing.
   real `KEY-n:` subjects describing an edit rather than a delivery. The conclusion is
   therefore *better* supported than the misattributed figure suggested, and it is robust
   across every basis computed (totals rather than marginals, and "any mention" rather than
-  `KEY-n:` for the loose body rule, all give the same ordering). **Two paths reach that write, and a third is blocked only by a guard
-  worth naming.** `claimCorroborated`'s `shippedSet.has(id)` arm is one; `decide`'s
-  shipped-alone arm is not (it sets neither field, and on a terminal ticket is unreachable).
-  The third is `buildBranchMap`'s own `shippedSet && shippedSet.has(id)` corroboration: a
-  wider set newly admits a *branch*. On a terminal ticket that is blocked by terminal-sticky
-  nulling both fields, which is why the conclusion for the twelve holds — but on a
-  NON-terminal ticket the same arm writes `branch:` and moves the ticket to `in-progress`.
-  The enumeration above is safe because of that guard, not in spite of needing it.
-
-  The manifest form unblocks
+  `KEY-n:` for the loose body rule, all give the same ordering). The manifest form unblocks
   the early return the way the return was designed to be unblocked: by making the bundle
   subject claim its leading id.
 

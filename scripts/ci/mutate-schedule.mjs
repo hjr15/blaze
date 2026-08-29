@@ -35,10 +35,11 @@
 // A lock was considered and rejected: the thing that has to respect it is `node --test`,
 // which knows nothing about this harness, so a lock here would serialise mutation runs
 // against each other — which was never the failure — and nothing else.
-import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync, existsSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync, cpSync, rmSync, realpathSync, existsSync }
+  from "node:fs";
 import { execSync } from "node:child_process";
 import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
+import { join, dirname, resolve, relative, isAbsolute, sep } from "node:path";
 import { fileURLToPath } from "node:url";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..", "..");
@@ -61,6 +62,55 @@ export function createSandbox(repo = REPO) {
     cpSync(from, join(dir, entry), { recursive: true });
   }
   return dir;
+}
+
+/** Teardown for a sandbox, and the ONLY place in this file allowed to remove anything
+ *  (BLZ-485). Refuses when `sandbox` names the checkout, or any directory containing it —
+ *  a recursive delete of an ancestor takes the checkout with it.
+ *
+ *  BLZ-472 put this refusal in `tests/ci-mutation-sandbox.test.mjs`'s teardown helper and
+ *  left the runner a bare recursive delete of whatever `createSandbox` returned. That put
+ *  the safety in the tests rather than in the thing that ships: the tests exist to catch a
+ *  `createSandbox` that returns the checkout, and the runner would have deleted the
+ *  repository on exactly that refactor, before any test could report it. The guard belongs
+ *  here; the helper now calls this.
+ *
+ *  UNREACHABLE ON TODAY'S CALL PATHS, and said plainly rather than implied to be pinned:
+ *  `createSandbox` is the sole producer of the argument and always returns a fresh
+ *  `mkdtempSync` path under `tmpdir()`, so nothing `runMutations` can pass reaches the
+ *  refusal and no mutation of it can be killed through the gate. It is defence in depth
+ *  against a future refactor, pinned by direct call against a stand-in repository.
+ *
+ *  COMPARED ON RESOLVED REAL PATHS, not on the strings. The helper's compare was
+ *  `sandbox !== repo`, which two spellings of one directory defeat: a symlink into the
+ *  checkout, or a path carrying `..` segments. `realpathSync` collapses both — including
+ *  the case where `tmpdir()` is itself a symlink, which is why a string compare of a
+ *  genuine sandbox against the checkout was never quite the check it looked like. A path
+ *  that does not exist cannot be a live checkout, so it falls back to `resolve` and is
+ *  allowed through to `rmSync`'s own `force` handling. */
+export function discardSandbox(sandbox, repo = REPO) {
+  const real = (p) => { try { return realpathSync(p); } catch { return resolve(p); } };
+  const s = real(sandbox);
+  const r = real(repo);
+  const rel = relative(s, r);
+  // `rel === ""` is "the same directory"; anything else that is neither absolute nor
+  // climbing out with `..` means the checkout sits INSIDE the path we were asked to
+  // delete recursively.
+  //
+  // `startsWith("..")` is NOT the climb-out test, and reading it as one is a false ACCEPT
+  // in the catastrophic direction: it also matches a real directory whose NAME begins with
+  // `..`. With the checkout at `<X>/..cache/blaze`, `relative(<X>, checkout)` is
+  // `..cache/blaze` — a descent, read as a climb — so `discardSandbox(<X>)` passed the guard
+  // and deleted the working tree. Reproduced end to end before this line was written the
+  // second time. A climb is `..` exactly, or `..` followed by the separator; nothing else.
+  const climbsOut = rel === ".." || rel.startsWith(`..${sep}`);
+  if (rel === "" || (!climbsOut && !isAbsolute(rel))) {
+    throw new Error(
+      `mutate-schedule: ${sandbox} resolves to ${s}, which ${rel === "" ? "IS" : "CONTAINS"} `
+      + `the checkout ${r} — refusing to remove it. createSandbox must return a throwaway `
+      + "directory; a runner that deletes the working tree is worse than the race it fixed");
+  }
+  rmSync(s, { recursive: true, force: true });
 }
 
 export const MUTATIONS = [
@@ -149,7 +199,7 @@ try {
     results.push({ ...m, status: killed ? "KILLED" : "SURVIVED", detail });
   }
 } finally {
-  rmSync(sandbox, { recursive: true, force: true });
+  discardSandbox(sandbox);
 }
 return results;
 }
