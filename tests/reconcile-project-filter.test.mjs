@@ -137,12 +137,59 @@ const UNSCOPEABLE_KINDS = new Set(["project-mismatch", "unreadable-ticket-direct
 // listed by hand — a hand-written roster is how the filter came to cover kinds nobody had
 // re-read it for. A new kind turns this red, which is the point: whoever adds one has to
 // decide whether the scope-leak assertions may go blind on it.
-const RECONCILE_FINDING_KINDS = readFileSync(
-  join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "utf8")
-  .split("\n")
-  .map((l) => /^\s+kind: "([a-z-]+)",$/.exec(l))
-  .filter(Boolean)
-  .map((m) => m[1]);
+//
+// BLZ-496: THE EXTRACTOR USED TO BE `/^\s+kind: "([a-z-]+)",$/` PER LINE, and it was
+// correct for what exists — it returned the seven real declarations and rejected the five
+// `{ host, kind }` returns in `classifyRemote`. What it could not see is a kind declared
+// INLINE (`findings.push({ kind: "x", … })`) or carrying a trailing comment: either one is
+// dropped SILENTLY, and a tripwire that fails open is a tripwire nobody learns is gone.
+//
+// So the shape is inverted. Instead of matching the one form it knows and discarding the
+// rest of the file unseen, it visits EVERY `kind:` occurrence and puts each in a bucket:
+// deliberately rejected by a NAMED rule, read as a declaration, or UNACCOUNTED. The last
+// bucket is asserted empty below, so a `kind:` written in a form this cannot read fails
+// loudly rather than shrinking the roster — the extraction has to have happened, not merely
+// to have produced a plausible answer.
+const RECONCILE_SOURCE = readFileSync(
+  join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "utf8");
+
+/** The only `kind:` occurrences that are deliberately NOT finding-kind declarations. Each
+ *  carries the reason it is refused, because "the extractor happens not to match it" is not
+ *  one. Their counts are asserted individually below, so deleting a rule takes its count
+ *  with it rather than quietly widening what the roster accepts. */
+const KIND_REJECTIONS = [
+  { rule: "comment",
+    why: "a `kind:` inside a comment declares nothing — this file's prose names the field",
+    test: (line, at) => /^\s*(?:\/\/|\*|\/\*)/.test(line) || line.slice(0, at).includes("//") },
+  { rule: "remote-host-classifier",
+    why: "`classifyRemote` returns `{ host, kind }` where `kind` is a FORGE (github, " +
+      "unsupported, unknown, none), not a finding this run can raise",
+    test: (line) => /return \{\s*host[^}]*\bkind:/.test(line) },
+];
+
+/** Every `kind:` in `source`, sorted into declarations, deliberate rejections, and the
+ *  occurrences no rule explains. Nothing is dropped: `kinds.length + rejected.length +
+ *  unaccounted.length` is the number of occurrences the scan actually saw. */
+function extractFindingKinds(source) {
+  const kinds = [], rejected = [], unaccounted = [];
+  source.split("\n").forEach((line, i) => {
+    for (const m of line.matchAll(/\bkind:/g)) {
+      const site = { line: i + 1, text: line.trim() };
+      const hit = KIND_REJECTIONS.find((r) => r.test(line, m.index));
+      if (hit) { rejected.push({ ...site, rule: hit.rule }); continue; }
+      // The VALUE, wherever the occurrence sits on the line — start of line, mid-object, or
+      // followed by a comment. Only a string literal is a declaration; `kind: someVariable`
+      // is a kind this test cannot name and is reported as such.
+      const value = /^\s*"([a-z-]+)"/.exec(line.slice(m.index + "kind:".length));
+      if (!value) { unaccounted.push(site); continue; }
+      kinds.push({ ...site, kind: value[1] });
+    }
+  });
+  return { kinds, rejected, unaccounted };
+}
+
+const RECONCILE_KIND_SITES = extractFindingKinds(RECONCILE_SOURCE);
+const RECONCILE_FINDING_KINDS = RECONCILE_KIND_SITES.kinds.map((k) => k.kind);
 
 describe("BLZ-394: --project restricts BOTH the scan and the write", () => {
   test("AC-1: a filtered run moves exactly the project named, and no other", async () => {
@@ -928,6 +975,78 @@ describe("BLZ-486: only the project-mismatch finding is excepted from the scope-
     }
     assert.equal([...new Set(RECONCILE_FINDING_KINDS)].filter((k) => !UNSCOPEABLE_KINDS.has(k)).length, 4,
       "four kinds stay asserted; a fifth appearing means someone widened the channel again");
+  });
+
+  test("BLZ-496: every `kind:` in reconcile.mjs is accounted for — declared, or refused by a named rule", () => {
+    // GROUND TRUTH the extractor cannot reach: the raw count of `kind:` in the file. The
+    // three buckets must add up to it exactly, which is what makes "the roster is 6 kinds"
+    // a statement about the whole file rather than about the lines one regex happened to
+    // like. An extractor that quietly stopped matching would fail HERE, not go vacuous.
+    const occurrences = (RECONCILE_SOURCE.match(/\bkind:/g) || []).length;
+    const { kinds, rejected, unaccounted } = RECONCILE_KIND_SITES;
+    assert.ok(occurrences >= 12, `only ${occurrences} \`kind:\` occurrences — the file was not read`);
+    assert.equal(kinds.length + rejected.length + unaccounted.length, occurrences,
+      "every occurrence must land in exactly one bucket");
+
+    assert.deepEqual(unaccounted.map((s) => `reconcile.mjs:${s.line}  ${s.text}`), [],
+      "a `kind:` this extractor cannot read is NOT a kind it may ignore. `kind: someVar` " +
+      "declares a finding the roster below would never list, and the scope-leak assertions " +
+      "would go blind on it exactly the way BLZ-486 found them blind on four kinds");
+
+    // Each rejection rule's own count, so a deleted rule takes its count with it instead of
+    // silently widening what the roster accepts. The host-classifier count is PINNED: those
+    // five are a deliberate exception and a sixth has to be re-decided, not inherited. The
+    // comment count is not pinned — prose naming the field is free to come and go.
+    const byRule = new Map(KIND_REJECTIONS.map((r) => [r.rule, 0]));
+    for (const r of rejected) byRule.set(r.rule, byRule.get(r.rule) + 1);
+    assert.equal(KIND_REJECTIONS.length, 2, "two rules refuse a `kind:`; a third must be argued for");
+    assert.equal(byRule.get("remote-host-classifier"), 5,
+      "`classifyRemote`'s five `{ host, kind }` returns are the only non-finding `kind:` " +
+      `uses in the file; got ${byRule.get("remote-host-classifier")}`);
+    assert.equal([...byRule.values()].reduce((a, b) => a + b, 0), rejected.length,
+      "every rejection must be attributed to a rule that still exists");
+
+    assert.equal(kinds.length, 7,
+      "seven declaration sites for six kinds — `terminal-record-unverifiable` is raised " +
+      `from two places. Got ${JSON.stringify(kinds.map((k) => `${k.line}:${k.kind}`))}`);
+  });
+
+  test("BLZ-496: a kind declared INLINE or with a trailing comment is caught, not dropped", () => {
+    // The whole ticket. Each of these is a declaration the previous line-anchored regex
+    // returned nothing for, so the roster shrank and the deepEqual above still passed on a
+    // stale list. Checked against the OLD pattern too, so the test says what changed.
+    const OLD = (src) => src.split("\n").map((l) => /^\s+kind: "([a-z-]+)",$/.exec(l))
+      .filter(Boolean).map((m) => m[1]);
+    const forms = {
+      "own-line": '      kind: "own-line",',
+      inline: '      findings.push({ kind: "inline", id: null });',
+      "trailing-comment": '      kind: "trailing-comment", // BLZ-999',
+      "no-trailing-comma": '      kind: "no-trailing-comma"',
+    };
+    for (const [name, line] of Object.entries(forms)) {
+      const got = extractFindingKinds(line).kinds.map((k) => k.kind);
+      assert.deepEqual(got, [name], `the ${name} declaration form must reach the roster`);
+    }
+    assert.deepEqual(OLD(Object.values(forms).join("\n")), ["own-line"],
+      "…and exactly one of the four was visible to the pattern this replaced, which is why " +
+      "an inline kind could inherit `exceptUnscopeable`'s exception without anyone deciding it");
+
+    // And on the REAL file, because a synthetic line proves the regex and not the wiring:
+    // splicing an inline declaration into reconcile.mjs's own source must move the roster,
+    // which is what turns the deepEqual in the sibling test above red.
+    const spliced = RECONCILE_SOURCE.replace(
+      '        kind: "project-mismatch",',
+      '        kind: "project-mismatch",\n      findings.push({ kind: "spliced-inline", id: null });');
+    assert.notEqual(spliced, RECONCILE_SOURCE, "the splice anchor must still exist in reconcile.mjs");
+    const after = extractFindingKinds(spliced);
+    assert.deepEqual(after.unaccounted, []);
+    assert.ok(after.kinds.map((k) => k.kind).includes("spliced-inline"),
+      "an inline kind added to reconcile.mjs must appear in the roster — otherwise it " +
+      "inherits whatever the filter does by default and no test says so");
+    assert.equal(after.kinds.length, RECONCILE_KIND_SITES.kinds.length + 1,
+      "…and it must be an ADDITION, not a replacement");
+    assert.deepEqual(OLD(spliced).sort(), [...RECONCILE_FINDING_KINDS].sort(),
+      "the pattern this replaced saw no change at all — that is the defect, reproduced");
   });
 
   test("a leak through any OTHER kind survives the filter — one line per kind, all still visible", () => {

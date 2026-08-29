@@ -13,7 +13,7 @@ test("reindex with BLAZE_PROJECTS_DIR writes the index under the data repo's .bl
   // engine tree, which must be disposable — never the real repo's .blaze/.
   const eng = mkdtempSync(join(tmpdir(), "blaze-reindex-eng-"));
   cpSync(join(REPO, "scripts"), join(eng, "scripts"), { recursive: true });
-  const data = mkdtempSync(join(tmpdir(), "blaze-reindex-"));
+  const data = mkdtempSync(join(tmpdir(), "blaze-reindexroot-"));
   mkdirSync(join(data, "projects", "ZZZ", "done"), { recursive: true });
   writeFileSync(join(data, "projects", "ZZZ", "done", "ZZZ-1.md"),
     "---\nid: ZZZ-1\ntype: task\nstatus: done\nestimate: 60\n---\n\nbody\n");

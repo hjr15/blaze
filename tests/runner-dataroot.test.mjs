@@ -29,7 +29,7 @@ function engineCopy() {
 // A pure DATA repo: git + blaze.config.json + projects/, NO scripts/ copy —
 // the engine runs from the engineCopy, the data lives here. This is the split.
 function dataRepo() {
-  const root = mkdtempSync(join(tmpdir(), "blaze-data-"));
+  const root = mkdtempSync(join(tmpdir(), "blaze-dataroot-data-"));
   execFileSync("git", ["-C", root, "init", "-q"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
