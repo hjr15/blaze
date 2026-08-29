@@ -6,7 +6,7 @@
 // description, a full frontmatter table, parent breadcrumb + children list, and
 // links. No new source of truth — relations come from the derived index, the
 // body + full frontmatter from the ticket file itself.
-import { readFileSync } from "node:fs";
+import { readRegularFileSync } from "../model/regular-file.mjs";
 import { buildIndex } from "../model/index.mjs";
 import { parseTicket } from "../model/ticket.mjs";
 import { fieldInputs } from "../model/fields.mjs";
@@ -81,6 +81,17 @@ export function panelHtml(projectsDir, id) {
   const index = buildIndex(projectsDir);
   const row = index.get(id);
   if (!row) return null;
-  const { frontmatter, body } = parseTicket(readFileSync(row.file, "utf8"));
+  // BLZ-493: REFUSE a ticket file that is not a regular file. `serve.mjs` already wraps this
+  // call and says why — "panelHtml re-reads the ticket file after the index walk, so a
+  // concurrent move/edit could ENOENT between the two — catch it as a 500". A FIFO arriving
+  // in that same window is the same race with a strictly worse outcome (a wedged route, not a
+  // 500), so the guard turns it into the answer the surrounding code was already written for.
+  //
+  // REACHABILITY, STATED RATHER THAN IMPLIED. `buildIndex` above never memoises, so the walk
+  // opens this very file four lines earlier and refuses there first. This guard is therefore
+  // reachable ONLY inside the sub-second window between those two reads, no test constructs
+  // that window, and reverting this line leaves every test green. It is defence in depth, it
+  // is not pinned, and ADR-0031 says so in those words instead of counting it as fixed.
+  const { frontmatter, body } = parseTicket(readRegularFileSync(row.file));
   return panelContentHtml(panelModel(index, id, { frontmatter, body }));
 }

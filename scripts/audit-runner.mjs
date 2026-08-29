@@ -3,7 +3,7 @@
 //
 // Read-only. Exits non-zero only on a HARD finding — a soft finding is a fill queue and
 // must never fail a run (blaze-pm ADR-0011). BLZ-137.
-import { readFileSync } from "node:fs";
+import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
 import { join, dirname, basename, resolve as resolvePath } from "node:path";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { unreadableTicketDirs } from "./model/index.mjs";
@@ -118,8 +118,22 @@ if (!keys.length && !configLoadError) { console.error(`no projects found under $
 
 const projects = {};
 for (const k of keys) {
-  try { projects[k] = JSON.parse(readFileSync(join(projectsDir, k, "project.json"), "utf8")); }
-  catch { projects[k] = { key: k }; }
+  // BLZ-493: the `catch` below is the deliberate tolerance for a project that declares no
+  // taxonomy, and it must NOT swallow "I could not read the taxonomy". A `project.json` that
+  // is a FIFO used to block this line forever; falling back to `{ key: k }` instead would
+  // audit the project against the EMPTY taxonomy and print `schema-invalid` counts measured
+  // against a file this run never opened — ADR-0030's defect exactly. So a non-regular file
+  // is REFUSED, named, and exits before a single finding is reported. ADR-0031.
+  try { projects[k] = JSON.parse(readRegularFileSync(join(projectsDir, k, "project.json"))); }
+  catch (e) {
+    if (e instanceof NotARegularFileError) {
+      console.error(e.message);
+      console.error(`blaze audit: refusing to audit ${k} against a taxonomy this run could not ` +
+        `read — every schema finding it produced would be measured against a file it never opened.`);
+      process.exit(2);
+    }
+    projects[k] = { key: k };
+  }
 }
 
 const wanted = new Set(keys);

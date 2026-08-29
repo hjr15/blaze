@@ -2,7 +2,7 @@
 // Merges the built-in defaults with a top-level (blaze.config.json) override and a
 // per-project (project.json) override, per registry entry: default → top → project,
 // later wins. Callers load `config`/`project` via config.mjs and pass them in.
-import { readFileSync } from "node:fs";
+import { readRegularFileSync } from "./regular-file.mjs";
 import { join } from "node:path";
 import { DEFAULT_TYPES, mergeTypes } from "./schema.mjs";
 import { DEFAULT_WORKFLOWS, mergeWorkflows, RESOLUTIONS } from "./workflows.mjs";
@@ -475,8 +475,17 @@ export { SCHEMA_VERSION, MIN_SCHEMA_VERSION, checkSchemaVersion } from "./schema
  *  which is what makes per-project customisation opt-in rather than a cliff (BLZ-238). */
 export function loadProjectSchema(projectsDir, key, { config = null } = {}) {
   let project = null;
-  try { project = JSON.parse(readFileSync(join(projectsDir, key, "project.json"), "utf8")); }
-  catch { project = null; }
+  // BLZ-493: `null` here means "this project declares no schema block", so the catch is the
+  // tolerance that makes per-project customisation opt-in. A `project.json` it could not READ
+  // is not that: resolving to the ambient registry would validate every ticket in the project
+  // against a taxonomy nobody wrote. It refuses, for the same reason `audit-runner.mjs` does
+  // at its own read of this same file — and without this one, fixing that one only moves the
+  // hang here, since `auditCorpus`'s schema layer opens the path a second time. ADR-0031.
+  try { project = JSON.parse(readRegularFileSync(join(projectsDir, key, "project.json"))); }
+  catch (e) {
+    if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;
+    project = null;
+  }
   return resolveSchema({ config, project });
 }
 

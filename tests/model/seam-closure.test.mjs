@@ -84,6 +84,13 @@ test("no module outside the write seam writes or renames a ticket file", () => {
     // known path even when the board's storage is Postgres, because the operator reads
     // it with `cat` before any identity exists.
     "model/setup-token.mjs",
+    // BLZ-493. `model/regular-file.mjs` is the primitive that stops a `writeFileSync` from
+    // BLOCKING FOREVER on a FIFO — it opens non-blocking, checks the descriptor's type, and
+    // writes to the FD it already holds. It writes no ticket and takes no path from a caller
+    // that is not already inside this allowlist (its one write caller is the transitions
+    // cache, listed above). Listed here rather than dodged by using a differently-named fs
+    // call, because a guard evaded by renaming is a guard that has stopped working.
+    "model/regular-file.mjs",
   ]);
   const offenders = [];
   for (const file of mjsFiles(SCRIPTS)) {

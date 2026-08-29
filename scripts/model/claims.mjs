@@ -15,7 +15,8 @@
 // ticket deletion, not on a move to a terminal status. A claim asserts "this id
 // was issued", which never stops being true. Deleting one lets a retired id be
 // re-issued and re-arms the bug this exists to close.
-import { mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync } from "node:fs";
+import { mkdirSync, writeFileSync, readdirSync, existsSync } from "node:fs";
+import { readRegularFileSync } from "./regular-file.mjs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 
@@ -66,9 +67,17 @@ export function cutoverPath(projectsDir, key) {
 // null means "this project has never allocated through the ledger", which is a
 // different state from "cutover is 0". Conflating them made every ticket on an
 // un-migrated board look like it was missing a claim.
+// BLZ-493: the `catch` is the "never allocated through the ledger" answer, and
+// `missingClaimErrors` answers `null` by STAYING SILENT — so a `.cutover` that could not be
+// read forgives every genuinely missing claim on the board. That is total laundering: the
+// check exists to prove ids are provably unique, and an unreadable marker makes it report
+// that they are. A non-regular file is therefore REFUSED, not turned into `null`. ADR-0031.
 export function readCutover(projectsDir, key) {
-  try { return Number(readFileSync(cutoverPath(projectsDir, key), "utf8").trim()) || 0; }
-  catch { return null; }
+  try { return Number(readRegularFileSync(cutoverPath(projectsDir, key)).trim()) || 0; }
+  catch (e) {
+    if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;
+    return null;
+  }
 }
 
 export function ensureCutover(projectsDir, key, currentMax) {

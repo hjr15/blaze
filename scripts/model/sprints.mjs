@@ -1,7 +1,8 @@
 // scripts/model/sprints.mjs — the sprint registry (sprints.json) at the data root.
 // Sprints are DATA, not engine config: read per-render (like .blaze/transitions.json),
 // so a mid-session edit is never stale. See ADR-0004.
-import { readFileSync, writeFileSync } from "node:fs";
+import { writeFileSync } from "node:fs";
+import { readRegularFileSync } from "./regular-file.mjs";
 import { join } from "node:path";
 
 const EMPTY = { active: null, sprints: [] };
@@ -38,14 +39,22 @@ const isRegistryVersion = (v) => Number.isInteger(v) && v >= 1;
  *
  * A MALFORMED registry still yields EMPTY and carries nothing forward. Preserving unknown keys
  * must not promote a junk file into a half-trusted one.
+ *
+ * BLZ-493 draws the line this function makes clearest, and it is the line ADR-0031 is built
+ * on. MALFORMED still yields EMPTY, unchanged, because that IS AN ANSWER — Blaze looked and
+ * the file is junk. A registry it could not OPEN is not an answer, and EMPTY would tell the
+ * board there are no sprints and tell `blaze new` that every sprint id the operator types is
+ * invalid. So a non-regular file is REFUSED and the refusal travels; a `sprints.json` FIFO
+ * used to block this line forever, taking `buildIndex` and every page render with it.
  */
 export function loadSprints({ root }) {
   try {
-    const raw = readFileSync(join(root, "sprints.json"), "utf8");
+    const raw = readRegularFileSync(join(root, "sprints.json"));
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.sprints)) return { ...EMPTY };
     return { ...parsed, active: parsed.active ?? null, sprints: parsed.sprints };
-  } catch {
+  } catch (e) {
+    if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;
     return { ...EMPTY };
   }
 }

@@ -830,7 +830,11 @@ function reconcileSummary(j) {
       const el=document.querySelector(".live"); if(!el) return;
       if(document.documentElement.dataset.view!=="live") return;
       try{
-        const {groups}=await (await fetch("/api/live")).json();
+        const {groups,unreadable}=await (await fetch("/api/live")).json();
+        // BLZ-493 / ADR-0031: a feed the server COULD NOT READ must not render as a feed it
+        // read and found empty. This branch is first for that reason — falling through to
+        // "No recent activity." would be the silent drop the whole guard exists to stop.
+        if(unreadable){ el.innerHTML='<div class="empty">ACTIVITY FEED UNREADABLE — this is not "no activity": '+esc(unreadable.path)+' could not be read, so nothing below reflects what agents are doing.</div>'; return; }
         if(!groups||!groups.length){ el.innerHTML='<div class="empty">No recent activity.</div>'; return; }
         el.innerHTML=groups.map(function(g){return '<article class="livecard '+(g.active?"active":"idle")+'">'
           +'<div class="lc-top"><span class="id">'+esc(g.key)+'</span><span class="lc-dot '+(g.active?"on":"")+'"></span><span class="lc-age">'+esc(fmtAge(g.ageMs))+'</span></div>'
