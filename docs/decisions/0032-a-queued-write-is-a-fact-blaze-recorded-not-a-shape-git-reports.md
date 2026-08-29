@@ -79,12 +79,26 @@ git -C <root> diff --quiet HEAD -- "<path recorded in the ledger>"
 Paths go IN, after `--`; only an exit code comes OUT. Nothing parses a path out of git's output, so
 BLZ-347's deleted parser is not reintroduced, and a filename with a space or a non-ASCII character
 cannot wedge it. Nothing walks `projects/`, so a symlinked `projects/` cannot silence it — the case
-design 2 was written to close and missed. Both were verified directly:
+design 2 was written to close and missed.
 
-| probe | symlinked `projects/`, dirty file | `ZZZ-1 spaced ünicode.md`, dirty |
-|---|---|---|
-| `git status --porcelain -- projects/` (design 2) | empty, exit 0 — **under-fires** | n/a |
-| `git diff --quiet HEAD -- <recorded path>` | exit 1 — **fires** | exit 1 — **fires** |
+**The recorded path is not automatically the path git knows, and assuming it was cost this design a
+review round.** `commitOrQueue` records `relative(root, f)` and nothing in `config.mjs` calls
+`realpath`, so on a board whose `projects/` is a symlink the ledger holds the through-symlink
+spelling while git's index holds the real one. `ls-files --error-unmatch` then never matches, and
+EVERY op on such a board reports `outstanding` forever — including the already-filed ones this verb
+exists to find. That is the OVER-fire twin of design 2's under-fire, on design 2's own fixture, and
+it corrupts the verb's headline distinction. The implementation therefore resolves each recorded
+path's longest existing prefix and re-relativises it against the real root before probing, and
+reports under the recorded spelling, which is what the operator has on disk. Resolving a PREFIX
+rather than the whole path is what keeps a move's already-deleted old path answerable.
+
+Verified directly, end to end through the real `blaze new` runner on a symlinked batch board:
+
+| probe | symlinked `projects/`, op already filed | symlinked, op genuinely unfiled | `ZZZ-1 spaced ünicode.md`, dirty |
+|---|---|---|---|
+| `git status --porcelain -- projects/` (design 2) | empty, exit 0 — **under-fires** | empty, exit 0 — **under-fires** | n/a |
+| probing the RECORDED path verbatim | `outstanding` — **over-fires** | `outstanding` (right, by luck) | fires |
+| probing the RESOLVED path (shipped) | **`settled`** | **`outstanding`** | **fires** |
 
 The owner is `blaze commit`, which owns the queue. Reconcile does not own it, cannot see whether one
 exists, and derives its answer from git rather than from anything a session wants (ADR-0023 §3).
@@ -134,7 +148,10 @@ nothing, and clears nothing — including the orphaned queues it names, whose cl
 decision. It returns before the branch guard, the lock, the `git add` and the `git commit`, the same
 position `checkBranch` occupies and for the same reason: a read must leave nothing half-made.
 
-It is registered `mutates: false`, which makes it runnable under `BLAZE_READONLY=1` (BLZ-121), and
+`blaze commit` stays `mutates: true` — the flush very much mutates. What makes this ONE
+invocation runnable under `BLAZE_READONLY=1` (BLZ-121) is `readOnlyFlags: ["--status"]` on the
+verb's table entry, an opt-in per-invocation exemption, so every other spelling of the verb is
+still refused. Declaring the whole verb read-only would have been the wrong fix, and
 that is pinned by a test rather than left to the flag's declaration.
 
 Consequently BLZ-394's blast-radius rule is untouched: the set of files a reconcile commit can name
@@ -157,7 +174,7 @@ with a bounded description, and a test now pins it so it cannot drift back.
   abandoned, instead of five days later by accident.
 - **Cost, accepted:** state (a) remains undecidable after the fact, and `--status` will not surface a
   `per-op` board's failed commit at all, because a `per-op` board keeps no ledger. Both are stated
-  in the verb's own help text rather than left to be discovered.
+  in the `--status` report's own trailer rather than left to be discovered.
 - **Cost, accepted:** `--status` reports queues belonging to sessions the caller does not own. That is
   deliberate — the 185 orphans span several — and it is a read, never a write, so BLZ-394 is not
   engaged.
