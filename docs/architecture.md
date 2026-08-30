@@ -82,6 +82,15 @@ flowchart TB
   harness's own session id, else the shared legacy fallback when neither is
   present — so `blaze commit` flushes only the caller's queue, refusing the
   fallback without `--shared`, and `--all` sweeps them all unconditionally).
+  The harness id is **inherited by every descendant process**, so a session and all
+  of its subagents resolve to ONE queue: any of them flushing takes all of them
+  (BLZ-124), while a different top-level session's queue is never looked at
+  (BLZ-498). Those are not competing claims — they are the same rule, "drain
+  exactly the queue your own session id resolves to", seen at its two boundaries,
+  and `tests/commit-session-queue-scope.test.mjs` observes both in a single run.
+  A queue that is fully drained is **removed**, not truncated to an empty file, so
+  a finished session stops leaving one behind forever (BLZ-498); a partial drain
+  keeps its file and its undrained bytes.
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
