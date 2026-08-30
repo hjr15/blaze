@@ -53,7 +53,10 @@ test("readForDrain returns entries plus the exact byte length of the file", () =
 
 test("readForDrain on an absent ledger returns empty entries and zero bytes", () => {
   const root = tmp();
-  assert.deepEqual(readForDrain(root), { entries: [], bytes: 0 });
+  // BLZ-518 review round: `dropped` (the raw lines that failed to parse) rides along on
+  // every readForDrain result, so the drainer can quarantine them before `clearLedger`
+  // erases the bytes they occupy. An absent ledger dropped nothing.
+  assert.deepEqual(readForDrain(root), { entries: [], dropped: [], bytes: 0 });
   rmSync(root, { recursive: true, force: true });
 });
 

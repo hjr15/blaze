@@ -37,25 +37,48 @@ export function appendEntry(root, entry, session = null) {
   appendFileSync(path, JSON.stringify(entry) + "\n"); // append-mode: atomic for the small single-line writes this ledger produces
 }
 
+/** Parse a ledger's lines, returning BOTH what parsed and the raw text of what did not.
+ *
+ *  Skipping rather than throwing is deliberate and stays: one corrupt line must not hold a
+ *  good ledger hostage. What was missing until BLZ-518's review round is that the skip went
+ *  no further than a `process.stderr.write` — so every caller received a SHORT list of
+ *  entries with no way to know it was short. `blaze commit --status` then rendered such a
+ *  queue as fully read, summed its partial buckets into the totals and exited 0, and
+ *  `blaze commit` cleared the unparseable bytes along with the ops it had committed. A
+ *  caller reading only the exit code, or only the entries, could not see either.
+ *
+ *  `dropped` carries the RAW lines, not a count: a count is enough to disclaim a total, but
+ *  only the bytes let the flush quarantine a record instead of destroying it. */
 function parseLines(text) {
-  const out = [];
+  const entries = [];
+  const dropped = [];
   for (const line of text.split("\n")) {
     if (line.trim() === "") continue;
     try {
-      out.push(JSON.parse(line));
+      entries.push(JSON.parse(line));
     } catch {
-      // A partial final line (process killed mid-append) or a corrupt line:
-      // skip rather than throw so a good ledger still drains. Warn so the drop is visible.
+      // A partial final line (process killed mid-append) or a corrupt line. The warning
+      // stays — it is the only signal on paths that do not read `dropped` — but it is no
+      // longer the ONLY signal.
       process.stderr.write("blaze: skipping unparseable pending-commit ledger line\n");
+      dropped.push(line);
     }
   }
-  return out;
+  return { entries, dropped };
+}
+
+/** A queue's parsed entries AND the raw lines that could not be parsed. Callers that must
+ *  distinguish "this queue is clean" from "this queue is as much of a queue as I could
+ *  read" (ADR-0030) use this; `readEntries` remains the shorthand for the many callers
+ *  that only want the entries. */
+export function readQueue(root, session = null) {
+  const path = ledgerPath(root, session);
+  if (!existsSync(path)) return { entries: [], dropped: [] };
+  return parseLines(readFileSync(path, "utf8"));
 }
 
 export function readEntries(root, session = null) {
-  const path = ledgerPath(root, session);
-  if (!existsSync(path)) return [];
-  return parseLines(readFileSync(path, "utf8"));
+  return readQueue(root, session).entries;
 }
 
 // Read a queue for draining: entries plus the byte length consumed, so the
@@ -66,9 +89,12 @@ export function readEntries(root, session = null) {
 // invalid byte decodes to U+FFFD, which re-encodes at 3 bytes.
 export function readForDrain(root, session = null) {
   const path = ledgerPath(root, session);
-  if (!existsSync(path)) return { entries: [], bytes: 0 };
+  if (!existsSync(path)) return { entries: [], dropped: [], bytes: 0 };
   const buf = readFileSync(path);
-  return { entries: parseLines(buf.toString("utf8")), bytes: buf.length };
+  // `dropped` rides along so the drainer can quarantine what it could not parse BEFORE it
+  // clears the bytes those lines occupy — `bytes` spans the whole file, unparseable lines
+  // included, so without this the clear destroys them.
+  return { ...parseLines(buf.toString("utf8")), bytes: buf.length };
 }
 
 // BLZ-498: a queue with NOTHING left in it is removed, not truncated to a zero-byte
@@ -110,6 +136,38 @@ export function clearLedger(root, session = null, consumedBytes = null) {
   // acceptable for this advisory, single-host design; not distributed-safe.
   const buf = readFileSync(path);
   clearOrRemove(path, buf.subarray(consumedBytes));
+}
+
+/** Where a flush parks the lines it could not parse.
+ *
+ *  BLZ-518 review round. `readForDrain` measures `bytes` over the WHOLE file, so
+ *  `clearLedger(bytes)` erased an unparseable line along with the ops that were
+ *  successfully committed — a record destroyed by the flush, verified by construction at
+ *  be4b110 (three recorded ops in, two in the commit body, the third then present nowhere
+ *  on disk). It has never fired on the live board (the 185 orphaned ops contain 0
+ *  unparseable lines) but the path exists, and it is the one way `blaze commit` can lose
+ *  something for good.
+ *
+ *  The extension is deliberately NOT `.jsonl`: `listQueues` filters on that suffix, so a
+ *  sidecar can never be picked up as a phantom queue — which would make the condition
+ *  self-perpetuating, since its contents are by definition unparseable. */
+export function quarantinePath(root, session = null) {
+  return session
+    ? join(root, ".blaze", "pending", `${session}.corrupt`)
+    : join(root, ".blaze", "pending-commit.corrupt");
+}
+
+/** Append raw unparseable lines to the queue's sidecar, timestamped. Returns the path so
+ *  the caller can name it. Called at the same point as `clearLedger` — after both git calls
+ *  have returned 0 — so a failed flush, which keeps its ledger, cannot duplicate them on
+ *  the next run. */
+export function quarantineDropped(root, session, lines) {
+  assertWritable("quarantine unparseable pending-ledger lines");
+  const path = quarantinePath(root, session);
+  mkdirSync(dirname(path), { recursive: true });
+  const stamp = new Date().toISOString();
+  appendFileSync(path, lines.map((l) => `${stamp}\t${l}\n`).join(""));
+  return path;
 }
 
 // Every queue that exists: the shared fallback first (session: null), then

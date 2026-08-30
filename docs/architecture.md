@@ -90,7 +90,12 @@ flowchart TB
   and `tests/commit-session-queue-scope.test.mjs` observes both in a single run.
   A queue that is fully drained is **removed**, not truncated to an empty file, so
   a finished session stops leaving one behind forever (BLZ-498); a partial drain
-  keeps its file and its undrained bytes.
+  keeps its file and its undrained bytes. A ledger line that will not parse is
+  skipped rather than thrown on, but the skip is **propagated** — `parseLines`
+  returns the raw dropped lines alongside the entries, so `--status` can mark the
+  queue `PARTIALLY READ` instead of reporting a short list as a complete one, and
+  the flush can quarantine those bytes to `<queue>.corrupt` instead of clearing
+  them with the ops it committed (BLZ-518).
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".

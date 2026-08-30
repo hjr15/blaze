@@ -85,12 +85,31 @@ export function summarizeEntries(entries) {
 export function renderQueueStatus(queues, mySession = undefined) {
   const L = ["blaze commit --status: read-only — nothing was committed, queued or cleared."];
   const ops = queues.reduce((n, q) => n + q.entries.length, 0);
-  if (ops === 0) {
+  // BLZ-518 / ADR-0030. A queue carrying `error` was NOT read, so it is not evidence of
+  // zero ops. Without this, a board whose only queue is malformed printed "Nothing queued —
+  // 0 op(s) on 0 queue(s)": a run that could not look, saying exactly what a run that
+  // looked and found nothing says.
+  const unreadable = queues.filter((q) => q.error);
+  // BLZ-518 review round: a queue whose lines partly failed to parse is incomplete too, and
+  // it is the shape that hid — `parseLines` returns a SHORT list, so a queue holding only
+  // unparseable lines yields ops === 0 and would otherwise print "Nothing queued", which is
+  // exactly what a run that looked and found nothing prints.
+  const partial = queues.filter((q) => !q.error && q.dropped?.length);
+  if (ops === 0 && unreadable.length === 0 && partial.length === 0) {
     L.push("", "  Nothing queued — 0 op(s) on 0 queue(s).");
   } else {
-    L.push("", `  ${queues.length} queue(s) holding ${ops} op(s).`, "");
+    const readable = queues.length - unreadable.length;
+    L.push("", `  ${readable} readable queue(s) holding ${ops} op(s).`, "");
     for (const q of queues) {
       const name = q.session === null ? "(shared fallback queue — no session identity)" : q.session;
+      if (q.error) {
+        // Named, with its reason, and with NO buckets — an unreadable queue must not be
+        // rendered in the same shape as one that was read and found clean.
+        L.push(`  ${name}${mySession !== undefined && q.session === mySession ? "  (yours)" : ""}  —  could not be read: ${q.error}`);
+        L.push("      state UNKNOWN — this queue is not counted in the totals below");
+        L.push("");
+        continue;
+      }
       // `undefined` means the caller did not say who it is, so nothing is claimed either
       // way; `null` is a real answer (no session identity => the shared fallback IS yours).
       const own = mySession !== undefined && q.session === mySession ? "  (yours)" : "";
@@ -99,14 +118,27 @@ export function renderQueueStatus(queues, mySession = undefined) {
       const age = Number.isNaN(newest) ? "" : `, ${((Date.now() - newest) / 86400000).toFixed(1)} d old`;
       const when = stamps.length ? `  oldest ${stamps[0]}${age}` : "";
       L.push(`  ${name}${own}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
+      // PARTIALLY READ is deliberately not "state UNKNOWN": an unreadable queue yields
+      // nothing, a partial one yields everything that parsed, and those ops are real work
+      // that must still be reported. What must not happen is the shortfall going unsaid.
+      if (q.dropped?.length) {
+        L.push(`      PARTIALLY READ — ${q.dropped.length} line(s) could not be parsed and are NOT counted below`);
+      }
       const { outstanding, settled, absent } = q.files;
       L.push(`      outstanding: ${outstanding.length} file(s) still differ from HEAD`);
       L.push(`      orphaned:    ${settled.length} file(s) already match HEAD — filed by something else`);
       if (absent.length) L.push(`      superseded:  ${absent.length} file(s) relocated again within a batch`);
       L.push("");
     }
-    const tot = (k) => queues.reduce((n, q) => n + q.files[k].length, 0);
-    L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${queues.length} queue(s).`);
+    const tot = (k) => queues.reduce((n, q) => n + (q.error ? 0 : q.files[k].length), 0);
+    L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${readable} readable queue(s).`);
+    if (unreadable.length) {
+      L.push(`  ${unreadable.length} queue(s) could not be read — the totals above DO NOT cover them.`);
+    }
+    if (partial.length) {
+      const lines = partial.reduce((n, q) => n + q.dropped.length, 0);
+      L.push(`  ${partial.length} queue(s) were only PARTIALLY read (${lines} unparseable line(s)) — the totals above DO NOT cover them.`);
+    }
     L.push("  Flush your own queue with `blaze commit`, or every queue with `blaze commit --all`.");
   }
   L.push("",

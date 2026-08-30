@@ -9,8 +9,8 @@
 // queue files.
 import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
-import { join } from "node:path";
-import { readForDrain, clearLedger, listQueues, sessionId, readEntries, outstandingFiles } from "./pending-ledger.mjs";
+import { join, relative } from "node:path";
+import { readForDrain, clearLedger, listQueues, sessionId, readQueue, outstandingFiles, quarantineDropped, quarantinePath } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -47,12 +47,55 @@ for (const a of argv) {
 // the caller's own, and a report scoped to `mySession` would have shown a clean board
 // on every one of the five days they sat there.
 if (status) {
+  // BLZ-518: PER QUEUE. Before this, all three of the shapes below threw out of this
+  // expression and took the ENTIRE report with them — on the live board, eight queues'
+  // worth of state lost to one bad line, and BLZ-498's orphaned-queue condition is exactly
+  // where an old malformed entry is most likely to be sitting. A *status* verb that aborts
+  // is reporting nothing, which is the one thing it exists not to do.
+  //
+  //   - an entry with no `files` list  -> `path.join(root, undefined)` (ERR_INVALID_ARG_TYPE)
+  //   - a queue file that is a DIRECTORY -> `readFileSync` EISDIR
+  //   - a recorded path outside the board -> `outstandingFiles`'s BLZ-394 refusal
+  //
+  // The third refusal is CORRECT and is deliberately still raised: this verb must not
+  // report on a path outside the board. What changes is only its blast radius. Caught here
+  // rather than pushed down into `outstandingFiles`, because that function's contract —
+  // "never report a queue as settled on a probe that did not run" (ADR-0030) — is the
+  // reason the refusal exists, and softening it there would weaken every other caller.
   const queues = listQueues(dataRoot).map((q) => {
-    const entries = readEntries(dataRoot, q.session);
-    return { session: q.session, entries, files: outstandingFiles(dataRoot, entries.flatMap((e) => e.files)) };
+    try {
+      // `dropped` is why this is `readQueue` and not `readEntries`: an unparseable line
+      // yields a SHORT entry list with no other trace, so a queue read in part was being
+      // rendered as a queue read in full — partial buckets summed into the totals, no
+      // marker, exit 0. The one shape of the four that was silent.
+      const { entries, dropped } = readQueue(dataRoot, q.session);
+      // Named per entry, so the operator can find the bad line rather than being told the
+      // queue is "invalid". `files` is the one field every queued op must carry.
+      const paths = entries.flatMap((e, i) => {
+        if (!Array.isArray(e.files)) {
+          throw new Error(`entry ${i + 1} (id ${e.id ?? "?"}, op ${e.op ?? "?"}) has no \`files\` list`);
+        }
+        return e.files;
+      });
+      return { session: q.session, entries, dropped, files: outstandingFiles(dataRoot, paths) };
+    } catch (e) {
+      // `files: null` is the ADR-0030 marker: this queue was NOT looked at, so it carries
+      // no buckets to be summed into a total or mistaken for zeroes.
+      return { session: q.session, entries: [], dropped: [], files: null, error: e.message };
+    }
   });
   console.log(renderQueueStatus(queues, sessionId()));
-  process.exit(0);
+  // Exit 2, not 0: the report is INCOMPLETE. A caller scripting on `blaze commit --status`
+  // must be able to tell "I looked at every queue and here is the state" from "part of the
+  // board is unreadable" — the exit-code seam of the same rule the output obeys. 1 is
+  // already taken by the verb's own refusals (unknown flag, read-only, no identity, lock,
+  // branch guard), which are a different thing: those are runs that never reported at all.
+  //
+  // A PARTIALLY read queue counts as incomplete here too. It is the same condition one
+  // degree weaker, and it was the silent one: a queue that could not be opened at least
+  // announced itself, whereas a queue with one truncated line came back short and looked
+  // clean. Both make the report cover less than the board.
+  process.exit(queues.some((q) => q.error || q.dropped.length) ? 2 : 0);
 }
 
 // BLZ-121 defence-in-depth, hoisted here for the same reason as
@@ -177,6 +220,19 @@ const add = spawnSync("git", ["-C", dataRoot, "add", "--", ...files], { stdio: "
 if (add.status !== 0) bail(`blaze commit: git add failed (status ${add.status}) — ledger kept, resolve manually`);
 const commit = spawnSync("git", ["-C", dataRoot, "commit", "-m", subject, "-m", body, "--", ...files], { stdio: "inherit" });
 if (commit.status !== 0) bail(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
-for (const q of drained) clearLedger(dataRoot, q.session, q.bytes);
+// BLZ-518 review round: quarantine BEFORE the clear. `q.bytes` spans the whole file, so
+// `clearLedger` erases the lines that failed to parse along with the ops just committed —
+// the one path on which `blaze commit` can destroy a record for good. The flush still
+// proceeds (a good ledger is not held hostage by one bad line); the bytes are parked in a
+// `.corrupt` sidecar, which `listQueues` cannot pick up, and the run says so.
+for (const q of drained) {
+  if (q.dropped.length) {
+    const where = quarantineDropped(dataRoot, q.session, q.dropped);
+    console.error(
+      `blaze commit: ${q.dropped.length} unparseable line(s) in ${q.session === null ? "the shared fallback queue" : `session ${q.session}`}`
+      + ` were NOT committed — moved to ${relative(dataRoot, where)} rather than discarded`);
+  }
+  clearLedger(dataRoot, q.session, q.bytes);
+}
 releaseLock(dataRoot);
 console.log(`blaze commit: flushed ${entries.length} op(s) → ${subject}`);

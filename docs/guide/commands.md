@@ -405,7 +405,7 @@ queue rather than risk taking another session's work.
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
 | `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
-| `--status` | **Report every queue and flush nothing.** Read-only: prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). Runs under `BLAZE_READONLY=1`. | off |
+| `--status` | **Report every queue and flush nothing.** Read-only: prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read — or could read only in part — is named as such and excluded from the totals, and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
 
 ### `--status`, and the one question the ledger can answer
 
@@ -422,6 +422,39 @@ It answers exactly **one** of the three states described under
 failed prior commit or your own in-flight edit, because neither leaves a ledger
 entry, and it says so in its own output rather than letting a clean report be read
 as a clean tree. See `docs/decisions/0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`.
+
+**A queue that could not be read is reported, not fatal** (BLZ-518). A ledger entry
+with no `files` list, a queue path that is a directory, and a recorded path outside
+the board each used to throw and abort the *whole* report — on the live board, eight
+healthy queues' worth of state lost to one bad line, in exactly the situation where
+an old malformed entry is most likely. Each is now contained to its own queue, which
+is printed as `could not be read: <reason>` with `state UNKNOWN`, carries no
+outstanding/orphaned buckets, and is excluded from the totals with an explicit
+disclaimer. A path outside the board is still **refused**, never reported on — only
+the blast radius of the refusal changed. Exit codes: **0** every queue was read in
+full, **2** the report is incomplete, **1** the verb refused to run at all (unknown
+flag, `BLAZE_READONLY`, no session identity, lock held, foreign branch).
+
+**A queue read only in PART is incomplete too** — the fourth shape, and the only
+silent one. A ledger line that will not parse (classically a partial final line from
+a process killed mid-append, which is exactly the abandoned-session condition) is
+skipped rather than thrown on, so a good ledger still drains. But the skip used to
+go no further than a warning on stderr: the queue came back short and was rendered
+as fully read, its partial buckets summed into the totals, exit 0 — and a caller
+reading the exit code never saw the warning. Such a queue is now marked `PARTIALLY
+READ — N line(s) could not be parsed`, excluded from the totals with its own
+disclaimer, and exits **2**. It is not the same as `state UNKNOWN`: an unreadable
+queue yields nothing, a partial one yields every op that *did* parse, and those ops
+are real work that must still be reported.
+
+**A flush quarantines what it could not parse, rather than erasing it.** The drain
+reads the whole file to know how many bytes to clear, so clearing used to destroy an
+unparseable line along with the ops that were successfully committed — the one path
+on which `blaze commit` could lose a record for good. The flush still proceeds; the
+raw lines are appended to `.blaze/pending/<session>.corrupt` first and the run says
+so on stderr. The sidecar deliberately does not end in `.jsonl`, so it is never
+picked up as a queue — which would make the condition self-perpetuating, its
+contents being unparseable by definition.
 
 **A queue that is fully drained is deleted, not emptied** (BLZ-498). Before this,
 `blaze commit` truncated a drained queue to a zero-byte file and left it, so
