@@ -29,7 +29,7 @@
 // answer: no config, no sprints, no cutover) from "there is something and I could not read
 // it" (not an answer). Folding the two together would turn every board without an optional
 // file into a hard failure — the mirror image of the bug.
-import { openSync, fstatSync, closeSync, readFileSync, writeFileSync, constants } from "node:fs";
+import { openSync, fstatSync, closeSync, readFileSync, writeFileSync, appendFileSync, constants } from "node:fs";
 
 // O_NONBLOCK is POSIX; `constants` omits it on platforms that have no such flag, where an
 // open cannot block on a FIFO either. `|| 0` keeps the call valid there rather than NaN.
@@ -98,6 +98,46 @@ export function writeRegularFileSync(path, data) {
     const info = fstatSync(fd);
     if (!info.isFile()) throw new NotARegularFileError(path, kindOf(info), "write");
     writeFileSync(fd, data);
+  } finally {
+    closeSync(fd);
+  }
+}
+
+/** The APPEND counterpart, and it exists for the same reason the other two do rather than as
+ *  a convenience. `appendFileSync` opens the path exactly as `writeFileSync` does, so a FIFO
+ *  with no reader blocks in `open(2)` — measured through the real `reconcile()`: `EXIT=124` at
+ *  a 10s and again at a 25s `timeout`. A `try/catch` around a blocking call catches nothing,
+ *  and `node:test`'s own timeout cannot rescue it either, because that timer lives on an event
+ *  loop a synchronous open never yields to. `O_NONBLOCK` turns that into an immediate `ENXIO`,
+ *  which a best-effort caller's catch can actually see.
+ *
+ *  `O_TRUNC` is the ONLY difference from `writeRegularFileSync`, and it is why this is a
+ *  second function rather than a flag: a caller that appends must not be one flag's typo away
+ *  from emptying the file it is appending to. `O_APPEND` also makes each write atomic against
+ *  concurrent appenders up to `PIPE_BUF`, which is what lets several processes share one
+ *  destination — the census instrument's whole shape, since `node --test` runs test files in
+ *  parallel and reconcile spawns children of its own.
+ *
+ *  This writes NO TICKET and is not a second write seam (ADR-0006), on the same footing as
+ *  its `O_TRUNC` sibling: it is a primitive for a best-effort, operator-enabled, non-board
+ *  file — today the `BLZ_MEASURE` census log in `scripts/reconcile.mjs`.
+ *
+ *  REACHABILITY OF THE `isFile()` REFUSAL FROM TODAY'S ONE CALLER, stated rather than left to
+ *  look pinned. It is `O_NONBLOCK` that saves the FIFO case, not this check: the open fails
+ *  ENXIO before `fstatSync` is reached, and a directory fails EISDIR at the open for the same
+ *  reason. Deleting the line reddens nothing in the suite, because the only shape it changes
+ *  is a DEVICE NODE — `/dev/null` would silently swallow every record instead of being
+ *  refused — and `census()` swallows the refusal either way, so no run decides differently.
+ *  It is kept because its two siblings have it, because a caller that is not best-effort
+ *  would need it, and because "the census went to /dev/null" is a thing an operator should be
+ *  able to be told rather than a silence. Verified by mutation: dropping it from THIS
+ *  function alone leaves `node --test tests/reconcile*.test.mjs` green. */
+export function appendRegularFileSync(path, data) {
+  const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NONBLOCK, 0o666);
+  try {
+    const info = fstatSync(fd);
+    if (!info.isFile()) throw new NotARegularFileError(path, kindOf(info), "append to");
+    appendFileSync(fd, data);
   } finally {
     closeSync(fd);
   }

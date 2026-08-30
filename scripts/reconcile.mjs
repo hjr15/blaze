@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
+import { appendRegularFileSync } from "./model/regular-file.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { unreadableTicketDirs } from "./model/index.mjs";
 import { fsStorage } from "./model/storage.mjs";
@@ -108,9 +109,50 @@ function sh(cmd, args, opts = {}) {
 // up through `gatherProject` to `reconcile()`'s result — plus the one thing the forge half
 // does not need: a run that could not complete a probe DOES NOT GET TO REPORT A CLEAN
 // BOARD. See the CLI's `GIT UNREADABLE` block.
+// --- the census instrument (BLZ-509) ----------------------------------------------
+// THIS SHIPS, AND THAT IS THE POINT. The figures in the census below `defaultBranchRef`
+// replaced four comments that quoted "the 330 reconcile tests" and had rotted, and the
+// first cut of that replacement named a reproduction command for an instrument that lived
+// only in a scratch patch — a census that cannot be re-taken rots exactly like the numbers
+// it replaced, one round later. So the instrument is here, in the tree, and the census
+// header's command runs it.
+//
+// Off unless `BLZ_MEASURE` names a file, so a normal run pays one `process.env` read per
+// `git` invocation and writes nothing. It observes only what reconcile already does: the
+// arguments of each probe and its outcome, and the size of each `buildBranchMap` result.
+//
+// WHAT THE CATCH DOES AND DOES NOT BUY, because the first cut of this comment said "it can
+// never change a result: the write is wrapped" and that was FALSE. A `try/catch` around a
+// SYNCHRONOUS BLOCKING call catches nothing — `appendFileSync` blocks inside `open(2)` on a
+// FIFO with no reader, so the catch is never reached, and `node:test`'s timeout cannot
+// rescue it either because that timer lives on an event loop a synchronous open never
+// yields to. Measured through the real `reconcile()`: `EXIT=124` at a 10s `timeout` and
+// again at 25s. That is ADR-0031's hang class, reappearing on the write side of an
+// instrument added to make figures reproducible.
+//
+// It is not solved here. ADR-0031 already solved it, and `appendRegularFileSync` is that
+// seam's append counterpart: `O_NONBLOCK` makes the open of a FIFO fail ENXIO immediately,
+// and `fstatSync` on the OPEN DESCRIPTOR refuses a directory or a device node with
+// `NotARegularFileError`, so the catch below sees an error instead of never running. The
+// guarantee is therefore the honest one — every failure this write can produce is a THROWN
+// one, and a thrown one is swallowed. `BLZ_MEASURE` naming a relative path still writes
+// into `process.cwd()`, which is what any relative path does and is not an error.
+//
+// `if (!path) return` is a FAST PATH, not a guard any test holds, and saying so is the rule
+// (a line no mutation can kill must be described that way): deleting it leaves
+// `appendRegularFileSync(undefined, ...)` to throw into the `catch` below, so the behaviour
+// is identical and only the wasted work differs. What IS pinned is that no census file
+// appears when `BLZ_MEASURE` is unset.
+function census(record) {
+  const path = process.env.BLZ_MEASURE;
+  if (!path) return;
+  try { appendRegularFileSync(path, JSON.stringify(record) + "\n"); } catch { /* never break a run to measure it */ }
+}
+
 function gitProbe(errors, repoPath, args, opts = {}) {
   const { exitIsAnAnswer = false, severity = "error", what = "", consequence = "", ...spawnOpts } = opts;
   const r = shResult("git", ["-C", repoPath, ...args], spawnOpts);
+  census({ p: "probe", repo: repoPath, args, status: r.status, ok: r.ok });
   if (r.ok) return r.stdout;
   const ran = r.status !== null;
   if (ran && exitIsAnAnswer) return null;
@@ -570,6 +612,48 @@ export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
   return idsFromSubject(title, key).includes(id);
 }
 
+// =============================================================================
+// THE GIT-PROBE CENSUS — one place, one command, one commit (BLZ-509, ADR-0024)
+// =============================================================================
+// Three comments in this file used to quote "the 330 reconcile tests" as the corpus for a
+// measurement, and none was maintained: the suite passed 373 and then 411 while all three
+// still said 330. The suite SIZE was never the finding; the per-probe failure counts were,
+// and they belong here, together, taken in ONE run, with the command that re-takes them.
+//
+// RE-TAKE IT, DO NOT QUOTE IT. The instrument is `census()` above `gitProbe` and it SHIPS —
+// the first cut of this block named a command for a scratch patch that was never committed,
+// which is this ticket's own failure mode one layer up. It is pinned by
+// tests/reconcile-census-instrument.test.mjs.
+//
+//   BLZ_MEASURE=/tmp/census.jsonl node --test tests/reconcile*.test.mjs
+//
+// then group the `p: "probe"` rows by probe form and by `ok`/`status`.
+//
+//   on BLZ-505..509 over 5c699fe — `tests/reconcile*.test.mjs`, 412 tests, 0 fail
+//
+//   probe                                 runs   non-ok   statuses
+//   rev-parse --verify --quiet <b>         816     550    1 x534, could-not-run x16
+//   rev-parse <rev>                        611       5    128 x1,  could-not-run x4
+//   log <branch> ^<ref> --format=%s        331       1    128 x1
+//   rev-parse --abbrev-ref origin/HEAD     281     271    128 x267, could-not-run x4
+//   log <ref> --format=%x00%B              281       8    128 x4,  could-not-run x4
+//   for-each-ref                           281       4    could-not-run x4
+//   fetch --prune --quiet                   11       6    128 x6
+//
+//   buildBranchMap: 296 invocations, 632 refs listed, 323 corroborated
+//
+// `could-not-run` is `status === null` — the process never completed. It is NEVER an answer
+// and is always reported, whatever a call site's `exitIsAnAnswer` says (ADR-0030), so those
+// columns are not evidence that a guard is silencing anything. Every one of them is a
+// `blz484-*` fixture that makes `git` unrunnable on purpose.
+//
+// Two things the reader should know before comparing a fresh run against this table.
+// `tests/reconcile-census-instrument.test.mjs` redirects `BLZ_MEASURE` to its own file
+// while it runs, so its probes are deliberately absent from these totals. And the table is
+// REPRODUCIBLE now in a sense the previous one was not: every fixture that fetches uses a
+// local path, so no row here can move because a repository outside this one changed
+// (BLZ-505 — four of the six `fetch` failures used to be a live GitHub URL).
+
 // --- resolve a repo's default-branch LOG REF, preferring the remote-tracking ---
 // branch. prMap comes from live `gh pr list` and branchMap reads
 // refs/remotes/origin, so the shipped signal must read the SAME freshness — the
@@ -581,10 +665,18 @@ export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
 //
 // BLZ-484: `resolved` is the CONTROL, and it is what lets the probes below tell an answer
 // from a silence. Every candidate here is asked "does this ref exist", and for THAT question
-// a non-zero exit is the answer — measured across the 330 reconcile tests, `rev-parse
-// --verify --quiet` exits 1 on 474 occasions and `rev-parse --abbrev-ref origin/HEAD` exits
-// 128 on 239, every one of them an ordinary "no such ref" on a fixture repo. So those exits
-// stay silent (`exitIsAnAnswer`), and only a probe that could not RUN is reported.
+// a non-zero exit is the answer: across `tests/reconcile*.test.mjs`, `rev-parse --verify
+// --quiet` exits 1 and `rev-parse --abbrev-ref origin/HEAD` exits 128 in the hundreds, every
+// one an ordinary "no such ref" on a fixture repo. So those exits stay silent
+// (`exitIsAnAnswer`), and only a probe that could not RUN is reported — which is a distinct
+// population and does still occur, on the four `blz484-*` fixtures that make `git` unrunnable
+// on purpose.
+//
+// BLZ-509: the counts that used to be in the sentence above are in the table at the bottom
+// of this file, taken in one instrumented run and pinned to the commit that produced them.
+// Three comments in this file quoted "the 330 reconcile tests" as if it were a constant; the
+// suite passed 373 and then 407 while they still said 330. A figure a reader trusts, that
+// nothing keeps true, belongs in ONE place with a SHA on it.
 //
 // What must NOT stay silent is the fall-through. Returning the bare string "main" told every
 // caller "the default branch is main" when what happened is that nothing resolved — so
@@ -861,6 +953,7 @@ export function buildBranchMap(refs, idFromRef, { key, shippedSet, inspect }) {
     if (!corroborated) continue;
     branchMap.set(id, ref);
   }
+  census({ p: "branchMap", refs: (refs || []).length, corroborated: branchMap.size });
   return branchMap;
 }
 
@@ -1174,10 +1267,12 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // of failure into "this repo has shipped nothing", and `decide` reads `shipped` to move a
   // bundled child to `done` — so a `git` that could not fork produced a board that looked
   // in sync. A non-zero exit is NOT an answer here: "I could not enumerate the commits on
-  // this ref" is never "this ref has no commits". Measured across the 330 reconcile tests,
-  // this probe fails zero times today, so nothing in the suite relied on the laundering.
-  // The one expected failure — `ref` is the "main" guess because nothing resolved — is
-  // already reported above, so it is not reported twice.
+  // this ref" is never "this ref has no commits". BLZ-484 read this probe as failing zero
+  // times, so nothing in the suite relied on the laundering; BLZ-509 re-derived it and that
+  // is no longer true — see the table at the bottom of this file. Every one of its failures
+  // is an expected one: four on fixtures where `git` cannot run at all (always reported,
+  // whatever `exitIsAnAnswer` says), and four exiting 128 because `ref` is the "main" guess
+  // and nothing resolved — already reported above by name, so not reported twice.
   const log = gitProbe(gitErrors, repoPath, ["log", ref, "--format=%x00%B"], {
     exitIsAnAnswer: !resolved,
     what: "Blaze reads the default branch's whole commit log to learn which tickets shipped.",
@@ -1199,8 +1294,10 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   const candidates = corroboratedByTicket(prs, idFromRef, shippedSet);
 
   // BLZ-484: same rule. "I could not list the refs" is never "this repo has no branches",
-  // and an empty branch set is what makes every branch-derived signal disappear. Zero
-  // failures across the 330 reconcile tests.
+  // and an empty branch set is what makes every branch-derived signal disappear. It never
+  // exits non-zero across `tests/reconcile*.test.mjs` — its only failures are the four
+  // `blz484-*` fixtures where `git` cannot run, which is exactly the case this rule exists
+  // for. Figures in the table at the bottom of this file (BLZ-509).
   const listed = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname)",
     "refs/heads", "refs/remotes/origin"], {
     what: "Blaze lists every local and origin ref to find the branches carrying ticket ids.",

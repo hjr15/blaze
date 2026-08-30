@@ -159,12 +159,14 @@ describe("BLZ-484: a git probe that could not RUN is not a git probe that found 
   });
 
   test("a probe that RAN and answered no is still silent — the discrimination, not just the alarm", async () => {
-    // The negative side, and the reason this is not simply "report every failure". Measured
-    // across the 330 reconcile tests on the parent commit, `git rev-parse --verify --quiet`
-    // exits 1 on 474 occasions and `rev-parse --abbrev-ref origin/HEAD` exits 128 on 239 —
-    // every one an ordinary "no such ref" on a fixture repo with no origin. If those were
-    // reported, every run on this suite would print a git condition and the real one would
-    // be buried. `origin/HEAD` and `origin/main` do not exist in this fixture, so both
+    // The negative side, and the reason this is not simply "report every failure". Across
+    // the reconcile suite `git rev-parse --verify --quiet` exits 1, and `rev-parse
+    // --abbrev-ref origin/HEAD` exits 128, in the hundreds — every one an ordinary "no such
+    // ref" on a fixture repo with no origin. If those were reported, every run on this suite
+    // would print a git condition and the real one would be buried. (BLZ-509: this comment
+    // used to carry the counts and a pin reading "the parent commit", which names nothing a
+    // reader can check out. The counts live in ONE place now, with a SHA: the git-probe
+    // census at the top of `defaultBranchRef` in scripts/reconcile.mjs.) `origin/HEAD` and `origin/main` do not exist in this fixture, so both
     // probes fail here, by exit code, and neither may say a word.
     const tmp = mkdtempSync(join(tmpdir(), "blz484-answered-"));
     try {
