@@ -1201,7 +1201,7 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // BLZ-484: same rule. "I could not list the refs" is never "this repo has no branches",
   // and an empty branch set is what makes every branch-derived signal disappear. Zero
   // failures across the 330 reconcile tests.
-  const listed = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname:short)",
+  const listed = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname)",
     "refs/heads", "refs/remotes/origin"], {
     what: "Blaze lists every local and origin ref to find the branches carrying ticket ids.",
     consequence: "The branch set is UNKNOWN for this repo, not empty — no branch signal reaches `decide`, and the absence of one is not evidence.",
@@ -1243,6 +1243,9 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // beside a remote-tracking `origin/<x>` renders ONE string for two different refs, and
   // `%(refname:short)` cannot separate them at all. That needs the full namespace split
   // (`%(refname)`), which is BLZ-506's job and not this ticket's.
+  //   — CLOSED by BLZ-506 below, which also corrects this paragraph: the two do NOT render
+  //     as one string once both exist. `shorten_unambiguous_ref` disambiguates them, and
+  //     the rendering it produces depends on which other refs are present.
   //
   // MEASURED BEFORE IT SHIPPED (BLZ-353), because this changes WHICH branches corroborate.
   // Every `buildBranchMap` result across the reconcile suite, at 1b00f3a and at round 2:
@@ -1283,16 +1286,126 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // not a proof about shapes the suite does not contain. The shape is measured directly
   // instead, on the construction below: 1b00f3a moves INF-1, round 1 moves nothing, round 2
   // moves INF-1 again. Pinned by the "BLZ-492 round 2" suite.
+  // BLZ-506: THE NAMESPACE IS THE ANSWER, AND `%(refname:short)` DOES NOT CARRY IT.
+  //
+  // Everything above this line was written against `%(refname:short)` and a text rule that
+  // stripped a leading `origin/`. BLZ-506 replaces both with the full ref path, and the
+  // reason is not the one its ticket gave. The ticket said `refs/heads/origin/x` and
+  // `refs/remotes/origin/x` "render identically" as `origin/x`. THEY DO NOT: git's
+  // `shorten_unambiguous_ref` disambiguates them the moment both exist, into
+  // `heads/origin/x` and `remotes/origin/x`. What is actually wrong is worse, because the
+  // rendering is CONTEXT-DEPENDENT — the same ref renders differently depending on which
+  // OTHER refs are in the repository:
+  //
+  //   refs/remotes/origin/task/INF-1-work  alone      -> "origin/task/INF-1-work"
+  //                                        shadowed   -> "remotes/origin/task/INF-1-work"
+  //   refs/heads/origin/INF-2-shadow       alone      -> "origin/INF-2-shadow"
+  //                                        shadowed   -> "heads/origin/INF-2-shadow"
+  //
+  // So the `origin/` strip is a text rule applied to a spelling that moves under it, and
+  // the BRANCH NAME it produced — the string `decide` writes into a ticket's `branch:`
+  // field, permanently — moved with it. Measured on the constructions in
+  // tests/reconcile-refname-namespace.test.mjs, at be4b110: a shadowed remote-only branch
+  // was recorded as `remotes/origin/task/INF-1-work`, which is a ref spelling and not a
+  // branch name; and a lone local head genuinely called `origin/INF-2-shadow` was recorded
+  // as `INF-2-shadow`, a name nothing in the repository answers to. Neither is a name a
+  // person can check out, and `pr`/`branch` are not in EDITABLE_FIELDS, so both persist.
+  //
+  // `%(refname)` is the same string whatever else exists. From it BOTH questions are
+  // answered exactly once, by the namespace rather than by the spelling:
+  //
+  //   the NAME     — `refs/heads/<n>` and `refs/remotes/origin/<n>` are both the branch
+  //                  `<n>`, which is what makes a branch that exists locally and on the
+  //                  remote ONE branch. A local head under `refs/heads/origin/<n>` is a
+  //                  branch genuinely called `origin/<n>`, and is named as such.
+  //   the QUESTION — the full ref path, which `git` resolves with no ambiguity and no
+  //                  warning. This is BLZ-492's fix, made total: `askable` no longer holds
+  //                  a display string that git has to guess at.
+  //
+  // ORDER IS STILL A DECISION, AND IT IS MADE EXPLICITLY RATHER THAN INHERITED FROM THE
+  // SORT. That is BLZ-492's round-2 lesson: round 1 said "`for-each-ref` lists
+  // `refs/heads/…` before `refs/remotes/…`, so a local ref always wins", and the sort is on
+  // the FULL refname, so `refs/heads/origin/task/…` sorts before `refs/heads/task/…` and the
+  // stale namesake won instead. Round 2 patched that with a tie-break; here the ranking IS
+  // the rule, and the listing order is not consulted at all:
+  //
+  //   0  an ordinary local head        `refs/heads/<n>`             — the branch, on disk
+  //   1  an origin remote-tracking ref `refs/remotes/origin/<n>`    — the same branch, on
+  //                                                                   the remote; rank 0
+  //                                                                   wins the name so a
+  //                                                                   branch that exists in
+  //                                                                   both places is ONE
+  //                                                                   branch, read locally
+  //   2  a local head under `origin/`  `refs/heads/origin/<n>`      — a branch genuinely
+  //                                                                   called `origin/<n>`,
+  //                                                                   and last, so it can
+  //                                                                   never take an id from
+  //                                                                   a real branch
+  //
+  // `buildBranchMap` takes the first ref that CORROBORATES for an id, so rank 2 being last
+  // is what stops a FRESH stale namesake — one whose tip is the default tip, which
+  // corroborates on its own terms — from claiming the id and being written into the ticket.
+  // Pinned by "a FRESH shadow does not take the slot from the branch that carries the work";
+  // the two other shadow tests do NOT hold it, because a shadow that fails to corroborate
+  // falls through whatever the order.
+  // MEASURED BEFORE IT SHIPPED (BLZ-353), because this changes WHICH branches corroborate
+  // and what they are CALLED. Instrumented `buildBranchMap` across `tests/reconcile*.test.mjs`
+  // (the pre-existing files, excluding this ticket's own), at c77547d and at this commit:
+  //
+  //   invocations 288 -> 288    corroborated 314 -> 314    refs listed 613 -> 612
+  //
+  // Corroboration does not move at all. The single ref that goes is the phantom `origin`
+  // described below.
+  //
+  // WHAT THAT MEASUREMENT WAS INCAPABLE OF OBSERVING, which is the whole of its value here.
+  // A suite-wide delta can only see shapes the suite contains, and the shape this changes is
+  // a ref under `refs/heads/origin/`. The pre-existing suite contains exactly one fixture
+  // with any (`shadowedByOriginNamedLocalBranch`, BLZ-492 round 2) and it has NO REMOTE AT
+  // ALL — so the case the ticket is actually about, a local `origin/<x>` beside a
+  // remote-tracking `origin/<x>`, appears nowhere in it and the 314 -> 314 reading is
+  // structurally blind to it. It is evidence of NO COLLATERAL DAMAGE and nothing else. The
+  // shapes themselves are measured directly, on the four constructions in
+  // tests/reconcile-refname-namespace.test.mjs, each of which reads a different wrong answer
+  // out of the pre-BLZ-506 code:
+  //
+  //   shadowed remote-only   `branch: remotes/origin/task/INF-1-work`  (a ref spelling)
+  //   lone origin/<x> head   `branch: INF-2-shadow`                    (no such branch)
+  //   FRESH shadow           takes INF-1's slot from the real branch
+  //   local + remote twin    held only by `for-each-ref`'s sort order, by nothing else
+  //
+  // This is the same trap BLZ-492's round 1 fell into — a suite-wide figure quoted as a
+  // proof about a shape the suite does not contain — and it is why the figure above is
+  // reported with what it cannot see attached to it.
+  const HEADS = "refs/heads/", REMOTE = "refs/remotes/origin/";
+  const named = [];
+  for (const full of listed) {
+    if (full.startsWith(HEADS)) named.push({ name: full.slice(HEADS.length), full, local: true });
+    else if (full.startsWith(REMOTE)) named.push({ name: full.slice(REMOTE.length), full, local: false });
+    // Anything else is neither a branch nor an origin remote-tracking ref, and this listing
+    // asked for nothing else.
+  }
+  const rankOf = (e) => (e.local ? (e.name.startsWith("origin/") ? 2 : 0) : 1);
   const refs = [];
   const askable = new Map();
-  for (const raw of listed) {
-    const name = raw.replace(/^origin\//, "");
-    if (!name || name === "HEAD") continue;
-    if (!askable.has(name)) { askable.set(name, raw); refs.push(name); }
-    // ROUND 2 (review). `raw === name` means nothing was stripped, and a ref under
-    // `refs/remotes/origin` always renders WITH the prefix — so this raw ref is an exact
-    // local head, and it outranks any stripped ref that claimed the same slot before it.
-    else if (raw === name) askable.set(name, raw);
+  for (const pass of [0, 1, 2]) {
+    for (const e of named) {
+      if (rankOf(e) !== pass) continue;
+      // `refs/remotes/origin/HEAD` is the remote's default-branch POINTER, not a branch.
+      // Under `%(refname:short)` it rendered as the bare string `origin`, which the old
+      // `origin/`-strip left alone and the old `name === "HEAD"` check therefore never
+      // caught — so every repo with an `origin/HEAD` carried a phantom branch called
+      // `origin` in its ref list. Full refnames make it say what it is. (Measured across
+      // `tests/reconcile*.test.mjs` at be4b110: the suite-wide ref count falls 613 -> 612.)
+      //
+      // NOT PINNED, AND SAID SO. Deleting this line reddens nothing, here or anywhere:
+      // `idFromRef("origin")` is null for every project key, so the phantom entry can never
+      // claim a ticket and no construction turns it into a behaviour difference. It costs
+      // two wasted `git` probes per repo and a wrong ref count. Described, not implied held.
+      if (!e.name || e.name === "HEAD") continue;
+      if (askable.has(e.name)) continue;
+      askable.set(e.name, e.full);
+      refs.push(e.name);
+    }
   }
 
   // What the branch itself says: the subjects unique to it (not already on the
