@@ -292,13 +292,42 @@ also stored on the index (`idx.warnings`) for any consumer that wants them.
 
 Sessions isolate **by default** when the caller has a session identity — you
 don't need to set anything for two agents on the same board to stay out of
-each other's way. Batch ops queue to `.blaze/pending/<session>.jsonl`, where
+each other's way. Batch ops queue to `<store>/.blaze/pending/<session>.jsonl`, where
 `<session>` is `BLAZE_SESSION` if set, else `auto-<harness session id>` when
 the agent harness exposes one (stable across invocations and inherited by
 every descendant, unlike `process.ppid` — a fresh shell per command means a
 fresh pid, not a stable per-session identity). With neither set, there is no
 reliable identity to derive a queue name from: the op queues to the shared
 `.blaze/pending-commit.jsonl` fallback instead (see below).
+
+**The store is one per REPOSITORY, not one per working copy** (BLZ-556, ADR-0033).
+`<store>` is `.blaze/` beside the repository's shared `.git` — i.e. the main
+checkout — so every linked worktree of the board writes to and reads from the
+same queues. `blaze commit --status` prints the store it resolved on its first
+line. Before this, `.blaze/pending/` was resolved against whichever working copy
+you happened to be in, and 210 ops ended up scattered across four of them while
+the nightly flush drained the one it mounts (19) and reported success.
+
+One store means you can now SEE every worktree's ops. It does not mean you may
+commit them: an op's files exist in the checkout that queued it and nowhere else,
+so `blaze commit` drains only the ops queued in **its own** working tree, leaves
+the rest in place byte-for-byte, names which working tree they belong to, and
+exits **3**. Run `blaze commit` from that worktree to flush them. Exit 3 means
+"flushed what this tree could reach, and there is more it cannot" — distinct from
+1 (a refusal) and 2 (`--status` reporting incompletely).
+
+Every queued op records its working tree, including the main checkout, which records
+the empty string. That matters on a **detached HEAD** (rebase, bisect, `checkout
+<sha>`, a detached review worktree): no branch is recorded there, so the working tree
+is the op's only provenance, and omitting it would let any other worktree drain and
+delete the op. `blaze commit` also takes the lock on the **store** as well as on its
+own working tree, so two worktrees can never drain one queue file at the same time.
+
+If you are upgrading a board that queued ops before this change, they are still in
+each working copy's own `.blaze/` and nothing reads them there. `blaze commit`
+names them and refuses to report success; migrate them with
+[the queue-store migration procedure](https://github.com/hjr15/blaze/blob/main/docs/operations/queue-store-migration.md).
+The engine never moves, merges or deletes a queue file.
 
 - `blaze commit` flushes **only your queue** — a parallel *session*'s queued WIP
   never rides your commit, whether or not either of you set `BLAZE_SESSION`.

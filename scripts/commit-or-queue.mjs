@@ -3,7 +3,7 @@
 // scoped to exactly the touched files (never `git add -A`).
 import { relative } from "node:path";
 import { commitFile } from "./serve-commit.mjs";
-import { appendEntry, sessionId } from "./pending-ledger.mjs";
+import { appendEntry, sessionId, queueRoot } from "./pending-ledger.mjs";
 import { assertWritable } from "./readonly.mjs";
 import { currentBranch } from "./branch-guard.mjs";
 import { OP_LABEL } from "./commit-summary.mjs";
@@ -32,6 +32,25 @@ export function commitOrQueue({ root, mode, op, id, ids = null, message, files, 
     // on — which is exactly the shape of the CRP-51/INF-663/INF-748 incidents,
     // where a parallel lane changed the shared checkout's branch in between.
     const branch = currentBranch(root);
+    // BLZ-556: which WORKING TREE this op's files were written in, relative to the shared
+    // queue store. One store now serves every worktree of the repo, so an op has to say
+    // where its files are: they exist in the checkout that queued it and nowhere else, and
+    // a flush elsewhere would stage nothing for them and then clear the queue.
+    //
+    // Recorded UNCONDITIONALLY, including the empty string that means "the main working
+    // tree". Omitting it there — to keep the ledger shape unchanged for the ordinary case —
+    // was a defect, not a saving: `currentBranch` returns null on a DETACHED HEAD, so a main
+    // checkout mid-rebase, mid-bisect, on `checkout <sha>`, or in any detached review
+    // worktree recorded neither field, and `belongsHere`'s last line ("neither field: a
+    // pre-INF-673 op, treated as this tree's") then made "queued in the main tree" and "no
+    // provenance at all" the same signal. Any other worktree would drain that op, stage
+    // nothing for it, and delete the record — at the flush, on the default branch, where
+    // `checkBranch` is not a backstop. `belongsHere` compares `"" === here.worktree`, so the
+    // empty string is a real answer and carries its own meaning.
+    //
+    // Recorded RELATIVE so it still means something inside the flush CronJob's container,
+    // where the board is mounted at a different absolute path.
+    const worktree = relative(queueRoot(root), root);
     appendEntry(root, {
       id,
       op,
@@ -45,6 +64,7 @@ export function commitOrQueue({ root, mode, op, id, ids = null, message, files, 
       ts: new Date().toISOString(),
       ...(session ? { session } : {}),
       ...(branch ? { branch } : {}),
+      worktree,
     }, session);
     return { ok: true, committed: false, queued: true };
   }
