@@ -94,8 +94,11 @@ flowchart TB
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
-  `commitFile` reports `{ ok, committed, … }`: `ok` answers "did this go wrong",
-  `committed` answers "is there a new commit". They differ on the benign empty-diff
+  `commitFile` reports `{ ok, committed, step, … }`: `ok` answers "did this go wrong",
+  `committed` answers "is there a new commit", and `step` (`"add"` | `"commit"`)
+  answers WHICH git call refused — carried rather than reconstructed, because `git
+  add` returns first and its failures were being reported under `git commit`'s name
+  (BLZ-502). They differ on the benign empty-diff
   no-op — an idempotent re-write whose staged tree already matches HEAD — which is
   `ok: true, committed: false, noop: true` and must never be reported as a commit
   (BLZ-422). Every verb's success line names that outcome via `commitSuffix`, the
