@@ -405,7 +405,7 @@ queue rather than risk taking another session's work.
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
 | `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
-| `--status` | **Report every queue and flush nothing.** Read-only: prints each queue's op count and age, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). Runs under `BLAZE_READONLY=1`. | off |
+| `--status` | **Report every queue and flush nothing.** Read-only: prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). Runs under `BLAZE_READONLY=1`. | off |
 
 ### `--status`, and the one question the ledger can answer
 
@@ -422,6 +422,14 @@ It answers exactly **one** of the three states described under
 failed prior commit or your own in-flight edit, because neither leaves a ledger
 entry, and it says so in its own output rather than letting a clean report be read
 as a clean tree. See `docs/decisions/0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`.
+
+**A queue that is fully drained is deleted, not emptied** (BLZ-498). Before this,
+`blaze commit` truncated a drained queue to a zero-byte file and left it, so
+`.blaze/pending/` grew by one entry for every session that had ever run and never
+shrank — 28 queues in one checkout of this project's own board, 14 in another. A
+queue with nothing left in it is not evidence of anything, and keeping it inflates
+every count taken over the queue list. A queue only *partially* drained (an op
+arrived from another session mid-commit) keeps both its file and those bytes.
 
 ### The subject line counts TICKETS, and used to count ops
 

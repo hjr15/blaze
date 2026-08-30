@@ -51,7 +51,7 @@ if (status) {
     const entries = readEntries(dataRoot, q.session);
     return { session: q.session, entries, files: outstandingFiles(dataRoot, entries.flatMap((e) => e.files)) };
   });
-  console.log(renderQueueStatus(queues));
+  console.log(renderQueueStatus(queues, sessionId()));
   process.exit(0);
 }
 

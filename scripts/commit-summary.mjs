@@ -61,7 +61,19 @@ export function summarizeEntries(entries) {
  *  (it resolves roots, parses argv and exits), so nothing in it can be imported and no test
  *  can reach its text. This is pure and importable, so the wording is drivable directly.
  *
- *  `queues` is `[{ session, entries, files: { outstanding, settled, absent } }]`.
+ *  `queues` is `[{ session, entries, files: { outstanding, settled, absent } }]`, and
+ *  `mySession` is the queue name the CALLER's own session id resolves to (null when it has
+ *  none, which is the shared fallback).
+ *
+ *  BLZ-498 AC1 asks that "a queue's age and owner are visible without reading the ledger by
+ *  hand". Two clauses do that, and neither is decoration:
+ *    - `(yours)` — of the eight orphaned queues on the live board, exactly one is the
+ *      caller's; without the marker an operator has to derive `auto-$CLAUDE_CODE_SESSION_ID`
+ *      themselves to know which line `blaze commit` would act on and which needs `--all`.
+ *    - `N.N d old` — measured from the NEWEST op, i.e. when the queue was last touched, so
+ *      it answers "is this session still going" rather than "when did it start". The
+ *      previous output gave only an ISO `oldest` stamp, leaving the age to be subtracted by
+ *      hand; that is a large part of why 185 ops sat unexamined across five nightly runs.
  *
  *  WHAT THIS DELIBERATELY DOES NOT SAY. The ledger answers exactly one of the three board
  *  states BLZ-404 round 4 conflated: a write blaze queued BY DESIGN. It cannot distinguish
@@ -70,7 +82,7 @@ export function summarizeEntries(entries) {
  *  `batch` board a failed flush KEEPS a queue byte-identical to a healthy one. Round 4's
  *  detector claimed to separate three states and separated none; this one names its own
  *  blind spot in its own output instead, which is what ADR-0030 and BLZ-433 ask for. */
-export function renderQueueStatus(queues) {
+export function renderQueueStatus(queues, mySession = undefined) {
   const L = ["blaze commit --status: read-only — nothing was committed, queued or cleared."];
   const ops = queues.reduce((n, q) => n + q.entries.length, 0);
   if (ops === 0) {
@@ -79,9 +91,14 @@ export function renderQueueStatus(queues) {
     L.push("", `  ${queues.length} queue(s) holding ${ops} op(s).`, "");
     for (const q of queues) {
       const name = q.session === null ? "(shared fallback queue — no session identity)" : q.session;
+      // `undefined` means the caller did not say who it is, so nothing is claimed either
+      // way; `null` is a real answer (no session identity => the shared fallback IS yours).
+      const own = mySession !== undefined && q.session === mySession ? "  (yours)" : "";
       const stamps = q.entries.map((e) => e.ts).filter(Boolean).sort();
-      const when = stamps.length ? `  oldest ${stamps[0]}` : "";
-      L.push(`  ${name}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
+      const newest = stamps.length ? Date.parse(stamps[stamps.length - 1]) : NaN;
+      const age = Number.isNaN(newest) ? "" : `, ${((Date.now() - newest) / 86400000).toFixed(1)} d old`;
+      const when = stamps.length ? `  oldest ${stamps[0]}${age}` : "";
+      L.push(`  ${name}${own}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
       const { outstanding, settled, absent } = q.files;
       L.push(`      outstanding: ${outstanding.length} file(s) still differ from HEAD`);
       L.push(`      orphaned:    ${settled.length} file(s) already match HEAD — filed by something else`);
