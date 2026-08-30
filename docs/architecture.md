@@ -77,7 +77,7 @@ flowchart TB
   `log`, `commit`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
   `*-runner.mjs` that wraps a pure `apply*`/model core and then commits via
   `commit-or-queue.mjs` (per-op commit, or a queued entry in `batch` mode —
-  session-keyed to `.blaze/pending/<session>.jsonl` since v0.4.0, where
+  session-keyed to `<store>/.blaze/pending/<session>.jsonl` since v0.4.0, where
   `<session>` is `BLAZE_SESSION` if set, else auto-derived from the agent
   harness's own session id, else the shared legacy fallback when neither is
   present — so `blaze commit` flushes only the caller's queue, refusing the
@@ -88,6 +88,15 @@ flowchart TB
   (BLZ-498). Those are not competing claims — they are the same rule, "drain
   exactly the queue your own session id resolves to", seen at its two boundaries,
   and `tests/commit-session-queue-scope.test.mjs` observes both in a single run.
+  `<store>` is **the repository, not the working copy** (BLZ-556, ADR-0033):
+  `.blaze/` beside the common `.git`, so every linked worktree shares one set of
+  queues and the flush's existing mount is the only store there is. The resolver is
+  guarded — a bare repo, a submodule and an ambient `GIT_DIR` each resolve
+  `--git-common-dir` somewhere whose parent is not a working tree of this repo — and
+  falls back to the invoking root rather than guessing. Because one store now exposes
+  every worktree's ops, the drain is provenance-aware: it commits only the ops queued
+  in its own working tree (their files exist nowhere else), rewrites the rest
+  byte-for-byte, and exits 3 rather than reporting a flush that left work behind.
   A queue that is fully drained is **removed**, not truncated to an empty file, so
   a finished session stops leaving one behind forever (BLZ-498); a partial drain
   keeps its file and its undrained bytes.

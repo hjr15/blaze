@@ -436,12 +436,23 @@ from the agent harness session when that's unset. If there is no session identit
 at all and you pass neither flag, `commit` refuses to drain the shared fallback
 queue rather than risk taking another session's work.
 
+The queue store is **one per repository** — `.blaze/` beside the shared `.git`, so
+every worktree of the board reads and writes the same queues (BLZ-556, ADR-0033).
+Seeing another worktree's ops is not permission to commit them: their files exist
+only in the checkout that queued them, so `commit` drains just its own working
+tree's ops, leaves the rest untouched, names where they belong, and **exits 3**.
+Exit 3 means "flushed what this working tree could reach; ops remain that it
+cannot" — 1 is a refusal (nothing happened), 2 is `--status` reporting
+incompletely. Ops left in a pre-BLZ-556 per-working-copy store are reported the
+same way; migrate them with
+[queue-store-migration](../operations/queue-store-migration.md).
+
 | Flag | Meaning | Default |
 |---|---|---|
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
 | `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
-| `--status` | **Report every queue and flush nothing.** Read-only: prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read is named as such and excluded from the totals, and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
+| `--status` | **Report every queue and flush nothing.** Read-only: names the resolved queue store on its first line, then prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read is named as such and excluded from the totals, and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
 
 ### `--status`, and the one question the ledger can answer
 
