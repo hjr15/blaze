@@ -512,8 +512,15 @@ describe("BLZ-518: --status degrades per queue instead of aborting the whole rep
     try {
       mkdirSync(ledgerPath(root, BROKEN), { recursive: true });
       const r = runStatus(root, { session: HEALTHY });
-      assert.doesNotMatch(r.stderr, /EISDIR/, "a directory where a queue should be must not surface as a raw errno stack");
-      assert.match(blockFor(r.stdout, BROKEN), /could not be read: .*EISDIR/,
+      assert.doesNotMatch(r.stderr, /at readFileSync|^\s+at /m, "a directory where a queue should be must not surface as a raw stack");
+      // BLZ-556: the PROPERTY is "reported as unreadable and excluded from the totals", not the
+      // errno spelling. The ledger's reads now go through ADR-0031's `readRegularFileSync`
+      // (BLZ-556 widened the FIFO exposure from one checkout to every worktree sharing the one
+      // store), which refuses a non-regular file from the open descriptor BEFORE `readFileSync`
+      // can raise EISDIR — so the message now names it as a directory, which is strictly more
+      // useful. Matching either spelling keeps this pinned to the behaviour rather than to the
+      // wording of whichever layer refuses first.
+      assert.match(blockFor(r.stdout, BROKEN), /could not be read: .*(EISDIR|is a directory, not a regular file)/,
         "named, unreadable, and carrying the reason it could not be read");
       assertHealthyStillReported(r.stdout);
     } finally { rmSync(root, { recursive: true, force: true }); }
