@@ -82,11 +82,23 @@ flowchart TB
   harness's own session id, else the shared legacy fallback when neither is
   present — so `blaze commit` flushes only the caller's queue, refusing the
   fallback without `--shared`, and `--all` sweeps them all unconditionally).
+  The harness id is **inherited by every descendant process**, so a session and all
+  of its subagents resolve to ONE queue: any of them flushing takes all of them
+  (BLZ-124), while a different top-level session's queue is never looked at
+  (BLZ-498). Those are not competing claims — they are the same rule, "drain
+  exactly the queue your own session id resolves to", seen at its two boundaries,
+  and `tests/commit-session-queue-scope.test.mjs` observes both in a single run.
+  A queue that is fully drained is **removed**, not truncated to an empty file, so
+  a finished session stops leaving one behind forever (BLZ-498); a partial drain
+  keeps its file and its undrained bytes.
   Both git-write surfaces serialize on the advisory `commit-lock.mjs`
   (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
   "Sessions (parallel agents on one board)".
-  `commitFile` reports `{ ok, committed, … }`: `ok` answers "did this go wrong",
-  `committed` answers "is there a new commit". They differ on the benign empty-diff
+  `commitFile` reports `{ ok, committed, step, … }`: `ok` answers "did this go wrong",
+  `committed` answers "is there a new commit", and `step` (`"add"` | `"commit"`)
+  answers WHICH git call refused — carried rather than reconstructed, because `git
+  add` returns first and its failures were being reported under `git commit`'s name
+  (BLZ-502). They differ on the benign empty-diff
   no-op — an idempotent re-write whose staged tree already matches HEAD — which is
   `ok: true, committed: false, noop: true` and must never be reported as a commit
   (BLZ-422). Every verb's success line names that outcome via `commitSuffix`, the

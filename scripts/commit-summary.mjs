@@ -61,7 +61,19 @@ export function summarizeEntries(entries) {
  *  (it resolves roots, parses argv and exits), so nothing in it can be imported and no test
  *  can reach its text. This is pure and importable, so the wording is drivable directly.
  *
- *  `queues` is `[{ session, entries, files: { outstanding, settled, absent } }]`.
+ *  `queues` is `[{ session, entries, files: { outstanding, settled, absent } }]`, and
+ *  `mySession` is the queue name the CALLER's own session id resolves to (null when it has
+ *  none, which is the shared fallback).
+ *
+ *  BLZ-498 AC1 asks that "a queue's age and owner are visible without reading the ledger by
+ *  hand". Two clauses do that, and neither is decoration:
+ *    - `(yours)` — of the eight orphaned queues on the live board, exactly one is the
+ *      caller's; without the marker an operator has to derive `auto-$CLAUDE_CODE_SESSION_ID`
+ *      themselves to know which line `blaze commit` would act on and which needs `--all`.
+ *    - `N.N d old` — measured from the NEWEST op, i.e. when the queue was last touched, so
+ *      it answers "is this session still going" rather than "when did it start". The
+ *      previous output gave only an ISO `oldest` stamp, leaving the age to be subtracted by
+ *      hand; that is a large part of why 185 ops sat unexamined across five nightly runs.
  *
  *  WHAT THIS DELIBERATELY DOES NOT SAY. The ledger answers exactly one of the three board
  *  states BLZ-404 round 4 conflated: a write blaze queued BY DESIGN. It cannot distinguish
@@ -70,26 +82,48 @@ export function summarizeEntries(entries) {
  *  `batch` board a failed flush KEEPS a queue byte-identical to a healthy one. Round 4's
  *  detector claimed to separate three states and separated none; this one names its own
  *  blind spot in its own output instead, which is what ADR-0030 and BLZ-433 ask for. */
-export function renderQueueStatus(queues) {
+export function renderQueueStatus(queues, mySession = undefined) {
   const L = ["blaze commit --status: read-only — nothing was committed, queued or cleared."];
   const ops = queues.reduce((n, q) => n + q.entries.length, 0);
-  if (ops === 0) {
+  // BLZ-518 / ADR-0030. A queue carrying `error` was NOT read, so it is not evidence of
+  // zero ops. Without this, a board whose only queue is malformed printed "Nothing queued —
+  // 0 op(s) on 0 queue(s)": a run that could not look, saying exactly what a run that
+  // looked and found nothing says.
+  const unreadable = queues.filter((q) => q.error);
+  if (ops === 0 && unreadable.length === 0) {
     L.push("", "  Nothing queued — 0 op(s) on 0 queue(s).");
   } else {
-    L.push("", `  ${queues.length} queue(s) holding ${ops} op(s).`, "");
+    const readable = queues.length - unreadable.length;
+    L.push("", `  ${readable} readable queue(s) holding ${ops} op(s).`, "");
     for (const q of queues) {
       const name = q.session === null ? "(shared fallback queue — no session identity)" : q.session;
+      if (q.error) {
+        // Named, with its reason, and with NO buckets — an unreadable queue must not be
+        // rendered in the same shape as one that was read and found clean.
+        L.push(`  ${name}${mySession !== undefined && q.session === mySession ? "  (yours)" : ""}  —  could not be read: ${q.error}`);
+        L.push("      state UNKNOWN — this queue is not counted in the totals below");
+        L.push("");
+        continue;
+      }
+      // `undefined` means the caller did not say who it is, so nothing is claimed either
+      // way; `null` is a real answer (no session identity => the shared fallback IS yours).
+      const own = mySession !== undefined && q.session === mySession ? "  (yours)" : "";
       const stamps = q.entries.map((e) => e.ts).filter(Boolean).sort();
-      const when = stamps.length ? `  oldest ${stamps[0]}` : "";
-      L.push(`  ${name}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
+      const newest = stamps.length ? Date.parse(stamps[stamps.length - 1]) : NaN;
+      const age = Number.isNaN(newest) ? "" : `, ${((Date.now() - newest) / 86400000).toFixed(1)} d old`;
+      const when = stamps.length ? `  oldest ${stamps[0]}${age}` : "";
+      L.push(`  ${name}${own}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
       const { outstanding, settled, absent } = q.files;
       L.push(`      outstanding: ${outstanding.length} file(s) still differ from HEAD`);
       L.push(`      orphaned:    ${settled.length} file(s) already match HEAD — filed by something else`);
       if (absent.length) L.push(`      superseded:  ${absent.length} file(s) relocated again within a batch`);
       L.push("");
     }
-    const tot = (k) => queues.reduce((n, q) => n + q.files[k].length, 0);
-    L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${queues.length} queue(s).`);
+    const tot = (k) => queues.reduce((n, q) => n + (q.error ? 0 : q.files[k].length), 0);
+    L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${readable} readable queue(s).`);
+    if (unreadable.length) {
+      L.push(`  ${unreadable.length} queue(s) could not be read — the totals above DO NOT cover them.`);
+    }
     L.push("  Flush your own queue with `blaze commit`, or every queue with `blaze commit --all`.");
   }
   L.push("",

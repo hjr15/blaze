@@ -2,7 +2,7 @@
 // for batch commit mode. One queue per session (keyed by BLAZE_SESSION) under
 // .blaze/pending/, plus the legacy shared fallback .blaze/pending-commit.jsonl
 // for callers with no session set. All gitignored; drained by `blaze commit`.
-import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, realpathSync } from "node:fs";
+import { appendFileSync, readFileSync, writeFileSync, existsSync, mkdirSync, readdirSync, realpathSync, rmSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join, dirname, relative, isAbsolute } from "node:path";
 import { assertWritable } from "./readonly.mjs";
@@ -71,11 +71,36 @@ export function readForDrain(root, session = null) {
   return { entries: parseLines(buf.toString("utf8")), bytes: buf.length };
 }
 
+// BLZ-498: a queue with NOTHING left in it is removed, not truncated to a zero-byte
+// file. The ticket's title is literal — "every abandoned session leaks one forever" —
+// and the leak is the file: `.blaze/pending/` grew by one entry per session that had
+// ever run and never shrank (28 queues holding 19 ops in the operator's `blaze-pm`
+// checkout, 14 holding 185 in the v4-spine worktree; see
+// docs/reports/2026-08-30-blz-500-ledger-capture.md §1 and §4). An emptied queue is not
+// evidence of anything — its ops are in `git log` — so keeping it only inflates every
+// count taken over `listQueues`, which is how "8 of 14 queues" reads as a board in worse
+// shape than it is. Removal is safe in both directions: `appendEntry` recreates the file
+// (and its directory) on the next queued op, and every reader goes through
+// `existsSync`. The unlink is CONDITIONAL on the remainder being empty — a drain-exact
+// clear that preserves a mid-commit append must preserve its file too, or that op is
+// destroyed by the very mechanism written to save it.
+const clearOrRemove = (path, remainder) => {
+  if (remainder.length === 0) { rmSync(path, { force: true }); return; }
+  writeFileSync(path, remainder);
+};
+
 export function clearLedger(root, session = null, consumedBytes = null) {
   const path = ledgerPath(root, session);
   if (!existsSync(path)) return;
+  // REACHABILITY, stated plainly rather than implied. This branch has NO production caller:
+  // the only production call site, `commit-runner.mjs`'s drain loop, always passes
+  // `q.bytes`. It is reached solely by `tests/pending-ledger.test.mjs`, which pins its
+  // back-compat shape. It therefore cannot be killed by any mutation of production
+  // behaviour — reverting it to the pre-BLZ-498 `writeFileSync(path, "")` leaves the full
+  // suite green — and it must not be described as pinned by the revert rule. Keep-vs-remove
+  // is being decided on its own ticket; it is deliberately not settled here.
   if (consumedBytes === null) {
-    writeFileSync(path, ""); // back-compat: truncate to empty exactly as before
+    clearOrRemove(path, Buffer.alloc(0)); // back-compat: nothing is kept, so nothing is left
     return;
   }
   // Drain-exact clear: keep only bytes appended AFTER the drain read, so an op
@@ -84,7 +109,7 @@ export function clearLedger(root, session = null, consumedBytes = null) {
   // below (an append landing in that gap is overwritten by the rewrite) —
   // acceptable for this advisory, single-host design; not distributed-safe.
   const buf = readFileSync(path);
-  writeFileSync(path, buf.subarray(consumedBytes));
+  clearOrRemove(path, buf.subarray(consumedBytes));
 }
 
 // Every queue that exists: the shared fallback first (session: null), then

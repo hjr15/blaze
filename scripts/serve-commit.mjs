@@ -10,8 +10,14 @@ export function commitFile(root, file, message, extraFiles = [], lockOpts = {}) 
   if (!lock.ok) return { ok: false, committed: false, locked: true, status: -1 };
   try {
     const filesToAdd = [file, ...extraFiles];
+    // BLZ-502: WHICH step failed is carried on the return, not left to be reconstructed.
+    // Both failure returns used to be `{ ok:false, committed:false, status }` and were
+    // therefore indistinguishable, so `reconcile-commit-report.mjs` labelled every one of
+    // them "git commit failed" — sending an operator whose `git add` refused a pathspec to
+    // go and read pre-commit hooks. A field, not a guess: the caller composing the sentence
+    // cannot infer this from a status code, since `git add` and `git commit` share them.
     const add = spawnSync("git", ["-C", root, "add", ...filesToAdd], { stdio: "ignore" });
-    if (add.status !== 0) return { ok: false, committed: false, status: add.status };
+    if (add.status !== 0) return { ok: false, committed: false, step: "add", status: add.status };
     const commit = spawnSync("git", ["-C", root, "commit", "-m", message, "--", ...filesToAdd], { stdio: "ignore" });
     // status 1 with nothing to commit is a benign no-op (idempotent re-write).
     //
@@ -29,7 +35,7 @@ export function commitFile(root, file, message, extraFiles = [], lockOpts = {}) 
     if (commit.status !== 0) {
       const clean = spawnSync("git", ["-C", root, "diff", "--cached", "--quiet"], { stdio: "ignore" });
       if (clean.status === 0) return { ok: true, committed: false, noop: true, status: 0 };
-      return { ok: false, committed: false, status: commit.status };
+      return { ok: false, committed: false, step: "commit", status: commit.status };
     }
     return { ok: true, committed: true, status: 0 };
   } finally {

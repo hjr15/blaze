@@ -47,12 +47,46 @@ for (const a of argv) {
 // the caller's own, and a report scoped to `mySession` would have shown a clean board
 // on every one of the five days they sat there.
 if (status) {
+  // BLZ-518: PER QUEUE. Before this, all three of the shapes below threw out of this
+  // expression and took the ENTIRE report with them — on the live board, eight queues'
+  // worth of state lost to one bad line, and BLZ-498's orphaned-queue condition is exactly
+  // where an old malformed entry is most likely to be sitting. A *status* verb that aborts
+  // is reporting nothing, which is the one thing it exists not to do.
+  //
+  //   - an entry with no `files` list  -> `path.join(root, undefined)` (ERR_INVALID_ARG_TYPE)
+  //   - a queue file that is a DIRECTORY -> `readFileSync` EISDIR
+  //   - a recorded path outside the board -> `outstandingFiles`'s BLZ-394 refusal
+  //
+  // The third refusal is CORRECT and is deliberately still raised: this verb must not
+  // report on a path outside the board. What changes is only its blast radius. Caught here
+  // rather than pushed down into `outstandingFiles`, because that function's contract —
+  // "never report a queue as settled on a probe that did not run" (ADR-0030) — is the
+  // reason the refusal exists, and softening it there would weaken every other caller.
   const queues = listQueues(dataRoot).map((q) => {
-    const entries = readEntries(dataRoot, q.session);
-    return { session: q.session, entries, files: outstandingFiles(dataRoot, entries.flatMap((e) => e.files)) };
+    try {
+      const entries = readEntries(dataRoot, q.session);
+      // Named per entry, so the operator can find the bad line rather than being told the
+      // queue is "invalid". `files` is the one field every queued op must carry.
+      const paths = entries.flatMap((e, i) => {
+        if (!Array.isArray(e.files)) {
+          throw new Error(`entry ${i + 1} (id ${e.id ?? "?"}, op ${e.op ?? "?"}) has no \`files\` list`);
+        }
+        return e.files;
+      });
+      return { session: q.session, entries, files: outstandingFiles(dataRoot, paths) };
+    } catch (e) {
+      // `files: null` is the ADR-0030 marker: this queue was NOT looked at, so it carries
+      // no buckets to be summed into a total or mistaken for zeroes.
+      return { session: q.session, entries: [], files: null, error: e.message };
+    }
   });
-  console.log(renderQueueStatus(queues));
-  process.exit(0);
+  console.log(renderQueueStatus(queues, sessionId()));
+  // Exit 2, not 0: the report is INCOMPLETE. A caller scripting on `blaze commit --status`
+  // must be able to tell "I looked at every queue and here is the state" from "part of the
+  // board is unreadable" — the exit-code seam of the same rule the output obeys. 1 is
+  // already taken by the verb's own refusals (unknown flag, read-only, no identity, lock,
+  // branch guard), which are a different thing: those are runs that never reported at all.
+  process.exit(queues.some((q) => q.error) ? 2 : 0);
 }
 
 // BLZ-121 defence-in-depth, hoisted here for the same reason as
