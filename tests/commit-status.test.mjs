@@ -28,7 +28,7 @@
 //     rule is not engaged: the set of files a flush stages is unchanged (T5, T6).
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, symlinkSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, symlinkSync, chmodSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -431,5 +431,141 @@ describe("the page and the verb do not drift (BLZ-499, BLZ-501)", () => {
     assert.doesNotMatch(design, /standalone board — nothing to reconcile/,
       "the live string is `reconcile: no projects configured — nothing to reconcile.`; "
       + "quoting a dead one is exactly BLZ-433's class of defect");
+  });
+});
+
+// ---------------------------------------------------------------------------------------
+// BLZ-518 — a *status* verb that aborts is reporting nothing.
+//
+// Found by the adversarial review of BLZ-499's PR. Three inputs each took the WHOLE report
+// down at `blaze` PR #158 head, verified again here at be4b110 before the fix:
+//
+//   | input                                        | result                                  |
+//   |----------------------------------------------|-----------------------------------------|
+//   | a ledger entry lacking `files`                | `ERR_INVALID_ARG_TYPE` out of `path.join`|
+//   | a queue file that is a DIRECTORY              | raw `EISDIR` stack                       |
+//   | ONE out-of-board or absolute recorded path    | the BLZ-394 refusal, thrown uncaught     |
+//
+// The third is the worst, and is why this is not cosmetic: a single malformed entry in one
+// queue hides the state of ALL the others. On the live board that is eight queues' worth of
+// information lost to one bad line — and BLZ-498's orphaned-queue condition is exactly the
+// situation where an old malformed entry is most likely to be sitting.
+//
+// What is NOT being changed: the out-of-board path is still REFUSED, never reported on.
+// BLZ-394's blast-radius rule is correct and the refusal survives; what stops is the
+// refusal taking eight healthy queues with it. And per ADR-0030, a queue that could not be
+// read is never rendered as a queue that was read and found clean — in the output OR in the
+// exit code, which is why a degraded report exits 2 rather than 0.
+describe("BLZ-518: --status degrades per queue instead of aborting the whole report", () => {
+  const HEALTHY = "a-healthy-session";
+  const BROKEN = "a-broken-session";
+
+  /** A board with one healthy queue, so every test below can assert the healthy queue is
+   *  STILL reported — which is the actual defect, not the crash. */
+  function boardWithHealthyQueue() {
+    const root = board();
+    const rel = "projects/ZZZ/defined/ZZZ-1.md";
+    trackedTicket(root, rel);
+    writeFileSync(join(root, rel), "one\nDIRTY\n");
+    appendEntry(root, { id: "ZZZ-1", op: "move", message: "ZZZ-1: queued", files: [rel], ts: new Date().toISOString(), session: HEALTHY }, HEALTHY);
+    return root;
+  }
+
+  /** The rendered block for ONE queue. Blocks are blank-line separated, so this keeps every
+   *  assertion below inside the queue it names — a `stdout`-wide regex like
+   *  /broken[\s\S]*?outstanding:/ matches straight across into the NEXT queue's buckets and
+   *  would pass while the defect stood. */
+  const blockFor = (out, name) => {
+    const b = out.split("\n\n").find((chunk) => chunk.includes(name));
+    assert.ok(b, `no rendered block for queue ${name}`);
+    return b;
+  };
+
+  const assertHealthyStillReported = (out) => {
+    const healthy = blockFor(out, HEALTHY);
+    assert.match(healthy, /outstanding: 1 file\(s\)/,
+      "the healthy queue must still be reported WITH its buckets — that IS the ticket");
+    assert.doesNotMatch(healthy, /could not be read/);
+  };
+
+  // Pins: commit-runner.mjs's per-entry `files` check inside the per-queue try/catch.
+  test("BLZ-518a: a ledger entry with no `files` list degrades ONLY its own queue", () => {
+    const root = boardWithHealthyQueue();
+    try {
+      writeFileSync(ledgerPath(root, BROKEN), JSON.stringify({ id: "ZZZ-9", op: "log", message: "ZZZ-9: no files key", ts: "t" }) + "\n");
+      const r = runStatus(root, { session: HEALTHY });
+      assert.doesNotMatch(r.stderr, /ERR_INVALID_ARG_TYPE|Cannot read|TypeError/,
+        "a malformed ledger entry must not surface as a node type error");
+      const broken = blockFor(r.stdout, BROKEN);
+      assert.match(broken, /could not be read/, "the broken queue must be named AND marked unreadable");
+      assert.match(broken, /`files` list/, "the reason must name the missing FIELD, not just say 'error'");
+      assert.match(broken, /entry 1 \(id ZZZ-9, op log\)/, "and which entry, so the bad line can be found");
+      assertHealthyStillReported(r.stdout);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Pins: the per-queue try/catch around readEntries — a different throw site from 518a's,
+  // reverted separately below because one catch serving two shapes looks pinned when only
+  // one is exercised.
+  test("BLZ-518b: a queue file that is a DIRECTORY is reported as unreadable, not an EISDIR stack", () => {
+    const root = boardWithHealthyQueue();
+    try {
+      mkdirSync(ledgerPath(root, BROKEN), { recursive: true });
+      const r = runStatus(root, { session: HEALTHY });
+      assert.doesNotMatch(r.stderr, /EISDIR/, "a directory where a queue should be must not surface as a raw errno stack");
+      assert.match(blockFor(r.stdout, BROKEN), /could not be read: .*EISDIR/,
+        "named, unreadable, and carrying the reason it could not be read");
+      assertHealthyStillReported(r.stdout);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Pins: the per-queue try/catch around outstandingFiles — the BLZ-394 refusal is raised
+  // from inside `ask()` in pending-ledger.mjs and must still be raised, just contained.
+  test("BLZ-518c: an out-of-board recorded path is STILL refused (BLZ-394) but takes down only its own queue", () => {
+    const root = boardWithHealthyQueue();
+    try {
+      writeFileSync(ledgerPath(root, BROKEN), JSON.stringify({ id: "ZZZ-9", op: "log", message: "ZZZ-9: outside", files: ["/etc/passwd"], ts: "t" }) + "\n");
+      const r = runStatus(root, { session: HEALTHY });
+      const broken = blockFor(r.stdout, BROKEN);
+      assert.match(broken, /could not be read: .*refusing to report a queue as settled/,
+        "the BLZ-394 refusal must still be the reason given");
+      // THE REFUSAL SURVIVES: nothing outside the board is reported on. If this queue ever
+      // starts showing outstanding/orphaned counts, BLZ-394's blast radius has been widened.
+      assert.doesNotMatch(broken, /outstanding: \d/,
+        "an out-of-board path must never be REPORTED ON — refusing is correct, the bug was the blast radius of the refusal");
+      assert.match(r.stdout, /totals above DO NOT cover them/,
+        "and the totals must disclaim it rather than silently omitting it");
+      assertHealthyStillReported(r.stdout);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Pins: renderQueueStatus's unreadable-queue accounting, and the exit code. ADR-0030.
+  test("BLZ-518d: when EVERY queue is unreadable the run does not report 'nothing queued', and exits 2", () => {
+    const root = board();
+    try {
+      mkdirSync(ledgerPath(root, BROKEN), { recursive: true });
+      const r = runStatus(root, { session: HEALTHY });
+      assert.doesNotMatch(r.stdout, /Nothing queued/,
+        "a run that could not look must not report what a run that looked and found nothing reports (ADR-0030)");
+      assert.match(r.stdout, /1 queue\(s\) could not be read/);
+      assert.equal(r.status, 2,
+        "a caller scripting on the exit code must be able to tell an incomplete report from a clean board");
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // The property BLZ-499 turns on, re-asserted on the DEGRADED path specifically: the
+  // crashes were loud and wrote nothing, and the fix must not buy legibility with a write.
+  test("BLZ-518e: a degraded report still commits nothing, clears nothing and takes no lock", () => {
+    const root = boardWithHealthyQueue();
+    try {
+      writeFileSync(ledgerPath(root, BROKEN), JSON.stringify({ id: "ZZZ-9", op: "log", message: "ZZZ-9: outside", files: ["/etc/passwd"], ts: "t" }) + "\n");
+      const before = { head: headCount(root), healthy: readFileSync(ledgerPath(root, HEALTHY), "utf8"), broken: readFileSync(ledgerPath(root, BROKEN), "utf8") };
+      const r = runStatus(root, { session: HEALTHY });
+      assert.equal(r.status, 2);
+      assert.equal(headCount(root), before.head, "--status must author no commit, degraded or not");
+      assert.equal(readFileSync(ledgerPath(root, HEALTHY), "utf8"), before.healthy);
+      assert.equal(readFileSync(ledgerPath(root, BROKEN), "utf8"), before.broken, "a malformed queue must not be 'cleaned up' by a read");
+      assert.equal(existsSync(join(root, ".blaze", "commit.lock")), false, "a read takes no lock");
+    } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });
