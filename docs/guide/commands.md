@@ -53,21 +53,32 @@ blaze board
 Serves the read/write dashboard at `/` plus the `/api/*` endpoints (move,
 edit, resolve, log, acceptance-criteria toggle). Parses no CLI args.
 
-**Access depends on whether the board has any users** (ADR-0013). See
-[HTTP surface](../architecture.md#http-surface) for which route needs which scope.
+**Access depends on whether the board has any users** (ADR-0013, and ADR-0034 for the
+browser half). See [HTTP surface](../architecture.md#http-surface) for which route needs
+which scope.
 
 - **No users configured, bound to loopback** — served without authentication,
   exactly as Blaze always has. The bind address *is* the boundary, and that is
   unchanged for every single-operator board.
 - **No users configured, bound to anything else** (`HOST=0.0.0.0`, a LAN address,
-  a container) — `blaze board` **refuses to start** and tells you both fixes. It
-  is checked before the socket is opened, so nothing is served. This is the
-  behaviour *until a first-run setup flow exists*, not a permanent design choice.
-- **One or more users** — every `/api/*` call needs
-  `Authorization: Bearer blz_…`, **and so does board content** (`GET /`,
-  `GET /view/<name>`): the page is rendered server-side and carries every ticket.
-  The token's scopes are re-intersected with its owner's *current* role on every
-  request, so demoting a user immediately narrows every token they hold.
+  a container) — `blaze board` serves the **first-run setup flow at `/setup`** and
+  nothing else at all; every other route answers `503` until an administrator
+  exists (BLZ-358).
+- **One or more users** — every `/api/*` call and all board content (`GET /`,
+  `GET /view/<name>`) needs a credential. There are **two**, and they are not
+  interchangeable:
+  - `Authorization: Bearer blz_…` — for the API, `curl`, the CLI and a reverse
+    proxy that injects it. Issue one with `blaze user add`.
+  - a **browser session**, obtained by signing in at `/signin` with an email
+    address and a password. The session arrives as an `HttpOnly`,
+    `SameSite=Strict` cookie that expires after 12 hours, and `POST /signout`
+    revokes it.
+
+  Whichever one is presented, its scopes are re-intersected with the owner's
+  *current* role on every request, so demoting a user immediately narrows every
+  token **and every live session** they hold. A bearer token presented in the
+  cookie is not a session and a session presented in the header is not a token —
+  the two credential spaces are disjoint by construction.
 
 - **`.blaze/identity.db` exists but is unreadable** (truncated, corrupt, or not a
   database) — `blaze board` **refuses to start** and names the file. This is never
@@ -75,11 +86,36 @@ edit, resolve, log, acceptance-criteria toggle). Parses no CLI args.
   treating the second as the first would silently remove authentication from a board
   that had it.
 
-  A browser cannot set that header itself, so once a board has users its content is
-  reachable from the API, from `curl`, or behind a reverse proxy that adds the
-  header — not from a bare browser tab. The board was already unusable in a browser
-  at that point (the page rendered while every XHR returned `401`); gating `/` makes
-  that honest rather than leaky. A sign-in flow is tracked separately.
+  The sign-in and setup forms **POST**, and neither route accepts a query string:
+  a request carrying one is refused with `400` rather than answered, so a password
+  or a setup token can never reach browser history or a proxy access log. Both
+  pre-auth responses carry `Cache-Control: no-store`, `Referrer-Policy:
+  no-referrer` and a `default-src 'none'` CSP. JavaScript is required to submit
+  either form; with it disabled the submission is refused, and the page says so.
+
+  Both servers serve `/signin`, and both send a browser there: an unauthenticated
+  request for board content that asks for HTML gets a `302` to `/signin`, while a
+  request that does not (`curl`, a health check, the API) keeps the `401` it has
+  always had and is told in prose where the door is. `/signin` is **absent** —
+  a plain `404`, not a hidden route — on a board with no users, and unreachable
+  during first-run setup, which owns the surface until an administrator exists.
+
+  To set the password an address signs in with, on the machine hosting the board:
+
+  ```
+  blaze user passwd --email you@example.com
+  ```
+
+  It reads the password from **stdin**, never from a flag: `argv` is visible to
+  every process on the box through `ps` and is written to shell history. A password
+  flag is refused in every spelling — and, more generally, **no error this command
+  prints ever repeats an argument it did not recognise**, naming its position
+  instead, so a secret typed where a flag was expected never reaches stderr, a
+  terminal scrollback or a CI log. Minimum 12
+  characters. Only a scrypt verifier is stored — the password itself is never
+  written to `identity.db`, to a log, or to the terminal. The first-run `/setup`
+  form asks for one too, so a freshly deployed board is signable-into the moment
+  setup completes.
 
 An unclassified `/api/*` route returns `404`; a route added without a scope fails
 closed rather than inheriting the last one's.

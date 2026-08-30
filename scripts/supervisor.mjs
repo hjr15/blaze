@@ -12,6 +12,7 @@ import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
+import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { execFileSync } from "node:child_process";
 
@@ -410,6 +411,26 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       res.end(JSON.stringify(obj));
     };
 
+    // ---- the browser's door (BLZ-566) ---------------------------------------------
+    // MOUNTED HERE TOO, AND THAT IS THE POINT. BLZ-359 learned that `blaze board` and
+    // `blaze start` are two servers and a control wired into one is absent from the
+    // other; both gate `/` and `/view/<name>` through the same `pageScopeFor`, so both had
+    // the identical lockout, and `blaze start` is the DEFAULT command. Decided BEFORE the
+    // gate, for the reason `/setup` is in serve.mjs: a caller signing in has no credential
+    // yet, since obtaining one is what the route is for.
+    //
+    // It DECLINES when `store` is null, so a board with no users gains no new surface, and
+    // `/api/*` and `/control/*` never reach it — the fail-closed 404 for an unclassified
+    // route in either table is untouched.
+    try {
+      if (await handleSigninRoutes({ req, res, url: u, store, csrf: CSRF,
+                                     boardTitle: cfg.boardTitle })) return;
+    } catch {
+      // Nothing wraps this async handler, and a throw would end the process for every
+      // connected session rather than refuse one request.
+      return json(500, { errors: ["sign-in could not be completed"] });
+    }
+
     // ---- the gate (BLZ-359) -------------------------------------------------------
     // `blaze start` boots THIS server, and it is the default command. Until now it
     // imported neither `gate` nor `checkBindSafety`, so every route below was open on a
@@ -441,12 +462,20 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         // A page route is reached by a browser, so it answers in prose; a JSON envelope
         // there tells a human nothing about what to do next.
         if (pageScope) {
+          // BLZ-566, and worded identically to serve.mjs because the two servers must not
+          // tell an operator different stories. A browser — one that asked for HTML — is
+          // sent to the door; every other caller is told where it is and keeps its 401.
+          if (/\btext\/html\b/.test(String(req.headers.accept ?? ""))) {
+            res.writeHead(302, { location: SIGNIN_PATH, "content-type": "text/plain; charset=utf-8" });
+            res.end("");
+            return;
+          }
           res.writeHead(decision.status, { "content-type": "text/plain; charset=utf-8" });
           res.end(`${decision.error}\n\nThis board has users configured, so its content `
-            + "requires a token:\n\n    Authorization: Bearer blz_...\n\n"
-            + "Issue one with `blaze user add`. A browser cannot set that header itself — "
-            + "put a\nreverse proxy in front that adds it, or use the API directly, until "
-            + "the sign-in\nflow lands.\n");
+            + "requires a credential.\n\nFrom a browser, sign in at " + SIGNIN_PATH
+            + " (set a password with `blaze user passwd`).\nFrom the API, the CLI or a "
+            + "reverse proxy:\n\n    Authorization: Bearer blz_...\n\n"
+            + "Issue one with `blaze user add`.\n");
           return;
         }
         return json(decision.status, { errors: [decision.error] });

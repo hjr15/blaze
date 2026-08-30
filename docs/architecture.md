@@ -340,12 +340,32 @@ called at all. An unknown *page* path is still a plain `404` rather than an auth
 — the page router is not a fixed table, and turning every typo into a `401` would both
 change long-standing behaviour and leak whether a path exists.
 
-**A browser cannot set an `Authorization` header itself.** Once a board has users, its
-content is reachable from the API, from `curl`, or through a reverse proxy that adds the
-header — not from a bare browser tab. That is a known gap, not a finished story: the
-board was already unusable in a browser at that point (the page rendered while every XHR
-returned `401`), and gating `/` makes the failure honest instead of leaky. A first-run
-sign-in flow is tracked separately and will replace this.
+**A browser cannot set an `Authorization` header itself**, so a board with users
+carries a second credential alongside the bearer token (ADR-0034, BLZ-566).
+
+| Method | Path | Scope | Notes |
+|---|---|---|---|
+| GET | `/signin` | *pre-auth* | The sign-in form. Self-contained, carries no board content, and present only while the board has users — on a board with none it is a plain `404`, and during first-run setup the `/setup` `503` catch-all answers instead |
+| POST | `/signin` | *pre-auth* | Email + password against a scrypt verifier, plus `x-blaze-csrf`. One refusal for every way it can fail, with the KDF run in every branch so the identical body is not undone by a stopwatch |
+| POST | `/signout` | *pre-auth* | Revokes the presented session and clears the cookie |
+
+A successful sign-in mints a row in `user_session` and returns it as an `HttpOnly`,
+`SameSite=Strict`, 12-hour cookie. The session is verified by the **same** `verify()`
+that judges an API token, so ADR-0013 §1's intersection — a credential carries a subset
+of its owner's access *at the moment it is used* — is shared code rather than a second
+copy of it: demoting a user narrows every live session on their next request.
+
+The two credential spaces are **disjoint by construction**. A session's plaintext begins
+`blz_sess.` and `.` is outside base64url, which is the entire alphabet `generateToken()`
+can emit — so no API token can ever collide with the session prefix, and a value arriving
+through the wrong door (`Authorization: Bearer blz_sess.…`, or an API token in the cookie)
+is refused at both the transport and the store. The bearer header is tried first and, if
+it carries anything at all, is the credential judged: a wrong or revoked token is never
+rescued by a cookie sitting beside it.
+
+`x-blaze-csrf` is still **not** authentication (ADR-0013 §7). It is now load-bearing
+again rather than vestigial, because this is what puts a cookie back into the browser
+flow: every `POST` — `/signin` and `/signout` included — requires it.
 
 ## Engine ⟂ data split
 

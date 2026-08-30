@@ -69,7 +69,11 @@ describe("blaze user add creates a user and issues its token", () => {
   test("an unknown role is refused rather than stored", async () => {
     const root = boardRoot();
     await assert.rejects(() => addUser(root, { email: "x@example.com", role: "superuser" }),
-      /unknown role "superuser"/);
+      // BLZ-566: the role VALUE is no longer quoted back. `--role <secret>` was one of four
+      // proven ways an untrusted argument reached stderr, so an unrecognised argument is
+      // now named by position and never by text. What must survive is that a bad role is
+      // still refused and the valid set is still named.
+      /unknown role.*expected admin, member, viewer/i);
     assert.equal(loadIdentity(root).hasIdentity, false);
   });
 

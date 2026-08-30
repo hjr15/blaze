@@ -181,5 +181,19 @@ export function loadIdentity(dataRoot) {
     close();
     return { state: "empty", store: null, hasIdentity: false, error: null, close() {} };
   }
+  // BLZ-566: the additive DDL, applied to a roster that already reads.
+  //
+  // AFTER THE COUNT, AND ONLY ON THE HEALTHY BRANCH — the ordering is the whole control.
+  // Every statement in `identityDdl` is CREATE ... IF NOT EXISTS, so on a current roster
+  // this is a no-op, and on a pre-BLZ-566 one it adds `local_password` and `user_session`
+  // without touching a row. Run it EARLIER and it would create those tables in a truncated
+  // or non-database file first, turning the `broken` verdict above — the one that stops a
+  // corrupted roster from silently disarming a board's authentication — into `empty`.
+  //
+  // BEST-EFFORT, because a read-only data mount (`-v <board>:/data:ro`, the Dockerfile's
+  // own hardened deployment) cannot take DDL and must still serve. What such a board loses
+  // is browser sign-in, which it never had; what it keeps is every bearer token, which is
+  // the credential that mount was deployed with.
+  try { opened.db.exec(identityDdl("sqlite")); } catch { /* read-only: sign-in unavailable */ }
   return { state: "healthy", store: opened.store, hasIdentity: true, error: null, close };
 }

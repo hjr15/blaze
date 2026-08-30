@@ -142,6 +142,51 @@ describe("authorise fails CLOSED", () => {
   });
 });
 
+describe("tokenUsable compares INSTANTS, not strings — a latent-path guard (BLZ-566)", () => {
+  // STATED PLAINLY: NO SHIPPED CONFIGURATION REACHES THIS TODAY. `identity-db.mjs`
+  // constructs exactly one store, `identityStore(exec, { dialect: "sqlite" })`, and
+  // nothing anywhere constructs the `postgres` dialect that `identity-store.mjs` also
+  // supports — so every `expires_at` this function sees today is a SQLite TEXT column
+  // round-tripping as an ISO-8601 `Z` string, and a lexicographic `<=` between two such
+  // strings happens to be correct.
+  //
+  // It stops being correct the day identity moves to Postgres, where `d.ts` is
+  // `timestamptz` and `pg` hands back a `Date`. `String(new Date())` is
+  // "Mon Aug 31 2026 …", which never compares `<=` an ISO string — so EXPIRY WOULD
+  // SILENTLY NEVER FIRE and every browser session would become permanent. A latent bug in
+  // an expiry check is not a bug that announces itself.
+  //
+  // These tests drive the function directly with the row shape the other driver would
+  // produce. They are a guard on a path no request can reach yet; they are not evidence
+  // that one can.
+  test("an expired Date object — what `pg` returns — is refused", () => {
+    const past = new Date("2020-01-01T00:00:00.000Z");
+    assert.match(tokenUsable({ expires_at: past }, { now: NOW }).error, /has expired/);
+  });
+
+  test("a future Date object is still usable", () => {
+    assert.equal(tokenUsable({ expires_at: new Date("2099-01-01T00:00:00.000Z") },
+      { now: NOW }).ok, true);
+  });
+
+  test("an epoch-millisecond expiry is read as an instant too", () => {
+    assert.match(tokenUsable({ expires_at: Date.parse("2020-01-01T00:00:00.000Z") },
+      { now: NOW }).error, /has expired/);
+  });
+
+  test("an UNPARSEABLE expiry fails CLOSED — a credential whose expiry cannot be read "
+    + "is not a credential", () => {
+    assert.match(tokenUsable({ expires_at: "not a timestamp" }, { now: NOW }).error,
+      /has expired/);
+  });
+
+  test("no expiry at all is still no expiry — an API token may legitimately have none", () => {
+    for (const expires_at of [null, undefined, ""]) {
+      assert.equal(tokenUsable({ expires_at }, { now: NOW }).ok, true);
+    }
+  });
+});
+
 describe("tokenUsable", () => {
   test("revoked, expired and absent are each their own message", () => {
     assert.match(tokenUsable(null).error, /no such token/);
@@ -250,7 +295,13 @@ describe("the schema", () => {
     db.exec(identityDdl("sqlite"));
     const tables = db.prepare(
       "SELECT name FROM sqlite_master WHERE type='table' ORDER BY name").all().map((r) => r.name);
-    assert.deepEqual(tables, ["api_token", "app_user", "membership", "user_identity"]);
+    // BLZ-566 added `local_password` and `user_session` — the browser half ADR-0013 §2
+    // named ("a local password today") and never built. The list stays EXACT rather than
+    // becoming a subset check: identity.db has no migration runner, so a table added here
+    // is a table every existing roster must also acquire on the read path
+    // (identity-db.mjs), and noticing that this list moved is how that stays true.
+    assert.deepEqual(tables, ["api_token", "app_user", "local_password", "membership",
+                              "user_identity", "user_session"]);
     assert.throws(() => identityDdl("mysql"), /unknown dialect "mysql"/);
   });
 
