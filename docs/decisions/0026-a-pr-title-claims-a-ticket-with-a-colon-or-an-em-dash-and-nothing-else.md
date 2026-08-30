@@ -222,7 +222,12 @@ mentions are adjudicated separately in ADR-0027.
 set newly admits a *branch*. On a terminal ticket that is blocked by terminal-sticky nulling
 both fields — which is why the conclusion for the twelve above holds — but on a NON-terminal
 ticket the same arm writes `branch:` and moves the ticket to `in-progress`. The two-path
-enumeration above is safe **because of** that guard, not in spite of needing one.
+enumeration above is safe **because of** that guard, not in spite of needing one. Pinned end to end by
+*"PATH 3 on a NON-TERMINAL ticket: the shipped set admits the BRANCH, which writes `branch:`
+and moves to in-progress"* and *"PATH 3 on a TERMINAL ticket: terminal-sticky blocks it — no
+move and no record"*, with a control identical but for the default branch's commit subject
+(BLZ-507). Until then this path was pinned only at unit level, on a stubbed `inspect`, which
+is the one place the guard it depends on does not run.
 
 ## The silent half, and what now says it
 
