@@ -1437,12 +1437,38 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // pinned by "an unresolved default branch is ONE warning, not one warning plus a
   // git-failed per branch".
   //
-  // REACHABILITY, STATED: the opt-in on the `rev-parse` half is a different case. It only
-  // runs when `defaultTip` resolved, and it is asked about a ref `for-each-ref` listed in
-  // the same run, so no construction in this suite makes it fire; mutating that one alone
-  // is not killable by any test here. It is kept because the listing and the probe are two
-  // separate `git` invocations and a ref can be pruned between them — a race no test can
-  // stage deterministically. Said plainly rather than left to look pinned.
+  // BLZ-508, DECIDED: THE `rev-parse` HALF'S OPT-IN IS KEPT, AND IT IS UNREACHABLE. Both
+  // halves of that sentence are true and neither softens the other.
+  //
+  // UNREACHABLE, MEASURED RATHER THAN ARGUED. Instrumented across `tests/reconcile*.test.mjs`
+  // at be4b110: of 593 bare `rev-parse <rev>` invocations, 5 exit non-zero and ALL FIVE are
+  // `defaultTip`'s `rev-parse <ref>` on a fixture where nothing resolved — `blz484-silent`,
+  // `blz484-loud`, `blz484-quiet`, `blz484-result` (could not run) and `blz492-unresolved`
+  // (exit 128). NONE is this probe. It cannot be otherwise: it runs only when `defaultTip`
+  // is truthy, and it is asked about a ref `for-each-ref` listed in the same run. Deleting
+  // the option entirely leaves the WHOLE suite green — 4,272 pass, 0 fail, 369 suites — so
+  // no mutation can kill it and nothing here holds it. Described that way, never implied
+  // pinned.
+  //
+  // KEPT ANYWAY, and this is the decision rather than an omission. The listing and the probe
+  // are two separate `git` invocations against a live repository. A ref pruned between them
+  // — by a concurrent `git fetch --prune`, which `blaze start`'s own loop runs, or by a
+  // `git branch -d` in another window — makes this probe exit 128, and that exit IS the
+  // answer to "is this branch at the default tip": it is not. Without the opt-in that
+  // becomes a `git-failed` ERROR, `GIT UNREADABLE`, and exit 1 on a run that was otherwise
+  // entirely correct. The race is real and no test can stage it deterministically, which is
+  // exactly why removing the guard would be trading a proven-harmless line for an
+  // unreproducible failure.
+  //
+  // BLZ-506 sharpened the argument: `rev` is now a full refname, so a non-zero exit here can
+  // no longer mean "that name was ambiguous" — the only remaining reading is "that ref is
+  // gone", which is an answer.
+  //
+  // The SIBLING site above — the `log` half — is a different case and is NOT covered by this
+  // decision. It fires (once, on `blz492-unresolved`) and removing its opt-in alone reddens
+  // "an unresolved default branch is ONE warning, not one warning plus a git-failed per
+  // branch" and "BLZ-492: exitIsAnAnswer on the branch-inspect probes is load-bearing, and
+  // this is why". The two were reverted separately, for that reason.
   //
   // `askable.get(name) || name` falls back to the name itself for a ref that was never
   // listed. `buildBranchMap` only ever passes names from `refs`, so that fallback is not
