@@ -92,6 +92,8 @@ reproduce is not a figure.**
   work order — is 26 live remote branches × 2 fixtures.** It is honest as a one-day diagnostic and
   **must not be quoted as a reproducible constant.** ADR-0024 says pin every figure to a SHA; a figure
   that also depends on another repository's mutable branch list is not pinned by a SHA at all.
+  **Done 2026-08-30 (BLZ-505): the fixtures build their own origin, and the figure re-derives as
+  21 and 20 at `be4b110` — 67 and 66 with the live remote still in place, so it had already moved.**
 - **BLZ-500 (30)** — the `blaze-flush` CronJob appears not to be draining every queue: **185 ops
   across 8 of 14 queues, aged 2–5 days, five nightly runs passed over them.** Undiagnosed.
   **Do not drain the queues before diagnosing** — they are the only evidence, and 67 of the 185 are

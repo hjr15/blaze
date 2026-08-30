@@ -20,6 +20,7 @@ import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
+import { appendRegularFileSync } from "./model/regular-file.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { unreadableTicketDirs } from "./model/index.mjs";
 import { fsStorage } from "./model/storage.mjs";
@@ -108,9 +109,50 @@ function sh(cmd, args, opts = {}) {
 // up through `gatherProject` to `reconcile()`'s result — plus the one thing the forge half
 // does not need: a run that could not complete a probe DOES NOT GET TO REPORT A CLEAN
 // BOARD. See the CLI's `GIT UNREADABLE` block.
+// --- the census instrument (BLZ-509) ----------------------------------------------
+// THIS SHIPS, AND THAT IS THE POINT. The figures in the census below `defaultBranchRef`
+// replaced four comments that quoted "the 330 reconcile tests" and had rotted, and the
+// first cut of that replacement named a reproduction command for an instrument that lived
+// only in a scratch patch — a census that cannot be re-taken rots exactly like the numbers
+// it replaced, one round later. So the instrument is here, in the tree, and the census
+// header's command runs it.
+//
+// Off unless `BLZ_MEASURE` names a file, so a normal run pays one `process.env` read per
+// `git` invocation and writes nothing. It observes only what reconcile already does: the
+// arguments of each probe and its outcome, and the size of each `buildBranchMap` result.
+//
+// WHAT THE CATCH DOES AND DOES NOT BUY, because the first cut of this comment said "it can
+// never change a result: the write is wrapped" and that was FALSE. A `try/catch` around a
+// SYNCHRONOUS BLOCKING call catches nothing — `appendFileSync` blocks inside `open(2)` on a
+// FIFO with no reader, so the catch is never reached, and `node:test`'s timeout cannot
+// rescue it either because that timer lives on an event loop a synchronous open never
+// yields to. Measured through the real `reconcile()`: `EXIT=124` at a 10s `timeout` and
+// again at 25s. That is ADR-0031's hang class, reappearing on the write side of an
+// instrument added to make figures reproducible.
+//
+// It is not solved here. ADR-0031 already solved it, and `appendRegularFileSync` is that
+// seam's append counterpart: `O_NONBLOCK` makes the open of a FIFO fail ENXIO immediately,
+// and `fstatSync` on the OPEN DESCRIPTOR refuses a directory or a device node with
+// `NotARegularFileError`, so the catch below sees an error instead of never running. The
+// guarantee is therefore the honest one — every failure this write can produce is a THROWN
+// one, and a thrown one is swallowed. `BLZ_MEASURE` naming a relative path still writes
+// into `process.cwd()`, which is what any relative path does and is not an error.
+//
+// `if (!path) return` is a FAST PATH, not a guard any test holds, and saying so is the rule
+// (a line no mutation can kill must be described that way): deleting it leaves
+// `appendRegularFileSync(undefined, ...)` to throw into the `catch` below, so the behaviour
+// is identical and only the wasted work differs. What IS pinned is that no census file
+// appears when `BLZ_MEASURE` is unset.
+function census(record) {
+  const path = process.env.BLZ_MEASURE;
+  if (!path) return;
+  try { appendRegularFileSync(path, JSON.stringify(record) + "\n"); } catch { /* never break a run to measure it */ }
+}
+
 function gitProbe(errors, repoPath, args, opts = {}) {
   const { exitIsAnAnswer = false, severity = "error", what = "", consequence = "", ...spawnOpts } = opts;
   const r = shResult("git", ["-C", repoPath, ...args], spawnOpts);
+  census({ p: "probe", repo: repoPath, args, status: r.status, ok: r.ok });
   if (r.ok) return r.stdout;
   const ran = r.status !== null;
   if (ran && exitIsAnAnswer) return null;
@@ -570,6 +612,48 @@ export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
   return idsFromSubject(title, key).includes(id);
 }
 
+// =============================================================================
+// THE GIT-PROBE CENSUS — one place, one command, one commit (BLZ-509, ADR-0024)
+// =============================================================================
+// Three comments in this file used to quote "the 330 reconcile tests" as the corpus for a
+// measurement, and none was maintained: the suite passed 373 and then 411 while all three
+// still said 330. The suite SIZE was never the finding; the per-probe failure counts were,
+// and they belong here, together, taken in ONE run, with the command that re-takes them.
+//
+// RE-TAKE IT, DO NOT QUOTE IT. The instrument is `census()` above `gitProbe` and it SHIPS —
+// the first cut of this block named a command for a scratch patch that was never committed,
+// which is this ticket's own failure mode one layer up. It is pinned by
+// tests/reconcile-census-instrument.test.mjs.
+//
+//   BLZ_MEASURE=/tmp/census.jsonl node --test tests/reconcile*.test.mjs
+//
+// then group the `p: "probe"` rows by probe form and by `ok`/`status`.
+//
+//   on BLZ-505..509 over 5c699fe — `tests/reconcile*.test.mjs`, 412 tests, 0 fail
+//
+//   probe                                 runs   non-ok   statuses
+//   rev-parse --verify --quiet <b>         816     550    1 x534, could-not-run x16
+//   rev-parse <rev>                        611       5    128 x1,  could-not-run x4
+//   log <branch> ^<ref> --format=%s        331       1    128 x1
+//   rev-parse --abbrev-ref origin/HEAD     281     271    128 x267, could-not-run x4
+//   log <ref> --format=%x00%B              281       8    128 x4,  could-not-run x4
+//   for-each-ref                           281       4    could-not-run x4
+//   fetch --prune --quiet                   11       6    128 x6
+//
+//   buildBranchMap: 296 invocations, 632 refs listed, 323 corroborated
+//
+// `could-not-run` is `status === null` — the process never completed. It is NEVER an answer
+// and is always reported, whatever a call site's `exitIsAnAnswer` says (ADR-0030), so those
+// columns are not evidence that a guard is silencing anything. Every one of them is a
+// `blz484-*` fixture that makes `git` unrunnable on purpose.
+//
+// Two things the reader should know before comparing a fresh run against this table.
+// `tests/reconcile-census-instrument.test.mjs` redirects `BLZ_MEASURE` to its own file
+// while it runs, so its probes are deliberately absent from these totals. And the table is
+// REPRODUCIBLE now in a sense the previous one was not: every fixture that fetches uses a
+// local path, so no row here can move because a repository outside this one changed
+// (BLZ-505 — four of the six `fetch` failures used to be a live GitHub URL).
+
 // --- resolve a repo's default-branch LOG REF, preferring the remote-tracking ---
 // branch. prMap comes from live `gh pr list` and branchMap reads
 // refs/remotes/origin, so the shipped signal must read the SAME freshness — the
@@ -581,10 +665,18 @@ export function claimCorroborated(id, { title = "", shippedSet = null } = {}) {
 //
 // BLZ-484: `resolved` is the CONTROL, and it is what lets the probes below tell an answer
 // from a silence. Every candidate here is asked "does this ref exist", and for THAT question
-// a non-zero exit is the answer — measured across the 330 reconcile tests, `rev-parse
-// --verify --quiet` exits 1 on 474 occasions and `rev-parse --abbrev-ref origin/HEAD` exits
-// 128 on 239, every one of them an ordinary "no such ref" on a fixture repo. So those exits
-// stay silent (`exitIsAnAnswer`), and only a probe that could not RUN is reported.
+// a non-zero exit is the answer: across `tests/reconcile*.test.mjs`, `rev-parse --verify
+// --quiet` exits 1 and `rev-parse --abbrev-ref origin/HEAD` exits 128 in the hundreds, every
+// one an ordinary "no such ref" on a fixture repo. So those exits stay silent
+// (`exitIsAnAnswer`), and only a probe that could not RUN is reported — which is a distinct
+// population and does still occur, on the four `blz484-*` fixtures that make `git` unrunnable
+// on purpose.
+//
+// BLZ-509: the counts that used to be in the sentence above are in the table at the bottom
+// of this file, taken in one instrumented run and pinned to the commit that produced them.
+// Three comments in this file quoted "the 330 reconcile tests" as if it were a constant; the
+// suite passed 373 and then 407 while they still said 330. A figure a reader trusts, that
+// nothing keeps true, belongs in ONE place with a SHA on it.
 //
 // What must NOT stay silent is the fall-through. Returning the bare string "main" told every
 // caller "the default branch is main" when what happened is that nothing resolved — so
@@ -861,6 +953,7 @@ export function buildBranchMap(refs, idFromRef, { key, shippedSet, inspect }) {
     if (!corroborated) continue;
     branchMap.set(id, ref);
   }
+  census({ p: "branchMap", refs: (refs || []).length, corroborated: branchMap.size });
   return branchMap;
 }
 
@@ -1094,14 +1187,41 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // flag promised.
   //
   // BLZ-494: THE SEVERITY IS LOAD-BEARING AND WAS UNPINNED — mutating it to `error` left
-  // the whole suite green. Re-measured at 1b00f3a by instrumenting every `git` invocation
-  // across `tests/reconcile*.test.mjs` (371 tests): `fetch --prune --quiet` runs 9 times
-  // and exits 128 on FOUR of them — `blz404-oracle-applied`, `blz404-oracle-preview`, and
-  // twice in `blz421-oracle-equiv`, each a fixture whose `origin` does not exist. At
-  // `error` those four land in `unreadableProbes`, print `GIT UNREADABLE` and `FAILED`,
-  // and exit 1. Now pinned by "the condition travels as severity: warning" and "the CLI
-  // says GIT DEGRADED, exits 0, and still reports the move it found" in
-  // tests/reconcile-git-probe-unreadable.test.mjs.
+  // the whole suite green. `fetch --prune --quiet` runs 11 times and exits 128 on SIX of
+  // them — `blz404-oracle-applied`, `blz404-oracle-preview`, twice in `blz421-oracle-equiv`,
+  // and `blz494-fetch-result` and `blz494-fetch-cli`, each a fixture whose `origin` does not
+  // exist. At `error` those six land in `unreadableProbes`, print `GIT UNREADABLE` and
+  // `FAILED`, and exit 1. Now pinned by "the condition travels as severity: warning" and
+  // "the CLI says GIT DEGRADED, exits 0, and still reports the move it found" in
+  // tests/reconcile-git-probe-unreadable.test.mjs. The figures are the census below
+  // `defaultBranchRef`; re-take them with the command in its header rather than trusting
+  // this sentence.
+  //
+  // BLZ-505 — WHY THIS FIGURE MOVED TWICE, AND WHAT IT TOOK TO MAKE IT REPRODUCIBLE. The
+  // original reading was 9 runs and FOUR failures, at 1b00f3a. Three separate things were
+  // wrong with it, and only the third was caught by review:
+  //
+  //   1. Two of the nine were `tests/reconcile-finding-surfaces.test.mjs` fixtures whose
+  //      `origin` was a LIVE GitHub URL that RESOLVED, so whether they counted as failures
+  //      depended on the network being up.
+  //   2. Two failures appeared afterwards — `blz494-fetch-result` and `blz494-fetch-cli`,
+  //      BLZ-494's own tests, added after the measurement its comment quoted.
+  //   3. FOUR of the six failures were `tests/reconcile-feed-truth-oracle.test.mjs`, whose
+  //      `origin` was ALSO a live GitHub URL — `hjr15/orc`, a repository that does not
+  //      exist. A URL that fails to resolve leaves no trace: the fetch exits 128, the run
+  //      carries on, and the row reads exactly as a local dead path would. That is why the
+  //      first fix of this ticket missed it and shipped this paragraph claiming the figure
+  //      "no longer depends on anything outside this repository" while four of its six
+  //      failures still did. `hjr15` is this repository's own account; the repo existing is
+  //      one click, and the reviewer showed that when it does, four rows of the census move
+  //      by 3 x 4 and four oracle tests go red.
+  //
+  // Every fixture that fetches is hermetic now, and that is a property of the CORPUS rather
+  // than of the files anyone thought to check: with a `git` shim recording the remotes of
+  // every `git fetch` across the whole of `tests/**`, no fetch names a host — the sources
+  // are local paths, or repos with no remote at all. A grep for a URL cannot establish that;
+  // a URL is harmless until something fetches it, and `orc` was missed precisely because
+  // everyone grepped for the OTHER repository's name.
   if (fetch) {
     gitProbe(gitErrors, repoPath, ["fetch", "--prune", "--quiet"], {
       timeout: 30000, severity: "warning",
@@ -1147,10 +1267,12 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // of failure into "this repo has shipped nothing", and `decide` reads `shipped` to move a
   // bundled child to `done` — so a `git` that could not fork produced a board that looked
   // in sync. A non-zero exit is NOT an answer here: "I could not enumerate the commits on
-  // this ref" is never "this ref has no commits". Measured across the 330 reconcile tests,
-  // this probe fails zero times today, so nothing in the suite relied on the laundering.
-  // The one expected failure — `ref` is the "main" guess because nothing resolved — is
-  // already reported above, so it is not reported twice.
+  // this ref" is never "this ref has no commits". BLZ-484 read this probe as failing zero
+  // times, so nothing in the suite relied on the laundering; BLZ-509 re-derived it and that
+  // is no longer true — see the table at the bottom of this file. Every one of its failures
+  // is an expected one: four on fixtures where `git` cannot run at all (always reported,
+  // whatever `exitIsAnAnswer` says), and four exiting 128 because `ref` is the "main" guess
+  // and nothing resolved — already reported above by name, so not reported twice.
   const log = gitProbe(gitErrors, repoPath, ["log", ref, "--format=%x00%B"], {
     exitIsAnAnswer: !resolved,
     what: "Blaze reads the default branch's whole commit log to learn which tickets shipped.",
@@ -1172,9 +1294,11 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   const candidates = corroboratedByTicket(prs, idFromRef, shippedSet);
 
   // BLZ-484: same rule. "I could not list the refs" is never "this repo has no branches",
-  // and an empty branch set is what makes every branch-derived signal disappear. Zero
-  // failures across the 330 reconcile tests.
-  const listed = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname:short)",
+  // and an empty branch set is what makes every branch-derived signal disappear. It never
+  // exits non-zero across `tests/reconcile*.test.mjs` — its only failures are the four
+  // `blz484-*` fixtures where `git` cannot run, which is exactly the case this rule exists
+  // for. Figures in the table at the bottom of this file (BLZ-509).
+  const listed = (gitProbe(gitErrors, repoPath, ["for-each-ref", "--format=%(refname)",
     "refs/heads", "refs/remotes/origin"], {
     what: "Blaze lists every local and origin ref to find the branches carrying ticket ids.",
     consequence: "The branch set is UNKNOWN for this repo, not empty — no branch signal reaches `decide`, and the absence of one is not evidence.",
@@ -1188,8 +1312,9 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // is unchanged. What was wrong is that the same stripped string was then handed to `git`
   // as a REVISION, and no local ref answers to it for a branch that exists only under
   // `refs/remotes/origin`: `git log INF-1-work ^origin/main` and `git rev-parse INF-1-work`
-  // both exit 128, `ambiguous argument`. Measured across the reconcile suite at 1b00f3a: 52
-  // occurrences each, and `buildBranchMap` read the resulting `own: []` /
+  // both exit 128, `ambiguous argument`. Read at 1b00f3a as "52 occurrences each"; see the
+  // BLZ-505 correction below for what that number actually counted. `buildBranchMap` read
+  // the resulting `own: []` /
   // `sameTipAsDefault: false` as evidence about the BRANCH rather than as the failure to
   // ask that it was.
   //
@@ -1215,6 +1340,9 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // beside a remote-tracking `origin/<x>` renders ONE string for two different refs, and
   // `%(refname:short)` cannot separate them at all. That needs the full namespace split
   // (`%(refname)`), which is BLZ-506's job and not this ticket's.
+  //   — CLOSED by BLZ-506 below, which also corrects this paragraph: the two do NOT render
+  //     as one string once both exist. `shorten_unambiguous_ref` disambiguates them, and
+  //     the rendering it produces depends on which other refs are present.
   //
   // MEASURED BEFORE IT SHIPPED (BLZ-353), because this changes WHICH branches corroborate.
   // Every `buildBranchMap` result across the reconcile suite, at 1b00f3a and at round 2:
@@ -1225,6 +1353,24 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // the one branch whose work had not landed on the default branch is the one the silence
   // cost. The ref list for that repo also goes 33 -> 32 — `refs/heads/main` and
   // `refs/remotes/origin/main` both stripped to `main`, and the old list carried it twice.
+  //
+  // BLZ-505 — EVERY FIGURE IN THE PARAGRAPH ABOVE CAME OUT OF SOMEBODY ELSE'S REPOSITORY,
+  // AND NONE OF THEM REPRODUCES. "The two fixtures that really fetch a remote" fetched a
+  // LIVE GitHub URL, so `52`, `25` and `33 -> 32` were readings of that repository's branch
+  // list on 2026-08-29 — a mutable input, in a run pinned to a SHA as if the SHA settled it.
+  // `INF-574-blaze-config-and-chart` is a branch on that repository, not a fixture anyone
+  // here made. Re-derived by instrumenting `inspect` to ask the PRE-BLZ-492 question (the
+  // stripped display name) alongside the real one, across `tests/reconcile*.test.mjs`:
+  //
+  //   at 1b00f3a, as published .......... 52 and 52
+  //   at be4b110, live remote still in ... 67 and 66   (the repo had gained branches, and
+  //                                                     the two counts were never equal)
+  //   at be4b110, fixtures hermetic ...... 21 and 20   (reproducible: no network, no
+  //                                                     foreign branch set)
+  //
+  // 21/20 is the figure to quote. The two counts differ because `sameTipAsDefault`
+  // short-circuits on a falsy `defaultTip`, so the `rev-parse` half is asked one fewer
+  // time — a detail "52 occurrences each" hid by asserting they were the same number.
   //
   // WHAT THAT MEASUREMENT COULD NOT SEE, said here because round 1 let an ARGUMENT stand
   // where BLZ-353 asks for a measurement. Round 1 read the delta as one-directional "by
@@ -1237,16 +1383,126 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // not a proof about shapes the suite does not contain. The shape is measured directly
   // instead, on the construction below: 1b00f3a moves INF-1, round 1 moves nothing, round 2
   // moves INF-1 again. Pinned by the "BLZ-492 round 2" suite.
+  // BLZ-506: THE NAMESPACE IS THE ANSWER, AND `%(refname:short)` DOES NOT CARRY IT.
+  //
+  // Everything above this line was written against `%(refname:short)` and a text rule that
+  // stripped a leading `origin/`. BLZ-506 replaces both with the full ref path, and the
+  // reason is not the one its ticket gave. The ticket said `refs/heads/origin/x` and
+  // `refs/remotes/origin/x` "render identically" as `origin/x`. THEY DO NOT: git's
+  // `shorten_unambiguous_ref` disambiguates them the moment both exist, into
+  // `heads/origin/x` and `remotes/origin/x`. What is actually wrong is worse, because the
+  // rendering is CONTEXT-DEPENDENT — the same ref renders differently depending on which
+  // OTHER refs are in the repository:
+  //
+  //   refs/remotes/origin/task/INF-1-work  alone      -> "origin/task/INF-1-work"
+  //                                        shadowed   -> "remotes/origin/task/INF-1-work"
+  //   refs/heads/origin/INF-2-shadow       alone      -> "origin/INF-2-shadow"
+  //                                        shadowed   -> "heads/origin/INF-2-shadow"
+  //
+  // So the `origin/` strip is a text rule applied to a spelling that moves under it, and
+  // the BRANCH NAME it produced — the string `decide` writes into a ticket's `branch:`
+  // field, permanently — moved with it. Measured on the constructions in
+  // tests/reconcile-refname-namespace.test.mjs, at be4b110: a shadowed remote-only branch
+  // was recorded as `remotes/origin/task/INF-1-work`, which is a ref spelling and not a
+  // branch name; and a lone local head genuinely called `origin/INF-2-shadow` was recorded
+  // as `INF-2-shadow`, a name nothing in the repository answers to. Neither is a name a
+  // person can check out, and `pr`/`branch` are not in EDITABLE_FIELDS, so both persist.
+  //
+  // `%(refname)` is the same string whatever else exists. From it BOTH questions are
+  // answered exactly once, by the namespace rather than by the spelling:
+  //
+  //   the NAME     — `refs/heads/<n>` and `refs/remotes/origin/<n>` are both the branch
+  //                  `<n>`, which is what makes a branch that exists locally and on the
+  //                  remote ONE branch. A local head under `refs/heads/origin/<n>` is a
+  //                  branch genuinely called `origin/<n>`, and is named as such.
+  //   the QUESTION — the full ref path, which `git` resolves with no ambiguity and no
+  //                  warning. This is BLZ-492's fix, made total: `askable` no longer holds
+  //                  a display string that git has to guess at.
+  //
+  // ORDER IS STILL A DECISION, AND IT IS MADE EXPLICITLY RATHER THAN INHERITED FROM THE
+  // SORT. That is BLZ-492's round-2 lesson: round 1 said "`for-each-ref` lists
+  // `refs/heads/…` before `refs/remotes/…`, so a local ref always wins", and the sort is on
+  // the FULL refname, so `refs/heads/origin/task/…` sorts before `refs/heads/task/…` and the
+  // stale namesake won instead. Round 2 patched that with a tie-break; here the ranking IS
+  // the rule, and the listing order is not consulted at all:
+  //
+  //   0  an ordinary local head        `refs/heads/<n>`             — the branch, on disk
+  //   1  an origin remote-tracking ref `refs/remotes/origin/<n>`    — the same branch, on
+  //                                                                   the remote; rank 0
+  //                                                                   wins the name so a
+  //                                                                   branch that exists in
+  //                                                                   both places is ONE
+  //                                                                   branch, read locally
+  //   2  a local head under `origin/`  `refs/heads/origin/<n>`      — a branch genuinely
+  //                                                                   called `origin/<n>`,
+  //                                                                   and last, so it can
+  //                                                                   never take an id from
+  //                                                                   a real branch
+  //
+  // `buildBranchMap` takes the first ref that CORROBORATES for an id, so rank 2 being last
+  // is what stops a FRESH stale namesake — one whose tip is the default tip, which
+  // corroborates on its own terms — from claiming the id and being written into the ticket.
+  // Pinned by "a FRESH shadow does not take the slot from the branch that carries the work";
+  // the two other shadow tests do NOT hold it, because a shadow that fails to corroborate
+  // falls through whatever the order.
+  // MEASURED BEFORE IT SHIPPED (BLZ-353), because this changes WHICH branches corroborate
+  // and what they are CALLED. Instrumented `buildBranchMap` across `tests/reconcile*.test.mjs`
+  // (the pre-existing files, excluding this ticket's own), at c77547d and at this commit:
+  //
+  //   invocations 288 -> 288    corroborated 314 -> 314    refs listed 613 -> 612
+  //
+  // Corroboration does not move at all. The single ref that goes is the phantom `origin`
+  // described below.
+  //
+  // WHAT THAT MEASUREMENT WAS INCAPABLE OF OBSERVING, which is the whole of its value here.
+  // A suite-wide delta can only see shapes the suite contains, and the shape this changes is
+  // a ref under `refs/heads/origin/`. The pre-existing suite contains exactly one fixture
+  // with any (`shadowedByOriginNamedLocalBranch`, BLZ-492 round 2) and it has NO REMOTE AT
+  // ALL — so the case the ticket is actually about, a local `origin/<x>` beside a
+  // remote-tracking `origin/<x>`, appears nowhere in it and the 314 -> 314 reading is
+  // structurally blind to it. It is evidence of NO COLLATERAL DAMAGE and nothing else. The
+  // shapes themselves are measured directly, on the four constructions in
+  // tests/reconcile-refname-namespace.test.mjs, each of which reads a different wrong answer
+  // out of the pre-BLZ-506 code:
+  //
+  //   shadowed remote-only   `branch: remotes/origin/task/INF-1-work`  (a ref spelling)
+  //   lone origin/<x> head   `branch: INF-2-shadow`                    (no such branch)
+  //   FRESH shadow           takes INF-1's slot from the real branch
+  //   local + remote twin    held only by `for-each-ref`'s sort order, by nothing else
+  //
+  // This is the same trap BLZ-492's round 1 fell into — a suite-wide figure quoted as a
+  // proof about a shape the suite does not contain — and it is why the figure above is
+  // reported with what it cannot see attached to it.
+  const HEADS = "refs/heads/", REMOTE = "refs/remotes/origin/";
+  const named = [];
+  for (const full of listed) {
+    if (full.startsWith(HEADS)) named.push({ name: full.slice(HEADS.length), full, local: true });
+    else if (full.startsWith(REMOTE)) named.push({ name: full.slice(REMOTE.length), full, local: false });
+    // Anything else is neither a branch nor an origin remote-tracking ref, and this listing
+    // asked for nothing else.
+  }
+  const rankOf = (e) => (e.local ? (e.name.startsWith("origin/") ? 2 : 0) : 1);
   const refs = [];
   const askable = new Map();
-  for (const raw of listed) {
-    const name = raw.replace(/^origin\//, "");
-    if (!name || name === "HEAD") continue;
-    if (!askable.has(name)) { askable.set(name, raw); refs.push(name); }
-    // ROUND 2 (review). `raw === name` means nothing was stripped, and a ref under
-    // `refs/remotes/origin` always renders WITH the prefix — so this raw ref is an exact
-    // local head, and it outranks any stripped ref that claimed the same slot before it.
-    else if (raw === name) askable.set(name, raw);
+  for (const pass of [0, 1, 2]) {
+    for (const e of named) {
+      if (rankOf(e) !== pass) continue;
+      // `refs/remotes/origin/HEAD` is the remote's default-branch POINTER, not a branch.
+      // Under `%(refname:short)` it rendered as the bare string `origin`, which the old
+      // `origin/`-strip left alone and the old `name === "HEAD"` check therefore never
+      // caught — so every repo with an `origin/HEAD` carried a phantom branch called
+      // `origin` in its ref list. Full refnames make it say what it is. (Measured across
+      // `tests/reconcile*.test.mjs` at be4b110: the suite-wide ref count falls 613 -> 612.)
+      //
+      // NOT PINNED, AND SAID SO. Deleting this line reddens nothing, here or anywhere:
+      // `idFromRef("origin")` is null for every project key, so the phantom entry can never
+      // claim a ticket and no construction turns it into a behaviour difference. It costs
+      // two wasted `git` probes per repo and a wrong ref count. Described, not implied held.
+      if (!e.name || e.name === "HEAD") continue;
+      if (askable.has(e.name)) continue;
+      askable.set(e.name, e.full);
+      refs.push(e.name);
+    }
   }
 
   // What the branch itself says: the subjects unique to it (not already on the
@@ -1258,9 +1514,15 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
     consequence: "Every branch is treated as NOT sharing the default tip, which is a guess, not a reading.",
   });
   // BLZ-492 (was BLZ-484's "stated rather than fixed"): both probes ask about `askable`,
-  // the ref `for-each-ref` actually listed, not the display name derived from it. The 52
-  // laundered exits above are gone — re-measured at the fix: 0 of each across the reconcile
-  // suite — and `buildBranchMap` now reads a remote-only branch's own commits.
+  // the ref `for-each-ref` actually listed, not the display name derived from it. The
+  // laundered exits above are gone — re-derived at be4b110 across `tests/reconcile*.test.mjs`,
+  // the `log` half fails ONCE and the `rev-parse` half not at all, against 21 and 20 for the
+  // question this code no longer asks. The one remaining `log` failure is `blz492-unresolved`,
+  // the fixture BLZ-492 itself added, where nothing resolved and `ref` is the guess "main" —
+  // the condition `no-default-branch` has already reported by name, which is precisely what
+  // the `exitIsAnAnswer` below is for. (BLZ-492's own comment said "0 of each"; it was
+  // measured before its own fixture landed. BLZ-505.) `buildBranchMap` now reads a
+  // remote-only branch's own commits.
   //
   // `exitIsAnAnswer: true` STAYS, and it is not vestigial. `git log <branch> ^<ref>` names
   // `ref`, so it is a DEPENDENT probe on the default-branch resolution, exactly like
@@ -1272,12 +1534,38 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // pinned by "an unresolved default branch is ONE warning, not one warning plus a
   // git-failed per branch".
   //
-  // REACHABILITY, STATED: the opt-in on the `rev-parse` half is a different case. It only
-  // runs when `defaultTip` resolved, and it is asked about a ref `for-each-ref` listed in
-  // the same run, so no construction in this suite makes it fire; mutating that one alone
-  // is not killable by any test here. It is kept because the listing and the probe are two
-  // separate `git` invocations and a ref can be pruned between them — a race no test can
-  // stage deterministically. Said plainly rather than left to look pinned.
+  // BLZ-508, DECIDED: THE `rev-parse` HALF'S OPT-IN IS KEPT, AND IT IS UNREACHABLE. Both
+  // halves of that sentence are true and neither softens the other.
+  //
+  // UNREACHABLE, MEASURED RATHER THAN ARGUED. Instrumented across `tests/reconcile*.test.mjs`
+  // at be4b110: of 593 bare `rev-parse <rev>` invocations, 5 exit non-zero and ALL FIVE are
+  // `defaultTip`'s `rev-parse <ref>` on a fixture where nothing resolved — `blz484-silent`,
+  // `blz484-loud`, `blz484-quiet`, `blz484-result` (could not run) and `blz492-unresolved`
+  // (exit 128). NONE is this probe. It cannot be otherwise: it runs only when `defaultTip`
+  // is truthy, and it is asked about a ref `for-each-ref` listed in the same run. Deleting
+  // the option entirely leaves the WHOLE suite green — 4,272 pass, 0 fail, 369 suites — so
+  // no mutation can kill it and nothing here holds it. Described that way, never implied
+  // pinned.
+  //
+  // KEPT ANYWAY, and this is the decision rather than an omission. The listing and the probe
+  // are two separate `git` invocations against a live repository. A ref pruned between them
+  // — by a concurrent `git fetch --prune`, which `blaze start`'s own loop runs, or by a
+  // `git branch -d` in another window — makes this probe exit 128, and that exit IS the
+  // answer to "is this branch at the default tip": it is not. Without the opt-in that
+  // becomes a `git-failed` ERROR, `GIT UNREADABLE`, and exit 1 on a run that was otherwise
+  // entirely correct. The race is real and no test can stage it deterministically, which is
+  // exactly why removing the guard would be trading a proven-harmless line for an
+  // unreproducible failure.
+  //
+  // BLZ-506 sharpened the argument: `rev` is now a full refname, so a non-zero exit here can
+  // no longer mean "that name was ambiguous" — the only remaining reading is "that ref is
+  // gone", which is an answer.
+  //
+  // The SIBLING site above — the `log` half — is a different case and is NOT covered by this
+  // decision. It fires (once, on `blz492-unresolved`) and removing its opt-in alone reddens
+  // "an unresolved default branch is ONE warning, not one warning plus a git-failed per
+  // branch" and "BLZ-492: exitIsAnAnswer on the branch-inspect probes is load-bearing, and
+  // this is why". The two were reverted separately, for that reason.
   //
   // `askable.get(name) || name` falls back to the name itself for a ref that was never
   // listed. `buildBranchMap` only ever passes names from `refs`, so that fallback is not

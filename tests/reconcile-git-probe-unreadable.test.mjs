@@ -159,12 +159,14 @@ describe("BLZ-484: a git probe that could not RUN is not a git probe that found 
   });
 
   test("a probe that RAN and answered no is still silent — the discrimination, not just the alarm", async () => {
-    // The negative side, and the reason this is not simply "report every failure". Measured
-    // across the 330 reconcile tests on the parent commit, `git rev-parse --verify --quiet`
-    // exits 1 on 474 occasions and `rev-parse --abbrev-ref origin/HEAD` exits 128 on 239 —
-    // every one an ordinary "no such ref" on a fixture repo with no origin. If those were
-    // reported, every run on this suite would print a git condition and the real one would
-    // be buried. `origin/HEAD` and `origin/main` do not exist in this fixture, so both
+    // The negative side, and the reason this is not simply "report every failure". Across
+    // the reconcile suite `git rev-parse --verify --quiet` exits 1, and `rev-parse
+    // --abbrev-ref origin/HEAD` exits 128, in the hundreds — every one an ordinary "no such
+    // ref" on a fixture repo with no origin. If those were reported, every run on this suite
+    // would print a git condition and the real one would be buried. (BLZ-509: this comment
+    // used to carry the counts and a pin reading "the parent commit", which names nothing a
+    // reader can check out. The counts live in ONE place now, with a SHA: the git-probe
+    // census at the top of `defaultBranchRef` in scripts/reconcile.mjs.) `origin/HEAD` and `origin/main` do not exist in this fixture, so both
     // probes fail here, by exit code, and neither may say a word.
     const tmp = mkdtempSync(join(tmpdir(), "blz484-answered-"));
     try {
@@ -319,13 +321,22 @@ describe("BLZ-484: a single probe can fail while its siblings answer", () => {
 // `severity: "warning"` on the `--fetch` probe is what stops a failed fetch from becoming
 // exit 1. Mutating it to `"error"` left the whole suite green, so nothing was holding it.
 //
-// IT IS LOAD-BEARING, AND HERE IS THE MEASUREMENT. Instrumented across the reconcile suite
-// at 1b00f3a (`tests/reconcile*.test.mjs`, 371 tests), `git fetch --prune --quiet` runs 9
-// times and EXITS 128 FOUR OF THEM — in `blz404-oracle-applied`, `blz404-oracle-preview`
-// and twice in `blz421-oracle-equiv`, every one a fixture whose `origin` points at a
-// repository that does not exist. Under `severity: "error"` each of those four lands in
+// IT IS LOAD-BEARING, AND HERE IS THE MEASUREMENT. `git fetch --prune --quiet` runs 11
+// times across `tests/reconcile*.test.mjs` and EXITS 128 SIX OF THEM — in
+// `blz404-oracle-applied`, `blz404-oracle-preview`, twice in `blz421-oracle-equiv`, and in
+// `blz494-fetch-result` and `blz494-fetch-cli`, every one a fixture whose `origin` points at
+// a repository that does not exist. Under `severity: "error"` each of those six lands in
 // `unreadableProbes`, prints `GIT UNREADABLE` and `FAILED — N git probe(s) could not be
-// completed`, and exits 1. The same figure re-derives unchanged after BLZ-492: 9 and 4.
+// completed`, and exits 1.
+//
+// BLZ-505: this comment used to read "9 and 4, at 1b00f3a", and every part of that was
+// unreliable. Two of the nine fetches were `reconcile-finding-surfaces` fixtures pointed at
+// a LIVE GitHub URL that resolves; FOUR of the six failures were `reconcile-feed-truth-oracle`
+// fixtures pointed at a live GitHub URL that does NOT resolve — indistinguishable from a
+// dead local path in the counts, which is how it survived the first round of this ticket;
+// and the last two failures are BLZ-494's own fixtures, added after the figure it quoted was
+// taken. Every fetching fixture in the corpus is hermetic now. Re-take the figure with the
+// command in the census header in scripts/reconcile.mjs rather than trusting this sentence.
 //
 // And warning is the RIGHT answer, not merely the convenient one. A failed fetch does not
 // make the run wrong about anything it read; it makes it no more current than a run without
