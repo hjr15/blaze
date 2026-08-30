@@ -11,9 +11,29 @@ import { ROLE_SCOPES, SCOPES } from "./identity-schema.mjs";
 /** Tokens are recognisable in a log or a paste, and matchable by secret-scanning. */
 export const TOKEN_PREFIX = "blz_";
 
+/**
+ * A BROWSER session's plaintext, generated once and never stored.
+ *
+ * THE `.` IS LOAD-BEARING and is not decoration. `generateToken()` emits `blz_` plus
+ * base64url, whose alphabet is `A-Za-z0-9-_` — so a randomly generated API token could,
+ * with probability 64^-5, begin `blz_sess_`, and a prefix test that decided which TABLE
+ * to look a credential up in would then send that one token to the wrong table forever.
+ * `.` is outside base64url, so the two credential spaces are DISJOINT BY CONSTRUCTION
+ * rather than by a probability nobody would ever debug.
+ *
+ * Still `blz_`-prefixed: the same secret-scanning rules must catch a leaked session.
+ */
+export const SESSION_PREFIX = `${TOKEN_PREFIX}sess.`;
+
 /** A token's plaintext, generated once and never stored. */
 export function generateToken() {
   return TOKEN_PREFIX + randomBytes(32).toString("base64url");
+}
+
+/** A session's plaintext. 32 random bytes, exactly as an API token: high-entropy, so it
+ *  is stored as a plain SHA-256 and needs no KDF — unlike the password that mints it. */
+export function generateSessionToken() {
+  return SESSION_PREFIX + randomBytes(32).toString("base64url");
 }
 
 /** What goes in the database. SHA-256: a dump must not yield working credentials. */
@@ -91,11 +111,48 @@ export function checkRequestedScopes({ role, requested }) {
   return { ok: true, error: null, scopes: SCOPES.filter((s) => asked.includes(s)) };
 }
 
+/**
+ * An INSTANT from whatever the driver handed back.
+ *
+ * BLZ-566. The comparison this feeds used to be `String(row.expires_at) <= now` — a
+ * LEXICOGRAPHIC compare between two strings, correct only because identity is hard-wired
+ * to SQLite, where `d.ts` is `TEXT` and every timestamp round-trips as an ISO-8601 `Z`
+ * string that happens to sort chronologically.
+ *
+ * `identity-store.mjs` already supports the `postgres` dialect, where `d.ts` is
+ * `timestamptz` and `pg` returns a `Date`. `String(new Date())` is "Mon Aug 31 2026 …",
+ * which never compares `<=` an ISO string — so on that driver EXPIRY WOULD SILENTLY NEVER
+ * FIRE and every browser session would become permanent. Nothing constructs that dialect
+ * today (`identity-db.mjs` builds exactly one store, sqlite), so this is a LATENT-PATH
+ * guard and is described as one rather than as a live fix. It is cheap, and an expiry
+ * check that fails open is not a thing to discover afterwards.
+ *
+ * @returns epoch milliseconds, or NaN when the value cannot be read as a time.
+ */
+function instant(value) {
+  if (value instanceof Date) return value.getTime();
+  if (typeof value === "number") return value;
+  return Date.parse(String(value));
+}
+
 /** Is this token row usable at all, independent of what it may do? */
 export function tokenUsable(row, { now = new Date().toISOString() } = {}) {
   if (!row) return { ok: false, error: "no such token" };
   if (row.revoked_at) return { ok: false, error: "this token has been revoked" };
-  if (row.expires_at && String(row.expires_at) <= now) return { ok: false, error: "this token has expired" };
+  // An ABSENT expiry is not an expiry. An `api_token` an operator pastes into a CI job may
+  // legitimately never expire; `user_session.expires_at` is NOT NULL, so a session can
+  // never take this branch.
+  if (row.expires_at === null || row.expires_at === undefined || row.expires_at === "") {
+    return { ok: true, error: null };
+  }
+  const expiresAt = instant(row.expires_at);
+  // FAIL CLOSED on an expiry that cannot be read at all. A credential row whose expiry is
+  // unreadable is a corrupted credential row, and the safe reading of "I cannot tell
+  // whether this has expired" is that it has.
+  if (!Number.isFinite(expiresAt)) return { ok: false, error: "this token has expired" };
+  const asked = instant(now);
+  const at = Number.isFinite(asked) ? asked : Date.now();
+  if (expiresAt <= at) return { ok: false, error: "this token has expired" };
   return { ok: true, error: null };
 }
 

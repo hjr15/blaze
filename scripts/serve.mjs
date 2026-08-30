@@ -31,6 +31,9 @@ import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admi
 import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
          ensureSetupTokenIgnored } from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
+import { handleSigninRoutes, readJsonBody, SIGNIN_PATH, preAuthHeaders, cspNonce,
+         queryRefusalPageHtml } from "./model/signin.mjs";
+import { checkPasswordPolicy, MIN_PASSWORD_LENGTH } from "./model/passwords.mjs";
 export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
 
 // BLZ-133: config is read lazily, and from the board being SERVED rather than
@@ -45,24 +48,10 @@ const cfgFor = (root) => {
   return _cfgCache.get(root);
 };
 
-function readJson(req) {
-  return new Promise((resolve, reject) => {
-    let data = "", size = 0, settled = false;
-    req.on("data", (c) => {
-      if (settled) return;
-      size += c.length;
-      if (size > 256 * 1024) {
-        settled = true;
-        req.destroy();
-        reject(new Error("too large"));
-      } else {
-        data += c;
-      }
-    });
-    req.on("end", () => { try { resolve(data ? JSON.parse(data) : {}); } catch (e) { reject(e); } });
-    req.on("error", (e) => { if (!settled) reject(e); });
-  });
-}
+// BLZ-566: ONE definition, in model/signin.mjs, because the sign-in surface is
+// pre-auth and needs the same 256KB cap this has always applied. Two copies of a body
+// limit is one copy that drifts.
+const readJson = readJsonBody;
 
 function aheadCount(root) {
   const r = spawnSync("git", ["-C", root, "rev-list", "--count", "@{u}..HEAD"], { encoding: "utf8" });
@@ -96,13 +85,13 @@ export async function reconcilePreview({ root, projectsDir, projects = null } = 
 // Compresses when the client advertises gzip support and the body is large
 // enough that compression is worth the CPU (below 1KB, gzip overhead can
 // exceed the savings).
-function send(req, res, code, type, body) {
+function send(req, res, code, type, body, extra = {}) {
   const buf = Buffer.isBuffer(body) ? body : Buffer.from(body);
   if (buf.length >= 1024 && /\bgzip\b/.test(String(req.headers["accept-encoding"] || ""))) {
-    res.writeHead(code, { "content-type": type, "content-encoding": "gzip" });
+    res.writeHead(code, { "content-type": type, "content-encoding": "gzip", ...extra });
     res.end(gzipSync(buf)); return;
   }
-  res.writeHead(code, { "content-type": type });
+  res.writeHead(code, { "content-type": type, ...extra });
   res.end(buf);
 }
 
@@ -137,9 +126,11 @@ function setupFailureReason(e) {
 // — the admin row exists, so leaving it live would let a second caller create a second
 // admin — and it cannot be reissued while that row is there. The ordinary page would send
 // the operator to read a file this process deleted. Path and command only; no value.
-function setupFailedPageHtml() {
+function setupFailedPageHtml(nonce = "") {
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   return `<!doctype html><meta charset="utf-8"><title>blaze — setup could not be completed</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
+<style nonce="${esc(nonce)}">body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
 code{background:#eee;padding:.15rem .35rem}</style>
 <h1>Setup could not be completed</h1>
 <p>The administrator account <strong>was created</strong>, but blaze could not open the
@@ -154,40 +145,64 @@ to act on.</p>
 `;
 }
 
-function setupPageHtml(tokenPath) {
+function setupPageHtml(tokenPath, nonce = "") {
   const esc = (v) => String(v).replace(/[&<>"]/g, (c) =>
     ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
   return `<!doctype html><meta charset="utf-8"><title>blaze — first-run setup</title>
-<style>body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
+<style nonce="${esc(nonce)}">body{font:15px/1.5 system-ui,sans-serif;max-width:34rem;margin:4rem auto;padding:0 1rem}
 label{display:block;margin:1rem 0 .25rem;font-weight:600}input{width:100%;padding:.5rem;font:inherit}
 code{background:#eee;padding:.15rem .35rem}button{margin-top:1.5rem;padding:.6rem 1.2rem;font:inherit}
-#out{margin-top:1.5rem;white-space:pre-wrap}</style>
+#out{margin-top:1.5rem;white-space:pre-wrap}
+.warn{color:#a00}</style>
 <h1>Set up blaze</h1>
 <p>This board has no users yet, so nothing is being served until you create the first
 administrator.</p>
 <p>Read the one-time setup token from this file on the machine hosting the board — it is
 not shown here, and it is not in any log:</p>
 <p><code>${esc(tokenPath)}</code></p>
-<form id="f">
+<noscript><p class="warn"><strong>JavaScript is required to complete setup.</strong>
+This form is submitted by script so that the setup token travels in a request body and
+never in a URL. With script disabled the submission below will be refused, not sent.</p></noscript>
+<!-- METHOD="POST" IS LOAD-BEARING MARKUP — BLZ-566. With no method a browser GETs the
+     current URL, putting every field in the QUERY STRING: here that is the ONE-TIME SETUP
+     TOKEN, which then sits in browser history and in the access log of every fronting
+     proxy. setup-token.mjs states the invariant this would break in as many words — the
+     value is "never logged, echoed, or rendered" — and the PATH is published precisely so
+     the VALUE never has to cross a channel that keeps it. -->
+<form id="f" method="post" action="/setup">
   <label for="token">Setup token</label>
   <input id="token" name="token" autocomplete="off" required>
   <label for="email">Your email address</label>
   <input id="email" name="email" type="email" required>
   <label for="displayName">Display name (optional)</label>
   <input id="displayName" name="displayName" autocomplete="off">
+  <label for="password">Password (for signing in from a browser)</label>
+  <input id="password" name="password" type="password" autocomplete="new-password"
+         minlength="${MIN_PASSWORD_LENGTH}" required>
   <button type="submit">Create administrator</button>
 </form>
 <div id="out"></div>
-<script>
+<!-- \\n, NOT \n — AND THIS PAGE IS WHY BLZ-566 WAS FILED. This whole document is a JS
+     TEMPLATE LITERAL, so a bare \\n here is an ESCAPE SEQUENCE consumed at build time: the
+     SERVED html then carried a real newline inside a double-quoted JS string, the script
+     died with "Invalid or unexpected token", the submit handler never bound, and the form
+     submitted natively. '/setup' could never complete in a browser. That is the operator's
+     original report — "it didn't continue after clicking Create administrator, looks like a
+     broken page" — and it was a broken page. Predates this branch; found by review on it.
+     ANY backslash escape inside a served template literal is suspect. -->
+<script nonce="${esc(nonce)}">
 document.getElementById("f").addEventListener("submit", async (e) => {
   e.preventDefault();
-  const body = { token: token.value, email: email.value, displayName: displayName.value || null };
+  const body = { token: token.value, email: email.value, displayName: displayName.value || null,
+                 password: password.value };
   const r = await fetch("/setup", { method: "POST",
     headers: { "content-type": "application/json" }, body: JSON.stringify(body) });
   const j = await r.json().catch(() => ({}));
   out.textContent = r.ok
-    ? "Administrator created.\n\nYour API token is shown ONCE and is not recoverable:\n\n"
-      + j.token + "\n\nStore it now, then reload this page."
+    ? "Administrator created.\\n\\nYour API token is shown ONCE and is not recoverable:\\n\\n"
+      + j.token + "\\n\\nStore it now."
+      + (j.passwordSet ? "\\n\\nYou can now sign in at /signin." : "\\n\\nNo password was set — "
+         + "run 'blaze user passwd' on the host to sign in from a browser.")
     : "Setup failed: " + ((j.errors || ["unknown error"]).join(", "));
 });
 </script>`;
@@ -335,19 +350,35 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // the gate. It exists ONLY while `setupPending`, so once an identity exists there is
     // no route here to reach: not hidden, absent.
     if (setupPending) {
+      // EVERY RESPONSE FROM THE SETUP BRANCH IS PRE-AUTH, and the success one carries the
+      // API token plaintext — the only moment it exists. It must not be written to a disk
+      // cache or a shared proxy cache, so this shadows the handler's `json` for the whole
+      // branch rather than being remembered at each of its six return sites.
+      const json = (code, obj) =>
+        send(req, res, code, "application/json", JSON.stringify(obj), preAuthHeaders());
       // WRAPPED, because this branch runs BEFORE any credential is checked and the rest
       // of this file states the rule three times: an uncaught throw in an async handler
       // ends the process for every connected session rather than refusing one request.
       // It was the one place here without a try, and one unauthenticated request with a
       // poisoned `toString` was enough to take the board down.
       try {
+      // NO PRE-AUTH ROUTE TAKES A QUERY STRING — BLZ-566, and on /setup the thing a
+      // method-less form would have put there is the ONE-TIME SETUP TOKEN. Refused before
+      // anything is rendered, and nothing it carried is ever echoed back.
+      if (u.pathname === "/setup" && [...u.searchParams.keys()].length) {
+        return send(req, res, 400, "text/html; charset=utf-8", queryRefusalPageHtml(),
+                    preAuthHeaders());
+      }
       if (req.method === "GET" && u.pathname === "/setup") {
+        const nonce = cspNonce();
         if (adoptionFailed) {
           // The token is gone and cannot be reissued while an admin row exists. Point at
           // the route that actually works from here. Path only — never a value.
-          return send(req, res, 200, "text/html; charset=utf-8", setupFailedPageHtml());
+          return send(req, res, 200, "text/html; charset=utf-8", setupFailedPageHtml(nonce),
+                      preAuthHeaders({ nonce }));
         }
-        return send(req, res, 200, "text/html; charset=utf-8", setupPageHtml(setupTokenPath(root)));
+        return send(req, res, 200, "text/html; charset=utf-8",
+                    setupPageHtml(setupTokenPath(root), nonce), preAuthHeaders({ nonce }));
       }
       if (req.method === "POST" && u.pathname === "/setup") {
         let body;
@@ -383,6 +414,19 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
             return json(400, { errors: ["display name is too long (200 characters max)"] });
           }
           if (!displayName) displayName = null;
+        }
+        // BLZ-566. VALIDATED HERE, AND SET AFTER ADOPTION. Checked before `addUser` so a
+        // password the policy refuses cannot leave a half-made board behind — an admin row
+        // with no way to sign in, and a setup token this branch would then have consumed.
+        // OPTIONAL in the body and REQUIRED in the form: the shipped page always sends one,
+        // so an operator completing setup is never locked out the way BLZ-566 was filed
+        // for; a caller driving `/setup` from a script keeps the contract it had, gets its
+        // API token, and is told `passwordSet: false` rather than being failed.
+        let password = null;
+        if (body?.password !== null && body?.password !== undefined) {
+          const policy = checkPasswordPolicy(body.password);
+          if (!policy.ok) return json(400, { errors: [policy.error] });
+          password = body.password;
         }
         if (setupInFlight) return json(409, { errors: ["setup is already in progress"] });
         setupInFlight = true;
@@ -446,18 +490,40 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           return json(500, { errors: ["setup could not be completed"] });
         }
         store = adopted.store;
+        // AFTER adoption and BEFORE the token is cleared, so the ordering above is
+        // untouched. A failure here does NOT fail setup: the administrator and its API
+        // token exist and are the thing that makes the install usable, and reporting
+        // `passwordSet: false` is a truthful answer the page acts on. Failing instead
+        // would consume the token and leave the board in the adoption-failed state over a
+        // password.
+        let passwordSet = false;
+        if (password) {
+          try {
+            await store.setPassword({ email, password });
+            passwordSet = true;
+          } catch (e) {
+            // The OPERATOR is told, on stderr, and the reason is the exception's MESSAGE
+            // only — never the object, which can carry the request that produced it. The
+            // password value appears in neither.
+            console.error("blaze: the administrator was created but its password could not "
+              + "be stored — sign in is not available until `blaze user passwd` is run:",
+              setupFailureReason(e));
+          }
+        }
         clearSetupToken(root);
         setupPending = false;
         // The API token is returned ONCE. ADR-0013 stores only its SHA-256, so this is
-        // the only moment it exists; it is not logged, for the same reason.
-        return json(200, { ok: true, user: created.user, token: created.token.token });
+        // the only moment it exists; it is not logged, for the same reason. The PASSWORD is
+        // not echoed back at all — only whether one was stored.
+        return json(200, { ok: true, user: created.user, token: created.token.token, passwordSet });
       }
       // Everything else waits. 503 rather than 404: the board is really there, it is
       // simply not safe to serve it yet, and a 404 would suggest the operator had the
       // wrong address. The body is a fixed string and carries nothing from the request
       // or from the token.
       return send(req, res, 503, "text/plain; charset=utf-8",
-        "blaze: first-run setup required — no users are configured. Open /setup\n");
+        "blaze: first-run setup required — no users are configured. Open /setup\n",
+        preAuthHeaders());
       } catch (e) {
         // The RESPONSE deliberately says nothing about what failed: this is the pre-auth
         // surface. The OPERATOR is told, on stderr — a silent 500 on the one route that
@@ -465,6 +531,24 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         console.error("blaze: first-run setup failed:", setupFailureReason(e));
         return json(500, { errors: ["setup could not be completed"] });
       }
+    }
+
+    // BLZ-566: the browser's door, decided BEFORE the gate for the same reason `/setup`
+    // is — a caller signing in has no credential to present yet, by definition, since
+    // obtaining one is what the route is for. It carries its own check (a password, and
+    // the CSRF header alongside it) and never reaches `gate()`.
+    //
+    // It DECLINES on a board with no users, so nothing new is served on an unconfigured
+    // board; and it is placed after the `setupPending` branch, so during first-run setup
+    // it is not reachable at all and the 503 catch-all answers instead. `/api/*` never
+    // arrives here, so the fail-closed 404 for an unclassified API route is untouched.
+    try {
+      if (await handleSigninRoutes({ req, res, url: u, store, csrf: CSRF,
+                                     boardTitle: cfgFor(root).boardTitle })) return;
+    } catch {
+      // The handler has its own try; this is the belt for the buckle. An uncaught throw
+      // in an async handler ends the process for every connected session.
+      return json(500, { errors: ["sign-in could not be completed"] });
     }
 
     let principal = null;
@@ -491,12 +575,26 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         // A page route answers in prose. It is reached by a browser, and a JSON envelope
         // there tells a human nothing about what to do next.
         if (pageScope) {
+          // BLZ-566. A BROWSER IS SENT TO THE DOOR; EVERY OTHER CALLER IS TOLD WHERE IT IS.
+          //
+          // The redirect is conditioned on the caller asking for HTML, not on guessing at a
+          // User-Agent: a browser navigating to a page sends `Accept: text/html`, and curl,
+          // fetch() and every proxy health check send `*/*` and keep the prose 401 they
+          // have always had. A 302 handed to a script is a 302 a script follows into an
+          // HTML page it cannot use.
+          if (/\btext\/html\b/.test(String(req.headers.accept ?? ""))) {
+            // No body: the refusal must carry nothing from the board, and a redirect body
+            // is the one place it would be easy to leak some.
+            res.writeHead(302, { location: SIGNIN_PATH, "content-type": "text/plain; charset=utf-8" });
+            res.end("");
+            return;
+          }
           res.writeHead(decision.status, { "content-type": "text/plain; charset=utf-8" });
           res.end(`${decision.error}\n\nThis board has users configured, so its content `
-            + "requires a token:\n\n    Authorization: Bearer blz_...\n\n"
-            + "Issue one with `blaze user add`. A browser cannot set that header itself — "
-            + "put a\nreverse proxy in front that adds it, or use the API directly, until "
-            + "the sign-in\nflow lands.\n");
+            + "requires a credential.\n\nFrom a browser, sign in at " + SIGNIN_PATH
+            + " (set a password with `blaze user passwd`).\nFrom the API, the CLI or a "
+            + "reverse proxy:\n\n    Authorization: Bearer blz_...\n\n"
+            + "Issue one with `blaze user add`.\n");
           return;
         }
         return json(decision.status, { errors: [decision.error] });

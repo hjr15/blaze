@@ -5,14 +5,20 @@
 // argument parsing and the creation itself live in model/user-admin.mjs, where they are
 // covered; this owns only the process — stdout, stderr and the exit code.
 import { resolveRoots } from "./config.mjs";
-import { parseUserArgv, addUser, ensureIdentityIgnored } from "./model/user-admin.mjs";
+import { parseUserArgv, addUser, setUserPassword, ensureIdentityIgnored } from "./model/user-admin.mjs";
+import { MIN_PASSWORD_LENGTH } from "./model/passwords.mjs";
 import { ROLES } from "./model/identity-schema.mjs";
 import { identityDbPath } from "./model/identity-db.mjs";
 
 const USAGE = [
-  "usage: blaze user add --email <address> [--role <role>] [--name <display name>]",
+  "usage: blaze user add    --email <address> [--role <role>] [--name <display name>]",
+  "       blaze user passwd --email <address>",
   "",
   `  --role   ${ROLES.join(" | ")}   (default: member)`,
+  "",
+  "`passwd` sets the password this address signs in with from a browser. It is read",
+  `from STDIN — never from a flag, because argv is visible in \`ps\` and is written to`,
+  `shell history. Minimum ${MIN_PASSWORD_LENGTH} characters; only a scrypt verifier is stored.`,
   "",
   "Creates the user and issues its first API token. The token is printed ONCE and",
   "stored only as a SHA-256 hash — it cannot be read back. Adding the first user",
@@ -35,6 +41,60 @@ if (!parsed.ok) {
 }
 
 const { dataRoot } = resolveRoots();
+
+/**
+ * Read the password from stdin, and from nowhere else.
+ *
+ * ECHO IS OFF ON A TTY. Node has no built-in for it, so the prompt is written to stderr
+ * and readline's own echo is suppressed — a password typed into a shared terminal must
+ * not be left on the screen for the next person, and it must not reach a scrollback
+ * buffer that gets pasted into a support ticket.
+ *
+ * Piped input is read as-is, so `blaze user passwd --email you@example.com < secret` and
+ * a password manager's stdout both work without a TTY.
+ */
+async function readPassword() {
+  if (!process.stdin.isTTY) {
+    let data = "";
+    for await (const chunk of process.stdin) data += chunk;
+    return data.split("\n")[0].replace(/\r$/, "");
+  }
+  const { createInterface } = await import("node:readline");
+  const rl = createInterface({ input: process.stdin, output: process.stderr, terminal: true });
+  process.stderr.write("Password: ");
+  // The one line that makes it silent: readline asks its output stream to render each
+  // keystroke, and this renders nothing at all.
+  rl._writeToOutput = () => {};
+  try {
+    return await new Promise((resolve) => rl.question("", resolve));
+  } finally {
+    rl.close();
+    process.stderr.write("\n");
+  }
+}
+
+if (parsed.verb === "passwd") {
+  try {
+    const password = await readPassword();
+    const { email } = await setUserPassword(dataRoot, { email: parsed.email, password });
+    // The ADDRESS, never the value. Same rule the setup token follows: the path may be
+    // named, the secret never may.
+    console.log(`password set for ${email}`);
+    console.log("");
+    console.log("Sign in from a browser at /signin on this board.");
+    console.log("API and CLI callers are unaffected — they keep using their `blz_` token.");
+    console.log("");
+    console.log("NOTE: a server that is ALREADY RUNNING picks this up without a restart —");
+    console.log("      unlike `blaze user add`, this changes no roster the server read at boot.");
+  } catch (e) {
+    // `e.message` and nothing else: the exception object can carry the call that produced
+    // it, and that call has the password in it.
+    console.error(`blaze: ${e.message}`);
+    process.exit(1);
+  }
+  process.exit(0);
+}
+
 try {
   const { user, token } = await addUser(dataRoot, {
     email: parsed.email, role: parsed.role, displayName: parsed.displayName,

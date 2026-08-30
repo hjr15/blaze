@@ -21,6 +21,7 @@
 //    there converts a silent exposure into a startup error, which is the trade this
 //    whole exercise exists to make.
 import { isIP } from "node:net";
+import { SESSION_PREFIX } from "./identity.mjs";
 
 /** Every route the API answers, and what it costs to call. */
 export const ROUTE_SCOPES = {
@@ -111,7 +112,49 @@ export function pageScopeFor(method, pathname) {
 export function bearerFrom(headers) {
   const raw = String(headers?.authorization ?? headers?.Authorization ?? "").trim();
   if (!/^Bearer\s+/i.test(raw)) return "";
-  return raw.replace(/^Bearer\s+/i, "").trim();
+  const value = raw.replace(/^Bearer\s+/i, "").trim();
+  // BLZ-566. A BROWSER SESSION IS NOT A BEARER TOKEN. The two credential spaces are
+  // disjoint by construction (identity.mjs, SESSION_PREFIX) and they are kept disjoint at
+  // both ends: a session is ambient and an api_token is not, and letting one arrive
+  // through the other's door would hand the Authorization header the cookie's CSRF
+  // exposure for nothing. Refused HERE as well as in `authenticate`, because this is the
+  // function every caller in the codebase asks "is there a bearer credential", and an
+  // answer of "yes, a session" is wrong before anyone acts on it.
+  return value.startsWith(SESSION_PREFIX) ? "" : value;
+}
+
+/** The name of the cookie a signed-in browser carries. One name, exported, so the page,
+ *  the gate and the sign-out route cannot drift. */
+export const SESSION_COOKIE = "blaze_session";
+
+/**
+ * One cookie's value out of a Cookie header, or "".
+ *
+ * Written out rather than split-on-`=`-and-take-[1]: a session credential is base64url
+ * and carries no `=`, but a cookie value in general may, and a parser that silently
+ * truncates at the first one is a parser that fails on the day something else uses it.
+ * The NAME is compared exactly — a cookie called `xblaze_session` is a different cookie,
+ * and matching it by suffix is how an attacker who can set ANY cookie on the origin sets
+ * the one that matters.
+ */
+export function cookieFrom(headers, name) {
+  const raw = String(headers?.cookie ?? headers?.Cookie ?? "");
+  if (!raw) return "";
+  for (const pair of raw.split(";")) {
+    const eq = pair.indexOf("=");
+    if (eq < 0) continue;
+    if (pair.slice(0, eq).trim() !== name) continue;
+    return pair.slice(eq + 1).trim();
+  }
+  return "";
+}
+
+/** The session credential a browser presented, or "" — where "" also covers "something
+ *  that is not session-shaped", so an api_token pasted into the cookie is not a session
+ *  and never reaches the store. */
+export function sessionFrom(headers) {
+  const value = cookieFrom(headers, SESSION_COOKIE);
+  return value.startsWith(SESSION_PREFIX) ? value : "";
 }
 
 /**
@@ -133,6 +176,21 @@ export async function gate({ method, pathname, headers, store, operation: forced
   // No identity configured — the loopback case, already vouched for at startup.
   if (!store) return { ok: true, status: 200, error: null, principal: null };
 
-  const r = await store.authenticate({ presented: bearerFrom(headers), operation });
+  // BLZ-566. TWO DOORS, IN THIS ORDER, AND ONE OF THEM IS TAKEN PER REQUEST.
+  //
+  // The bearer header first, and if it carries anything at all that is the credential
+  // being judged — a wrong or revoked token is NOT rescued by a cookie sitting beside it.
+  // Falling through would mean a caller who deliberately presented a narrowed token got
+  // silently upgraded to whatever their browser session happens to hold, which is the
+  // opposite of what presenting it explicitly asked for.
+  //
+  // The cookie only when no bearer was presented. That ordering is also what keeps this
+  // additive: every existing API, curl and reverse-proxy caller takes exactly the path it
+  // took before, and `store.authenticateSession` is not reached at all on that path.
+  const bearer = bearerFrom(headers);
+  const session = bearer ? "" : sessionFrom(headers);
+  const r = session
+    ? await store.authenticateSession({ presented: session, operation })
+    : await store.authenticate({ presented: bearer, operation });
   return { ok: r.ok, status: r.status, error: r.error, principal: r.principal ?? null };
 }
