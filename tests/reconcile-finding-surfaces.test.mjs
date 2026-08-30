@@ -14,7 +14,7 @@
 //      `reconcile: NEEDS ATTENTION —` line and ESC bytes write an OSC-8 hyperlink.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
@@ -22,6 +22,81 @@ import { ACTIVITY_SCRIPT, newFindingEvents, newForgeErrorEvents } from "../scrip
 
 const ESC = String.fromCharCode(27);
 const BEL = String.fromCharCode(7);
+
+// =============================================================================
+// BLZ-505: THE FIXTURES' `origin` IS BUILT HERE, NOT FETCHED FROM GITHUB
+// =============================================================================
+// Four call sites in this file used to set `origin` to a live GitHub repository, and
+// `grep -- '--fetch'` finds nothing here because no test passes the CLI flag: the fetch
+// arrives from the CALLER. `supervisor.mjs`'s `runReconcile` hardcodes
+// `reconcile({ fetch: true, ... })`, so the two sites that drive it fetched a real remote
+// on every run. (The CLI sites spawn `reconcile.mjs` with no arguments and
+// `/api/reconcile-preview` passes `fetch: false`, so those two never fetched — the
+// four-site count is about the URL, not about four fetches.)
+//
+// What the two fetching sites pulled in was another repository's CURRENT state: its branch
+// list AND its default-branch commit log, whose subjects named the fixture's own ticket
+// twice and so put that id in `shippedSet`. Every figure taken over this suite therefore
+// depended on a repository nobody here controls, on the day the suite happened to run —
+// which is how BLZ-492's headline "52 occurrences" became a number that no longer
+// reproduces (see the re-derivation in `scripts/reconcile.mjs`'s `gatherRepo`).
+//
+// So the remote is constructed. `originFixture` builds a bare repository on disk;
+// `pointAtFixtureOrigin` makes it the fixture's `origin`, which is the only remote a bare
+// `git fetch` touches. A local-path remote is not a forge, and `gatherPrs` declines to
+// spend a `gh` call on one, so a SECOND remote supplies the forge classification under a
+// host in the RFC 2606 `.invalid` TLD — reserved, guaranteed never to resolve. Nothing
+// contacts it: `gh` is stubbed wherever pull requests are read.
+
+/** Remote-only branches on the fixture origin. Their ids exist on no board in this file,
+ *  so they exercise `inspect`'s remote-only path — the shape BLZ-492 is about, and the one
+ *  the live remote used to supply by accident — without touching any decision asserted
+ *  here. */
+const REMOTE_ONLY = ["INF-901-remote-only", "INF-902-remote-only"];
+
+/** Subjects on the fixture origin's default branch. The live remote's `main` named INF-645
+ *  in two subjects, which put INF-645 in `shippedSet` for the two fetching fixtures. That
+ *  input is reproduced deliberately rather than inherited by accident: it is the fixture's
+ *  own history now, and it does not change when somebody else pushes. */
+const ORIGIN_SUBJECTS = [
+  "seed: the fixture origin",
+  "INF-645: descope the dead-man's switch; cover the real risk with a CI guard test (#80)",
+  "INF-645: close the Tier-1 alert gaps, guard the blackhole receiver (#81)",
+];
+
+/** A bare repository, on disk, standing in for `origin`. */
+function originFixture(tmp) {
+  const seed = join(tmp, "origin-seed");
+  mkdirSync(seed, { recursive: true });
+  const g = (...a) => execFileSync("git", ["-C", seed, ...a]);
+  g("init", "-q", "-b", "main");
+  g("config", "user.email", "t@t.t");
+  g("config", "user.name", "t");
+  for (const [i, subject] of ORIGIN_SUBJECTS.entries()) {
+    writeFileSync(join(seed, `o${i}.md`), `o${i}\n`);
+    g("add", "-A");
+    g("commit", "-q", "-m", subject);
+  }
+  for (const b of REMOTE_ONLY) {
+    g("checkout", "-q", "-b", b);
+    writeFileSync(join(seed, `${b}.md`), "x\n");
+    g("add", "-A");
+    g("commit", "-q", "-m", `chore: work on ${b} that names no ticket`);
+    g("checkout", "-q", "main");
+  }
+  const bare = join(tmp, "origin.git");
+  execFileSync("git", ["clone", "-q", "--bare", seed, bare]);
+  return bare;
+}
+
+/** Give `repo` the fixture origin, plus the `.invalid` remote that makes `gatherPrs`
+ *  classify it as askable. `git fetch` with no arguments fetches `origin` and nothing
+ *  else, so the second remote is never contacted by git either. */
+function pointAtFixtureOrigin(repo, tmp) {
+  execFileSync("git", ["-C", repo, "remote", "add", "origin", originFixture(tmp)]);
+  execFileSync("git", ["-C", repo, "remote", "add", "forge",
+    "https://github.blaze-fixture.invalid/hjr15/service-platform.git"]);
+}
 
 // =============================================================================
 // 1. The feed renders the finding, not the word "warning"
@@ -119,8 +194,7 @@ describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", 
       writeFileSync(join(repo, "README.md"), "x\n");
       execFileSync("git", ["-C", repo, "add", "-A"]);
       execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
-      execFileSync("git", ["-C", repo, "remote", "add", "origin",
-        "https://github.com/hjr15/service-platform.git"]);
+      pointAtFixtureOrigin(repo, tmp);
       const root = join(tmp, "board");
       const dir = join(root, "projects", "INF", "done");
       mkdirSync(dir, { recursive: true });
@@ -187,8 +261,12 @@ describe("BLZ-395: `gh` output cannot forge a line on the operator's terminal", 
       writeFileSync(join(repo, "README.md"), "x\n");
       execFileSync("git", ["-C", repo, "add", "-A"]);
       execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
+      // BLZ-505: `.invalid` is reserved and never resolves, and `NON_GITHUB_HOST`'s
+      // `/(^|\.)gitlab\./` matches this host exactly as it matched the live one — so the
+      // repo is still an UNSUPPORTED forge, `gh` is still never called, and the host is
+      // now unreachable by construction rather than merely unvisited.
       execFileSync("git", ["-C", repo, "remote", "add", "origin",
-        "https://gitlab.com/acme/svc.git"]);
+        "https://gitlab.invalid/acme/svc.git"]);
       const root = join(tmp, "board");
       const dir = join(root, "projects", "INF", "done");
       mkdirSync(dir, { recursive: true });
@@ -265,8 +343,7 @@ test("BLZ-395: the supervisor's reconcile loop PUBLISHES the finding", async () 
     writeFileSync(join(repo, "R"), "x");
     execFileSync("git", ["-C", repo, "add", "-A"]);
     execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
-    execFileSync("git", ["-C", repo, "remote", "add", "origin",
-      "https://github.com/hjr15/service-platform.git"]);
+    pointAtFixtureOrigin(repo, tmp);
 
     const root = join(tmp, "board");
     mkdirSync(join(root, "projects", "INF", "done"), { recursive: true });
@@ -319,8 +396,7 @@ test("BLZ-395: /api/reconcile-preview carries the findings, not just the changes
     writeFileSync(join(repo, "R"), "x");
     execFileSync("git", ["-C", repo, "add", "-A"]);
     execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
-    execFileSync("git", ["-C", repo, "remote", "add", "origin",
-      "https://github.com/hjr15/service-platform.git"]);
+    pointAtFixtureOrigin(repo, tmp);
     const root = join(tmp, "board");
     mkdirSync(join(root, "projects", "INF", "done"), { recursive: true });
     writeFileSync(join(root, "projects", "INF", "done", "INF-645-t.md"),
@@ -408,8 +484,7 @@ test("BLZ-398: the supervisor PUBLISHES cleared, it does not just render it", as
     writeFileSync(join(repo, "R"), "x");
     execFileSync("git", ["-C", repo, "add", "-A"]);
     execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
-    execFileSync("git", ["-C", repo, "remote", "add", "origin",
-      "https://github.com/hjr15/service-platform.git"]);
+    pointAtFixtureOrigin(repo, tmp);
     const root = join(tmp, "board");
     mkdirSync(join(root, "projects", "INF", "in-review"), { recursive: true });
     // Carries a rank-chosen record from its in-review phase — the shape that gets cleared.
@@ -461,4 +536,96 @@ test("BLZ-398: the activity feed routes a forge WARNING to the warning channel",
   const err = newForgeErrorEvents([{ message: "gh could not read gitlab.com" }], new Set());
   assert.equal(err[0].type, "error", "an entry with no severity is still an error");
   assert.match(err[0].message, /forge unreadable/);
+});
+
+// =============================================================================
+// 5. The suite is HERMETIC, and that is pinned rather than asserted — BLZ-505
+// =============================================================================
+// Two tests, because the property has two halves and one guard cannot hold both.
+//
+// The first is the RUNTIME half: it drives a real `reconcile({ fetch: true })` with
+// `GIT_ALLOW_PROTOCOL=file` in the environment, which makes `git` refuse every transport
+// except a local path — `fatal: transport 'https' not allowed`. So the fetch either runs
+// over the filesystem or it does not run at all, and the test asserts BOTH that no fetch
+// probe failed and that the fetch actually brought the remote's branches in. Without the
+// second assertion a fetch that silently did nothing would pass the first.
+//
+// The second is the STATIC half, and it exists because the runtime half is blind to the
+// sites it does not drive: a live URL re-introduced at any of the other three call sites
+// would leave it green. It reads this file's own source and holds every remote URL literal
+// to a host that cannot resolve.
+
+test("BLZ-505: reconcile's fetch reaches the fixture origin over the FILE transport alone", async () => {
+  const tmp = mkdtempSync(join(tmpdir(), "blaze-blz505-file-transport-"));
+  const prevProto = process.env.GIT_ALLOW_PROTOCOL;
+  const prevPath = process.env.PATH;
+  try {
+    const repo = join(tmp, "svc");
+    mkdirSync(repo, { recursive: true });
+    for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
+                     ["config", "user.name", "t"]])
+      execFileSync("git", ["-C", repo, ...a]);
+    writeFileSync(join(repo, "R"), "x\n");
+    execFileSync("git", ["-C", repo, "add", "-A"]);
+    execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
+    pointAtFixtureOrigin(repo, tmp);
+
+    const root = join(tmp, "board");
+    mkdirSync(join(root, "projects", "INF", "defined"), { recursive: true });
+    writeFileSync(join(root, "projects", "INF", "defined", "INF-901-t.md"),
+      "---\nid: INF-901\ntype: task\nproject: INF\nestimate: 30\n---\n\nbody\n");
+    writeFileSync(join(root, "blaze.config.json"),
+      JSON.stringify({ key: "INF", projects: ["INF"], codeRepos: [repo] }));
+
+    const bin = join(tmp, "bin");
+    mkdirSync(bin, { recursive: true });
+    writeFileSync(join(bin, "gh"), "#!/usr/bin/env bash\necho '[]'\n");
+    execFileSync("chmod", ["+x", join(bin, "gh")]);
+    process.env.PATH = bin + ":" + prevPath;
+    process.env.GIT_ALLOW_PROTOCOL = "file";
+
+    const { reconcile } = await import("../scripts/reconcile.mjs");
+    const r = await reconcile({ fetch: true, commit: false, dryRun: true,
+      root, projectsDir: join(root, "projects") });
+
+    const fetchErrors = (r.gitErrors || []).filter((e) => /^git fetch\b/.test(e.command || ""));
+    assert.deepEqual(fetchErrors, [],
+      "with only the file transport permitted, a fetch that fails is a fetch that was "
+      + "reaching for the network: " + JSON.stringify(fetchErrors));
+
+    // ...and it really fetched. A remote that was never contacted also produces no error.
+    const refs = execFileSync("git",
+      ["-C", repo, "for-each-ref", "--format=%(refname)", "refs/remotes/origin"],
+      { encoding: "utf8" });
+    for (const b of REMOTE_ONLY) {
+      assert.match(refs, new RegExp(`refs/remotes/origin/${b}$`, "m"),
+        `the fetch must actually bring ${b} in, or the assertion above is vacuous`);
+    }
+  } finally {
+    if (prevProto === undefined) delete process.env.GIT_ALLOW_PROTOCOL;
+    else process.env.GIT_ALLOW_PROTOCOL = prevProto;
+    process.env.PATH = prevPath;
+    rmSync(tmp, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-505: no remote URL in this file names a host that could resolve", () => {
+  const src = readFileSync(join(import.meta.dirname, "reconcile-finding-surfaces.test.mjs"), "utf8");
+
+  // Every `git remote add <name> <url>` whose url is a STRING LITERAL. A url that is an
+  // expression (`originFixture(tmp)`) is a path this file built, which is the point.
+  const literals = [...src.matchAll(/"remote",\s*"add",\s*"[a-z]+",\s*\n?\s*"([^"]+)"/g)]
+    .map((m) => m[1]);
+  assert.ok(literals.length >= 2,
+    "the remote-add sites must be findable, or this guard is vacuous; got " + literals.length);
+  for (const url of literals) {
+    assert.match(url, /^https:\/\/[^/]*\.invalid\//,
+      "a fixture remote may only name a host under the reserved `.invalid` TLD, so that no "
+      + "run of this suite can depend on the network or on another repository's state: " + url);
+  }
+
+  // And the specific host this suite used to reach, by name, so a straight revert is loud.
+  assert.doesNotMatch(src, /\bgithub\.com\b/,
+    "a live GitHub remote pulls another repository's branch list and commit log into these "
+    + "fixtures — see the BLZ-505 note above `originFixture`");
 });

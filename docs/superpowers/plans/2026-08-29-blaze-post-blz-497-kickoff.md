@@ -107,6 +107,8 @@ All four touch `scripts/reconcile.mjs` or its tests, so they cannot be split acr
   which branches corroborate — measure that before shipping it** (BLZ-353's rule), and re-derive the
   52 afterwards. Note `exitIsAnAnswer: true` at those sites is load-bearing: without it every board
   with remote-only branches exits 1 on all 52.
+  **Corrected 2026-08-30 (BLZ-505): 52 is not reproducible — it counted a live GitHub repository's
+  branch list. It is 21 and 20 at `be4b110` with the fixtures hermetic; see ADR-0030's correction.**
 - **BLZ-495** — a scoped run naming an unreadable out-of-scope directory, and `blaze audit --projects
   INF` returning `ok=false` on it. **The behaviour is right** (a misfiled INF ticket could be under
   that directory; audit filters on id prefix, not directory) — it is a second deliberate BLZ-394
@@ -116,6 +118,9 @@ All four touch `scripts/reconcile.mjs` or its tests, so they cannot be split acr
   `model/index.mjs`'s status-directory unreadable route). The fetch severity is load-bearing:
   `fetch --prune` exits 128 four times in the suite today, so flipping it to `error` makes those
   runs exit 1.
+  **Corrected 2026-08-30 (BLZ-505): it is SIX of eleven runs, not four. Four of the six were a
+  live GitHub URL in a fixture, so the figure was network-dependent as well as stale; re-take
+  it with the command in the git-probe census header in `scripts/reconcile.mjs`.**
 
 ### Lane D — BLZ-490 + BLZ-491 + BLZ-496 + BLZ-497, ONE PR: the residue (75 min)
 

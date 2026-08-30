@@ -150,7 +150,32 @@ function buildOracleBoard(tmp) {
   writeFileSync(join(repo, "README.md"), "x\n");
   execFileSync("git", ["-C", repo, "add", "-A"]);
   execFileSync("git", ["-C", repo, "commit", "-q", "-m", "seed"]);
-  execFileSync("git", ["-C", repo, "remote", "add", "origin", "https://github.com/hjr15/orc.git"]);
+  // BLZ-505 (review round): THIS FIXTURE USED TO NAME A LIVE GITHUB URL, AND IT IS FETCHED.
+  //
+  // `runReconcile` hardcodes `reconcile({ fetch: true, ... })`, and this oracle drives it
+  // four times per suite run — so `git fetch --prune --quiet` went to the network on every
+  // one. `hjr15/orc` does not exist today, so the fetch exits 128 and the run carries on;
+  // that is exactly what made it invisible. It is not stable: `hjr15` is this repository's
+  // own account, so the repo coming into existence is one click, and when it does the
+  // fetch SUCCEEDS, its branches land in the fixture, and this oracle's counts move with
+  // somebody else's branch set. Measured by the reviewer with a stand-in repo of three
+  // branches: 407 -> 403 pass / 4 fail, and four rows of the git-probe census shift by
+  // exactly 3 x 4.
+  //
+  // `origin` is therefore a LOCAL path that does not exist. That is the faithful hermetic
+  // equivalent of what this fixture has always actually had — a remote that cannot be
+  // reached — so every downstream signal is unchanged: the fetch still exits 128, no
+  // `refs/remotes/origin/*` appears, `defaultBranchRef` still resolves the local `main`.
+  // What changes is that it now cannot depend on anything outside this repository.
+  //
+  // The second remote is what keeps `gh` in play: a local-path remote is not a forge, and
+  // `gatherPrs` declines to spend a `gh` call on one (`no-remote`), which would delete
+  // every PR signal in the cross-product. Its host sits under the reserved `.invalid` TLD,
+  // never resolves, and is never contacted — `classifyRemote` reads it as GitHub on the
+  // name alone (`host.includes("github")`) and the stubbed `gh` answers.
+  execFileSync("git", ["-C", repo, "remote", "add", "origin", join(tmp, "no-such-origin.git")]);
+  execFileSync("git", ["-C", repo, "remote", "add", "forge",
+    "https://github.blaze-fixture.invalid/hjr15/orc.git"]);
 
   const root = join(tmp, "board");
   mkdirSync(join(root, "projects", KEY), { recursive: true });
@@ -372,6 +397,33 @@ const groundTruthBudget = (before, movedIds) => 3 * before.size + 3 * movedIds.s
 let expectedTotal = 0;
 
 describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the filesystem", () => {
+  test("BLZ-505: no remote this fixture configures names a host that could resolve", () => {
+    // Read from `git config` in the built fixture, not from this file's source — a source
+    // grep cannot see a URL assembled from parts, and this oracle drives a real
+    // `reconcile({ fetch: true })` four times per suite run. `origin` is the only remote a
+    // bare `git fetch` touches, so it must be a path; any other remote may name a host only
+    // under the reserved `.invalid` TLD, which never resolves.
+    const tmp = mkdtempSync(join(tmpdir(), "blaze-blz505-oracle-remotes-"));
+    try {
+      const { repo } = buildOracleBoard(tmp);
+      const cfg = execFileSync("git",
+        ["-C", repo, "config", "--get-regexp", "^remote\\..*\\.url"], { encoding: "utf8" });
+      const remotes = cfg.split("\n").filter(Boolean)
+        .map((l) => { const m = /^remote\.(.+)\.url\s+(.+)$/.exec(l.trim()); return { name: m[1], url: m[2] }; });
+      assert.ok(remotes.length >= 2, "the fixture's remotes must be readable; got " + cfg);
+      const origin = remotes.find((r) => r.name === "origin");
+      assert.ok(origin, "`origin` is the remote `git fetch` acts on and must be present");
+      assert.doesNotMatch(origin.url, /:\/\/|^[^/]+@/,
+        "`origin` must be a local path — this fixture is fetched: " + origin.url);
+      for (const r of remotes.filter((x) => x.name !== "origin")) {
+        assert.match(r.url, /^https:\/\/[^/]*\.invalid\//,
+          `remote \`${r.name}\` may only name a host under the reserved .invalid TLD: ` + r.url);
+      }
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
   test("applied run: every event's claim about a move matches a real directory change on disk", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz404-oracle-applied-"));
     const prevPath = process.env.PATH;

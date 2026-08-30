@@ -144,8 +144,9 @@ reproduce this ADR's own defect inside its fix.
 
 `inspect()`'s two probes ask about a branch by a name with `origin/` already stripped, so a
 branch that exists only on the remote is asked about by a name no local ref answers to. That
-is **reconcile's own bug, not the environment's** — 52 occurrences each in the suite, every
-one an `ambiguous argument` on a stripped remote-only ref, after which `buildBranchMap` reads
+is **reconcile's own bug, not the environment's** — 52 occurrences each in the suite as it was
+read then (see the correction at the end of this ADR), every one an `ambiguous argument` on a
+stripped remote-only ref, after which `buildBranchMap` reads
 `own: []` / `sameTipAsDefault: false` and silently declines to corroborate the branch on its
 own evidence. Reporting it as an unreadable repo would blame the environment for a defect in
 this file; fixing the ref name changes which branches corroborate, which is a behaviour change
@@ -271,3 +272,11 @@ would make it the silent skip it exists to report.
   permanent; this one is transient and actionable, and "nothing to do" under it is false.
 - **Skip the directory silently but count it.** A count with no name sends an operator
   hunting; the finding names the directory, the shape found, and what to do about it.
+
+## Correction 2026-08-30 — the 52, and only the 52
+
+**Correction (BLZ-505, `be4b110`).** The "52 occurrences each" figure is not reproducible and never was. Two fixtures in `tests/reconcile-finding-surfaces.test.mjs` set `origin` to a live GitHub URL and ran under `reconcile({ fetch: true })`, so the count included that repository's branch list as it stood on the day. Re-derived with the same instrument: **67 and 66** at `be4b110` with the live remote still in place, and **21 and 20** at `be4b110` once those fixtures build their own origin. Quote 21/20. The two halves were never one number — `sameTipAsDefault` short-circuits, so the `rev-parse` probe is asked one fewer time.
+
+The **decision** this ADR records is untouched: `exitIsAnAnswer` is still per call site, the two
+`inspect` probes are still deliberately silent, and §3's argument does not depend on the size of
+the number. Only the number is wrong.

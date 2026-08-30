@@ -10,8 +10,12 @@
 //   git log INF-1-work ^origin/main --format=%s   →  exit 128, `ambiguous argument`
 //   git rev-parse INF-1-work                      →  exit 128, `ambiguous argument`
 //
-// Measured across the reconcile suite at 1b00f3a: 52 occurrences each, every one on a
-// stripped remote-only ref. `buildBranchMap` then read `own: []` and
+// Read at 1b00f3a as "52 occurrences each". BLZ-505: that number counted a LIVE GitHub
+// repository's branch list, because two fixtures in
+// tests/reconcile-finding-surfaces.test.mjs fetched one — so it was never reproducible, and
+// by be4b110 the same instrument read 67 and 66. With those fixtures hermetic it is 21 and
+// 20 at be4b110, every one on a stripped remote-only ref. `buildBranchMap` then read
+// `own: []` and
 // `sameTipAsDefault: false` and declined to corroborate the branch on its own evidence —
 // silently, because a non-zero exit at those two sites is deliberately not a finding.
 //

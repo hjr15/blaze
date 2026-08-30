@@ -1094,14 +1094,41 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // flag promised.
   //
   // BLZ-494: THE SEVERITY IS LOAD-BEARING AND WAS UNPINNED — mutating it to `error` left
-  // the whole suite green. Re-measured at 1b00f3a by instrumenting every `git` invocation
-  // across `tests/reconcile*.test.mjs` (371 tests): `fetch --prune --quiet` runs 9 times
-  // and exits 128 on FOUR of them — `blz404-oracle-applied`, `blz404-oracle-preview`, and
-  // twice in `blz421-oracle-equiv`, each a fixture whose `origin` does not exist. At
-  // `error` those four land in `unreadableProbes`, print `GIT UNREADABLE` and `FAILED`,
-  // and exit 1. Now pinned by "the condition travels as severity: warning" and "the CLI
-  // says GIT DEGRADED, exits 0, and still reports the move it found" in
-  // tests/reconcile-git-probe-unreadable.test.mjs.
+  // the whole suite green. `fetch --prune --quiet` runs 11 times and exits 128 on SIX of
+  // them — `blz404-oracle-applied`, `blz404-oracle-preview`, twice in `blz421-oracle-equiv`,
+  // and `blz494-fetch-result` and `blz494-fetch-cli`, each a fixture whose `origin` does not
+  // exist. At `error` those six land in `unreadableProbes`, print `GIT UNREADABLE` and
+  // `FAILED`, and exit 1. Now pinned by "the condition travels as severity: warning" and
+  // "the CLI says GIT DEGRADED, exits 0, and still reports the move it found" in
+  // tests/reconcile-git-probe-unreadable.test.mjs. The figures are the census below
+  // `defaultBranchRef`; re-take them with the command in its header rather than trusting
+  // this sentence.
+  //
+  // BLZ-505 — WHY THIS FIGURE MOVED TWICE, AND WHAT IT TOOK TO MAKE IT REPRODUCIBLE. The
+  // original reading was 9 runs and FOUR failures, at 1b00f3a. Three separate things were
+  // wrong with it, and only the third was caught by review:
+  //
+  //   1. Two of the nine were `tests/reconcile-finding-surfaces.test.mjs` fixtures whose
+  //      `origin` was a LIVE GitHub URL that RESOLVED, so whether they counted as failures
+  //      depended on the network being up.
+  //   2. Two failures appeared afterwards — `blz494-fetch-result` and `blz494-fetch-cli`,
+  //      BLZ-494's own tests, added after the measurement its comment quoted.
+  //   3. FOUR of the six failures were `tests/reconcile-feed-truth-oracle.test.mjs`, whose
+  //      `origin` was ALSO a live GitHub URL — `hjr15/orc`, a repository that does not
+  //      exist. A URL that fails to resolve leaves no trace: the fetch exits 128, the run
+  //      carries on, and the row reads exactly as a local dead path would. That is why the
+  //      first fix of this ticket missed it and shipped this paragraph claiming the figure
+  //      "no longer depends on anything outside this repository" while four of its six
+  //      failures still did. `hjr15` is this repository's own account; the repo existing is
+  //      one click, and the reviewer showed that when it does, four rows of the census move
+  //      by 3 x 4 and four oracle tests go red.
+  //
+  // Every fixture that fetches is hermetic now, and that is a property of the CORPUS rather
+  // than of the files anyone thought to check: with a `git` shim recording the remotes of
+  // every `git fetch` across the whole of `tests/**`, no fetch names a host — the sources
+  // are local paths, or repos with no remote at all. A grep for a URL cannot establish that;
+  // a URL is harmless until something fetches it, and `orc` was missed precisely because
+  // everyone grepped for the OTHER repository's name.
   if (fetch) {
     gitProbe(gitErrors, repoPath, ["fetch", "--prune", "--quiet"], {
       timeout: 30000, severity: "warning",
@@ -1188,8 +1215,9 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // is unchanged. What was wrong is that the same stripped string was then handed to `git`
   // as a REVISION, and no local ref answers to it for a branch that exists only under
   // `refs/remotes/origin`: `git log INF-1-work ^origin/main` and `git rev-parse INF-1-work`
-  // both exit 128, `ambiguous argument`. Measured across the reconcile suite at 1b00f3a: 52
-  // occurrences each, and `buildBranchMap` read the resulting `own: []` /
+  // both exit 128, `ambiguous argument`. Read at 1b00f3a as "52 occurrences each"; see the
+  // BLZ-505 correction below for what that number actually counted. `buildBranchMap` read
+  // the resulting `own: []` /
   // `sameTipAsDefault: false` as evidence about the BRANCH rather than as the failure to
   // ask that it was.
   //
@@ -1226,6 +1254,24 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
   // cost. The ref list for that repo also goes 33 -> 32 — `refs/heads/main` and
   // `refs/remotes/origin/main` both stripped to `main`, and the old list carried it twice.
   //
+  // BLZ-505 — EVERY FIGURE IN THE PARAGRAPH ABOVE CAME OUT OF SOMEBODY ELSE'S REPOSITORY,
+  // AND NONE OF THEM REPRODUCES. "The two fixtures that really fetch a remote" fetched a
+  // LIVE GitHub URL, so `52`, `25` and `33 -> 32` were readings of that repository's branch
+  // list on 2026-08-29 — a mutable input, in a run pinned to a SHA as if the SHA settled it.
+  // `INF-574-blaze-config-and-chart` is a branch on that repository, not a fixture anyone
+  // here made. Re-derived by instrumenting `inspect` to ask the PRE-BLZ-492 question (the
+  // stripped display name) alongside the real one, across `tests/reconcile*.test.mjs`:
+  //
+  //   at 1b00f3a, as published .......... 52 and 52
+  //   at be4b110, live remote still in ... 67 and 66   (the repo had gained branches, and
+  //                                                     the two counts were never equal)
+  //   at be4b110, fixtures hermetic ...... 21 and 20   (reproducible: no network, no
+  //                                                     foreign branch set)
+  //
+  // 21/20 is the figure to quote. The two counts differ because `sameTipAsDefault`
+  // short-circuits on a falsy `defaultTip`, so the `rev-parse` half is asked one fewer
+  // time — a detail "52 occurrences each" hid by asserting they were the same number.
+  //
   // WHAT THAT MEASUREMENT COULD NOT SEE, said here because round 1 let an ARGUMENT stand
   // where BLZ-353 asks for a measurement. Round 1 read the delta as one-directional "by
   // construction", on the ground that the old code could only ever read `own: []` and
@@ -1258,9 +1304,15 @@ function gatherRepo(repoPath, idFromRef, key, { fetch }) {
     consequence: "Every branch is treated as NOT sharing the default tip, which is a guess, not a reading.",
   });
   // BLZ-492 (was BLZ-484's "stated rather than fixed"): both probes ask about `askable`,
-  // the ref `for-each-ref` actually listed, not the display name derived from it. The 52
-  // laundered exits above are gone — re-measured at the fix: 0 of each across the reconcile
-  // suite — and `buildBranchMap` now reads a remote-only branch's own commits.
+  // the ref `for-each-ref` actually listed, not the display name derived from it. The
+  // laundered exits above are gone — re-derived at be4b110 across `tests/reconcile*.test.mjs`,
+  // the `log` half fails ONCE and the `rev-parse` half not at all, against 21 and 20 for the
+  // question this code no longer asks. The one remaining `log` failure is `blz492-unresolved`,
+  // the fixture BLZ-492 itself added, where nothing resolved and `ref` is the guess "main" —
+  // the condition `no-default-branch` has already reported by name, which is precisely what
+  // the `exitIsAnAnswer` below is for. (BLZ-492's own comment said "0 of each"; it was
+  // measured before its own fixture landed. BLZ-505.) `buildBranchMap` now reads a
+  // remote-only branch's own commits.
   //
   // `exitIsAnAnswer: true` STAYS, and it is not vestigial. `git log <branch> ^<ref>` names
   // `ref`, so it is a DEPENDENT probe on the default-branch resolution, exactly like
