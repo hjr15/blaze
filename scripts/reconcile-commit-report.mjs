@@ -18,7 +18,10 @@
 //                 is NOT a commit and must never be reported as one.
 //   "queued"    — deferred to the pending ledger (commitMode: "batch").
 //   "locked"    — the advisory commit lock is held by another writer.
-//   "failed"    — `git commit` itself refused.
+//   "failed"    — a git step in the commit path refused. BLZ-502: the sentence names WHICH
+//                 one (`git add` or `git commit`), read from `commitFile`'s `step` field
+//                 rather than assumed, because `git add` returns first and its failure was
+//                 being reported under `git commit`'s name.
 
 export const COMMIT_OUTCOMES = ["none", "committed", "no-op", "queued", "locked", "failed"];
 
@@ -35,7 +38,12 @@ export function commitOutcomeFrom(c) {
   if (c.locked) {
     return { outcome: "locked", error: "the advisory commit lock is held by another writer" };
   }
-  return { outcome: "failed", error: `git commit failed (exit status ${c.status})` };
+  // BLZ-502: `step` comes from `commitFile`, which is the only code that knows which
+  // spawn returned non-zero. Defaulting to "commit" keeps every pre-existing caller's
+  // sentence byte-identical — `commitOrQueue`'s batch path and the lock/no-op arms above
+  // never reach here, and the two that do now both set it.
+  const step = c.step === "add" ? "git add" : "git commit";
+  return { outcome: "failed", error: `${step} failed (exit status ${c.status})` };
 }
 
 /** The single line the CLI prints for an `--apply` run, as
@@ -117,12 +125,21 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
     // wording ("re-run once the lock clears"), which is FALSE for a failing pre-commit
     // hook or a detached HEAD — outcomes that reach "failed", never "locked", and carry
     // no lock at all. Each outcome gets advice that is true for it.
+    //
+    // BLZ-502, the same defect one level down: the advice named `git commit`'s causes
+    // ONLY, so a `git add` that refused a pathspec sent the operator to read hooks. It now
+    // defers to the step `error` names — which `commitOutcomeFrom` reads off `commitFile`
+    // rather than guessing — and gives the common cause of each. Written as one sentence
+    // covering both rather than as a branch on a `step` parameter, because the only caller
+    // (`scripts/reconcile.mjs`) forwards `outcome` and `error` and nothing else; a branch
+    // no reachable call path can select is not a fix, it is an unpinnable else.
     return { stream: "err", exit: 1,
       text: `reconcile: FAILED TO COMMIT — ${error}. ${written} — already ` +
         "written to disk and now UNCOMMITTED (a dirty tree), not merely un-applied. " +
-        "No lock is involved in this failure — check for a failing pre-commit hook, a detached " +
-        "HEAD, or another reason `git commit` itself refuses, fix it, then commit the tree " +
-        "manually or re-run." };
+        "No lock is involved in this failure. The message above names the git step that " +
+        "refused: `git add` most often means a pathspec matched nothing, `git commit` most " +
+        "often means a failing pre-commit hook or a detached HEAD. Fix that step, then " +
+        "commit the tree manually or re-run." };
   }
   return null;
 }
