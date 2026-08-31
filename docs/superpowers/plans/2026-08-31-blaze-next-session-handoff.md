@@ -64,7 +64,7 @@ npm ci && node --test 2>&1 | tail -9
 | | |
 |---|---|
 | `blaze` main | **`326233e`** |
-| Suite | **4,411 pass / 0 fail / 395 suites** |
+| Suite | **4,445 pass / 0 fail / 395 suites** — measured on `326233e` itself |
 | Coverage | 98.48 / 88.28 / 97.35 (gates 91/77/93/91) |
 | Board | **2,838 tickets**, 11 projects, **`ok=true` unscoped** |
 | Non-terminal | **142** — 0 critical, **13 high**, 92 medium, 37 low |
@@ -82,6 +82,11 @@ still queued, and the settled figure is 20.
 - Snapshot: `/home/rnamwoh/Documents/Code/blaze-pm-queue-snapshot-20260831-190249` (16 MB)
 - Held originals: `<worktree>/.blaze/migrated-<ts>/`
 - **Delete neither until a drain is verified.**
+
+> **On quoting these figures.** An earlier draft said 4,411 — that was the sign-in branch measured
+> in isolation, before the queue lane merged, and it was wrong for `main`. The number above was
+> measured on `326233e` directly. **Re-derive rather than quote**; that is the whole lesson of
+> BLZ-505 and BLZ-509, and it has already caught two stale figures in this document's own lineage.
 
 ## 3. Two operator-owned conditions that are NOT bugs
 
