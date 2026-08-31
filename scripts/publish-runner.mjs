@@ -54,6 +54,20 @@ assertWritable("publish the board");
 // --all, not just this session's: the queues that strand are precisely those
 // belonging to sessions that ended without committing, so a publish that only
 // drained its own would never clear them.
+//
+// BLZ-590 / ADR-0035: what the sweep's exit 0 MEANS changed under this caller. It used to
+// be "a commit was made"; it is now "the queue is drained" — by a commit, by finding the
+// ops already filed, or by both. The two messages below asserted "the local sweep
+// committed" off that 0, and on a settled drain that is simply false. Publish cannot read
+// what the sweep said (step 1 runs `stdio: "inherit"`, so its output goes straight to the
+// operator), so the sentence is derived from the one fact publish can establish itself:
+// whether HEAD moved across the sweep. Control flow is unaffected either way — the flush
+// job no-ops when HEAD did not move — this is about the report not outrunning the evidence.
+const headSha = () => {
+  const r = spawnSync("git", ["-C", dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
+  return r.status === 0 ? (r.stdout || "").trim() : null;
+};
+const headBefore = headSha();
 const sweep = spawnSync(process.execPath, [join(import.meta.dirname, "commit-runner.mjs"), "--all"], {
   cwd: dataRoot,
   stdio: "inherit",
@@ -63,6 +77,14 @@ if (sweep.status !== 0) {
   console.error("blaze publish: local sweep failed — not triggering the flush (nothing was published)");
   process.exit(1);
 }
+const headAfter = headSha();
+// ADR-0030: a `git` that could not answer is not evidence of either outcome, and this
+// says so rather than defaulting to the friendlier of the two.
+const sweepNote = headBefore === null || headAfter === null
+  ? "whether the local sweep committed could not be determined (git did not answer)"
+  : headBefore !== headAfter
+    ? "the local sweep committed"
+    : "the local sweep made no commit — the queues were empty, or their ops were already filed";
 
 // --- step 2: trigger the flush -----------------------------------------------
 const NS = process.env.BLAZE_FLUSH_NAMESPACE || "blaze";
@@ -100,7 +122,7 @@ if (dryRun) {
 const r = spawnSync(trigger[0], trigger.slice(1), { encoding: "utf8", stdio: "inherit" });
 if (r.error && r.error.code === "ENOENT") {
   console.error(
-    "blaze publish: kubectl not found — the local sweep committed, but nothing was published.\n" +
+    `blaze publish: kubectl not found — ${sweepNote}, but nothing was published.\n` +
     `  Trigger the flush from a machine with cluster access:\n    ${trigger.join(" ")}`,
   );
   process.exit(1);
@@ -108,7 +130,7 @@ if (r.error && r.error.code === "ENOENT") {
 if (r.status !== 0) {
   console.error(
     `blaze publish: flush trigger failed (status ${r.status}) against ${contextNote}. ` +
-    `The local sweep committed; origin/main is unchanged until a flush runs.\n` +
+    `${sweepNote}; origin/main is unchanged until a flush runs.\n` +
     `  If kubectl reported \`namespaces "${NS}" not found\`, the cluster is almost certainly the ` +
     `problem and not the namespace — check \`kubectl config get-contexts\` and set ` +
     `BLAZE_FLUSH_CONTEXT to the cluster that hosts the ${NS} namespace.`,

@@ -17,8 +17,8 @@ import {
 import { resolveRoots } from "./config.mjs";
 import { acquireLock, releaseLock } from "./commit-lock.mjs";
 import { assertWritable } from "./readonly.mjs";
-import { checkBranch, currentBranch } from "./branch-guard.mjs";
-import { summarizeEntries, renderQueueStatus } from "./commit-summary.mjs";
+import { checkBranch, currentBranch, defaultBranch } from "./branch-guard.mjs";
+import { summarizeEntries, renderQueueStatus, entryIds } from "./commit-summary.mjs";
 
 const { dataRoot } = resolveRoots();
 const argv = process.argv.slice(2);
@@ -57,6 +57,62 @@ const here = {
   // left for `checkBranch` below to refuse as a batch.
   branchOwner: worktreeBranchOwners(dataRoot),
 };
+// Does the op's OWN record say it was queued in this checkout? BLZ-590: this is the fact
+// that decides whether this run may reach ANY verdict about it.
+//
+// The local filesystem cannot answer that question. `belongsHere` holds a branch-recorded
+// op back only while some OTHER worktree currently has that branch checked out, and
+// `checkBranch` returns ok unconditionally on the default branch (branch-guard.mjs) — so a
+// checkout on `main` has no second guard, and every one of the 210 live ops is exactly
+// that shape: `branch` recorded, `worktree` not. The moment a lane finishes and its
+// worktree moves off its branch, this run would see its ops with none of their files
+// present and, before this guard, clear them at exit 0 — unattended, since
+// `blaze publish` runs `commit-runner --all`.
+//
+// "No later run can stage it" was checkout-local reasoning about a store BLZ-556 made
+// repo-GLOBAL. A run in the other checkout can stage it; `git checkout HEAD -- <path>`
+// restores the `git rm` one.
+//
+// No provenance recorded at all is a pre-INF-673 op. Refusing it everywhere is not the safe
+// direction — nothing else would ever claim it either, so it would sit in the queue forever,
+// BLZ-590's own bug class of a queue that cannot empty. Claiming it EVERYWHERE is not safe
+// either: round 4's review found that a detached worktree (where `checkBranch` is explicitly
+// ok) would then judge such an op, call it absent, and clear it at exit 0, destroying the
+// record while the real file sat uncommitted in the main tree.
+//
+// So exactly one checkout claims them, and it is the store's own tree: `here.worktree` is
+// `relative(store, dataRoot)`, which is "" for exactly that tree and non-empty everywhere
+// else. Round 5's review verified there is exactly one such tree per shared store across
+// linked, detached, nested, symlinked, bare and submodule layouts, and that none of them
+// leaves a shared store with no claimant.
+//
+// It is the tree that PROBABLY queued them, not the one that must have: before BLZ-556 the
+// store was each working copy's own `.blaze/`, so a no-provenance op left in a LANE's store
+// and later merged in by docs/operations/queue-store-migration.md — which appends lines
+// byte-verbatim and stamps nothing — would be claimed here and cleared, while the lane's
+// file sat uncommitted. Measured as reachable-in-principle and unreachable-in-fact: 0 of the
+// 216 ops now in this repo's shared store AND its stranded queues record no provenance. The
+// fix belongs in the migration (stamp the source copy's `worktree` as it appends), and is
+// ticketed; guessing harder here cannot recover a fact the record does not carry.
+//
+// The tests pin both halves, so loosening this to `true` or tightening it to `false` is a
+// deliberate red either way.
+const queuedHere = (e) => {
+  if (e.worktree !== undefined && e.worktree !== null) return e.worktree === here.worktree;
+  if (e.branch !== undefined && e.branch !== null) return e.branch === here.branch;
+  return here.worktree === "";
+};
+// Named by the same field, in the same order, that `queuedHere` refuses by, so the sentence
+// can never describe a different field from the one that actually refused the op. Three legs,
+// because `queuedHere` has three: an op recording no provenance at all is refused by every
+// tree except the store's own, and saying "queued on branch 'undefined'" about it would name a
+// field it does not have.
+const notOursBecause = (e) =>
+  e.worktree !== undefined && e.worktree !== null
+    ? `were queued in working tree '${e.worktree === "" ? "the main working tree" : e.worktree}'`
+    : e.branch !== undefined && e.branch !== null
+      ? `were queued on branch '${e.branch}', which is not this checkout's`
+      : "record no provenance at all, so only the working tree the queue store sits beside can claim them";
 const stranded = strandedQueues(dataRoot);
 // The SHARED store's own directory listing. Separate from `stranded` because it is the store
 // every worktree drains, not a leftover: if it cannot be listed, this run does not know what is
@@ -79,7 +135,21 @@ const strandedUnreadable = stranded.filter((q) => q.count === null);
 // words, so the operator reading `--status` and the operator reading a red CronJob log are
 // looking at one fact. `foreign` is filled in by the flush path below; `--status` renders
 // the stranded half only, because it drains nothing and so strands nothing.
+// BLZ-590: name TICKETS, not entry ids. A reconcile op's `id` is a synthetic key
+// (`reconcile:BLZ`) and the tickets it covers are in `ids` — `entryIds` is the accessor
+// BLZ-427 added for exactly this, and the subject line has used it all along. Capped,
+// because the live case is 210 ops and a message nobody finishes is a message nobody reads.
+const nameTickets = (ops) => {
+  const ids = [...new Set(ops.flatMap((e) => entryIds(e)))];
+  if (ids.length === 0) return "no ticket id recorded";
+  return `${ids.slice(0, 10).join(", ")}${ids.length > 10 ? `, and ${ids.length - 10} more ticket(s)` : ""}`;
+};
 const foreign = [];
+// BLZ-590: ops this run DRAINED and then could not judge, so it put them back. Separate
+// from `foreign` because they got past `belongsHere` — either their provenance is another
+// checkout's (refused at the partition, before any path of theirs is collected) or they
+// record no paths to measure at all (discovered during classification).
+const heldBack = [];
 function unreachedLines() {
   const out = [];
   if (foreign.length > 0) {
@@ -109,6 +179,18 @@ function unreachedLines() {
     for (const [k, n] of [...by].sort()) out.push(`    ${n} op(s) queued in ${k}`);
     out.push("  Their files exist only in that checkout, so committing them here would stage nothing");
     out.push("  and then clear the queue. Run `blaze commit` from that working tree.");
+  }
+  if (heldBack.length > 0) {
+    const by = new Map();
+    for (const h of heldBack) by.set(h.why, [...(by.get(h.why) ?? []), h.entry]);
+    out.push(`blaze commit: ${heldBack.length} op(s) were put back in the queue — this working tree`);
+    out.push("  could not establish what they record, so it did not judge them:");
+    for (const [why, ops] of [...by].sort()) {
+      out.push(`    ${ops.length} op(s) ${why} — ${nameTickets(ops)}`);
+    }
+    out.push("  Nothing has been dropped. Whether their files are present here is not the question:");
+    out.push("  an op belongs to the checkout that queued it, and only that checkout can say what");
+    out.push("  became of the work. Run `blaze commit` there.");
   }
   if (storeListing.unreadable.length > 0) {
     for (const u of storeListing.unreadable) {
@@ -254,20 +336,51 @@ const drained = targets
 //
 // `keep` carries the RAW lines of the ops held back, so they are rewritten byte-for-byte
 // and compose with the drain-exact clear that preserves a mid-commit append.
+//
+// BLZ-590: `keepIdx` holds INDICES rather than the raw lines themselves, because a second
+// decision later in the run (an op whose provenance is another checkout) also has to put a
+// line back, and indices re-sort into the queue's original order. Sorting the raw strings
+// would not.
 for (const q of drained) {
   q.mine = [];
-  q.keep = [];
+  q.keepIdx = [];
   q.entries.forEach((e, i) => {
-    if (belongsHere(e, here)) q.mine.push(e);
-    else { q.keep.push(q.lines[i]); foreign.push(e); }
+    if (!belongsHere(e, here)) { q.keepIdx.push(i); foreign.push(e); return; }
+    // BLZ-590 round 4. Refused HERE, not during classification, because holding the ledger
+    // line is only half of not judging an op. `recorded` — and so `addPaths` and the commit
+    // pathspec — is built from whatever survives this partition, so an op refused later
+    // still had its files staged and COMMITTED by this run: measured on 2026-08-31, a
+    // foreign op's ticket file landed in this checkout's commit while its ledger line was
+    // kept and the operator was told to "run `blaze commit` there". A tracked board file
+    // exists in every checkout, so it is `stageable` here whenever it is dirty here.
+    //
+    // Provenance needs no probe — it is a property of the RECORD, not of the tree — so it
+    // can be asked before any path is collected. May-not-judge now means may-not-touch.
+    if (!queuedHere(e)) {
+      q.keepIdx.push(i);
+      heldBack.push({ entry: e, why: notOursBecause(e) });
+      return;
+    }
+    q.mine.push({ entry: e, index: i });
   });
 }
-const entries = drained.flatMap((q) => q.mine.map((e) => ({ ...e, session: q.session })));
+// `origin` maps each drained entry back to the queue and line it came from. The entries
+// below are COPIES (`{ ...e, session }`), so identity is the only way back, and the
+// held-back decision needs the exact raw line to rewrite byte-for-byte.
+const origin = new Map();
+const entries = [];
+for (const q of drained) {
+  for (const { entry, index } of q.mine) {
+    const tagged = { ...entry, session: q.session };
+    origin.set(tagged, { q, index });
+    entries.push(tagged);
+  }
+}
 
 if (entries.length === 0) {
   // Ops this run cannot reach are NOT "nothing to flush". Saying so, and exiting 0, is
   // precisely the false green BLZ-556 exists to remove.
-  if (foreign.length > 0 || stranded.length > 0 || storeListing.unreadable.length > 0) {
+  if (foreign.length > 0 || heldBack.length > 0 || stranded.length > 0 || storeListing.unreadable.length > 0) {
     console.error(unreachedLines().join("\n"));
     process.exit(UNREACHED_EXIT);
   }
@@ -306,32 +419,77 @@ if (!guard.ok) {
 
 // Cheap divergence signal against already-fetched refs — no network, so the
 // verb stays fast and offline-safe. Publishing handles the real rebase.
-const hasUpstream = spawnSync("git", ["-C", dataRoot, "rev-parse", "--verify", "-q", "refs/remotes/origin/main"], { stdio: "ignore" });
-if (hasUpstream.status === 0) {
-  const behind = spawnSync("git", ["-C", dataRoot, "rev-list", "--count", "HEAD..origin/main"], { encoding: "utf8" });
+//
+// BLZ-590: WHICH ref, reviewed. This compared against the literal `origin/main`, and that
+// one spelling was wrong in both directions at once:
+//
+//   * a board whose default branch is `master` has no `origin/main`, so the warning could
+//     never fire on it AT ALL — the signal was simply absent, silently;
+//   * a branch with an upstream of its own was measured against a ref it does not publish
+//     to. That is what the operator hit: `1 commit(s) behind origin/main … rebase before
+//     publishing` on `BLZ-305-v4-spine`, a branch `git` reports as up to date with
+//     `origin/BLZ-305-v4-spine`. The sentence was TRUE and about the wrong ref, which is
+//     the harder kind of wrong to read.
+//
+// The ref this warning is about is the one a push would write to — the branch's own
+// upstream. Only when the branch has none does the remote default branch stand in, and
+// that name is READ from the repo (`origin/HEAD`, else whichever conventional remote ref
+// exists) for the same reason `branch-guard.mjs` reads it rather than spelling it here.
+// The ref is named in the message, so the operator can see which comparison was made.
+const gitOut = (...args) => spawnSync("git", ["-C", dataRoot, ...args], { encoding: "utf8" });
+const divergenceRef = () => {
+  const up = gitOut("rev-parse", "--abbrev-ref", "--symbolic-full-name", "@{upstream}");
+  if (up.status === 0 && (up.stdout || "").trim() !== "") return (up.stdout || "").trim();
+  const sym = gitOut("symbolic-ref", "--short", "-q", "refs/remotes/origin/HEAD");
+  if (sym.status === 0 && (sym.stdout || "").trim() !== "") return (sym.stdout || "").trim();
+  // `defaultBranch` prefers a LOCAL name (correct for the guard that uses it: it answers
+  // "the branch you ought to be on"). Here it is only a candidate for a REMOTE ref, and is
+  // used only if that remote ref actually exists — so a `master` checkout that merely has
+  // an `origin/main` still gets compared against `origin/main` rather than nothing.
+  for (const cand of [defaultBranch(dataRoot), "main", "master"]) {
+    if (cand && gitOut("rev-parse", "--verify", "-q", `refs/remotes/origin/${cand}`).status === 0) {
+      return `origin/${cand}`;
+    }
+  }
+  return null;
+};
+const compareTo = divergenceRef();
+if (compareTo !== null && gitOut("rev-parse", "--verify", "-q", compareTo).status === 0) {
+  const behind = gitOut("rev-list", "--count", `HEAD..${compareTo}`);
   const n = Number((behind.stdout || "").trim());
   if (behind.status === 0 && n > 0) {
-    console.error(`blaze commit: warning — ${n} commit(s) behind origin/main (no fetch run); rebase before publishing`);
+    console.error(`blaze commit: warning — ${n} commit(s) behind ${compareTo} (no fetch run); rebase before publishing`);
   }
 }
 
-// Counts by op → "2 new, 3 logged, 1 moved, 1 resolved". BLZ-427: composed in
-// commit-summary.mjs, which is importable — this file is a script with top-level
-// side effects, so nothing here could ever be reached by a test.
-const summary = summarizeEntries(entries);
-
-const date = new Date().toISOString().slice(0, 10);
-const subject = `blaze: ${date} board update (${summary})`;
-const body = entries.map((e) => `- ${e.message}${e.session ? ` [${e.session}]` : ""}`).join("\n");
-
-// A path created then relocated again within one batch (e.g. a ticket moved
-// twice) is neither on disk nor in HEAD by the time the batch drains — drop
-// it, there is nothing to stage for it.
+// WHICH RECORDED PATHS GIT COULD HAVE A CHANGE FOR — asked of all THREE trees, because
+// there are three and they disagree (BLZ-590).
+//
+//   existsSync  -> the WORKING TREE
+//   ls-files    -> the INDEX
+//   cat-file -e -> HEAD
+//
+// Round 2 read the first two and then made claims about the third. `git rm <boardfile>` —
+// an ordinary hand action — falsifies that: the path is in neither the working tree nor
+// the index, but it IS in HEAD and the index holds a staged deletion, so there is real
+// work to commit for it. Reading only two trees dropped the path, left the staged deletion
+// behind in the index, and called the op superseded.
+//
+// A path created then relocated again within one batch (a ticket moved twice) is in NONE
+// of the three, and is still dropped: there is genuinely nothing to stage for it.
 const isTracked = (f) =>
   spawnSync("git", ["-C", dataRoot, "ls-files", "--error-unmatch", "--", f], { stdio: "ignore" }).status === 0;
-const files = [...new Set(entries.flatMap((e) => e.files))].filter(
-  (f) => existsSync(join(dataRoot, f)) || isTracked(f),
-);
+const inHead = (f) =>
+  spawnSync("git", ["-C", dataRoot, "cat-file", "-e", `HEAD:${f}`], { stdio: "ignore" }).status === 0;
+const recorded = [...new Set(entries.flatMap((e) => e.files))];
+// TWO lists, and they are not the same list. `git add` refuses a pathspec that matches
+// nothing in the working tree or the index — measured: `git add -- <git-rm'd path>` exits
+// 128, "did not match any files" — so a HEAD-only path must not be handed to it. It does
+// not need to be: `git rm` already staged the deletion. `git commit -- <that path>` records
+// it, which is why the commit pathspec is the wider list.
+const stageable = new Set(recorded.filter((f) => existsSync(join(dataRoot, f)) || isTracked(f)));
+const files = recorded.filter((f) => stageable.has(f) || inHead(f));
+const addPaths = files.filter((f) => stageable.has(f));
 
 // BLZ-556: TWO locks, because there are now two shared resources with different extents,
 // and one lock cannot cover both.
@@ -384,16 +542,171 @@ const bail = (msg) => {
   unlock();
   process.exit(1);
 };
-const add = spawnSync("git", ["-C", dataRoot, "add", "--", ...files], { stdio: "ignore" });
+const add = spawnSync("git", ["-C", dataRoot, "add", "--", ...addPaths], { stdio: "ignore" });
 if (add.status !== 0) bail(`blaze commit: git add failed (status ${add.status}) — ledger kept, resolve manually`);
-const commit = spawnSync("git", ["-C", dataRoot, "commit", "-m", subject, "-m", body, "--", ...files], { stdio: "inherit" });
-if (commit.status !== 0) bail(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
-for (const q of drained) clearLedger(dataRoot, q.session, q.bytes, q.keep);
+
+// BLZ-590: "nothing to commit" is NOT "the commit failed". Told apart by asking the index.
+//
+// Hit live on 2026-08-31 draining the 210 ops BLZ-556 had just consolidated. Every one was
+// orphaned — its recorded file already matched HEAD, because the work had been filed by
+// hand during the weeks the flush was broken. So `git add` staged nothing, `git commit`
+// exited 1, and the line below read that exit code as failure: the operator was told to
+// "resolve manually" a situation with nothing to resolve, and the LEDGER WAS KEPT, so the
+// queue could never empty and every later run hit the same wall. A board whose recorded
+// work is entirely settled could never drain. This is BLZ-502's class one line down —
+// there, `git add` failing was separated from `git commit` failing because the wrong name
+// sent the operator to read hooks; here, a no-op is separated from a failure.
+//
+// THE FACT, NOT THE SPELLING. git's "nothing to commit, working tree clean" is a message:
+// localisable, version-dependent, and not a contract. Nothing here reads it — the commit
+// runs with `stdio: "inherit"`, so its text goes straight to the operator's terminal and is
+// never captured, and the verdict below is reached BEFORE any commit is attempted. What is
+// asked instead is `git diff --cached --quiet -- <paths>`, whose exit code IS the fact.
+//
+// Asked PER OP, with the same pathspec spelling `git add` was just given, because the
+// answer has to carry WHICH ops were settled: a partly-settled drain must commit the real
+// part, settle the rest, and report both, with no op silently dropped and none committed
+// twice. Every path in `files` came from some entry's `files`, so "no op has anything
+// staged" and "the batch has nothing staged" are the same statement — the batch verdict is
+// DERIVED from the per-op one rather than probed a second time and risking disagreement.
+//
+// ADR-0030 applies unchanged: the probe is two-valued by contract (0 nothing staged,
+// 1 something staged), so any third answer, and a spawn that never ran, is an absence of
+// evidence and is bucketed UNKNOWN. An unknown op is committed with the rest and never
+// reported settled — the safe direction, since the cost of a wrong "settled" is a cleared
+// ledger whose work never landed.
+//
+// THE GATE, asked ONCE, before any bucket is decided.
+//
+// Rounds 1-3 each fixed the bucket they were shown: round 1 asserted a verdict without
+// measuring, round 2 gated nothing, round 3 gated `absent` — and `settled` still cleared an
+// op belonging to another checkout at exit 0, over a sentence ("every file they record
+// already matches HEAD") that compared THIS checkout's copy against work living somewhere
+// else. Three rounds, one defect, three buckets, because the gate was a clause inside a
+// branch rather than the question in front of all of them.
+//
+// So it is not a clause any more. `classify` is called from exactly one place — here, past
+// the gate — and a state added to `classify` tomorrow cannot escape provenance by forgetting
+// to ask: it is unreachable for a foreign op by construction, not by remembering.
+//
+// Stated plainly rather than left looking load-bearing: the partition above already refused
+// every foreign op, so `elsewhere` is not reachable from here today and no test reddens on
+// this line alone. It is kept as the second of two, because the cost of the two disagreeing
+// is a cleared ledger, and because it is what makes the property true of `classify` itself
+// rather than of one caller.
+const opState = (e) => (queuedHere(e) ? classify(e) : "elsewhere");
+const classify = (e) => {
+  // Zero recorded paths: there is nothing to look at, so nothing can be established. Round
+  // 2 called this absent, which asserts the word over an empty measurement. Not reachable
+  // from any current writer and 0 of the 210 live ops have it — said plainly rather than
+  // left looking like a guarded case.
+  //
+  // A `files` that is not an array is a SEPARATE defect and this guard does not cover it —
+  // round 4's review measured what actually happens, correcting the claim that used to sit
+  // here that the `recorded` flatMap throws first. `files: undefined` throws out of
+  // `node:path` join with a raw stack trace (ledger safe, exit 1); a STRING `files` does not
+  // throw at all — `flatMap` spreads it, and its path is staged and committed while this
+  // guard reports the op as recording no files and keeps it queued forever. Only a
+  // hand-edited ledger can produce either; ticketed, not fixed here.
+  if (!Array.isArray(e.files) || e.files.length === 0) return "no-paths";
+  const own = e.files.filter((f) => files.includes(f));
+  // Every path this op records is in NONE of the three trees — measured, by the
+  // `existsSync` / `ls-files` / `cat-file -e HEAD:` that built `files` above. Deliberately
+  // not `settled`: settled means the file IS in HEAD and matches it, which is the opposite
+  // claim. `outstandingFiles` (pending-ledger.mjs) has kept these apart since BLZ-499,
+  // "because two would lie".
+  //
+  // WHOSE absence it is has already been settled by the gate: only the checkout the op says
+  // queued it reaches here, and only it can read absence as "superseded". No probe is run —
+  // there is no pathspec to probe with, and an empty pathspec would silently widen the
+  // question to the whole index.
+  if (own.length === 0) return "absent";
+  const r = spawnSync("git", ["-C", dataRoot, "diff", "--cached", "--quiet", "--", ...own], { stdio: "ignore" });
+  if (r.status === 1) return "staged";
+  if (r.status === 0) return "settled";
+  return "unknown";
+};
+const state = new Map(entries.map((e) => [e, opState(e)]));
+const stagedOps = entries.filter((e) => state.get(e) === "staged");
+const unknownOps = entries.filter((e) => state.get(e) === "unknown");
+const settledOps = entries.filter((e) => state.get(e) === "settled");
+const absentOps = entries.filter((e) => state.get(e) === "absent");
+// Put back what this working tree may not judge, in the queue's own order. `heldBack`
+// carries the reason so the report names it rather than lumping every case together.
+for (const e of entries) {
+  const why = state.get(e);
+  if (why !== "elsewhere" && why !== "no-paths") continue;
+  const o = origin.get(e);
+  o.q.keepIdx.push(o.index);
+  heldBack.push({
+    entry: e,
+    why: why === "no-paths"
+      ? "recording no files at all, so there is nothing to measure"
+      : notOursBecause(e),
+  });
+}
+// What actually enters the commit — and therefore what the commit MESSAGE may describe.
+// `summarizeEntries(entries)` counted the whole drain, so a drain of one outstanding op
+// and two already-filed ones wrote `(3 new)` onto a one-file commit. A commit message is a
+// delivery record; it does not get to claim work the commit does not contain.
+const committedEntries = entries.filter((e) => ["staged", "unknown"].includes(state.get(e)));
+const summary = summarizeEntries(committedEntries);
+const date = new Date().toISOString().slice(0, 10);
+const subject = `blaze: ${date} board update (${summary})`;
+const body = committedEntries.map((e) => `- ${e.message}${e.session ? ` [${e.session}]` : ""}`).join("\n");
+
+let committed = false;
+if (stagedOps.length > 0 || unknownOps.length > 0) {
+  const commit = spawnSync("git", ["-C", dataRoot, "commit", "-m", subject, "-m", body, "--", ...files], { stdio: "inherit" });
+  // A GENUINE failure — a hook refusing, a bad signature, a lock. The ledger is kept and
+  // this exits non-zero, because the work did not land. Collapsing this into the settled
+  // path would be worse than the bug it sits beside: it would clear a ledger whose ops were
+  // never filed. Nothing here claims the work was filed.
+  if (commit.status !== 0) {
+    if (unknownOps.length > 0) {
+      console.error(`blaze commit: git could not say whether ${unknownOps.length} op(s) had anything staged, so none of them is reported as already filed`);
+    }
+    bail(`blaze commit: git commit failed (status ${commit.status}) — ledger kept, resolve manually`);
+  }
+  committed = true;
+}
+
+for (const q of drained) {
+  clearLedger(dataRoot, q.session, q.bytes, q.keepIdx.sort((a, b) => a - b).map((i) => q.lines[i]));
+}
 unlock();
-console.log(`blaze commit: flushed ${entries.length} op(s) → ${subject}`);
+if (committed) console.log(`blaze commit: flushed ${committedEntries.length} op(s) → ${subject}`);
+// SETTLED and ABSENT get their own sentence each, and are never merged into one. They are
+// different established facts, and each sentence says only what was actually established:
+//   settled — `git diff --cached --quiet` was run and reported no difference from HEAD.
+//   absent  — `existsSync` and `git ls-files` were run and found the path in neither, so
+//             there is nothing to commit AND nothing that could be compared to HEAD.
+// Merging them is what made round 1 wrong; the merged sentence attested the comparison
+// that the absent case is precisely the case of not having.
+if (settledOps.length + absentOps.length > 0) {
+  // Name the tickets, capped: the live case is 210 ops, and a message nobody finishes
+  // reading is a message nobody reads. The count is always exact; the list is a sample.
+  const out = [committed
+    ? "blaze commit: also cleared from the queue, with nothing of theirs in the commit:"
+    : "blaze commit: nothing to commit, and nothing failed. Cleared from the queue:"];
+  if (settledOps.length > 0) {
+    out.push(`    ${settledOps.length} op(s) already filed — every file they record already matches HEAD`);
+    out.push(`      — ${nameTickets(settledOps)}`);
+  }
+  if (absentOps.length > 0) {
+    // Every clause here is a tree this run READ: `existsSync`, `git ls-files`, and
+    // `git cat-file -e HEAD:`. Round 2's sentence named HEAD twice having read it zero
+    // times, and `git rm` falsified both of those clauses at once.
+    out.push(`    ${absentOps.length} op(s) superseded — every path they record is in none of the three trees`);
+    out.push(`      this run read (this working tree, git's index, and HEAD), and nothing records them as`);
+    out.push(`      queued in another checkout, so there is nothing here left to commit for them`);
+    out.push(`      — ${nameTickets(absentOps)}`);
+  }
+  console.log(out.join("\n"));
+}
 // The commit succeeded; the QUEUE did not empty. Report and exit non-zero, so no caller
 // can read this run as "the board is flushed".
-if (foreign.length > 0 || stranded.length > 0 || storeListing.unreadable.length > 0) {
+if (foreign.length > 0 || heldBack.length > 0 || stranded.length > 0 || storeListing.unreadable.length > 0) {
   console.error(unreachedLines().join("\n"));
   process.exit(UNREACHED_EXIT);
 }

@@ -454,6 +454,67 @@ same way; migrate them with
 | `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
 | `--status` | **Report every queue and flush nothing.** Read-only: names the resolved queue store on its first line, then prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read is named as such and excluded from the totals, and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
 
+### Nothing to commit is not a failed commit
+
+A drain in which **every op's recorded file already matches HEAD** — the ops were filed by
+something else, so they are *orphaned* in `--status`'s vocabulary — **clears the queue,
+says so, and exits 0**. It is not a failure: there is nothing to resolve, and nothing
+failed. Before BLZ-590 it was reported as `git commit failed (status 1) — ledger kept,
+resolve manually`, and because the ledger was kept, every later run hit the same wall: a
+board whose recorded work was entirely settled could never drain. Hit live on 2026-08-31
+draining the 210 ops [ADR-0033](../decisions/0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md)
+had just consolidated.
+
+A **genuine** commit failure — a pre-commit hook refusing, a bad signature, a lock — still
+**keeps the queue** and exits **1**, and says nothing about the work having been filed.
+Collapsing the two would be worse than the bug it replaced: it would clear a queue whose
+ops never landed.
+
+A drain that is **partly** settled commits the real part, clears the settled part, and
+reports both counts, so no op is silently dropped and none is committed twice. The commit's
+subject and body describe **only the ops that entered it** — a drain of one outstanding op
+beside two already-filed ones writes `(1 new)`, not `(3 new)`.
+
+**Absent is a third outcome, reported separately from settled.** *Absent* means every path
+the op records is in **none of the three trees** — not in the working tree (`existsSync`),
+not in the index (`git ls-files`), and not in HEAD (`git cat-file -e HEAD:`). All three are
+read, so the sentence never attests a comparison that was not made. A `git rm`'d board file
+is therefore **not** absent: it is in HEAD with a staged deletion, and the deletion is
+committed like any other change.
+
+**An absent op is cleared only in the checkout that queued it**, which the op's own record
+says (`worktree` when stamped, else `branch`) — never the local filesystem. An absent op
+whose provenance is another checkout, or which records none, is **put back in the queue,
+reported, and the run exits 3**: its files may exist in a checkout that simply is not
+present right now, and `commit` does not judge what it cannot read. Reasoning in
+[ADR-0035](../decisions/0035-nothing-to-commit-is-a-settled-drain-not-a-failed-one.md).
+
+The two are told apart by **asking the index** — `git diff --cached --quiet -- <the op's
+own recorded paths>`, per op, with the same pathspec `git add` was given — and never by
+matching git's `nothing to commit, working tree clean`, which is a message: localisable,
+version-dependent, and not a contract. Per [ADR-0030](../decisions/0030-a-run-that-could-not-look-does-not-report-what-a-run-that-looked-reports.md)
+the probe is two-valued; a third answer is not evidence of a settled op, so that op is
+committed with the rest and never reported as already filed.
+
+Exit codes for `blaze commit`: **0** the queue is drained (by a commit, by finding its ops
+already filed, or by both); **1** the verb refused or the commit genuinely failed, and the
+queue is kept; **2** `--status` reported incompletely; **3** what this working tree could
+reach is flushed and ops remain that it cannot.
+
+### The divergence warning names the ref it compared against
+
+`blaze commit` prints `warning — N commit(s) behind <ref> (no fetch run); rebase before
+publishing` from **already-fetched** refs, running no network. `<ref>` is the branch's own
+upstream when it has one — the ref a push would write to — and otherwise the remote default
+branch, read from the repo (`origin/HEAD`, else whichever of `origin/main` / `origin/master`
+exists).
+
+**It used to be the hardcoded literal `origin/main`** (BLZ-590), which was wrong in both
+directions: a board whose default branch is `master` never got the warning at all, and a
+feature branch with its own upstream was measured against a ref it does not publish to —
+the operator saw `1 commit(s) behind origin/main` on a branch `git` calls up to date with
+its upstream, a true sentence about the wrong ref.
+
 ### `--status`, and the one question the ledger can answer
 
 A queue is abandoned the moment its session ends: `blaze commit` drains only the
