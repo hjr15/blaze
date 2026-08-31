@@ -522,7 +522,7 @@ test("BLZ-590: an op recording no paths at all is held back, never declared abse
 
   assert.equal(r.status, 3, `stdout: ${r.stdout} stderr: ${r.stderr}`);
   assert.doesNotMatch(r.stdout, /superseded|absent/, "zero paths measured is not a measurement");
-  assert.match(r.stderr, /records no files/, `stderr: ${r.stderr}`);
+  assert.match(r.stderr, /recording no files/, `stderr: ${r.stderr}`);
   assert.equal(readEntries(root, SESSION).length, 1, "kept — there is nothing to establish either way");
   rmSync(root, { recursive: true, force: true });
 });
@@ -558,23 +558,251 @@ test("BLZ-590: held-back ops are written back byte-for-byte, in the queue's orig
 // The ordering above survives dropping the sort, because both survivors are appended in
 // ascending order anyway — so on its own it leaves the sort UNPINNED, not proven. The sort
 // is load-bearing only when the two SOURCES of survivors interleave: `belongsHere` puts a
-// foreign op back during partition, and classification puts a held-back op back afterwards,
-// so a foreign op sitting BETWEEN two held-back ops produces keepIdx [1, 0, 2].
-test("BLZ-590: a foreign op between two held-back ops is restored in queue order, not in the order they were decided", () => {
+// foreign op back during partition, and classification puts a held-back op back afterwards.
+//
+// And it is not enough for the survivors to interleave: they must interleave ACROSS A
+// DECADE BOUNDARY. `[1, 0, 2]` is restored correctly by a bare `.sort()` too, because
+// lexicographic and numeric orders agree below index 10 — so an interleaving in single
+// digits pins that A sort happens, not that it is NUMERIC. Survivors at indices 2 and 10
+// separate them: numeric gives [2, 10]; lexicographic gives ["10", "2"], and the queue comes
+// back with its two survivors swapped. Same bug, one order of magnitude up.
+test("BLZ-590: survivors at indices 2 and 10 come back in numeric order, not lexicographic", () => {
   const root = gitRepo();
-  appendEntry(root, { id: "OBA-A", op: "move", message: "OBA-A: lane", files: ["projects/OBA/gone-A.md"], ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
-  // Stamped with another WORKING TREE, so `belongsHere` refuses it during partition —
-  // a different decision point from the held-back ops either side of it.
-  appendEntry(root, { id: "OBA-F", op: "new", message: "OBA-F: foreign", files: ["projects/OBA/backlog/OBA-F.md"], ts: "t", session: SESSION, worktree: "some-other-lane" }, SESSION);
-  appendEntry(root, { id: "OBA-B", op: "move", message: "OBA-B: lane", files: ["projects/OBA/gone-B.md"], ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
+  // 12 ops. Index 2 is held back at CLASSIFICATION (another branch, path in no tree);
+  // index 10 is refused at PARTITION (another working tree) — so keepIdx is filled [10, 2].
+  const lines = [];
+  for (let i = 0; i < 12; i += 1) {
+    const id = `OBA-L${i}`;
+    if (i === 2) {
+      appendEntry(root, { id, op: "move", message: `${id}: lane`, files: [`projects/OBA/gone-${i}.md`], ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
+    } else if (i === 10) {
+      appendEntry(root, { id, op: "new", message: `${id}: foreign`, files: [`projects/OBA/backlog/${id}.md`], ts: "t", session: SESSION, worktree: "some-other-lane" }, SESSION);
+    } else {
+      writeFileSync(join(root, "projects", "OBA", "backlog", `${id}.md`), `real ${i}`);
+      appendEntry(root, { id, op: "new", message: `${id}: real`, files: [`projects/OBA/backlog/${id}.md`], ts: "t", session: SESSION, branch: "master" }, SESSION);
+    }
+    lines.push(id);
+  }
   const queue = ledgerPath(root, SESSION);
-  const before = readFileSync(queue, "utf8");
-  assert.equal(before.split("\n").filter(Boolean).length, 3, "fixture needs all three lines");
+  const raw = readFileSync(queue, "utf8").split("\n").filter(Boolean);
+  assert.equal(raw.length, 12, "fixture needs all twelve lines");
+  const expected = `${raw[2]}\n${raw[10]}\n`;
 
   const r = runCommit(root);
 
   assert.equal(r.status, 3, `stdout: ${r.stdout} stderr: ${r.stderr}`);
-  assert.equal(readFileSync(queue, "utf8"), before,
-    "nothing was committable, so the queue must come back exactly as it was — including the ORDER");
+  assert.match(r.stdout, /flushed 10 op\(s\)/, `the other ten really commit. stdout: ${r.stdout}`);
+  const after = readFileSync(queue, "utf8");
+  assert.equal(after, expected,
+    `survivors must come back as OBA-L2 then OBA-L10, byte-for-byte: ${JSON.stringify(after)}`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// The convention this gate inherits, pinned so changing it is a deliberate red rather than
+// a quiet drift: an op recording NEITHER `worktree` NOR `branch` is a pre-INF-673 op, and
+// `belongsHere` documents it as "treated as this tree's". The gate keeps that rather than
+// inventing a stricter rule than the guard running in front of it. 0 of the 210 live ops
+// are this shape.
+test("BLZ-590: an op with no recorded provenance at all is judged here, per belongsHere's convention", () => {
+  const root = gitRepo();
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-97.md"), "legacy op, no provenance");
+  appendEntry(root, { id: "OBA-97", op: "new", message: "OBA-97: legacy", files: ["projects/OBA/backlog/OBA-97.md"], ts: "t", session: SESSION }, SESSION);
+
+  const r = runCommit(root);
+
+  assert.equal(r.status, 0, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+  assert.match(r.stdout, /flushed 1 op\(s\)/,
+    "a legacy op with no provenance still drains — a stricter gate would strand it forever");
+  assert.deepEqual(readEntries(root, SESSION), []);
+  rmSync(root, { recursive: true, force: true });
+});
+
+// ---------------------------------------------------------------------------
+// 19. ROUND 4. THE PROPERTY, not the buckets.
+//
+// Round 1 asserted a verdict without measuring. Round 2 gated nothing. Round 3
+// gated `absent` — and only `absent`, so a `settled` op belonging to another
+// checkout still cleared at exit 0, its ledger line destroyed, over a sentence
+// ("every file they record already matches HEAD") comparing THIS checkout's copy
+// against work living somewhere else. Three rounds, one defect, three buckets.
+//
+// The property is single: THIS CHECKOUT MAY ONLY REACH A VERDICT ABOUT AN OP THE
+// OP SAYS WAS QUEUED HERE. It is now asked twice, and neither is a clause inside
+// a bucket: the partition refuses a foreign op before any path of its is even
+// collected, and `classify` is called from exactly one place, past a gate, so a
+// state added to the classifier cannot escape it either.
+//
+// Pinned as the property, table-driven over EVERY state the classifier can
+// return. Each row runs twice: once with provenance here — which asserts the
+// fixture really reaches that state, so the row cannot pass vacuously — and once
+// with provenance elsewhere, which must be held back no matter what this
+// checkout's working tree, index or HEAD say. Adding a state without gating it
+// fails here.
+// ---------------------------------------------------------------------------
+
+const BROKEN_DIFF_SHIM = (root) => {
+  const dir = join(root, "gitshim");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "git"),
+    `#!/bin/sh\nif [ "$3" = "diff" ]; then\n  for a in "$@"; do\n    if [ "$a" = "--cached" ]; then exit 128; fi\n  done\nfi\nexec "$BLAZE_TEST_REAL_GIT" "$@"\n`);
+  chmodSync(join(dir, "git"), 0o755);
+  return {
+    PATH: `${dir}:${process.env.PATH}`,
+    BLAZE_TEST_REAL_GIT: execFileSync("which", ["git"], { encoding: "utf8" }).trim(),
+  };
+};
+
+const EVERY_STATE = [
+  {
+    state: "staged",
+    files: (id) => [`projects/OBA/backlog/${id}.md`],
+    seed: (root, id) => writeFileSync(join(root, "projects", "OBA", "backlog", `${id}.md`), "outstanding"),
+    hereVerdict: (r) => assert.match(r.stdout, /flushed 1 op\(s\)/, `stdout: ${r.stdout}`),
+  },
+  {
+    state: "settled",
+    files: (id) => [`projects/OBA/backlog/${id}.md`],
+    seed: (root, id) => {
+      const rel = `projects/OBA/backlog/${id}.md`;
+      writeFileSync(join(root, rel), "filed by hand");
+      execFileSync("git", ["-C", root, "add", "--", rel]);
+      execFileSync("git", ["-C", root, "commit", "-qm", `hand-filed ${id}`]);
+    },
+    hereVerdict: (r) => assert.match(r.stdout, /already filed/, `stdout: ${r.stdout}`),
+  },
+  {
+    state: "absent",
+    files: (id) => [`projects/OBA/backlog/${id}.md`],
+    seed: () => {},
+    hereVerdict: (r) => assert.match(r.stdout, /superseded/, `stdout: ${r.stdout}`),
+  },
+  {
+    state: "no-paths",
+    files: () => [],
+    seed: () => {},
+    // Held back even when it IS this checkout's — for its own reason, not provenance.
+    hereVerdict: (r) => {
+      assert.equal(r.status, 3, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.match(r.stderr, /recording no files/, `stderr: ${r.stderr}`);
+    },
+  },
+  {
+    state: "unknown",
+    files: (id) => [`projects/OBA/backlog/${id}.md`],
+    // Hand-filed AND the index probe broken: the path is on disk and tracked, so it reaches
+    // the probe, and the probe cannot answer. The commit then finds nothing to commit and
+    // fails, which is the arm that makes `unknown` visible on stderr.
+    seed: (root, id) => {
+      const rel = `projects/OBA/backlog/${id}.md`;
+      writeFileSync(join(root, rel), "filed by hand");
+      execFileSync("git", ["-C", root, "add", "--", rel]);
+      execFileSync("git", ["-C", root, "commit", "-qm", `hand-filed ${id}`]);
+    },
+    env: BROKEN_DIFF_SHIM,
+    hereVerdict: (r) => {
+      assert.notEqual(r.status, 0, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+      assert.match(r.stderr, /could not say whether/, `stderr: ${r.stderr}`);
+    },
+  },
+];
+
+for (const c of EVERY_STATE) {
+  test(`BLZ-590: the fixture for '${c.state}' really reaches that state when the op is this checkout's`, () => {
+    const root = gitRepo();
+    const id = "OBA-100";
+    c.seed(root, id);
+    appendEntry(root, { id, op: "move", message: `${id}: m`, files: c.files(id), ts: "t", session: SESSION, branch: "master" }, SESSION);
+    c.hereVerdict(runCommit(root, { env: c.env ? c.env(root) : {} }));
+    rmSync(root, { recursive: true, force: true });
+  });
+
+  test(`BLZ-590: an op queued in ANOTHER checkout is held back whatever this tree says — the '${c.state}' case`, () => {
+    const root = gitRepo();
+    const id = "OBA-100";
+    c.seed(root, id);
+    appendEntry(root, { id, op: "move", message: `${id}: m`, files: c.files(id), ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
+    const before = headOf(root);
+
+    const r = runCommit(root, { env: c.env ? c.env(root) : {} });
+
+    assert.equal(r.status, 3, `must be reported as unreached, not judged. stdout: ${r.stdout} stderr: ${r.stderr}`);
+    assert.equal(readEntries(root, SESSION).length, 1,
+      `THE PROPERTY: an op this checkout may not judge keeps its ledger line ('${c.state}')`);
+    assert.match(r.stderr, /lane-x/, `the message must name where it belongs. stderr: ${r.stderr}`);
+    assert.doesNotMatch(r.stdout, /already filed|superseded|flushed/,
+      `no verdict of any kind may be reached about it ('${c.state}'). stdout: ${r.stdout}`);
+    assert.equal(headOf(root), before, "and nothing of it may reach a commit");
+    rmSync(root, { recursive: true, force: true });
+  });
+}
+
+// ---------------------------------------------------------------------------
+// 20. ROUND 4, second half. Holding the LEDGER LINE is only half of not judging.
+//
+// Found by probing the round-4 gate rather than by reading it: with the gate in
+// `opState`, a foreign op was still held back correctly — and its file was
+// COMMITTED by this run anyway. `recorded` is built from every entry that got
+// past `belongsHere`, so a foreign op's paths reached `addPaths` and the commit
+// pathspec before classification ever ran. A board file is tracked in every
+// checkout, so it is stageable here the moment it is dirty here.
+//
+// The run then printed "an op belongs to the checkout that queued it ... Run
+// `blaze commit` there" about work it had just published itself.
+//
+// So the refusal moved to the partition, where no path of a foreign op is
+// collected at all. Provenance is a property of the RECORD, not of the tree, so
+// it needs no probe and can be asked before any path is gathered. May-not-judge
+// means may-not-touch.
+test("BLZ-590: a foreign op's file is not committed by this checkout, even when it is dirty here", () => {
+  const root = gitRepo();
+  // Ours — a real outstanding op, so the run genuinely reaches `git commit`.
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "ours");
+  appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: ours", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t", session: SESSION, branch: "master" }, SESSION);
+  // Theirs — queued on another branch, but its path exists HERE and is dirty.
+  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-F.md"), "theirs, not this checkout's to publish");
+  appendEntry(root, { id: "OBA-F", op: "new", message: "OBA-F: theirs", files: ["projects/OBA/backlog/OBA-F.md"], ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
+
+  const r = runCommit(root);
+
+  assert.equal(r.status, 3, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+  const names = namesIn(root);
+  assert.match(names, /OBA-1\.md/, "our own outstanding op must still land");
+  assert.doesNotMatch(names, /OBA-F\.md/,
+    "THE PROPERTY: an op this checkout may not judge is an op it may not commit either");
+  assert.deepEqual(readEntries(root, SESSION).map((e) => e.id), ["OBA-F"], "and its ledger line is kept");
+  // Not merely uncommitted — untouched. A staged-but-uncommitted foreign path would
+  // leave the operator's index carrying work this run said it would not act on.
+  assert.equal(
+    spawnSync("git", ["-C", root, "diff", "--cached", "--quiet", "--", "projects/OBA/backlog/OBA-F.md"]).status, 0,
+    "and it is not left staged in the index either");
+  rmSync(root, { recursive: true, force: true });
+});
+
+// Round 4's review found the cost of the leg above being unconditional: a DETACHED worktree
+// is exactly where `checkBranch` is explicitly ok, so it would judge a no-provenance op,
+// find its path in none of the three trees IT can see, call it superseded and clear it at
+// exit 0 — destroying the record while the real file sat uncommitted in the tree that
+// queued it. One checkout claims these ops, and it is the one the store sits beside.
+test("BLZ-590: a no-provenance op is held back by a worktree that is not the store's own", () => {
+  const root = gitRepo();
+  const lane = join(root, "..", `lane-${Math.random().toString(36).slice(2)}`);
+  execFileSync("git", ["-C", root, "worktree", "add", "-q", "--detach", lane]);
+  // The linked worktree needs its own copy of scripts/ (untracked in the fixture), and it
+  // shares the store: `queueRoot` resolves through --git-common-dir back to `root`.
+  cpSync(join(root, "scripts"), join(lane, "scripts"), { recursive: true });
+  mkdirSync(join(lane, "projects", "OBA", "backlog"), { recursive: true });
+  appendEntry(root, { id: "OBA-98", op: "new", message: "OBA-98: legacy", files: ["projects/OBA/backlog/OBA-98.md"], ts: "t", session: SESSION }, SESSION);
+  assert.equal(readEntries(root, SESSION).length, 1, "fixture: the op is in the shared store");
+
+  const r = runCommit(lane);
+
+  assert.equal(r.status, 3, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+  assert.doesNotMatch(r.stdout, /superseded|already filed|flushed/,
+    `no verdict may be reached about it from here. stdout: ${r.stdout}`);
+  assert.equal(readEntries(root, SESSION).length, 1, "THE PROPERTY: its ledger line survives");
+  assert.match(r.stderr, /record no provenance at all/,
+    `and the reason names the field it does not have, not one it does. stderr: ${r.stderr}`);
+  assert.doesNotMatch(r.stderr, /undefined|branch ''/, "never name a field the op never recorded");
+  execFileSync("git", ["-C", root, "worktree", "remove", "--force", lane]);
   rmSync(root, { recursive: true, force: true });
 });
