@@ -115,3 +115,73 @@ test("INF-800: with no context configured, publish says which context it will us
   );
   rmSync(root, { recursive: true, force: true });
 });
+
+// ---------------------------------------------------------------------------
+// BLZ-590. ADR-0035 widened `blaze commit`'s exit 0 from "a commit was made" to
+// "the queue is drained" — by a commit, by finding its ops already filed, or by
+// both. `publish` read that 0 and asserted "the local sweep committed" on both
+// of its failure paths. Control flow is fine (the flush no-ops when HEAD did not
+// move), but the sentence was a claim about something the sweep never reported:
+// step 1 runs with `stdio: "inherit"`, so publish cannot read what it said.
+//
+// The fact publish CAN establish is whether HEAD moved across the sweep. Both
+// directions are pinned, because a fix that always said "no commit" would pass
+// the first of these two on its own.
+// ---------------------------------------------------------------------------
+
+/** A PATH holding git and nothing else, so `kubectl` is genuinely absent (ENOENT)
+ *  while the sweep's own git calls still work. */
+function pathWithoutKubectl(root) {
+  const dir = join(root, "nokubectl");
+  mkdirSync(dir, { recursive: true });
+  const git = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
+  execFileSync("ln", ["-s", git, join(dir, "git")]);
+  assert.equal(spawnSync("kubectl", ["version"], { env: { PATH: dir } }).error?.code, "ENOENT",
+    "fixture is vacuous unless kubectl is really unreachable on this PATH");
+  return dir;
+}
+
+function runPublishForReal(root, extraEnv = {}) {
+  return spawnSync(process.execPath, [join(root, "scripts", "publish-runner.mjs")], {
+    cwd: root, encoding: "utf8",
+    env: { ...process.env, BLAZE_SESSION: "pubtest", ...extraEnv },
+  });
+}
+
+test("BLZ-590: publish does not claim the local sweep committed when the sweep only settled", () => {
+  const root = boardRepo();
+  const file = "projects/PROJ/defined/PROJ-9-x.md";
+  writeFileSync(join(root, file), "---\nid: PROJ-9\ntitle: t\ntype: task\nproject: PROJ\npriority: medium\n---\nb\n");
+  appendEntry(root, { id: "PROJ-9", op: "new", message: "PROJ-9: create task", files: [file] }, "pubtest");
+  // Filed by hand — the op is now orphaned, so the sweep settles and makes no commit.
+  execFileSync("git", ["-C", root, "add", "--", file]);
+  execFileSync("git", ["-C", root, "commit", "-qm", "hand-filed PROJ-9"]);
+  const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+  const r = runPublishForReal(root, { PATH: pathWithoutKubectl(root) });
+
+  assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), before,
+    "fixture is vacuous unless the sweep really made no commit");
+  assert.notEqual(r.status, 0, `kubectl is absent, so publish must fail. stdout: ${r.stdout}`);
+  assert.doesNotMatch(r.stderr, /the local sweep committed/,
+    `nothing was committed, so publish may not say it was. stderr: ${r.stderr}`);
+  assert.match(r.stderr, /made no commit/, `it must say what did happen. stderr: ${r.stderr}`);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-590: publish still says the local sweep committed when it did", () => {
+  const root = boardRepo();
+  const file = "projects/PROJ/defined/PROJ-10-x.md";
+  writeFileSync(join(root, file), "---\nid: PROJ-10\ntitle: t\ntype: task\nproject: PROJ\npriority: medium\n---\nb\n");
+  appendEntry(root, { id: "PROJ-10", op: "new", message: "PROJ-10: create task", files: [file] }, "pubtest");
+  const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+
+  const r = runPublishForReal(root, { PATH: pathWithoutKubectl(root) });
+
+  assert.notEqual(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), before,
+    "fixture is vacuous unless the sweep really did commit");
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /the local sweep committed/,
+    `a real commit must still be reported as one. stderr: ${r.stderr}`);
+  rmSync(root, { recursive: true, force: true });
+});
