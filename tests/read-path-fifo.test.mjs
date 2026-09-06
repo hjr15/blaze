@@ -161,21 +161,137 @@ describe("BLZ-493: readRegularFileSync refuses what it cannot safely open", () =
   });
 
   test("the check is on the OPEN FILE DESCRIPTOR, so there is no stat-then-open window", () => {
-    // A stat-first guard leaves a race: the path can become a FIFO between the stat and the
-    // open, and winning that race is an UNBOUNDED HANG, not a wrong answer. The panel site
-    // below is reachable only through a race of exactly that shape, so a racy guard there
-    // would pin the wrong thing. `O_NONBLOCK` on the open makes a FIFO open return in 0ms
-    // (measured) and `fstat` then answers about the file that is actually open.
-    const src = execFileSync("cat", [join(SCRIPTS, "model", "regular-file.mjs")], { encoding: "utf8" });
-    assert.match(src, /O_NONBLOCK/,
-      "the open must be non-blocking, or the guard itself blocks on the FIFO it is guarding");
-    assert.match(src, /fstatSync/,
-      "the type must be read from the FD, not from the path — a path can change under you");
-    assert.doesNotMatch(src, /\bstatSync\s*\(/,
-      "a stat on a PATH before the open is the race this guard exists not to have — " +
-      "`fstatSync` on the descriptor is not that, and is what this module uses");
+    // BLZ-521. This test USED TO BE `assert.doesNotMatch(src, /\bstatSync\s*\(/)` — a pin on
+    // a SPELLING, which `lstatSync` or an aliased import walks straight past. MEASURED, with
+    // the type decision moved to `lstatSync as peek` on the PATH in all three verbs: the
+    // whole suite stayed green — 4412 tests, 0 fail — including the test you are reading.
+    //
+    // So it does not read the source at all now. It makes the PATH and the DESCRIPTOR
+    // DISAGREE and asks the module which one it believed, which no rename can survive.
+    //
+    // The old `assert.match(src, /O_NONBLOCK/)` went with it, and nothing is lost: setting
+    // `NONBLOCK = 0` reddens 14 of this file's own tests by HANGING their children out to
+    // the 15s cap — measured. A source pin adds nothing on top of a behaviour that already
+    // fails that loudly.
+    //
+    // A stat on a PATH answers about the file that was there a moment ago; the process then
+    // opens the file that is there now. Losing that race is not a wrong answer, it is an
+    // UNBOUNDED HANG, and one site (`views/panel-content.mjs`) is reachable ONLY through a
+    // race of exactly that shape. Real files cannot be made to disagree on demand, so
+    // `node:module`'s `registerHooks` swaps `node:fs` for a shim that answers one type from
+    // a path and another from a descriptor. Everything else in the shim is the real fs.
+    //
+    // HOW THIS DIFFERS FROM ITS SIBLING [[BLZ-535]], the same "pins a spelling" defect on the
+    // write-seam guard in `tests/model/seam-closure.test.mjs`. Two remedies, deliberately:
+    // that one is STRUCTURAL and corpus-wide — which modules may reach node:fs at all — with
+    // no behaviour to run, so it enumerates the fs surface instead of naming members. This
+    // one is BEHAVIOURAL and single-function — how ONE function decides a type — so it runs
+    // the function and disagrees with it. Enumerating a surface would not have pinned this;
+    // running it does.
+    for (const [verb, call, ok] of [
+      ["read", `readRegularFileSync(P)`, `"READ"`],
+      ["write", `writeRegularFileSync(P, "x")`, `"WROTE"`],
+      ["append to", `appendRegularFileSync(P, "x")`, `"APPENDED"`],
+    ]) {
+      const tmp = mkdtempSync(join(tmpdir(), "blz521-fd-"));
+      try {
+        const target = join(tmp, "r.txt");
+        writeFileSync(target, "hello\n");
+
+        // The path says REGULAR FILE, the descriptor says FIFO. A guard that asked the path
+        // goes ahead; a guard that asked the descriptor refuses. Only one of those is safe.
+        const lying = underDisagreeingFs(tmp,
+          { pathKind: "file", fdKind: "fifo" }, target, call, ok);
+        assert.match(lying.out, /REFUSED ERR_BLAZE_NOT_A_REGULAR_FILE/,
+          `${verb}: the DESCRIPTOR said FIFO and the path said regular file. Refusing is the ` +
+          "only safe answer, and this took the path's word for it. Got: " + lying.out);
+        assert.match(lying.out, /FIFO/,
+          `${verb}: the refusal must name what the DESCRIPTOR found, not what the path said`);
+
+        // And the mirror, which is the half a merely-stricter guard would fail: the path
+        // says FIFO, the descriptor says regular file. The open succeeded on a regular
+        // file, so the verb must go through. A stat-then-open guard refuses a healthy file.
+        const scared = underDisagreeingFs(tmp,
+          { pathKind: "fifo", fdKind: "file" }, target, call, ok);
+        assert.match(scared.out, new RegExp(JSON.parse(ok)),
+          `${verb}: the DESCRIPTOR said regular file — the only thing that is actually open — ` +
+          "so this must go through. Refusing here is a stat-then-open guard. Got: " + scared.out);
+
+        // Assert the OBSERVATION happened. If the shim were not installed the two cases
+        // above would both run against the real fs and could agree by accident; an empty
+        // trace is the shape of a test that proved nothing.
+        for (const seen of [lying.seen, scared.seen]) {
+          assert.ok(seen.length > 0,
+            `${verb}: the shim was never consulted — this test observed nothing`);
+          assert.ok(seen.includes("fstatSync"),
+            `${verb}: the type must be read from the DESCRIPTOR; trace was ${seen.join(",")}`);
+          assert.deepEqual(seen.filter((c) => c === "statSync" || c === "lstatSync"), [],
+            `${verb}: a stat on the PATH is the race this guard exists not to have; ` +
+            `trace was ${seen.join(",")}`);
+        }
+      } finally { rmSync(tmp, { recursive: true, force: true }); }
+    }
   });
 });
+
+/** A stand-in for `node:fs` in which a PATH and an OPEN DESCRIPTOR disagree about the type.
+ *  Every call is the real one; only the `isX()` answers are rewritten, and every call is
+ *  recorded so the test can prove the module was actually asked. The real fs is handed in on
+ *  `globalThis` because the resolve hook below would otherwise intercept the shim's own
+ *  import of it too.
+ *
+ *  The named exports are exactly what `scripts/model/regular-file.mjs` imports today. If it
+ *  starts importing another fs member the child fails to LINK, loudly, which is the correct
+ *  outcome — a shim that silently stopped covering the module is a test that proves nothing. */
+const FS_SHIM = `
+const real = globalThis.__realFs;
+const plan = globalThis.__fsPlan;
+const seen = globalThis.__fsSeen;
+function typed(kind, base) {
+  const is = (k) => () => k === kind;
+  return { ...base, isFile: is("file"), isFIFO: is("fifo"), isDirectory: is("dir"),
+    isSocket: is("sock"), isCharacterDevice: is("chr"), isBlockDevice: is("blk") };
+}
+export function statSync(p, ...r) { seen.push("statSync"); return typed(plan.pathKind, real.statSync(p, ...r)); }
+export function lstatSync(p, ...r) { seen.push("lstatSync"); return typed(plan.pathKind, real.lstatSync(p, ...r)); }
+export function fstatSync(fd, ...r) { seen.push("fstatSync"); return typed(plan.fdKind, real.fstatSync(fd, ...r)); }
+export function openSync(...a) { seen.push("openSync"); return real.openSync(...a); }
+export function closeSync(...a) { return real.closeSync(...a); }
+export function readFileSync(...a) { return real.readFileSync(...a); }
+export function writeFileSync(...a) { return real.writeFileSync(...a); }
+export function appendFileSync(...a) { return real.appendFileSync(...a); }
+export const constants = real.constants;
+`;
+
+/** Run one verb of `regular-file.mjs` in a child whose `node:fs` is the shim above. Returns
+ *  what the verb said and the trace of fs calls the shim actually saw. */
+function underDisagreeingFs(tmp, plan, target, call, ok) {
+  const shim = join(tmp, `fs-shim-${Math.random().toString(36).slice(2)}.mjs`);
+  writeFileSync(shim, FS_SHIM);
+  const out = child(tmp, `
+import * as realFs from "node:fs";
+import { registerHooks } from "node:module";
+import { pathToFileURL } from "node:url";
+globalThis.__realFs = realFs;
+globalThis.__fsPlan = ${JSON.stringify(plan)};
+globalThis.__fsSeen = [];
+const SHIM = pathToFileURL(${JSON.stringify(shim)}).href;
+registerHooks({
+  resolve(spec, ctx, next) {
+    if (spec === "node:fs" || spec === "fs") return { url: SHIM, shortCircuit: true };
+    return next(spec, ctx);
+  },
+});
+const { readRegularFileSync, writeRegularFileSync, appendRegularFileSync } = await import(${mod("model", "regular-file.mjs")});
+const P = ${JSON.stringify(target)};
+let said;
+try { ${call}; said = ${ok}; }
+catch (e) { said = "REFUSED " + e.code + " :: " + e.message; }
+console.log(JSON.stringify({ said, seen: globalThis.__fsSeen }));
+`).stdout;
+  const parsed = JSON.parse(out);
+  return { out: parsed.said, seen: parsed.seen };
+}
 
 // =============================================================================
 // Site 1 — `walkTickets`'s `.md` read. REFUSE.
