@@ -17,7 +17,7 @@
 // When Postgres IS reachable the assertions are identical, not merely similar.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
@@ -84,68 +84,84 @@ async function seedPg() {
   return { s, root: null };
 }
 
+/** Open a driver and register its teardown BEFORE any assertion can throw.
+ *
+ *  BLZ-534. Every test below used to end with `await s.close?.()` as its last statement,
+ *  which is the one path a failing assertion never reaches. For fs, mem and sqlite that
+ *  leaks a temp directory. For Postgres it leaks a live referenced TCP socket, and a
+ *  `node --test` child holding one of those cannot exit: the suite was observed sitting on
+ *  this very file for 27+ minutes at 0% CPU, blocked in `ep_poll`, `loopIdleTime` 1678s.
+ *
+ *  NOT A CLAIM THAT THIS WAS THE HANG. That hang was reproduced once and then survived ~10
+ *  further runs across two reviewers; it has not been reproduced here, and a green suite is
+ *  no evidence about it either way. What is verifiable is that this file no longer has a
+ *  path on which it opens a Postgres connection and does not close it — and, separately,
+ *  that a file which does hang is now ended and reported (tests/setup/hang-watchdog.mjs). */
+async function open(make, t) {
+  const { s, root } = await make();
+  t.after(async () => {
+    await s.close?.();
+    if (root) rmSync(root, { recursive: true, force: true });
+  });
+  return { s, root };
+}
+
 /** Every assertion the contract makes. Awaited, so sync and async drivers both pass. */
 async function conformance(make, name) {
-  await test(`${name}: getTicket resolves by id, with status and body`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: getTicket resolves by id, with status and body`, async (t) => {
+    const { s, root } = await open(make, t);
     const r = await s.getTicket(root, "BLZ-2");
     assert.equal(r.found?.frontmatter.id, "BLZ-2");
     assert.equal(r.found.status, "defined");
     assert.match(r.found.body, /body of BLZ-2/);
-    await s.close?.();
   });
 
-  await test(`${name}: getTicket returns found:null for an unknown id`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: getTicket returns found:null for an unknown id`, async (t) => {
+    const { s, root } = await open(make, t);
     assert.equal((await s.getTicket(root, "BLZ-999")).found, null);
-    await s.close?.();
   });
 
-  await test(`${name}: records carry project and status first-class`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: records carry project and status first-class`, async (t) => {
+    const { s, root } = await open(make, t);
     const r = (await s.getTicket(root, "BLZ-3")).found;
     assert.equal(r.project, "BLZ");
     assert.equal(r.status, "done");
-    await s.close?.();
   });
 
-  await test(`${name}: listChildren answers the drill`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: listChildren answers the drill`, async (t) => {
+    const { s, root } = await open(make, t);
     const kids = (await s.listChildren(root, "BLZ-1")).map((t) => t.frontmatter.id).sort();
     assert.deepEqual(kids, ["BLZ-2", "BLZ-3"]);
     assert.deepEqual(await s.listChildren(root, "BLZ-4"), []);
-    await s.close?.();
   });
 
-  await test(`${name}: blockersOf returns inbound Blocks only, never the ticket itself`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: blockersOf returns inbound Blocks only, never the ticket itself`, async (t) => {
+    const { s, root } = await open(make, t);
     const ids = (await s.blockersOf(root, "BLZ-1")).map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-2", "BLZ-3"], "BLZ-4 Relates; BLZ-1 blocks itself and must be excluded");
-    await s.close?.();
   });
 
-  await test(`${name}: listTickets yields the whole corpus`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: listTickets yields the whole corpus`, async (t) => {
+    const { s, root } = await open(make, t);
     const ids = [...await s.listTickets(root)].map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-1", "BLZ-2", "BLZ-3", "BLZ-4"]);
-    await s.close?.();
   });
 
-  await test(`${name}: listProjects returns the project keys`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: listProjects returns the project keys`, async (t) => {
+    const { s, root } = await open(make, t);
     assert.deepEqual(await s.listProjects(root), ["BLZ"]);
-    await s.close?.();
   });
 
-  await test(`${name}: dates are plain YYYY-MM-DD strings, not instants`, async () => {
+  await test(`${name}: dates are plain YYYY-MM-DD strings, not instants`, async (t) => {
     // Added after dual-write (BLZ-293) found what 32 assertions had missed: `pg`
     // decodes a Postgres `date` into a JS Date at LOCAL midnight, so 2026-01-01 read
     // from Sydney came back as "2025-12-31T13:00:00.000Z" — every created/updated date
     // shifted a day, in a direction that depends on the reader's timezone. Blaze stores
     // dates with no time and no zone; a driver that hands back an instant is wrong.
-    const { s, root } = await make();
-    const t = await s.getTicket(root, "BLZ-1");
-    const rec = t.found ?? t;
+    const { s, root } = await open(make, t);
+    // `t` is the test context here, so the read is named for what it is.
+    const read = await s.getTicket(root, "BLZ-1");
+    const rec = read.found ?? read;
     // Assert the VALUE, not the shape. An earlier version of this checked only that the
     // string matched /\d{4}-\d{2}-\d{2}/ and passed against the bug: pg-storage's
     // `iso()` helper runs toISOString().slice(0,10) on a Date already parked at LOCAL
@@ -157,15 +173,13 @@ async function conformance(make, name) {
       assert.equal(v, "2026-01-01",
         `${field} must be the date the corpus stored, got ${JSON.stringify(v)}`);
     }
-    await s.close?.();
   });
 
-  await test(`${name}: changeToken is a stable opaque string`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: changeToken is a stable opaque string`, async (t) => {
+    const { s, root } = await open(make, t);
     const a = await s.changeToken(root);
     assert.equal(typeof a, "string");
     assert.equal(a, await s.changeToken(root));
-    await s.close?.();
   });
 }
 

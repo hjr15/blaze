@@ -29,6 +29,76 @@ Set `tests` as a required status check in branch protection so a red run blocks
 merge (honour-system on free-private repos — see the repo's branch-protection
 note; irrelevant once this repo is public, where required checks work normally).
 
+## The engine is checked before the suite runs
+
+`package.json` declares `"engines": { "node": ">=24" }` — the floor exists because
+`node:sqlite` is built in from Node 24 and 34-odd suites import it. Nothing used to
+enforce that. Running the suite on Node 20 makes every `node:sqlite` file fail to LOAD,
+and the tally that produces says nothing about the engine: measured on 2026-09-07,
+`/usr/bin/node` v20.20.2 gave **3,916 tests / 3,743 pass / 173 fail** where v24.19.0 gave
+**4,408 / 4,406 / 0**. A real regression is invisible in the first of those (BLZ-601).
+
+So `pretest` and `pretest:coverage` run
+[`scripts/ci/require-engine.mjs`](../scripts/ci/require-engine.mjs), which refuses with
+exit 78 and prints the required major, the detected version, whether `node:sqlite`
+resolves, and how to get a conforming Node — including the exact `export PATH=…` line when
+it finds one already installed under `~/.local/node*`, nvm, fnm, volta or n. Someone who
+runs `node --test` directly bypasses npm and its pre-scripts; for them the same check is an
+ordinary test, `tests/engine-precondition.test.mjs`.
+
+`BLAZE_ENGINE_GUARD_FAKE_VERSION` substitutes the detected version. It is a test seam, so
+the refusal path can be exercised on a machine (or a CI runner) where every Node available
+is conforming.
+
+## A hung test file is bounded and reported as a hang
+
+The suite could hang **forever** on one file: observed once at 27+ minutes on
+`tests/model/driver-conformance.test.mjs`, 0% CPU, blocked in `ep_poll`, holding a live
+referenced TCP handle to the Postgres port (BLZ-534). Every test in the file had already
+passed — the process simply could not exit. Note that `node --test` passes
+`--test-timeout=0` to each per-file child by default, which is where that flag in the
+ticket comes from: with no timeout set, nothing ends such a file.
+
+Two bounds, for two different failures:
+
+| Bound | Ends | Set by |
+|---|---|---|
+| `--test-timeout=120000` | a test whose BODY never returns | the `test` / `test:coverage` npm scripts |
+| [`tests/setup/hang-watchdog.mjs`](../tests/setup/hang-watchdog.mjs) | a PROCESS that cannot exit after its tests finished | `--import=` in the same npm scripts |
+
+The watchdog's timer is **unref'd**: it does not keep a healthy file alive, so it costs the
+suite no wall-clock time, and it still fires when something else holds the loop open past
+the deadline. When it fires it prints `BLAZE TEST HANG WATCHDOG`, names the file, the
+deadline it exceeded, the still-open handle types and — for sockets — the peer address, then
+exits 87 so the runner counts the file as **failed**. In a CI log a hang and a slow run are
+otherwise the same thing.
+
+The deadline defaults to 300s and is set with `BLAZE_TEST_WATCHDOG_MS` (`0` disables it).
+`tests/hang-watchdog.test.mjs` pins both directions against a fixture that leaks a socket
+on purpose, including that the fixture really does hang without the watchdog.
+
+**The cause, for this one file, was found and fixed.** Each conformance test ended with
+`await s.close?.()`, the one statement a failing assertion never reaches — so a red
+Postgres assertion left the client open and the child could never exit. It reproduces on
+demand: mutate one assertion with `BLAZE_TEST_PG_URL` set and the run never returns, where
+the fixed file exits in about a second with four failures. Teardown now runs from
+`t.after()`. That does not prove the original intermittent hang is gone — it survived ~10
+runs across two reviewers before this — which is why the bound above exists regardless.
+
+## Cleanup runs whether a test passes or fails
+
+Related, and the same shape one level down: cleanup written as the last statement of a test
+is skipped by a failing assertion (BLZ-603).
+[`scripts/ci/temp-cleanup-guard.mjs`](../scripts/ci/temp-cleanup-guard.mjs) scans `tests/`
+for that shape and `tests/temp-cleanup-guard.test.mjs` holds the corpus to the per-file
+counts recorded in `scripts/ci/temp-cleanup-debt.json` — **454 sites across 64 files** at
+the time of writing, pre-existing debt that is recorded rather than hidden. The check is an
+equality, so a file cannot gain a site and a file that is cleaned up must drop its entry in
+the same change (`node scripts/ci/temp-cleanup-guard.mjs --write` re-records).
+
+The scanner is a line scanner, not a parser: cleanup done inside a helper a test calls is
+invisible to it, so the number is a floor. That limit is asserted, not assumed.
+
 ## Mutation testing is scoped
 
 `node scripts/ci/mutate-schedule.mjs` is **not** a whole-repo mutation gate, and reading
