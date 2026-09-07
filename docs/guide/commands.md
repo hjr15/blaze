@@ -452,7 +452,7 @@ same way; migrate them with
 | `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
 | `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
 | `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
-| `--status` | **Report every queue and flush nothing.** Read-only: names the resolved queue store on its first line, then prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read is named as such and excluded from the totals, and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
+| `--status` | **Report every queue and flush nothing.** Read-only: names the resolved queue store on its first line, then prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read is named as such; a queue only **partially** read — some of its lines would not parse — is marked `PARTIALLY READ` with the count. Neither is included in the op count, the file totals or the readable-queue count, which is what the disclaimer under them says (BLZ-531), and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
 
 ### Nothing to commit is not a failed commit
 
@@ -498,8 +498,48 @@ committed with the rest and never reported as already filed.
 
 Exit codes for `blaze commit`: **0** the queue is drained (by a commit, by finding its ops
 already filed, or by both); **1** the verb refused or the commit genuinely failed, and the
-queue is kept; **2** `--status` reported incompletely; **3** what this working tree could
-reach is flushed and ops remain that it cannot.
+queue is kept; **2** `--status` reported incompletely — a queue it could not read, or one it
+could read only in part; **3** what this working tree could reach is flushed and ops remain
+that it cannot, which since BLZ-531 includes a queue kept because a line it could not parse
+could not be parked either.
+
+### A line the ledger cannot parse is quarantined, never erased
+
+`blaze commit` skips a ledger line it cannot parse — a partial final line from a process
+killed mid-append, or a corrupt one — so that one bad line cannot hold a good queue hostage.
+Until BLZ-531 it then **destroyed** it: the drain measures the bytes it consumed over the
+**whole file**, unparseable lines included, so clearing the queue erased a line that was
+never parsed, never committed, and named in no report. Nothing anywhere could re-derive it.
+Verified by construction: three recorded ops with a truncated middle line drained to a
+commit carrying two, and the third was then present nowhere on disk.
+
+Such a line is now appended to a sidecar beside its queue — `<store>/.blaze/pending/<session>.corrupt`,
+or `<store>/.blaze/pending-commit.corrupt` for the shared fallback — as one record per line,
+`<ISO timestamp>` then a TAB then **the raw bytes, verbatim**. Split at the first tab to
+recover a record; the bytes may contain tabs of their own. The extension is deliberately not
+`.jsonl`, so a sidecar can never be picked up as a queue — its contents are by definition
+unparseable, which would make the condition self-perpetuating.
+
+Three properties, each of which the drain path depends on:
+
+- **The park happens before the clear.** A crash between the two leaves the record in *both*
+  places and the next run parks it again — duplicated evidence, which is recoverable, rather
+  than none, which is not.
+- **It fails closed.** If the sidecar cannot be written — a directory or a FIFO in its place,
+  a read-only store — the queue is **kept**, the run says which path it could not write, and
+  it exits **3**. The ops that were committed are in git; re-running once the path is
+  writable clears them (they come back as already filed) and parks the line. A queue is never
+  cleared over bytes this engine could not preserve.
+- **The lock is released regardless.** All of this happens after `git commit` has returned 0
+  with both commit locks held, so the loop runs under `try`/`finally`. A failure there used to
+  walk out of the process leaving `.blaze/commit.lock/` behind — and per
+  [ADR-0033](../decisions/0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md)
+  the store lock sits behind *every* worktree of the repo and the unattended flush.
+
+The sidecar write goes through the same regular-file guard as every other ledger write
+([ADR-0031](../decisions/0031-what-a-read-that-refused-to-open-reports-per-site.md)): a FIFO
+at that path is refused immediately rather than blocking in `open(2)` forever with the commit
+already made and the store lock held.
 
 ### The divergence warning names the ref it compared against
 
