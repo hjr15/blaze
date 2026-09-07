@@ -205,8 +205,14 @@ describe("BLZ-493: readRegularFileSync refuses what it cannot safely open", () =
         assert.match(lying.out, /REFUSED ERR_BLAZE_NOT_A_REGULAR_FILE/,
           `${verb}: the DESCRIPTOR said FIFO and the path said regular file. Refusing is the ` +
           "only safe answer, and this took the path's word for it. Got: " + lying.out);
-        assert.match(lying.out, /FIFO/,
-          `${verb}: the refusal must name what the DESCRIPTOR found, not what the path said`);
+        // NOT `/FIFO/`: `NotARegularFileError`'s boilerplate always contains "Opening a FIFO
+        // with no peer blocks forever", so that pattern passes for a DIRECTORY and a device
+        // node too — it asserts the sentence exists, not that the type was read. This matches
+        // the `kind` slot the error interpolates, which is the only part that varies. Measured:
+        // flipping the shim's `fdKind` to "dir" leaves `/FIFO/` green and reddens this.
+        assert.match(lying.out, /is a FIFO \(a named pipe\), not a regular file/,
+          `${verb}: the refusal must name what the DESCRIPTOR found, not what the path said, ` +
+          "and not merely quote the boilerplate that mentions a FIFO. Got: " + lying.out);
 
         // And the mirror, which is the half a merely-stricter guard would fail: the path
         // says FIFO, the descriptor says regular file. The open succeeded on a regular
@@ -241,8 +247,11 @@ describe("BLZ-493: readRegularFileSync refuses what it cannot safely open", () =
  *  import of it too.
  *
  *  The named exports are exactly what `scripts/model/regular-file.mjs` imports today. If it
- *  starts importing another fs member the child fails to LINK, loudly, which is the correct
- *  outcome — a shim that silently stopped covering the module is a test that proves nothing. */
+ *  starts importing another fs member the child fails to LINK — and the loudness is not free:
+ *  a link failure kills the child before it prints anything, so the raw symptom is
+ *  `SyntaxError: Unexpected end of JSON input` from this file's own `JSON.parse`, with the
+ *  child's stderr thrown away. `underDisagreeingFs` catches that parse and reports the
+ *  child's stderr instead, so the message names the missing export rather than the parse. */
 const FS_SHIM = `
 const real = globalThis.__realFs;
 const plan = globalThis.__fsPlan;
@@ -268,7 +277,7 @@ export const constants = real.constants;
 function underDisagreeingFs(tmp, plan, target, call, ok) {
   const shim = join(tmp, `fs-shim-${Math.random().toString(36).slice(2)}.mjs`);
   writeFileSync(shim, FS_SHIM);
-  const out = child(tmp, `
+  const res = child(tmp, `
 import * as realFs from "node:fs";
 import { registerHooks } from "node:module";
 import { pathToFileURL } from "node:url";
@@ -288,8 +297,21 @@ let said;
 try { ${call}; said = ${ok}; }
 catch (e) { said = "REFUSED " + e.code + " :: " + e.message; }
 console.log(JSON.stringify({ said, seen: globalThis.__fsSeen }));
-`).stdout;
-  const parsed = JSON.parse(out);
+`);
+  let parsed;
+  try { parsed = JSON.parse(res.stdout); } catch {
+    // The child printed nothing parseable. Overwhelmingly this is the shim having stopped
+    // covering `regular-file.mjs`: an ESM link error names the missing export on stderr and
+    // exits before a line of the body runs. Say THAT, rather than letting the failure surface
+    // as this file's own `SyntaxError: Unexpected end of JSON input` with the reason discarded.
+    assert.fail(
+      "the child under the disagreeing-fs shim printed no result, so nothing was observed. " +
+      "If the message below names an export, `scripts/model/regular-file.mjs` now imports an " +
+      "fs member FS_SHIM does not provide — add it to the shim; a shim that silently stopped " +
+      "covering the module is a test that proves nothing.\n" +
+      `child exit ${res.status}, signal ${res.signal}\n` +
+      `stdout: ${JSON.stringify(res.stdout)}\nstderr: ${res.stderr.trim() || "(empty)"}`);
+  }
   return { out: parsed.said, seen: parsed.seen };
 }
 
