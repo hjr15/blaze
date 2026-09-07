@@ -147,24 +147,57 @@ findings. Unscoped the same corpus is `ok=true`. It would permanently fail a per
 
 ## 5. Questions to answer before the phase they gate
 
-**Q1 (gates phase 3).** Which write port does CSV import target? Through the model layer it survives
-the cutover unchanged; against the filesystem port it is disposable. **Record the answer.**
+**Q1–Q4 were answered by the operator on 2026-09-07 and are recorded here, not only in a
+transcript. A later session inherits the decision, not the question.**
 
-**Q2 (gates phase 3).** What is actually being imported? Which tracker, how many, which fields,
-whether links/parents/attachments/history come too, whether ids must be preserved. **Nobody has seen
-a sample. Get one — even 20 rows — before designing the schema.**
+**Q1 (gates phase 3) — ANSWERED: the model layer.** CSV import targets the model layer, not the
+filesystem write port, so it survives the cutover unchanged. The plan already recommended this and
+nothing has been found against it.
+
+**Q2 (gates phase 3) — ANSWERED: design the canonical schema first; adapt arbitrary CSVs at import
+time.** The operator's decision, verbatim: *"Design it first but ideally it should be able to read a
+CSV and import accordingly. If that means leveraging an AI account to figure it out at the time
+based on the format then so be it."*
+
+This changes the shape of phase 3 and is not merely a schema choice. It means **two** deliverables,
+and the second is the one the operator actually asked for:
+
+1. **A canonical, documented, versioned CSV schema** — blaze's own, derived from the board's field
+   model. This is what BLZ-589 exports and what the zero-diff round trip is measured against.
+2. **A mapping layer that takes a CSV blaze has never seen and lands it on that schema.** Column
+   names, date formats, status vocabularies and id conventions differ per tracker, so the mapping is
+   inferred per file rather than hardcoded per tracker. An LLM may propose the mapping.
+
+**The mapping is a proposal, never an import.** A model inferring `Summary → title` is a guess about
+someone's data, and an import that silently guesses wrong is worse than one that refuses. So:
+the inferred mapping is **rendered for confirmation before any write**, it is **saved as a reusable
+mapping file** so the same export imports identically next time (and so the import is reproducible
+without a model), and **import itself is deterministic** — given the mapping file, no model runs.
+A dry-run that reports what would be created, updated and skipped comes before the write.
+
+**No sample is required to start**, which is what unblocks phase 3 — but the round trip in (1) is
+still the acceptance test, and the first real export the operator supplies is a required test
+fixture before phase 3 is called done.
 
 **Q3 (gates phase 5).** See §6.
 
-**Q4 (gates phase 5).** **What happens to 371+ commits of board history?** A cutover keeping only
-current state discards the audit trail. Migrate it, keep the repo read-only in perpetuity, or accept
-the loss — deliberately. **This is the question most likely to be discovered late and regretted.**
+**Q4 (gates phase 5) — ANSWERED: keep `blaze-pm` read-only in perpetuity.** The repository is
+archived on GitHub as read-only and kept indefinitely; the database carries current state only. The
+audit trail survives untouched, no history-migration code is written, and no zero-diff oracle for
+history is needed. **Retirement means archived, never deleted** — anything in §6 or elsewhere that
+implies deleting the repo is superseded by this line.
 
 **Q5 (gates phase 4).** Does the flush survive the cutover, and in what form? If the database is
 primary, what merges concurrent writers?
 
 **Q6 (gates phase 4).** What is the rollback, and what does "the dual-write soak passed" mean
 **numerically**? Establish it before relying on it.
+
+**BLZ-571 (gates phase 1) — ANSWERED: in the app, per-source, with a trusted-proxy config.** Rate
+limiting and backoff for `POST /signin` live in the application, keyed per source address, with a
+trusted-proxy setting so the real client address is read correctly behind Traefik. Chosen over
+delegating to the edge because it holds however the board is fronted and because it is testable in
+the suite; an edge limit may be added later as defence in depth, but the app may not rely on one.
 
 ## 6. The retirement criterion — write it before you need it
 
@@ -190,17 +223,39 @@ export BLAZE_TEST_PG_URL=postgres://postgres:x@127.0.0.1:55481/postgres   # your
 npm ci && node --test 2>&1 | tail -9
 ```
 
-`blaze` main **`168c5f9`**; suite **4,411 pass / 0 fail / 395 suites**; coverage 98.48 / 88.28 /
-97.35. Board **`ok=true`** unscoped. Deployed image digest matches the git pin, so both engine
-changes are live.
+**Superseded 2026-09-07 — re-verified, not copied.** The figures below replace the earlier ones;
+re-derive them again rather than trusting these.
 
-**The queue store is one per repository** (ADR-0033). All **210** ops were migrated into
-`blaze-pm/.blaze` on 2026-08-31 and verified **byte-identical** against a pre-migration snapshot —
-zero lost, zero duplicated. `blaze commit --status`: **0 outstanding, 20 orphaned** — the direct
-measurement confirming BLZ-500's finding that **nothing was ever lost** while the flush was silently
-doing nothing. **The ops are consolidated but NOT drained.** Snapshot at
-`blaze-pm-queue-snapshot-20260831-190249`; originals in `<worktree>/.blaze/migrated-<ts>/`.
-**Delete neither until a drain is verified.**
+`blaze` main **`a1f5fbd`** (BLZ-590 merged via PR #168). Suite on **Node 24**: **4,408 tests /
+4,406 pass / 0 fail / 383 suites / 2 skipped** locally; CI on `v24.19.0` reported **4,478 / 4,477 /
+0** for the PR branch (CI also runs the coverage gate and the Postgres suites, hence the higher
+count). The earlier "4,411 / 0 fail / 395 suites" is retired.
+
+**Run the suite with Node 24 or every number you get is noise.** `/usr/bin/node` on this machine is
+**v20.20.2**, under which 34 test files fail to load on `No such built-in module: node:sqlite` and
+the suite reports ~171 failures that are pure environment. `export
+PATH=/home/rnamwoh/.local/node24/bin:$PATH` gives **v24.19.0**, which `package.json` requires
+(`engines: node >=24`). A fresh worktree also needs `npm install` — without `node_modules`, 13 files
+fail on `Cannot find package 'pg'`, which is a DIFFERENT symptom from the Node 20 one and is easy to
+misread as a regression.
+
+**The drain is done, and BLZ-590 is what made it possible.** `blaze commit` no longer reports a
+settled drain as a failure, and an op belonging to another checkout is neither judged nor staged nor
+committed (ADR-0035). On 2026-09-07, **198 of 217 ops drained** across the v4-spine and v3-phase0
+worktrees — 185 of them orphans whose work had already been filed by hand, exactly as BLZ-500
+predicted, so the drain cleared the ledger without needing a commit.
+
+**19 ops remain**, all recorded on branch `BLZ-143-engineering-method-and-work-item-model` and
+therefore drainable only from `blaze-pm`'s main checkout at
+`/home/rnamwoh/Documents/Code/blaze-pm`. They are safely held, not stranded: the runner names them
+on every run and refuses to judge them from anywhere else. That checkout is 89 behind `main` with 10
+dirty files, which is also why the nightly flush CronJob fails by design. **Drain those 19 BEFORE
+moving that checkout to `main`** — moving first would leave them recorded against a branch no
+checkout holds, and nothing would ever claim them.
+
+The pre-drain snapshot at `blaze-pm-queue-snapshot-20260831-190249` and the per-worktree originals
+in `<worktree>/.blaze/migrated-<ts>/` may now be deleted once the last 19 are drained — the drain
+they were kept for has been verified.
 
 ## 8. Constraints — non-negotiable
 
