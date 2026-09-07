@@ -560,6 +560,108 @@ describe("BLZ-518: --status degrades per queue instead of aborting the whole rep
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
+  // -------------------------------------------------------------------------------------
+  // 518f / 518g — A QUEUE READ ONLY IN PART. BLZ-531.
+  //
+  // The fourth shape, and the one that was silent. `parseRecords` skips a line it cannot
+  // parse and returns a SHORT list, so unlike the three above this queue raised nothing: it
+  // was rendered in the same shape as a queue read in full, its buckets summed into the
+  // totals, exit 0.
+  //
+  // 518f USED TO ASSERT TWO STRINGS — /PARTIALLY READ/ and /totals above DO NOT cover
+  // them/ — and that is why it passed over a report whose totals DID cover them:
+  // `commit-summary.mjs` printed the disclaimer while `tot()` and the op count summed the
+  // partial queue in regardless. A test that greps for a sentence cannot tell whether the
+  // sentence is true. So it pins the ARITHMETIC instead, and it pins it as an INVARIANT
+  // computed from the report itself — the totals must equal the sum over exactly the queue
+  // blocks the report does not mark incomplete — which cannot be satisfied by wording.
+  // -------------------------------------------------------------------------------------
+
+  /** Everything the report says, as numbers: one record per rendered queue block, plus the
+   *  totals line. Blocks are blank-line separated (`blockFor`'s reasoning, applied to all of
+   *  them at once), and a queue block is one carrying the `  —  ` separator. */
+  function readReport(out) {
+    const blocks = out.split("\n\n").filter((b) => b.includes("  —  "));
+    const queues = blocks.map((b) => ({
+      outstanding: Number(/outstanding: (\d+) file/.exec(b)?.[1] ?? 0),
+      settled: Number(/orphaned: +(\d+) file/.exec(b)?.[1] ?? 0),
+      // The two ways the report can say "I did not read all of this queue".
+      incomplete: /PARTIALLY READ|could not be read/.test(b),
+    }));
+    const t = /(\d+) file\(s\) outstanding, (\d+) orphaned, across (\d+) readable queue\(s\)/.exec(out);
+    assert.ok(t, `the report must carry a totals line: ${out}`);
+    return { queues, totals: { outstanding: Number(t[1]), settled: Number(t[2]), readable: Number(t[3]) } };
+  }
+
+  /** A second queue holding ONE parseable op — with an outstanding file of its own, so it
+   *  contributes a non-zero amount to any total that wrongly includes it — and ONE line
+   *  truncated mid-JSON. Returns that raw line. */
+  function partialQueue(root, session) {
+    const rel = "projects/ZZZ/defined/ZZZ-2.md";
+    trackedTicket(root, rel);
+    writeFileSync(join(root, rel), "one\nDIRTY\n");
+    appendEntry(root, { id: "ZZZ-2", op: "move", message: "ZZZ-2: queued", files: [rel], ts: new Date().toISOString() }, session);
+    const truncated = '{"id":"ZZZ-9","op":"mo';
+    writeFileSync(ledgerPath(root, session), readFileSync(ledgerPath(root, session), "utf8") + truncated + "\n");
+    assert.throws(() => JSON.parse(truncated), "the fixture's bad line must actually be unparseable");
+    return truncated;
+  }
+
+  test("BLZ-518f: a partially-read queue is excluded from the totals AND from the readable count, so the numbers say what the disclaimer says", () => {
+    const root = boardWithHealthyQueue();
+    try {
+      partialQueue(root, BROKEN);
+      const r = runStatus(root, { session: HEALTHY });
+      const { queues, totals } = readReport(r.stdout);
+
+      // The fixture is not vacuous: the report renders BOTH queues, one of them marked
+      // incomplete, and the incomplete one carries buckets that a wrong total would absorb.
+      assert.equal(queues.length, 2, `both queues must still be rendered: ${r.stdout}`);
+      const excluded = queues.filter((q) => q.incomplete);
+      assert.equal(excluded.length, 1, "exactly one queue is marked as not fully read");
+      assert.ok(excluded[0].outstanding > 0,
+        "the partial queue must have buckets of its own, or including it would change nothing");
+
+      // THE PROPERTY, computed from the report rather than matched against it: every
+      // aggregate covers exactly the queues the report does not mark incomplete.
+      const kept = queues.filter((q) => !q.incomplete);
+      assert.equal(totals.outstanding, kept.reduce((n, q) => n + q.outstanding, 0),
+        "the outstanding total must sum the fully-read queues and only those");
+      assert.equal(totals.settled, kept.reduce((n, q) => n + q.settled, 0),
+        "and so must the orphaned total — the same set, or the two disagree with each other");
+      assert.equal(totals.readable, kept.length,
+        "and the readable-queue count must be that same set's size, not the number of queues that exist");
+
+      // Spelled out concretely, so what the invariant is worth is visible: two queues, one
+      // outstanding file each, and the totals name one of them.
+      assert.deepEqual(totals, { outstanding: 1, settled: 0, readable: 1 });
+
+      assert.equal(r.status, 2,
+        "a caller scripting on the exit code must not read a partially-read board as a complete report");
+      assertHealthyStillReported(r.stdout);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
+  // Pins renderQueueStatus's `partial.length === 0` term specifically. 518f cannot reach it,
+  // because its board has parseable ops: a queue whose lines ALL fail to parse yields
+  // `ops === 0` with no `error`, so without that term the report reaches the very sentence a
+  // genuinely empty board reaches — a run that could not look saying what a run that looked
+  // and found nothing says. ADR-0030, on the shape that hid.
+  test("BLZ-518g: a queue whose lines ALL fail to parse is not reported as an empty board", () => {
+    const root = board();
+    try {
+      mkdirSync(join(root, ".blaze", "pending"), { recursive: true });
+      writeFileSync(ledgerPath(root, BROKEN), '{"id":"ZZZ-1","op":"mo\n{"id":"ZZZ-2"\n');
+      const r = runStatus(root, { session: HEALTHY });
+      assert.doesNotMatch(r.stdout, /Nothing queued/,
+        "0 PARSEABLE ops is not 0 recorded ops");
+      assert.match(r.stdout, /PARTIALLY READ — 2 line\(s\)/, "and the shortfall is quantified");
+      assert.equal(readReport(r.stdout).totals.readable, 0,
+        "no queue on this board was read in full, and the totals must say so");
+      assert.equal(r.status, 2);
+    } finally { rmSync(root, { recursive: true, force: true }); }
+  });
+
   // The property BLZ-499 turns on, re-asserted on the DEGRADED path specifically: the
   // crashes were loud and wrote nothing, and the fix must not buy legibility with a write.
   test("BLZ-518e: a degraded report still commits nothing, clears nothing and takes no lock", () => {

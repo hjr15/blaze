@@ -55,7 +55,13 @@ test("readForDrain on an absent ledger returns empty entries and zero bytes", ()
   const root = tmp();
   // `lines` (BLZ-556) is index-aligned with `entries`: the raw text of each line, so a
   // caller draining only some of them can hand the rest back to clearLedger unchanged.
-  assert.deepEqual(readForDrain(root), { entries: [], bytes: 0, lines: [] });
+  // `dropped` (BLZ-531) is the raw bytes of every line that would NOT parse — the drainer
+  // must park those before it clears the bytes they occupy, because `bytes` spans the whole
+  // file and would otherwise erase them. Still `deepEqual` on the WHOLE shape rather than a
+  // field-by-field check: a caller that destructures a key this function stopped returning
+  // gets `undefined`, and on the drain path `undefined.length` is how a queue gets cleared
+  // over a record nobody saved.
+  assert.deepEqual(readForDrain(root), { entries: [], bytes: 0, lines: [], dropped: [] });
   rmSync(root, { recursive: true, force: true });
 });
 

@@ -11,7 +11,8 @@ import { spawnSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join, relative } from "node:path";
 import {
-  readForDrain, clearLedger, listQueues, sessionId, readEntries, outstandingFiles,
+  readForDrain, clearLedger, listQueues, sessionId, readQueue, outstandingFiles,
+  quarantineDropped,
   queueRoot, strandedQueues, belongsHere, worktreeBranchOwners, listQueuesResult,
 } from "./pending-ledger.mjs";
 import { resolveRoots } from "./config.mjs";
@@ -150,6 +151,14 @@ const foreign = [];
 // checkout's (refused at the partition, before any path of theirs is collected) or they
 // record no paths to measure at all (discovered during classification).
 const heldBack = [];
+// BLZ-531: queues whose unparseable line(s) this run could not park in a sidecar, and which
+// were therefore NOT cleared. Declared up here, beside the other two, because
+// `unreachedLines` closes over it and is called on the `entries.length === 0` path long
+// before the drain loop exists — a `const` declared beside the loop would be in its temporal
+// dead zone there and the early report would die on a ReferenceError.
+const quarantineFailures = [];
+// How the report names a queue. `null` is the shared fallback, not a session called "null".
+const queueLabel = (session) => (session === null ? "the shared fallback queue" : `session ${session}`);
 function unreachedLines() {
   const out = [];
   if (foreign.length > 0) {
@@ -191,6 +200,17 @@ function unreachedLines() {
     out.push("  Nothing has been dropped. Whether their files are present here is not the question:");
     out.push("  an op belongs to the checkout that queued it, and only that checkout can say what");
     out.push("  became of the work. Run `blaze commit` there.");
+  }
+  if (quarantineFailures.length > 0) {
+    const lines = quarantineFailures.reduce((n, f) => n + f.count, 0);
+    out.push(`blaze commit: ${lines} unparseable line(s) in ${quarantineFailures.length} queue(s) could NOT be`);
+    out.push("  quarantined, so those queues were KEPT rather than cleared. Nothing has been dropped:");
+    for (const f of quarantineFailures) {
+      out.push(`    ${f.count} line(s) in ${queueLabel(f.session)} — could not write ${f.path}: ${f.error}`);
+    }
+    out.push("  The ops this run committed are in git. Make that path writable and re-run: the");
+    out.push("  committed ops come back as already filed and clear, and the unparseable lines are");
+    out.push("  parked. A queue is never cleared over bytes this engine could not preserve.");
   }
   if (storeListing.unreadable.length > 0) {
     for (const u of storeListing.unreadable) {
@@ -247,7 +267,13 @@ if (status) {
   // reason the refusal exists, and softening it there would weaken every other caller.
   const queues = storeListing.queues.map((q) => {
     try {
-      const entries = readEntries(dataRoot, q.session);
+      // BLZ-531: `readQueue`, not `readEntries`, and `dropped` is carried the whole way to
+      // the renderer. A queue with an unparseable line came back SHORT with no other trace,
+      // so a queue read IN PART was rendered exactly like one read in full — its buckets
+      // summed into the totals, no marker, exit 0. That is the same ADR-0030 confusion the
+      // `error` marker beside it already refuses, one degree weaker and, unlike `error`,
+      // completely silent.
+      const { entries, dropped } = readQueue(dataRoot, q.session);
       // Named per entry, so the operator can find the bad line rather than being told the
       // queue is "invalid". `files` is the one field every queued op must carry.
       const paths = entries.flatMap((e, i) => {
@@ -256,11 +282,11 @@ if (status) {
         }
         return e.files;
       });
-      return { session: q.session, entries, files: outstandingFiles(dataRoot, paths) };
+      return { session: q.session, entries, dropped, files: outstandingFiles(dataRoot, paths) };
     } catch (e) {
       // `files: null` is the ADR-0030 marker: this queue was NOT looked at, so it carries
       // no buckets to be summed into a total or mistaken for zeroes.
-      return { session: q.session, entries: [], files: null, error: e.message };
+      return { session: q.session, entries: [], dropped: [], files: null, error: e.message };
     }
   });
   // Name the resolved store. Before BLZ-556 the operator had no way to tell, from any
@@ -278,8 +304,14 @@ if (status) {
   // 2 also when a STRANDED queue could not be read: the report is incomplete in exactly the
   // same way, and the caller scripting on this must not read "I looked at everything" from a run
   // that could not open part of the board.
+  //
+  // BLZ-531: and 2 for a PARTIALLY read queue. It is the same condition one degree weaker,
+  // and it was the silent one — a queue that could not be opened at least announced itself,
+  // whereas a queue with one truncated line came back short and looked clean. Both make the
+  // report cover less of the board than the run enumerated.
   process.exit(
-    queues.some((q) => q.error) || strandedUnreadable.length > 0 || storeListing.unreadable.length > 0
+    queues.some((q) => q.error || q.dropped.length > 0)
+      || strandedUnreadable.length > 0 || storeListing.unreadable.length > 0
       ? 2 : 0);
 }
 
@@ -671,10 +703,52 @@ if (stagedOps.length > 0 || unknownOps.length > 0) {
   committed = true;
 }
 
-for (const q of drained) {
-  clearLedger(dataRoot, q.session, q.bytes, q.keepIdx.sort((a, b) => a - b).map((i) => q.lines[i]));
+// BLZ-531: QUARANTINE BEFORE THE CLEAR, AND NEVER THE CLEAR WITHOUT IT.
+//
+// `q.bytes` spans the WHOLE queue file, unparseable lines INCLUDED, so this loop used to
+// erase a line `parseRecords` had skipped along with the ops that had just been committed.
+// That is the one path on which `blaze commit` destroys a record for good: the line was
+// never parsed, so it is in no commit, in no report and in no `keepIdx` — nothing anywhere
+// could re-derive it. Verified by construction at be4b110 and pinned end-to-end by
+// tests/commit-drain-quarantine.test.mjs.
+//
+// ORDER, NOT ATOMICITY, is what makes the gap safe. The bytes are parked first and the queue
+// cleared second, so a crash between the two leaves the record in BOTH places and the next
+// run parks it again — duplicated evidence, which an operator can reconcile, rather than
+// none, which nobody can. The other order loses it. A rename-based two-phase commit would
+// remove the duplicate and is not something this advisory, single-host design has; the
+// read-rewrite window `clearLedger` already documents is the same class of trade.
+//
+// FAIL CLOSED, PER QUEUE. A queue whose sidecar write threw is NOT cleared: `continue`
+// rather than `break`, so one unwritable sidecar does not also strand the queues listed
+// after it. Its ops go round again on the next run, where BLZ-590's `classify` finds every
+// recorded file already matching HEAD and reports them settled — a re-run, not a second
+// commit of the same work.
+//
+// try/finally, because everything above happens AFTER `git commit` returned 0 and WITH BOTH
+// LOCKS HELD. Before it, an EISDIR or EACCES on the sidecar walked straight out of the
+// process with `.blaze/commit.lock/` still on disk, and the store lock is the one BLZ-556
+// put behind every worktree of the repo and the unattended flush CronJob. `acquireLock`
+// would eventually steal it — its owner pid is dead — but only after announcing a stolen
+// lock, and only for a caller that got as far as trying.
+try {
+  for (const q of drained) {
+    if (q.dropped.length > 0) {
+      try {
+        const where = quarantineDropped(dataRoot, q.session, q.dropped);
+        console.error(
+          `blaze commit: ${q.dropped.length} unparseable line(s) in ${queueLabel(q.session)} were NOT`
+          + ` committed — moved to ${where} rather than discarded`);
+      } catch (e) {
+        quarantineFailures.push({ session: q.session, count: q.dropped.length, path: e.path ?? "the sidecar", error: e.message });
+        continue;
+      }
+    }
+    clearLedger(dataRoot, q.session, q.bytes, q.keepIdx.sort((a, b) => a - b).map((i) => q.lines[i]));
+  }
+} finally {
+  unlock();
 }
-unlock();
 if (committed) console.log(`blaze commit: flushed ${committedEntries.length} op(s) → ${subject}`);
 // SETTLED and ABSENT get their own sentence each, and are never merged into one. They are
 // different established facts, and each sentence says only what was actually established:
@@ -705,8 +779,11 @@ if (settledOps.length + absentOps.length > 0) {
   console.log(out.join("\n"));
 }
 // The commit succeeded; the QUEUE did not empty. Report and exit non-zero, so no caller
-// can read this run as "the board is flushed".
-if (foreign.length > 0 || heldBack.length > 0 || stranded.length > 0 || storeListing.unreadable.length > 0) {
+// can read this run as "the board is flushed". BLZ-531 adds the quarantine failures for
+// exactly that reason: a queue kept because its unparseable bytes could not be preserved is
+// a queue still holding ops, and `outcome=published` must not be true over it.
+if (foreign.length > 0 || heldBack.length > 0 || stranded.length > 0
+    || storeListing.unreadable.length > 0 || quarantineFailures.length > 0) {
   console.error(unreachedLines().join("\n"));
   process.exit(UNREACHED_EXIT);
 }

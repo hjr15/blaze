@@ -61,9 +61,23 @@ export function summarizeEntries(entries) {
  *  (it resolves roots, parses argv and exits), so nothing in it can be imported and no test
  *  can reach its text. This is pure and importable, so the wording is drivable directly.
  *
- *  `queues` is `[{ session, entries, files: { outstanding, settled, absent } }]`, and
- *  `mySession` is the queue name the CALLER's own session id resolves to (null when it has
- *  none, which is the shared fallback).
+ *  `queues` is `[{ session, entries, dropped, files: { outstanding, settled, absent } }]`,
+ *  and `mySession` is the queue name the CALLER's own session id resolves to (null when it
+ *  has none, which is the shared fallback).
+ *
+ *  THREE STATES A QUEUE CAN BE IN, and the totals cover exactly one of them (BLZ-531):
+ *    - fully read     — `error` unset and `dropped` empty. Counted, and summed.
+ *    - unreadable     — `error` set. Named with its reason and no buckets (ADR-0030).
+ *    - partially read — some lines would not parse. Named WITH the buckets of the ops that
+ *      did parse, because those are real work an operator has to see, but excluded from
+ *      every aggregate: the op count, the file totals and the readable-queue count alike.
+ *
+ *  The exclusion is all three or none. The previous round disclaimed the partials in a
+ *  sentence — "the totals above DO NOT cover them" — while `tot()` and the op count summed
+ *  them in regardless, so the report contradicted itself in the one place an operator goes
+ *  to find out how much of the board was actually looked at. Either the numbers or the
+ *  sentence had to move; the numbers did, because a total that silently mixes complete and
+ *  incomplete measurements is the thing ADR-0030 exists to forbid.
  *
  *  BLZ-498 AC1 asks that "a queue's age and owner are visible without reading the ledger by
  *  hand". Two clauses do that, and neither is decoration:
@@ -84,16 +98,26 @@ export function summarizeEntries(entries) {
  *  blind spot in its own output instead, which is what ADR-0030 and BLZ-433 ask for. */
 export function renderQueueStatus(queues, mySession = undefined) {
   const L = ["blaze commit --status: read-only — nothing was committed, queued or cleared."];
-  const ops = queues.reduce((n, q) => n + q.entries.length, 0);
   // BLZ-518 / ADR-0030. A queue carrying `error` was NOT read, so it is not evidence of
   // zero ops. Without this, a board whose only queue is malformed printed "Nothing queued —
   // 0 op(s) on 0 queue(s)": a run that could not look, saying exactly what a run that
   // looked and found nothing says.
   const unreadable = queues.filter((q) => q.error);
-  if (ops === 0 && unreadable.length === 0) {
+  // BLZ-531: and a queue some of whose lines would not parse was not read either — not
+  // wholly. It is the shape that hid, because `parseRecords` returns a SHORT list rather
+  // than throwing: a queue holding only unparseable lines yields `ops === 0` with no
+  // `error`, which reached the same sentence a genuinely empty board reaches.
+  const partial = queues.filter((q) => !q.error && q.dropped?.length);
+  // THE ONE SET EVERY AGGREGATE BELOW IS TAKEN OVER. Derived once and used for the op
+  // count, the file totals and the queue count together, so those three cannot disagree
+  // about which queues they cover — which is precisely how the disclaimer came to contradict
+  // the numbers it disclaimed.
+  const complete = queues.filter((q) => !q.error && !q.dropped?.length);
+  const ops = complete.reduce((n, q) => n + q.entries.length, 0);
+  if (ops === 0 && unreadable.length === 0 && partial.length === 0) {
     L.push("", "  Nothing queued — 0 op(s) on 0 queue(s).");
   } else {
-    const readable = queues.length - unreadable.length;
+    const readable = complete.length;
     L.push("", `  ${readable} readable queue(s) holding ${ops} op(s).`, "");
     for (const q of queues) {
       const name = q.session === null ? "(shared fallback queue — no session identity)" : q.session;
@@ -113,16 +137,29 @@ export function renderQueueStatus(queues, mySession = undefined) {
       const age = Number.isNaN(newest) ? "" : `, ${((Date.now() - newest) / 86400000).toFixed(1)} d old`;
       const when = stamps.length ? `  oldest ${stamps[0]}${age}` : "";
       L.push(`  ${name}${own}  —  ${q.entries.length} op(s), ${summarizeEntries(q.entries)}${when}`);
+      // PARTIALLY READ is deliberately not "state UNKNOWN": an unreadable queue yields
+      // nothing, a partial one yields everything that parsed, and those ops are real work
+      // that must still be reported here. What must not happen is the shortfall going
+      // unsaid — or, worse, being said while the aggregates below quietly include it.
+      if (q.dropped?.length) {
+        L.push(`      PARTIALLY READ — ${q.dropped.length} line(s) could not be parsed;`
+          + " this queue is excluded from the totals below");
+      }
       const { outstanding, settled, absent } = q.files;
       L.push(`      outstanding: ${outstanding.length} file(s) still differ from HEAD`);
       L.push(`      orphaned:    ${settled.length} file(s) already match HEAD — filed by something else`);
       if (absent.length) L.push(`      superseded:  ${absent.length} file(s) relocated again within a batch`);
       L.push("");
     }
-    const tot = (k) => queues.reduce((n, q) => n + (q.error ? 0 : q.files[k].length), 0);
+    const tot = (k) => complete.reduce((n, q) => n + q.files[k].length, 0);
     L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${readable} readable queue(s).`);
     if (unreadable.length) {
       L.push(`  ${unreadable.length} queue(s) could not be read — the totals above DO NOT cover them.`);
+    }
+    if (partial.length) {
+      const lines = partial.reduce((n, q) => n + q.dropped.length, 0);
+      L.push(`  ${partial.length} queue(s) were only PARTIALLY read (${lines} unparseable line(s))`
+        + " — the totals above DO NOT cover them either.");
     }
     L.push("  Flush your own queue with `blaze commit`, or every queue with `blaze commit --all`.");
   }

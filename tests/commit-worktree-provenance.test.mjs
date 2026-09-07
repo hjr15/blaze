@@ -538,3 +538,42 @@ test("BLZ-556: appending to a queue file that is a FIFO is refused immediately, 
     cleanup(main);
   }
 });
+
+// ---------------------------------------------------------------------------
+// BLZ-531 — WHERE THE QUARANTINE SIDECAR LANDS. `blaze commit` parks a ledger line it could
+// not parse in a `.corrupt` sidecar rather than erasing it with the rest of the drained
+// bytes. That sidecar has to sit beside the QUEUE, and after BLZ-556 the queue is in the
+// shared store, which for a linked worktree is not the directory the verb ran in.
+//
+// Rooting it at the invoking working copy instead — which is what a `join(root, ".blaze",
+// …)` spelling gives, exactly as `ledgerPath` would have before it was routed through
+// `queueRoot` — puts the only surviving copy of the record in a `.blaze/` nothing reads,
+// that no flush drains, and that `strandedQueues` does not even report (it filters on
+// `.jsonl`), WHILE the shared store's ledger is cleared. The bytes survive the way a letter
+// survives being posted into a wall. Pinned here rather than in the drain-quarantine suite
+// because only a real linked worktree separates the two directories at all.
+// ---------------------------------------------------------------------------
+test("BLZ-531: a flush from a LINKED worktree parks the sidecar in the SHARED store, not in the working copy it ran from", () => {
+  const main = board();
+  const wt = lane(main, "quarantine-lane");
+  try {
+    writeFileSync(join(wt, "projects", "ZZZ", "defined", "ZZZ-1.md"), "seed\nDIRTY\n");
+    appendEntry(wt, op({ branch: "quarantine-lane" }), "s1");
+    const ledger = join(main, ".blaze", "pending", "s1.jsonl");
+    assert.ok(existsSync(ledger), "the fixture must queue into the SHARED store, or it tests nothing");
+    const truncated = '{"id":"ZZZ-9","op":"ed';
+    writeFileSync(ledger, readFileSync(ledger, "utf8") + truncated + "\n");
+
+    const r = runCommit(main, wt);
+
+    const inStore = join(main, ".blaze", "pending", "s1.corrupt");
+    const inWorkingCopy = join(wt, ".blaze", "pending", "s1.corrupt");
+    assert.ok(existsSync(inStore),
+      `the sidecar must sit beside the queue the bytes came out of: ${r.stdout}${r.stderr}`);
+    assert.ok(readFileSync(inStore, "utf8").includes(truncated), "and carry the raw line verbatim");
+    assert.equal(existsSync(inWorkingCopy), false,
+      "a sidecar in the invoking working copy is a file no reader, no flush and no stranded-queue report ever looks at");
+    assert.equal(existsSync(ledger), false,
+      `the queue that was cleared is the store's, so the record kept must be the store's too: ${r.stderr}`);
+  } finally { cleanup(main, wt); }
+});
