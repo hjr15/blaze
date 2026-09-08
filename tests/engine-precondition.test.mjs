@@ -1,13 +1,13 @@
 // tests/engine-precondition.test.mjs — BLZ-601.
 //
 // THE CORRECTED PREMISE. BLZ-601 was filed saying this machine has no conforming Node.
-// It has one: `~/.local/node24/bin/node` is v24.19.0 and `node:sqlite` works there. The suite measured under it is 4,408 tests / 4,406 pass / 0 fail. The defect is
-// not absence, it is DISCOVERABILITY: `package.json` declares `engines: {node: ">=24"}`,
-// nothing enforces it, and a developer who runs the suite under the Node 20 that is first
-// on `PATH` gets every `node:sqlite` file failing to LOAD and no hint that the engine is
-// why. Measured on this branch 2026-09-07: v20.20.2 gives 3,916 tests / 3,743 pass / 173
-// fail against v24.19.0's 4,408 / 4,406 / 0. The ticket body in blaze-pm has been
-// corrected to say this.
+// It has one: `~/.local/node24/bin/node` is v24.19.0 and `node:sqlite` works there. The
+// defect is not absence, it is DISCOVERABILITY: `package.json` declares
+// `engines: {node: ">=24"}`, nothing enforces it, and a developer who runs the suite under
+// the Node 20 that is first on `PATH` gets every `node:sqlite` file failing to LOAD and no
+// hint that the engine is why. Measured with `node --test` at this commit, twice, stably:
+// v20.20.2 gives 3,945 tests / 3,772 pass / 173 fail against v24.19.0’s 4,464 / 4,462 / 0.
+// The ticket body in blaze-pm has been corrected to say this.
 //
 // So the fix is a precondition that fails FAST and says three things: what is required,
 // what is running, and how to get the required one — including, when the guard can find
@@ -20,11 +20,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
-  GUARD_EXIT_CODE, describeEngine, detectEngine, requiredMajor,
+  GUARD_EXIT_CODE, candidateNodePaths, describeEngine, detectEngine, requiredMajor,
 } from "../scripts/ci/require-engine.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
@@ -114,4 +115,59 @@ test("BLZ-601: npm test cannot start under the wrong engine — the pre-scripts 
       `npm run ${name.slice(3)} must refuse before running a suite whose failures would be `
       + "the engine rather than the code");
   }
+});
+
+/** A throwaway home directory. `layout` is a list of relative `bin/node` paths to create,
+ *  each a symlink to a real Node so `findConformingNodes` can actually run it. */
+function fakeHome(t, layout) {
+  const home = mkdtempSync(join(tmpdir(), "blaze-engine-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const rel of layout) {
+    mkdirSync(join(home, dirname(rel)), { recursive: true });
+    symlinkSync(process.execPath, join(home, rel));
+  }
+  return home;
+}
+
+test("BLZ-601: a home with no ~/.local still finds an nvm Node — one absent directory must not end the search", (t) => {
+  // REVIEW FINDING. `candidateNodePaths` guarded only `existsSync(home)` and then read
+  // `join(home, ".local")` unconditionally. On a home without one that throws ENOENT,
+  // `safeCandidates()` swallowed it, and nvm/fnm/volta/n were never reached — so the guard
+  // told a developer who already had a conforming Node under nvm to go and install one.
+  // That is the headline feature failing on exactly the machines that need it: a fresh
+  // container, or a dev box that uses nvm and has no ~/.local at all. Reproduced before
+  // this fix: this same layout printed "No conforming Node was found".
+  const home = fakeHome(t, [".nvm/versions/node/v24.19.0/bin/node"]);
+  const found = candidateNodePaths(home);
+  assert.deepEqual(found, [join(home, ".nvm/versions/node/v24.19.0/bin/node")],
+    "an absent ~/.local must cost only ~/.local, not nvm, fnm, volta and n as well");
+});
+
+test("BLZ-601: every discovery source is independent — an unreadable one loses only itself", (t) => {
+  // The general form of the finding above. Each source is guarded on its own, so a home
+  // where any single location is missing or unreadable still yields the others.
+  const home = fakeHome(t, [
+    ".local/node24/bin/node",
+    ".nvm/versions/node/v24.19.0/bin/node",
+    ".fnm/node-versions/v24.19.0/installation/bin/node",
+    ".volta/tools/image/node/24.19.0/bin/node",
+  ]);
+  const found = candidateNodePaths(home);
+  assert.deepEqual(found.sort(), [
+    join(home, ".fnm/node-versions/v24.19.0/installation/bin/node"),
+    join(home, ".local/node24/bin/node"),
+    join(home, ".nvm/versions/node/v24.19.0/bin/node"),
+    join(home, ".volta/tools/image/node/24.19.0/bin/node"),
+  ].sort(), "all four home-rooted sources must be searched");
+});
+
+test("BLZ-601: ~/.local is searched for node* directories only, not every directory in it", (t) => {
+  // ~/.local also holds bin, lib, share and state. Widening the fix into "read everything
+  // under ~/.local" would spawn every one of them looking for a version string.
+  const home = fakeHome(t, [".local/node24/bin/node", ".local/share/bin/node"]);
+  assert.deepEqual(candidateNodePaths(home), [join(home, ".local/node24/bin/node")]);
+});
+
+test("BLZ-601: a home that does not exist at all yields no candidates and does not throw", () => {
+  assert.deepEqual(candidateNodePaths(join(tmpdir(), "blaze-engine-home-does-not-exist")), []);
 });

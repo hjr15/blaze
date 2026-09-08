@@ -8,6 +8,7 @@
     "ci-mutation-sandbox.test.mjs": 3,
     "claims-remote-all-refs.test.mjs": 10,
     "cli.test.mjs": 3,
+    "commit-drain-quarantine.test.mjs": 1,
     "commit-lock.test.mjs": 6,
     "commit-or-queue.test.mjs": 5,
     "commit-runner-branch-guard.test.mjs": 8,

@@ -34,9 +34,9 @@ note; irrelevant once this repo is public, where required checks work normally).
 `package.json` declares `"engines": { "node": ">=24" }` — the floor exists because
 `node:sqlite` is built in from Node 24 and 34-odd suites import it. Nothing used to
 enforce that. Running the suite on Node 20 makes every `node:sqlite` file fail to LOAD,
-and the tally that produces says nothing about the engine: measured on 2026-09-07,
-`/usr/bin/node` v20.20.2 gave **3,916 tests / 3,743 pass / 173 fail** where v24.19.0 gave
-**4,408 / 4,406 / 0**. A real regression is invisible in the first of those (BLZ-601).
+and the tally that produces says nothing about the engine: measured on 2026-09-08,
+`/usr/bin/node` v20.20.2 gave **3,945 tests / 3,772 pass / 173 fail** where v24.19.0 gave
+**4,464 / 4,462 / 0**. A real regression is invisible in the first of those (BLZ-601).
 
 So `pretest` and `pretest:coverage` run
 [`scripts/ci/require-engine.mjs`](../scripts/ci/require-engine.mjs), which refuses with
@@ -45,6 +45,13 @@ resolves, and how to get a conforming Node — including the exact `export PATH=
 it finds one already installed under `~/.local/node*`, nvm, fnm, volta or n. Someone who
 runs `node --test` directly bypasses npm and its pre-scripts; for them the same check is an
 ordinary test, `tests/engine-precondition.test.mjs`.
+
+**Each of those locations is guarded on its own.** An earlier version checked that `$HOME`
+existed and then read `~/.local` unconditionally, so a home without one — a fresh container,
+or any box that manages Node with nvm alone — threw `ENOENT` there, the catch swallowed it,
+and nvm, fnm, volta and n were never looked at. The guard then told a developer who already
+had a conforming Node to go and install one, which is the discoverability failure this file
+exists to end. A missing or unreadable location now costs that location only.
 
 `BLAZE_ENGINE_GUARD_FAKE_VERSION` substitutes the detected version. It is a test seam, so
 the refusal path can be exercised on a machine (or a CI runner) where every Node available
@@ -64,7 +71,7 @@ Two bounds, for two different failures:
 | Bound | Ends | Set by |
 |---|---|---|
 | `--test-timeout=120000` | a test whose BODY never returns | the `test` / `test:coverage` npm scripts |
-| [`tests/setup/hang-watchdog.mjs`](../tests/setup/hang-watchdog.mjs) | a PROCESS that cannot exit after its tests finished | `--import=` in the same npm scripts |
+| [`tests/setup/hang-watchdog.mjs`](../tests/setup/hang-watchdog.mjs) | a PROCESS still alive past the deadline, whatever is holding it | `--import=` in the same npm scripts |
 
 The watchdog's timer is **unref'd**: it does not keep a healthy file alive, so it costs the
 suite no wall-clock time, and it still fires when something else holds the loop open past
@@ -73,9 +80,48 @@ deadline it exceeded, the still-open handle types and — for sockets — the pe
 exits 87 so the runner counts the file as **failed**. In a CI log a hang and a slow run are
 otherwise the same thing.
 
+**It reports what it measured and nothing more.** The timer is armed at *import*, not at
+test completion, so when it fires it does not know whether the file's tests had finished —
+an earlier version printed "This is a HANG, not a slow run" directly above its own
+contradicting `Still open:` line, and a fixture doing three seconds of honest work got that
+sentence. It now states the deadline, the open handles, and `Loop: <n>ms of the last <m>ms
+idle` from `performance.nodeTiming.idleTime`, and reads that number only at the busy end of
+the scale, where it separates a file doing real work from one that is waiting. A leaked
+socket and a merely-slow timer-driven file are both ~97% idle and it does not claim to tell
+them apart.
+
+**It reaps the process's children before exiting.** `process.exit()` does not, so a hung
+file that had spawned a helper used to leak one process per run — measured, and a real
+`scripts/serve.mjs` was found alive fifteen minutes after a probe. A process-*group* kill is
+not available (this process shares its group with the runner and npm), so descendants are
+walked with `pgrep -P` and killed deepest first. The report says which of the three things
+happened — `reaped <n>`, `none to reap`, or `could not be checked` on a machine with no
+usable `pgrep` — because "I looked and found none" and "I could not look" are not the same
+answer.
+
 The deadline defaults to 300s and is set with `BLAZE_TEST_WATCHDOG_MS` (`0` disables it).
+An unparseable value keeps the default rather than silently removing the bound.
 `tests/hang-watchdog.test.mjs` pins both directions against a fixture that leaks a socket
 on purpose, including that the fixture really does hang without the watchdog.
+
+### Both bounds are asserted from inside the suite
+
+A bound that nothing can look at is a bound that can be dropped silently, which is the same
+failure one level up. So each is read as a **number** and checked against the other:
+
+* `activeBounds()` reads the per-test bound off `process.execArgv`, so a test can see what
+  its own process actually got — and `resolveWatchdogMs()` answers the same question for the
+  watchdog deadline, which has no flag and would otherwise take five minutes to observe.
+* The two npm scripts must declare the **same** per-test bound; CI runs one and a developer
+  usually runs the other.
+* The per-test bound must sit **between** the 60s deadline `tests/hang-watchdog.test.mjs`
+  gives its own fixture children and the watchdog's 300s deadline. Below the floor, that
+  file's tests die before their fixtures finish; above the ceiling the watchdog always wins
+  and a stuck *test* is only ever reported as a stuck *file*.
+* When the watchdog is preloaded the run came from an npm script, so the bound the process
+  received must equal the one `package.json` declares — this is the assertion that reddens
+  if the flag is dropped. A bare `node --test` is a legitimate way to run one file and is
+  not failed for it; it prints an `UNBOUNDED TEST RUN` notice in its own output instead.
 
 **The cause, for this one file, was found and fixed.** Each conformance test ended with
 `await s.close?.()`, the one statement a failing assertion never reaches — so a red
@@ -91,13 +137,31 @@ Related, and the same shape one level down: cleanup written as the last statemen
 is skipped by a failing assertion (BLZ-603).
 [`scripts/ci/temp-cleanup-guard.mjs`](../scripts/ci/temp-cleanup-guard.mjs) scans `tests/`
 for that shape and `tests/temp-cleanup-guard.test.mjs` holds the corpus to the per-file
-counts recorded in `scripts/ci/temp-cleanup-debt.json` — **454 sites across 64 files** at
+counts recorded in `scripts/ci/temp-cleanup-debt.json` — **455 sites across 65 files** at
 the time of writing, pre-existing debt that is recorded rather than hidden. The check is an
 equality, so a file cannot gain a site and a file that is cleaned up must drop its entry in
 the same change (`node scripts/ci/temp-cleanup-guard.mjs --write` re-records).
 
-The scanner is a line scanner, not a parser: cleanup done inside a helper a test calls is
-invisible to it, so the number is a floor. That limit is asserted, not assumed.
+The scanner is a line scanner, not a parser, and it errs in both directions. Cleanup done
+inside a helper a test calls is invisible to it, so the number is a floor — that limit is
+asserted, not assumed. It also over-reports: any `rmSync` after the first assertion in a
+test reads as trailing cleanup, including one that is really mid-test *setup* guarded by an
+outer `finally` (`commit-drain-quarantine.test.mjs` has exactly one such line). The count is
+a ratchet on a shape, not a defect list.
+
+**Moving teardown into `t.after()` only covers the assertion path.** The other leaking path
+is *setup*: registering the hook once the seed has **returned** leaves the window between
+"the connection is open" and "setup finished" uncovered, and that is where
+`tests/model/driver-conformance.test.mjs`'s `seedPg` does its `TRUNCATE` and its `INSERT`s.
+Reproduced with a real Postgres and a `BEFORE TRUNCATE` trigger that raises: the file ran
+past a 45s bound and was killed at exit 124 — BLZ-534's exact shape.
+[`tests/helpers/open-driver.mjs`](../tests/helpers/open-driver.mjs) inverts it. A seed does
+not *return* its resources, it **releases** them: it is handed a `release` callback and
+calls it the statement after each resource becomes live, and the `t.after` hook is
+registered before the seed is ever called. Whatever has been released by the time a throw
+propagates is torn down, in reverse, with every teardown attempted and the first error
+rethrown. The scanner cannot see cleanup inside a helper, so
+`tests/driver-setup-teardown.test.mjs` is the check that stands in its place.
 
 ## Mutation testing is scoped
 

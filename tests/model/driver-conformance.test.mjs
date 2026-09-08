@@ -22,6 +22,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
+import { openDriver } from "../helpers/open-driver.mjs";
 
 const PG = process.env.BLAZE_TEST_PG_URL ?? null;
 
@@ -35,8 +36,13 @@ const CORPUS = [
   { id: "BLZ-4", num: 4, status: "defined", parent: "", links: [{ type: "Relates", target: "BLZ-1" }] },
 ];
 
-function seedFs() {
+// EVERY SEED RELEASES WHAT IT OPENS IN THE STATEMENT AFTER IT OPENS IT (BLZ-534). Each of
+// these does real work between creating a resource and returning, so a throw in that work —
+// a full disk here, a schema drift or a trigger in `seedPg` — must not strand the resource.
+// See tests/helpers/open-driver.mjs.
+function seedFs(release) {
   const dir = mkdtempSync(join(tmpdir(), "blaze-conf-"));
+  release(() => rmSync(dir, { recursive: true, force: true }));
   for (const t of CORPUS) {
     mkdirSync(join(dir, "BLZ", t.status), { recursive: true });
     writeFileSync(join(dir, "BLZ", t.status, `${t.id}-x.md`),
@@ -49,7 +55,8 @@ function seedFs() {
   return { s: fsReadStorage, root: dir };
 }
 
-function seedMem() {
+function seedMem(_release) {
+  // Nothing to release: an in-memory array holds no handle and no directory.
   return { s: memReadStorage(CORPUS.map((t) => ({
     frontmatter: { id: t.id, title: `${t.id} title`, type: "task", project: "BLZ",
                    created: "2026-01-01", updated: "2026-01-01",
@@ -58,8 +65,9 @@ function seedMem() {
   }))), root: null };
 }
 
-function seedSqlite() {
+function seedSqlite(release) {
   const s = openSqliteRead(":memory:", { create: true });
+  release(() => s.close?.());
   const ins = s.db.prepare(
     `INSERT INTO ticket (id,project_key,num,type,status,title,parent_id,parent_type,body,created_on,updated_on)
      VALUES (?,'BLZ',?,'task',?,?,?,?,?,'2026-01-01','2026-01-01')`);
@@ -70,9 +78,13 @@ function seedSqlite() {
   return { s, root: null };
 }
 
-async function seedPg() {
+async function seedPg(release) {
   const { openPostgresRead } = await import("../../scripts/model/pg-storage.mjs");
   const s = await openPostgresRead(PG, { create: true });
+  // THE LINE BLZ-534 TURNS ON. Everything below opens a live referenced TCP socket and then
+  // keeps working; a throw from any of those statements used to leave that socket open, and
+  // a `node --test` child holding one cannot exit.
+  release(async () => { await s.close?.(); });
   await s.client.query("TRUNCATE ticket_event, ticket_link, acceptance_criterion, worklog_entry, ticket CASCADE");
   for (const t of CORPUS)
     await s.client.query(
@@ -84,32 +96,10 @@ async function seedPg() {
   return { s, root: null };
 }
 
-/** Open a driver and register its teardown BEFORE any assertion can throw.
- *
- *  BLZ-534. Every test below used to end with `await s.close?.()` as its last statement,
- *  which is the one path a failing assertion never reaches. For fs, mem and sqlite that
- *  leaks a temp directory. For Postgres it leaks a live referenced TCP socket, and a
- *  `node --test` child holding one of those cannot exit: the suite was observed sitting on
- *  this very file for 27+ minutes at 0% CPU, blocked in `ep_poll`, `loopIdleTime` 1678s.
- *
- *  NOT A CLAIM THAT THIS WAS THE HANG. That hang was reproduced once and then survived ~10
- *  further runs across two reviewers; it has not been reproduced here, and a green suite is
- *  no evidence about it either way. What is verifiable is that this file no longer has a
- *  path on which it opens a Postgres connection and does not close it — and, separately,
- *  that a file which does hang is now ended and reported (tests/setup/hang-watchdog.mjs). */
-async function open(make, t) {
-  const { s, root } = await make();
-  t.after(async () => {
-    await s.close?.();
-    if (root) rmSync(root, { recursive: true, force: true });
-  });
-  return { s, root };
-}
-
 /** Every assertion the contract makes. Awaited, so sync and async drivers both pass. */
 async function conformance(make, name) {
   await test(`${name}: getTicket resolves by id, with status and body`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     const r = await s.getTicket(root, "BLZ-2");
     assert.equal(r.found?.frontmatter.id, "BLZ-2");
     assert.equal(r.found.status, "defined");
@@ -117,38 +107,38 @@ async function conformance(make, name) {
   });
 
   await test(`${name}: getTicket returns found:null for an unknown id`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     assert.equal((await s.getTicket(root, "BLZ-999")).found, null);
   });
 
   await test(`${name}: records carry project and status first-class`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     const r = (await s.getTicket(root, "BLZ-3")).found;
     assert.equal(r.project, "BLZ");
     assert.equal(r.status, "done");
   });
 
   await test(`${name}: listChildren answers the drill`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     const kids = (await s.listChildren(root, "BLZ-1")).map((t) => t.frontmatter.id).sort();
     assert.deepEqual(kids, ["BLZ-2", "BLZ-3"]);
     assert.deepEqual(await s.listChildren(root, "BLZ-4"), []);
   });
 
   await test(`${name}: blockersOf returns inbound Blocks only, never the ticket itself`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     const ids = (await s.blockersOf(root, "BLZ-1")).map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-2", "BLZ-3"], "BLZ-4 Relates; BLZ-1 blocks itself and must be excluded");
   });
 
   await test(`${name}: listTickets yields the whole corpus`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     const ids = [...await s.listTickets(root)].map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-1", "BLZ-2", "BLZ-3", "BLZ-4"]);
   });
 
   await test(`${name}: listProjects returns the project keys`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     assert.deepEqual(await s.listProjects(root), ["BLZ"]);
   });
 
@@ -158,7 +148,7 @@ async function conformance(make, name) {
     // from Sydney came back as "2025-12-31T13:00:00.000Z" — every created/updated date
     // shifted a day, in a direction that depends on the reader's timezone. Blaze stores
     // dates with no time and no zone; a driver that hands back an instant is wrong.
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     // `t` is the test context here, so the read is named for what it is.
     const read = await s.getTicket(root, "BLZ-1");
     const rec = read.found ?? read;
@@ -176,7 +166,7 @@ async function conformance(make, name) {
   });
 
   await test(`${name}: changeToken is a stable opaque string`, async (t) => {
-    const { s, root } = await open(make, t);
+    const { s, root } = await openDriver(make, t);
     const a = await s.changeToken(root);
     assert.equal(typeof a, "string");
     assert.equal(a, await s.changeToken(root));
