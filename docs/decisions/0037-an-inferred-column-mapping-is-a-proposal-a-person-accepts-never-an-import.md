@@ -1,4 +1,4 @@
-# ADR-0036 — an inferred column mapping is a proposal a person accepts, never an import
+# ADR-0037 — an inferred column mapping is a proposal a person accepts, never an import
 
 - **Status:** Accepted
 - **Date:** 2026-09-08
@@ -36,7 +36,7 @@ comment on the line above warns about. That is the anti-pattern BLZ-587's accept
 name by hand, and it is filesystem-shaped in both halves.
 
 **Why a model in the loop is a new hazard class for this repo.** Nothing on a write path here
-has ever consulted a language model. The groomer does (`scripts/loops/groomer.mjs:546,570`,
+has ever consulted a language model. The groomer does (`scripts/loops/groomer.mjs:547,570`,
 spawning `cfg.agentCommand`, default `"claude -p"` at `scripts/config.mjs:21`), and it is
 wrapped in a tree snapshot, an out-of-bounds path check, a symlink refusal and a revert — about
 250 lines of containment for one agent edit to one file. An importer that asked a model what a
@@ -78,14 +78,30 @@ only by `blaze import propose-mapping`. Its entire output is a **candidate mappi
 never sees the board, never resolves an id, never touches a write port, and its output is not
 input to anything until a person has accepted it.
 
-`blaze import` — the verb that writes — **does not link the proposer at all.** They are separate
-runners over separate module graphs. This is a reachability property, not a convention, and it
-is pinned as one: a structural test walks the transitive import graph of the import runner and
-asserts that the proposer module is absent from it, that no module in it imports
-`node:child_process`, and that no module in it reads `agentCommand`. Following the repo's own
-method (plan §9, *"pin the property, not the spelling"*), the same walk is run over the
-propose runner as a **positive control** and must find the proposer — a graph walker that finds
-nothing anywhere proves nothing anywhere.
+`blaze import` — the verb that writes — **does not link the proposer at all**, and more
+importantly **performs no spawn**. Those are two different claims and only the second is
+enforceable in general; an earlier draft of this ADR asserted three static-graph conditions and
+two of them are unsatisfiable in this repo. Measured from the modules the importer must reach
+(`schema.mjs`, `workflows.mjs`, `ids.mjs`, `rules.mjs`, `taxonomy.mjs`, `index.mjs`,
+`write-port.mjs`, `commit-or-queue.mjs`): **26 modules reached, 6 of them importing
+`node:child_process`** — `config.mjs` via `workflows.mjs`, `model/claims.mjs` via `index.mjs`,
+`model/git-common.mjs` via `ids.mjs`, and `branch-guard.mjs`, `pending-ledger.mjs`,
+`serve-commit.mjs` via `commit-or-queue.mjs`. And `config.mjs` is the sole module mentioning
+`agentCommand` because it **defines** it (`:21`) and populates it from the environment (`:271`),
+so any importer that calls `loadConfig()` — which it must, to resolve the type registry — holds a
+`cfg` carrying the spawn string.
+
+So the pinned property is **behavioural**: a full import of a fixture CSV completes with
+`child_process.spawnSync`, `spawn` and `execFileSync` replaced by throwing stubs. A `cfg` carrying
+`agentCommand` is harmless if nothing can execute it. Its positive control is the same harness
+applied to `propose-mapping`, which must throw — otherwise a passing import proves only that the
+stub was never wired.
+
+One static assertion survives and keeps a control that genuinely discriminates: the **proposer
+module is absent** from the import runner's transitive graph, and **present** in the propose
+runner's. Following the repo's own method (plan §9, *"pin the property, not the spelling"* and
+*"check a positive control before trusting a negative"*), where the first draft pinned a graph
+shape the repo's own module structure forbids.
 
 ### 3. Acceptance is a separate invocation that writes a file and nothing else
 
@@ -114,16 +130,29 @@ requires `--apply`. This follows `reconcile`, whose CLI entry already reads *"dr
 
 An importer that cannot be exported from is unverifiable, and this repo has spent nineteen
 adversarial rounds establishing that a measurement which cannot observe the failure is not
-evidence. `blaze export --format csv` emits the same versioned schema, and the gate is a
-**byte-identical export-to-export** comparison: export a fixture corpus, import it into an empty
-board, export again, `diff` is empty.
+evidence. `blaze export --format csv` emits the same versioned schema, and the verification is
+**two gates, because either alone is blind to half the system**:
 
-The gate is deliberately not a byte comparison of the *markdown*. `scripts/migrate/zero-diff.mjs`
-measured that one before any migration existed: 137 of 2,534 tickets (5.4%) do not re-emit
-byte-identically today, with zero value mismatches, purely because `serializeTicket` normalises
-to `FIELD_ORDER` while on-disk files keep whatever order they were authored in. An acceptance
-criterion that fails for an unrelated reason gets waived, and then it is not watching when
-something real breaks.
+- **Gate 1 — `diff X Y` is empty**, where X is an export of a fixture corpus and Y an export of
+  the board that importing X produced. This catches **importer** defects.
+- **Gate 2 — `zeroDiff(A, B).valueDiffs` is empty**, comparing the source corpus against the
+  imported one by value. This catches **exporter** defects, and without it gate 1 is vacuous:
+  X and Y come from the same exporter, so any exporter defect is common-mode and cancels. An
+  exporter that emitted a correct header and an empty cell for 21 of the 31 columns would pass
+  gate 1 byte-for-byte and pass `blaze audit`, because `validateTicket`
+  (`scripts/model/rules.mjs:25-31`) checks only `requiredFields(type)`.
+
+This ADR records gate 2 explicitly because an earlier draft of the design specified gate 1 alone
+and called it the acceptance test. It was refuted by construction, and the instrument gate 2 needs
+already existed in the repo, unused: `scripts/migrate/zero-diff.mjs` is a value-level,
+order-tolerant comparator over exactly these fields (`:130-136`), with a defaults carve-out at
+`:141-147`.
+
+Neither gate is a byte comparison of the *markdown*. `scripts/migrate/zero-diff.mjs:8-12` measured
+that one before any migration existed: 137 of 2,534 tickets (5.4%) do not re-emit byte-identically
+today, with zero value mismatches, purely because `serializeTicket` normalises to `FIELD_ORDER`
+while on-disk files keep whatever order they were authored in. An acceptance criterion that fails
+for an unrelated reason gets waived, and then it is not watching when something real breaks.
 
 ## Consequences
 
@@ -172,7 +201,10 @@ something real breaks.
 - **Write rows through `applyNew` + `applyMove` to reuse the transition validator.** Rejected on
   measurement of the consequence rather than on taste: it fabricates transitions that never
   happened, stamps `updated` up to three times per imported row, and — under `BLAZE_WRITE_PORT=db`
-  — appends up to three `ticket_event` rows per import (`scripts/model/write-port.mjs`'s
-  `recordEvent`), corrupting the event log the migration oracle later reads.
+  — appends **four** `ticket_event` rows per imported ticket rather than one: `dbWritePort`'s
+  `persist` calls `recordEvent` on every `write` *and* every `move`
+  (`scripts/model/write-port.mjs:293,303-304`), so a create plus three hops is four rows. The
+  `fs` port writes none at all (`:89-94`), so the corruption is invisible until cutover — which
+  is precisely when the migration oracle starts reading that log.
 - **Ship an untyped, dynamic column set that accepts whatever the CSV has.** Rejected: it makes
   the round trip unfalsifiable. A schema you cannot fail is not a schema.
