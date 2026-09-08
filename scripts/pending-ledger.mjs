@@ -212,7 +212,7 @@ export function readEntries(root, session = null) {
 // invalid byte decodes to U+FFFD, which re-encodes at 3 bytes.
 export function readForDrain(root, session = null) {
   const path = ledgerPath(root, session);
-  if (!existsSync(path)) return { entries: [], bytes: 0, lines: [], dropped: [] };
+  if (!existsSync(path)) return { entries: [], bytes: 0, lines: [], dropped: [], consumed: Buffer.alloc(0) };
   const buf = readRegularFileSync(path, null);
   const { records, dropped } = parseRecords(buf);
   // `lines[i]` is the raw text of `entries[i]`'s line — index-aligned, so a caller that
@@ -222,10 +222,71 @@ export function readForDrain(root, session = null) {
   // INCLUDED. Without it the drainer has no way to reach the bytes it is about to erase, and
   // the record is gone with nothing able to re-derive it. The drainer must park these before
   // it calls `clearLedger`, and must not call `clearLedger` if it could not.
+  //
+  // BLZ-608: `consumed` is the BYTES this read actually saw — the evidence `clearLedger`
+  // needs to prove that the prefix it is about to erase is still the prefix it read. `bytes`
+  // alone cannot carry that: it is a length, and two different files have the same length
+  // all the time. Held as the buffer rather than a digest because a queue is kilobytes and
+  // the comparison must be exact; a digest would trade an exact answer for nothing.
   return {
     entries: records.map((r) => r.entry), bytes: buf.length,
-    lines: records.map((r) => r.line), dropped,
+    lines: records.map((r) => r.line), dropped, consumed: buf,
   };
+}
+
+/** Is the queue on disk still the queue this drain READ, over the prefix it is about to
+ *  erase? BLZ-608.
+ *
+ *  THE DEFECT this answers. `readForDrain` runs at commit-runner.mjs:359, and
+ *  `acquireLock(store, …)` not until :557 — so two ordinary, concurrent `blaze commit`
+ *  flushes both measure `bytes` over the SAME on-disk file before either takes the store
+ *  lock, and whichever clears second hands `clearLedger` a byte count taken from a file that
+ *  has since changed shape. Reproduced with no injected fault and no lock steal: a 106-byte
+ *  ledger became the 3-byte fragment `"}\n`, the op appended while both runs were in flight
+ *  was in no commit and left untracked on disk, and both processes exited 0.
+ *
+ *  WHY BYTE EQUALITY AND NOT A LENGTH CHECK. The ticket's first proposal — refuse when
+ *  `consumedBytes > buf.length` — does not catch its own repro: the replacement line was
+ *  LONGER than the 106 bytes that were read, so the length check passes and `subarray(106)`
+ *  slices the tail off a line it never saw. Length is not identity. The bytes are.
+ *
+ *  WHY HERE AND NOT UNDER THE LOCK. Moving the read under the store lock narrows the window
+ *  and does not close it: `acquireLock`'s 60 s `staleMs` steals the lock from a LIVE owner by
+ *  design (commit-lock.mjs, pinned by tests/commit-lock.test.mjs), so a flush slower than the
+ *  lease still has its lock taken and the two-reader shape returns — and holding the lock
+ *  across every git probe and the whole classification pass makes exceeding that lease more
+ *  likely, not less. A lock is a convention between well-behaved participants; this is a fact
+ *  about the file, and it is correct whatever the lock did.
+ *
+ *  FAIL CLOSED, INCLUDING ON NO PROOF AT ALL. A caller doing byte-offset arithmetic with no
+ *  record of the bytes it read cannot establish that its offset means anything, and this is
+ *  the one path in this engine where being wrong destroys a record nothing can re-derive. So
+ *  the absent-evidence case is refused rather than waved through; `consumedBytes === null`
+ *  (clear everything, no arithmetic) never reaches here at all.
+ *
+ *  ONE function, and every leg of the proof inside it, so a rollback can re-instate the
+ *  pre-fix engine by neutralising exactly this — which is what
+ *  tests/commit-drain-concurrent-clear.test.mjs's rollback test does, and why that test can
+ *  show the original destruction returning without pinning how the guard is spelled. */
+export function consumedPrefixIntact(buf, consumedBytes, consumed) {
+  if (!Buffer.isBuffer(consumed)) {
+    return { ok: false, why: `this run kept no record of the ${consumedBytes} byte(s) it read, so a drain-exact clear cannot be proved correct` };
+  }
+  // SUBSUMED, and said so rather than left looking like a guard. `Buffer.subarray` CLAMPS to
+  // the buffer's own length, so a queue shorter than `consumedBytes` yields a short slice that
+  // can never equal the full prefix below — the byte comparison already refuses every case
+  // this leg refuses, and reverting this branch to `false` reddens nothing (measured: mutation
+  // M3 of BLZ-608's table). It is kept because it names WHICH way the queue changed, and the
+  // operator reading a kept queue needs that; it is not counted as a second guard, and the
+  // ticket's own proposal — this check ALONE — is the one shape that does not fix the defect,
+  // since the repro's replacement line was LONGER than the bytes that were read.
+  if (consumedBytes > buf.length) {
+    return { ok: false, why: `the queue is ${buf.length} byte(s) and this run read ${consumedBytes} — it shrank under this run` };
+  }
+  if (!buf.subarray(0, consumedBytes).equals(consumed.subarray(0, consumedBytes))) {
+    return { ok: false, why: `the first ${consumedBytes} byte(s) of the queue are not the bytes this run read — it changed under this run` };
+  }
+  return { ok: true, why: null };
 }
 
 // BLZ-498: a queue with NOTHING left in it is removed, not truncated to a zero-byte
@@ -265,9 +326,13 @@ const clearOrRemove = (path, remainder) => {
  *  worktree that queued them. They are written back ahead of the post-drain tail, so a
  *  partial drain and a mid-commit append compose: neither destroys the other. Defaulting
  *  to [] leaves every pre-existing call site byte-identical in behaviour. */
-export function clearLedger(root, session = null, consumedBytes = null, keepLines = []) {
+export function clearLedger(root, session = null, consumedBytes = null, keepLines = [], consumed = null) {
   const path = ledgerPath(root, session);
-  if (!existsSync(path)) return;
+  // BLZ-608: every exit from here says whether the clear HAPPENED, and why not when it did
+  // not. It used to return nothing at all, so a caller had no way to tell a queue it had
+  // emptied from a queue it had left standing — and the drain loop then went on to print
+  // "Cleared from the queue" over both.
+  if (!existsSync(path)) return { cleared: false, why: "the queue file is no longer on disk — another run removed it after this one read it" };
   // REACHABILITY, stated plainly rather than implied. This branch has NO production caller:
   // the only production call site, `commit-runner.mjs`'s drain loop, always passes
   // `q.bytes`. It is reached solely by `tests/pending-ledger.test.mjs`, which pins its
@@ -277,7 +342,7 @@ export function clearLedger(root, session = null, consumedBytes = null, keepLine
   // is being decided on its own ticket; it is deliberately not settled here.
   if (consumedBytes === null) {
     clearOrRemove(path, Buffer.alloc(0)); // back-compat: nothing is kept, so nothing is left
-    return;
+    return { cleared: true, why: null };
   }
   // Drain-exact clear: keep only bytes appended AFTER the drain read, so an op
   // queued by another session mid-commit isn't lost. A microsecond
@@ -285,9 +350,18 @@ export function clearLedger(root, session = null, consumedBytes = null, keepLine
   // below (an append landing in that gap is overwritten by the rewrite) —
   // acceptable for this advisory, single-host design; not distributed-safe.
   const buf = readRegularFileSync(path, null);
+  // BLZ-608: PROVE IT, then erase. The window the paragraph above calls a microsecond is a
+  // whole flush wide in practice — the read happens before the store lock is taken — and an
+  // overlapping flush that cleared first leaves this one about to slice `consumedBytes` off
+  // a file it has never seen. Refusing costs a re-run, in which BLZ-590's `classify` finds
+  // the committed ops already filed and clears them; guessing costs a record that is in no
+  // commit, in no report and in no `keepIdx`, with nothing anywhere able to re-derive it.
+  const proof = consumedPrefixIntact(buf, consumedBytes, consumed);
+  if (!proof.ok) return { cleared: false, why: proof.why };
   const tail = buf.subarray(consumedBytes);
-  if (keepLines.length === 0) { clearOrRemove(path, tail); return; }
+  if (keepLines.length === 0) { clearOrRemove(path, tail); return { cleared: true, why: null }; }
   clearOrRemove(path, Buffer.concat([Buffer.from(keepLines.map((l) => `${l}\n`).join(""), "utf8"), tail]));
+  return { cleared: true, why: null };
 }
 
 /** Where a flush parks the lines it could not parse.

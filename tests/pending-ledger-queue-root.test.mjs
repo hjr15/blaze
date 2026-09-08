@@ -282,7 +282,7 @@ test("BLZ-556: clearLedger keeps the raw lines it is told to keep, plus anything
     // An op appended by another session while the commit ran.
     const late = { id: "C", op: "new", message: "m", files: ["f"], ts: "t", branch: "main" };
     appendEntry(root, late, "s");
-    clearLedger(root, "s", q.bytes, [q.lines[1]]); // commit A, keep B
+    clearLedger(root, "s", q.bytes, [q.lines[1]], q.consumed); // commit A, keep B
     assert.deepEqual(readEntries(root, "s"), [theirs, late],
       "the foreign op survives the drain, and so does the one appended mid-commit");
   } finally { cleanup(root); }
@@ -295,7 +295,7 @@ test("BLZ-556: a queue with nothing kept and nothing appended is still REMOVED, 
   try {
     appendEntry(root, { id: "A", op: "new", message: "m", files: ["f"], ts: "t" }, "s");
     const q = readForDrain(root, "s");
-    clearLedger(root, "s", q.bytes, []);
+    clearLedger(root, "s", q.bytes, [], q.consumed);
     assert.ok(!existsSync(ledgerPath(root, "s")), "an emptied queue file is unlinked");
   } finally { cleanup(root); }
 });

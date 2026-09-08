@@ -157,6 +157,11 @@ const heldBack = [];
 // before the drain loop exists — a `const` declared beside the loop would be in its temporal
 // dead zone there and the early report would die on a ReferenceError.
 const quarantineFailures = [];
+// BLZ-608: queues this run did NOT clear because it could not prove the bytes it was about
+// to erase are the bytes it read — another `blaze commit` flushed the same queue between
+// this run's read (`readForDrain`, before the store lock) and its clear (after it). Declared
+// beside the other three for the same reason: `unreachedLines` closes over it.
+const clearRefusals = [];
 // How the report names a queue. `null` is the shared fallback, not a session called "null".
 const queueLabel = (session) => (session === null ? "the shared fallback queue" : `session ${session}`);
 function unreachedLines() {
@@ -211,6 +216,18 @@ function unreachedLines() {
     out.push("  The ops this run committed are in git. Make that path writable and re-run: the");
     out.push("  committed ops come back as already filed and clear, and the unparseable lines are");
     out.push("  parked. A queue is never cleared over bytes this engine could not preserve.");
+  }
+  if (clearRefusals.length > 0) {
+    // `count` is what THIS RUN READ from the queue, and the sentence says so: after another
+    // run's clear-and-append the queue holds something else, and this run has not looked.
+    const ops = clearRefusals.reduce((n, f) => n + f.count, 0);
+    out.push(`blaze commit: ${clearRefusals.length} queue(s) were NOT cleared (this run had read ${ops} op(s) from`);
+    out.push("  them) — the queue changed on disk between this run's read of it and its clear, so this");
+    out.push("  run cannot say which bytes it would be erasing. Nothing has been dropped:");
+    for (const f of clearRefusals) out.push(`    ${queueLabel(f.session)} — ${f.why}`);
+    out.push("  Another `blaze commit` was flushing the same queue at the same time. Whatever this run");
+    out.push("  committed is in git; re-run and those ops come back as already filed and clear. A queue");
+    out.push("  is never cleared over a byte range this engine cannot prove it read.");
   }
   if (storeListing.unreadable.length > 0) {
     for (const u of storeListing.unreadable) {
@@ -744,7 +761,12 @@ try {
         continue;
       }
     }
-    clearLedger(dataRoot, q.session, q.bytes, q.keepIdx.sort((a, b) => a - b).map((i) => q.lines[i]));
+    // BLZ-608: the clear can now REFUSE, and a refusal is a queue still holding ops — the
+    // same shape as a quarantine failure one line up, and reported the same way. `continue`
+    // is not needed here: the clear is the last thing this iteration does.
+    const cleared = clearLedger(dataRoot, q.session, q.bytes,
+      q.keepIdx.sort((a, b) => a - b).map((i) => q.lines[i]), q.consumed);
+    if (!cleared.cleared) clearRefusals.push({ session: q.session, count: q.mine.length, why: cleared.why });
   }
 } finally {
   unlock();
@@ -757,24 +779,35 @@ if (committed) console.log(`blaze commit: flushed ${committedEntries.length} op(
 //             there is nothing to commit AND nothing that could be compared to HEAD.
 // Merging them is what made round 1 wrong; the merged sentence attested the comparison
 // that the absent case is precisely the case of not having.
-if (settledOps.length + absentOps.length > 0) {
+//
+// BLZ-608: "cleared from the queue" is now only said about queues that were ACTUALLY
+// cleared. A refused clear (the second of two overlapping flushes, which cannot prove what
+// its byte offset would erase) leaves those ops exactly where they were, and the sentence
+// below used to attest a clear that had just been declined — the same class of lying
+// sentence as the two the comment above separates. The ops of a kept queue are reported by
+// `unreachedLines`'s refusal section instead, which says what did happen to them.
+const keptSessions = new Set(clearRefusals.map((f) => f.session));
+const wasCleared = (e) => !keptSessions.has(e.session);
+const settledCleared = settledOps.filter(wasCleared);
+const absentCleared = absentOps.filter(wasCleared);
+if (settledCleared.length + absentCleared.length > 0) {
   // Name the tickets, capped: the live case is 210 ops, and a message nobody finishes
   // reading is a message nobody reads. The count is always exact; the list is a sample.
   const out = [committed
     ? "blaze commit: also cleared from the queue, with nothing of theirs in the commit:"
     : "blaze commit: nothing to commit, and nothing failed. Cleared from the queue:"];
-  if (settledOps.length > 0) {
-    out.push(`    ${settledOps.length} op(s) already filed — every file they record already matches HEAD`);
-    out.push(`      — ${nameTickets(settledOps)}`);
+  if (settledCleared.length > 0) {
+    out.push(`    ${settledCleared.length} op(s) already filed — every file they record already matches HEAD`);
+    out.push(`      — ${nameTickets(settledCleared)}`);
   }
-  if (absentOps.length > 0) {
+  if (absentCleared.length > 0) {
     // Every clause here is a tree this run READ: `existsSync`, `git ls-files`, and
     // `git cat-file -e HEAD:`. Round 2's sentence named HEAD twice having read it zero
     // times, and `git rm` falsified both of those clauses at once.
-    out.push(`    ${absentOps.length} op(s) superseded — every path they record is in none of the three trees`);
+    out.push(`    ${absentCleared.length} op(s) superseded — every path they record is in none of the three trees`);
     out.push(`      this run read (this working tree, git's index, and HEAD), and nothing records them as`);
     out.push(`      queued in another checkout, so there is nothing here left to commit for them`);
-    out.push(`      — ${nameTickets(absentOps)}`);
+    out.push(`      — ${nameTickets(absentCleared)}`);
   }
   console.log(out.join("\n"));
 }
@@ -783,7 +816,8 @@ if (settledOps.length + absentOps.length > 0) {
 // exactly that reason: a queue kept because its unparseable bytes could not be preserved is
 // a queue still holding ops, and `outcome=published` must not be true over it.
 if (foreign.length > 0 || heldBack.length > 0 || stranded.length > 0
-    || storeListing.unreadable.length > 0 || quarantineFailures.length > 0) {
+    || storeListing.unreadable.length > 0 || quarantineFailures.length > 0
+    || clearRefusals.length > 0) {
   console.error(unreachedLines().join("\n"));
   process.exit(UNREACHED_EXIT);
 }
