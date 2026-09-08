@@ -5,13 +5,13 @@
 // `package.json` declares `engines: { node: ">=24" }` and nothing enforced it. Under Node
 // 20 — which is what `node` resolves to on the author's machine — every file that imports
 // `node:sqlite` fails to LOAD with `No such built-in module: node:sqlite`. Measured on this
-// branch 2026-09-08: `/usr/bin/node` v20.20.2 gives 3,945 tests / 3,772 pass / 173 fail,
-// against 4,464 / 4,462 / 0 on v24.19.0. Nothing in those 173 says "wrong Node". Real
+// branch 2026-09-08: `/usr/bin/node` v20.20.2 gives 3,946 tests / 3,773 pass / 173 fail,
+// against 4,465 / 4,463 / 0 on v24.19.0. Nothing in those 173 says "wrong Node". Real
 // regressions hide behind that noise, and "the suite is green" stops being checkable.
 //
 // BLZ-601 was filed saying the machine had no conforming Node. That premise was wrong:
 // `~/.local/node24/bin/node` there is v24.19.0 with a working `node:sqlite`, and the suite
-// under it is 4,464 tests / 4,462 pass / 0 fail. What was missing was any way to
+// under it is 4,465 tests / 4,463 pass / 0 fail. What was missing was any way to
 // DISCOVER that. So when this guard refuses, it goes looking for a conforming Node in the
 // usual places and, if it finds one, hands over the exact line that selects it.
 //
@@ -62,8 +62,15 @@ export function detectEngine(version = process.env.BLAZE_ENGINE_GUARD_FAKE_VERSI
  *  and install one, which is the discoverability failure this file exists to end, one level
  *  up. Reproduced against a fake home holding an nvm Node 24 and no `~/.local`: it printed
  *  "No conforming Node was found"; adding an empty `~/.local` flipped it to the right
- *  `export PATH=` line. So a missing or unreadable location must cost that location only. */
-export function candidateNodePaths(home = homedir()) {
+ *  `export PATH=` line. So a missing or unreadable location must cost that location only.
+ *
+ *  The machine-global roots are a SEPARATE parameter because they are not under `$HOME` and
+ *  a fake home cannot hold them out. A GitHub-hosted `ubuntu-latest` runner really does have
+ *  `n` installed at the first of them: the tests that assert the exact candidate list for a
+ *  fake home were green on a developer box and red in CI for precisely that reason. */
+export const SYSTEM_NODE_ROOTS = ["/usr/local/n/versions/node"];
+
+export function candidateNodePaths(home = homedir(), systemRoots = SYSTEM_NODE_ROOTS) {
   const out = [];
   /** Every `<parent>/<name>/<suffix…>` that exists, for names this source cares about. */
   const globDirs = (parent, suffix, keep = () => true) => {
@@ -80,7 +87,7 @@ export function candidateNodePaths(home = homedir()) {
   globDirs(join(home, ".nvm", "versions", "node"), ["bin", "node"]);
   globDirs(join(home, ".fnm", "node-versions"), ["installation", "bin", "node"]);
   globDirs(join(home, ".volta", "tools", "image", "node"), ["bin", "node"]);
-  globDirs("/usr/local/n/versions/node", ["bin", "node"]);
+  for (const root of systemRoots) globDirs(root, ["bin", "node"]);
   return out;
 }
 
@@ -117,7 +124,7 @@ export function describeEngine({ version, major, sqlite, required, conforming })
     "",
     "Every test file that imports `node:sqlite` fails to LOAD on this engine, and none of",
     "the failures that produces mentions the engine. Measured on this repo 2026-09-08:",
-    "Node v20.20.2 gives 3,945 tests / 173 fail; Node v24.19.0 gives 4,464 / 0 fail. A real",
+    "Node v20.20.2 gives 3,946 tests / 173 fail; Node v24.19.0 gives 4,465 / 0 fail. A real",
     "regression would be invisible in the first of those.",
     "",
   ];

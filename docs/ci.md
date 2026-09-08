@@ -35,8 +35,8 @@ note; irrelevant once this repo is public, where required checks work normally).
 `node:sqlite` is built in from Node 24 and 34-odd suites import it. Nothing used to
 enforce that. Running the suite on Node 20 makes every `node:sqlite` file fail to LOAD,
 and the tally that produces says nothing about the engine: measured on 2026-09-08,
-`/usr/bin/node` v20.20.2 gave **3,945 tests / 3,772 pass / 173 fail** where v24.19.0 gave
-**4,464 / 4,462 / 0**. A real regression is invisible in the first of those (BLZ-601).
+`/usr/bin/node` v20.20.2 gave **3,946 tests / 3,773 pass / 173 fail** where v24.19.0 gave
+**4,465 / 4,463 / 0**. A real regression is invisible in the first of those (BLZ-601).
 
 So `pretest` and `pretest:coverage` run
 [`scripts/ci/require-engine.mjs`](../scripts/ci/require-engine.mjs), which refuses with
@@ -52,6 +52,14 @@ or any box that manages Node with nvm alone — threw `ENOENT` there, the catch 
 and nvm, fnm, volta and n were never looked at. The guard then told a developer who already
 had a conforming Node to go and install one, which is the discoverability failure this file
 exists to end. A missing or unreadable location now costs that location only.
+
+The machine-global roots (`n`'s `/usr/local/n/versions/node`) are a **separate parameter**
+from `$HOME`, because a test that fabricates a home cannot hold them out. Asserting the exact
+candidate list without that was green on a developer box and red on a GitHub-hosted
+`ubuntu-latest` runner, which really does have `n` installed — the assertion failed on a real
+Node the runner happened to own. The exact-list tests now pass an empty root list and one
+test supplies its own root under the fake home, so what the machine has installed cannot
+decide the result.
 
 `BLAZE_ENGINE_GUARD_FAKE_VERSION` substitutes the detected version. It is a test seam, so
 the refusal path can be exercised on a machine (or a CI runner) where every Node available
