@@ -19,6 +19,9 @@ import * as fsCallbacks from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
+// BLZ-535: a devDependency, never a dependency. This package ships zero runtime deps, and
+// this parser is loaded by one TEST. See the banner below for why a parser and not a reader.
+import { parse } from "acorn";
 
 const SCRIPTS = join(fileURLToPath(new URL("../../scripts", import.meta.url)));
 
@@ -40,14 +43,32 @@ function* jsFiles(dir) {
   }
 }
 
+/** Every function CALLED in a module, by the name at the callee — `f()` and `o.f()` alike.
+ *  A call, not a mention in prose: comments and error strings legitimately name these, and
+ *  a parser tells the two apart without a comment-stripping regex that a `//` inside a
+ *  string or a regex literal can derail. A module that does not parse is REPORTED. */
+function callsIn(raw) {
+  const { ast } = parseModule(raw);
+  if (!ast) return { called: new Set(), unreadable: true };
+  const called = new Set();
+  for (const node of astIndex(ast).nodes) {
+    if (node.type !== "CallExpression" && node.type !== "NewExpression") continue;
+    const callee = node.callee;
+    if (callee.type === "Identifier") called.add(callee.name);
+    else if (callee.type === "MemberExpression" && !callee.computed) {
+      called.add(nameOf(callee.property));
+    }
+  }
+  return { called, unreadable: false };
+}
+
 test("no module outside the seam calls walkTickets", () => {
   const offenders = [];
   for (const file of jsFiles(SCRIPTS)) {
     const rel = relative(SCRIPTS, file).split("\\").join("/");
     if (SEAM.has(rel)) continue;
-    const src = readFileSync(file, "utf8");
-    // a call, not a mention in prose — comments legitimately name it
-    if (/\bwalkTickets\s*\(/.test(src.replace(/\/\/.*$/gm, ""))) offenders.push(rel);
+    const { called, unreadable } = callsIn(readFileSync(file, "utf8"));
+    if (unreadable || called.has("walkTickets")) offenders.push(rel);
   }
   assert.deepEqual(offenders, [],
     "ADR-0009: reads go through the driver. Add a named operation to read-storage.mjs " +
@@ -71,8 +92,8 @@ test("no module outside the seam stats or lists the projects tree directly", () 
   for (const file of jsFiles(SCRIPTS)) {
     const rel = relative(SCRIPTS, file).split("\\").join("/");
     if (ALLOWED.has(rel) || rel.startsWith("ci/")) continue;
-    const src = readFileSync(file, "utf8").replace(/\/\/.*$/gm, "");
-    if (/\breaddirSync\s*\(|\bstatSync\s*\(/.test(src)) offenders.push(rel);
+    const { called, unreadable } = callsIn(readFileSync(file, "utf8"));
+    if (unreadable || called.has("readdirSync") || called.has("statSync")) offenders.push(rel);
   }
   assert.deepEqual(offenders, [],
     "a bespoke directory walk outside the seam is how contentHash hid for four slices");
@@ -155,25 +176,66 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //     reading the source at all and make the path and the descriptor DISAGREE, which no
 //     rename can survive. Enumerating a surface would not have pinned it; running it does.
 //
-// WHAT THIS STILL CANNOT SEE, stated rather than left to look total. This guard reads TEXT.
-// It is not a parser, not a scope analyser and not a linker, and each of those is a hole:
-//   * A write REPACKAGED BY A LOCAL MODULE. `./regular-file.mjs` exports its own
-//     `writeRegularFileSync`, which is a write, and is allowlisted for exactly that; a
-//     consumer importing it is invisible here and always will be. What is no longer
-//     invisible is the narrower `export { writeFileSync } from "node:fs"` — that one is now
-//     an offence in the re-exporting module.
+// ROUND 3 — TWO FINDINGS THAT MADE EVERY CLAIM ABOVE UNSOUND, and what changed for each.
+//
+//   B1. THE READER WAS A HAND-ROLLED TOKENISER, and it decided whether a `/` opened a REGEX
+//      or was a DIVISION by looking at the previous non-space CHARACTER. After a keyword —
+//      `return`, `case`, `typeof`, `in`, `await`, `yield`, `else`, `do` — that character is a
+//      letter, so `return /'/.test(x)` was read as a division followed by a string that
+//      never closed, and the reader then swallowed everything up to the next quote ANYWHERE
+//      IN THE FILE. Imports included. MEASURED on 718d362: one module holding that line
+//      above an `appendFileSync` import wrote 19 bytes to /tmp while this file reported 9
+//      tests, 9 pass, 0 fail, exit 0. Not a spelling that slipped past — a whole module the
+//      guard had stopped reading, with no sign that it had.
+//      The remedy is not a better heuristic. There is no character-local answer to that
+//      question, which is why every JS parser tracks it in the grammar. So the reader is now
+//      `acorn`, a DEVDEPENDENCY (this package ships zero runtime dependencies and the parser
+//      is loaded by one test), and everything below is classified by its POSITION IN THE AST
+//      rather than by the characters around it. A module that does not parse is an OFFENCE,
+//      never a skip: a guard that goes quiet on what it cannot read has a documented way to
+//      be blinded — ship it a file it chokes on.
+//      Two more holes closed with it, both of them "the reader erased it": a call inside a
+//      TEMPLATE SUBSTITUTION (`` `${fs.writeFileSync(p, d)}` `` executed and was never
+//      looked at, because `${` skipped to the matching brace), and `import("node:fs").then(
+//      m => m.writeFileSync(...))`, where the namespace never lands in a binding at all.
+//
+//   B4. A WRITE REPACKAGED BY A LOCAL MODULE was conceded in this banner as invisible "and
+//      always will be" — directly under the claim that no module outside the allowlist can
+//      reach a write. Both could not be true, and on main the second was the false one:
+//      `scripts/reconcile.mjs` imports `appendRegularFileSync` from `model/regular-file.mjs`
+//      and hands it a caller-supplied path, and reconcile.mjs was not on the list. The
+//      concession is withdrawn rather than the claim weakened: the seam's own primitives are
+//      PINNED, by name, in `SEAM_WRITE_PROVIDERS`, and importing one from a module the
+//      allowlist does not name is an offence under the member's own name. reconcile.mjs is
+//      now listed, narrowly, with its reason.
+//      That pin is EXACT, and it is the one place in this file where exactness is the point
+//      (B5): every export of a provider must be classified as a write or a read, and a new
+//      export nobody has classified reddens the pin test AND is rejected by name at every
+//      consumer. The node:fs surface stays DERIVED for the opposite reason — Node's surface
+//      is not ours to pin, so an unknown member there is a write.
+//      `model/storage.mjs` and the write ports are deliberately not pinned this way. They are
+//      the DRIVER: ADR-0006 says ticket writes go THROUGH them, so importing one is the
+//      sanctioned route. What is guarded is the raw path-taking primitive underneath.
+//
+// WHAT THIS STILL CANNOT SEE, stated rather than left to look total. This guard now parses,
+// but it is not a scope analyser and not a linker, and each of those is a hole:
+//   * A WRITE REPACKAGED BY AN UNPINNED LOCAL MODULE. `SEAM_WRITE_PROVIDERS` names the
+//     primitives the seam has; a module that wraps node:fs itself and is not pinned there is
+//     invisible to its consumers — but it is an OFFENDER IN ITSELF unless the allowlist
+//     names it, so the chain cannot start without somebody writing the exemption down. An
+//     allowlisted module's exports are, by construction, the sanctioned route.
 //   * AN FS SPECIFIER WITH NO LITERAL FRAGMENT. `import("node:" + "fs")` IS reported — the
 //     `"fs"` fragment is a literal in a position that is not a value position — but
 //     `import("n" + "ode:fs")` contains no fs specifier literal anywhere and is not seen.
 //     This reader does not fold constants and never will.
-//   * CODE INSIDE A STRING. `eval` and `new Function` take a string, and the tokeniser erases
-//     every string. MEASURED: `eval('import("node:fs").then(m => m.writeFileSync(a, b))')`
-//     is the one route out of 34 in the self-attack battery that this guard does not see.
-//     A template WITH a substitution is not in that hole — it is recorded as non-constant and
-//     reported — but its interior is gone all the same.
+//   * CODE INSIDE A STRING. `eval` and `new Function` take a string, and a string is a leaf
+//     to a parser. `eval('import("node:fs").then(m => m.writeFileSync(a, b))')` is the one
+//     route in the self-attack battery that this guard does not see. A template
+//     SUBSTITUTION is no longer in that hole: its interior is real syntax and is walked.
 //   * SHADOWING. A local `const fs = {}` in an inner scope of a module that also has
-//     `import * as fs from "node:fs"` is read as the fs namespace. The guard errs toward
-//     REPORTING, so this is noise rather than blindness.
+//     `import * as fs from "node:fs"` is read as the fs namespace: the walk is over
+//     identifier NAMES, not resolved bindings. The guard errs toward REPORTING, so this is
+//     noise rather than blindness.
 //   * A PLATFORM-CONDITIONAL EXPORT KEY. The surface is derived from the Node this run is
 //     on. `lchmodSync` is safe — it is a KEY on Linux even though its value is `undefined` —
 //     but a member some other platform exports and this one does not name at all would be
@@ -240,246 +302,395 @@ function deriveSurface(mods) {
 const { write: WRITE_SURFACE, namespaces: FS_NAMESPACE_MEMBERS, members: FS_MEMBERS } =
   deriveSurface([fsCallbacks, fsPromises]);
 
-/** One pass over a module that drops comments and replaces every string, template and regex
- *  literal with an inert `""` — while REMEMBERING what each string said and where its
- *  placeholder landed. The remembering is the point, and it is what the first cut lacked:
- *  the guard has to know that `"fs"` next to a `(` is an acquisition and that `?? "fs"` is
- *  the default value of BLAZE_WRITE_PORT, and it can know neither if the strings are already
- *  gone by the time it looks. A template with a `${}` in it is recorded as NOT CONSTANT, so
- *  a specifier assembled inside one is reported rather than read. */
-function scan(src) {
-  const literals = [];
-  let code = ""; let i = 0; let prev = ""; const n = src.length;
-  while (i < n) {
-    const c = src[i], d = src[i + 1];
-    if (c === "/" && d === "/") { while (i < n && src[i] !== "\n") i++; continue; }
-    if (c === "/" && d === "*") {
-      i += 2; while (i < n && !(src[i] === "*" && src[i + 1] === "/")) i++; i += 2; continue;
-    }
-    if (c === '"' || c === "'") {
-      const q = c; i++; let value = "";
-      while (i < n && src[i] !== q) {
-        if (src[i] === "\\") { value += src[i + 1] ?? ""; i += 2; continue; }
-        value += src[i]; i++;
-      }
-      i++;
-      literals.push({ value, at: code.length, constant: true });
-      code += '""'; prev = '"'; continue;
-    }
-    if (c === "`") {
-      i++; let depth = 0; let value = ""; let constant = true;
-      while (i < n) {
-        if (src[i] === "\\") { value += src[i + 1] ?? ""; i += 2; continue; }
-        if (src[i] === "`" && depth === 0) { i++; break; }
-        if (src[i] === "$" && src[i + 1] === "{") { constant = false; depth++; i += 2; continue; }
-        if (src[i] === "}" && depth > 0) { depth--; i++; continue; }
-        if (depth === 0) value += src[i];
-        i++;
-      }
-      literals.push({ value, at: code.length, constant });
-      code += '""'; prev = '"'; continue;
-    }
-    if (c === "/" && (prev === "" || /[=(,:[!&|?{};+\-*%<>~^]/.test(prev))) {
-      i++; let inClass = false;
-      while (i < n) {
-        if (src[i] === "\\") { i += 2; continue; }
-        if (src[i] === "[") inClass = true;
-        else if (src[i] === "]") inClass = false;
-        else if (src[i] === "/" && !inClass) { i++; break; }
-        else if (src[i] === "\n") break;
-        i++;
-      }
-      while (i < n && /[dgimsuvy]/.test(src[i])) i++;
-      code += "0"; prev = "0"; continue;
-    }
-    code += c; if (!/\s/.test(c)) prev = c; i++;
+/** Parse a module with acorn. EVERY executable file in this tree is ESM under
+ *  `"type": "module"`, but a `.cjs` file is a script, so both goals are tried before giving
+ *  up — and giving up is an OFFENCE, never a skip. This is the whole of BLZ-535's third
+ *  pass: the reader this replaces was a hand-rolled tokeniser that decided whether a `/`
+ *  opened a regex by looking at the previous non-space CHARACTER. After `return`, `case`,
+ *  `typeof`, `yield`, `in` and `await` the previous character is a letter, so `return /'/`
+ *  was read as a division followed by an unterminated string — and the tokeniser then ate
+ *  the rest of the file. MEASURED on the commit before this one: a module holding
+ *  `return /'/.test(x)` above an `appendFileSync` import wrote 19 bytes to /tmp while this
+ *  file reported 9 pass / 0 fail at exit 0. A parser has no such state to lose. */
+function parseModule(raw) {
+  const options = {
+    ecmaVersion: "latest", allowHashBang: true,
+    allowReturnOutsideFunction: true, allowAwaitOutsideFunction: true,
+  };
+  let error = null;
+  for (const sourceType of ["module", "script"]) {
+    try { return { ast: parse(raw, { ...options, sourceType }) }; }
+    catch (e) { error ??= e; }
   }
-  return { code, literals };
+  return { error };
 }
 
-/** Every spelling of an fs specifier. There is no regex for these any more — a specifier is
- *  a STRING LITERAL WHOSE VALUE IS ONE OF THESE, so `"expected 'fs', 'dual' or 'db'"` is one
- *  literal that is not any of them rather than a substring match waiting to happen. */
+const AST_SKIP_KEYS = new Set(["type", "start", "end", "loc", "range"]);
+
+/** The three declarations that carry a module specifier of their own. A specifier literal
+ *  sitting in one of these is judged as the import or re-export it is, not as a loose
+ *  literal — and `import(...)`, which also has a `.source`, is deliberately NOT one of them. */
+const DECLARATION_TYPES = new Set([
+  "ImportDeclaration", "ExportNamedDeclaration", "ExportAllDeclaration",
+]);
+
+/** Every node of the tree, and each node's parent. The classification below is entirely
+ *  positional — a name means one thing as a member and another as a binding — so the parent
+ *  link is what replaces the old reader's "what character came before this one". */
+function astIndex(ast) {
+  const parents = new Map(); const nodes = [];
+  const visit = (node, parent) => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) { for (const child of node) visit(child, parent); return; }
+    if (typeof node.type !== "string") return;
+    parents.set(node, parent); nodes.push(node);
+    for (const key of Object.keys(node)) {
+      if (AST_SKIP_KEYS.has(key)) continue;
+      visit(node[key], node);
+    }
+  };
+  visit(ast, null);
+  return { parents, nodes };
+}
+
+/** Every spelling of an fs specifier. A specifier is a STRING LITERAL WHOSE VALUE IS ONE OF
+ *  THESE, so `"expected 'fs', 'dual' or 'db'"` is one literal that is not any of them rather
+ *  than a substring match waiting to happen. */
 const FS_SPECIFIERS = new Set(["fs", "node:fs", "fs/promises", "node:fs/promises"]);
 
 /** The ONE spelling that is also a value in this tree: BLAZE_WRITE_PORT is set to the string
  *  "fs", compared and defaulted in four modules, so bare `"fs"` gets a data exemption and has
  *  to. Every other spelling names node:fs and nothing else, so it gets NO exemption: a
  *  `const S = "node:fs"` that some later line hands to `import(S)` is reported where it sits,
- *  because this reader cannot follow the variable and will not pretend the literal is inert. */
+ *  because this reader does not fold constants and will not pretend the literal is inert. */
 const AMBIGUOUS_SPECIFIER = new Set(["fs"]);
 
+/** The three positions in which a bare `"fs"` is DATA rather than an acquisition, and they
+ *  are the three this tree actually contains: `env.BLAZE_WRITE_PORT ?? "fs"`, `mode === "fs"`
+ *  and `{ name: "fs" }`. Everything else — a call argument, an array element, a `+`, a bare
+ *  `const S = "fs"` — is REPORTED. The old reader answered this question with a regex over
+ *  the preceding characters; the parent node answers it exactly. */
+function isDataPosition(node, parent) {
+  if (!parent) return false;
+  if (parent.type === "LogicalExpression") return true;
+  if (parent.type === "BinaryExpression") {
+    return ["==", "===", "!=", "!=="].includes(parent.operator);
+  }
+  if (parent.type === "Property") return parent.value === node && !parent.computed;
+  return false;
+}
+
 // The offences that are not a member name. Each is a construct the reader CANNOT resolve, and
-// each is reported rather than skipped — F3 and F4 were both "could not read it, so said
-// nothing", and a guard that goes quiet on what it does not understand is not a guard.
+// each is reported rather than skipped — a guard that goes quiet on what it does not
+// understand is not a guard.
 const OPAQUE = "node:fs acquired in a shape this guard cannot read";
 const WHOLESALE = "node:fs re-exported wholesale";
 const COMPUTED = "a computed member access on an fs namespace";
 const ESCAPE = "an fs namespace escaping where this guard cannot follow it";
+const SEAM_WHOLESALE = "the write seam's own primitives taken wholesale";
+const unparseable = (why) => `a module this guard cannot parse, so cannot judge: ${why}`;
 const unreadableClause = (part) => `an fs binding clause this guard cannot read: ${part}`;
 const unknownMember = (name) => `an unknown member \`${name}\` on an fs namespace`;
+const unknownSeamMember = (name) => `an unpinned member \`${name}\` of the write seam`;
 
-/** The token positions in which an fs specifier is a VALUE rather than an acquisition — a
- *  comparison, a default, an assignment, an object property, an array or argument element.
- *  This arm has to exist: BLAZE_WRITE_PORT's value is literally the string "fs", compared and
- *  defaulted in four modules of this tree. Everything NOT on this list, not an import, not a
- *  re-export and not a call argument is REPORTED rather than assumed to be data —
- *  `import("node:" + "fs")` puts the literal next to a `+`, which this reader cannot evaluate
- *  and will not wave through. A specifier sitting in an array that is later joined and
- *  imported is still data to this reader, and is stated in the banner. */
-const DATA_CONTEXT = /(?:[=!]==?|=>|\?\?|&&|\|\||[:=]|\breturn|\bcase)$/;
+/** BLZ-535 B4/B5. The write seam's OWN primitives — a write REPACKAGED BY A LOCAL MODULE,
+ *  which every previous cut of this guard conceded in its banner as invisible while
+ *  `scripts/reconcile.mjs` imported `appendRegularFileSync` and appended to a caller-supplied
+ *  path. Importing one of these from a module the allowlist does not name is now an offence
+ *  under the MEMBER'S OWN NAME, so a narrow exemption can name it.
+ *
+ *  The member set is PINNED and EXACT, not derived, and it is enforced in BOTH directions by
+ *  `the write seam's own primitives are pinned to an exact member set` below: every export of
+ *  the provider must appear in exactly one of these two sets. Adding a third write primitive
+ *  to `regular-file.mjs` therefore reddens this file until somebody classifies it — which is
+ *  the property B5 asks for, and the opposite of the derived node:fs surface, where an
+ *  unknown name is a write because Node's surface is not ours to pin.
+ *
+ *  `model/storage.mjs` and the write ports are deliberately NOT here. They are the DRIVER —
+ *  ADR-0006 says ticket writes go THROUGH them — so importing them is the sanctioned route,
+ *  not the bypass. What is guarded is the raw path-taking primitive underneath. */
+const SEAM_WRITE_PROVIDERS = new Map([
+  ["model/regular-file.mjs", {
+    writes: new Set(["writeRegularFileSync", "appendRegularFileSync"]),
+    reads: new Set(["readRegularFileSync", "NotARegularFileError"]),
+  }],
+]);
 
-const DECL_TARGET = String.raw`(\{[^{}]*\}|[A-Za-z_$][\w$]*)`;
-/** `const X = <anything>(` — the declaration a call-form acquisition lands in. The callee is
- *  deliberately unconstrained: `import`, `require`, `createRequire(import.meta.url)` and a
- *  name nobody has thought of yet are all the same shape, and pinning the callee's SPELLING
- *  is the defect this guard is named after. */
-const CALL_BINDING = new RegExp(
-  String.raw`(?:const|let|var)\s+${DECL_TARGET}\s*=\s*(?:await\s+)?` +
-  String.raw`[A-Za-z_$][\w$.]*\s*(?:\([^()]*\)\s*)*\($`);
-const ASSIGNED_TO = new RegExp(
-  String.raw`(?:^|[;{(,]|\b(?:const|let|var)\b)\s*${DECL_TARGET}\s*=$`);
-
-/** Split a `{ a, b as c }` clause into local -> imported. FAIL-CLOSED: a part that is not a
- *  plain name or a plain alias — a computed key `{ ["writeFileSync"]: w }`, a rest element
- *  `{ ...rest }`, a default — is recorded as an offence rather than dropped. */
-function readBraces(clause, named, hits) {
-  const braces = /\{([\s\S]*)\}/.exec(clause);
-  if (!braces) return false;
-  for (const part of braces[1].split(",")) {
-    const t = part.trim(); if (!t) continue;
-    const aliased = /^([A-Za-z_$][\w$]*)\s*(?::|\bas\b)\s*([A-Za-z_$][\w$]*)$/.exec(t);
-    if (aliased) { named.set(aliased[2], aliased[1]); continue; }
-    if (/^[A-Za-z_$][\w$]*$/.test(t)) { named.set(t, t); continue; }
-    hits.add(unreadableClause(t));
+/** Resolve a relative specifier against the importing module's own seam-relative path, so
+ *  `./regular-file.mjs` from `model/index.mjs` and `../model/regular-file.mjs` from
+ *  `views/data.mjs` are recognised as the same provider. A bare or absolute specifier is not
+ *  one of ours and returns null. */
+function resolveProvider(rel, spec) {
+  if (typeof spec !== "string" || !spec.startsWith(".")) return null;
+  const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
+  const out = [];
+  for (const part of [...dir.split("/"), ...spec.split("/")]) {
+    if (part === "" || part === ".") continue;
+    if (part === "..") { out.pop(); continue; }
+    out.push(part);
   }
-  return true;
+  return SEAM_WRITE_PROVIDERS.get(out.join("/")) ?? null;
 }
 
-/** Bind whatever a namespace-valued expression was assigned to, so the taint follows the
- *  alias: `const p = fs.promises`, `const { writeFileSync } = fs`, `const g = fs`. Returns
- *  false when the expression was not assigned to anything at all, which is the caller's cue
- *  that the namespace escaped somewhere this reader cannot follow. */
-function bindTarget(head, named, ns, hits) {
-  const m = ASSIGNED_TO.exec(head);
-  if (!m) return false;
-  if (m[1].startsWith("{")) readBraces(m[1], named, hits); else ns.add(m[1]);
-  return true;
-}
-
-/** Every reference to one fs NAMESPACE binding, classified. A dotted chain is walked member
- *  by member so `fs.promises.writeFile` resolves; a `[` is an offence because the guard
- *  cannot evaluate it; a bare reference either binds an alias or escapes. */
-function walkNamespace(body, nsName, named, ns, hits) {
-  const re = new RegExp(String.raw`(?<![\w$])${nsName}(?![\w$])`, "g");
-  for (const m of body.matchAll(re)) {
-    const head = body.slice(0, m.index).replace(/\s+$/, "");
-    // `other.fs` is somebody else's member, and not this binding. `...fs` is a SPREAD of this
-    // one — three dots, not a member access — and a lookbehind that rejects any preceding dot
-    // waves it straight through. Found while attacking this fix, not by the review.
-    if (/\.$/.test(head) && !/\.\.\.$/.test(head)) continue;
-    const rest = body.slice(m.index + nsName.length);
-    if (/^\s*\[/.test(rest)) { hits.add(COMPUTED); continue; }
-    const chain = /^((?:\s*\.\s*[A-Za-z_$][\w$]*)+)/.exec(rest);
-    if (chain) {
-      let landedOn = "value";
-      for (const part of chain[1].split(".").map((s) => s.trim()).filter(Boolean)) {
-        if (INERT.has(part)) { landedOn = "value"; break; }
-        if (FS_NAMESPACE_MEMBERS.has(part)) { landedOn = "namespace"; continue; }
-        landedOn = "value";
-        if (WRITE_SURFACE.has(part)) { hits.add(part); break; }
-        if (NON_MUTATING.has(part)) break;
-        hits.add(unknownMember(part)); break;
+/** Every name a module exports, read off the AST. Used to hold the pinned seam surface to
+ *  exactly what the provider exports — no more, and no less. */
+function exportedNames(raw) {
+  const { ast, error } = parseModule(raw);
+  if (!ast) throw new Error(`cannot read exports: ${error.message}`);
+  const names = new Set();
+  for (const node of astIndex(ast).nodes) {
+    if (node.type === "ExportDefaultDeclaration") { names.add("default"); continue; }
+    if (node.type === "ExportAllDeclaration") { names.add(node.exported ? nameOf(node.exported) : "*"); continue; }
+    if (node.type !== "ExportNamedDeclaration") continue;
+    for (const s of node.specifiers) names.add(nameOf(s.exported));
+    const decl = node.declaration;
+    if (!decl) continue;
+    if (decl.type === "VariableDeclaration") {
+      for (const d of decl.declarations) {
+        if (d.id.type === "Identifier") names.add(d.id.name);
+        else names.add(`(${d.id.type})`);
       }
-      // `const p = fs.promises` — the chain ended ON a namespace, so the alias inherits it.
-      if (landedOn === "namespace") bindTarget(head, named, ns, hits);
       continue;
     }
-    if (/^\s*=(?![=>])/.test(rest)) continue;   // this occurrence is the target of an assignment
-    if (bindTarget(head, named, ns, hits)) continue;
-    hits.add(ESCAPE);
+    if (decl.id) names.add(nameOf(decl.id));
   }
+  return names;
 }
 
-/** Every mutating fs member a module BINDS, HANDS ON, or reaches through a namespace —
- *  binding it is the offence, not calling it, so there is no `const w = fs.writeFileSync`
- *  indirection to hide behind. */
-function fsWritesIn(raw) {
-  const { code, literals } = scan(raw);
-  const hits = new Set(); const named = new Map(); const ns = new Set();
+/** An ESTree name node is an Identifier or — for a string module export name — a Literal. */
+function nameOf(node) {
+  if (!node) return null;
+  return node.type === "Identifier" ? node.name : String(node.value);
+}
 
-  // The acquisition sites are blanked out of the body before the namespace scan, so an
-  // import clause's own `fs` is not misread as the namespace escaping into an expression.
-  const masked = [...code];
-  const blank = (from, to) => {
-    for (let k = from; k < to; k++) if (!/\s/.test(masked[k])) masked[k] = " ";
+/** Every mutating fs member a module BINDS, HANDS ON, or reaches through a namespace, plus
+ *  every write primitive it takes off the local seam. Binding it is the offence, not calling
+ *  it, so there is no `const w = fs.writeFileSync` indirection to hide behind. `rel` is the
+ *  module's seam-relative path, and it is load-bearing: it is what a relative specifier is
+ *  resolved against. */
+function fsWritesIn(raw, rel) {
+  const { ast, error } = parseModule(raw);
+  if (!ast) return [unparseable(String(error.message).split("\n")[0])];
+  const { parents, nodes } = astIndex(ast);
+
+  const hits = new Set();
+  const named = new Map();   // a local name -> the fs member it is bound to
+  const ns = new Set();      // local names holding an fs namespace
+  const seenRef = new Set(); // identifier nodes already classified as a namespace reference
+
+  const classifyMember = (at, name) => {
+    if (name === null) { hits.add(COMPUTED); return; }
+    if (INERT.has(name)) return;                                  // fs.constants.O_RDONLY
+    if (FS_NAMESPACE_MEMBERS.has(name)) { classifyNsUse(at); return; }   // fs.promises...
+    if (WRITE_SURFACE.has(name)) { hits.add(name); return; }
+    if (NON_MUTATING.has(name)) return;
+    hits.add(unknownMember(name));
   };
 
-  for (const lit of literals) {
-    if (!FS_SPECIFIERS.has(lit.value)) continue;
-    if (!lit.constant) { hits.add(OPAQUE); continue; }
-    const head = code.slice(0, lit.at).replace(/\s+$/, "");
-
-    if (/\bfrom$/.test(head)) {
-      let kw = null; let kwAt = -1;
-      for (const k of head.matchAll(/\b(import|export)\b/g)) { kw = k[1]; kwAt = k.index; }
-      if (kw === null) { hits.add(OPAQUE); continue; }
-      blank(kwAt, lit.at + 2);
-      const clause = head.slice(kwAt + kw.length, head.length - "from".length).trim();
-      if (kw === "import") {
-        const nsm = /\*\s*as\s+([A-Za-z_$][\w$]*)/.exec(clause);
-        if (nsm) ns.add(nsm[1]);
-        readBraces(clause, named, hits);
-        const def = /^([A-Za-z_$][\w$]*)\s*(?:,|$)/.exec(clause);
-        if (def) ns.add(def[1]);        // a default import IS the namespace: `fs.promises` etc.
-        continue;
+  const readObjectPattern = (pattern) => {
+    for (const prop of pattern.properties) {
+      if (prop.type === "RestElement") { hits.add(WHOLESALE); continue; }  // `{ ...all }`
+      if (prop.computed) { hits.add(COMPUTED); continue; }   // `{ ["writeFileSync"]: w }`
+      const key = nameOf(prop.key);
+      if (key === null) { hits.add(unreadableClause(prop.key.type)); continue; }
+      let value = prop.value;
+      if (value.type === "AssignmentPattern") value = value.left;
+      if (value.type === "Identifier") { named.set(value.name, key); continue; }
+      if (value.type === "ObjectPattern") {
+        if (INERT.has(key)) continue;
+        if (FS_NAMESPACE_MEMBERS.has(key)) { readObjectPattern(value); continue; }
+        hits.add(unreadableClause(`{ ${key}: { … } }`)); continue;
       }
-      // `export ... from "node:fs"` HANDS THE BINDING ON. The first cut counted this as
-      // resolved and then bound nothing, so a re-exporting helper plus a consumer wrote to
-      // disk with the guard green. A re-export of a write is a write, here, in this module.
-      if (clause.includes("*")) { hits.add(WHOLESALE); continue; }
-      const reexported = new Map();
-      if (!readBraces(clause, reexported, hits)) { hits.add(OPAQUE); continue; }
-      for (const imported of reexported.values()) {
-        if (FS_NAMESPACE_MEMBERS.has(imported)) hits.add(WHOLESALE);
-        else if (WRITE_SURFACE.has(imported)) hits.add(imported);
-      }
-      continue;
+      hits.add(unreadableClause(value.type));
     }
+  };
 
-    if (/\($/.test(head)) {
-      // A specifier in a CALL's argument position, whatever the callee is spelled. That is
-      // `import(...)`, `require(...)` and `createRequire(import.meta.url)(...)` alike — the
-      // last of which the first cut missed entirely, because `\brequire` does not match
-      // `createRequire` and so the scan came back with nothing at all to report.
-      const m = CALL_BINDING.exec(head);
-      if (!m) { hits.add(OPAQUE); continue; }
-      blank(m.index, lit.at + 2);
-      if (m[1].startsWith("{")) readBraces(m[1], named, hits); else ns.add(m[1]);
-      continue;
+  /** Bind whatever a namespace-valued expression landed in, so the taint follows the alias. */
+  const bindPattern = (target) => {
+    if (target.type === "Identifier") { ns.add(target.name); return; }
+    if (target.type === "ObjectPattern") { readObjectPattern(target); return; }
+    hits.add(unreadableClause(target.type));
+  };
+
+  /** One reference to a value that IS an fs namespace, classified by where it sits. */
+  const classifyNsUse = (node) => {
+    const parent = parents.get(node);
+    if (!parent) { hits.add(ESCAPE); return; }
+    switch (parent.type) {
+      case "MemberExpression":
+        if (parent.object !== node) break;              // `other[fs]` — not a member of ours
+        if (parent.computed) { hits.add(COMPUTED); return; }
+        classifyMember(parent, nameOf(parent.property));
+        return;
+      case "AwaitExpression": case "ChainExpression": case "ParenthesizedExpression":
+      case "SequenceExpression":
+        classifyNsUse(parent); return;
+      case "VariableDeclarator":
+        if (parent.init === node) { bindPattern(parent.id); return; }
+        break;
+      case "AssignmentExpression":
+        if (parent.right === node) { bindPattern(parent.left); return; }
+        break;
+      case "ExportSpecifier":                            // `export { fs }` — handed on
+        hits.add(WHOLESALE); return;
+      default: break;
     }
+    hits.add(ESCAPE);
+  };
 
-    if (/\bimport$/.test(head)) continue;   // `import "node:fs"` — a side effect, binds nothing
-    if (AMBIGUOUS_SPECIFIER.has(lit.value) && DATA_CONTEXT.test(head)) continue;
+  /** Where an identifier is a BINDING SITE rather than a reference: a property name, a
+   *  declaration, a parameter, an import clause. Everything else is a use. */
+  const isBindingSite = (node, parent) => {
+    if (!parent) return false;
+    switch (parent.type) {
+      case "MemberExpression": return parent.property === node && !parent.computed;
+      case "Property": case "MethodDefinition": case "PropertyDefinition":
+        return parent.key === node && !parent.computed;
+      case "VariableDeclarator": return parent.id === node;
+      case "ImportSpecifier": case "ImportDefaultSpecifier": case "ImportNamespaceSpecifier":
+        return true;
+      case "FunctionDeclaration": case "FunctionExpression": case "ArrowFunctionExpression":
+        return parent.id === node || (parent.params ?? []).includes(node);
+      case "ClassDeclaration": case "ClassExpression": return parent.id === node;
+      case "LabeledStatement": case "BreakStatement": case "ContinueStatement":
+        return parent.label === node;
+      default: return false;
+    }
+  };
+
+  /** Whatever an acquisition — `import(...)`, `require(...)`, `createRequire(...)(...)`, or a
+   *  callee nobody has thought of yet — was assigned to. Unassigned is not silence: a
+   *  namespace that goes somewhere this reader cannot follow is reported. */
+  const bindAcquisition = (valueNode) => {
+    let node = valueNode; let parent = parents.get(node);
+    while (parent && ["AwaitExpression", "ChainExpression", "ParenthesizedExpression"]
+      .includes(parent.type)) { node = parent; parent = parents.get(node); }
+    if (!parent) { hits.add(OPAQUE); return; }
+    if (parent.type === "VariableDeclarator" && parent.init === node) {
+      bindPattern(parent.id); return;
+    }
+    if (parent.type === "AssignmentExpression" && parent.right === node) {
+      bindPattern(parent.left); return;
+    }
+    if (parent.type === "MemberExpression" && parent.object === node) {
+      if (parent.computed) { hits.add(COMPUTED); return; }
+      classifyMember(parent, nameOf(parent.property));   // `import("node:fs").then(...)`
+      return;
+    }
     hits.add(OPAQUE);
+  };
+
+  /** A named member taken off the LOCAL write seam, judged against the pinned member set. */
+  const classifySeamMember = (provider, name) => {
+    if (name === null || !provider.reads.has(name)) {
+      if (name !== null && provider.writes.has(name)) { hits.add(name); return; }
+      hits.add(unknownSeamMember(name ?? "computed"));
+    }
+  };
+
+  const classifyProviderUse = (node, provider) => {
+    if (node.type === "ExportAllDeclaration") { hits.add(SEAM_WHOLESALE); return; }
+    for (const s of node.specifiers ?? []) {
+      if (s.type === "ImportNamespaceSpecifier" || s.type === "ImportDefaultSpecifier") {
+        hits.add(SEAM_WHOLESALE); continue;
+      }
+      classifySeamMember(provider, nameOf(s.type === "ImportSpecifier" ? s.imported : s.local));
+    }
+  };
+
+  for (const node of nodes) {
+    const source = node.source ?? null;
+    const isDecl = node.type === "ImportDeclaration" || node.type === "ExportAllDeclaration"
+      || (node.type === "ExportNamedDeclaration" && source);
+
+    if (isDecl && source && FS_SPECIFIERS.has(source.value)) {
+      if (node.type === "ImportDeclaration") {
+        for (const s of node.specifiers) {
+          if (s.type === "ImportSpecifier") named.set(s.local.name, nameOf(s.imported));
+          else ns.add(s.local.name);          // a default import IS the namespace, as is `* as`
+        }
+        continue;                             // no specifiers: `import "node:fs"` binds nothing
+      }
+      // A re-export HANDS THE BINDING ON: a re-export of a write is a write, here, in this
+      // module — otherwise a two-file chain writes to disk with this guard at exit 0.
+      if (node.type === "ExportAllDeclaration") { hits.add(WHOLESALE); continue; }
+      for (const s of node.specifiers) {
+        const imported = nameOf(s.local);
+        if (imported === null || FS_NAMESPACE_MEMBERS.has(imported)) { hits.add(WHOLESALE); continue; }
+        if (WRITE_SURFACE.has(imported)) hits.add(imported);
+        else if (!FS_MEMBERS.has(imported)) hits.add(unknownMember(imported));
+      }
+      continue;
+    }
+
+    if (isDecl && source) {
+      const provider = resolveProvider(rel, source.value);
+      if (provider) { classifyProviderUse(node, provider); continue; }
+    }
+
+    // A dynamic import whose specifier is not a plain literal cannot be read, and is
+    // therefore reported: every dynamic import in this tree is a literal one.
+    if (node.type === "ImportExpression" && node.source.type !== "Literal") {
+      const spec = node.source;
+      const quasis = spec.type === "TemplateLiteral"
+        ? [spec.quasis.map((q) => q.value.cooked ?? "").join(""),
+          ...spec.quasis.map((q) => q.value.cooked ?? "")] : [];
+      if (spec.type === "TemplateLiteral" && spec.expressions.length === 0
+        && !FS_SPECIFIERS.has(quasis[0])) continue;   // a constant template of something else
+      hits.add(OPAQUE);
+      continue;
+    }
+
+    if (node.type !== "Literal" || typeof node.value !== "string") continue;
+    const parent = parents.get(node);
+
+    if (FS_SPECIFIERS.has(node.value)) {
+      if (parent && parent.source === node && DECLARATION_TYPES.has(parent.type)) continue;
+      if (parent && parent.type === "ImportExpression" && parent.source === node) {
+        bindAcquisition(parent); continue;
+      }
+      // A specifier in a CALL's argument position, whatever the callee is spelled. That is
+      // `require(...)`, `createRequire(import.meta.url)(...)` and
+      // `process.getBuiltinModule(...)` alike — pinning the callee's SPELLING is the defect
+      // this guard is named after.
+      if (parent && parent.type === "CallExpression" && parent.arguments.includes(node)) {
+        bindAcquisition(parent); continue;
+      }
+      if (AMBIGUOUS_SPECIFIER.has(node.value) && isDataPosition(node, parent)) continue;
+      hits.add(OPAQUE);
+      continue;
+    }
+
+    const provider = resolveProvider(rel, node.value);
+    if (provider && parent && ((parent.type === "ImportExpression" && parent.source === node)
+      || (parent.type === "CallExpression" && parent.arguments.includes(node)))) {
+      hits.add(SEAM_WHOLESALE);
+    }
   }
 
-  // A namespace hands out more namespaces (`fs.promises`) and more names (`const { w } = fs`),
-  // so resolution runs to a FIXPOINT rather than one level deep.
-  const body = masked.join("");
-  const walked = new Set();
+  // A namespace hands out more namespaces (`fs.promises`) and more names
+  // (`const { w } = fs`), so resolution runs to a FIXPOINT rather than one level deep.
   for (let grew = true; grew;) {
     grew = false;
     for (const [local, imported] of [...named]) {
       if (FS_NAMESPACE_MEMBERS.has(imported) && !ns.has(local)) { ns.add(local); grew = true; }
     }
-    for (const nsName of [...ns]) {
-      if (walked.has(nsName)) continue;
-      walked.add(nsName); grew = true;
-      walkNamespace(body, nsName, named, ns, hits);
+    for (const node of nodes) {
+      if (node.type !== "Identifier" || !ns.has(node.name) || seenRef.has(node)) continue;
+      seenRef.add(node); grew = true;
+      const parent = parents.get(node);
+      if (isBindingSite(node, parent)) continue;
+      classifyNsUse(node);
     }
   }
-  for (const imported of named.values()) if (WRITE_SURFACE.has(imported)) hits.add(imported);
+
+  for (const imported of named.values()) {
+    if (FS_NAMESPACE_MEMBERS.has(imported) || INERT.has(imported)) continue;
+    if (WRITE_SURFACE.has(imported)) hits.add(imported);
+    else if (!NON_MUTATING.has(imported) && !FS_MEMBERS.has(imported)) {
+      hits.add(unknownMember(imported));
+    }
+  }
   return [...hits].sort();
 }
 
@@ -492,7 +703,7 @@ function writeSeamOffenders(sources, allowed) {
   for (const [rel, raw] of sources) {
     const permitted = allowed.get(rel);
     if (permitted === "*") continue;
-    const hits = fsWritesIn(raw).filter((h) => !(permitted ?? []).includes(h));
+    const hits = fsWritesIn(raw, rel).filter((h) => !(permitted ?? []).includes(h));
     if (hits.length) offenders.push(`${rel} :: ${hits.join(", ")}`);
   }
   return offenders.sort();
@@ -561,6 +772,20 @@ const WRITE_ALLOWED = new Map([
   // `writeSync(2, ...)` — a partial-write loop onto STDERR, which is a terminal, not a file.
   // Named to that one member: a path-taking write appearing in the CLI still reddens.
   ["cli.mjs", ["writeSync"]],
+  // BLZ-535 B4 — a LIVE hole on main until this pass, and the reason the banner above used
+  // to be false. `reconcile.mjs` imports `appendRegularFileSync` out of
+  // `model/regular-file.mjs` and hands it a caller-supplied path, so a module this list did
+  // not name reached a write while the banner claimed none could. Nothing about that import
+  // was hidden; the guard simply did not look at LOCAL repackagings of a write, and said so
+  // in its own banner as though conceding a hole were the same as not having one.
+  //
+  // Listed rather than removed, and narrowly. The write is the BLZ_MEASURE census: one JSONL
+  // line per git probe, to a path the OPERATOR names in the environment, written only while
+  // that variable is set and never on a normal run. It is not a ticket, so ADR-0006 has no
+  // claim on it, and it must be the FIFO-safe primitive precisely because the operator may
+  // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
+  // primitive, appearing in reconcile still reddens.
+  ["reconcile.mjs", ["appendRegularFileSync"]],
 ]);
 
 test("the mutating fs surface is DERIVED from node:fs, and derived fail-closed", () => {
@@ -719,10 +944,128 @@ test("a write is seen through any spelling, alias, namespace or dynamic import",
     "the whole module re-exported under a name": 'export * as fs from "node:fs";',
     "the default re-exported, which is the namespace again":
       'export { default as fs } from "node:fs";',
+    // BLZ-535 round 3. The reader this replaces erased a template's interior along with the
+    // template — `${` set a flag and it skipped to the matching `}` — so a call written
+    // inside a substitution executed at import time and was never looked at.
+    "a write inside a template substitution":
+      'import * as fs from "node:fs";\nexport const s = `${fs.writeFileSync(p, d)}`;',
+    // the namespace never lands in a binding at all: it is the argument of a `.then`
+    "a namespace taken straight off a dynamic import's `.then`":
+      'import("node:fs").then((m) => m.writeFileSync(p, d));',
+    "the builtin module handed over by name rather than imported":
+      'const fs = process.getBuiltinModule("node:fs");\nfs.writeFileSync(p, d);',
+    // FAIL CLOSED: a module this guard cannot read is a module the seam does not cover, so
+    // a parse failure is an OFFENCE. A guard that skips what it cannot parse is a guard with
+    // a documented way to become invisible: ship a file it chokes on.
+    "a module that does not parse, which is not a module this guard may skip":
+      'import { writeFileSync } from "node:fs"\nfunction ( { ;',
+    // the bare spelling is the only one with a data exemption, and the exemption is exactly
+    // three positions wide. A `"fs"` anywhere else is REPORTED rather than assumed inert —
+    // this reader does not follow a variable into a later `import(spec)`.
+    "a bare fs specifier parked in a position that is not one of the three data shapes":
+      'export const spec = "fs";',
   };
   for (const [why, src] of Object.entries(cases)) {
     const found = writeSeamOffenders(new Map([["fake.mjs", src]]), new Map());
     assert.ok(found.length === 1, `${why}: this must be an offender, and it is not — ${src}`);
+  }
+});
+
+test("a regex literal does not blind this guard to the rest of the module", () => {
+  // BLZ-535 ROUND 3, and the reason there is a parser here at all. The reader this replaces
+  // decided whether a `/` opened a regex by looking at the previous non-space CHARACTER.
+  // After a KEYWORD that character is a letter, so `return /'/` was read as a division
+  // followed by a string that never closed — and everything from there to the next quote in
+  // the file, imports included, stopped existing as far as the guard was concerned.
+  //
+  // MEASURED on 718d362, the commit before this one: `scripts/attack-b1.mjs` holding
+  // `return /'/.test(x)` above an `appendFileSync` import wrote 19 bytes to disk while this
+  // file reported 9 tests, 9 pass, 0 fail, exit 0. One module, one character, whole file
+  // invisible. Each row below is that defect with a different keyword in front of it.
+  const afterAKeyword = {
+    return: "export function q(x) { return /'/.test(x); }",
+    case: "switch (k) { case 1: /'/.test(x); }",
+    typeof: "export const t = typeof /'/;",
+    in: 'export const i = "k" in /\'/;',
+    await: "export const a = await /'/.exec(s);",
+    yield: "export function* g() { yield /'/; }",
+    else: "if (a) { b(); } else /'/.test(x);",
+    do: "do /'/.test(x); while (0);",
+  };
+  for (const [keyword, prefix] of Object.entries(afterAKeyword)) {
+    // the trailing literal is what made the old reader's swallow END, so the damage was a
+    // silently invisible MIDDLE rather than an obvious truncation
+    const src = `${prefix}\nimport { appendFileSync } from "node:fs";\nappendFileSync(p, d);\n` +
+      "export const note = \"it's\";";
+    assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()),
+      ["fake.mjs :: appendFileSync"],
+      `a write below a regex literal after \`${keyword}\` must still be seen — it was not, ` +
+      "and that is not a spelling this guard missed, it is a whole module it stopped reading");
+  }
+});
+
+test("a write primitive taken off the LOCAL write seam is a write", () => {
+  // BLZ-535 B4. A live hole on main: `scripts/reconcile.mjs` imports `appendRegularFileSync`
+  // from `model/regular-file.mjs` and hands it a caller-supplied path, while every previous
+  // cut of this guard CONCEDED IN ITS OWN BANNER that a write repackaged by a local module
+  // was invisible "and always will be" — under a banner that also claimed no module outside
+  // the allowlist could reach a write. Both could not be true. The concession is withdrawn:
+  // the seam's own primitives are pinned, and taking one is an offence under its own name.
+  const consumer = (spec, clause) =>
+    new Map([["views/consumer.mjs", `import ${clause} from "${spec}";`]]);
+  const cases = [
+    ["{ appendRegularFileSync }", "appendRegularFileSync"],
+    ["{ writeRegularFileSync as jot }", "writeRegularFileSync"],
+    ["* as rf", SEAM_WHOLESALE],
+    ["rf", SEAM_WHOLESALE],
+    // a member nobody has pinned is an offence IN ITSELF — this is the consumer-side half of
+    // B5, and it is what makes adding a write primitive to the seam impossible to do quietly
+    ["{ truncateRegularFileSync }", unknownSeamMember("truncateRegularFileSync")],
+  ];
+  for (const [clause, offence] of cases) {
+    assert.deepEqual(
+      writeSeamOffenders(consumer("../model/regular-file.mjs", clause), new Map()),
+      [`views/consumer.mjs :: ${offence}`],
+      `\`import ${clause}\` off the write seam must be an offence in the consumer`);
+  }
+  // ...and the two halves of discrimination: a READ off the same module is not a write, and
+  // a function that merely SHARES A NAME, from a module that is not the seam, is not one.
+  assert.deepEqual(
+    writeSeamOffenders(consumer("../model/regular-file.mjs", "{ readRegularFileSync }"), new Map()),
+    [], "a read off the write seam is a read");
+  assert.deepEqual(
+    writeSeamOffenders(consumer("./local-helpers.mjs", "{ appendRegularFileSync }"), new Map()),
+    [], "the SEAM is what is guarded, not the spelling of a function name");
+  // the resolution is relative to the IMPORTING module, so the same provider is the same
+  // provider from anywhere in the tree
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["model/x.mjs",
+      'import { appendRegularFileSync } from "./regular-file.mjs";']]), new Map()),
+    ["model/x.mjs :: appendRegularFileSync"],
+    "`./regular-file.mjs` from model/ and `../model/regular-file.mjs` from views/ are one module");
+});
+
+test("the write seam's own primitives are pinned to an exact member set", () => {
+  // BLZ-535 B5. The node:fs surface is DERIVED and fail-closed, because Node's surface is not
+  // ours to pin — an unknown member there is a write. The SEAM's surface is the opposite: it
+  // is ours, it changes when we change it, and a new primitive on it must not be usable
+  // before anybody has judged it. So it is pinned MEMBER BY MEMBER and checked BOTH WAYS
+  // against what the module actually exports: adding `truncateRegularFileSync` to
+  // regular-file.mjs, or deleting one of the two writes, reddens THIS test until the pin is
+  // updated — and until then the consumer-side test above rejects the new member by name.
+  const sources = corpus();
+  for (const [rel, provider] of SEAM_WRITE_PROVIDERS) {
+    const src = sources.get(rel);
+    assert.ok(src !== undefined,
+      `${rel} is pinned as a write-seam provider and is not in the corpus at all`);
+    const exported = [...exportedNames(src)].sort();
+    assert.ok(exported.length > 0,
+      `no exports were read out of ${rel} — the reader is dead, and a dead reader agrees ` +
+      "with every pin there has ever been");
+    assert.deepEqual(exported, [...provider.writes, ...provider.reads].sort(),
+      `${rel} is the write seam's own surface. Every export of it must be classified here as ` +
+      "a write or a read, exactly once. A new export nobody has classified is a write " +
+      "primitive the allowlist cannot name and the guard cannot judge.");
   }
 });
 
@@ -754,6 +1097,14 @@ test("prose, a message or a regex that merely NAMES a write is not a write", () 
     'export { readFileSync } from "node:fs";',
     // a side-effect import binds nothing
     'import "node:fs";\nconsole.log(1);',
+    // the other side of the regex/division question the old reader got wrong: a division is
+    // a division, and a parser needs no heuristic to say so
+    'import { readFileSync } from "node:fs";\nexport const half = (a) => a / 2 / 2;',
+    // a template substitution is READ now rather than erased, so what is inside one is
+    // judged on its merits — a read is still a read
+    'import * as fs from "node:fs";\nexport const s = `${fs.readFileSync(p)}`;',
+    // a READ off the local write seam, which is the module B4 pinned
+    'import { readRegularFileSync } from "./model/regular-file.mjs";\nreadRegularFileSync(p);',
   ];
   for (const src of innocent) {
     assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()), [],
@@ -778,8 +1129,28 @@ test("the write-seam scan OBSERVED the corpus, and its allowlist is all load-bea
     `the scan saw ${sources.size} modules under scripts/ — it is not reading the corpus`);
   assert.ok(sources.has("ci/mutate-schedule.mjs"),
     "`ci/` is inside the corpus now; if it is not here the widening has been undone");
-  assert.deepEqual(fsWritesIn(sources.get("model/storage.mjs")).includes("renameSync"), true,
+  assert.deepEqual(fsWritesIn(sources.get("model/storage.mjs"), "model/storage.mjs")
+    .includes("renameSync"), true,
     "the write seam itself must register as a writer — if it does not, the detector is dead");
+
+  // BLZ-535 round 3. The reader is a PARSER now, so "could not read it" is a state it can
+  // actually be in — and the one it must never be in quietly. Every module in the corpus is
+  // asserted to have PARSED and to have yielded nodes: a scan that could not look is not a
+  // scan that looked, and a parse failure is an offence above rather than a skip.
+  const unread = [];
+  for (const [rel, src] of sources) {
+    const { ast } = parseModule(src);
+    if (!ast || astIndex(ast).nodes.length === 0) unread.push(rel);
+  }
+  assert.deepEqual(unread, [],
+    "these modules did not parse, so nothing in this file has judged them. A guard that " +
+    "cannot read a module has not cleared it.");
+
+  // B4, on the live tree rather than on a fixture: the module that proved the banner false.
+  assert.ok(fsWritesIn(sources.get("reconcile.mjs"), "reconcile.mjs")
+    .includes("appendRegularFileSync"),
+    "reconcile.mjs takes a write primitive off the local seam. If this stops being seen, " +
+    "the hole that was live on main until BLZ-535's third pass is open again.");
 
   // A NARROWED exemption has to be enforced by something, or naming its members is a review
   // convention wearing a guard's clothes. MEASURED against the first cut: widening
@@ -790,7 +1161,7 @@ test("the write-seam scan OBSERVED the corpus, and its allowlist is all load-bea
   for (const [rel, permitted] of WRITE_ALLOWED) {
     const src = sources.get(rel);
     if (src === undefined) { dead.push(`${rel} (no such module)`); continue; }
-    const writes = fsWritesIn(src);
+    const writes = fsWritesIn(src, rel);
     if (permitted === "*") {
       if (writes.length === 0) dead.push(`${rel} (reaches nothing mutating any more)`);
       continue;
