@@ -217,17 +217,67 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      the DRIVER: ADR-0006 says ticket writes go THROUGH them, so importing one is the
 //      sanctioned route. What is guarded is the raw path-taking primitive underneath.
 //
+// ROUND 5 — THREE MORE, and the class they share: round 4 stopped pinning the CALLEE's
+// spelling and started pinning the LITERAL's. Same defect, one layer down.
+//
+//   D1. AN ACQUISITION WAS ONLY EXAMINED WHEN ITS SPECIFIER WAS A PLAIN STRING `Literal`.
+//      `process.getBuiltinModule(`node:fs`)` — backticks — landed a real file with the guard
+//      at 12 pass / 0 fail, while the SAME LINE in double quotes reddened it. Backtick versus
+//      quote was the whole difference. So did `require(`node:fs`)`, so did
+//      `require(["f", "s"].join(""))` with no fs literal anywhere in the file, and so did a
+//      specifier parked in a variable — `const mode = env.BLAZE_WRITE_PORT ?? "fs"` copied
+//      verbatim out of this file's own innocent list, where the literal really is data and
+//      the VARIABLE is what carries it.
+//      Two changes. The reader FOLDS constants — a template with no substitution, a `+` of
+//      constants and an array `.join()` of constants are one VALUE, and the value is judged —
+//      so the first three are ordinary specifiers again. And what will not fold is not
+//      waved through: a call whose arguments this reader cannot fold is a possible
+//      acquisition whatever the callee is called, so its RESULT is watched, and reaching a
+//      mutating member or a nested fs namespace through it is an offence.
+//
+//   D2. THE PIN WAS DEFEATED BY THREE CHARACTERS. `resolveProvider` joined path segments and
+//      looked the result up in a Map, so `"./model/regular-file.mjs?v=1"` — the same module
+//      to Node, a different key to a Map — reopened the whole of B4. A `?query` or
+//      `#fragment` is stripped before the lookup now, and before an fs specifier is matched.
+//
+//   D3. B4 WAS CLOSED FOR ONE MODULE OUT OF SIXTEEN. The pin named `model/regular-file.mjs`
+//      and defended the rest with a general claim — "an allowlisted module's exports are, by
+//      construction, the sanctioned route" — which was self-refuting, because regular-file.mjs
+//      is itself `*`-allowlisted and was pinned anyway. MEASURED: `saveState("/tmp/X", {})`,
+//      out of `*`-allowlisted `loops/groomer.mjs`, created a file from a module the allowlist
+//      does not name, at 12 pass / 0 fail. `restoreSnapshot`, `appendEntry`, `acquireLock`,
+//      `issueSetupToken` and `saveSprints` are the same shape.
+//      The general claim is gone. Every module the allowlist names is now pinned — membership
+//      DERIVED from the allowlist, so exempting a module without judging its exports is
+//      itself an offence — and every export of every one of them is classified as a write
+//      primitive, as sanctioned, or as inert. Seven consumers of those primitives joined the
+//      allowlist, each named to the members it takes and each with its reason.
+//      Neither the classification nor the coverage is taken on trust: a reachability walk
+//      over each module decides which of its exports actually put bytes on disk, and the pin
+//      must agree with it exactly, both ways.
+//
+// THIS FILE HARD-DEPENDS ON `acorn`, and that is a failure mode worth naming: without
+// `npm ci` the whole file dies at import with ERR_MODULE_NOT_FOUND — 1 test, 1 fail — which
+// is a MISSING GUARD wearing the clothes of a failing one. It is a devDependency, `npm ci`
+// installs it in every workflow that runs the suite, and the two workflows that skip
+// devDependencies (smoke, build-image) run no tests at all.
+//
 // WHAT THIS STILL CANNOT SEE, stated rather than left to look total. This guard now parses,
 // but it is not a scope analyser and not a linker, and each of those is a hole:
-//   * A WRITE REPACKAGED BY AN UNPINNED LOCAL MODULE. `SEAM_WRITE_PROVIDERS` names the
-//     primitives the seam has; a module that wraps node:fs itself and is not pinned there is
-//     invisible to its consumers — but it is an OFFENDER IN ITSELF unless the allowlist
-//     names it, so the chain cannot start without somebody writing the exemption down. An
-//     allowlisted module's exports are, by construction, the sanctioned route.
-//   * AN FS SPECIFIER WITH NO LITERAL FRAGMENT. `import("node:" + "fs")` IS reported — the
-//     `"fs"` fragment is a literal in a position that is not a value position — but
-//     `import("n" + "ode:fs")` contains no fs specifier literal anywhere and is not seen.
-//     This reader does not fold constants and never will.
+//   * A WRITE REPACKAGED BY A MODULE THE ALLOWLIST DOES NOT NAME. Every module it DOES name
+//     is pinned export by export since D3, so that half is closed. A module the allowlist
+//     does not name cannot repackage a write without being an offender itself — it would
+//     have to reach node:fs to have a write to repackage — so the chain cannot start. What
+//     remains is narrower and real: a module could re-export a SANCTIONED verb of an
+//     allowlisted module under a new name, and its consumers would see that name rather than
+//     the pinned one. The verb still writes only where its own job says.
+//   * AN UNFOLDABLE ACQUISITION WHOSE RESULT NEVER NAMES AN FS MEMBER. Constants fold now, so
+//     `"node:" + "fs"`, `` `node:fs` `` and `["f", "s"].join("")` are all reported, fragment
+//     or no fragment. What is not reported is `const fs = getBuiltinModule(mode)` followed by
+//     `fs[k](p, d)` or `registerBackend(fs)`: a COMPUTED access on a call result occurs 112
+//     times in this tree as ordinary code, and reporting all of them would get the guard
+//     deleted. Reaching a NAMED mutating member through such a binding IS reported, and that
+//     is every shape the review drove a write through.
 //   * CODE INSIDE A STRING. `eval` and `new Function` take a string, and a string is a leaf
 //     to a parser. `eval('import("node:fs").then(m => m.writeFileSync(a, b))')` is the one
 //     route in the self-attack battery that this guard does not see. A template
@@ -353,10 +403,46 @@ function astIndex(ast) {
   return { parents, nodes };
 }
 
-/** Every spelling of an fs specifier. A specifier is a STRING LITERAL WHOSE VALUE IS ONE OF
- *  THESE, so `"expected 'fs', 'dual' or 'db'"` is one literal that is not any of them rather
- *  than a substring match waiting to happen. */
+/** The constant string an expression evaluates to, or null when this reader cannot fold it.
+ *  BLZ-535 ROUND 5, D1: the previous cut examined a specifier only when it was a plain string
+ *  `Literal`, so it had stopped pinning the CALLEE's spelling and started pinning the
+ *  LITERAL's — same defect, one layer down. `process.getBuiltinModule(`node:fs`)` with
+ *  backticks landed a real file with the guard green while the same line in double quotes
+ *  reddened it. Backtick versus quote was the whole difference. Folding removes the
+ *  question: a template with no substitution, a `+` of constants and an array `.join()` of
+ *  constants are all the same VALUE, and the value is what is judged. */
+function constantString(node) {
+  if (!node) return null;
+  switch (node.type) {
+    case "Literal": return typeof node.value === "string" ? node.value : null;
+    case "TemplateLiteral":
+      return node.expressions.length === 0
+        ? node.quasis.map((q) => q.value.cooked ?? "").join("") : null;
+    case "BinaryExpression": {
+      if (node.operator !== "+") return null;
+      const left = constantString(node.left); const right = constantString(node.right);
+      return left === null || right === null ? null : left + right;
+    }
+    case "CallExpression": {
+      const callee = node.callee;
+      if (callee.type !== "MemberExpression" || callee.computed) return null;
+      if (nameOf(callee.property) !== "join" || callee.object.type !== "ArrayExpression") return null;
+      const sep = node.arguments.length === 0 ? "," : constantString(node.arguments[0]);
+      if (sep === null) return null;
+      const parts = callee.object.elements.map((e) => constantString(e));
+      return parts.some((part) => part === null) ? null : parts.join(sep);
+    }
+    default: return null;
+  }
+}
+
+/** Every spelling of an fs specifier. A specifier is a CONSTANT STRING WHOSE VALUE IS ONE OF
+ *  THESE, so `"expected 'fs', 'dual' or 'db'"` is one string that is not any of them rather
+ *  than a substring match waiting to happen. A `?query` or `#fragment` suffix is stripped
+ *  first: Node tolerates one on a specifier, and a map lookup does not (D2). */
 const FS_SPECIFIERS = new Set(["fs", "node:fs", "fs/promises", "node:fs/promises"]);
+const withoutSuffix = (spec) => spec.split("?")[0].split("#")[0];
+const isFsSpecifier = (value) => typeof value === "string" && FS_SPECIFIERS.has(withoutSuffix(value));
 
 /** The ONE spelling that is also a value in this tree: BLAZE_WRITE_PORT is set to the string
  *  "fs", compared and defaulted in four modules, so bare `"fs"` gets a data exemption and has
@@ -380,6 +466,13 @@ function isDataPosition(node, parent) {
   return false;
 }
 
+/** A member name that would take a value INTO the fs surface: a mutating member, or one of
+ *  the nested namespaces that leads to the whole surface a second time. Used to decide
+ *  whether an acquisition this reader could not fold matters. */
+function reachesFsSurface(name) {
+  return name !== null && (WRITE_SURFACE.has(name) || FS_NAMESPACE_MEMBERS.has(name));
+}
+
 // The offences that are not a member name. Each is a construct the reader CANNOT resolve, and
 // each is reported rather than skipped — a guard that goes quiet on what it does not
 // understand is not a guard.
@@ -393,27 +486,128 @@ const unreadableClause = (part) => `an fs binding clause this guard cannot read:
 const unknownMember = (name) => `an unknown member \`${name}\` on an fs namespace`;
 const unknownSeamMember = (name) => `an unpinned member \`${name}\` of the write seam`;
 
-/** BLZ-535 B4/B5. The write seam's OWN primitives — a write REPACKAGED BY A LOCAL MODULE,
- *  which every previous cut of this guard conceded in its banner as invisible while
- *  `scripts/reconcile.mjs` imported `appendRegularFileSync` and appended to a caller-supplied
- *  path. Importing one of these from a module the allowlist does not name is now an offence
- *  under the MEMBER'S OWN NAME, so a narrow exemption can name it.
+/** BLZ-535 B4/B5, widened in round 5 by D3. Every module the write allowlist names, and the
+ *  disposition of EVERY name it exports. Round 4 pinned ONE of them — `regular-file.mjs` —
+ *  and defended the other fifteen with a general claim ("an allowlisted module's exports are,
+ *  by construction, the sanctioned route") that was self-refuting: regular-file.mjs is itself
+ *  `*`-allowlisted and was pinned anyway, precisely because it takes a caller-supplied path.
+ *  MEASURED: `import { saveState } from "./loops/groomer.mjs"; saveState("/tmp/X", {})`
+ *  created a file from a module the allowlist does not name, at 12 pass / 0 fail.
  *
- *  The member set is PINNED and EXACT, not derived, and it is enforced in BOTH directions by
- *  `the write seam's own primitives are pinned to an exact member set` below: every export of
- *  the provider must appear in exactly one of these two sets. Adding a third write primitive
- *  to `regular-file.mjs` therefore reddens this file until somebody classifies it — which is
- *  the property B5 asks for, and the opposite of the derived node:fs surface, where an
- *  unknown name is a write because Node's surface is not ours to pin.
+ *  So the general claim is gone and every export is judged, in one of three buckets:
  *
- *  `model/storage.mjs` and the write ports are deliberately NOT here. They are the DRIVER —
- *  ADR-0006 says ticket writes go THROUGH them — so importing them is the sanctioned route,
- *  not the bypass. What is guarded is the raw path-taking primitive underneath. */
+ *    writes     — a WRITE PRIMITIVE: the caller chooses the destination and the content, so
+ *                 with it any module can put any bytes anywhere, a ticket included. Importing
+ *                 one from a module the allowlist does not name is an OFFENCE, under the
+ *                 member's own name, so a narrow exemption can name it.
+ *    sanctioned — it writes, and it is the module's OWN verb or the driver's entry point:
+ *                 what it writes and where is its job, not its caller's choice. ADR-0006 says
+ *                 ticket writes go THROUGH the driver, so the driver's front door cannot be
+ *                 the bypass the guard exists to stop. Each is named with what it writes.
+ *    inert      — reaches nothing mutating in node:fs at all.
+ *
+ *  None of those three is taken on trust. `the allowlist's own modules are pinned, export by
+ *  export` asserts the union is EXACTLY what the module exports, and `every export that
+ *  reaches a write is classified as one` asserts `writes ∪ sanctioned` is EXACTLY what a
+ *  reachability walk over the module finds. A new export reddens the first; a write added to
+ *  an inert export reddens the second; a `sanctioned` entry that has stopped writing reddens
+ *  it too. */
 const SEAM_WRITE_PROVIDERS = new Map([
-  ["model/regular-file.mjs", {
-    writes: new Set(["writeRegularFileSync", "appendRegularFileSync"]),
-    reads: new Set(["readRegularFileSync", "NotARegularFileError"]),
-  }],
+  // The FIFO-safe primitive of ADR-0031: caller's path, caller's bytes. This is the one that
+  // was live on main — reconcile.mjs took `appendRegularFileSync` and the guard could not see
+  // it. `readRegularFileSync` reaches `openSync`, which is on the mutating surface because
+  // `open` can create; this one cannot, because it opens O_RDONLY|O_NONBLOCK and checks the
+  // descriptor. That is why it is sanctioned rather than a write, and why it is recorded here
+  // instead of quietly excluded.
+  ["model/regular-file.mjs", { writes: ["writeRegularFileSync", "appendRegularFileSync"],
+    sanctioned: ["readRegularFileSync"], inert: ["NotARegularFileError"] }],
+  // The WRITE SEAM itself. `fsStorage` writes every ticket there is — and it is the driver,
+  // so importing it is the route ADR-0006 prescribes, not a bypass of it.
+  ["model/storage.mjs", { writes: [], sanctioned: ["fsStorage"],
+    inert: ["slugify", "ticketPath", "memStorage"] }],
+  // The allocator, deleted at Phase 2. `allocateId` and `writeClaim` put a claim file under a
+  // caller-supplied projects dir; `ensureCutover` writes the cutover marker.
+  ["model/ids.mjs", { writes: ["allocateId"], sanctioned: [], inert: ["maxId", "nextId"] }],
+  ["model/claims.mjs", { writes: ["writeClaim", "ensureCutover"], sanctioned: [],
+    inert: ["claimDir", "claimPath", "claimedNumbers", "maxClaim", "cutoverPath",
+      "readCutover", "remoteMaxClaim"] }],
+  // `loadTransitions` refreshes the git-rename cache it reads. `buildTransitions` is pure —
+  // the reviewer named it as a write primitive and the reachability walk disagrees, which is
+  // the point of having one.
+  ["model/transitions.mjs", { writes: [], sanctioned: ["loadTransitions"],
+    inert: ["parseTransitions", "buildTransitions"] }],
+  // The sprint registry: `saveSprints({ root }, registry)` is caller's root, caller's bytes.
+  ["model/sprints.mjs", { writes: ["saveSprints"], sanctioned: [],
+    inert: ["SPRINT_REGISTRY_VERSION", "loadSprints", "unstampedRegistryWarning",
+      "nextSprintId", "isIsoDate", "validateSprintFields", "addSprint", "setActive",
+      "formatSprintList"] }],
+  ["reindex.mjs", { writes: [], sanctioned: [], inert: [] }],       // derived caches, no exports
+  ["migrate-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["cli.mjs", { writes: [], sanctioned: [], inert: [] }],
+  // The pending ledger: an op queue under a caller-supplied root, appended to and cleared.
+  ["pending-ledger.mjs", { writes: ["appendEntry", "clearLedger", "quarantineDropped"],
+    sanctioned: [], inert: ["sessionId", "queueRoot", "ledgerPath", "readQueue", "readEntries",
+      "readForDrain", "quarantinePath", "listQueues", "listQueuesResult", "strandedQueues",
+      "worktreeBranchOwners", "belongsHere", "outstandingFiles"] }],
+  // The commit lock: a lockfile under a caller-supplied root, taken and released.
+  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock"], sanctioned: [],
+    inert: ["lockPath"] }],
+  ["migrate/jira-import.mjs", { writes: [], sanctioned: ["runLive"],
+    inert: ["loadNormalized", "runDryRun"] }],
+  ["migrate/jira-client.mjs", { writes: ["writeRawCache"], sanctioned: [],
+    inert: ["cacheFile", "readRawCache"] }],
+  // `saveState` and `restoreSnapshot` are the two the reviewer landed a file with: root and
+  // contents both come from the caller. `groomOnce` is the groomer's verb.
+  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot"], sanctioned: ["groomOnce"],
+    inert: ["hashContent", "loadState", "statusDirs", "matchersFor", "selectNextTicket",
+      "extractGroomingRules", "buildPrompt", "parseChangedFiles", "isStructuralChange",
+      "redactSecrets", "outOfBoundsPaths", "CONFIG_FILE", "DEFAULT_TIMEOUT_SEC",
+      "DEFAULT_MAX_BUFFER_MB", "git", "SNAPSHOT_SKIP_DIRS", "SNAPSHOT_SKIP_FILES",
+      "snapshotTree", "diffSnapshots", "porcelainLines", "commitMessage"] }],
+  ["init-runner.mjs", { writes: [], sanctioned: ["runInit"],
+    inert: ["parseArgs", "USAGE", "askHidden"] }],
+  // The setup-token credential. All three touch it or the .gitignore line that hides it.
+  ["model/setup-token.mjs",
+    { writes: ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored"], sanctioned: [],
+      inert: ["SETUP_TOKEN_PREFIX", "setupTokenPath", "readSetupToken", "setupTokenMatches",
+        "_existsSync"] }],
+  ["ci/mutate-schedule.mjs", { writes: ["createSandbox", "discardSandbox"], sanctioned: [],
+    inert: ["SANDBOX_CONTENTS", "MUTATIONS"] }],
+  ["db-runner.mjs", { writes: [], sanctioned: ["runDb"], inert: ["USAGE"] }],
+  // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
+  // the loader that goes through it.
+  ["model/identity-db.mjs", { writes: ["openIdentityDb"], sanctioned: ["loadIdentity"],
+    inert: ["identityDbPath", "identityExec"] }],
+  // `addUser` and `setUserPassword` write to the identity DATABASE, which is node:sqlite and
+  // not this guard's surface at all. `ensureIdentityIgnored` appends the .gitignore line.
+  ["model/user-admin.mjs", { writes: ["ensureIdentityIgnored"],
+    sanctioned: ["addUser", "setUserPassword"], inert: ["USER_VERBS", "parseUserArgv"] }],
+  // The soak's artifacts under gitignored .blaze/. `resolveWritePort` is how a verb OBTAINS
+  // the driver — the front door again, not a bypass.
+  ["model/write-port-resolve.mjs",
+    { writes: ["openShadow", "logDivergence", "recordSoakOp"], sanctioned: ["resolveWritePort"],
+      inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
+        "sqliteExec", "readSoakState", "assertConfigNamespace"] }],
+  // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
+  // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
+  // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
+  // whose own exports nobody has judged is how the primitive travels one module further.
+  // Each of these exports a VERB: what it writes and where is its job, not its caller's.
+  ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
+  ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["commit-or-queue.mjs", { writes: [], sanctioned: ["commitOrQueue"],
+    inert: ["commitSuffix"] }],
+  ["serve-commit.mjs", { writes: [], sanctioned: ["commitFile"], inert: [] }],
+  ["serve.mjs", { writes: [], sanctioned: ["startServer"],
+    inert: ["CSRF", "boardModel", "contentHash", "liveModel", "pageHtml",
+      "reconcilePreview"] }],
+  ["new.mjs", { writes: [], sanctioned: ["applyNew"], inert: [] }],
+  ["reconcile.mjs", { writes: [], sanctioned: ["buildBranchMap", "reconcile"],
+    inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
+      "idsFromSubject", "claimCorroborated", "prTitleClaim", "betterPr", "buildPrMap",
+      "ambiguousDeliverers", "remoteHost", "classifyRemote", "parseRemoteUrls", "gatherPrs",
+      "recordablePr"] }],
 ]);
 
 /** Resolve a relative specifier against the importing module's own seam-relative path, so
@@ -422,9 +616,12 @@ const SEAM_WRITE_PROVIDERS = new Map([
  *  one of ours and returns null. */
 function resolveProvider(rel, spec) {
   if (typeof spec !== "string" || !spec.startsWith(".")) return null;
+  // D2. `./model/regular-file.mjs?v=1` is the same module to Node and a different KEY to a
+  // Map, and three characters reopened the whole of B4 with the guard at 12 pass / 0 fail.
+  const clean = withoutSuffix(spec);
   const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
   const out = [];
-  for (const part of [...dir.split("/"), ...spec.split("/")]) {
+  for (const part of [...dir.split("/"), ...clean.split("/")]) {
     if (part === "" || part === ".") continue;
     if (part === "..") { out.pop(); continue; }
     out.push(part);
@@ -434,27 +631,131 @@ function resolveProvider(rel, spec) {
 
 /** Every name a module exports, read off the AST. Used to hold the pinned seam surface to
  *  exactly what the provider exports — no more, and no less. */
-function exportedNames(raw) {
+function exportedBindings(raw) {
   const { ast, error } = parseModule(raw);
   if (!ast) throw new Error(`cannot read exports: ${error.message}`);
-  const names = new Set();
+  const out = new Map();
   for (const node of astIndex(ast).nodes) {
-    if (node.type === "ExportDefaultDeclaration") { names.add("default"); continue; }
-    if (node.type === "ExportAllDeclaration") { names.add(node.exported ? nameOf(node.exported) : "*"); continue; }
+    if (node.type === "ExportDefaultDeclaration") {
+      out.set("default", node.declaration.id ? nameOf(node.declaration.id) : "default"); continue;
+    }
+    if (node.type === "ExportAllDeclaration") {
+      const name = node.exported ? nameOf(node.exported) : "*"; out.set(name, name); continue;
+    }
     if (node.type !== "ExportNamedDeclaration") continue;
-    for (const s of node.specifiers) names.add(nameOf(s.exported));
+    for (const s of node.specifiers) out.set(nameOf(s.exported), nameOf(s.local));
     const decl = node.declaration;
     if (!decl) continue;
     if (decl.type === "VariableDeclaration") {
       for (const d of decl.declarations) {
-        if (d.id.type === "Identifier") names.add(d.id.name);
-        else names.add(`(${d.id.type})`);
+        const name = d.id.type === "Identifier" ? d.id.name : `(${d.id.type})`;
+        out.set(name, name);
       }
       continue;
     }
-    if (decl.id) names.add(nameOf(decl.id));
+    if (decl.id) out.set(nameOf(decl.id), nameOf(decl.id));
   }
-  return names;
+  return out;
+}
+const exportedNames = (raw) => new Set(exportedBindings(raw).keys());
+
+/** Every node under one node, itself included. */
+function subtreeOf(root) {
+  const out = [];
+  const visit = (node) => {
+    if (node === null || typeof node !== "object") return;
+    if (Array.isArray(node)) { for (const child of node) visit(child); return; }
+    if (typeof node.type !== "string") return;
+    out.push(node);
+    for (const key of Object.keys(node)) { if (AST_SKIP_KEYS.has(key)) continue; visit(node[key]); }
+  };
+  visit(root);
+  return out;
+}
+
+/** BLZ-535 round 5, D3. The exports of one module that can REACH node:fs's mutating surface:
+ *  the binding calls a mutating member itself, or calls something else in the same module
+ *  that does, or calls a WRITE PRIMITIVE pinned on another allowlisted module. Walked to a
+ *  fixpoint over the module's top-level bindings.
+ *
+ *  This is what stops the pin below from being 138 assertions nobody can check. A pin says
+ *  which exports write; this says which exports DO write; the test asserts they are the same
+ *  set. An `inert` claim is therefore checked against the code rather than believed, and a
+ *  write added to an inert export reddens without anybody remembering to re-judge it.
+ *
+ *  It is deliberately INTRA-MODULE. Propagating through every import would mark the whole
+ *  tree write-reaching — `blaze new` reaches a write, so does the CLI — which is true and
+ *  useless. What the guard is asking is narrower: which of THIS module's exports put bytes
+ *  on disk itself. */
+function writeReachingExports(raw, rel) {
+  const { ast, error } = parseModule(raw);
+  if (!ast) throw new Error(`cannot walk ${rel}: ${error.message}`);
+  const nodes = astIndex(ast).nodes;
+  const writeNames = new Set();   // local names that ARE a write when called
+  const fsNs = new Set();
+  for (const node of nodes) {
+    if (node.type !== "ImportDeclaration") continue;
+    const spec = node.source.value;
+    const provider = resolveProvider(rel, spec);
+    for (const sp of node.specifiers) {
+      if (sp.type !== "ImportSpecifier") {
+        if (isFsSpecifier(spec)) fsNs.add(sp.local.name);
+        continue;
+      }
+      const imported = nameOf(sp.imported);
+      if (isFsSpecifier(spec)) { if (WRITE_SURFACE.has(imported)) writeNames.add(sp.local.name); }
+      else if (provider && provider.writes.includes(imported)) writeNames.add(sp.local.name);
+    }
+  }
+  const bindings = new Map();
+  for (const stmt of ast.body) {
+    const decl = stmt.type === "ExportNamedDeclaration" || stmt.type === "ExportDefaultDeclaration"
+      ? stmt.declaration : stmt;
+    if (!decl || typeof decl.type !== "string") continue;
+    if (decl.type === "FunctionDeclaration" || decl.type === "ClassDeclaration") {
+      if (decl.id) bindings.set(decl.id.name, decl);
+      continue;
+    }
+    if (decl.type !== "VariableDeclaration") continue;
+    for (const d of decl.declarations) {
+      if (d.id.type === "Identifier" && d.init) bindings.set(d.id.name, d);
+    }
+  }
+  const facts = new Map();
+  for (const [name, node] of bindings) {
+    let writes = false; const calls = new Set();
+    for (const n of subtreeOf(node)) {
+      if (n.type !== "CallExpression") continue;
+      const callee = n.callee;
+      if (callee.type === "Identifier") {
+        if (writeNames.has(callee.name)) writes = true;
+        calls.add(callee.name);
+        continue;
+      }
+      if (callee.type !== "MemberExpression" || callee.computed) continue;
+      const member = nameOf(callee.property);
+      calls.add(member);
+      let base = callee.object;
+      if (base.type === "MemberExpression" && !base.computed
+        && FS_NAMESPACE_MEMBERS.has(nameOf(base.property))) base = base.object;
+      if (base.type === "Identifier" && fsNs.has(base.name) && WRITE_SURFACE.has(member)) writes = true;
+    }
+    facts.set(name, { writes, calls });
+  }
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const fact of facts.values()) {
+      if (fact.writes) continue;
+      for (const call of fact.calls) {
+        if (facts.get(call)?.writes) { fact.writes = true; grew = true; break; }
+      }
+    }
+  }
+  const reaching = new Set();
+  for (const [exported, local] of exportedBindings(raw)) {
+    if (facts.get(local)?.writes) reaching.add(exported);
+  }
+  return reaching;
 }
 
 /** An ESTree name node is an Identifier or — for a string module export name — a Literal. */
@@ -582,10 +883,9 @@ function fsWritesIn(raw, rel) {
 
   /** A named member taken off the LOCAL write seam, judged against the pinned member set. */
   const classifySeamMember = (provider, name) => {
-    if (name === null || !provider.reads.has(name)) {
-      if (name !== null && provider.writes.has(name)) { hits.add(name); return; }
-      hits.add(unknownSeamMember(name ?? "computed"));
-    }
+    if (name !== null && provider.writes.includes(name)) { hits.add(name); return; }
+    if (name !== null && (provider.sanctioned.includes(name) || provider.inert.includes(name))) return;
+    hits.add(unknownSeamMember(name ?? "computed"));
   };
 
   const classifyProviderUse = (node, provider) => {
@@ -603,7 +903,7 @@ function fsWritesIn(raw, rel) {
     const isDecl = node.type === "ImportDeclaration" || node.type === "ExportAllDeclaration"
       || (node.type === "ExportNamedDeclaration" && source);
 
-    if (isDecl && source && FS_SPECIFIERS.has(source.value)) {
+    if (isDecl && source && isFsSpecifier(source.value)) {
       if (node.type === "ImportDeclaration") {
         for (const s of node.specifiers) {
           if (s.type === "ImportSpecifier") named.set(s.local.name, nameOf(s.imported));
@@ -628,23 +928,22 @@ function fsWritesIn(raw, rel) {
       if (provider) { classifyProviderUse(node, provider); continue; }
     }
 
-    // A dynamic import whose specifier is not a plain literal cannot be read, and is
-    // therefore reported: every dynamic import in this tree is a literal one.
-    if (node.type === "ImportExpression" && node.source.type !== "Literal") {
-      const spec = node.source;
-      const quasis = spec.type === "TemplateLiteral"
-        ? [spec.quasis.map((q) => q.value.cooked ?? "").join(""),
-          ...spec.quasis.map((q) => q.value.cooked ?? "")] : [];
-      if (spec.type === "TemplateLiteral" && spec.expressions.length === 0
-        && !FS_SPECIFIERS.has(quasis[0])) continue;   // a constant template of something else
+    // A dynamic import whose specifier will not FOLD to a constant cannot be read, and is
+    // therefore reported: every dynamic import in this tree folds.
+    if (node.type === "ImportExpression" && constantString(node.source) === null) {
       hits.add(OPAQUE);
       continue;
     }
 
-    if (node.type !== "Literal" || typeof node.value !== "string") continue;
+    // The value, not the spelling. A plain literal, a backtick template, a `+` chain and an
+    // array `.join("")` are one constant here, and D1 turned on exactly that difference.
+    const folded = constantString(node);
+    if (folded === null) continue;
     const parent = parents.get(node);
+    // fold the OUTERMOST expression only, so `"node:" + "fs"` is judged once, as "node:fs"
+    if (parent && constantString(parent) !== null) continue;
 
-    if (FS_SPECIFIERS.has(node.value)) {
+    if (isFsSpecifier(folded)) {
       if (parent && parent.source === node && DECLARATION_TYPES.has(parent.type)) continue;
       if (parent && parent.type === "ImportExpression" && parent.source === node) {
         bindAcquisition(parent); continue;
@@ -656,15 +955,65 @@ function fsWritesIn(raw, rel) {
       if (parent && parent.type === "CallExpression" && parent.arguments.includes(node)) {
         bindAcquisition(parent); continue;
       }
-      if (AMBIGUOUS_SPECIFIER.has(node.value) && isDataPosition(node, parent)) continue;
+      if (AMBIGUOUS_SPECIFIER.has(folded) && isDataPosition(node, parent)) continue;
       hits.add(OPAQUE);
       continue;
     }
 
-    const provider = resolveProvider(rel, node.value);
+    const provider = resolveProvider(rel, folded);
     if (provider && parent && ((parent.type === "ImportExpression" && parent.source === node)
       || (parent.type === "CallExpression" && parent.arguments.includes(node)))) {
-      hits.add(SEAM_WHOLESALE);
+      // `const { reconcile } = await import("./reconcile.mjs")` names its members exactly as
+      // a static import does, so it is judged member by member. Landing anywhere else takes
+      // the module wholesale, and that is an offence: nobody can say which member is used.
+      let at = parent; let up = parents.get(at);
+      while (up && ["AwaitExpression", "ChainExpression", "ParenthesizedExpression"]
+        .includes(up.type)) { at = up; up = parents.get(at); }
+      const target = up && up.type === "VariableDeclarator" && up.init === at ? up.id
+        : up && up.type === "AssignmentExpression" && up.right === at ? up.left : null;
+      if (target === null || target.type !== "ObjectPattern") { hits.add(SEAM_WHOLESALE); continue; }
+      for (const prop of target.properties) {
+        if (prop.type === "RestElement" || prop.computed) { hits.add(SEAM_WHOLESALE); continue; }
+        classifySeamMember(provider, nameOf(prop.key));
+      }
+    }
+  }
+
+  // D1's fail-closed arm, and the reason there is one at all: an acquisition is a CALL whose
+  // arguments this reader cannot fold, and the callee's spelling is deliberately not
+  // consulted — `require`, `createRequire(...)(...)` and `process.getBuiltinModule(...)` are
+  // one shape, and the next one has not been invented yet. So the RESULT is watched instead.
+  // `require(["f", "s"].join(""))` folds; `getBuiltinModule(mode)` does not, and it is the
+  // member reached THROUGH the result that gives it away.
+  const unfoldable = new Set();
+  for (const node of nodes) {
+    if (node.type !== "CallExpression" && node.type !== "ImportExpression") continue;
+    const args = node.type === "ImportExpression" ? [node.source] : node.arguments;
+    if (!args.some((a) => constantString(a) === null)) continue;
+    let at = node; let parent = parents.get(at);
+    while (parent && ["AwaitExpression", "ChainExpression", "ParenthesizedExpression"]
+      .includes(parent.type)) { at = parent; parent = parents.get(at); }
+    if (!parent) continue;
+    if (parent.type === "MemberExpression" && parent.object === at && !parent.computed) {
+      if (reachesFsSurface(nameOf(parent.property))) hits.add(OPAQUE);
+      continue;
+    }
+    let target = null;
+    if (parent.type === "VariableDeclarator" && parent.init === at) target = parent.id;
+    else if (parent.type === "AssignmentExpression" && parent.right === at) target = parent.left;
+    if (target === null) continue;
+    if (target.type === "Identifier") { unfoldable.add(target.name); continue; }
+    if (target.type !== "ObjectPattern") continue;
+    for (const prop of target.properties) {
+      if (prop.type === "RestElement" || prop.computed) continue;
+      if (reachesFsSurface(nameOf(prop.key))) hits.add(OPAQUE);
+    }
+  }
+  if (unfoldable.size > 0) {
+    for (const node of nodes) {
+      if (node.type !== "MemberExpression" || node.computed) continue;
+      if (node.object.type !== "Identifier" || !unfoldable.has(node.object.name)) continue;
+      if (reachesFsSurface(nameOf(node.property))) hits.add(OPAQUE);
     }
   }
 
@@ -759,16 +1108,24 @@ const WRITE_ALLOWED = new Map([
   //
   // `blaze db init` recreates the gitignored shadow database under .blaze/ — a derived
   // artifact of the dual-write soak, on the same footing as reindex.mjs's caches.
-  ["db-runner.mjs", ["rmSync"]],
+  // ...and `db init` opens the shadow to recreate it, which is write-port-resolve's primitive.
+  ["db-runner.mjs", ["rmSync", "openShadow"]],
   // The identity database's own directory: .blaze/ created 0700 and re-tightened. Same
   // credential-store footing as setup-token.mjs, and deliberately NOT in the shadow
   // database, which `db init` may destroy.
   ["model/identity-db.mjs", ["mkdirSync", "chmodSync"]],
   // `blaze user add` appends the identity database to the board's .gitignore, so a
   // credential store cannot be committed. A .gitignore line, not a ticket.
-  ["model/user-admin.mjs", ["appendFileSync"]],
+  // ...and it opens the identity database, whose directory the primitive creates at 0700.
+  ["model/user-admin.mjs", ["appendFileSync", "openIdentityDb"]],
   // The dual-write soak's divergence log and its counter, both under gitignored .blaze/.
-  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync"]],
+  // BLZ-535 round 5, D1. The third member is not an fs call: `const port = dualWritePort(...)`
+  // is a call this reader cannot fold, and `port.write(op)` reaches a member NAME that
+  // node:fs also has. It is the dual-write PORT's own method, not `fs.write`, and this is
+  // the single place in the tree where D1's fail-closed arm fires on something innocent.
+  // Named rather than tuned away: a rule loosened until this module goes quiet is a rule
+  // loosened for every module.
+  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE]],
   // `writeSync(2, ...)` — a partial-write loop onto STDERR, which is a terminal, not a file.
   // Named to that one member: a path-taking write appearing in the CLI still reddens.
   ["cli.mjs", ["writeSync"]],
@@ -786,6 +1143,32 @@ const WRITE_ALLOWED = new Map([
   // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
   // primitive, appearing in reconcile still reddens.
   ["reconcile.mjs", ["appendRegularFileSync"]],
+  // BLZ-535 round 5, D3. The seven below take a WRITE PRIMITIVE off an allowlisted module —
+  // `saveState`, `appendEntry`, `acquireLock` and their kin, each of which puts caller-chosen
+  // bytes at a caller-chosen root. Round 4 could not see any of them, because it pinned one
+  // provider out of sixteen and defended the rest with a general claim. None writes a ticket;
+  // each is named to the members it actually takes, and the load-bearing test below checks
+  // every one of those names is still reached.
+  //
+  // `blaze commit` owns the commit lock and drains the ledger it has just committed; the
+  // quarantine sidecar is BLZ-531's. `commit-or-queue` is the other half: it records an op on
+  // the ledger when the lock is held elsewhere. `serve-commit` is the board server taking the
+  // same lock.
+  ["commit-runner.mjs", ["acquireLock", "releaseLock", "clearLedger", "quarantineDropped"]],
+  ["commit-or-queue.mjs", ["appendEntry"]],
+  ["serve-commit.mjs", ["acquireLock", "releaseLock"]],
+  // First-run setup: the board server issues the setup-token CREDENTIAL, clears it when setup
+  // completes, and keeps both it and the identity database out of git. `blaze user add` does
+  // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
+  // themselves, which are allowlisted for the same files.
+  ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
+    "ensureIdentityIgnored"]],
+  ["user-runner.mjs", ["ensureIdentityIgnored"]],
+  // `blaze new` allocates the id and writes its claim — the allocator, deleted at Phase 2,
+  // and on exactly the footing of ids.mjs and claims.mjs above.
+  ["new.mjs", ["allocateId", "writeClaim"]],
+  // `blaze sprint` saves the sprint registry. A registry, not a ticket.
+  ["sprint-runner.mjs", ["saveSprints"]],
 ]);
 
 test("the mutating fs surface is DERIVED from node:fs, and derived fail-closed", () => {
@@ -877,6 +1260,11 @@ test("the eleven routes an adversarial review drove a real write through", () =>
   //
   // F5a: `"type": "module"`, so a `.js` file under scripts/ executes exactly like an `.mjs`
   // one. The corpus yielded `.mjs` only, so such a file was not scanned at all.
+  //
+  // Stated plainly, because a widening nobody can see is indistinguishable from one nobody
+  // made: the live tree is 150 files and every one of them is `.mjs`, so ONLY the synthetic
+  // fixture below exercises this. It is a guard against the day somebody adds `scripts/x.js`,
+  // not a claim that anything is being caught today.
   const tmp = mkdtempSync(join(tmpdir(), "blz535-corpus-"));
   try {
     for (const name of ["a.mjs", "b.js", "c.cjs", "d.txt", "e.sh"]) {
@@ -1045,27 +1433,186 @@ test("a write primitive taken off the LOCAL write seam is a write", () => {
     "`./regular-file.mjs` from model/ and `../model/regular-file.mjs` from views/ are one module");
 });
 
-test("the write seam's own primitives are pinned to an exact member set", () => {
-  // BLZ-535 B5. The node:fs surface is DERIVED and fail-closed, because Node's surface is not
-  // ours to pin — an unknown member there is a write. The SEAM's surface is the opposite: it
-  // is ours, it changes when we change it, and a new primitive on it must not be usable
-  // before anybody has judged it. So it is pinned MEMBER BY MEMBER and checked BOTH WAYS
-  // against what the module actually exports: adding `truncateRegularFileSync` to
-  // regular-file.mjs, or deleting one of the two writes, reddens THIS test until the pin is
-  // updated — and until then the consumer-side test above rejects the new member by name.
+test("every module the write allowlist names is pinned, export by export", () => {
+  // BLZ-535 round 5, D3. Round 4 pinned ONE module out of sixteen and defended the rest with
+  // a general claim. MEASURED against it: `saveState("/tmp/X", {})`, imported out of
+  // `*`-allowlisted loops/groomer.mjs by a module the allowlist does not name, created a real
+  // file at 12 tests, 12 pass, 0 fail. So the membership is DERIVED from the allowlist
+  // itself: a module cannot be exempted from node:fs without its own exports being judged.
+  assert.deepEqual([...SEAM_WRITE_PROVIDERS.keys()].sort(), [...WRITE_ALLOWED.keys()].sort(),
+    "every module the write allowlist exempts must have its exports classified, and nothing " +
+    "else may be. A module exempted from reaching node:fs and NOT pinned here is a module " +
+    "whose exports are an unjudged way for anybody to reach one.");
+
   const sources = corpus();
-  for (const [rel, provider] of SEAM_WRITE_PROVIDERS) {
+  const wrong = [];
+  for (const [rel, pin] of SEAM_WRITE_PROVIDERS) {
     const src = sources.get(rel);
-    assert.ok(src !== undefined,
-      `${rel} is pinned as a write-seam provider and is not in the corpus at all`);
+    if (src === undefined) { wrong.push(`${rel} (no such module)`); continue; }
     const exported = [...exportedNames(src)].sort();
-    assert.ok(exported.length > 0,
-      `no exports were read out of ${rel} — the reader is dead, and a dead reader agrees ` +
-      "with every pin there has ever been");
-    assert.deepEqual(exported, [...provider.writes, ...provider.reads].sort(),
-      `${rel} is the write seam's own surface. Every export of it must be classified here as ` +
-      "a write or a read, exactly once. A new export nobody has classified is a write " +
-      "primitive the allowlist cannot name and the guard cannot judge.");
+    const pinned = [...pin.writes, ...pin.sanctioned, ...pin.inert];
+    const seen = new Set();
+    for (const name of pinned) {
+      if (seen.has(name)) wrong.push(`${rel} :: ${name} (classified twice)`);
+      seen.add(name);
+    }
+    if (JSON.stringify(exported) !== JSON.stringify([...pinned].sort())) {
+      wrong.push(`${rel} (exports [${exported}], pinned [${[...pinned].sort()}])`);
+    }
+  }
+  assert.deepEqual(wrong, [],
+    "every export of an allowlisted module must be classified exactly once, as a write " +
+    "primitive, as sanctioned, or as inert. A new export nobody has classified is a way " +
+    "into the write seam that nobody has judged.");
+
+  // the observation: this pin is not vacuously empty
+  const primitives = [...SEAM_WRITE_PROVIDERS.values()].flatMap((p) => p.writes);
+  assert.ok(primitives.length > 15,
+    `only ${primitives.length} write primitives are pinned across the whole allowlist — ` +
+    "that is not this tree, that is a pin that has been emptied");
+});
+
+test("an export that reaches a write is pinned as one, and one that does not is not", () => {
+  // The pin above is 138 hand-written judgements, and a hand-written judgement nobody checks
+  // is the thing this whole ticket exists to delete. So it is checked: a reachability walk
+  // over each module decides which of its exports actually put bytes on disk, and the two
+  // answers must be the same SET. An `inert` claim is verified rather than believed, a
+  // `sanctioned` entry that has stopped writing reddens, and a write added to an inert export
+  // reddens without anybody remembering to come back here.
+  const sources = corpus();
+  const disagreements = [];
+  for (const [rel, pin] of SEAM_WRITE_PROVIDERS) {
+    const reaching = [...writeReachingExports(sources.get(rel), rel)].sort();
+    const claimed = [...pin.writes, ...pin.sanctioned].sort();
+    if (JSON.stringify(reaching) !== JSON.stringify(claimed)) {
+      disagreements.push(`${rel}: reaches [${reaching}], pinned as writing [${claimed}]`);
+    }
+  }
+  assert.deepEqual(disagreements, [],
+    "the pin and the code disagree about which exports reach a write. Re-judge the export: " +
+    "a caller-chosen destination makes it a `writes`, the module's own verb makes it " +
+    "`sanctioned`, and neither makes it `inert`.");
+
+  // the observation: the walk is not returning an empty set for everything
+  assert.ok(writeReachingExports(sources.get("model/storage.mjs"), "model/storage.mjs")
+    .has("fsStorage"),
+    "the write seam's own driver must come back as write-reaching. If it does not, the walk " +
+    "is dead, and a dead walk agrees with every pin there has ever been.");
+  assert.ok(writeReachingExports(sources.get("loops/groomer.mjs"), "loops/groomer.mjs")
+    .has("saveState"),
+    "D3's own case: the groomer's state writer must come back as write-reaching");
+});
+
+test("a write primitive is a write wherever it is imported from", () => {
+  // B4 in round 4 (regular-file.mjs), D3 in round 5 (the other fifteen), D2 in round 5 (the
+  // specifier suffix). Each row is a real write from a module the allowlist does not name.
+  const cases = [
+    // D3 — the reviewer's own case, and the one that was green on 56fa011
+    ["loops/groomer.mjs", "{ saveState }", "saveState"],
+    ["loops/groomer.mjs", "{ restoreSnapshot }", "restoreSnapshot"],
+    ["pending-ledger.mjs", "{ appendEntry }", "appendEntry"],
+    ["commit-lock.mjs", "{ acquireLock }", "acquireLock"],
+    ["model/setup-token.mjs", "{ issueSetupToken }", "issueSetupToken"],
+    ["model/sprints.mjs", "{ saveSprints }", "saveSprints"],
+    ["model/claims.mjs", "{ writeClaim as put }", "writeClaim"],
+    ["model/regular-file.mjs", "{ appendRegularFileSync }", "appendRegularFileSync"],
+    // the whole module, however it is taken
+    ["loops/groomer.mjs", "* as groomer", SEAM_WHOLESALE],
+    ["loops/groomer.mjs", "groomer", SEAM_WHOLESALE],
+  ];
+  for (const [provider, clause, offence] of cases) {
+    const src = `import ${clause} from "./${provider}";`;
+    assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()),
+      [`fake.mjs :: ${offence}`],
+      `\`import ${clause}\` from ${provider} must be an offence in the consumer`);
+  }
+
+  // D2 — three characters Node tolerates and a Map lookup does not. Every suffix shape.
+  for (const suffix of ["?v=1", "#frag", "?a=1&b=2#x"]) {
+    const src = `import { appendRegularFileSync } from "./model/regular-file.mjs${suffix}";`;
+    assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()),
+      ["fake.mjs :: appendRegularFileSync"],
+      `a \`${suffix}\` suffix must not take a module out of the pin — it is the same module ` +
+      "to Node, and reopening B4 with it costs three characters");
+  }
+
+  // ...and the discrimination. A SANCTIONED export is the module's own verb or the driver's
+  // front door: importing one is the route ADR-0006 prescribes, not a bypass of it. An inert
+  // one is not a write at all. Neither is an offence, and a guard that cannot be quiet about
+  // them would have to exempt half the tree to stay green — which is how an allowlist stops
+  // meaning anything.
+  const quiet = [
+    ["loops/groomer.mjs", "{ groomOnce }"],
+    ["model/storage.mjs", "{ fsStorage }"],
+    ["model/write-port-resolve.mjs", "{ resolveWritePort }"],
+    ["model/regular-file.mjs", "{ readRegularFileSync }"],
+    ["model/transitions.mjs", "{ loadTransitions }"],
+    ["model/sprints.mjs", "{ loadSprints, addSprint }"],
+    ["pending-ledger.mjs", "{ readForDrain, listQueues }"],
+  ];
+  for (const [provider, clause] of quiet) {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", `import ${clause} from "./${provider}";`]]),
+        new Map()), [],
+      `${clause} off ${provider} is sanctioned or inert, and must not be an offence`);
+  }
+  // a member nobody has classified is an offence in itself: this is the consumer-side half of
+  // the pin, and it is what makes adding a primitive to the seam impossible to do quietly
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs",
+      'import { truncateRegularFileSync } from "./model/regular-file.mjs";']]), new Map()),
+    [`fake.mjs :: ${unknownSeamMember("truncateRegularFileSync")}`],
+    "an unpinned member of a pinned module must be an offence");
+  // and a function that merely SHARES A NAME, from a module that is not on the allowlist,
+  // is not one
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "./local-helpers.mjs";']]),
+      new Map()), [],
+    "the MODULE is what is pinned, not the spelling of a function name");
+});
+
+test("an acquisition this guard cannot fold is an acquisition it reports", () => {
+  // BLZ-535 round 5, D1, and the reason the reader folds constants at all. Round 4 examined a
+  // specifier only when it was a plain string `Literal` — it had stopped pinning the CALLEE's
+  // spelling and started pinning the LITERAL's. MEASURED on 56fa011: the first row below
+  // landed a real file at 12 pass / 0 fail, and the SAME LINE with double quotes instead of
+  // backticks reddened it. Backtick versus quote was the whole difference.
+  const routes = {
+    "a backtick specifier through getBuiltinModule":
+      "const fs = process.getBuiltinModule(`node:fs`);\nfs.writeFileSync(p, d);",
+    "a backtick specifier through require":
+      "const require = createRequire(import.meta.url);\nconst fs = require(`node:fs`);\nfs.writeFileSync(p, d);",
+    "a specifier with no fs literal anywhere in the file":
+      'const require = createRequire(import.meta.url);\nconst m = require(["f", "s"].join(""));\nm.writeFileSync(p, d);',
+    // the `??` line is copied verbatim out of the innocent list below: the literal really is
+    // data, and the VARIABLE is what carries it into the acquisition. The reader does not
+    // follow variables and will not pretend it does — so the RESULT is what gives it away.
+    "a specifier parked in a variable the reader cannot follow":
+      'const mode = process.env.BLAZE_WRITE_PORT ?? "fs";\nconst fs = process.getBuiltinModule(mode);\nfs.writeFileSync(p, d);',
+    "the same, through an object property":
+      'const cfg = { name: "fs" };\nconst fs = process.getBuiltinModule(cfg.name);\nfs.writeFileSync(p, d);',
+    "an unfoldable acquisition destructured on the spot":
+      'const { writeFileSync } = process.getBuiltinModule(mode);\nwriteFileSync(p, d);',
+    "an unfoldable acquisition whose namespace is reached without a binding":
+      "process.getBuiltinModule(mode).promises.writeFile(p, d);",
+    // folding is what catches this one and nothing else is: the namespace is HANDED ON
+    // rather than used, so there is no member access to give it away
+    "a folded specifier whose namespace is re-exported rather than called":
+      "const fs = require(`node:fs`);\nexport { fs };",
+  };
+  for (const [why, src] of Object.entries(routes)) {
+    const found = writeSeamOffenders(new Map([["fake.mjs", src]]), new Map());
+    assert.equal(found.length, 1, `${why}: this must be an offender, and it is not — ${src}`);
+  }
+  // discrimination: an unfoldable call whose result never reaches the fs surface is ordinary
+  // code, and this tree is made of it
+  for (const src of [
+    'const r = shResult("git", args);\nif (r.ok) return r.stdout;',
+    "const cfg = loadConfig(root);\nreturn cfg.projects;",
+    "const { records, dropped } = parseRecords(buf);\nreturn records.length + dropped.length;",
+  ]) {
+    assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()), [],
+      `an ordinary call is not an acquisition:\n${src}`);
   }
 });
 
@@ -1138,13 +1685,21 @@ test("the write-seam scan OBSERVED the corpus, and its allowlist is all load-bea
   // asserted to have PARSED and to have yielded nodes: a scan that could not look is not a
   // scan that looked, and a parse failure is an offence above rather than a skip.
   const unread = [];
+  let nodesSeen = 0;
   for (const [rel, src] of sources) {
     const { ast } = parseModule(src);
-    if (!ast || astIndex(ast).nodes.length === 0) unread.push(rel);
+    if (!ast) { unread.push(rel); continue; }
+    nodesSeen += astIndex(ast).nodes.length;
   }
   assert.deepEqual(unread, [],
     "these modules did not parse, so nothing in this file has judged them. A guard that " +
     "cannot read a module has not cleared it.");
+  // ...and the walk actually walked. The arm this replaces asked whether a parsed module
+  // yielded ZERO nodes, which it cannot: `Program` is always one, so the arm was dead and
+  // read as an observation while observing nothing.
+  assert.ok(nodesSeen > 50000,
+    `the walk saw ${nodesSeen} AST nodes across the corpus — that is not this tree, and a ` +
+    "reader that stopped descending would report every module clean");
 
   // B4, on the live tree rather than on a fixture: the module that proved the banner false.
   assert.ok(fsWritesIn(sources.get("reconcile.mjs"), "reconcile.mjs")
