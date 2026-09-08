@@ -1113,7 +1113,7 @@ rows, which is what the first draft specified.
 
 ## Ticket breakdown
 
-Ten items. Dependency order is top to bottom within a phase; items in the same phase are
+Eleven items. Dependency order is top to bottom within a phase; items in the same phase are
 independent of each other. **These are not created on the board** — this is the list to create
 from.
 
@@ -1157,14 +1157,14 @@ from.
   decoration. Either a criterion on BLZ-589 or its own ticket, but not an implicit part of B3 —
   the whole reason B3 needed rewriting is that its first version was green against a defect that
   blanked 21 of 31 columns.
-- **Claims on import** (§8.1) — either a new criterion on BLZ-587 or its own ticket.
-- **The two link vocabularies, and the `Precedes`-writer dependency** (§8.3) — its own ticket, and
+- **Claims on import** (§8 item 1) — either a new criterion on BLZ-587 or its own ticket.
+- **The two link vocabularies, and the `Precedes`-writer dependency** (§8 item 3) — its own ticket, and
   it should carry a blocks/blocked-by edge to whoever lands BLZ-360 §5.5's writer, because that
   is the change that silently invalidates §2.4's parity bound.
-- **`docs/guide/schema.md` contradicts shipped code** (§8.5) — a doc ticket, and larger than the
+- **`docs/guide/schema.md` contradicts shipped code** (§8 item 5) — a doc ticket, and larger than the
   "one-line fix" an earlier draft called it: the paragraph denies that `verified` shipped, and the
   neighbouring claim about `superseded` needs independent checking.
-- **BLZ-587's stale `git add -A` Context** (§8.6) — a ticket-text correction, not a code change.
+- **BLZ-587's stale `git add -A` Context** (§8 item 6) — a ticket-text correction, not a code change.
 
 **Sequencing.** A3 lands **with** B2, not after it — BLZ-589's round trip is the only honest
 verification of BLZ-587 and the plan is explicit that it is *"not optional and not last"*. **B4
