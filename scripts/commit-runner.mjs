@@ -291,19 +291,63 @@ if (status) {
       // `error` marker beside it already refuses, one degree weaker and, unlike `error`,
       // completely silent.
       const { entries, dropped } = readQueue(dataRoot, q.session);
+      // BLZ-597: PARTITION BY PROVENANCE BEFORE ANY VERDICT, exactly as the drain does at its
+      // partition loop — the same two legs, `belongsHere` then `queuedHere`, in the same
+      // order and refused by the same fields.
+      //
+      // This read path had no partition at all, so `outstandingFiles` asked THIS tree's
+      // `existsSync`, THIS tree's index and THIS tree's HEAD about paths whose files live in
+      // another checkout. Reproduced: a queue of ops recording `worktree: "lane-q"`, read
+      // from the main working tree, exited 0 and printed `orphaned: 1 file(s) already match
+      // HEAD — filed by something else` and `superseded: 1 file(s) relocated again within a
+      // batch`. A tracked board file exists in EVERY checkout, so the answers are not blank,
+      // they are confidently wrong — the same lying sentence BLZ-590's round 3 removed from
+      // the drain, still live here. Someone reading "0 outstanding" hand-cleans a queue full
+      // of live foreign work.
+      //
+      // Unreachable ops are still COUNTED and still NAMED. Dropping them from the report
+      // would trade a wrong verdict for a missing queue, and this verb exists because 185 ops
+      // sat unexamined for five days.
+      const judged = [];
+      const unreachable = [];
+      for (const e of entries) {
+        // NAMED BY THE FIELD THAT ACTUALLY REFUSED, IN THE ORDER `belongsHere` ASKS. It
+        // decides on `worktree` FIRST and consults the branch owner only when no worktree is
+        // recorded — so the branch-owner wording may be reached only on that second leg.
+        // Two refutations pinned the order here: spelling the branch sentence over both legs
+        // printed `queued on branch 'undefined', which undefined currently has checked out`
+        // about a worktree-only op; and looking the owner up BEFORE asking which leg refused
+        // sent an op recording `{worktree:"lane-q", branch:"bx"}` to the checkout holding
+        // `bx` — where the drain refuses it as foreign on the worktree mismatch — and folded
+        // it into that checkout's count, where it hid. The drain over the identical queue
+        // says `queued in lane-q (branch 'bx')`, and 13 of the 32 live ops measured on
+        // 2026-09-09 recorded both fields. `notOursBecause` covers every other shape by the
+        // same worktree/branch/no-provenance precedence.
+        if (!belongsHere(e, here)) {
+          const refusedOnBranch = (e.worktree === undefined || e.worktree === null)
+            && e.branch !== undefined && e.branch !== null && here.branchOwner.has(e.branch);
+          unreachable.push({ entry: e, why: refusedOnBranch
+            ? `were queued on branch '${e.branch}', which ${here.branchOwner.get(e.branch)} currently has checked out`
+            : notOursBecause(e) });
+        } else if (!queuedHere(e)) {
+          unreachable.push({ entry: e, why: notOursBecause(e) });
+        } else judged.push(e);
+      }
       // Named per entry, so the operator can find the bad line rather than being told the
-      // queue is "invalid". `files` is the one field every queued op must carry.
-      const paths = entries.flatMap((e, i) => {
+      // queue is "invalid". `files` is the one field every queued op must carry. Asked of
+      // EVERY entry, reachable or not: a missing `files` list is a malformed record whichever
+      // checkout queued it, and the index in the message must be the index in the queue.
+      entries.forEach((e, i) => {
         if (!Array.isArray(e.files)) {
           throw new Error(`entry ${i + 1} (id ${e.id ?? "?"}, op ${e.op ?? "?"}) has no \`files\` list`);
         }
-        return e.files;
       });
-      return { session: q.session, entries, dropped, files: outstandingFiles(dataRoot, paths) };
+      const paths = judged.flatMap((e) => e.files);
+      return { session: q.session, entries, dropped, unreachable, files: outstandingFiles(dataRoot, paths) };
     } catch (e) {
       // `files: null` is the ADR-0030 marker: this queue was NOT looked at, so it carries
       // no buckets to be summed into a total or mistaken for zeroes.
-      return { session: q.session, entries: [], dropped: [], files: null, error: e.message };
+      return { session: q.session, entries: [], dropped: [], unreachable: [], files: null, error: e.message };
     }
   });
   // Name the resolved store. Before BLZ-556 the operator had no way to tell, from any

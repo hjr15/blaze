@@ -145,6 +145,19 @@ export function renderQueueStatus(queues, mySession = undefined) {
         L.push(`      PARTIALLY READ — ${q.dropped.length} line(s) could not be parsed;`
           + " this queue is excluded from the totals below");
       }
+      // BLZ-597: the ops this checkout MAY NOT JUDGE, named before the buckets and excluded
+      // from them. `--status` used to measure every op's files against this tree whoever
+      // queued them, so a lane's ops read back as `orphaned` and `superseded` here — verdicts
+      // about the wrong checkout, at exit 0. The ops stay counted in the queue's own op count
+      // (they are queued, and that is the fact this verb exists to report); what changes is
+      // that no bucket below claims to know anything about their files.
+      if (q.unreachable?.length) {
+        const by = new Map();
+        for (const u of q.unreachable) by.set(u.why, (by.get(u.why) ?? 0) + 1);
+        L.push(`      ${q.unreachable.length} op(s) this working tree cannot judge — their files live in the`);
+        L.push("      checkout that queued them, so they are in NONE of the buckets below:");
+        for (const [why, n] of [...by].sort()) L.push(`          ${n} op(s) ${why}`);
+      }
       const { outstanding, settled, absent } = q.files;
       L.push(`      outstanding: ${outstanding.length} file(s) still differ from HEAD`);
       L.push(`      orphaned:    ${settled.length} file(s) already match HEAD — filed by something else`);
@@ -153,6 +166,14 @@ export function renderQueueStatus(queues, mySession = undefined) {
     }
     const tot = (k) => complete.reduce((n, q) => n + q.files[k].length, 0);
     L.push(`  ${tot("outstanding")} file(s) outstanding, ${tot("settled")} orphaned, across ${readable} readable queue(s).`);
+    // BLZ-597, said in the totals as well as per queue, because the totals are what an
+    // operator reads to decide the board is clear. Taken over EVERY queue that was read, not
+    // just `complete`: a partially-read queue's foreign ops are foreign either way.
+    const foreign = queues.filter((q) => !q.error).reduce((n, q) => n + (q.unreachable?.length ?? 0), 0);
+    if (foreign) {
+      L.push(`  ${foreign} op(s) belong to another checkout — this working tree cannot say what became`);
+      L.push("  of their files, so they are in none of the totals above. Run `blaze commit` there.");
+    }
     if (unreadable.length) {
       L.push(`  ${unreadable.length} queue(s) could not be read — the totals above DO NOT cover them.`);
     }
