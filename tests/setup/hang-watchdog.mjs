@@ -70,29 +70,38 @@ export function resolveWatchdogMs(env = process.env) {
   return ms > 0 ? ms : 0;
 }
 
-/** Below this share of the window spent idle, the loop was demonstrably still running work,
- *  and the report says so. Above it nothing is claimed either way: measured on this repo, a
- *  leaked socket and a merely-slow timer-driven file are both ~0.97 idle and indistinguishable
- *  here. Only the busy end of the scale carries a signal, so only it is read as one. */
-export const BUSY_IDLE_FRACTION = 0.9;
-
-/** Idle time in the loop when the watchdog was armed, so the report describes ITS window
- *  rather than the whole life of the process. */
+/** Idle time in the loop, and the clock, when the watchdog was armed — so the report
+ *  describes ITS window rather than the whole life of the process, and reports the window
+ *  that ACTUALLY elapsed rather than the deadline that was asked for. An 8s synchronous
+ *  block against a 1500ms deadline used to print `0ms of the last 1500ms idle`: the timer
+ *  could not fire until the block ended, so the real window was 8s and the line was a
+ *  statement about the deadline dressed up as a measurement. */
 let idleAtArm = 0;
+let armedAt = 0;
 
 /** Every descendant pid of `pid`, shallowest first.
  *
- *  `null` — distinct from `[]` — when the process table could not be read at all, so the
- *  report can say "could not be checked" rather than implying a clean exit it never verified.
+ *  `null` — distinct from `[]` — when the walk could not be COMPLETED, so the report can say
+ *  "could not be checked" rather than implying a clean exit it never verified.
  *  `pgrep -P` is used rather than a dependency: it is present on Linux and macOS, and its
- *  absence degrades the message instead of throwing. */
+ *  absence degrades the message instead of throwing.
+ *
+ *  A FAILURE ANYWHERE IN THE WALK IS A FAILURE OF THE WALK. This used to propagate `null`
+ *  from the ROOT read only, and swallowed every nested one with `childrenOf(k) ?? []`. So
+ *  `descendantPids(1, (p) => p === 1 ? [2] : null)` returned `[2]` and the reap reported
+ *  `checked: true` for a tree it never finished walking — reachable in production whenever
+ *  a nested `pgrep` hits its 5s timeout or cannot fork. A partial answer presented as a
+ *  complete one is the failure this whole file exists to end, one level down. */
 export function descendantPids(pid = process.pid, childrenOf = pgrepChildren) {
-  const roots = childrenOf(pid);
-  if (roots === null) return null;
   const out = [];
-  const walk = (kids) => { for (const k of kids) { out.push(k); walk(childrenOf(k) ?? []); } };
-  walk(roots);
-  return out;
+  let complete = true;
+  const walk = (parent) => {
+    const kids = childrenOf(parent);
+    if (kids === null) { complete = false; return; }   // this subtree is unknown, not empty
+    for (const k of kids) { out.push(k); walk(k); }
+  };
+  walk(pid);
+  return complete ? out : null;
 }
 
 function pgrepChildren(pid) {
@@ -112,7 +121,15 @@ function pgrepChildren(pid) {
  *  and a probe left a real `scripts/serve.mjs` running fifteen minutes later.
  *  `tests/hang-watchdog.test.mjs` kills the process GROUP for this reason. A group kill is
  *  not available here: this process shares its group with the test runner and with npm, so
- *  killing the group would take the whole run down. The descendants are walked instead. */
+ *  killing the group would take the whole run down. The descendants are walked instead.
+ *
+ *  WHAT THE WALK CANNOT SEE, AND SO IS NOT CLAIMED. `pgrep -P` follows the CURRENT parent
+ *  links. A grandchild whose own parent has already exited is reparented (to init, or to a
+ *  subreaper) and is no longer a descendant of this process by that measure — measured with
+ *  a fixture spawning `sh -c '… & exit 0'`: 0 live helpers before, 1 after, reparented, and
+ *  the report said `none to reap`. Nothing here can fix that without a process group, so the
+ *  report says how many it killed and stops there — it never says the process was left with
+ *  no children, because that is a stronger claim than the walk can support. */
 export function reapDescendants(pids = descendantPids()) {
   if (pids === null) return { checked: false, killed: 0 };
   let killed = 0;
@@ -152,23 +169,29 @@ export function describeActiveResources() {
 /** The message printed when the deadline is hit. Exported so the wording is testable
  *  without having to hang a process to read it.
  *
- *  EVERY LINE IS SOMETHING THAT WAS MEASURED. The deadline, the handles still open, the
- *  share of the window the loop spent idle, and what the reap actually did. The one
- *  interpretive line is gated on `idleMs`, and it only fires at the end of the scale where
- *  that number means something. */
-export function watchdogReport({ file, ms, types, peers, idleMs, reap }) {
-  const idle = Math.round(idleMs);
-  const busy = Math.max(0, Math.round(ms - idleMs));
-  const reading = idleMs / ms < BUSY_IDLE_FRACTION
-    ? [`The loop was still running work for about ${busy}ms of that window, so this file may`,
-       "simply be SLOW rather than stuck. Give it room with BLAZE_TEST_WATCHDOG_MS before",
-       "hunting for a leaked handle."]
-    : ["The loop spent almost all of that window with nothing to run. That is what a leaked",
-       "handle looks like — and also what waiting on something slow looks like, so the",
-       "handles above are what tells them apart, not this deadline being hit."];
+ *  EVERY LINE IS SOMETHING THAT WAS MEASURED, AND NOTHING IS INTERPRETED. This file has now
+ *  twice shipped a verdict the measurement could not carry. First `"This is a HANG, not a
+ *  slow run"`, printed over a fixture that was merely slow. Then its replacement, gated on
+ *  the idle fraction, which told a fixture that burned ~1.2s of CPU and then leaked a
+ *  referenced socket that it "may simply be SLOW rather than stuck. Give it room with
+ *  BLAZE_TEST_WATCHDOG_MS" — directly above its own `Endpoints: socket connected to
+ *  127.0.0.1:42757`, and advising the operator to raise the deadline on a real leak. The
+ *  window runs from IMPORT, so ANY file that does more than a fraction of the deadline's
+ *  worth of work and then hangs lands in that branch: the gate never separated the two cases
+ *  and could not.
+ *
+ *  So the split is printed as two numbers and left there. Busy and idle are facts; which of
+ *  them means "stuck" is a question the handles above answer and this line does not. */
+export function watchdogReport({ file, ms, types, peers, idleMs, elapsedMs = ms, reap }) {
+  const window = Math.max(1, Math.round(elapsedMs));
+  const idle = Math.min(window, Math.max(0, Math.round(idleMs)));
+  const busy = window - idle;
   const children = reap.checked
-    ? (reap.killed ? `reaped ${reap.killed} — process.exit() does not do this on its own` : "none to reap")
-    : "could not be checked (no usable pgrep); anything this file spawned may still be running";
+    ? (reap.killed
+        ? `reaped ${reap.killed} still parented to this process — process.exit() does not do this`
+        : "none still parented to this process")
+    : "the walk did not complete (no usable pgrep, or a lookup failed); anything this file "
+      + "spawned may still be running";
   return [
     "",
     "=== BLAZE TEST HANG WATCHDOG ===============================================",
@@ -177,9 +200,10 @@ export function watchdogReport({ file, ms, types, peers, idleMs, reap }) {
     "it reports what it measured and ends the process (BLZ-534).",
     `Still open: ${types.length ? types.join(", ") : "nothing reportable"}`,
     ...(peers.length ? [`Endpoints:  ${peers.join("; ")}`] : []),
-    `Loop:       ${idle}ms of the last ${ms}ms idle`,
+    `Loop:       ${idle}ms idle, ${busy}ms busy, over the ${window}ms actually elapsed`,
     `Children:   ${children}`,
-    ...reading,
+    "Neither number decides this: a leaked handle and a slow wait are both idle, and a file",
+    "that works and THEN leaks is busy. The handles above are what tell them apart.",
     "Two PipeWrap handles are this process's own stdout/stderr and are expected.",
     "A leaked database or HTTP client is the usual cause of a stuck file — close it on the",
     "failure path too, not only as the last statement of a passing test.",
@@ -216,13 +240,17 @@ export function installHangWatchdog({
 } = {}) {
   if (!Number.isFinite(ms) || ms <= 0) return null;
   idleAtArm = performance.nodeTiming.idleTime;
+  armedAt = performance.now();
   const timer = setTimeout(() => {
     const { types, peers } = describeActiveResources();
     const idleMs = performance.nodeTiming.idleTime - idleAtArm;
+    // The window the report describes is the one that ELAPSED, not the one that was asked
+    // for. A synchronous block holds the timer past its deadline, sometimes by seconds.
+    const elapsedMs = performance.now() - armedAt;
     // Reaped BEFORE the report is written, so what the report says about children is what
     // actually happened rather than what was about to be attempted.
     const reap = reapDescendants();
-    const report = watchdogReport({ file, ms, types, peers, idleMs, reap });
+    const report = watchdogReport({ file, ms, types, peers, idleMs, elapsedMs, reap });
     if (onFire) return onFire(report);
     process.stderr.write(report);
     process.exit(WATCHDOG_EXIT_CODE);

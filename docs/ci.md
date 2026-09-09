@@ -34,9 +34,9 @@ note; irrelevant once this repo is public, where required checks work normally).
 `package.json` declares `"engines": { "node": ">=24" }` — the floor exists because
 `node:sqlite` is built in from Node 24 and 34-odd suites import it. Nothing used to
 enforce that. Running the suite on Node 20 makes every `node:sqlite` file fail to LOAD,
-and the tally that produces says nothing about the engine: measured on 2026-09-08,
-`/usr/bin/node` v20.20.2 gave **3,946 tests / 3,773 pass / 173 fail** where v24.19.0 gave
-**4,465 / 4,463 / 0**. A real regression is invisible in the first of those (BLZ-601).
+and the tally that produces says nothing about the engine: measured on 2026-09-10,
+`/usr/bin/node` v20.20.2 gave **3,953 tests / 3,780 pass / 173 fail** where v24.19.0 gave
+**4,472 / 4,470 / 0**. A real regression is invisible in the first of those (BLZ-601).
 
 So `pretest` and `pretest:coverage` run
 [`scripts/ci/require-engine.mjs`](../scripts/ci/require-engine.mjs), which refuses with
@@ -79,7 +79,7 @@ Two bounds, for two different failures:
 | Bound | Ends | Set by |
 |---|---|---|
 | `--test-timeout=120000` | a test whose BODY never returns | the `test` / `test:coverage` npm scripts |
-| [`tests/setup/hang-watchdog.mjs`](../tests/setup/hang-watchdog.mjs) | a PROCESS still alive past the deadline, whatever is holding it | `--import=` in the same npm scripts |
+| [`tests/setup/hang-watchdog.mjs`](../tests/setup/hang-watchdog.mjs) | a per-file test CHILD still alive past the deadline, whatever is holding it | `--import=` in the same npm scripts |
 
 The watchdog's timer is **unref'd**: it does not keep a healthy file alive, so it costs the
 suite no wall-clock time, and it still fires when something else holds the loop open past
@@ -88,24 +88,44 @@ deadline it exceeded, the still-open handle types and — for sockets — the pe
 exits 87 so the runner counts the file as **failed**. In a CI log a hang and a slow run are
 otherwise the same thing.
 
-**It reports what it measured and nothing more.** The timer is armed at *import*, not at
-test completion, so when it fires it does not know whether the file's tests had finished —
-an earlier version printed "This is a HANG, not a slow run" directly above its own
-contradicting `Still open:` line, and a fixture doing three seconds of honest work got that
-sentence. It now states the deadline, the open handles, and `Loop: <n>ms of the last <m>ms
-idle` from `performance.nodeTiming.idleTime`, and reads that number only at the busy end of
-the scale, where it separates a file doing real work from one that is waiting. A leaked
-socket and a merely-slow timer-driven file are both ~97% idle and it does not claim to tell
-them apart.
+**It reports what it measured, and interprets none of it.** The timer is armed at *import*,
+not at test completion, so when it fires it does not know whether the file's tests had
+finished. Two verdicts have been tried here and both were wrong. First "This is a HANG, not
+a slow run", printed over a fixture doing three seconds of honest work. Then a replacement
+gated on the idle fraction — which told a fixture that burns ~1.2s of CPU and *then* leaks a
+referenced socket that it "may simply be SLOW rather than stuck. Give it room with
+`BLAZE_TEST_WATCHDOG_MS`", directly above its own `Endpoints: socket connected to …`, sending
+the operator away from a real leak. Because the window starts at import, any file that works
+and then hangs lands in that branch; the gate never separated the two cases.
+
+So the report now prints `Loop: <i>ms idle, <b>ms busy, over the <w>ms actually elapsed` and
+stops. Both numbers are facts; which one means "stuck" is a question the handle list answers.
+The window is the one that **elapsed**, not the deadline that was requested — a synchronous
+block holds the timer past its deadline, and an 8s block against a 1500ms deadline used to
+print `0ms of the last 1500ms idle`, a statement about the flag dressed as a measurement.
+
+**It is armed in the per-file child, never in the runner.** `node --test` applies `--import`
+to each test-file child it spawns and not to the orchestrating process: measured, three test
+files give exactly three preloads, all with `NODE_TEST_CONTEXT` set. That is why the coverage
+job can run 388s against a 300s deadline without a watchdog report — the orchestrator, and
+the `c8` process above it, are not armed. It is the right scope (BLZ-534's failure was a
+per-file child that could not exit, and killing the orchestrator would take the whole run
+down) but it is a real limit: a runner that itself wedges is bounded by the CI job timeout
+and by nothing here.
 
 **It reaps the process's children before exiting.** `process.exit()` does not, so a hung
 file that had spawned a helper used to leak one process per run — measured, and a real
 `scripts/serve.mjs` was found alive fifteen minutes after a probe. A process-*group* kill is
 not available (this process shares its group with the runner and npm), so descendants are
 walked with `pgrep -P` and killed deepest first. The report says which of the three things
-happened — `reaped <n>`, `none to reap`, or `could not be checked` on a machine with no
-usable `pgrep` — because "I looked and found none" and "I could not look" are not the same
-answer.
+happened — `reaped <n> still parented to this process`, `none still parented to this
+process`, or `the walk did not complete` — because "I looked and found none" and "I could
+not look" are not the same answer, and a failure *anywhere* in the walk makes the whole walk
+unknown rather than the tree small. The wording is deliberately narrow: `pgrep -P` follows
+current parent links, so a grandchild whose own parent has already exited is reparented and
+is no longer visible as a descendant. Measured with a fixture spawning `sh -c '… & exit 0'`:
+0 live helpers before, 1 after, and the report said none were still parented — which was
+true, and is why it does not say the process was left with no children.
 
 The deadline defaults to 300s and is set with `BLAZE_TEST_WATCHDOG_MS` (`0` disables it).
 An unparseable value keeps the default rather than silently removing the bound.
@@ -129,7 +149,15 @@ failure one level up. So each is read as a **number** and checked against the ot
 * When the watchdog is preloaded the run came from an npm script, so the bound the process
   received must equal the one `package.json` declares — this is the assertion that reddens
   if the flag is dropped. A bare `node --test` is a legitimate way to run one file and is
-  not failed for it; it prints an `UNBOUNDED TEST RUN` notice in its own output instead.
+  not failed for it; `tests/hang-watchdog.test.mjs` prints an `UNBOUNDED TEST RUN` notice
+  instead. That notice lives **inside that one file**, so it only appears when that file is
+  in the selected set — `node --test tests/board-gate.test.mjs` prints nothing. It is a
+  courtesy to someone at a terminal, not a gate.
+* Every **workflow step** that runs the test runner is therefore checked separately: a step
+  either goes through `npm test` / `npm run test:coverage`, which carry the bounds declared
+  once in `package.json`, or it must carry both flags itself. `board-gate.yml` ran a bare
+  `node --test tests/board-gate.test.mjs` — a whole CI job with neither bound and nothing
+  saying so — and now runs `npm test --` instead.
 
 **The cause, for this one file, was found and fixed.** Each conformance test ended with
 `await s.close?.()`, the one statement a failing assertion never reaches — so a red

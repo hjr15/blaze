@@ -5,13 +5,13 @@
 // `package.json` declares `engines: { node: ">=24" }` and nothing enforced it. Under Node
 // 20 — which is what `node` resolves to on the author's machine — every file that imports
 // `node:sqlite` fails to LOAD with `No such built-in module: node:sqlite`. Measured on this
-// branch 2026-09-08: `/usr/bin/node` v20.20.2 gives 3,946 tests / 3,773 pass / 173 fail,
-// against 4,465 / 4,463 / 0 on v24.19.0. Nothing in those 173 says "wrong Node". Real
+// branch 2026-09-10: `/usr/bin/node` v20.20.2 gives 3,953 tests / 3,780 pass / 173 fail,
+// against 4,472 / 4,470 / 0 on v24.19.0. Nothing in those 173 says "wrong Node". Real
 // regressions hide behind that noise, and "the suite is green" stops being checkable.
 //
 // BLZ-601 was filed saying the machine had no conforming Node. That premise was wrong:
 // `~/.local/node24/bin/node` there is v24.19.0 with a working `node:sqlite`, and the suite
-// under it is 4,465 tests / 4,463 pass / 0 fail. What was missing was any way to
+// under it is 4,472 tests / 4,470 pass / 0 fail. What was missing was any way to
 // DISCOVER that. So when this guard refuses, it goes looking for a conforming Node in the
 // usual places and, if it finds one, hands over the exact line that selects it.
 //
@@ -72,23 +72,36 @@ export const SYSTEM_NODE_ROOTS = ["/usr/local/n/versions/node"];
 
 export function candidateNodePaths(home = homedir(), systemRoots = SYSTEM_NODE_ROOTS) {
   const out = [];
-  /** Every `<parent>/<name>/<suffix…>` that exists, for names this source cares about. */
-  const globDirs = (parent, suffix, keep = () => true) => {
+  for (const { parent, suffix, keep = () => true } of discoverySources(home, systemRoots)) {
     let names;
-    try { names = readdirSync(parent); } catch { return; }  // absent or unreadable: skip this source alone
+    try { names = readdirSync(parent); } catch { continue; }  // absent or unreadable: skip this source alone
     for (const name of names.filter(keep)) {
       const p = join(parent, name, ...suffix);
       if (existsSync(p)) out.push(p);
     }
-  };
-  // `~/.local` also holds bin, lib, share and state, so only `node*` entries are considered
-  // — otherwise the refusal path would spawn every directory in there asking its version.
-  globDirs(join(home, ".local"), ["bin", "node"], (n) => n.startsWith("node"));
-  globDirs(join(home, ".nvm", "versions", "node"), ["bin", "node"]);
-  globDirs(join(home, ".fnm", "node-versions"), ["installation", "bin", "node"]);
-  globDirs(join(home, ".volta", "tools", "image", "node"), ["bin", "node"]);
-  for (const root of systemRoots) globDirs(root, ["bin", "node"]);
+  }
   return out;
+}
+
+/** Every directory the search will read, and what it expects to find under each.
+ *
+ *  Split out so THE DEFAULTS THEMSELVES ARE OBSERVABLE. Parameterising `home` and
+ *  `systemRoots` made the search testable and, on its own, made it possible for every test
+ *  to pass both explicitly — at which point `candidateNodePaths(home = homedir(),
+ *  systemRoots = [])` and `home = "/nonexistent"` both leave the suite fully green, because
+ *  nothing exercises the configuration a real run uses. A test can call this with no
+ *  arguments and see the actual bindings, so losing `$HOME` or `n` reddens instead of
+ *  passing quietly. */
+export function discoverySources(home = homedir(), systemRoots = SYSTEM_NODE_ROOTS) {
+  return [
+    // `~/.local` also holds bin, lib, share and state, so only `node*` entries are considered
+    // — otherwise the refusal path would spawn every directory in there asking its version.
+    { parent: join(home, ".local"), suffix: ["bin", "node"], keep: (n) => n.startsWith("node") },
+    { parent: join(home, ".nvm", "versions", "node"), suffix: ["bin", "node"] },
+    { parent: join(home, ".fnm", "node-versions"), suffix: ["installation", "bin", "node"] },
+    { parent: join(home, ".volta", "tools", "image", "node"), suffix: ["bin", "node"] },
+    ...systemRoots.map((parent) => ({ parent, suffix: ["bin", "node"] })),
+  ];
 }
 
 /** Every candidate that actually reports a conforming version. Only ever called on the
@@ -123,8 +136,8 @@ export function describeEngine({ version, major, sqlite, required, conforming })
     `  node:sqlite: ${sqlite ? "available" : "MISSING"}`,
     "",
     "Every test file that imports `node:sqlite` fails to LOAD on this engine, and none of",
-    "the failures that produces mentions the engine. Measured on this repo 2026-09-08:",
-    "Node v20.20.2 gives 3,946 tests / 173 fail; Node v24.19.0 gives 4,465 / 0 fail. A real",
+    "the failures that produces mentions the engine. Measured on this repo 2026-09-10:",
+    "Node v20.20.2 gives 3,953 tests / 173 fail; Node v24.19.0 gives 4,472 / 0 fail. A real",
     "regression would be invisible in the first of those.",
     "",
   ];

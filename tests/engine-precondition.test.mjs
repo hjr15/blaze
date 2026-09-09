@@ -6,7 +6,7 @@
 // `engines: {node: ">=24"}`, nothing enforces it, and a developer who runs the suite under
 // the Node 20 that is first on `PATH` gets every `node:sqlite` file failing to LOAD and no
 // hint that the engine is why. Measured with `node --test` at this commit, twice, stably:
-// v20.20.2 gives 3,946 tests / 3,773 pass / 173 fail against v24.19.0’s 4,465 / 4,463 / 0.
+// v20.20.2 gives 3,953 tests / 3,780 pass / 173 fail against v24.19.0’s 4,472 / 4,470 / 0.
 // The ticket body in blaze-pm has been corrected to say this.
 //
 // So the fix is a precondition that fails FAST and says three things: what is required,
@@ -21,12 +21,12 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { homedir, tmpdir } from "node:os";
 import { dirname, join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import {
   GUARD_EXIT_CODE, SYSTEM_NODE_ROOTS, candidateNodePaths, describeEngine, detectEngine,
-  requiredMajor,
+  discoverySources, requiredMajor,
 } from "../scripts/ci/require-engine.mjs";
 
 /** Hold the machine-global roots out, so an exact-list assertion is about the fake home
@@ -187,6 +187,52 @@ test("BLZ-601: ~/.local is searched for node* directories only, not every direct
 test("BLZ-601: a home that does not exist at all yields no candidates and does not throw", () => {
   assert.deepEqual(
     candidateNodePaths(join(tmpdir(), "blaze-engine-home-does-not-exist"), NO_SYSTEM_ROOTS), []);
+});
+
+test("BLZ-601: the DEFAULTS a real run uses are the ones asserted, not just the parameters", () => {
+  // REVIEW FINDING, and the cost of the fix above. Parameterising `home` and `systemRoots`
+  // made the search testable — and then every test passed both explicitly, so nothing
+  // exercised the bindings a real run actually gets. Measured: with
+  // `candidateNodePaths(home = homedir(), systemRoots = [])` the suite was 49/49 GREEN, and
+  // with `home = "/nonexistent"` it was 49/49 GREEN. Production discovery could lose `n` and
+  // `$HOME` together without a single red test — green precisely because it was testing a
+  // configuration no real run uses. So the defaults are read with NO arguments here.
+  const parents = discoverySources().map((d) => d.parent);
+
+  const home = homedir();
+  assert.ok(parents.some((p) => p === join(home, ".nvm", "versions", "node")),
+    `nothing under this machine's actual home (${home}) is searched by default, so the guard `
+    + "would tell a developer with an nvm Node to go and install one");
+  assert.ok(parents.every((p) => p.startsWith(home) || SYSTEM_NODE_ROOTS.includes(p)),
+    "every source must be either home-rooted or one of the declared machine-global roots");
+  for (const root of SYSTEM_NODE_ROOTS) {
+    assert.ok(parents.includes(root),
+      `${root} is declared as a discovery root but is not bound into the default search`);
+  }
+
+  // The bindings are one thing; that the search USES them is another. `homedir()` reads
+  // `$HOME` on POSIX, so a child with a fabricated one shows the default actually resolving.
+  const rel = ".nvm/versions/node/v24.19.0/bin/node";
+  const fake = mkdtempSync(join(tmpdir(), "blaze-engine-defaulthome-"));
+  try {
+    mkdirSync(join(fake, dirname(rel)), { recursive: true });
+    symlinkSync(process.execPath, join(fake, rel));
+    // The module path travels in the ENVIRONMENT, not in argv: this file's guard runs its
+    // CLI when `process.argv[1]` is itself, so passing the path as an argument made the
+    // probe refuse under any Node below the floor and had nothing to do with what is
+    // being asserted here.
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e",
+      'const m = await import(process.env.BLAZE_PROBE_MODULE);'
+      + ' console.log(JSON.stringify(m.candidateNodePaths()));'],
+      { encoding: "utf8", timeout: 30_000, env: {
+        ...process.env, HOME: fake,
+        BLAZE_PROBE_MODULE: pathToFileURL(join(REPO, "scripts", "ci", "require-engine.mjs")).href,
+      } });
+    assert.equal(r.status, 0, `the probe must run: ${r.stderr}`);
+    assert.ok(JSON.parse(r.stdout).includes(join(fake, rel)),
+      "called with no arguments, the search must actually read the running user's home — "
+      + `it did not find ${rel} under a home it was given as $HOME`);
+  } finally { rmSync(fake, { recursive: true, force: true }); }
 });
 
 test("BLZ-601: the machine-global roots are searched too, and `n`'s is one of them", (t) => {

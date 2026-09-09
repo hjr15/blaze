@@ -77,6 +77,27 @@ async function loadPg() {
   }
 }
 
+/** Run the rest of setup with `client` already connected, closing it if setup THROWS.
+ *
+ *  BLZ-534, one frame deeper than the conformance suite's `seedPg`. `openPostgresRead`
+ *  connects and then runs `checkDbSchema` and, on an empty database, `createDbSchema`. Both
+ *  of the explicit REFUSALS in there called `client.end()`; a throw did not, and either of
+ *  those calls can throw for ordinary reasons — a connection dropped mid-query, a
+ *  permissions error, DDL that collides. That left a live referenced TCP handle behind, and
+ *  a Node process holding one of those cannot exit. That is BLZ-534's hang.
+ *
+ *  Exported because the guarantee is testable here and not testable through
+ *  `openPostgresRead`, which needs a real server before it can reach the window at all. */
+export async function closeOnSetupFailure(client, setup) {
+  try {
+    return await setup();
+  } catch (error) {
+    // Closing must not replace the reason we are closing.
+    try { await client.end(); } catch { /* the connection is already gone */ }
+    throw error;
+  }
+}
+
 /**
  * @param opts.create  create the schema when the database is EMPTY. Default false.
  *
@@ -93,18 +114,20 @@ export async function openPostgresRead(connection, { create = false } = {}) {
     run: (sql, params = []) => client.query(sql, params.length ? params : undefined),
     all: async (sql, params = []) => (await client.query(sql, params.length ? params : undefined)).rows,
   };
-  const state = await checkDbSchema(exec, { dialect: "postgres" });
-  if (!state.ok) { await client.end(); throw new Error(`blaze: ${state.error}`); }
-  if (state.state === "empty") {
-    if (!create) {
-      await client.end();
-      throw new Error(
-        "blaze: this database has no Blaze schema. Create one explicitly rather than "
-        + "having a read open silently write DDL — pass { create: true }, or run "
-        + "'blaze db init'.");
+  // BLZ-534: FROM HERE THE SOCKET IS LIVE, SO EVERY EXIT FROM SETUP MUST CLOSE IT.
+  await closeOnSetupFailure(client, async () => {
+    const state = await checkDbSchema(exec, { dialect: "postgres" });
+    if (!state.ok) throw new Error(`blaze: ${state.error}`);
+    if (state.state === "empty") {
+      if (!create) {
+        throw new Error(
+          "blaze: this database has no Blaze schema. Create one explicitly rather than "
+          + "having a read open silently write DDL — pass { create: true }, or run "
+          + "'blaze db init'.");
+      }
+      await createDbSchema(exec, { dialect: "postgres" });
     }
-    await createDbSchema(exec, { dialect: "postgres" });
-  }
+  });
 
   const linksFor = async (id) =>
     (await client.query(

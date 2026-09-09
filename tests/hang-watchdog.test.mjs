@@ -23,7 +23,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawn, spawnSync } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { readFileSync, readdirSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import {
@@ -37,6 +37,7 @@ const LEAKY = join(REPO, "tests", "fixtures", "hang-watchdog", "leaks-a-socket.m
 const CLEAN = join(REPO, "tests", "fixtures", "hang-watchdog", "exits-cleanly.mjs");
 const SLOW = join(REPO, "tests", "fixtures", "hang-watchdog", "slow-but-honest.mjs");
 const SPAWNER = join(REPO, "tests", "fixtures", "hang-watchdog", "spawns-a-helper-then-leaks.mjs");
+const BUSY_LEAK = join(REPO, "tests", "fixtures", "hang-watchdog", "busy-then-leaks.mjs");
 
 /** A child that runs its OWN `node --test`. `NODE_TEST_CONTEXT` is set in this process by
  *  the runner that is executing this file, and an inherited copy makes the child print
@@ -198,6 +199,42 @@ test("BLZ-534: the suite is actually run with a bound — the npm scripts carry 
 // would only pin the spelling and would have to be edited in lockstep with the thing it
 // claims to guard.
 
+test("BLZ-534: no CI step runs the test runner outside the two bounds", () => {
+  // REVIEW FINDING. `.github/workflows/board-gate.yml` ran `node --test tests/board-gate.test.mjs`
+  // — no `--import`, and therefore Node's own `--test-timeout=0`. A whole CI job was running
+  // the runner unbounded, and nothing said so: measured,
+  // `node --test tests/board-gate.test.mjs | grep -c "UNBOUNDED TEST RUN"` gave 0 against 2
+  // for tests/hang-watchdog.test.mjs. The notice lives INSIDE that file, so it only ever
+  // fires when that file is in the selected set — a run of any other file is silent. The
+  // notice is for a human at a terminal; this is the check that covers CI, where nobody is
+  // reading. The fix in board-gate.yml is `npm test --`, which carries the bounds already
+  // declared once in package.json rather than a third copy of them that can drift.
+  const dir = join(REPO, ".github", "workflows");
+  const steps = [];
+  for (const f of readdirSync(dir).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"))) {
+    for (const line of readFileSync(join(dir, f), "utf8").split("\n")) {
+      if (/^\s*#/.test(line)) continue;                       // a comment ABOUT a command is not one
+      if (/(^|[^\w-])node\s+--test\b|(^|[^\w-])npm\s+(run\s+)?test\b/.test(line)) steps.push({ f, line: line.trim() });
+    }
+  }
+  // ASSERT THE OBSERVATION HAPPENED. A regex that silently stopped matching would report a
+  // clean sweep of nothing, which is the failure mode this whole file is about.
+  assert.ok(steps.length >= 2,
+    `only ${steps.length} test-running workflow step(s) were found; the scan is broken, and a `
+    + "sweep that found nothing is not a sweep that found nothing wrong");
+
+  for (const { f, line } of steps) {
+    // `npm test` / `npm run test:coverage` carry both bounds by definition — that is what the
+    // tests above pin. Anything invoking the runner directly must carry them itself.
+    if (/(^|[^\w-])npm\s+(run\s+)?test/.test(line)) continue;
+    assert.match(line, /--import=\.\/tests\/setup\/hang-watchdog\.mjs/,
+      `${f}: this step runs the test runner with no hang watchdog:\n    ${line}`);
+    assert.match(line, /--test-timeout=\d+/,
+      `${f}: this step runs the test runner with no per-test timeout, which is Node's `
+      + `--test-timeout=0 — BLZ-534's own value:\n    ${line}`);
+  }
+});
+
 test("BLZ-534: both npm scripts declare the SAME per-test bound", () => {
   const scripts = npmScripts();
   const declared = ["test", "test:coverage"].map((n) => [n, declaredTestTimeoutMs(scripts[n])]);
@@ -266,6 +303,28 @@ test("BLZ-534: the watchdog's own deadline is observable without waiting for it 
 // Two defects a review reproduced against the shipped watchdog. Both are about the same
 // thing: the watchdog said more than it had measured, and did less than it had claimed.
 
+test("BLZ-534: a file that WORKS and then hangs is not told it is merely slow", () => {
+  // REVIEW FINDING, and the same defect as the one below with its sign flipped. The verdict
+  // that replaced "This is a HANG, not a slow run" was gated on the idle fraction — and the
+  // watchdog's window runs from IMPORT, so a file that does real work and THEN leaks reads
+  // as busy. This fixture burns ~1.2s of CPU and then leaks a live referenced socket, so it
+  // can never exit; against a 3s deadline it was told it "may simply be SLOW rather than
+  // stuck. Give it room with BLAZE_TEST_WATCHDOG_MS", printed directly above its own
+  // `Endpoints: socket connected to …`. On a real leak that advice sends the operator the
+  // wrong way. No gate on this number can separate the two cases, so none is applied.
+  const r = runWithWatchdog(BUSY_LEAK, 3_000);
+  const out = `${r.stdout}${r.stderr}`;
+  assert.match(out, /BLAZE TEST HANG WATCHDOG/,
+    "the fixture must actually trip the deadline, or this test measures nothing");
+  assert.match(out, /Endpoints: .*socket connected to/,
+    "and it must really be leaking a socket — otherwise this is not the case under test");
+  assert.doesNotMatch(out, /may\s+simply be SLOW/,
+    "a file holding a live socket open must not be told it is probably just slow, least of "
+    + "all directly above the endpoint list that refutes it");
+  assert.doesNotMatch(out, /before\s+hunting for a leaked handle/,
+    "nor be advised away from the leak the same report just named");
+});
+
 test("BLZ-534: the watchdog does not call a slow file a hang — it cannot tell them apart", () => {
   // REPRODUCED: this fixture does three seconds of honest work and leaks nothing. Against a
   // 1.5s deadline the shipped watchdog killed it and printed "This is a HANG, not a slow
@@ -285,17 +344,30 @@ test("BLZ-534: the watchdog does not call a slow file a hang — it cannot tell 
 test("BLZ-534: the watchdog reports the idle measurement it actually took", () => {
   // The other half of the rule: having dropped the claim it could not support, it must state
   // the number it can. `performance.nodeTiming.idleTime` was cited in the ticket and never
-  // read; it is read now, and printed, so a reader can weigh the verdict themselves.
-  const out = (() => { const r = runWithWatchdog(LEAKY, 1_500); return `${r.stdout}${r.stderr}`; })();
-  assert.match(out, /Loop: +\d+ms of the last 1500ms idle/,
-    "the deadline report must state how much of its window the event loop spent idle");
+  // read; it is read now, and printed, so a reader can weigh the evidence themselves.
+  const r = runWithWatchdog(LEAKY, 1_500);
+  const out = `${r.stdout}${r.stderr}`;
+  assert.match(out, /Loop: +\d+ms idle, \d+ms busy, over the \d+ms actually elapsed/,
+    "the deadline report must state how the window it enforced was actually spent");
 });
 
-test("BLZ-534: a slow file is told it may simply be slow, and how to say so", () => {
-  const r = runWithWatchdog(SLOW, 1_500);
+test("BLZ-534: the window reported is the one that ELAPSED, not the one that was asked for", (t) => {
+  // REVIEW FINDING. The line used to read `${idle}ms of the last ${ms}ms idle`, where `ms`
+  // is the DECLARED deadline. A synchronous block holds the timer past its deadline, so an
+  // 8s block against a 1500ms deadline printed `Loop: 0ms of the last 1500ms idle` — a
+  // statement about the flag, dressed as a measurement, under a banner reading EVERY LINE IS
+  // SOMETHING THAT WAS MEASURED. The fixture below burns ~1.2s of CPU inside a 500ms window.
+  const r = runWithWatchdog(BUSY_LEAK, 500);
   const out = `${r.stdout}${r.stderr}`;
-  assert.match(out, /BLAZE_TEST_WATCHDOG_MS/,
-    "a file that is only slow needs the knob that gives it room");
+  const m = /Loop: +(\d+)ms idle, (\d+)ms busy, over the (\d+)ms actually elapsed/.exec(out);
+  assert.ok(m, `the report must state the elapsed window:\n${out}`);
+  const [, idle, busy, elapsed] = m.map(Number);
+  t.diagnostic(`idle=${idle} busy=${busy} elapsed=${elapsed} against a 500ms deadline`);
+  assert.ok(elapsed > 1_000,
+    `the window reported (${elapsed}ms) is not the one that elapsed — this file blocked the `
+    + "loop for over a second past a 500ms deadline, so anything near 500 is the flag being "
+    + "read back rather than the clock");
+  assert.equal(idle + busy, elapsed, "the two halves must add up to the window they describe");
 });
 
 /** Every live pid running the long-lived helper fixture. */
@@ -329,9 +401,12 @@ test("BLZ-534: the watchdog says what it did about children — the COUNT, not a
   // spawns exactly one helper, so the report has exactly one number it can honestly print.
   const r = runWithWatchdog(SPAWNER, 1_500);
   const out = `${r.stdout}${r.stderr}`;
-  assert.match(out, /Children: +reaped 1\b/,
+  assert.match(out, /Children: +reaped 1 still parented to this process\b/,
     "the report must state how many descendants were actually killed; this fixture leaves "
     + "exactly one, and any other answer means the reap did not happen as reported");
+  assert.doesNotMatch(out, /no children|nothing left running|clean exit/i,
+    "and must not upgrade a count into a claim that nothing was left behind — `pgrep -P` "
+    + "cannot see a grandchild that has already been reparented");
 });
 
 test("BLZ-534: a reap that could not look never reads as a clean exit", () => {
@@ -340,19 +415,39 @@ test("BLZ-534: a reap that could not look never reads as a clean exit", () => {
   // written by. Three distinct outcomes, three distinct sentences; conflating "I looked and
   // found none" with "I could not look" is how a leaked process gets reported as no process.
   const say = (reap) => watchdogReport({ file: "f.mjs", ms: 1_000, types: [], peers: [], idleMs: 900, reap });
-  assert.match(say({ checked: true, killed: 2 }), /Children: +reaped 2\b/);
-  assert.match(say({ checked: true, killed: 0 }), /Children: +none to reap/);
+  assert.match(say({ checked: true, killed: 2 }), /Children: +reaped 2 still parented/);
+  assert.match(say({ checked: true, killed: 0 }), /Children: +none still parented to this process/);
   const blind = say({ checked: false, killed: 0 });
-  assert.match(blind, /Children: +could not be checked/,
-    "a watchdog that could not read the process table must say so");
-  assert.doesNotMatch(blind, /none to reap|reaped \d/,
+  assert.match(blind, /Children: +the walk did not complete/,
+    "a watchdog whose walk did not finish must say so");
+  assert.doesNotMatch(blind, /none still parented|reaped \d/,
     "and must not report an outcome it never observed");
 
-  // And the source of that flag: `null` from the process-table read, distinct from `[]`.
+  // And the source of that flag: `null` from the walk, distinct from `[]`.
   assert.equal(descendantPids(1, () => null), null, "an unreadable process table must be null, not empty");
   assert.deepEqual(descendantPids(1, () => []), [], "a readable table with no children is empty, not null");
   assert.deepEqual(reapDescendants(null), { checked: false, killed: 0 },
     "nothing may be claimed killed when nothing could be listed");
+});
+
+test("BLZ-534: a walk that failed BELOW the root is incomplete, not complete-and-small", () => {
+  // REVIEW FINDING, and the same rule as above one level down. `null` propagated from the
+  // ROOT read only; every nested failure was swallowed by `childrenOf(k) ?? []`. So a walk
+  // that listed the first generation and then could not read the second returned that first
+  // generation as if it were the whole tree, and the report said `reaped 1` or `none` for a
+  // tree it never finished. Reachable in production whenever a nested `pgrep` hits its 5s
+  // timeout or cannot fork — exactly when a machine is loaded enough to be leaking processes.
+  const rootOnly = (pid) => (pid === 1 ? [2] : null);
+  assert.equal(descendantPids(1, rootOnly), null,
+    "a lookup that failed below the root must make the WHOLE walk unknown — returning [2] "
+    + "here is a partial answer presented as a complete one");
+  assert.deepEqual(reapDescendants(descendantPids(1, rootOnly)), { checked: false, killed: 0 },
+    "and nothing may be claimed about children of a tree that was never fully walked");
+
+  // The walk still works when every generation answers, and it really does go deeper than one.
+  const tree = { 1: [2, 3], 2: [4], 3: [], 4: [] };
+  assert.deepEqual(descendantPids(1, (pid) => tree[pid] ?? []).sort(), [2, 3, 4],
+    "a complete walk must reach the grandchildren, not stop at the first generation");
 });
 
 test("BLZ-534: a run that has neither bound says so, in its own output rather than only in docs", (t) => {
