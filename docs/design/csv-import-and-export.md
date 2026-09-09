@@ -536,13 +536,17 @@ B  ──blaze export --format csv──▶  Y
 **Gate 1 — `diff X Y` is empty, byte for byte.** This catches importer defects. `fs` port only,
 per §2.6.
 
-**Gate 3 — every one of the 31 columns is non-empty in at least one row of X.** Listed here beside
-the other two rather than only in the CI recipe: an earlier draft mentioned it in §3.3 and in the
-ticket breakdown but left both the headline decisions and the ADR saying *"two gates"*, so an
-implementer following the binding record would have built two and shipped the hole gate 3 closes.
-
 **Gate 2 — `zeroDiff(A, B).valueDiffs` is empty.** This catches **exporter** defects, and without
 it gate 1 is vacuous.
+
+**Gate 3 — every one of the 31 columns is non-empty in at least one row of X.** Gates 1 and 2 both
+compare *corpora*; neither notices a column empty **everywhere** — in the fixture and in both
+exports alike. Thirty-one assertions, and the cheapest of the three.
+
+All three are stated here, in §0 and in ADR-0037. An earlier draft carried gate 3 only in the CI
+recipe and the ticket breakdown while both the headline decisions and the binding ADR said *"two
+gates"* — so an implementer following the decision record would have built two and shipped the
+hole gate 3 closes.
 
 **Why gate 1 alone is not an oracle, stated plainly because an earlier draft of this document
 claimed it was.** X and Y are produced by the *same exporter*, so **any exporter defect is
