@@ -416,9 +416,53 @@ if (!all && !shared && mySession === null) {
 // the fallback regardless of whether the caller also has a session identity
 // of its own (that queue is left untouched); else the caller's own queue.
 const targets = all ? storeListing.queues : [{ session: shared ? null : mySession }];
-const drained = targets
-  .map((q) => ({ session: q.session, ...readForDrain(dataRoot, q.session) }))
-  .filter((q) => q.entries.length > 0);
+// `read` is every queue this run OPENED; `drained` is the subset with at least one parseable
+// op, which is what the partition and the commit work over. Kept apart because the count
+// below is a statement about what was read, and a queue read in full and found to hold only
+// unparseable lines was read — it is not evidence of nothing (BLZ-531, ADR-0030).
+const read = targets.map((q) => ({ session: q.session, ...readForDrain(dataRoot, q.session) }));
+const drained = read.filter((q) => q.entries.length > 0);
+
+// BLZ-558: STATE THE COUNT, over exactly the queues this run READ.
+//
+// The nightly flush Job's `queueops=` counter derived this by globbing `.blaze/pending/`,
+// and so missed the legacy shared fallback ledger `.blaze/pending-commit.jsonl` — which
+// `listQueues` enumerates FIRST and which `--all` drains along with everything else. An op
+// appended with no session id was therefore swept by the run and absent from its count, so
+// the Job could read `queueops=0` over a flush that had just committed work. PR #110
+// narrowed the documented claim instead of widening the count; ADR-0033 recorded the gap.
+//
+// Closed HERE rather than in the consumer, because any consumer re-deriving this by globbing
+// gets it wrong the same way: the run knows exactly which queues it read, and nothing outside
+// it does. `targets` already resolves to `storeListing.queues` under `--all` — the fallback
+// included — so the count and the drain cannot disagree by construction.
+//
+// ADR-0030 applies to a number as much as to a report, and it applies to EVERY CLAUSE of the
+// line, not only the number:
+//   * it counts only queues actually READ. An unlistable store directory is named on the same
+//     line and never folded in, and so are the unparseable lines of a queue that was opened
+//     but yielded nothing — that queue is dropped from `drained` before it can be quarantined
+//     (BLZ-532/610's scope), and a count that quietly left it out read as a clean board;
+//   * it says whether the FALLBACK was among the queues read, from `read` itself. The first
+//     cut printed "(the legacy shared fallback ledger included)" unconditionally — on a plain
+//     `blaze commit` that never opened it, while the fallback's ops sat there unread and
+//     unnamed. "Included" and "not read" are different facts exactly as an absent measurement
+//     and a measured zero are, and the Job this line is written for cannot tell them apart
+//     from the number alone;
+//   * it is always PRINTED, including as 0.
+const queueOps = read.reduce((n, q) => n + q.entries.length, 0);
+const unparseable = read.reduce((n, q) => n + q.dropped.length, 0);
+const fallbackRead = read.some((q) => q.session === null);
+const fallbackNote = fallbackRead
+  ? "the legacy shared fallback ledger included"
+  : all || shared
+    ? "no legacy shared fallback ledger exists to read"
+    : "the legacy shared fallback ledger was NOT read by this run; pass --all to sweep it";
+const notCovering = [];
+if (unparseable > 0) notCovering.push(`${unparseable} unparseable line(s)`);
+if (storeListing.unreadable.length > 0) notCovering.push(`${storeListing.unreadable.length} queue directory/ies this run could not list`);
+console.log(`blaze commit: queueops=${queueOps} across ${read.length} queue(s) read (${fallbackNote})`
+  + (notCovering.length > 0 ? ` — NOT covering ${notCovering.join(" and ")}` : ""));
 
 // BLZ-556: partition each queue by PROVENANCE before anything is staged. One store means
 // this run can now see every worktree's ops — the fix — and could therefore commit ops
