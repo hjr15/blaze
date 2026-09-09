@@ -91,11 +91,22 @@ two of them are unsatisfiable in this repo. Measured from the modules the import
 so any importer that calls `loadConfig()` — which it must, to resolve the type registry — holds a
 `cfg` carrying the spawn string.
 
-So the pinned property is **behavioural**: a full import of a fixture CSV completes with
-`child_process.spawnSync`, `spawn` and `execFileSync` replaced by throwing stubs. A `cfg` carrying
-`agentCommand` is harmless if nothing can execute it. Its positive control is the same harness
-applied to `propose-mapping`, which must throw — otherwise a passing import proves only that the
-stub was never wired.
+So the pinned property is **behavioural, and narrower than "no spawn"**: no spawn at all is false
+for a correct importer, which shells out to `git` to stage. What must never happen is that **the
+configured agent command executes** on the import path. A `cfg` carrying `agentCommand` is
+harmless if nothing runs it.
+
+It is pinned with a **PATH-shadowed stub**, not an in-process patch. `cli.mjs:9` spawns the runner
+as a separate process (`spawnSync(process.execPath, …)`), so monkey-patching `child_process` in
+the test reaches nothing inside it — and would miss `execSync`, `execFile` and `fork` besides.
+The repo already has the right pattern: `stubGh` at `tests/reconcile-delivery-truth.test.mjs:65-73`
+shadows a binary on `PATH`, and `tests/supervisor-identity.test.mjs:41-45` points `agentCommand`
+at a script. Because the runner inherits the environment, both reach it.
+
+Three assertions: a full fixture import succeeds **and leaves no sentinel file**; `propose-mapping`
+under the identical environment **fails with the sentinel present and named in the error**; and,
+with the stub repointed at a benign one, `propose-mapping` **succeeds** — so the second
+assertion's failure is attributable to the stub rather than to the harness.
 
 One static assertion survives and keeps a control that genuinely discriminates: the **proposer
 module is absent** from the import runner's transitive graph, and **present** in the propose
@@ -131,16 +142,26 @@ requires `--apply`. This follows `reconcile`, whose CLI entry already reads *"dr
 An importer that cannot be exported from is unverifiable, and this repo has spent nineteen
 adversarial rounds establishing that a measurement which cannot observe the failure is not
 evidence. `blaze export --format csv` emits the same versioned schema, and the verification is
-**two gates, because either alone is blind to half the system**:
+**three gates, because each alone is blind to something the others catch**:
 
 - **Gate 1 — `diff X Y` is empty**, where X is an export of a fixture corpus and Y an export of
-  the board that importing X produced. This catches **importer** defects.
+  the board that importing X produced. This catches **importer** defects. It is `fs`-port only:
+  `dbWritePort` writes `fm.priority || "medium"` and `fm.assignee || "unassigned"` into `NOT NULL`
+  columns (`scripts/model/write-port.mjs:235-236`), so absence in those two cannot survive a `db`
+  round trip no matter what the importer does.
 - **Gate 2 — `zeroDiff(A, B).valueDiffs` is empty**, comparing the source corpus against the
   imported one by value. This catches **exporter** defects, and without it gate 1 is vacuous:
   X and Y come from the same exporter, so any exporter defect is common-mode and cancels. An
   exporter that emitted a correct header and an empty cell for 21 of the 31 columns would pass
   gate 1 byte-for-byte and pass `blaze audit`, because `validateTicket`
   (`scripts/model/rules.mjs:25-31`) checks only `requiredFields(type)`.
+- **Gate 3 — every one of the 31 columns is non-empty in at least one fixture row.** Gates 1 and 2
+  both compare corpora; neither notices a column that is empty *everywhere*, in the fixture and in
+  both exports alike. Thirty-one assertions, and the cheapest of the three.
+
+Gate 2 lives in a `node --test` suite, not in `.github/workflows/board-gate.yml`. It needs a temp
+board, which the suite builds routinely, and the repo's most important correctness gate must be
+runnable locally and mutation-testable rather than encoded in CI-workflow YAML.
 
 This ADR records gate 2 explicitly because an earlier draft of the design specified gate 1 alone
 and called it the acceptance test. It was refuted by construction, and the instrument gate 2 needs
