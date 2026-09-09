@@ -18,7 +18,7 @@ import { tmpdir } from "node:os";
 import * as fsCallbacks from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { join, relative } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 // BLZ-535: a devDependency, never a dependency. This package ships zero runtime deps, and
 // this parser is loaded by one TEST. See the banner below for why a parser and not a reader.
 import { parse } from "acorn";
@@ -256,6 +256,45 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      over each module decides which of its exports actually put bytes on disk, and the pin
 //      must agree with it exactly, both ways.
 //
+// ROUND 7 — TWO MORE, and the pattern is now the whole point of this banner: each round has
+// stopped pinning one spelling and started pinning the next one down. Callee, then literal,
+// then the PATH.
+//
+//   F1. THE PIN WAS NEVER REACHED. `resolveProvider` normalised `?query` and `#fragment` —
+//      round 5's fix — and then did a literal `Map.get` on hand-joined path segments. Node
+//      accepts several more spellings of the same file, and every one of them missed the
+//      Map. MEASURED on 6252627: `import { saveState } from "./loops/groomer%2Emjs"`, ONE
+//      percent-escape, then `saveState("/tmp/blz-r6-attack", { … })` — a real 24-byte file on
+//      disk at 15 tests, 15 pass, 0 fail, exit 0. An absolute path and a `file:///…` URL did
+//      the same. The rollback was decisive: the identical file with the plain spelling
+//      reddened. The pin was never wrong.
+//      The segments are not joined by hand any more. `new URL(spec, base)` plus
+//      `fileURLToPath` IS Node's resolution — it decodes `%2E`, collapses `.` and `..`, drops
+//      the query and the fragment, and follows an absolute or `file:` specifier where it
+//      actually points. And it fails CLOSED: a specifier that will not resolve, or that
+//      resolves outside `scripts/`, is an offence rather than a shrug. Returning "not one of
+//      mine" for what it could not place is precisely how the three spellings got through.
+//      Verified against Node 24 rather than assumed, including the one escape that is not a
+//      spelling of anything: `%2F` stays encoded in a URL path and Node refuses the specifier
+//      outright, so the guard reports it instead of guessing.
+//
+//   F2. `sanctioned` CARRIED A CALLER-CHOSEN DESTINATION, so its own criterion was false.
+//      The bucket said "what it writes and where is its job, not its caller's choice", and
+//      `loadTransitions({ root })` writes `<root>/.blaze/transitions.json` with `root` wholly
+//      from the caller. `loadIdentity`, `fsStorage` and `groomOnce` are the same shape, and
+//      this file's own `quiet` list ASSERTED that importing them must not be an offence.
+//      A criterion refuted twice — round 4's general claim, round 6's "caller's choice" — does
+//      not get a third rewording. It is deleted. If an export writes it is a `writes`, and
+//      every module that imports one is named in the allowlist with its reason: fifteen more
+//      joined it, the six ticket verbs and their six runners among them. `sanctioned` survives
+//      with exactly one member and exactly one meaning — the walk flags `readRegularFileSync`
+//      because it reaches `openSync`, and it opens O_RDONLY|O_NONBLOCK and provably cannot
+//      create.
+//      The allowlist is 44 entries for it, and it now means what it says: THESE ARE THE
+//      MODULES THAT CAN CAUSE A WRITE. One of them is a VIEW — rendering the board refreshes
+//      the git-derived transitions cache — which is the read path touching disk, the same
+//      class of defect as contentHash, named instead of invisible.
+//
 // THIS FILE HARD-DEPENDS ON `acorn`, and that is a failure mode worth naming: without
 // `npm ci` the whole file dies at import with ERR_MODULE_NOT_FOUND — 1 test, 1 fail — which
 // is a MISSING GUARD wearing the clothes of a failing one. It is a devDependency, `npm ci`
@@ -264,6 +303,12 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //
 // WHAT THIS STILL CANNOT SEE, stated rather than left to look total. This guard now parses,
 // but it is not a scope analyser and not a linker, and each of those is a hole:
+//   * A SPECIFIER IN A BARE CALL ARGUMENT, for the fail-closed arm only. `import(x)` is
+//     unambiguously a module specifier and is judged fully; `require("./x.mjs")` is resolved
+//     the same way, but a string handed to some OTHER call is not reported when it will not
+//     resolve — `join(root, "../x")` is a path, not a specifier, and reporting every string
+//     passed to every function would report the tree. Resolution still applies there, so a
+//     provider reached by any spelling is still seen.
 //   * A WRITE REPACKAGED BY A MODULE THE ALLOWLIST DOES NOT NAME. Every module it DOES name
 //     is pinned export by export since D3, so that half is closed. A module the allowlist
 //     does not name cannot repackage a write without being an offender itself — it would
@@ -481,6 +526,8 @@ const WHOLESALE = "node:fs re-exported wholesale";
 const COMPUTED = "a computed member access on an fs namespace";
 const ESCAPE = "an fs namespace escaping where this guard cannot follow it";
 const SEAM_WHOLESALE = "the write seam's own primitives taken wholesale";
+const UNRESOLVABLE = "a module specifier this guard cannot resolve";
+const OUTSIDE = "an import resolving outside the scripts tree";
 const unparseable = (why) => `a module this guard cannot parse, so cannot judge: ${why}`;
 const unreadableClause = (part) => `an fs binding clause this guard cannot read: ${part}`;
 const unknownMember = (name) => `an unknown member \`${name}\` on an fs namespace`;
@@ -500,10 +547,22 @@ const unknownSeamMember = (name) => `an unpinned member \`${name}\` of the write
  *                 with it any module can put any bytes anywhere, a ticket included. Importing
  *                 one from a module the allowlist does not name is an OFFENCE, under the
  *                 member's own name, so a narrow exemption can name it.
- *    sanctioned — it writes, and it is the module's OWN verb or the driver's entry point:
- *                 what it writes and where is its job, not its caller's choice. ADR-0006 says
- *                 ticket writes go THROUGH the driver, so the driver's front door cannot be
- *                 the bypass the guard exists to stop. Each is named with what it writes.
+ *    sanctioned — the walk below says it reaches the mutating surface, and it PROVABLY CANNOT
+ *                 CREATE. There is exactly one in this tree — `readRegularFileSync`, which
+ *                 reaches `openSync` and opens O_RDONLY|O_NONBLOCK — and the bucket exists
+ *                 for that one fact, not for a judgement about shape.
+ *
+ *                 ROUND 7, Finding 2: this bucket used to mean "it writes, and it is the
+ *                 module's own verb — what it writes and where is its job, not its caller's
+ *                 choice". That criterion was FALSE and was refuted by reading it:
+ *                 `loadTransitions({ root })` writes `<root>/.blaze/transitions.json` with
+ *                 `root` wholly from the caller, and `loadIdentity`, `fsStorage` and
+ *                 `groomOnce` are the same shape. A criterion that has now been refuted twice
+ *                 — round 4's general claim, round 6's "caller's choice" — does not get a
+ *                 third rewording. It is gone, and with it every exemption it carried: if an
+ *                 export writes, it is a `writes`, and every module that imports one is named
+ *                 in the allowlist with its reason. The allowlist is longer for it, and it
+ *                 now means what it says: these are the modules that can cause a write.
  *    inert      — reaches nothing mutating in node:fs at all.
  *
  *  None of those three is taken on trust. `the allowlist's own modules are pinned, export by
@@ -519,11 +578,10 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // `open` can create; this one cannot, because it opens O_RDONLY|O_NONBLOCK and checks the
   // descriptor. That is why it is sanctioned rather than a write, and why it is recorded here
   // instead of quietly excluded.
-  ["model/regular-file.mjs", { writes: ["writeRegularFileSync", "appendRegularFileSync"],
-    sanctioned: ["readRegularFileSync"], inert: ["NotARegularFileError"] }],
+  ["model/regular-file.mjs", { writes: ["writeRegularFileSync", "appendRegularFileSync"], sanctioned: ["readRegularFileSync"], inert: ["NotARegularFileError"] }],
   // The WRITE SEAM itself. `fsStorage` writes every ticket there is — and it is the driver,
   // so importing it is the route ADR-0006 prescribes, not a bypass of it.
-  ["model/storage.mjs", { writes: [], sanctioned: ["fsStorage"],
+  ["model/storage.mjs", { writes: ["fsStorage"], sanctioned: [],
     inert: ["slugify", "ticketPath", "memStorage"] }],
   // The allocator, deleted at Phase 2. `allocateId` and `writeClaim` put a claim file under a
   // caller-supplied projects dir; `ensureCutover` writes the cutover marker.
@@ -534,7 +592,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // `loadTransitions` refreshes the git-rename cache it reads. `buildTransitions` is pure —
   // the reviewer named it as a write primitive and the reachability walk disagrees, which is
   // the point of having one.
-  ["model/transitions.mjs", { writes: [], sanctioned: ["loadTransitions"],
+  ["model/transitions.mjs", { writes: ["loadTransitions"], sanctioned: [],
     inert: ["parseTransitions", "buildTransitions"] }],
   // The sprint registry: `saveSprints({ root }, registry)` is caller's root, caller's bytes.
   ["model/sprints.mjs", { writes: ["saveSprints"], sanctioned: [],
@@ -545,26 +603,25 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["migrate-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["cli.mjs", { writes: [], sanctioned: [], inert: [] }],
   // The pending ledger: an op queue under a caller-supplied root, appended to and cleared.
-  ["pending-ledger.mjs", { writes: ["appendEntry", "clearLedger", "quarantineDropped"],
-    sanctioned: [], inert: ["sessionId", "queueRoot", "ledgerPath", "readQueue", "readEntries",
+  ["pending-ledger.mjs", { writes: ["appendEntry", "clearLedger", "quarantineDropped"], sanctioned: [], inert: ["sessionId", "queueRoot", "ledgerPath", "readQueue", "readEntries",
       "readForDrain", "quarantinePath", "listQueues", "listQueuesResult", "strandedQueues",
       "worktreeBranchOwners", "belongsHere", "outstandingFiles"] }],
   // The commit lock: a lockfile under a caller-supplied root, taken and released.
   ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock"], sanctioned: [],
     inert: ["lockPath"] }],
-  ["migrate/jira-import.mjs", { writes: [], sanctioned: ["runLive"],
+  ["migrate/jira-import.mjs", { writes: ["runLive"], sanctioned: [],
     inert: ["loadNormalized", "runDryRun"] }],
   ["migrate/jira-client.mjs", { writes: ["writeRawCache"], sanctioned: [],
     inert: ["cacheFile", "readRawCache"] }],
   // `saveState` and `restoreSnapshot` are the two the reviewer landed a file with: root and
   // contents both come from the caller. `groomOnce` is the groomer's verb.
-  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot"], sanctioned: ["groomOnce"],
+  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot", "groomOnce"], sanctioned: [],
     inert: ["hashContent", "loadState", "statusDirs", "matchersFor", "selectNextTicket",
       "extractGroomingRules", "buildPrompt", "parseChangedFiles", "isStructuralChange",
       "redactSecrets", "outOfBoundsPaths", "CONFIG_FILE", "DEFAULT_TIMEOUT_SEC",
       "DEFAULT_MAX_BUFFER_MB", "git", "SNAPSHOT_SKIP_DIRS", "SNAPSHOT_SKIP_FILES",
       "snapshotTree", "diffSnapshots", "porcelainLines", "commitMessage"] }],
-  ["init-runner.mjs", { writes: [], sanctioned: ["runInit"],
+  ["init-runner.mjs", { writes: ["runInit"], sanctioned: [],
     inert: ["parseArgs", "USAGE", "askHidden"] }],
   // The setup-token credential. All three touch it or the .gitignore line that hides it.
   ["model/setup-token.mjs",
@@ -573,19 +630,18 @@ const SEAM_WRITE_PROVIDERS = new Map([
         "_existsSync"] }],
   ["ci/mutate-schedule.mjs", { writes: ["createSandbox", "discardSandbox"], sanctioned: [],
     inert: ["SANDBOX_CONTENTS", "MUTATIONS"] }],
-  ["db-runner.mjs", { writes: [], sanctioned: ["runDb"], inert: ["USAGE"] }],
+  ["db-runner.mjs", { writes: ["runDb"], sanctioned: [], inert: ["USAGE"] }],
   // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
   // the loader that goes through it.
-  ["model/identity-db.mjs", { writes: ["openIdentityDb"], sanctioned: ["loadIdentity"],
+  ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity"], sanctioned: [],
     inert: ["identityDbPath", "identityExec"] }],
   // `addUser` and `setUserPassword` write to the identity DATABASE, which is node:sqlite and
   // not this guard's surface at all. `ensureIdentityIgnored` appends the .gitignore line.
-  ["model/user-admin.mjs", { writes: ["ensureIdentityIgnored"],
-    sanctioned: ["addUser", "setUserPassword"], inert: ["USER_VERBS", "parseUserArgv"] }],
+  ["model/user-admin.mjs", { writes: ["ensureIdentityIgnored", "addUser", "setUserPassword"], sanctioned: [], inert: ["USER_VERBS", "parseUserArgv"] }],
   // The soak's artifacts under gitignored .blaze/. `resolveWritePort` is how a verb OBTAINS
   // the driver — the front door again, not a bypass.
   ["model/write-port-resolve.mjs",
-    { writes: ["openShadow", "logDivergence", "recordSoakOp"], sanctioned: ["resolveWritePort"],
+    { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
         "sqliteExec", "readSoakState", "assertConfigNamespace"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
@@ -596,37 +652,76 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
-  ["commit-or-queue.mjs", { writes: [], sanctioned: ["commitOrQueue"],
+  ["commit-or-queue.mjs", { writes: ["commitOrQueue"], sanctioned: [],
     inert: ["commitSuffix"] }],
-  ["serve-commit.mjs", { writes: [], sanctioned: ["commitFile"], inert: [] }],
-  ["serve.mjs", { writes: [], sanctioned: ["startServer"],
+  ["serve-commit.mjs", { writes: ["commitFile"], sanctioned: [], inert: [] }],
+  ["serve.mjs", { writes: ["startServer"], sanctioned: [],
     inert: ["CSRF", "boardModel", "contentHash", "liveModel", "pageHtml",
       "reconcilePreview"] }],
-  ["new.mjs", { writes: [], sanctioned: ["applyNew"], inert: [] }],
-  ["reconcile.mjs", { writes: [], sanctioned: ["buildBranchMap", "reconcile"],
+  ["new.mjs", { writes: ["applyNew"], sanctioned: [], inert: [] }],
+  ["edit.mjs", { writes: [], sanctioned: [], inert: ["applyEdit", "applyToggleAc"] }],
+  ["link.mjs", { writes: [], sanctioned: [], inert: ["applyLink"] }],
+  ["log.mjs", { writes: [], sanctioned: [], inert: ["applyLog"] }],
+  ["move.mjs", { writes: [], sanctioned: [], inert: ["applyMove"] }],
+  ["resolve.mjs", { writes: [], sanctioned: [], inert: ["applyResolve"] }],
+  ["schedule-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["edit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["link-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["log-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["move-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["new-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["resolve-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
+  ["supervisor.mjs", { writes: ["createApp", "startSupervisor"], sanctioned: [], inert: ["ACTIVITY_SCRIPT", "SHA_RE", "SUPERVISOR_HOST", "SUPERVISOR_SCOPES", "newFindingEvents", "newForgeErrorEvents", "newRunErrorEvent", "supervisorScopeFor"] }],
+  ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml"] }],
+  ["reconcile.mjs", { writes: ["buildBranchMap", "reconcile"], sanctioned: [],
     inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
       "idsFromSubject", "claimCorroborated", "prTitleClaim", "betterPr", "buildPrMap",
       "ambiguousDeliverers", "remoteHost", "classifyRemote", "parseRemoteUrls", "gatherPrs",
       "recordablePr"] }],
 ]);
 
-/** Resolve a relative specifier against the importing module's own seam-relative path, so
- *  `./regular-file.mjs` from `model/index.mjs` and `../model/regular-file.mjs` from
- *  `views/data.mjs` are recognised as the same provider. A bare or absolute specifier is not
- *  one of ours and returns null. */
+/** Resolve a module specifier THE WAY NODE DOES, and say which module of this tree it names.
+ *
+ *  BLZ-535 ROUND 7, Finding 1, and the third time this guard has been refuted for pinning a
+ *  spelling. Round 5 normalised `?query` and `#fragment` and then did a literal `Map.get` on
+ *  hand-joined path segments, so every OTHER spelling Node accepts for the same file missed
+ *  the pin: `"./loops/groomer%2Emjs"` — one percent-escape — landed a real 24-byte file
+ *  through `saveState` while the guard reported 15 tests, 15 pass, 0 fail. An absolute path
+ *  and a `file:///…` URL did the same. The pin was never wrong; it was never REACHED.
+ *
+ *  So the segments are not joined by hand any more. `new URL(spec, base)` plus
+ *  `fileURLToPath` is the resolution Node itself performs — it decodes `%2E`, collapses `..`
+ *  and `.`, drops the query and the fragment, and takes an absolute or `file:` specifier
+ *  where it actually points. Returns:
+ *    { rel }      the seam-relative module this specifier names
+ *    { offence }  it names a file, and this reader cannot place it inside the tree
+ *    null         it is not a file specifier at all — a bare package, or a `node:` builtin,
+ *                 which the fs arms above have already judged
+ *  FAIL CLOSED: a specifier that resolves OUTSIDE `scripts/`, or one that will not resolve,
+ *  is reported. A guard that returns "not one of mine" for what it cannot place is a guard
+ *  with a documented way to be dodged, which is exactly what this finding was. */
+function resolveModule(rel, spec) {
+  if (typeof spec !== "string") return { offence: UNRESOLVABLE };
+  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(spec)?.[1]?.toLowerCase() ?? null;
+  if (scheme === "node") return null;                     // a builtin: judged by the fs arms
+  if (scheme !== null && scheme !== "file") return { offence: UNRESOLVABLE };  // data:, http:
+  if (scheme === null && !spec.startsWith(".") && !spec.startsWith("/")) return null;  // package
+  let target;
+  try {
+    target = fileURLToPath(new URL(spec, pathToFileURL(join(SCRIPTS, rel))));
+  } catch { return { offence: UNRESOLVABLE }; }
+  const inTree = relative(SCRIPTS, target).split("\\").join("/");
+  if (inTree === "" || inTree.startsWith("../")) return { offence: OUTSIDE };
+  return { rel: inTree };
+}
+
+/** The pinned module a specifier names, or null when it names none of them. The offence a
+ *  specifier can BE is handled by the caller — see `resolveModule`. */
 function resolveProvider(rel, spec) {
-  if (typeof spec !== "string" || !spec.startsWith(".")) return null;
-  // D2. `./model/regular-file.mjs?v=1` is the same module to Node and a different KEY to a
-  // Map, and three characters reopened the whole of B4 with the guard at 12 pass / 0 fail.
-  const clean = withoutSuffix(spec);
-  const dir = rel.includes("/") ? rel.slice(0, rel.lastIndexOf("/")) : "";
-  const out = [];
-  for (const part of [...dir.split("/"), ...clean.split("/")]) {
-    if (part === "" || part === ".") continue;
-    if (part === "..") { out.pop(); continue; }
-    out.push(part);
-  }
-  return SEAM_WRITE_PROVIDERS.get(out.join("/")) ?? null;
+  const resolved = resolveModule(rel, spec);
+  if (resolved === null || resolved.offence !== undefined) return null;
+  return SEAM_WRITE_PROVIDERS.get(resolved.rel) ?? null;
 }
 
 /** Every name a module exports, read off the AST. Used to hold the pinned seam surface to
@@ -678,7 +773,7 @@ function subtreeOf(root) {
  *  that does, or calls a WRITE PRIMITIVE pinned on another allowlisted module. Walked to a
  *  fixpoint over the module's top-level bindings.
  *
- *  This is what stops the pin below from being 138 assertions nobody can check. A pin says
+ *  This is what stops the pin below from being 182 assertions nobody can check. A pin says
  *  which exports write; this says which exports DO write; the test asserts they are the same
  *  set. An `inert` claim is therefore checked against the code rather than believed, and a
  *  write added to an inert export reddens without anybody remembering to re-judge it.
@@ -924,7 +1019,12 @@ function fsWritesIn(raw, rel) {
     }
 
     if (isDecl && source) {
-      const provider = resolveProvider(rel, source.value);
+      // A STATIC specifier is a module specifier and nothing else, so this arm is fully
+      // fail-closed: one that will not resolve, or that resolves outside the tree, is an
+      // offence rather than a shrug. Finding 1 drove three spellings through the shrug.
+      const resolved = resolveModule(rel, source.value);
+      if (resolved !== null && resolved.offence !== undefined) { hits.add(resolved.offence); continue; }
+      const provider = resolved === null ? null : SEAM_WRITE_PROVIDERS.get(resolved.rel) ?? null;
       if (provider) { classifyProviderUse(node, provider); continue; }
     }
 
@@ -960,6 +1060,15 @@ function fsWritesIn(raw, rel) {
       continue;
     }
 
+    // A DYNAMIC specifier is judged the same way when it is unambiguously one — the source of
+    // an `import()`. In a bare call argument it is not: `join(root, "../x")` is a path, not a
+    // specifier, and resolving every string handed to every function would report the tree.
+    // So there the resolution is used but the fail-closed arm is not, and that is stated in
+    // the banner rather than left to be found.
+    if (parent && parent.type === "ImportExpression" && parent.source === node) {
+      const resolved = resolveModule(rel, folded);
+      if (resolved !== null && resolved.offence !== undefined) { hits.add(resolved.offence); continue; }
+    }
     const provider = resolveProvider(rel, folded);
     if (provider && parent && ((parent.type === "ImportExpression" && parent.source === node)
       || (parent.type === "CallExpression" && parent.arguments.includes(node)))) {
@@ -1125,7 +1234,7 @@ const WRITE_ALLOWED = new Map([
   // the single place in the tree where D1's fail-closed arm fires on something innocent.
   // Named rather than tuned away: a rule loosened until this module goes quiet is a rule
   // loosened for every module.
-  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE]],
+  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE, "fsStorage"]],
   // `writeSync(2, ...)` — a partial-write loop onto STDERR, which is a terminal, not a file.
   // Named to that one member: a path-taking write appearing in the CLI still reddens.
   ["cli.mjs", ["writeSync"]],
@@ -1142,7 +1251,7 @@ const WRITE_ALLOWED = new Map([
   // claim on it, and it must be the FIFO-safe primitive precisely because the operator may
   // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
   // primitive, appearing in reconcile still reddens.
-  ["reconcile.mjs", ["appendRegularFileSync"]],
+  ["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage"]],
   // BLZ-535 round 5, D3. The seven below take a WRITE PRIMITIVE off an allowlisted module —
   // `saveState`, `appendEntry`, `acquireLock` and their kin, each of which puts caller-chosen
   // bytes at a caller-chosen root. Round 4 could not see any of them, because it pinned one
@@ -1155,20 +1264,50 @@ const WRITE_ALLOWED = new Map([
   // the ledger when the lock is held elsewhere. `serve-commit` is the board server taking the
   // same lock.
   ["commit-runner.mjs", ["acquireLock", "releaseLock", "clearLedger", "quarantineDropped"]],
-  ["commit-or-queue.mjs", ["appendEntry"]],
+  ["commit-or-queue.mjs", ["appendEntry", "commitFile"]],
   ["serve-commit.mjs", ["acquireLock", "releaseLock"]],
   // First-run setup: the board server issues the setup-token CREDENTIAL, clears it when setup
   // completes, and keeps both it and the identity database out of git. `blaze user add` does
   // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
   // themselves, which are allowlisted for the same files.
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
-    "ensureIdentityIgnored"]],
-  ["user-runner.mjs", ["ensureIdentityIgnored"]],
+    "ensureIdentityIgnored", "addUser", "commitOrQueue", "loadIdentity", "reconcile",
+    "resolveWritePort", "pageHtml", "viewEnvelope"]],
+  ["user-runner.mjs", ["ensureIdentityIgnored", "addUser", "setUserPassword"]],
   // `blaze new` allocates the id and writes its claim — the allocator, deleted at Phase 2,
   // and on exactly the footing of ids.mjs and claims.mjs above.
-  ["new.mjs", ["allocateId", "writeClaim"]],
+  ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
-  ["sprint-runner.mjs", ["saveSprints"]],
+  ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+  // BLZ-535 round 7, Finding 2. Fifteen more, and they are the cost of deleting a false
+  // criterion rather than rewording it: `fsStorage`, `resolveWritePort`, `commitOrQueue`,
+  // `groomOnce`, `loadIdentity` and `loadTransitions` all write to a destination their caller
+  // chooses, so they are write primitives like any other, and every module that takes one is
+  // named here. None of these writes a ticket outside the driver — each takes the driver, or
+  // the verb that owns the file it touches.
+  //
+  // The six ticket verbs take the storage driver to apply their own change.
+  ["edit.mjs", ["fsStorage"]],
+  ["link.mjs", ["fsStorage"]],
+  ["log.mjs", ["fsStorage"]],
+  ["move.mjs", ["fsStorage"]],
+  ["resolve.mjs", ["fsStorage"]],
+  ["schedule-runner.mjs", ["fsStorage"]],
+  // ...their six CLI runners resolve the write port and hand the result to the commit queue.
+  ["edit-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  ["link-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  ["log-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  ["move-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  ["new-runner.mjs", ["applyNew", "commitOrQueue", "resolveWritePort"]],
+  ["resolve-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
+  ["model/write-port.mjs", ["fsStorage"]],
+  // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
+  ["supervisor.mjs", ["groomOnce", "loadIdentity", "reconcile", "viewEnvelope"]],
+  // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
+  // git-derived transitions cache under the board root. It is the read path touching disk —
+  // the same class of defect as contentHash, now named instead of invisible.
+  ["views/page.mjs", ["loadTransitions"]],
 ]);
 
 test("the mutating fs surface is DERIVED from node:fs, and derived fail-closed", () => {
@@ -1473,7 +1612,7 @@ test("every module the write allowlist names is pinned, export by export", () =>
 });
 
 test("an export that reaches a write is pinned as one, and one that does not is not", () => {
-  // The pin above is 138 hand-written judgements, and a hand-written judgement nobody checks
+  // The pin above is 182 hand-written judgements, and a hand-written judgement nobody checks
   // is the thing this whole ticket exists to delete. So it is checked: a reachability walk
   // over each module decides which of its exports actually put bytes on disk, and the two
   // answers must be the same SET. An `inert` claim is verified rather than believed, a
@@ -1510,6 +1649,14 @@ test("a write primitive is a write wherever it is imported from", () => {
     // D3 — the reviewer's own case, and the one that was green on 56fa011
     ["loops/groomer.mjs", "{ saveState }", "saveState"],
     ["loops/groomer.mjs", "{ restoreSnapshot }", "restoreSnapshot"],
+    // Finding 2: this one was `sanctioned` on a criterion that was false — "what it writes
+    // and where is its job, not its caller's choice" — while `groomOnce({ root })`,
+    // `loadTransitions({ root })`, `loadIdentity({ root })` and `fsStorage` all take the
+    // destination straight from the caller. The bucket that exempted them is gone.
+    ["loops/groomer.mjs", "{ groomOnce }", "groomOnce"],
+    ["model/transitions.mjs", "{ loadTransitions }", "loadTransitions"],
+    ["model/identity-db.mjs", "{ loadIdentity }", "loadIdentity"],
+    ["model/storage.mjs", "{ fsStorage }", "fsStorage"],
     ["pending-ledger.mjs", "{ appendEntry }", "appendEntry"],
     ["commit-lock.mjs", "{ acquireLock }", "acquireLock"],
     ["model/setup-token.mjs", "{ issueSetupToken }", "issueSetupToken"],
@@ -1542,13 +1689,15 @@ test("a write primitive is a write wherever it is imported from", () => {
   // them would have to exempt half the tree to stay green — which is how an allowlist stops
   // meaning anything.
   const quiet = [
-    ["loops/groomer.mjs", "{ groomOnce }"],
-    ["model/storage.mjs", "{ fsStorage }"],
-    ["model/write-port-resolve.mjs", "{ resolveWritePort }"],
+    // the ONE sanctioned export left in the tree, and the reason the bucket still exists:
+    // the walk flags it because it reaches `openSync`, and it provably cannot create
     ["model/regular-file.mjs", "{ readRegularFileSync }"],
-    ["model/transitions.mjs", "{ loadTransitions }"],
+    // ...and inert exports, which reach nothing mutating at all
     ["model/sprints.mjs", "{ loadSprints, addSprint }"],
     ["pending-ledger.mjs", "{ readForDrain, listQueues }"],
+    ["model/transitions.mjs", "{ parseTransitions, buildTransitions }"],
+    ["model/storage.mjs", "{ slugify, ticketPath }"],
+    ["model/write-port.mjs", "{ fsWritePort, dualWritePort }"],
   ];
   for (const [provider, clause] of quiet) {
     assert.deepEqual(
@@ -1569,6 +1718,90 @@ test("a write primitive is a write wherever it is imported from", () => {
     writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "./local-helpers.mjs";']]),
       new Map()), [],
     "the MODULE is what is pinned, not the spelling of a function name");
+});
+
+test("a specifier is resolved the way NODE resolves it, and an unresolvable one is an offence", () => {
+  // BLZ-535 ROUND 7, Finding 1, and the third refutation of this guard for pinning a
+  // spelling. Round 5 normalised `?query` and `#fragment` and then did a literal `Map.get` on
+  // hand-joined segments, so the pin was never wrong — it was never REACHED. MEASURED on
+  // 6252627: `import { saveState } from "./loops/groomer%2Emjs"` — one percent-escape —
+  // followed by `saveState("/tmp/blz-r6-attack", {...})` put a real 24-byte file on disk at
+  // 15 tests, 15 pass, 0 fail, exit 0. An absolute path and a `file:///…` URL did the same,
+  // while the plain spelling of the identical file reddened. Every row below is one spelling
+  // of ONE module, `loops/groomer.mjs`, and Node loads the same file for all of them.
+  const groomer = join(SCRIPTS, "loops", "groomer.mjs");
+  const spellings = {
+    "the plain relative one, which always worked": "./loops/groomer.mjs",
+    "a percent-escaped dot": "./loops/groomer%2Emjs",
+    "a redundant traversal": "./loops/../loops/groomer.mjs",
+    "a redundant same-directory step": "././loops/./groomer.mjs",
+    "a query suffix": "./loops/groomer.mjs?v=1",
+    "a fragment suffix": "./loops/groomer.mjs#anything",
+    "both suffixes at once": "./loops/groomer.mjs?a=1&b=2#x",
+    "an absolute path": groomer,
+    "a file: URL": pathToFileURL(groomer).href,
+  };
+  for (const [why, spec] of Object.entries(spellings)) {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", `import { saveState } from "${spec}";`]]),
+        new Map()),
+      ["fake.mjs :: saveState"],
+      `${why}: Node loads loops/groomer.mjs for this specifier, so this guard must too — ` +
+      `a pin reached through a normaliser that Node does not share is a pin nobody reaches`);
+  }
+
+  // ...and FAIL CLOSED on what cannot be placed in the tree, rather than returning "not one
+  // of mine". Returning null for the unplaceable is exactly how the three spellings above got
+  // through: each of them WAS a module of this tree and was answered with a shrug.
+  const unplaceable = {
+    "a relative specifier climbing out of the tree": "../outside.mjs",
+    "an absolute path that is not in this tree": "/etc/passwd",
+    "a file: URL that is not in this tree": "file:///etc/passwd",
+  };
+  for (const [why, spec] of Object.entries(unplaceable)) {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", `import { x } from "${spec}";`]]), new Map()),
+      [`fake.mjs :: ${OUTSIDE}`], `${why} must be reported, not shrugged at`);
+  }
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs", 'import { x } from "data:text/javascript,0";']]),
+      new Map()),
+    [`fake.mjs :: ${UNRESOLVABLE}`],
+    "a data: URL is a module made of a string, and a string is a leaf to this reader");
+  // ...and a percent-escaped SEPARATOR, which is the one escape that is not a spelling of
+  // anything: `new URL` leaves `%2F` encoded and Node refuses the specifier outright with
+  // ERR_INVALID_MODULE_SPECIFIER. VERIFIED against Node 24 rather than assumed. The guard
+  // reports it instead of guessing which file was meant — the same answer Node gives, and
+  // the fail-closed one either way.
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs",
+      'import { saveState } from ".%2Floops%2Fgroomer.mjs";']]), new Map()),
+    [`fake.mjs :: ${UNRESOLVABLE}`],
+    "a percent-escaped separator is a specifier Node itself will not load");
+
+  // A SUFFIXED BUILTIN. Node refuses all three of `node:fs?x`, `fs?x` and `node:fs#y`
+  // (ERR_UNKNOWN_BUILTIN_MODULE / ERR_MODULE_NOT_FOUND — VERIFIED against Node 24), so this
+  // is not a live route. The guard strips the suffix and treats it as node:fs anyway, and the
+  // row is here so that the stripping is load-bearing rather than dead code reading as cover.
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs",
+      'const fs = await import("node:fs?x");\nfs.writeFileSync(p, d);']]), new Map()),
+    ["fake.mjs :: writeFileSync"],
+    "a suffix does not stop `node:fs` naming node:fs");
+
+  // The discrimination: a bare package specifier and a `node:` builtin are not files of this
+  // tree, and reporting them would report every module in it.
+  for (const spec of ["pg", "node:path", "node:child_process"]) {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", `import { x } from "${spec}";`]]), new Map()), [],
+      `${spec} is not a module of this tree`);
+  }
+  // ...and the same module reached from a different directory is still the same module
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["views/deep/x.mjs",
+      'import { saveState } from "../../loops/groomer.mjs";']]), new Map()),
+    ["views/deep/x.mjs :: saveState"],
+    "resolution is relative to the IMPORTING module, wherever it sits");
 });
 
 test("an acquisition this guard cannot fold is an acquisition it reports", () => {
