@@ -40,7 +40,7 @@ Where something could not be verified it says so rather than asserting.
 > from the same exporter, so an exporter defect cancels in the diff — 21 of the 31 columns can be
 > blanked with a byte-identical diff and a passing audit. Gate 1 is `diff X Y`; gate 2 is
 > `zeroDiff`'s value comparison of the source board against the imported one; gate 3 is that every
-> column is non-empty somewhere in the fixture.**
+> column is non-empty in at least one row of **X**, the exported CSV.**
 
 ---
 
@@ -586,7 +586,7 @@ strictness, on the artefact where byte strictness is achievable.
 
 | Between | Allowed to differ | Enforced by |
 |---|---|---|
-| **X and Y** | **Nothing.** Byte-identical | gate 1 |
+| **X and Y** | **Nothing.** Byte-identical | gate 1, **`fs` port only** (§2.6) |
 | **A and B as values** | **Nothing.** All 28 keys, the status and the body compare equal | **gate 2** |
 | A's ticket files and B's ticket files as bytes | Frontmatter key **order** (the 5.4% above); the filename slug where A's had drifted from `id-slug(title)`; `.blaze/` derived state; git history | nothing, deliberately |
 
@@ -665,6 +665,15 @@ minimum:
   produce one — so without these two the §2.6 defaults conflict would have stayed green in CI.
   `INF-608` is the live proof the case exists (§1.6);
 - **gaps in the id sequence**, so the round trip cannot pass by renumbering;
+- **a `.ids/.cutover` marker on the fixture project, and an assertion that a claim file exists for
+  every created ticket.** Without the marker the fixture is *structurally incapable* of catching a
+  regression in §5.5: `missingClaimErrors` returns early at `scripts/model/index.mjs:367`
+  (`if (cutover === null) continue;`) and `ensureCutover` has one call site, inside `allocateId`
+  (`scripts/model/ids.mjs:72`) — so a fresh board never allocates, never gets a marker, and stays
+  silent forever. An importer that regressed to skipping claims would pass CI indefinitely and
+  fail only on the operator's real board, which is the exact distribution §5.5 exists to close.
+  Seeding the marker is what makes the guard possible at all; asserting the claim files directly
+  is what makes it independent of the audit's own early return;
 - a ticket carrying `ref`, `category`, `verification` and `derived` — the four keys that
   serialize after `updated` and are therefore the ones an implementation is most likely to drop;
 - **a ticket carrying `not_before`, `deadline` and `sprint`.** These three have **zero live
@@ -750,13 +759,34 @@ sprint definition is source, so it lives at top level and gets committed like ti
 - **`sourceIdColumn` names the source's own identity column**, and it is what makes a re-import of
   the same foreign export idempotent. §5.2 requires a blaze `id` and offers `--allocate-ids` for
   rows without one; on its own that flag forfeits the no-op guarantee. With `sourceIdColumn`, the
-  importer keys the skip/update decision on the **source** key instead, recording the
-  source-key → blaze-id pair in the receipt, so re-running the same export is a no-op even though
-  blaze allocated the ids. The forfeit then applies only to a CSV with **no identity column at
-  all** — a genuinely anonymous spreadsheet — which the dry run names in as many words rather
-  than leaving to be discovered on the second run. In §4.2's example the column is `Issue key`,
-  which also maps to `id`; the two uses are independent, and a tracker whose keys do not parse as
-  `<KEY>-<N>` uses `sourceIdColumn` alone.
+  importer keys the skip/update decision on the **source** key instead, so re-running the same
+  export is a no-op even though blaze allocated the ids. The forfeit then applies only to a CSV
+  with **no identity column at all** — a genuinely anonymous spreadsheet — which the dry run names
+  in as many words. In §4.2's example the column is `Issue key`, which also maps to `id`; the two
+  uses are independent, and a tracker whose keys do not parse as `<KEY>-<N>` uses
+  `sourceIdColumn` alone.
+
+  **The map lives in its own durable store, and an earlier draft put it in the one artifact the
+  retention rule is designed to delete.** That draft recorded the source-key → blaze-id pairs in
+  the receipt while §5.3 pruned receipts older than 90 days *whose every `intent` has a matching
+  `done`* — so retention kept the records of **failed** runs and deleted the records of **clean**
+  ones, which is the exact inverse of what idempotency needs. Concretely: import 2,800 rows
+  cleanly on day 0; on day 91 the next `--apply` prunes that receipt; on day 92 the same export
+  re-imports with the map gone and **duplicates the entire board** — the precise failure
+  `sourceIdColumn` exists to prevent. Both halves were added in the same commit, which is how they
+  were written without ever being read against each other.
+
+  The map is therefore **`source-ids/<mapping-name>.json` at the data root**, beside
+  `import-mappings/` and committed for the same reason: it is source, not a run artifact, and it
+  outlives every individual run. One file per mapping, so the lookup reads exactly one file rather
+  than folding N receipts of unknown completeness. A merge is **additive and never rewrites an
+  existing pair** — a source key that already has a blaze id keeps it, because remapping one is
+  how the same foreign row becomes two tickets. It is written **before** the tickets it describes,
+  under §5.1's exit-4 invariant like every other write.
+
+  This also removes the two questions the receipt-based scheme could not answer: which receipts the
+  lookup would have had to read across N runs, and what a torn-line quarantine dropping some source
+  keys would do to a partially-recovered map. Neither arises against a single durable file.
 - `transform` is a **closed vocabulary**, not an expression language: `identity` (the default),
   `hours-to-minutes`, `seconds-to-minutes`, `days-to-minutes`, `trim`, `split-semicolon`,
   `split-comma`, `iso-date`, `dmy-date`, `mdy-date`. A mapping naming a transform outside the
@@ -821,27 +851,48 @@ stub, the `stubGh` pattern at `tests/reconcile-delivery-truth.test.mjs:65-73`, c
 `cli.mjs` spawns with the inherited environment, a `PATH` and `BLAZE_AGENT_COMMAND` set in the
 test propagate into the runner process, which is exactly what the in-process patch could not do.
 
-Set up once: a stub script that **writes a sentinel file and exits non-zero**, pointed at by
-`BLAZE_AGENT_COMMAND`, plus a PATH-shadowed `claude` of the same shape so the built-in default
-(`scripts/config.mjs:21`) is covered too.
+**Two arms, two sentinels — because they are exercised by different configurations and a single
+sentinel cannot tell them apart.** `config.mjs:271` is
+`if (env.BLAZE_AGENT_COMMAND) cfg.agentCommand = env.BLAZE_AGENT_COMMAND` — an **override**, not a
+merge — and the spawn site splits `cfg.agentCommand` and spawns `cmd` directly
+(`groomer.mjs:547,570`). So with the env var set to a stub path, `cmd` is **absolute** and `PATH`
+is never consulted. An earlier draft set both the env var and a PATH-shadowed `claude` and used
+**one** sentinel for both: across all three of its assertions the PATH stub was never executed
+once, so a misconfigured shadow — wrong directory, not `chmod +x`, `PATH` not actually inherited —
+left assertion 1 passing and nothing noticing. Vacuously green for the entire default-config
+class the shadow exists to cover: round 2's defect, halved rather than fixed.
+
+Set up: **two** stub scripts, each writing its **own** sentinel and exiting non-zero — `ENV_HIT`
+for the one `BLAZE_AGENT_COMMAND` points at, `PATH_HIT` for a PATH-shadowed `claude` covering the
+built-in default (`scripts/config.mjs:21`).
 
 1. **No agent command runs on the import path.** `blaze import --apply` over a fixture CSV
-   **succeeds**, and the **sentinel file does not exist** afterwards. Asserting the sentinel's
-   absence — not merely a zero exit — is what distinguishes "nothing spawned it" from "it spawned
-   and we ignored the result".
-2. **Positive control.** `blaze import propose-mapping`, under the *identical* environment,
-   **fails**, the sentinel file **does exist**, and the failure message **carries the sentinel
-   string**. Without this the first assertion is satisfied by a stub that was never wired.
-3. **Rollback control.** With `BLAZE_AGENT_COMMAND` repointed at a benign stub that succeeds,
-   `propose-mapping` **succeeds**. This proves assertion 2's failure came from the sentinel stub
-   and not from the harness, the fixture, or an unrelated error — the plan's §9 rule that a
-   negative result is worthless without a positive control, applied to the control itself.
+   **succeeds**, and **neither sentinel exists** afterwards. Asserting sentinel absence — not
+   merely a zero exit — is what distinguishes "nothing spawned it" from "it spawned and we ignored
+   the result".
+2. **Positive control, env arm.** `blaze import propose-mapping` under the *identical* environment
+   **fails**, `ENV_HIT` **exists**, and the failure message **carries its sentinel string**.
+3. **Positive control, PATH arm.** `blaze import propose-mapping` with `BLAZE_AGENT_COMMAND`
+   **unset** — so `cfg.agentCommand` falls back to the built-in `"claude -p"` and the bare name
+   *is* resolved through `PATH` — **fails**, and **`PATH_HIT` exists**. Without this assertion the
+   shadow is never executed and its correctness is never observed.
+4. **Rollback control.** With both stubs repointed at benign scripts that succeed,
+   `propose-mapping` **succeeds**. This proves assertions 2 and 3 failed *because of the stubs* and
+   not because of the harness, the fixture, or an unrelated error — the plan's §9 rule that a
+   negative result is worthless without a positive control, applied to the controls themselves.
 
-Covered set for the shadow: `spawn`, `spawnSync`, `exec`, `execSync`, `execFile`, `execFileSync`
-and `fork` all resolve a bare command name through `PATH`, so shadowing the name covers every one
-of them. A spawn of an **absolute path** bypasses `PATH` and is deliberately out of this guard's
-reach — which is correct, because `cli.mjs:9`'s spawn of `process.execPath` is exactly that and
-must keep working.
+Covered set for the PATH shadow: `spawn`, `spawnSync`, `exec`, `execSync`, `execFile` and
+`execFileSync` resolve a bare command name through `PATH`, so shadowing the name covers all six.
+
+**`fork` does not, and an earlier draft claimed it did.** `fork` resolves a **module path** and
+runs it under `process.execPath`; it never consults `PATH` for an executable. Reproduced against a
+PATH-shadowed `claude`: `fork("claude")` exits **1** with the sentinel **absent**. No hole follows
+— nothing here forks — but the sentence asserting the guard's completeness contained a false claim
+about the runtime, which is the sort of thing that gets relied on later.
+
+A spawn of an **absolute path** bypasses `PATH` and is deliberately out of the shadow's reach —
+correct, because `cli.mjs:9`'s spawn of `process.execPath` is exactly that and must keep working.
+It is also why the env arm needs its own sentinel rather than sharing the PATH arm's.
 
 The surviving static assertion, which still holds and still has a real control: **the proposer
 module is absent** from `scripts/import-runner.mjs`'s transitive graph and **present** in
@@ -941,7 +992,8 @@ Four separations, each because the remedy differs:
   a different remedy. An earlier draft overloaded `2` with both.
 - **The board-changed rule is a post-condition on the whole run, not a property of one call site.**
   Stated once, so it cannot be satisfied in one place and missed in another: **once any ticket has
-  been written, no later failure may exit anything but 4.** An earlier draft asserted `4` was the
+  been written, no later failure may exit anything but 4** — and see the process-boundary limit
+  below, which is where that promise genuinely stops. An earlier draft asserted `4` was the
   only board-changed code while routing staging through `commitOrQueue` *after* the writes — and
   `commitOrQueue` **throws**, at `scripts/commit-or-queue.mjs:18-21` on an op absent from
   `OP_LABEL` and at `:27` via `assertWritable`, so an uncaught throw exited 1. The repair caught
@@ -949,6 +1001,40 @@ Four separations, each because the remedy differs:
   which appends per row during the writes and can fail on `ENOSPC`. Two instances of one bug in
   two consecutive sections is the evidence that the rule belongs here, as one invariant over the
   run, rather than as a fix applied per call.
+
+**The post-condition holds only for in-process failures, and a signal defeats it.** This is a
+limit, not a bug to be argued away, and an earlier draft's §5.1/§5.3 reasoned entirely about
+throws inside the runner without ever reaching the process boundary.
+
+`blaze import` is not the process that computes the exit code. `cli.mjs:9` dispatches it with
+`spawnSync(process.execPath, …)` and `cli.mjs:290` is `process.exit(r.status ?? 0)`. A child killed
+by a signal returns `status: null`, and `?? 0` maps that to **0**. Reproduced:
+
+```
+wrote 300 of 500 tickets
+spawnSync -> status=null signal="SIGKILL"
+cli.mjs:290 would exit with: 0
+```
+
+So an OOM-killed import — and the runner, not the 40-line parent, is the large-RSS process — exits
+**0** with the board partially written. That is strictly worse than the exit-1 case the round-3
+fix was written to eliminate: 1 at least says something went wrong.
+
+Two things follow, and neither is optional:
+
+1. **A test that SIGKILLs `blaze import --apply` mid-write and asserts the observed exit code.**
+   Whatever the answer is, it is pinned rather than assumed — the failure above is invisible to
+   every test that lets the runner finish.
+2. **Either `cli.mjs:290` learns about signals** (`r.signal ? 128 + signum : (r.status ?? 0)`, or
+   any explicit non-zero), **or this document states plainly that under signal death the exit code
+   carries no information and the receipt's unmatched-`intent` set is the sole evidence.** This
+   design takes the second as its floor and proposes the first as the fix, because changing
+   `cli.mjs` affects **every** verb and is not this lane's call to make unilaterally — it is filed
+   in §8.
+
+The repo has already settled the general form of this. ADR-0035's consequences: *"A caller that
+needs to know whether HEAD moved must read the stdout line or git, not the exit code."* The same
+rule applies here — the exit code is a summary, and the receipt is the record.
 
 **Exit 0 does not mean "committed".** On a `commitMode: "batch"` board `commitOrQueue` **queues**
 rather than commits (`scripts/commit-or-queue.mjs:28-31`), so a fully successful import exits 0
@@ -1002,14 +1088,32 @@ not echo the offending cell's contents **where the cell may carry pasted data**"
 A value that parsed as `<KEY>-<N>` cannot be a pasted paragraph, whatever else is wrong with it. A
 value that merely failed to be one of thirteen statuses can be anything at all.
 
-| | Shape constraint | Echoed |
+**The test is on the VALUE at hand, not on the column it came from**, and a draft of this table
+got that wrong in the same way the membership version did. It answered per **field** — `id` yes,
+`estimate` yes, the six dates yes — while the rule and its justification are conditional on the
+value *passing* the shape (*"a value that parsed as `<KEY>-<N>` cannot be a pasted paragraph"*).
+But §2.3 defines a refusal for exactly the **failing** case: a cell refused *because* it is not an
+id has by definition not satisfied the shape. Table and rule then contradict, and an implementer
+following the table echoes a pasted paragraph out of the `id` column — precisely the harm BLZ-587
+names. The `status` fix, reintroduced one axis over.
+
+So every shaped field splits by **which check failed**:
+
+| Field | Failure | Echoed |
 |---|---|---|
-| `id`, `parent`, link `target` | `<KEY>-<N>` | **yes** |
-| `estimate` | integer | **yes** |
-| `created`, `updated`, `start`, `due`, `not_before`, `deadline` | `YYYY-MM-DD` | **yes** |
-| `status`, `type`, `priority`, `resolution`, link `type` | none — membership only | **no** |
-| `label`, `component`, `sprint` | none — membership only | **no** |
-| `title`, `description`, `worklog.note`, any unmapped column | none | **no** |
+| `id`, `parent`, link `target` | **shape** — not `<KEY>-<N>` | **no** |
+| `id`, `parent`, link `target` | **membership** — well-formed, but duplicate / dangling / unknown | **yes** |
+| `estimate` | **shape** — not an integer | **no** |
+| `estimate` | **membership** — an integer, but not a multiple of 5 | **yes** |
+| `created`, `updated`, `start`, `due`, `not_before`, `deadline` | **shape** — not `YYYY-MM-DD` | **no** |
+| `created`, `updated`, `start`, `due`, `not_before`, `deadline` | **membership** — well-formed but rejected | **yes** |
+| `status`, `type`, `priority`, `resolution`, link `type` | any — no shape constraint exists | **no** |
+| `label`, `component`, `sprint` | any — no shape constraint exists | **no** |
+| `title`, `description`, `worklog.note`, any unmapped column | any — no shape constraint exists | **no** |
+
+One sentence covers the whole table, and it is the implementable form of the rule: **echo the value
+only after it has passed a shape check.** A shape failure reports the column, the row and the
+expected grammar; nothing of the cell.
 
 Where a value is not echoed the message gives the **row, the column, and the legal set** — which
 is what the operator acts on. "Row 412's `status` is not one of `defined`, `in-progress`,
@@ -1107,6 +1211,18 @@ open my own log"* is a different fact with a different remedy. Board unchanged; 
    matching `done`** — a clean run's record is disposable once it is history. A receipt with **any
    unmatched `intent` is never pruned**, at any age, because that is the evidence of a partial
    apply and it is the whole reason the file exists.
+
+   **The prune runs BEFORE any write, is best-effort, and never affects the exit code.** Its
+   placement is the whole of its specification, because both other placements are wrong and an
+   earlier draft left it unstated. *Inside* the exit-4 guard, an `EACCES` unlinking a 91-day-old
+   file after 500 tickets landed would exit 4 and tell the operator the board is partially
+   applied when it is not. *After* the writes but outside the guard, the same `EACCES` throws and
+   exits 1 — violating the post-condition on the very run that fix protects, which is §5.3's own
+   "mistake 3" a third time. Before any write, a failed unlink is a warning on stderr and nothing
+   else: nothing has been written, so there is no post-condition to violate, and a receipt that
+   outlives its retention window costs disk rather than correctness.
+
+   `source-ids/` (§4.2) is **not** prune-eligible at all. It is not a run artifact.
 3. **A torn last line.** A hard crash mid-append leaves a partial JSONL line — precisely BLZ-531's
    unparseable-ledger-line shape, invoked here as precedent without its rule being applied. So the
    receipt reader takes that rule too: a line that will not parse is **parked, not skipped** — the
@@ -1271,8 +1387,8 @@ therefore also where help, the `BLAZE_READONLY` gate and the description come fr
 
 ## 8. Where this design and the existing tickets disagree
 
-One thing in BLZ-587 **is** contradicted — item 6 below — and six things the three tickets do not
-cover.
+One thing in BLZ-587 **is** contradicted — item 7 below — and six things the three tickets do not
+cover, one of which (item 6) is an engine-wide defect this design merely ran into.
 
 1. **Claims — on every created row, not merely every allocated one.** BLZ-587's acceptance
    criteria never mention the `.ids/` claim ledger. An importer that satisfies every criterion as
@@ -1304,7 +1420,18 @@ cover.
    transitions and a resolution. The doc contradicts running code rather than lagging it, so this
    is not the "one-line fix" an earlier draft called it — the paragraph has to be rewritten and
    the claim about `superseded` re-checked independently.
-6. **BLZ-587's Context is stale about `git add -A`, and this design does not repeat it.** The
+6. **`cli.mjs:290` maps a signal death to exit 0, for every verb — not just this one.**
+   `process.exit(r.status ?? 0)` turns a `spawnSync` `status: null` (the shape a signal-killed
+   child returns) into a clean success. Reproduced: an OOM-killed import that wrote 300 of 500
+   tickets exits **0**. This is not an import defect and its fix is not this lane's to land —
+   `cli.mjs` dispatches all 21 subcommands and a change there affects every one — but it caps what
+   §5.1's post-condition can promise, so it must be a ticket rather than a paragraph. The fix is
+   one line (`r.signal ? 128 + signum : (r.status ?? 0)`, or any explicit non-zero); the test is a
+   SIGKILL mid-verb asserting the observed code. Until it lands, the receipt's unmatched-`intent`
+   set is the only evidence a signal-killed run leaves, exactly as ADR-0035 already rules for
+   `blaze commit`: *"a caller that needs to know whether HEAD moved must read the stdout line or
+   git, not the exit code."*
+7. **BLZ-587's Context is stale about `git add -A`, and this design does not repeat it.** The
    ticket says `blaze migrate --live` *"is the one blaze command that runs `git add -A` over the
    data repo rather than staging only what it wrote."* BLZ-139 had already scoped that call to a
    pathspec (`scripts/migrate-runner.mjs:73`), and the comment above it is the record of that fix
@@ -1320,7 +1447,10 @@ existing import surface, not from the ticket.
 One place the design is **weaker** than an earlier draft of itself claimed, and the ticket never
 required: `--allocate-ids` forfeits BLZ-587's *"a re-run of the same file is a no-op rather than a
 duplicate"*. The default path (`id` required) satisfies the criterion in full; the flag is an
-explicit, named opt-out. Naming it beats an importer that quietly fails the criterion for id-less
+explicit, named opt-out — and §4.2's `sourceIdColumn` narrows it further: with a mapping that
+declares the source's own identity column the guarantee **holds** even for allocated ids, so the
+forfeit now covers only a CSV with no identity column of any kind. Naming it beats an importer that
+quietly fails the criterion for id-less
 rows, which is what the first draft specified.
 
 ---
@@ -1344,17 +1474,17 @@ from.
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
 | B1 | **The plan** (`scripts/model/import-plan.mjs`) | Whole-file read, id set, forward references, duplicate detection, create/update/skip/refuse classification, every §5.2 refusal. **Pure — no writes** | **BLZ-587** | A2 |
-| B2 | **The apply** (`scripts/model/import-apply.mjs` + `blaze import`) | Walk the plan through the injected write port; **a claim per created ticket on BOTH the explicit-id and `--allocate-ids` paths** (§5.5); the once-any-ticket-is-written-only-exit-4 invariant covering writes, staging **and** receipt appends (§5.1); the two-entry receipt with its 90-day prune and torn-line quarantine (§5.3); exit codes 0–5; dry run by default | **BLZ-587** | B1, A3 |
-| B3 | **The round-trip gate — gates 1, 2 and 3** | `tests/csv-round-trip.test.mjs` (a `node --test` suite, **not** `board-gate.yml` — it needs a temp board and must be runnable locally); the fixture, incl. `not_before`/`deadline`/`sprint` and a **`priority`-absent and `assignee`-absent row**, none of which any enum assertion can reach; **gate 2** with its `listTickets` wrapper (§3.3), since `zero-diff.mjs:81` hard-codes `listTickets(null)`; **gate 3**; the enum-coverage assertion; `zeroDiff`'s `compared`/`fieldsChecked` positive control | **BLZ-589** | B2 |
+| B2 | **The apply** (`scripts/model/import-apply.mjs` + `blaze import`) | Walk the plan through the injected write port; **a claim per created ticket on BOTH the explicit-id and `--allocate-ids` paths** (§5.5); the once-any-ticket-is-written-only-exit-4 invariant covering writes, staging **and** receipt appends (§5.1); the two-entry receipt with its **pre-write, best-effort, exit-code-neutral** 90-day prune and torn-line quarantine (§5.3); exit codes 0–5; **a SIGKILL-mid-write test pinning the observed code** (§5.1); dry run by default | **BLZ-587** | B1, A3 |
+| B3 | **The round-trip gate — gates 1, 2 and 3** | `tests/csv-round-trip.test.mjs` (a `node --test` suite, **not** `board-gate.yml` — it needs a temp board and must be runnable locally); the fixture, incl. `not_before`/`deadline`/`sprint` and a **`priority`-absent and `assignee`-absent row**, and a **`.ids/.cutover` marker plus per-ticket claim assertions** (without the marker `missingClaimErrors` returns early at `index.mjs:367` and the claim guard is structurally impossible), none of which any enum assertion can reach; **gate 2** with its `listTickets` wrapper (§3.3), since `zero-diff.mjs:81` hard-codes `listTickets(null)`; **gate 3**; the enum-coverage assertion; `zeroDiff`'s `compared`/`fieldsChecked` positive control | **BLZ-589** | B2 |
 | B4 | **The blanking revert test** | Blank — not remove — one exported column and assert **gate 2** goes red for the reason its name gives. Separated from B3 because it is the test that proves B3 discriminates, and a gate merged without it is a gate nobody has falsified | **BLZ-589** | B3 |
 
 ### Phase C — the mapping layer
 
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
-| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, and **`sourceIdColumn`** — which is what restores the re-run-is-a-no-op guarantee for a foreign export whose keys blaze allocated ids for. **No model** | **gap — new ticket** | B1 |
+| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, and **`sourceIdColumn`** plus its durable **`source-ids/<mapping>.json`** store — never in the receipt, which the prune deletes on exactly the clean runs idempotency depends on. Additive merge; an existing pair is never rewritten. **No model** | **gap — new ticket** | B1 |
 | C2 | **The proposer + the confirmation** (`scripts/model/import-mapping-propose.mjs`, `blaze import propose-mapping`) | Spawn `agentCommand`; render §4.4; write the mapping file and nothing else | **gap — new ticket** | C1 |
-| C3 | **The boundary guard** | §4.3's assertions over a **PATH-shadowed sentinel stub** (`stubGh` pattern, `tests/reconcile-delivery-truth.test.mjs:65-73`): import succeeds **and leaves no sentinel**; `propose-mapping` fails **with the sentinel present and named**; repointed at a benign stub, `propose-mapping` succeeds. Plus the one surviving static assertion. Explicitly **not** the first draft's three static assertions (two unsatisfiable) nor the second draft's in-process patch (`cli.mjs:9` spawns a separate process) | **gap — new ticket** | C2 |
+| C3 | **The boundary guard** | §4.3's assertions over a **PATH-shadowed sentinel stub** (`stubGh` pattern, `tests/reconcile-delivery-truth.test.mjs:65-73`): **two** stubs with **two** sentinels; import succeeds leaving neither; `propose-mapping` fails with `ENV_HIT`; `propose-mapping` with `BLAZE_AGENT_COMMAND` **unset** fails with `PATH_HIT` (without which the PATH arm is never executed); both repointed at benign stubs, `propose-mapping` succeeds. Plus the one surviving static assertion. Explicitly **not** the first draft's three static assertions (two unsatisfiable) nor the second draft's in-process patch (`cli.mjs:9` spawns a separate process) | **gap — new ticket** | C2 |
 
 ### Phase D — the second front end
 
@@ -1378,7 +1508,9 @@ from.
 - **`docs/guide/schema.md` contradicts shipped code** (§8 item 5) — a doc ticket, and larger than the
   "one-line fix" an earlier draft called it: the paragraph denies that `verified` shipped, and the
   neighbouring claim about `superseded` needs independent checking.
-- **BLZ-587's stale `git add -A` Context** (§8 item 6) — a ticket-text correction, not a code change.
+- **`cli.mjs:290`'s signal handling** (§8 item 6) — its own ticket, engine-wide, blocking nothing
+  here but capping what §5.1 can promise. One-line fix, one SIGKILL test.
+- **BLZ-587's stale `git add -A` Context** (§8 item 7) — a ticket-text correction, not a code change.
 
 **Sequencing.** A3 lands **with** B2, not after it — BLZ-589's round trip is the only honest
 verification of BLZ-587 and the plan is explicit that it is *"not optional and not last"*. **B4
