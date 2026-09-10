@@ -68,7 +68,17 @@ export function renderView(name, { m, pDir, project, now, transitions, focus = n
     case "list": return list.render(m);
     case "live": return live.render();
     case "metrics": {
-      const txns = transitions === undefined ? loadTransitions({ root: resolveRoots().dataRoot }).transitions : transitions;
+      // `resolveRoots()` reads the AMBIENT process, not the board being served, so
+      // `GET /view/metrics` THREW ("no data dir found") for any server started against an
+      // explicit projectsDir from a directory that is not itself a board. Nothing wraps
+      // this async handler, so the throw did not fail the request — it became an
+      // UNHANDLED REJECTION, which on Node 24 KILLS THE PROCESS. One request to one view
+      // took the whole board down for every connected session. The gantt branch below
+      // already spelled out the correct source and the reason for it; this line had simply
+      // not been given the same treatment. `dirname(pDir)` is the data root of the board
+      // actually being rendered, which in the ordinary single-board case is the same value
+      // `resolveRoots()` returned -- which is why no test noticed.
+      const txns = transitions === undefined ? loadTransitions({ root: dirname(pDir) }).transitions : transitions;
       const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
       return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
