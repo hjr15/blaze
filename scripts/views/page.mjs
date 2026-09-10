@@ -161,6 +161,7 @@ export function pageHtml({
   view = "board",
   afterHeader = "",
   beforeBodyEnd = "",
+  nonce = null,
   projectsDir: _pDir,
   now = Date.now(),
   transitions,
@@ -168,6 +169,15 @@ export function pageHtml({
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const cfg = cfgFor(pDir);
+  // BLZ-578. THE NONCE IS STAMPED, NOT INVENTED HERE. Only the server can put a nonce in
+  // the `Content-Security-Policy` header, so only the server may choose it — a value this
+  // function made up would be one no header names, and every script on the page would be
+  // silently dropped. A caller that passes none gets the document exactly as it was
+  // before this ticket (no attributes, and it will be serving no policy either); both
+  // servers that mount this page pass one, and tests/board-csp.test.mjs pins each of them
+  // separately because BLZ-359's lesson is that a control wired into one is absent from
+  // the other.
+  const nonceAttr = nonce ? ` nonce="${nonce}"` : "";
   // Clamp: board must always be enabled regardless of what the caller passes
   // (belt-and-suspenders alongside config.mjs's own board:true enforcement).
   const V = { ...(views ?? cfg.views), board: true };
@@ -194,12 +204,12 @@ export function pageHtml({
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>${cfg.boardTitle}</title>
-<script>
+<script${nonceAttr}>
   window.__csrf = "${CSRF}";
   // Set the saved view before paint so there's no flash of the wrong layout.
   try { document.documentElement.dataset.view = localStorage.getItem("tracker.view") || "board"; } catch {}
 </script>
-<style>
+<style${nonceAttr}>
   :root {
     color-scheme: dark;
     --blaze-red: #FF3B1F;
@@ -277,10 +287,18 @@ export function pageHtml({
   #toast.show { opacity: 1; }
   .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
   .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
+  /* BLZ-578: margin-left:auto and the Reconcile button's whole appearance were inline
+     style= attributes. A nonce-only style-src drops an inline style attribute in
+     silence — the element renders unstyled and nothing anywhere says why — so the rules
+     moved here, into the one stylesheet the nonce covers. (No backticks in this comment:
+     the whole document is one template literal.) */
   .search { background: #161b22; border: 1px solid #21262d; border-radius: 8px; color: var(--neutral);
-    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); }
+    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); margin-left: auto; }
   .search:focus { outline: none; border-color: var(--blaze-orange); }
   .search::placeholder { color: #7d8590; }
+  .reconcile-pill { background: #161b22; border: 1px solid #21262d; border-radius: 6px;
+    color: #adbac7; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    padding: 4px 12px; }
   .card.filtered-out, .row.filtered-out { display: none !important; }
   .chipbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 20px;
     background: #0F172Acc; border-bottom: 1px solid #21262d; }
@@ -304,14 +322,14 @@ export function pageHtml({
     ${["all", ...Object.keys(projects)].map((k) =>
       `<a class="proj ${k === selected ? "on" : ""}" href="${k === "all" ? "/" : "/?project=" + esc(k)}">${k === "all" ? "All" : esc(k)}${k === "all" ? "" : ` <span class="count">${projects[k]}</span>`}</a>`
     ).join("")}
-    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off">
     ${boardToggle}
     <div class="viewtoggle" role="group" aria-label="View">
       ${VIEW_NAMES.filter((v) => V[v]).map((v) =>
         `<button type="button" class="pill" data-view="${v}">${v.charAt(0).toUpperCase()}${v.slice(1)}</button>`
       ).join("\n      ")}
     </div>
-    <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
+    <button type="button" id="reconcileBtn" class="pill reconcile-pill">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
     <span class="sub" id="sync"></span>
   </header>
@@ -319,7 +337,7 @@ export function pageHtml({
   ${crumbs}
   ${afterHeader}
   <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint })}</div>
-  <script>
+  <script${nonceAttr}>
     // View toggle (Board / List), persisted to localStorage. Synchronous only —
     // flips data-view + pill state + localStorage. Fetching/swapping the actual
     // view markup is swapView's job (defined below, after toast/blazePost).
@@ -333,7 +351,7 @@ export function pageHtml({
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
       b.addEventListener("click", () => window.blazeSwapView(b.dataset.view)));
   </script>
-  <script>
+  <script${nonceAttr}>
     (function () {
       const pills = [...document.querySelectorAll(".boardtoggle .bpill")];
       if (!pills.length) return;
@@ -361,7 +379,7 @@ export function pageHtml({
       window.blazeApplyBoardPill();
     })();
   </script>
-  <script>
+  <script${nonceAttr}>
     // Poll a cheap content hash, scoped to the page's own ?project=; refresh
     // in place (swapView) only when ticket files actually change. Focus
     // scoping is deliberately project-granular, not focus-granular — cheap
@@ -385,7 +403,7 @@ export function pageHtml({
     poll();
     setInterval(poll, 3000);
   </script>
-  <script>
+  <script${nonceAttr}>
     const CSRF = window.__csrf;
     function toast(msg) {
       const el = document.getElementById("toast");
@@ -489,7 +507,7 @@ export function pageHtml({
       toast(reconcileSummary(j));
     });
   </script>
-  <script>
+  <script${nonceAttr}>
     // View swap: fetch the fragment for a view, replace #viewhost + chipbar +
     // crumbs + subline, then re-run that view's init(). Defined after the
     // toast/blazePost block above so toast() is in scope.
@@ -512,7 +530,7 @@ export function pageHtml({
     }
     window.blazeSwapView = swapView;
   </script>
-  <script>
+  <script${nonceAttr}>
     // Client-side filtering: search + status chips COMPOSE — a card/row is
     // visible iff it passes both. Search matches the data-search index; a chip
     // constrains to a status set. Chip state lives in the URL hash
@@ -566,7 +584,7 @@ export function pageHtml({
     })();
   </script>
   ${panel.render()}
-  <script>
+  <script${nonceAttr}>
     window.blazeViews = {
       board: { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
       list:  { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
@@ -577,7 +595,7 @@ export function pageHtml({
     };
     ${panel.clientScript}
   </script>
-  <script>
+  <script${nonceAttr}>
     // First-load init runs exactly once: if the client's saved view differs
     // from the server-rendered view, swap (fetches + inits); otherwise just
     // apply pill/localStorage state and run that view's init directly.

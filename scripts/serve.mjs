@@ -32,6 +32,7 @@ import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, se
          ensureSetupTokenIgnored } from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
 import { AttemptLimiter } from "./model/rate-limit.mjs";
+import { boardHeaders, cspNonce as boardNonce } from "./model/board-csp.mjs";
 import { handleSigninRoutes, readJsonBody, SIGNIN_PATH, preAuthHeaders, cspNonce,
          queryRefusalPageHtml } from "./model/signin.mjs";
 import { checkPasswordPolicy, MIN_PASSWORD_LENGTH } from "./model/passwords.mjs";
@@ -663,7 +664,15 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // AMBIENT board rather than the one this server was started against
       // (/view/<name> above already passes it) — a latent mismatch that
       // BLZ-133's stricter resolveRoots turns from wrong-data into a throw.
-      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, sprint, view, views, projectsDir }));
+      // BLZ-578. A FRESH NONCE PER RESPONSE, and the same value in the header and in the
+      // document — generated here, at the moment of the response, because that is the
+      // only place both halves are in one scope. Hoisting it to module or server scope
+      // would make it a constant an injected script could read off any element and copy,
+      // which is not a nonce at all.
+      const nonce = boardNonce();
+      return send(req, res, 200, "text/html; charset=utf-8",
+                  pageHtml({ project, focus, flat, sprint, view, views, projectsDir, nonce }),
+                  boardHeaders(nonce));
     }
     if (req.method === "POST") {
       // NOT authentication, and never was — ADR-0013 §7 and the ADR's own reproduction:

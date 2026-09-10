@@ -58,7 +58,11 @@ function legendHtml(series) {
   return `<div class="cfd-legend">${statuses
     .map(
       (s, i) =>
-        `<span class="cfd-legend-item"><span class="cfd-swatch" style="background:${PALETTE[i % PALETTE.length]}"></span>${esc(s)}</span>`,
+        // BLZ-578: the swatch colour was an inline `style=` attribute, which the board's
+        // nonce-only `style-src` drops without a word — every swatch in the legend would
+        // have lost its colour and nothing would have said why. The palette index is a
+        // small closed set, so it becomes a CLASS and the colours live in `styles` below.
+        `<span class="cfd-legend-item"><span class="cfd-swatch cfd-c${i % PALETTE.length}"></span>${esc(s)}</span>`,
     )
     .join("")}</div>`;
 }
@@ -108,7 +112,8 @@ export const styles = `
   .metrics.no-data .cfd-empty { display: block; }
   .cfd-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12px; color: #adbac7; }
   .cfd-legend-item { display: flex; align-items: center; gap: 5px; }
-  .cfd-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }`;
+  .cfd-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+${PALETTE.map((c, i) => `  .cfd-c${i} { background: ${c}; }`).join("\n")}`;
 
 // Client-side: parse #cfd-series once, draw a hand-rolled stacked-area CFD
 // (no chart lib), and redraw on data-range clicks. Guarded (mirrors
