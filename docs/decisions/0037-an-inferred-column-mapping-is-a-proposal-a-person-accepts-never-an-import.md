@@ -155,13 +155,22 @@ evidence. `blaze export --format csv` emits the same versioned schema, and the v
   exporter that emitted a correct header and an empty cell for 21 of the 31 columns would pass
   gate 1 byte-for-byte and pass `blaze audit`, because `validateTicket`
   (`scripts/model/rules.mjs:25-31`) checks only `requiredFields(type)`.
-- **Gate 3 — every one of the 31 columns is non-empty in at least one fixture row.** Gates 1 and 2
-  both compare corpora; neither notices a column that is empty *everywhere*, in the fixture and in
-  both exports alike. Thirty-one assertions, and the cheapest of the three.
+- **Gate 3 — every one of the 31 columns is non-empty in at least one row of X**, the exported
+  CSV. Gates 1 and 2 both compare corpora; neither notices a column that is empty *everywhere*, in
+  the fixture and in both exports alike. Thirty-one assertions, and the cheapest of the three.
 
-Gate 2 lives in a `node --test` suite, not in `.github/workflows/board-gate.yml`. It needs a temp
-board, which the suite builds routinely, and the repo's most important correctness gate must be
-runnable locally and mutation-testable rather than encoded in CI-workflow YAML.
+**The artifact is X, not the fixture, and the distinction is load-bearing.** Gate 3 over X catches
+an exporter that blanks a column; gate 3 over the fixture does not — and "a column of the
+fixture" is ill-typed anyway, since the fixture is a board of markdown tickets and has no columns.
+An earlier draft said "the fixture" in this ADR and in the design's headline decisions while the
+design's own body said "a row of X", which is two different gates under one name.
+
+**All three gates live in one `node --test` suite, `tests/csv-round-trip.test.mjs`** — not in
+`.github/workflows/board-gate.yml`. They need a temp board, which the suite builds routinely, and
+the repo's most important correctness gate must be runnable locally and mutation-testable rather
+than encoded in CI-workflow YAML. An earlier draft of this ADR said only that *gate 2* lived in a
+suite and named no file, which would have left an implementer putting gates 1 and 3 back in YAML —
+the complaint that produced this whole section.
 
 This ADR records gate 2 explicitly because an earlier draft of the design specified gate 1 alone
 and called it the acceptance test. It was refuted by construction, and the instrument gate 2 needs
