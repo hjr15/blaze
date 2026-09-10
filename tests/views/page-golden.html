@@ -4,12 +4,12 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Blaze</title>
-<script>
+<script nonce="GOLDEN-NONCE">
   window.__csrf = "CSRF";
   // Set the saved view before paint so there's no flash of the wrong layout.
   try { document.documentElement.dataset.view = localStorage.getItem("tracker.view") || "board"; } catch {}
 </script>
-<style>
+<style nonce="GOLDEN-NONCE">
   :root {
     color-scheme: dark;
     --blaze-red: #FF3B1F;
@@ -181,10 +181,18 @@
   #toast.show { opacity: 1; }
   .card[draggable="true"], .row[draggable="true"] { cursor: grab; }
   .col.drop-hover, .group.drop-hover { outline: 2px dashed var(--blaze-orange); outline-offset: -2px; }
+  /* BLZ-578: margin-left:auto and the Reconcile button's whole appearance were inline
+     style= attributes. A nonce-only style-src drops an inline style attribute in
+     silence — the element renders unstyled and nothing anywhere says why — so the rules
+     moved here, into the one stylesheet the nonce covers. (No backticks in this comment:
+     the whole document is one template literal.) */
   .search { background: #161b22; border: 1px solid #21262d; border-radius: 8px; color: var(--neutral);
-    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); }
+    font: inherit; font-size: 13px; padding: 5px 10px; width: min(240px, 40vw); margin-left: auto; }
   .search:focus { outline: none; border-color: var(--blaze-orange); }
   .search::placeholder { color: #7d8590; }
+  .reconcile-pill { background: #161b22; border: 1px solid #21262d; border-radius: 6px;
+    color: #adbac7; cursor: pointer; font: inherit; font-size: 12px; font-weight: 600;
+    padding: 4px 12px; }
   .card.filtered-out, .row.filtered-out { display: none !important; }
   .chipbar { display: flex; flex-wrap: wrap; gap: 6px; padding: 8px 20px;
     background: #0F172Acc; border-bottom: 1px solid #21262d; }
@@ -256,6 +264,14 @@
   .cfd-legend { display: flex; flex-wrap: wrap; gap: 10px; margin-top: 10px; font-size: 12px; color: #adbac7; }
   .cfd-legend-item { display: flex; align-items: center; gap: 5px; }
   .cfd-swatch { width: 10px; height: 10px; border-radius: 3px; display: inline-block; }
+  .cfd-c0 { background: #79c0ff; }
+  .cfd-c1 { background: #3fb950; }
+  .cfd-c2 { background: #d29922; }
+  .cfd-c3 { background: #f85149; }
+  .cfd-c4 { background: #a371f7; }
+  .cfd-c5 { background: #56d4dd; }
+  .cfd-c6 { background: #ffa657; }
+  .cfd-c7 { background: #7ee787; }
   .mapwrap { position: relative; padding: 0 20px 20px; }
   svg.graph {
     display: block; width: 100%; height: auto; max-width: 100%; min-height: 320px;
@@ -325,7 +341,7 @@
     <h1>Blaze</h1>
     <span class="sub">2 tickets · 2 in flight</span>
     <a class="proj on" href="/">All</a><a class="proj " href="/?project=T">T <span class="count">2</span></a>
-    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off" style="margin-left:auto">
+    <input id="board-search" class="search" type="search" placeholder="Search…" aria-label="Search tickets" autocomplete="off">
     
     <div class="viewtoggle" role="group" aria-label="View">
       <button type="button" class="pill" data-view="board">Board</button>
@@ -335,7 +351,7 @@
       <button type="button" class="pill" data-view="map">Map</button>
       <button type="button" class="pill" data-view="gantt">Gantt</button>
     </div>
-    <button type="button" id="reconcileBtn" class="pill" style="background:#161b22;border:1px solid #21262d;border-radius:6px;color:#adbac7;cursor:pointer;font:inherit;font-size:12px;font-weight:600;padding:4px 12px">Reconcile (dry-run)</button>
+    <button type="button" id="reconcileBtn" class="pill reconcile-pill">Reconcile (dry-run)</button>
     <span class="sub" id="live">live</span>
     <span class="sub" id="sync"></span>
   </header>
@@ -446,7 +462,7 @@
     </details>
         </div>
       </section></div></div>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     // View toggle (Board / List), persisted to localStorage. Synchronous only —
     // flips data-view + pill state + localStorage. Fetching/swapping the actual
     // view markup is swapView's job (defined below, after toast/blazePost).
@@ -460,7 +476,7 @@
     document.querySelectorAll(".viewtoggle .pill").forEach((b) =>
       b.addEventListener("click", () => window.blazeSwapView(b.dataset.view)));
   </script>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     (function () {
       const pills = [...document.querySelectorAll(".boardtoggle .bpill")];
       if (!pills.length) return;
@@ -488,7 +504,7 @@
       window.blazeApplyBoardPill();
     })();
   </script>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     // Poll a cheap content hash, scoped to the page's own ?project=; refresh
     // in place (swapView) only when ticket files actually change. Focus
     // scoping is deliberately project-granular, not focus-granular — cheap
@@ -512,7 +528,7 @@
     poll();
     setInterval(poll, 3000);
   </script>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     const CSRF = window.__csrf;
     function toast(msg) {
       const el = document.getElementById("toast");
@@ -734,7 +750,7 @@ function reconcileSummary(j) {
       toast(reconcileSummary(j));
     });
   </script>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     // View swap: fetch the fragment for a view, replace #viewhost + chipbar +
     // crumbs + subline, then re-run that view's init(). Defined after the
     // toast/blazePost block above so toast() is in scope.
@@ -757,7 +773,7 @@ function reconcileSummary(j) {
     }
     window.blazeSwapView = swapView;
   </script>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     // Client-side filtering: search + status chips COMPOSE — a card/row is
     // visible iff it passes both. Search matches the data-search index; a chip
     // constrains to a status set. Chip state lives in the URL hash
@@ -817,7 +833,7 @@ function reconcileSummary(j) {
       <div class="panel-content"></div>
     </aside>
   </div>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     window.blazeViews = {
       board: { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
       list:  { init: function () { window.blazeBindZones && window.blazeBindZones(); window.blazeApplyBoardPill && window.blazeApplyBoardPill(); } },
@@ -1054,7 +1070,7 @@ function reconcileSummary(j) {
   });
 
   </script>
-  <script>
+  <script nonce="GOLDEN-NONCE">
     // First-load init runs exactly once: if the client's saved view differs
     // from the server-rendered view, swap (fetches + inits); otherwise just
     // apply pill/localStorage state and run that view's init directly.
