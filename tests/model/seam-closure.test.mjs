@@ -10,9 +10,9 @@
 // above it for why, and for how that remedy differs from BLZ-521's on the fd guard.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readdirSync, readFileSync, statSync,
+import { readdirSync, readFileSync, statSync, realpathSync,
   // BLZ-535 F5a: the corpus-scope case needs a throwaway tree of its own
-  mkdtempSync, writeFileSync, rmSync } from "node:fs";
+  mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
 // the whole surface of both fs modules, for BLZ-535's derived write-seam ledger
 import * as fsCallbacks from "node:fs";
@@ -295,6 +295,51 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      the git-derived transitions cache — which is the read path touching disk, the same
 //      class of defect as contentHash, named instead of invisible.
 //
+// ROUND 9 — THE LEDGER, THE DROPPED ARM, AND THE HALF OF RESOLUTION THAT IS NOT THE DISK.
+//
+//   A. A READ MEMBER THAT TAKES A FLAG IS A WRITE, and this is the first refutation to come
+//      through the read-only LEDGER rather than through a spelling. `readFileSync` and
+//      `createReadStream` accept a caller-chosen open flag. MEASURED: a module holding
+//      `readFileSync(path, { flag: "w+" })`, run against a real 25-byte file, left that file
+//      at 0 BYTES while this file reported 16 tests, 16 pass, 0 fail, exit 0 — and the same
+//      call against a missing path creates it. `ReadStream` and `FileReadStream` are the same
+//      shape.
+//      Deleting those four names from the ledger would make every `readFileSync` in this tree
+//      an offence, which is false and would get the guard deleted. So the PROPERTY is pinned:
+//      an fs call — any member, read or write — carrying a `flag`/`flags` option that is not
+//      a read-only mode is an offence in itself, including one behind a computed key, a
+//      spread, a value that will not fold, or one hop through a local `const`.
+//
+//   B. THE BARE-CALL-ARGUMENT RESIDUAL WAS NOT A RESIDUAL. Round 7 claimed a call argument was
+//      "resolved the same way, but not fail-closed". The provider lookup was; the offence was
+//      COMPUTED AND THEN DROPPED, because the lookup mapped every offence to null. One module
+//      and one write, two spellings: `import { emit } from "../outside-writer.cjs"` reddened,
+//      `createRequire(import.meta.url)("../outside-writer.cjs")` was silent, and the review
+//      landed the file through the silent one at 16/16. The old justification — that
+//      `join(root, "../x")` is a path, not a specifier — does not cover a string that
+//      resolves to a real module file Node then loads, and the FILESYSTEM settles which is
+//      which. The arm now applies to any folded call-argument string that resolves to a file
+//      THAT EXISTS outside the tree. MEASURED across the corpus: zero constant call-argument
+//      strings do, so nothing legitimate pays for it.
+//
+//   C. `new URL` + `fileURLToPath` IS NOT THE WHOLE OF NODE'S RESOLUTION — it is the
+//      filesystem half. `#name` imports and self-references go through package.json, and a
+//      `#g` specifier was filed as somebody else's package and dropped; with an `imports` map
+//      added, a real state.json was written at 16/16. Both are now routed through
+//      package.json's `imports`/`exports`, and both fail CLOSED: a name package.json claims
+//      and this reader cannot follow — a condition object, a fallback array, a name the map
+//      does not define — is reported. There is no `imports` and no `exports` field in this
+//      package today, so those arms are a guard against the edit that adds one, and they are
+//      exercised against a synthetic manifest rather than left as dead code reading as cover.
+//
+//   ...and one hole no test on this machine can reach: a CASE-DIFFERING path.
+//   `./loops/Groomer.mjs` is ENOENT on ext4 and is the same file on a case-insensitive mount,
+//   which macOS is by default, where a lexical answer would place it at a `rel` the pin does
+//   not hold and return it as a non-offence. The resolved path is `realpathSync`ed before the
+//   pin is consulted, so wherever the module really is is where this reader looks it up. The
+//   same call is what makes a symlink resolve to its target, which IS testable here and is
+//   tested, so the arm is exercised rather than asserted.
+//
 // THIS FILE HARD-DEPENDS ON `acorn`, and that is a failure mode worth naming: without
 // `npm ci` the whole file dies at import with ERR_MODULE_NOT_FOUND — 1 test, 1 fail — which
 // is a MISSING GUARD wearing the clothes of a failing one. It is a devDependency, `npm ci`
@@ -303,12 +348,16 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //
 // WHAT THIS STILL CANNOT SEE, stated rather than left to look total. This guard now parses,
 // but it is not a scope analyser and not a linker, and each of those is a hole:
-//   * A SPECIFIER IN A BARE CALL ARGUMENT, for the fail-closed arm only. `import(x)` is
-//     unambiguously a module specifier and is judged fully; `require("./x.mjs")` is resolved
-//     the same way, but a string handed to some OTHER call is not reported when it will not
-//     resolve — `join(root, "../x")` is a path, not a specifier, and reporting every string
-//     passed to every function would report the tree. Resolution still applies there, so a
-//     provider reached by any spelling is still seen.
+//   * A CALL-ARGUMENT SPECIFIER NAMING A FILE THAT DOES NOT EXIST. Round 9 closed the case
+//     that matters — a string resolving to a real file outside the tree is reported wherever
+//     it sits — but a string that resolves to NOTHING is still not reported from a bare call
+//     argument, because `join(root, "../x")` is a path being built and reporting every string
+//     passed to every function would report the tree. A module that is not on disk is not a
+//     module Node will load, so the gap is between "reported" and "unloadable" rather than
+//     between "reported" and "runs".
+//   * AN OPTIONS OBJECT THIS READER CANNOT SEE. The flag rule reads an object literal, and
+//     one local `const` hop to reach one. `readFileSync(p, optionsFromSomewhereElse)` is not
+//     followed further: this reader does no dataflow, here or anywhere.
 //   * A WRITE REPACKAGED BY A MODULE THE ALLOWLIST DOES NOT NAME. Every module it DOES name
 //     is pinned export by export since D3, so that half is closed. A module the allowlist
 //     does not name cannot repackage a write without being an offender itself — it would
@@ -340,9 +389,20 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 // =============================================================================
 
 /** The READ-ONLY half of `node:fs`: members that cannot create, modify, replace or remove a
- *  filesystem entry. This is the only hand-written list in the guard, and it is the half
+ *  filesystem entry BY THEMSELVES.
+ *
+ *  ROUND 9, Finding A, corrects what this comment used to claim. It said this was "the half
  *  where being wrong is SAFE — forgetting an entry here makes the guard noisier, never
- *  blinder. Names cover both the callback and the promises module, whose members share them.
+ *  blinder", and that is true of an OMISSION and exactly inverted for a WRONG ENTRY. A name
+ *  in this list that CAN mutate is the one kind of error here that makes the guard blinder,
+ *  and there were four: `readFileSync`, `createReadStream`, `ReadStream` and `FileReadStream`
+ *  all take a caller-chosen open flag, and `readFileSync(p, { flag: "w+" })` truncates.
+ *  They stay, because they read in every use in this tree; what pins them is the flag rule in
+ *  `fsWritesIn`, which judges the CALL rather than the name. Note what the surrounding tests
+ *  do and do not cover: a mutation that ADDS a write name to this list reddens, and until
+ *  round 9 nothing asserted that a name already in it cannot create.
+ *
+ *  Names cover both the callback and the promises module, whose members share them.
  *  Every entry is asserted below to be a name one of those modules actually has, so a stale
  *  entry (`StatFs` and `Stream` were two, until this test looked) cannot sit here reading
  *  like coverage. */
@@ -527,6 +587,11 @@ const COMPUTED = "a computed member access on an fs namespace";
 const ESCAPE = "an fs namespace escaping where this guard cannot follow it";
 const SEAM_WHOLESALE = "the write seam's own primitives taken wholesale";
 const UNRESOLVABLE = "a module specifier this guard cannot resolve";
+const OPEN_FLAG = (mode) => `an fs call opening with a flag that is not read-only: ${mode}`;
+/** The open flags that cannot create, truncate or append. Everything else — `w`, `w+`, `a`,
+ *  `a+`, `wx`, `r+`, and any spelling nobody here has thought of — is a write. `r+` is on the
+ *  write side deliberately: it cannot create, but it can overwrite in place. */
+const READ_ONLY_FLAGS = new Set(["r", "rs", "sr"]);
 const OUTSIDE = "an import resolving outside the scripts tree";
 const unparseable = (why) => `a module this guard cannot parse, so cannot judge: ${why}`;
 const unreadableClause = (part) => `an fs binding clause this guard cannot read: ${part}`;
@@ -706,14 +771,80 @@ function resolveModule(rel, spec) {
   const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(spec)?.[1]?.toLowerCase() ?? null;
   if (scheme === "node") return null;                     // a builtin: judged by the fs arms
   if (scheme !== null && scheme !== "file") return { offence: UNRESOLVABLE };  // data:, http:
-  if (scheme === null && !spec.startsWith(".") && !spec.startsWith("/")) return null;  // package
+  let path = spec;
+  if (scheme === null && !spec.startsWith(".") && !spec.startsWith("/")) {
+    // ROUND 9, Finding C. A `#name` is a PACKAGE-INTERNAL import and a bare specifier can be
+    // a self-reference, and BOTH are resolved by package.json rather than by the filesystem —
+    // which is the part of Node's resolution `new URL` is not. MEASURED by the review: with
+    // `"imports": { "#g": "./scripts/loops/groomer.mjs" }` added, `import { saveState } from
+    // "#g"` wrote a real state.json at 16 pass / 0 fail, because a `#` specifier was filed as
+    // "somebody else's package" and dropped.
+    const mapped = packageSubpath(spec);
+    if (mapped === null) return null;                     // a real third-party package
+    if (mapped.offence !== undefined) return mapped;      // named in package.json, unreadable
+    path = mapped.path;                                   // now a path relative to the root
+  }
   let target;
   try {
-    target = fileURLToPath(new URL(spec, pathToFileURL(join(SCRIPTS, rel))));
+    const base = path.startsWith(".") || path.startsWith("/") || /^file:/i.test(path)
+      ? pathToFileURL(join(SCRIPTS, rel)) : pathToFileURL(join(SCRIPTS, ".."));
+    target = fileURLToPath(new URL(path, base));
   } catch { return { offence: UNRESOLVABLE }; }
+  // CASE. `./loops/Groomer.mjs` is ENOENT on this ext4 checkout and is the same file on a
+  // case-insensitive mount, which macOS is by default. A lexical path would place it at a
+  // `rel` the pin does not hold and hand it back as a non-offence — a hole nobody on Linux
+  // can even reproduce. `realpathSync` asks the filesystem, so wherever the module really is
+  // is where this reader looks it up. It throws when the path does not exist, which a
+  // FIXTURE specifier legitimately does not, so that falls back to the lexical answer.
+  try { target = realpathSync.native(target); } catch { /* not on disk: lexical it is */ }
   const inTree = relative(SCRIPTS, target).split("\\").join("/");
-  if (inTree === "" || inTree.startsWith("../")) return { offence: OUTSIDE };
-  return { rel: inTree };
+  if (inTree === "" || inTree.startsWith("../")) return { offence: OUTSIDE, target };
+  return { rel: inTree, target };
+}
+
+/** Does this resolved path name a file that actually exists? The filesystem is what separates
+ *  `require("../outside-writer.cjs")`, a module Node will load, from `join(root, "../x")`,
+ *  which is a path being built. */
+function isRealFile(target) {
+  if (typeof target !== "string") return false;
+  try { return statSync(target).isFile(); } catch { return false; }
+}
+
+/** package.json's `imports` and `exports` maps, which are the half of Node's resolution that
+ *  is not the filesystem. Returns null when the specifier names a real third-party package,
+ *  `{ path }` when package.json maps it into this repo, and `{ offence }` when package.json
+ *  claims the name and this reader cannot follow where it goes — a conditional object, an
+ *  array of fallbacks, a wildcard. FAIL CLOSED, and cheap to be: there is no `imports` and no
+ *  `exports` field in this package today, so every arm below is a guard against the edit that
+ *  adds one rather than a description of what is there. */
+function packageSubpath(spec, pkg = packageManifest()) {
+  if (spec.startsWith("#")) {
+    const map = pkg.imports;
+    if (map === undefined || map === null) return { offence: UNRESOLVABLE };
+    const target = map[spec];
+    if (typeof target === "string") return { path: target };
+    if (target === undefined) {
+      // a `#name` that package.json does not define: Node refuses it, and so does this
+      const wildcard = Object.keys(map).some((k) => k.includes("*"));
+      return { offence: UNRESOLVABLE, wildcard };
+    }
+    return { offence: UNRESOLVABLE };
+  }
+  const name = pkg.name;
+  if (typeof name !== "string" || (spec !== name && !spec.startsWith(`${name}/`))) return null;
+  // a SELF-REFERENCE, which Node resolves through `exports` and refuses without one
+  const map = pkg.exports;
+  if (map === undefined || map === null) return { offence: UNRESOLVABLE };
+  const sub = spec === name ? "." : `.${spec.slice(name.length)}`;
+  const target = map[sub];
+  if (typeof target === "string") return { path: target };
+  return { offence: UNRESOLVABLE };
+}
+
+let PACKAGE_MANIFEST = null;
+function packageManifest() {
+  PACKAGE_MANIFEST ??= JSON.parse(readFileSync(join(SCRIPTS, "..", "package.json"), "utf8"));
+  return PACKAGE_MANIFEST;
 }
 
 /** The pinned module a specifier names, or null when it names none of them. The offence a
@@ -873,6 +1004,19 @@ function fsWritesIn(raw, rel) {
   const named = new Map();   // a local name -> the fs member it is bound to
   const ns = new Set();      // local names holding an fs namespace
   const seenRef = new Set(); // identifier nodes already classified as a namespace reference
+
+  /** The object literal a name was declared with, so `const o = { flag: "w+" }` followed by
+   *  `readFileSync(p, o)` is read as the options it is. One hop, and no further: this reader
+   *  does not do dataflow, and says so in the banner. */
+  const objectBoundTo = (arg) => {
+    if (arg.type !== "Identifier") return null;
+    for (const candidate of nodes) {
+      if (candidate.type !== "VariableDeclarator") continue;
+      if (candidate.id.type !== "Identifier" || candidate.id.name !== arg.name) continue;
+      if (candidate.init?.type === "ObjectExpression") return candidate.init;
+    }
+    return null;
+  };
 
   const classifyMember = (at, name) => {
     if (name === null) { hits.add(COMPUTED); return; }
@@ -1061,13 +1205,29 @@ function fsWritesIn(raw, rel) {
     }
 
     // A DYNAMIC specifier is judged the same way when it is unambiguously one — the source of
-    // an `import()`. In a bare call argument it is not: `join(root, "../x")` is a path, not a
-    // specifier, and resolving every string handed to every function would report the tree.
-    // So there the resolution is used but the fail-closed arm is not, and that is stated in
-    // the banner rather than left to be found.
+    // an `import()`.
     if (parent && parent.type === "ImportExpression" && parent.source === node) {
       const resolved = resolveModule(rel, folded);
       if (resolved !== null && resolved.offence !== undefined) { hits.add(resolved.offence); continue; }
+    }
+    // ROUND 9, Finding B. In a BARE CALL ARGUMENT the offence used to be computed and then
+    // dropped, because the provider lookup mapped every offence to null. So the same module,
+    // reached the same way, was reported as a static import and silent through
+    // `createRequire(import.meta.url)("../outside-writer.cjs")` — MEASURED by the review at
+    // 16 pass / 0 fail with the helper's `writeFileSync` landing a real file.
+    //
+    // The old justification — `join(root, "../x")` is a path, not a specifier — does not
+    // cover a string that resolves to a real module file Node then loads, and the difference
+    // is one the filesystem can settle. So the arm applies here too, narrowed to a string
+    // that RESOLVES TO A FILE THAT EXISTS outside the tree. MEASURED across the corpus: zero
+    // constant call-argument strings resolve to a real file outside `scripts/`, so this costs
+    // nothing today and closes the route.
+    if (parent && parent.type === "CallExpression" && parent.arguments.includes(node)) {
+      const resolved = resolveModule(rel, folded);
+      if (resolved !== null && resolved.offence === OUTSIDE && isRealFile(resolved.target)) {
+        hits.add(OUTSIDE);
+        continue;
+      }
     }
     const provider = resolveProvider(rel, folded);
     if (provider && parent && ((parent.type === "ImportExpression" && parent.source === node)
@@ -1084,6 +1244,39 @@ function fsWritesIn(raw, rel) {
       for (const prop of target.properties) {
         if (prop.type === "RestElement" || prop.computed) { hits.add(SEAM_WHOLESALE); continue; }
         classifySeamMember(provider, nameOf(prop.key));
+      }
+    }
+  }
+
+  // ROUND 9, Finding A. A READ MEMBER THAT TAKES A FLAG IS A WRITE. `readFileSync` and
+  // `createReadStream` accept a caller-chosen open flag, so `readFileSync(p, { flag: "w+" })`
+  // TRUNCATES an existing file and CREATES a missing one — MEASURED by the review against a
+  // real 25-byte file, which came back 0 bytes with this guard at 16 pass / 0 fail. The
+  // read-only ledger was not merely incomplete there; it was WRONG, and a wrong entry is the
+  // one kind of ledger error that makes this guard blinder rather than noisier.
+  //
+  // Pinning it by deleting those four names would make every `readFileSync` in the tree an
+  // offence, which is not true and would get the guard deleted. So the PROPERTY is pinned
+  // instead: an fs call — any member, read or write — carrying a `flag`/`flags` option that
+  // is not a read-only mode is an offence in itself. `{ flag: "r" }` stays quiet;
+  // `"w+"`, `"a"`, `"wx"`, a computed key and a value this reader cannot fold do not.
+  for (const node of nodes) {
+    if (node.type !== "CallExpression") continue;
+    const callee = node.callee;
+    const onFs = callee.type === "Identifier" ? named.has(callee.name)
+      : callee.type === "MemberExpression" && !callee.computed
+        && callee.object.type === "Identifier" && ns.has(callee.object.name);
+    if (!onFs) continue;
+    for (const arg of node.arguments) {
+      const options = arg.type === "ObjectExpression" ? arg : objectBoundTo(arg);
+      if (options === null) continue;
+      for (const prop of options.properties) {
+        if (prop.type === "SpreadElement") { hits.add(OPEN_FLAG("a spread")); continue; }
+        if (prop.computed) { hits.add(OPEN_FLAG("a computed key")); continue; }
+        if (!["flag", "flags"].includes(nameOf(prop.key))) continue;
+        const mode = constantString(prop.value);
+        if (mode === null) { hits.add(OPEN_FLAG("one this guard cannot fold")); continue; }
+        if (!READ_ONLY_FLAGS.has(mode)) hits.add(OPEN_FLAG(mode));
       }
     }
   }
@@ -1847,6 +2040,154 @@ test("an acquisition this guard cannot fold is an acquisition it reports", () =>
     assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()), [],
       `an ordinary call is not an acquisition:\n${src}`);
   }
+});
+
+test("a read member that takes an open flag is a write", () => {
+  // BLZ-535 ROUND 9, Finding A, and the first time this guard has been refuted through its
+  // read-only LEDGER rather than through a spelling. `readFileSync` and `createReadStream`
+  // take a caller-chosen open flag. MEASURED by the review on 857ebbb: a module holding
+  // `readFileSync(path, { flag: "w+" })`, run against a real 25-byte file, left that file at
+  // 0 BYTES while this file reported 16 tests, 16 pass, 0 fail, exit 0 — and the same call
+  // against a missing path CREATES it. The ledger entry was not incomplete; it was FALSE.
+  const writes = {
+    "the flag that truncates": '{ flag: "w+" }',
+    "the flag that appends": '{ flag: "a" }',
+    "the flag that creates exclusively": '{ flag: "wx" }',
+    "the flag that overwrites in place, which cannot create but can destroy": '{ flag: "r+" }',
+    "the stream spelling of the same option": '{ flags: "w" }',
+    "a flag this guard cannot fold": "{ flag: mode }",
+    "a flag hidden behind a computed key": '{ ["fl" + "ag"]: "w" }',
+    "an options object spread in from somewhere this reader cannot see": "{ ...opts }",
+  };
+  for (const [why, options] of Object.entries(writes)) {
+    const src = `import { readFileSync } from "node:fs";\nreadFileSync(p, ${options});`;
+    const found = writeSeamOffenders(new Map([["fake.mjs", src]]), new Map());
+    assert.equal(found.length, 1, `${why}: this must be an offender, and it is not — ${src}`);
+  }
+  // ...through the namespace, and one hop through a local binding, which is the obvious dodge
+  for (const src of [
+    'import * as fs from "node:fs";\nfs.readFileSync(p, { flag: "w+" });',
+    'import { createReadStream } from "node:fs";\ncreateReadStream(p, { flags: "a" });',
+    'import { readFileSync } from "node:fs";\nconst o = { flag: "w+" };\nreadFileSync(p, o);',
+    'import { readFile } from "node:fs/promises";\nawait readFile(p, { flag: "w" });',
+  ]) {
+    assert.equal(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()).length, 1,
+      `an open flag is an open flag wherever the member came from — ${src}`);
+  }
+  // ...and the discrimination, which is the whole reason this is a flag rule and not four
+  // names deleted from the ledger: a read is still a read, and every `readFileSync` in this
+  // tree is one.
+  for (const src of [
+    'import { readFileSync } from "node:fs";\nreadFileSync(p, "utf8");',
+    'import { readFileSync } from "node:fs";\nreadFileSync(p, { encoding: "utf8" });',
+    'import { readFileSync } from "node:fs";\nreadFileSync(p, { flag: "r", encoding: "utf8" });',
+    'import { createReadStream } from "node:fs";\ncreateReadStream(p, { flags: "r" });',
+    'import { readFileSync } from "node:fs";\nconst opts = { encoding: "utf8" };\nreadFileSync(p, opts);',
+    // an object literal that is not an fs call's options at all
+    'import { readFileSync } from "node:fs";\nregister({ flag: "w+" });\nreadFileSync(p);',
+  ]) {
+    assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()), [],
+      `this reads, and must stay quiet:\n${src}`);
+  }
+});
+
+test("a call argument that resolves to a real module outside the tree is an offence", () => {
+  // BLZ-535 ROUND 9, Finding B. The `OUTSIDE` offence WAS computed for a call-argument
+  // specifier and then dropped, because the provider lookup mapped every offence to null. So
+  // one module, one write, two spellings: `import { emit } from "../outside-writer.cjs"`
+  // reddened and `createRequire(import.meta.url)("../outside-writer.cjs")` was silent, and
+  // the review landed the file at 16 pass / 0 fail through the silent one.
+  //
+  // The fixtures below name THIS test file, which is a real file outside `scripts/` — the
+  // property is "Node would load this", and the filesystem is what settles it.
+  const outside = "../../tests/model/seam-closure.test.mjs";
+  for (const src of [
+    `const m = createRequire(import.meta.url)("${outside}");\nm.emit();`,
+    `const m = require("${outside}");\nm.emit();`,
+    `const m = await import("${outside}");\nm.emit();`,
+  ]) {
+    assert.deepEqual(writeSeamOffenders(new Map([["model/fake.mjs", src]]), new Map()),
+      [`model/fake.mjs :: ${OUTSIDE}`],
+      `a module of this repo that is not in the corpus is unjudged, and reaching one is an ` +
+      `offence however it is spelled — ${src}`);
+  }
+  // ...and the discrimination that kept this arm off call arguments until now: a string being
+  // used as a PATH is not a specifier. MEASURED across the corpus: zero constant
+  // call-argument strings resolve to a real file outside `scripts/`, so nothing legitimate
+  // pays for this.
+  for (const src of [
+    'const p = join(root, "../x");\nreturn p;',
+    'const p = resolve(root, "./nothing-of-the-sort.mjs");\nreturn p;',
+    'log("../outside-writer.cjs is where it would go");',
+  ]) {
+    assert.deepEqual(writeSeamOffenders(new Map([["model/fake.mjs", src]]), new Map()), [],
+      `a path is not a module specifier:\n${src}`);
+  }
+});
+
+test("a specifier is resolved against the filesystem, not against its own text", () => {
+  // ROUND 9. The resolved path is `realpathSync`ed before the pin is consulted, and the
+  // reason is a hole nobody on this machine can reproduce: on a CASE-INSENSITIVE mount, which
+  // macOS is by default, `./loops/Groomer.mjs` IS `loops/groomer.mjs`, and a lexical answer
+  // would place it at a `rel` the pin does not hold and hand it back as a non-offence. ext4
+  // refuses that spelling outright, so it cannot be tested here — but the same `realpathSync`
+  // is what makes a SYMLINK resolve to its target, and that IS testable here, so the arm is
+  // exercised rather than asserted.
+  const link = join(SCRIPTS, "..", "blz535-symlink-fixture.mjs");
+  rmSync(link, { force: true });
+  symlinkSync(join(SCRIPTS, "loops", "groomer.mjs"), link);
+  try {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs",
+        'import { saveState } from "../blz535-symlink-fixture.mjs";']]), new Map()),
+      ["fake.mjs :: saveState"],
+      "a symlink pointing into the tree resolves to the module it points AT. Lexically this " +
+      "specifier leaves `scripts/` and would be reported as an out-of-tree import instead — " +
+      "a different offence, and on a case-insensitive filesystem, no offence at all.");
+  } finally { rmSync(link, { force: true }); }
+});
+
+test("a specifier package.json resolves is resolved through package.json", () => {
+  // BLZ-535 ROUND 9, Finding C. `new URL` + `fileURLToPath` is the FILESYSTEM half of Node's
+  // resolution and not the whole of it: `#name` imports and self-references go through
+  // package.json, and a `#g` specifier was filed as somebody else's package and dropped. With
+  // `"imports": { "#g": "./scripts/loops/groomer.mjs" }` added, the review wrote a real
+  // state.json through `import { saveState } from "#g"` at 16 pass / 0 fail. It needs an edit
+  // to package.json, which is why it was supporting rather than blocking — and why the arm
+  // below is written against a SYNTHETIC manifest: there is no `imports` field in this
+  // package today, so the mapping arm has to be exercised deliberately or it is dead code
+  // reading as cover.
+  assert.deepEqual(packageSubpath("#g", { imports: { "#g": "./scripts/loops/groomer.mjs" } }),
+    { path: "./scripts/loops/groomer.mjs" },
+    "a `#name` package.json defines resolves to what package.json says");
+  assert.equal(packageSubpath("pg", { name: "@hjr15/blaze-board" }), null,
+    "a real third-party package is not a module of this tree");
+  assert.deepEqual(
+    packageSubpath("@hjr15/blaze-board/x.mjs",
+      { name: "@hjr15/blaze-board", exports: { "./x.mjs": "./scripts/x.mjs" } }),
+    { path: "./scripts/x.mjs" }, "a self-reference resolves through `exports`");
+  for (const [spec, pkg] of [
+    ["#g", {}],                                        // no imports map at all
+    ["#missing", { imports: { "#g": "./x.mjs" } }],     // a name the map does not define
+    ["#g", { imports: { "#g": { node: "./x.mjs" } } }], // a condition this reader cannot pick
+    ["#g", { imports: { "#g": ["./a.mjs", "./b.mjs"] } }],            // a fallback array
+    ["@hjr15/blaze-board/x.mjs", { name: "@hjr15/blaze-board" }],      // self-ref, no exports
+  ]) {
+    assert.equal(packageSubpath(spec, pkg)?.offence, UNRESOLVABLE,
+      `package.json claims ${spec} and this reader cannot follow it, so it must be reported`);
+  }
+
+  // ...and end to end, against the manifest this repo actually has: it defines no `imports`,
+  // so a `#` specifier is an offence rather than a shrug — which is what stops the edit that
+  // adds one from being invisible.
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "#g";']]), new Map()),
+    [`fake.mjs :: ${UNRESOLVABLE}`],
+    "this package has no `imports` map, so `#g` names nothing and is reported");
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs", 'import { parse } from "acorn";\nimport pg from "pg";']]),
+      new Map()), [],
+    "a real dependency is not a module of this tree");
 });
 
 test("prose, a message or a regex that merely NAMES a write is not a write", () => {
