@@ -23,6 +23,16 @@ in the same way `docs/schema-versioning.md` and `docs/schema-customization.md` a
 **Every claim below about how blaze works today is cited to the file and line it was read from.**
 Where something could not be verified it says so rather than asserting.
 
+**Two kinds of path appear in this document, and they must not be confused.** A path with a line
+number — `scripts/model/ticket.mjs:112-119` — is **existing code at `13f661c`**, read and cited.
+A path without one under `scripts/model/csv.mjs`, `import-*.mjs`, `export-*.mjs`, the three
+runners, and `tests/csv-round-trip.test.mjs` is **proposed** — it does not exist in the tree, and
+§6 is its inventory. In particular, `scripts/model/import-mapping-propose.mjs` is described as
+the only module that will spawn `agentCommand`; **today the tree has exactly one read of
+`agentCommand`, at `scripts/loops/groomer.mjs:547`**, and the proposer is what this design adds
+beside it. Every sentence about a proposed module is a specification of what it will do, not a
+report of what it does.
+
 ---
 
 ## 0. The three decisions
@@ -732,6 +742,7 @@ sprint definition is source, so it lives at top level and gets committed like ti
     "columns": ["Issue key", "Summary", "Issue Type", "Status", "Priority", "Story Points"],
     "sha256": "b1946ac9…"
   },
+  "sourceIdColumn": "Issue key",
   "columns": {
     "id":          { "from": "Issue key" },
     "title":       { "from": "Summary" },
@@ -776,7 +787,7 @@ sprint definition is source, so it lives at top level and gets committed like ti
   `sourceIdColumn` exists to prevent. Both halves were added in the same commit, which is how they
   were written without ever being read against each other.
 
-  The map is therefore **`source-ids/<mapping-name>.json` at the data root**, beside
+  The map is therefore **`source-ids/<mapping>.json` at the data root**, beside
   `import-mappings/` and committed for the same reason: it is source, not a run artifact, and it
   outlives every individual run. One file per mapping, so the lookup reads exactly one file rather
   than folding N receipts of unknown completeness. A merge is **additive and never rewrites an
@@ -806,12 +817,15 @@ sprint definition is source, so it lives at top level and gets committed like ti
 | Writes | one file: `import-mappings/<name>.json` | tickets, under `--apply` |
 | Sees the board? | no | yes |
 
-The proposer is `proposeMapping(header, sampleRows, { agentCommand })` in
-`scripts/model/import-mapping-propose.mjs`. It spawns `cfg.agentCommand` — the same seam the
-groomer already uses (`scripts/loops/groomer.mjs:547,570`), default `"claude -p"`
-(`scripts/config.mjs:21`), overridable by `BLAZE_AGENT_COMMAND` (`scripts/config.mjs:271`). It is
-handed the header row and a bounded sample of rows and returns a mapping candidate. It never
-resolves an id, never reads the corpus and never touches a write port.
+The proposer **will be** `proposeMapping(header, sampleRows, { agentCommand })` in
+`scripts/model/import-mapping-propose.mjs` — a new module; nothing by that name exists at
+`13f661c`. It will spawn `cfg.agentCommand` through the same seam the groomer already uses
+(`scripts/loops/groomer.mjs:547,570`, today the tree's **only** read of `agentCommand`), default
+`"claude -p"` (`scripts/config.mjs:21`), overridable by `BLAZE_AGENT_COMMAND`
+(`scripts/config.mjs:271`). It will be handed the header row and a bounded sample of rows and
+will return a mapping candidate. It will never resolve an id, never read the corpus and never
+touch a write port — and C3's guard (§4.3) is what turns each of those "never"s from a
+specification into a pinned property.
 
 **The guarantee is that no spawn is PERFORMED — not that none is linked.** An earlier draft of
 this document specified three static-graph assertions, and **two of the three are unsatisfiable.**
@@ -1318,6 +1332,9 @@ So the honest position, rather than a guarantee that does not exist:
 
 ## 6. Where the code goes
 
+**None of these files exists at `13f661c`.** This is the inventory of what the build adds, and
+where, so that the coverage gate applies to the right half of it.
+
 | File | What | Coverage |
 |---|---|---|
 | `scripts/model/csv.mjs` | RFC 4180 reader and canonical writer. Pure, zero-dependency | gated |
@@ -1326,7 +1343,7 @@ So the honest position, rather than a guarantee that does not exist:
 | `scripts/model/import-apply.mjs` | Walks a plan through the injected write port. No `node:fs` | gated |
 | `scripts/model/export-rows.mjs` | Corpus → canonical rows, via the read seam | gated |
 | `scripts/model/import-mapping.mjs` | Mapping file load, validate, apply. **Deterministic, no model** | gated |
-| `scripts/model/import-mapping-propose.mjs` | The **only** module that spawns `agentCommand` | gated |
+| `scripts/model/import-mapping-propose.mjs` | Will be the **only** module that spawns `agentCommand` other than the groomer, which reads it today at `loops/groomer.mjs:547` | gated |
 | `scripts/import-runner.mjs` | CLI for `blaze import`. Argument parsing and printing only | excluded |
 | `scripts/import-mapping-runner.mjs` | CLI for `blaze import propose-mapping` | excluded |
 | `scripts/export-runner.mjs` | CLI for `blaze export` | excluded |
@@ -1334,6 +1351,18 @@ So the honest position, rather than a guarantee that does not exist:
 Logic lives under `scripts/model/` because `.c8rc.json` excludes `scripts/*-runner.mjs` from the
 coverage gate (statements 91, branches 77, functions 93, lines 91). A decision made in a runner is
 a decision nothing measures.
+
+**What this design adds to the data root** — three artifacts, in one place so the distinction
+between them is not spread across §4.2, §5.3 and §5.5:
+
+| Path | What | Committed | Prunable |
+|---|---|---|---|
+| `import-mappings/<name>.json` | the confirmed column mapping (§4.2) | yes | no |
+| `source-ids/<mapping>.json` | source key → blaze id, the idempotency map (§4.2) | yes | **never** |
+| `import-receipts/<ISO>-<name>.jsonl` | one run's intent/done record (§5.3) | yes | after 90 days, **only** if every `intent` has a `done` |
+
+None of them is under `.blaze/`, which holds regenerable caches `scripts/reindex.mjs:1-4` calls
+safe to delete. All three are records or source; none is derivable from the corpus.
 
 Two new entries in `SUBCOMMANDS` (`scripts/cli.mjs:27-64`), which is the only dispatch table and
 therefore also where help, the `BLAZE_READONLY` gate and the description come from:

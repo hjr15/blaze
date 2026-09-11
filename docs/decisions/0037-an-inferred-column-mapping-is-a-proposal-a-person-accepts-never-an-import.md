@@ -73,10 +73,13 @@ What is validated is membership — the status must be in `statusesFor(type)` �
 
 ### 2. A model may produce a mapping. It may never produce a row
 
-There is exactly one place a model is invoked: `proposeMapping(header, sampleRows)`, reached
-only by `blaze import propose-mapping`. Its entire output is a **candidate mapping file**. It
-never sees the board, never resolves an id, never touches a write port, and its output is not
-input to anything until a person has accepted it.
+There will be exactly one place a model is invoked: `proposeMapping(header, sampleRows)`, in a
+new module `scripts/model/import-mapping-propose.mjs`, reached only by `blaze import
+propose-mapping`. Neither exists at `13f661c` — today the tree reads `agentCommand` in exactly one
+place, `scripts/loops/groomer.mjs:547`, and this decision adds a second beside it. Its entire
+output will be a **candidate mapping file**. It will never see the board, never resolve an id,
+never touch a write port, and its output is not input to anything until a person has accepted
+it.
 
 `blaze import` — the verb that writes — **does not link the proposer at all**, and more
 importantly **performs no spawn**. Those are two different claims and only the second is
