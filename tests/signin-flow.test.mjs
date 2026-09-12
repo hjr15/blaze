@@ -20,6 +20,7 @@ import { startServer, CSRF } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { loadIdentity } from "../scripts/model/identity-db.mjs";
 import { SESSION_COOKIE } from "../scripts/model/serve-auth.mjs";
+import { cspAllowsFetch } from "./support/csp.mjs";
 
 const PASSWORD = "correct horse battery staple";
 const roots = [];
@@ -288,6 +289,63 @@ describe("A CREDENTIAL CAN NEVER LEAVE THE BROWSER IN A URL", () => {
   const scriptsIn = (html) =>
     [...html.matchAll(/<script[^>]*>([\s\S]*?)<\/script>/g)].map((m) => m[1]);
 
+  /**
+   * BLZ-570. Every URL the served page's own script really hands to `fetch()`.
+   *
+   * RUN, NOT READ. A regex over the script source would pin the SPELLING of the call —
+   * the very mistake this ticket exists to undo — and would miss a target built at run
+   * time (`"/setup" + suffix`). The script is executed against a minimal DOM, its submit
+   * handler is invoked, and what `fetch` receives is what a browser would send.
+   *
+   * The DOM is derived from the served markup rather than hand-listed: every `id="…"` in
+   * the document gets a stub, so a page that grows a field does not silently stop being
+   * exercised here. `f` is the form, and is the one element with a real listener.
+   */
+  async function fetchTargetsOf(html) {
+    const script = scriptsIn(html)[0];
+    assert.ok(script, "the page served no inline script to run");
+    const targets = [];
+    let handler = null;
+    const sandbox = { location: { href: "/" } };
+    for (const [, id] of html.matchAll(/\bid="([A-Za-z][\w-]*)"/g)) {
+      if (id === "f") continue;
+      sandbox[id] = { value: "dummy", textContent: "" };
+    }
+    sandbox.document = {
+      getElementById: (id) => (id === "f"
+        ? { addEventListener: (_e, fn) => { handler = fn; } }
+        : sandbox[id]),
+    };
+    // Dummy data only: nothing here is a credential, and the response is the minimum
+    // shape both pages read back (`token`/`passwordSet` on /setup, `ok` on /signin).
+    sandbox.fetch = async (url) => {
+      targets.push(String(url));
+      return { ok: true, json: async () => ({ ok: true, token: "dummy-token", passwordSet: true }) };
+    };
+    // eslint-disable-next-line no-new-func
+    new Function(...Object.keys(sandbox), script)(...Object.values(sandbox));
+    assert.ok(handler, "the script bound no submit handler, so it can call nothing");
+    await handler({ preventDefault: () => {} });
+    return targets;
+  }
+
+  // BLZ-570. The evaluator's whole discipline is that it never answers a question it has
+  // not modelled. `'strict-dynamic'` is the case where a source-by-source walk gets the
+  // answer WRONG rather than merely incomplete, so it is pinned here by name.
+  test("the CSP evaluator REFUSES a policy whose host sources it would misread", () => {
+    assert.throws(
+      () => cspAllowsFetch("script-src 'nonce-abc' 'strict-dynamic' https://cdn.example",
+        { pageOrigin: "http://board.test", target: "https://cdn.example/x", kind: "script-src" }),
+      /strict-dynamic/,
+      "a browser ignores host sources under 'strict-dynamic', so walking them reports "
+      + "ALLOW for an origin that is in fact blocked — over-permissive, which is the "
+      + "failure class this evaluator exists to remove");
+    // …and it still answers the policies it DOES model, or the throw above is just a wall.
+    assert.equal(
+      cspAllowsFetch("default-src 'none'; connect-src 'self'",
+        { pageOrigin: "http://board.test", target: "/signin" }), true);
+  });
+
   for (const [name, path] of [["the sign-in page", "/signin"], ["the setup page", "/setup"]]) {
     test(`${name}'s inline script actually PARSES`, async () => {
       const ctx = path === "/setup" ? await unconfigured() : await configured();
@@ -303,22 +361,59 @@ describe("A CREDENTIAL CAN NEVER LEAVE THE BROWSER IN A URL", () => {
       } finally { ctx.server.close(); }
     });
 
-    test(`${name}'s CSP permits the request its own script makes`, async () => {
-      const ctx = path === "/setup" ? await unconfigured() : await configured();
-      try {
-        const r = await fetch(`${ctx.base}${path}`);
-        const html = await r.text();
-        const csp = r.headers.get("content-security-policy");
-        // The page submits with fetch(), which CSP governs under `connect-src` — and
-        // which falls back to `default-src` when unset. `default-src 'none'` therefore
-        // BLOCKS it unless connect-src is stated.
-        assert.match(scriptsIn(html)[0], /fetch\(/,
-          "this test's premise is that the page submits by fetch");
-        assert.match(csp, /connect-src 'self'/,
-          "without connect-src the page's own fetch is blocked by default-src 'none' and "
-          + "the operator sees nothing happen at all");
-      } finally { ctx.server.close(); }
-    });
+    // BLZ-570. PINS THE ORIGIN THE SCRIPT CALLS, NOT THE TEXT OF THE DIRECTIVE.
+    //
+    // What stood here asserted two facts that were never related to each other: that the
+    // header contained `connect-src 'self'`, and that the script contained `fetch(`. A
+    // script fetching `https://evil.example/signin` kept both green — the string was
+    // still in the header and `fetch(` was still in the script — while the browser
+    // blocked every call the page made. The test could not tell a working page from a
+    // dead one, which is precisely the class of gap BLZ-566 shipped through.
+    //
+    // This runs the served script for real and asks the browser's own question of every
+    // URL it hands to `fetch()`: does the served policy admit that origin. Both
+    // directions are pinned, because a policy can fail in both:
+    //   NARROWED below what the page needs → the call is blocked, nothing leaves the
+    //     page, and the operator sees no failure at all; and
+    //   WIDENED past it → an injected script on the credential page could ship the
+    //     password to an origin of the attacker's choosing.
+    test(`${name}'s CSP admits every origin its script calls, and refuses one it does not`,
+      async () => {
+        const ctx = path === "/setup" ? await unconfigured() : await configured();
+        try {
+          const r = await fetch(`${ctx.base}${path}`);
+          const html = await r.text();
+          const csp = r.headers.get("content-security-policy");
+          assert.ok(csp, "a pre-auth page must state its own policy");
+
+          const targets = await fetchTargetsOf(html);
+          // ASSERT THE OBSERVATION HAPPENED. A page whose script never reached `fetch()`
+          // — because it threw, or because the submit handler never bound — would
+          // otherwise satisfy the loop below vacuously, and "no call was blocked" would
+          // be indistinguishable from "no call was ever made".
+          assert.ok(targets.length > 0,
+            `${path}'s script made no fetch() call, so this test observed nothing`);
+
+          for (const target of targets) {
+            const called = new URL(target, ctx.base);
+            assert.equal(
+              cspAllowsFetch(csp, { pageOrigin: ctx.base, target }), true,
+              `${path}'s script calls ${called.origin}${called.pathname}, and the served `
+              + `policy does not admit it — the browser blocks the submission and the `
+              + `operator sees nothing happen at all. Policy: ${csp}`);
+          }
+
+          // ...and the same evaluator, on an origin the page does NOT call. A policy
+          // widened to `*`, or to a second origin, passes the loop above unchanged; this
+          // is the assertion that notices. The host is a dummy in the reserved `.invalid`
+          // TLD (RFC 2606) and is never resolved or contacted.
+          assert.equal(
+            cspAllowsFetch(csp, { pageOrigin: ctx.base, target: "https://not-this-board.invalid/steal" }),
+            false,
+            "the credential page's policy admits an origin its own script never calls, so "
+            + `an injected script could post the password there. Policy: ${csp}`);
+        } finally { ctx.server.close(); }
+      });
 
     test(`${name} uses no inline style= attribute, which its own CSP would block`,
       async () => {

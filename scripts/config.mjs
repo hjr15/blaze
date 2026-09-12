@@ -18,6 +18,14 @@ const DEFAULTS = {
   columns: ["backlog", "todo", "in-progress", "in-review", "done", "canceled", "duplicate"],
   defaultLabels: ["frontend", "backend", "infra", "docs", "bug", "chore"],
   port: 4321,
+  // BLZ-571. WHICH PEERS MAY SPEAK FOR SOMEONE ELSE. Empty by default, and empty means
+  // `X-Forwarded-For` is ignored entirely — the peer address is the client address. That
+  // is the fail-closed direction and it is the right default: an unconfigured board is
+  // the common case and the one where trusting the header would be worst, since nothing
+  // sits in front of it to overwrite what a client sent. Set it to the address blaze sees
+  // its reverse proxy arrive from (Traefik on the same host: ["127.0.0.1", "::1"]).
+  // See scripts/model/rate-limit.mjs for why the LAST element of the chain is the one read.
+  trustedProxies: [],
   agentCommand: "claude -p",
   commitMode: "per-op",
   loops: {

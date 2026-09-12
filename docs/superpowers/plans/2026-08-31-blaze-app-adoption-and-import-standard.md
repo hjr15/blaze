@@ -268,7 +268,7 @@ they were kept for has been verified.
   `</dev/null`, under `timeout`. **Never `git stash`** — repo-wide, shared across worktrees.
 - **The setup token's PATH may be logged; its VALUE never is.** Same for any API token — `blaze user
   add` prints it once and stores only a SHA-256. **An error message is an output channel.**
-- Do not reopen ADR-0001, 0006, 0013, 0021–**0034**. **ADR-0035 is the next free number.**
+- Do not reopen ADR-0001, 0006, 0013, 0021–**0036**. **ADR-0037 is the next free number.**
 - **One writer for the board.** With parallel lanes the coordinator owns all `blaze` board ops.
 - **Every PR gets an adversarial review in a separate worktree**, by an agent that did not write it,
   scoped to product behaviour. Wording and test-machinery findings are **ticketed, not
