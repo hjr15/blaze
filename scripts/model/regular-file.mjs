@@ -122,16 +122,28 @@ export function writeRegularFileSync(path, data) {
  *  its `O_TRUNC` sibling: it is a primitive for a best-effort, operator-enabled, non-board
  *  file — today the `BLZ_MEASURE` census log in `scripts/reconcile.mjs`.
  *
- *  REACHABILITY OF THE `isFile()` REFUSAL FROM TODAY'S ONE CALLER, stated rather than left to
- *  look pinned. It is `O_NONBLOCK` that saves the FIFO case, not this check: the open fails
- *  ENXIO before `fstatSync` is reached, and a directory fails EISDIR at the open for the same
- *  reason. Deleting the line reddens nothing in the suite, because the only shape it changes
- *  is a DEVICE NODE — `/dev/null` would silently swallow every record instead of being
- *  refused — and `census()` swallows the refusal either way, so no run decides differently.
- *  It is kept because its two siblings have it, because a caller that is not best-effort
- *  would need it, and because "the census went to /dev/null" is a thing an operator should be
- *  able to be told rather than a silence. Verified by mutation: dropping it from THIS
- *  function alone leaves `node --test tests/reconcile*.test.mjs` green. */
+ *  WHAT THE `isFile()` REFUSAL ACTUALLY CHANGES, measured rather than asserted (BLZ-537).
+ *  It is `O_NONBLOCK` that saves the FIFO-with-NO-READER case, not this check: that open
+ *  fails ENXIO before `fstatSync` is ever reached, and a directory fails EISDIR at the open
+ *  for the same reason. TWO shapes do reach the check, and both are refused by it:
+ *
+ *    * a DEVICE NODE. Measured against `/dev/null`: REFUSED with the line, silently
+ *      APPENDED without it — every record swallowed, no error, nothing to notice.
+ *    * a FIFO WITH A READER ATTACHED. This one does NOT fail at the open: there is a peer,
+ *      so it returns a descriptor and `fstatSync` is reached. Measured with a 141-byte
+ *      census record and `cat` draining the pipe: 0 bytes through with the line, all 141
+ *      through without it. An earlier revision of this comment said a device node was "the
+ *      only shape it changes". That was FALSE, and it understated the guard's blast radius
+ *      by exactly this case — which is the whole of BLZ-537.
+ *
+ *  REACHABILITY, stated rather than left to look pinned. `census()` swallows the refusal
+ *  either way, so no run of today's one caller decides differently. The line is NOT
+ *  unpinned, though: dropping it from THIS function alone reddens `read-path-fifo.test.mjs`'s
+ *  "the check is on the OPEN FILE DESCRIPTOR" case (BLZ-521), which drives all three verbs
+ *  through a descriptor that reports a FIFO. Measured: 1 failing test out of 4412. It is
+ *  kept for that, because its two siblings have it, because a caller that is not
+ *  best-effort would need it, and because "the census went to /dev/null" is a thing an
+ *  operator should be able to be told rather than a silence. */
 export function appendRegularFileSync(path, data) {
   const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_APPEND | NONBLOCK, 0o666);
   try {

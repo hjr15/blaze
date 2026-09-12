@@ -49,6 +49,7 @@
   },
   "license": "MIT",
   "devDependencies": {
+    "acorn": "8.18.0",
     "c8": "11.0.0",
     "pg": "^8.16.0"
   },
