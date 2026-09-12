@@ -8,6 +8,11 @@ on:
 jobs:
   test:
     runs-on: ubuntu-latest
+    # BLZ-534: the hang watchdog is armed in each per-file test child, never in the
+    # `node --test` orchestrator or the `c8` process above it — so a wedged RUNNER is bounded
+    # by this and by nothing else. Without it the bound is GitHub's 360-minute default, on
+    # the merge gate. This job takes about 4 minutes; 20 is five times that.
+    timeout-minutes: 20
 
     # The driver conformance suite asserts ONE contract across four drivers. Without a
     # real server the Postgres quarter skips, so the suite's headline claim would only
