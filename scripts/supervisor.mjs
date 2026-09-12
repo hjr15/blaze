@@ -13,6 +13,7 @@ import { reconcile } from "./reconcile.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
+import { AttemptLimiter } from "./model/rate-limit.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { execFileSync } from "node:child_process";
 
@@ -404,6 +405,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     bus.publish({ type: "status", loop: name, state: "stopped", ts: today() });
   }
 
+  // BLZ-571. `blaze start` is the DEFAULT command and mounts the same door, so it gets
+  // the same limit. BLZ-359's lesson, applied again: a control wired into one of these two
+  // servers is absent from the other.
+  const signinLimiter = new AttemptLimiter();
+
   const server = createServer(async (req, res) => {
     const u = new URL(req.url || "/", "http://localhost");
     const json = (code, obj) => {
@@ -424,7 +430,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     // route in either table is untouched.
     try {
       if (await handleSigninRoutes({ req, res, url: u, store, csrf: CSRF,
-                                     boardTitle: cfg.boardTitle })) return;
+                                     boardTitle: cfg.boardTitle,
+                                     limiter: signinLimiter,
+                                     trustedProxies: cfg.trustedProxies })) return;
     } catch {
       // Nothing wraps this async handler, and a throw would end the process for every
       // connected session rather than refuse one request.
