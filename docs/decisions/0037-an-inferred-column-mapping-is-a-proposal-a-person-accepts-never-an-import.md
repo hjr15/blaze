@@ -30,10 +30,13 @@ cutover-proof; a verb written against `node:fs` is not.
 
 **What the one existing import surface does instead.** `blaze migrate` writes tickets with a
 bare `writeFileSync` (`scripts/migrate/jira-import.mjs:95`) after `mkdirSync`, bypassing the
-write port entirely, and its `--live` path then stages the result with
-`git add -A -- <projectsDir>` (`scripts/migrate-runner.mjs:73`) — the blast radius its own
-comment on the line above warns about. That is the anti-pattern BLZ-587's acceptance criteria
-name by hand, and it is filesystem-shaped in both halves.
+write port entirely. That half is filesystem-shaped and is the anti-pattern this decision avoids.
+Its staging is **not** the anti-pattern an earlier version of this paragraph said it was:
+`scripts/migrate-runner.mjs:73` is `git add -A -- <projectsDir>`, **pathspec-scoped**, and the
+comment at `:67-72` is the record of the BLZ-139 *fix* — the bare `add -A` was the bug, and the
+scoped form is kept because `removeExisting()` deletes superseded files whose deletions must be
+staged. This paragraph quoted the first half of a comment describing a fixed defect as though it
+described current behaviour, and BLZ-587's own Context makes the same error (design §8 item 7).
 
 **Why a model in the loop is a new hazard class for this repo.** Nothing on a write path here
 has ever consulted a language model. The groomer does (`scripts/loops/groomer.mjs:547,570`,
@@ -190,8 +193,12 @@ for an unrelated reason gets waived, and then it is not watching when something 
 ## Consequences
 
 - **The import survives the cutover.** With `BLAZE_WRITE_PORT=db` the same importer writes rows
-  instead of files, and gains real per-run atomicity from the transaction it did not have on a
-  filesystem.
+  instead of files. It gains **no** atomicity from doing so — an earlier version of this bullet
+  said it did, and that was false about existing code: `scripts/model/write-port.mjs` has no
+  `BEGIN`, `COMMIT` or `ROLLBACK`, `persist` runs bare autocommitting `exec.run` statements, and
+  the port exposes no transaction. Both ports are per-row durable and neither is all-or-nothing;
+  the receipt means the same on both. A transactional `db` import would need a different receipt
+  shape (one `done` per run, after commit), not this one behind a `BEGIN`.
 - **An import is reproducible and auditable.** The mapping file is committed, so the decision
   "`Summary` means `title` on this tracker's exports" is reviewable in a diff rather than
   re-inferred per run.
@@ -206,10 +213,15 @@ for an unrelated reason gets waived, and then it is not watching when something 
   all-or-nothing; the write is not. A write that fails part way through stops at the first
   failure, names every id written and every id not, and exits 4. It does not roll back — a
   rollback is a second write path with its own failure mode, which is the shape ADR-0032
-  rejected in a neighbouring problem. What it does instead is keep the evidence: the run records
-  each row's outcome **before** performing that row's write, and refuses to start at all if that
-  record cannot be written. That is BLZ-531's rule (`13f661c`) in a second place — park before you
-  clear, and fail closed on a unit whose record could not be kept.
+  rejected in a neighbouring problem. What it does instead is keep the evidence: a per-row
+  receipt of **intent, then allocated, then done** — the intent *before* the write and the done
+  *after* it — so a crash between the two leaves a named row and never an asserted outcome. An
+  earlier version of this bullet said the run "records each row's outcome before performing that
+  row's write", which is a record written before the event and therefore not an outcome — the
+  design's own §5.3 names that as its "mistake 1", and this ADR carried it for four revisions
+  after the design corrected it. The run refuses to start at all if its records cannot be
+  established. That is BLZ-531's rule (`13f661c`) in a second place — park before you clear, and
+  fail closed on a unit whose record could not be kept.
 - **Scheduled expiry, partial.** BLZ-254 retires `fsWritePort`; §1's injection is what makes that
   a configuration change rather than a rewrite. §2's boundary has no expiry — it is a property of
   the verb, not of the store.
