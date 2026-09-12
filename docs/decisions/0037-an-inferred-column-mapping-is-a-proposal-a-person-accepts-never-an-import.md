@@ -130,7 +130,10 @@ and every required canonical column nothing maps to — and, on confirmation, wr
 `blaze import --mapping import-mappings/<name>.json <file.csv>` is a different command run later.
 Given the mapping file it is **deterministic**: the same file and the same mapping produce the
 same plan on every machine, forever, with no network and no model. Re-running it is a no-op
-rather than a duplicate.
+rather than a duplicate on the default path, where every row carries a blaze `id`, and under a
+mapping that declares `sourceIdColumn`, where the skip is keyed on the source's own key even
+though blaze allocated the ids; `--allocate-ids` over a file with no identity column of either
+kind forfeits it, and says so in its dry-run trailer (design §4.2, §8).
 
 The mapping file is **source, not cache**, so it lives at the data root beside `sprints.json`
 and is committed — not under `.blaze/`, which holds regenerable derived state
@@ -222,6 +225,18 @@ for an unrelated reason gets waived, and then it is not watching when something 
   after the design corrected it. The run refuses to start at all if its records cannot be
   established. That is BLZ-531's rule (`13f661c`) in a second place — park before you clear, and
   fail closed on a unit whose record could not be kept.
+
+  **What this ADR decides about the record, and what it leaves to the design.** Decided here:
+  that a per-row record exists, that it is written before *and* after the write rather than
+  before only, that the run refuses to start when it cannot be kept, and that under
+  `sourceIdColumn` the re-import identity of a row is a **source-key → blaze-id pair** kept in
+  a durable, committed map (`source-ids/<name>.jsonl`) rather than in the prunable receipt, and
+  appended between the ticket write and `done` so that `done` implies pair. The receipt's
+  phases — `intent`, `allocated`, `done`, and the `resolved` that the repair verb
+  `blaze import repair <receipt>` appends after the pair it vouches for — their exact order, the
+  claim's place in the sequence, and the inspection rule are the design's (§5.3, the one copy)
+  and are not restated here; a reader who finds this ADR and the design disagreeing on them
+  should take §5.3 as binding and this bullet as the summary.
 - **Scheduled expiry, partial.** BLZ-254 retires `fsWritePort`; §1's injection is what makes that
   a configuration change rather than a rewrite. §2's boundary has no expiry — it is a property of
   the verb, not of the store.

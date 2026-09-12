@@ -767,6 +767,14 @@ sprint definition is source, so it lives at top level and gets committed like ti
 - `source.columns` is the **verbatim header row** and `source.sha256` is its digest. Import checks
   both. A source export whose header has changed is a **refusal**, not a best-effort re-map —
   that is the case where silently continuing produces the wrong-but-plausible board.
+- **`name` is the mapping's identity, and it must equal the file's basename** —
+  `import-mappings/<name>.json` carries `"name": "<name>"`, and a mismatch is a refusal (exit 3,
+  §5.2). One spelling, because two other artifacts are keyed on it: the map is
+  `source-ids/<name>.jsonl` and each run's receipt is `import-receipts/<ISO>-<name>.jsonl`
+  (§5.3), and "this mapping's latest receipt" is only computable if the three agree. **`canonical`
+  is reserved** — it is the `<name>` a canonical-header import with no mapping file uses for its
+  receipt, so a mapping file may not be called `canonical`, and `propose-mapping` refuses to write
+  one.
 - **`sourceIdColumn` names the source's own identity column**, and it is what makes a re-import of
   the same foreign export idempotent. §5.2 requires a blaze `id` and offers `--allocate-ids` for
   rows without one; on its own that flag forfeits the no-op guarantee. With `sourceIdColumn`, the
@@ -787,10 +795,10 @@ sprint definition is source, so it lives at top level and gets committed like ti
   `sourceIdColumn` exists to prevent. Both halves were added in the same commit, which is how they
   were written without ever being read against each other.
 
-  The map is therefore **`source-ids/<mapping>.jsonl` at the data root**, beside
-  `import-mappings/` and committed for the same reason: it is source, not a run artifact, and it
-  outlives every individual run. One file per mapping, so the lookup reads exactly one file rather
-  than folding N receipts of unknown completeness.
+  The map is therefore **`source-ids/<name>.jsonl` at the data root** — `<name>` the mapping's
+  `name`, above — beside `import-mappings/` and committed for the same reason: it is source, not
+  a run artifact, and it outlives every individual run. One file per mapping, so the lookup reads
+  exactly one file rather than folding N receipts of unknown completeness.
 
   **It is an OUTCOME record, appended one pair per row BETWEEN the ticket write and that row's `done` — and the draft
   that moved it here got that exactly backwards.** That draft wrote the whole map *before* the
@@ -819,7 +827,9 @@ sprint definition is source, so it lives at top level and gets committed like ti
   - **One line is appended per row, BETWEEN the ticket write and that row's `done`**, through
     `appendRegularFileSync` (`scripts/model/regular-file.mjs:135-143`) — synchronous, and refusing
     a non-regular file. So **`done` implies pair**: a row with a `done` has its ticket on disk and
-    its pair in the map, and a row without one may have either, both, or neither. An earlier
+    its pair in the map, and a row without one may have the ticket alone, both, or neither —
+    never the pair alone, short of the power-loss and manual-deletion cases §5.3's table names
+    and leaves to a person. An earlier
     draft appended the pair *after* `done` and claimed "a pair never exists without its ticket" —
     the right invariant in the wrong direction. What matters on re-import is the converse: a
     **ticket without a pair** is invisible to the lookup and gets created twice. After-`done`
@@ -849,15 +859,19 @@ sprint definition is source, so it lives at top level and gets committed like ti
     recorded: `intent` carries **`source`** (the row's `sourceIdColumn` value) and a new
     **`allocated`** phase carries the id the moment it exists (§5.3). A pair is then
     reconstructible from the receipt alone: `source` from the `intent`, `id` from the
-    `allocated`.
+    `allocated` — or from the `intent` itself on the explicit-id path, where the id was supplied
+    and no `allocated` is written (§5.3).
 
-    **The inspection path repairs by truncate-then-append, and the truncate is a non-append
-    write this document has to state.** "Re-append the pair" onto an append-only file whose last
-    line is a torn fragment with no newline glues the pair to the fragment and makes it
-    unparseable too. So the path: park the fragment's raw bytes to `<map>.corrupt` (BLZ-531 —
-    park before you clear), **truncate** the map to its last complete line, then
-    `appendRegularFileSync` the reconstructed pair. The one place the map is not append-only,
-    and it is an operator action, never the importer's.
+    **The inspection path — the verb `blaze import repair <receipt>` (§5.3) — repairs by
+    truncate-then-append, and the truncate is a non-append write this document has to state.**
+    "Re-append the pair" onto an append-only file whose last line is a torn fragment with no
+    newline glues the pair to the fragment and makes it unparseable too. So the path, **in this
+    order**: park the fragment's raw bytes to `<map>.corrupt` (BLZ-531 — park before you clear),
+    **truncate** the map to its last complete line, `appendRegularFileSync` the reconstructed
+    pair, and only then append that row's `resolved` entry to the receipt. Pair before
+    `resolved`, because `resolved` is what lifts the exit-5 refusal and must never exist without
+    the pair it vouches for — §5.3 states what a crash between the two leaves in each order. The
+    one place the map is not append-only, and it is an operator action, never the importer's.
 
   ```
   {"source":"ACME-123","id":"BLZ-620","seq":41}
@@ -872,11 +886,15 @@ sprint definition is source, so it lives at top level and gets committed like ti
      append itself, not something after it, because that is the only placement that opens the
      ticket-without-pair window. Assert: ticket N **is** on disk; the map holds **N−1** lines;
      the receipt has row N's `intent` and `allocated` and **no** `done`. Then re-import the same
-     file and assert it **refuses with exit 5** naming row N as unresolved. Then resolve through
-     the inspection path and re-import again: rows above N **created**, rows 1..N **skipped**,
-     **no duplicate**, **no phantom pair**. This is the test that would have caught both the
-     pre-write draft and the after-`done` draft, and it is the one that proves `sourceIdColumn`
-     is idempotent *under failure*, which is the only case that matters.
+     file and assert it **refuses with exit 5** naming row N as unresolved. Then run
+     **`blaze import repair <receipt>`** and assert the map holds **N** lines and the receipt
+     ends with row N's `resolved`, `state: "pair-appended"` — and, as a second fault injection, kill `repair` between its pair append and its `resolved`
+     append and assert the next import **still refuses with 5** (§5.3: the pair is written
+     first, so a crash between them keeps the refusal, never lifts it). Then re-import again:
+     rows above N **created**, rows 1..N **skipped**, **no duplicate**, **no phantom pair**. This
+     is the test that would have caught both the pre-write draft and the after-`done` draft, and
+     it is the one that proves `sourceIdColumn` is idempotent *under failure*, which is the only
+     case that matters.
 - `transform` is a **closed vocabulary**, not an expression language: `identity` (the default),
   `hours-to-minutes`, `seconds-to-minutes`, `days-to-minutes`, `trim`, `split-semicolon`,
   `split-comma`, `iso-date`, `dmy-date`, `mdy-date`. A mapping naming a transform outside the
@@ -888,13 +906,13 @@ sprint definition is source, so it lives at top level and gets committed like ti
 
 ### 4.3 Where the model runs, and the boundary that guarantees it does not
 
-| | proposes | imports |
-|---|---|---|
-| Command | `blaze import propose-mapping <file.csv>` | `blaze import --mapping <m.json> <file.csv>` |
-| Runner | `scripts/import-mapping-runner.mjs` | `scripts/import-runner.mjs` |
-| Model? | **yes**, once | **never** |
-| Writes | one file: `import-mappings/<name>.json` | tickets, under `--apply` |
-| Sees the board? | no | yes |
+| | proposes | imports | repairs |
+|---|---|---|---|
+| Command | `blaze import propose-mapping <file.csv>` | `blaze import --mapping <m.json> <file.csv>` | `blaze import repair <receipt>` (§5.3) |
+| Runner | `scripts/import-mapping-runner.mjs` | `scripts/import-runner.mjs` | `scripts/import-runner.mjs` |
+| Model? | **yes**, once | **never** | **never** |
+| Writes | one file: `import-mappings/<name>.json` | tickets, under `--apply` | the map (park, truncate, pair) and the receipt (`resolved`) — never a ticket |
+| Sees the board? | no | yes | yes — a `stat` per examined row, nothing more |
 
 The proposer **will be** `proposeMapping(header, sampleRows, { agentCommand })` in
 `scripts/model/import-mapping-propose.mjs` — a new module; nothing by that name exists at
@@ -1071,8 +1089,8 @@ Aligned with the codes already in use: `0` clean, `1` a refusal or a hard findin
 | **1** | **Data refused.** One or more rows fail validation | **unchanged** — nothing written |
 | **2** | **Could not look.** The **input** could not be read as the format it claims. Only the input — an earlier draft widened this to the `source-ids` map and thereby violated the rule two rows down that each code exists because its remedy differs | unchanged |
 | **3** | **Mapping incomplete.** A source column has no confirmed mapping, or the mapping's `source.sha256` does not match the file | unchanged |
-| **4** | **The board changed and the run did not finish cleanly.** A ticket write failed part way, **or** a receipt or `source-ids` append failed after a ticket write, **or** every write landed and staging failed | **changed** — see §5.3 |
-| **5** | **The run's own records are not in a state it may start from.** Four cases: the receipt cannot be opened for append; the `source-ids` map cannot be opened for append; the map has a torn line; or — **under `sourceIdColumn` only** — the mapping's latest receipt carries an `intent` with neither a `done` nor a `resolved` entry (§5.3 defines both, and `<name>`). Scoped that way because only the source-key lookup can be blind to a ticket that exists; an explicit-id import finds it on the board and compares. The run never starts | unchanged — nothing attempted |
+| **4** | **The board changed and the run did not finish cleanly.** A ticket, reservation or claim write failed part way (§5.3 steps 2, 4, 5), **or** a receipt or `source-ids` append failed after a ticket write, **or** every write landed and staging failed | **changed** — see §5.3 |
+| **5** | **The run's own records are not in a state it may start from.** Four cases: the receipt cannot be opened for append; the `source-ids` map cannot be opened for append; the map has a torn line; or — **under `sourceIdColumn` only** — the mapping's latest receipt carries an `intent` with neither a `done` nor a `resolved` entry (§5.3 defines both, `<name>`, and `blaze import repair`, the verb that appends `resolved`). Scoped that way because only the source-key lookup can be blind to a ticket that exists; an explicit-id import finds it on the board and compares. The run never starts | unchanged — nothing attempted |
 
 Four separations, each because the remedy differs:
 
@@ -1182,6 +1200,7 @@ data-loss defect in.
 |---|---|---|
 | **An unmappable column** — a source column in neither `columns` nor `unmapped` | Refuse before reading any row. Name the column and both places it could be declared. Nothing is written | **3** |
 | **A source header that has changed** since the mapping was confirmed (`sha256` mismatch) | Refuse. Name the columns added and removed. Do **not** re-map, do not fall back to name matching | **3** |
+| **A mapping whose `name` is not its file's basename**, or is `canonical` (§4.2) | Refuse before reading any row. The map and the receipt are keyed on `<name>`, so a mapping with two names has two histories | **3** |
 | **An unknown status value** — a cell not in `statusesFor(type)` after translation | Refuse the run. Name the row number, the column and the **set of legal values**. Per BLZ-587's criterion the message does **not** echo the cell — see the scoping rule below the table | **1** |
 | **An unknown `type`, `priority` or `resolution`** | Same as above. A value outside the registry is a **refusal, never a coercion**. `blaze migrate`'s `mapPriority` silently defaults an unknown priority to `medium` (`scripts/migrate/map.mjs:29-32`); the CSV importer deliberately does not | **1** |
 | **A duplicate id within one file** | Refuse. Name the id — shape-bounded, so echoed per the rule below the table — and every row number carrying it. Never "last row wins" — `duplicateIdErrors` (`scripts/model/index.mjs:398`) records that a silent last-wins collapse hid open work behind a closed ticket on a real board | **1** |
@@ -1195,8 +1214,8 @@ data-loss defect in.
 | **An `estimate` that is not a multiple of 5** | Refuse, naming the row and the nearest legal values. Not rounded — rounding is `blaze new`'s input policy and it invents (`scripts/model/time.mjs:19-21`); an import mirrors | **1** |
 | **A `sprint` not in `sprints.json`** | Refuse, naming the **column and the registered sprint ids** — not the offending value, which has no shape constraint (echo rule below the table). `validateSprintFields` supplies the check | **1** |
 | **An off-taxonomy `label` or `component`** | Refuse, naming the column and the declared set and pointing at the same `projects/<KEY>/project.json`. **Not** `validateTaxonomy`'s own message — it interpolates the cell (`scripts/model/taxonomy.mjs:14`), which is right for a CLI and wrong for an import (echo rule below the table) | **1** |
-| **A torn line in the `source-ids` map** | Refuse before any write, naming the map and the line number. Read-only — the importer does not park; the inspection path does (§4.2). The receipt is the recovery source | **5** |
-| **An unresolved prior partial apply** — under `sourceIdColumn`, the mapping's latest receipt has an `intent` with neither a `done` nor a `resolved` (§5.3) | Refuse before any write, naming the receipt and every unresolved row. A re-import that proceeded would recreate any row whose ticket landed but whose pair did not (§4.2 test 2) | **5** |
+| **A torn line in the `source-ids` map** | Refuse before any write, naming the map and the line number. Read-only — the importer does not park; `blaze import repair` does (§4.2, §5.3). The receipt is the recovery source | **5** |
+| **An unresolved prior partial apply** — under `sourceIdColumn`, the mapping's latest receipt has an `intent` with neither a `done` nor a `resolved` (§5.3) | Refuse before any write, naming the receipt, every unresolved row, and the verb that lifts it — `blaze import repair <receipt>`. A re-import that proceeded would recreate any row whose ticket landed but whose pair did not (§4.2 test 2) | **5** |
 | **An unreadable input path** — missing, a directory, a FIFO, a socket | Refuse via `readRegularFileSync` (`scripts/model/regular-file.mjs`), per ADR-0031. Never opened blind: a FIFO with no writer blocks forever (`scripts/model/index.mjs:52-70`) | **2** |
 
 **The no-echo rule is scoped, because stated as a blanket principle it contradicts this very
@@ -1301,18 +1320,60 @@ rather than quietly fixed, because both were the kind that survive review by sou
 row *before* that row's write and called it the outcome. A record written before the event cannot
 be an outcome: on a crash it asserts a write that never happened, over-reporting by exactly one
 row, with no way for the operator to tell which. The receipt is therefore an append-only JSONL
-log with **two or three entries per row** — three when the row's id was allocated, two when it was supplied — and **the per-row sequence is stated here once** —
-§4.2, §5.5 and the ADR refer to it rather than restating it, because three restatements is how
-its ordering drifted in earlier drafts:
+log with **two or three entries per row written by the run itself** — three when the row's id
+was allocated, two when it was supplied — plus at most one `resolved` entry per row, appended
+later by `blaze import repair` (below) and never by the run. **The per-row sequence is stated
+here once** — §4.2, §5.5 and the ADR refer to it rather than restating it, because three
+restatements is how its ordering drifted in earlier drafts:
 
 ```
-1. intent     → receipt   {"seq":41,"phase":"intent","row":41,"source":"ACME-123","id":null,"op":"create"}   id is the row's own when supplied, null when to be allocated
-2. allocate   → .ids/     allocateId + writeClaim, only when the row carries no id (§5.5)
-3. allocated  → receipt   {"seq":41,"phase":"allocated","id":"BLZ-620"}   only when step 2 ran; a supplied id is already in the intent
-4. write      → board     writePort.write at the declared status
-5. pair       → map       {"source":"ACME-123","id":"BLZ-620","seq":41}   only under sourceIdColumn
-6. done       → receipt   {"seq":41,"phase":"done","id":"BLZ-620","file":"projects/BLZ/done/BLZ-620-….md","claim":true}
+1. intent     → receipt       {"seq":41,"phase":"intent","row":41,"source":"ACME-123","id":null,"op":"create"}   id is the row's own when supplied, null when to be allocated
+2. allocate   → reservation   allocateId — the O_EXCL file under <common>/blaze/ids/<KEY>/ (§5.5) — only when the row carries no id
+3. allocated  → receipt       {"seq":41,"phase":"allocated","id":"BLZ-620"}   only when step 2 ran; a supplied id is already in the intent
+4. claim      → .ids/         writeClaim — on BOTH paths, whether the id was allocated or supplied (§5.5); every created row
+5. write      → board         writePort.write at the declared status
+6. pair       → map           {"source":"ACME-123","id":"BLZ-620","seq":41}   only under sourceIdColumn
+7. done       → receipt       {"seq":41,"phase":"done","id":"BLZ-620","file":"projects/BLZ/done/BLZ-620-….md","claim":true}
 ```
+
+Seven steps; 2, 3 and 6 are conditional and the other four run for every **created** row. An
+update row (`--update`, §5.2) runs steps 1, 5 and 7 only — an existing ticket keeps whatever
+claim it has, and §5.5's promise is a claim per *created* ticket. A failure at step 2 or step 4
+— a reservation or a claim that cannot be written — takes the same rule as a failure at step 5:
+stop, list written and unwritten ids, **exit 4**. The reservation directory and `.ids/` are
+board state the run may already have written to, the row's `intent` is on the receipt with no
+`done`, and that receipt is what exit 4 points the operator at; a code that said "unchanged"
+about a directory the run had just written to would be the confusion §5.1 separates the codes
+to avoid.
+
+**The claim is its own step, before the ticket write, on both paths — a deliberate departure
+from `scripts/new.mjs`, which writes the ticket (`:118`) and then the claim (`:123`).** An
+earlier draft folded the claim into step 2 and ran step 2 only when the id was allocated, so on
+the explicit-id path — the default since `id` became required — **no step wrote a claim** while
+`done` still recorded `"claim":true` and §5.5 promised one on both paths. The sequence
+contradicted the section that depends on it, and an implementer following the sequence would
+have shipped the defect §5.5 was rewritten to prevent. Claim-before-write rather than
+`new.mjs`'s write-before-claim, for three reasons:
+
+- **`new.mjs`'s order is free; this one is not.** `applyNew` holds an `O_EXCL` reservation from
+  `allocateId` before it writes either file, so its number is protected whichever order the two
+  land in. The explicit-id path has **no** reservation — the claim is the only ledger entry that
+  number will ever get — so it is written before the ticket exists, on the same before-the-event
+  discipline as the `intent`.
+- **Ticket on disk ⇒ claim on disk**, by ordering. The inspection rule below therefore needs no
+  claim column, and a `done` implies the claim without a separate check. The reverse order adds
+  a state — ticket present, claim absent — that the inspection path would have to detect and
+  repair.
+- **The crash residue is the harmless one.** A kill between steps 4 and 5 leaves a claim with no
+  ticket, which is the orphan-reservation class §5.5 already accepts: `allocateId` folds
+  `maxClaim` into its floor (`scripts/model/ids.mjs:74`), so an orphan claim advances the floor
+  and nothing else, and no audit rule reports a claim without a ticket. The reverse order's
+  residue — a ticket with no claim — is a `missingClaimErrors` **error**
+  (`scripts/model/index.mjs:353-377`) on the operator's board after every partial apply.
+
+`writeClaim` is a plain `writeFileSync` (`scripts/model/claims.mjs:34-39`), so re-creating a row
+whose claim survived an earlier crash rewrites the same bytes; the re-import is idempotent over an
+orphan claim.
 
 Every receipt and map line goes through `appendRegularFileSync` (§5.1). Three facts the ordering
 buys, each of which an earlier draft lacked:
@@ -1322,39 +1383,74 @@ buys, each of which an earlier draft lacked:
   is the recovery source" a sentence rather than a property.
 - **`allocated` records the id the moment it exists.** The `intent` is written *before*
   allocation (§5.5 — so an orphaned reservation is findable) and therefore cannot carry the id.
-  Without this phase, a row that reached step 4 but not step 6 had a ticket on disk that nothing
+  Without this phase, a row that reached step 5 but not step 7 had a ticket on disk that nothing
   could match back to its `source`.
-- **`done` implies pair, and pair implies ticket** (steps 4 → 5 → 6). An `intent` with no `done`
-  is the set to inspect. Within it there are **three** states, not two — an earlier draft
-  collapsed the middle one into the last, which is precisely the state F1 was fixed for:
+- **`done` implies pair, pair implies ticket, and ticket implies claim** (steps 4 → 5 → 6 → 7).
+  An `intent` with no `done` is the set to inspect. Within it the sequence can leave **three**
+  states, not two — an earlier draft collapsed the middle one into the last, which is precisely
+  the state F1 was fixed for — and there is a fourth the sequence cannot produce but the
+  inspection path must still name, because an earlier draft's table said the wrong thing for it:
 
-  | Ticket on disk | Pair in map | Meaning | Repair |
-  |---|---|---|---|
-  | no | — | steps 4–6 did not land: an **orphan reservation** (§5.5) | none; the row is re-created on re-import |
-  | **yes** | **no** | step 4 landed, step 5 did not — the ticket-without-pair window | **append the pair**, `source` from the `intent`, `id` from the `allocated` (or from the `intent` on the explicit-id path) |
-  | yes | yes | steps 4–5 landed, only step 6 is missing | nothing to repair |
+  | Ticket on disk | Pair in map | Meaning | Repair | `resolved` state |
+  |---|---|---|---|---|
+  | no | no | steps 5–7 did not land: an **orphan reservation**, and possibly an orphan claim (§5.5) | none; the row is re-created on re-import | `orphan-reservation` |
+  | **yes** | **no** | step 5 landed, step 6 did not — the ticket-without-pair window | **append the pair**, `source` from the `intent`, `id` from the `allocated` (or from the `intent` on the explicit-id path) | `pair-appended` |
+  | yes | yes | steps 5–6 landed, only step 7 is missing | nothing to repair | `nothing-to-repair` |
+  | no | **yes** | **not a state the sequence produces** — the pair follows the write, so only a power loss that lost the ticket's bytes and kept the pair's, or a manual deletion, reaches it. **The pair governs the lookup** (§4.2): a re-import that proceeded would find the key and *skip* the row, so it is neither re-created nor duplicated — it is silently absent | **manual.** Restore the ticket file, or park and remove the pair line. `repair` names the row, appends nothing for it, and exits non-zero; once a person has acted the row re-examines as row 1 or row 3 | **none** — the row stays unresolved and exit 5 keeps firing until it has been examined again |
 
-  The middle row is the one a re-import would duplicate, and the one an inspection path that
+  The second row is the one a re-import would duplicate, and the one an inspection path that
   checked only "is the ticket on disk" would have called "only `done` is missing" and left
-  alone. All three are decidable from the receipt plus a `stat` and a map lookup — readable,
-  not inferred.
+  alone. The fourth is the one "ticket absent ⇒ re-created on re-import" got wrong: with a pair
+  present the lookup finds the key before the planner ever classifies the row. All four are
+  decidable from the receipt plus a `stat` and a map lookup — readable, not inferred. Claims do
+  not appear in the table because step 4 precedes step 5: a ticket on disk has its claim, and a
+  missing ticket's orphan claim is the same residue as its orphan reservation (§5.5). Without
+  `sourceIdColumn` there is no map and the pair column does not apply: only the first and third
+  rows occur, and `repair` is optional there, because the exit-5 refusal is scoped to
+  `sourceIdColumn` (§5.1) and an explicit-id re-import finds a landed ticket on the board.
 
-**What "resolved" means, so the refusal can be lifted.** The inspection path **appends a
-`resolved` entry** to the receipt for each row it examines —
+**The inspection path is a verb, and an earlier draft described four writes with nothing to
+invoke them: `blaze import repair <receipt>`.** A second subcommand of `import` beside
+`propose-mapping` (§6), dispatched by `scripts/import-runner.mjs`, taking the receipt path and
+deriving the map from the receipt's `<name>` (`source-ids/<name>.jsonl`, §4.2). It is **not a
+flag** on `blaze import`: it reads no CSV and builds no plan, so a flag would be a mode switch
+that discards every other argument. It is **not automatic** at the start of the next import: it
+parks and truncates, which §4.2 says is an operator action and never the importer's, and every
+reader that runs before a ticket write is read-only (item 3 below). It is not named `resolve`,
+because `blaze resolve` already sets a ticket's resolution (`scripts/cli.mjs:50`). It runs no
+model, writes no ticket, and writes nothing but the records this section names; it inherits
+`import`'s `mutates: true` because it writes. C1 builds it (ticket breakdown).
+
+**What "resolved" means, so the refusal can be lifted.** `blaze import repair` **appends a
+`resolved` entry** to the receipt for each row it examines and did not leave for a person —
 `{"seq":41,"phase":"resolved","state":"pair-appended"}` with `state` one of `orphan-reservation`,
-`pair-appended`, `nothing-to-repair` — the three states above. The receipt stays append-only;
-nothing is edited. The §5.1 exit-5 check then reads: *any `intent` in the mapping's latest
-receipt with neither a `done` nor a `resolved`.* An earlier draft defined the refusal with no
-lift condition at all, so after the operator repaired the map the receipt still carried its
-unmatched `intent`, the check still fired, and the re-import test 2 requires could never run.
+`pair-appended`, `nothing-to-repair` — the first three rows of the table above; the fourth row
+gets none. The receipt stays append-only; nothing is edited. The §5.1 exit-5 check then reads:
+*any `intent` in the mapping's latest receipt with neither a `done` nor a `resolved`.* An
+earlier draft defined the refusal with no lift condition at all, so after the operator repaired
+the map the receipt still carried its unmatched `intent`, the check still fired, and the
+re-import test 2 requires could never run.
+
+**The pair is appended first and `resolved` second — the order is load-bearing, and an earlier
+draft left it unstated.** For a `pair-appended` row the repair is two appends to two files. In
+that order a crash between them leaves the pair present and the `intent` still unresolved: the
+next import refuses again with exit 5, the next `repair` finds ticket and pair present, records
+`nothing-to-repair`, and the refusal lifts — nothing lost, one extra run. In the reverse order
+the same crash leaves `resolved` present and the pair absent: the refusal is lifted, the lookup
+misses the key, and the re-import creates the row again — the F1 window, reopened on the
+recovery path by exactly the argument §4.2 makes for placing the pair between the write and
+`done`. So the rule, stated once: **the record that lifts the refusal is written last, after the
+record it vouches for.** Where the map's last line was torn, the park and the truncate (§4.2)
+precede both appends, for the same reason. Test 2 (§4.2) injects a kill between the two.
 
 `resolved` lifts the **refusal** and nothing else. It does not make the receipt prunable: the
 prune (item 2) requires every `intent` to have a `done`, and a partial-apply receipt is evidence
 that is kept regardless of age.
 
-**`<name>` in the receipt path is the mapping's `name` field** (`import-mappings/<name>.json`,
-§4.2), or `canonical` for a canonical-header import with no mapping. "The mapping's latest
-receipt" is therefore computable: the lexically last `import-receipts/<ISO>-<name>.jsonl` with
+**`<name>` — in the receipt path and in the map path alike — is the mapping's `name` field**,
+which §4.2 requires to equal the basename of `import-mappings/<name>.json`, or `canonical` for a
+canonical-header import with no mapping; `canonical` is therefore a reserved mapping name (§4.2,
+§5.2). "The mapping's latest receipt" is therefore computable: the lexically last `import-receipts/<ISO>-<name>.jsonl` with
 that name — ISO-8601 sorts by time. **The check runs before the current run opens its own
 receipt** — it is part of the pre-write phase, alongside the prune — because if it ran after,
 "latest" would be the empty file the run had just created and the check would never fire.
@@ -1418,8 +1514,8 @@ open my own log"* is a different fact with a different remedy. Board unchanged; 
    - **The prune's reader is read-only and never quarantines.** It parses; it does not park. A
      receipt with **any** line that will not parse is treated as **not prune-eligible** — kept,
      conservatively, because *unreadable* and *clean* are not the same fact and a prune that
-     cannot tell them apart must keep. Quarantine happens only when an operator inspects a
-     receipt through the explicit read path, which is a write they asked for.
+     cannot tell them apart must keep. Quarantine happens only when an operator runs
+     `blaze import repair` over a receipt, which is a write they asked for.
    - **A torn `intent` is an unmatched `intent`.** Eligibility requires every `intent` to have a
      `done` *and* the file to have parsed completely. Both, or the receipt stays.
 
@@ -1430,7 +1526,7 @@ open my own log"* is a different fact with a different remedy. Board unchanged; 
    raw bytes appended to `<receipt>.corrupt` — and the reader reports the dropped count rather
    than presenting a partial read as a complete one (ADR-0030).
 
-   **Parking is a write, so only the explicit inspection path does it.** Every reader that runs
+   **Parking is a write, so only `blaze import repair` — the explicit inspection path — does it.** Every reader that runs
    *before a ticket write* — the prune (item 2) and the `source-ids` lookup (§4.2) — is read-only:
    it reports a torn line and acts conservatively (keep the receipt; refuse the import), and it
    never parks. A park that failed in the pre-write phase would fall under no exit code, which is
@@ -1442,7 +1538,7 @@ open my own log"* is a different fact with a different remedy. Board unchanged; 
 **Under `BLAZE_WRITE_PORT=db` the run is NOT one transaction, and an earlier draft claimed it
 was.** Checked against source rather than assumed: `scripts/model/write-port.mjs` contains no
 `BEGIN`, `COMMIT` or `ROLLBACK`; `persist` (`:204-300`) runs bare `exec.run` statements; and the
-`exec` it is handed exposes only `{ run, all }` and the port itself only `{ name, exists, write, move, read }` (`:77-79`, `:298`) — no transaction on either. Each statement autocommits, so under `db` a row
+`exec` it is handed exposes only `{ run, all }` and the port itself only `{ name, exists, write, move, read, close }` (`fsWritePort` `:77-79` with `close() {}` at `:113`; `dbWritePort` `:297-298` with `close() {}` at `:368`) — `close` is a no-op on both, and there is no transaction on either. Each statement autocommits, so under `db` a row
 is durable the moment its `persist` returns — **per-row durable, exactly like the filesystem**,
 and no more all-or-nothing than it. The claim was false about existing code, and it would have
 been wrong to make true: a per-row `done` written inside one uncommitted transaction is mistake 1
@@ -1483,9 +1579,12 @@ name each file explicitly rather than relying on `-A` over a directory.
 
 ### 5.5 Id allocation, claims, and the residue neither guarantees away
 
-**Every created ticket gets a claim, on both paths.** An earlier draft wrote claims only under
-`--allocate-ids`, which left the defect uncovered on the path the `id`-required fix had just made
-the default. The mechanism:
+**Every created ticket gets a claim, on both paths — §5.3 step 4, written before the ticket.**
+An earlier draft wrote claims only under `--allocate-ids`, which left the defect uncovered on the
+path the `id`-required fix had just made the default; a later draft promised both paths here
+while §5.3's sequence still ran the claim only inside the allocation step, so the promise and the
+sequence disagreed. The sequence is the one copy now, and this section refers to it. The
+mechanism:
 
 - `writeClaim` has **exactly one caller repo-wide** — `scripts/new.mjs:123` — and neither write
   port touches `scripts/model/claims.mjs`. So nothing writes a claim unless the importer does it
@@ -1500,11 +1599,13 @@ error on every imported id above the cutover — the exact defect §8 item 1 exi
 default path. A project that has *never* allocated has no marker, `readCutover` returns `null`, and
 the check stays silent (`:369-370`) — so the failure is invisible on a fresh fixture board and
 appears on the operator's real board. That is the worst possible distribution, and it is why the
-claim write is unconditional rather than tied to a flag.
+claim write is unconditional — §5.3 step 4 runs whether or not step 2 did — rather than tied to
+a flag.
 
 An id-less row is refused unless `--allocate-ids` is given (§5.2). Under that flag the id comes
-from `allocateId` (`scripts/model/ids.mjs:66-86`) — the `O_EXCL` reservation of ADR-0005 — and the
-claim is written exactly as on the explicit path.
+from `allocateId` (`scripts/model/ids.mjs:66-86`) — the `O_EXCL` reservation of ADR-0005, §5.3
+step 2 — and the claim is written at the same step 4 as on the explicit path. The two paths
+differ only in whether steps 2 and 3 run.
 
 **Dropped from an earlier draft: "the id's number is checked against the project's allocation
 floor so an import cannot hand out an id a later `blaze new` would reissue."** That guarded a
@@ -1516,26 +1617,43 @@ needed and specifying one would have implied a risk that is not there.
 false, and `applyNew` says so itself.** The real order is `allocateId` (`scripts/new.mjs:111`) →
 `writePort.exists` → `writePort.write` (`:118`) → `writeClaim` (`:123`) — three separable steps —
 and the comment at `scripts/new.mjs:31-33` states the consequence outright: *"Allocation is an
-irreversible side effect (an O_EXCL reservation that survives a failed create)."*
+irreversible side effect (an O_EXCL reservation that survives a failed create)."* This design
+writes the claim **before** the ticket rather than after it, and §5.3 says why beside the
+sequence; the separability is the same.
 
 So the honest position, rather than a guarantee that does not exist:
 
-- An exit-4 partial apply **leaves orphan reservations** — numbers reserved under
-  `<common>/blaze/ids/<KEY>/` with no ticket behind them.
-- **They are harmless but not invisible.** `allocateId` takes the max across disk, claims,
-  reservations and the remote (`:74`), so an orphan only advances the floor; it can never cause a
-  reissue. What it costs is a gap in the id sequence, which on this board is meaningful — a gap
-  is normally evidence a ticket was deleted.
+- An exit-4 partial apply — or a signal death (§5.1) — **leaves orphan reservations** — numbers
+  reserved under `<common>/blaze/ids/<KEY>/` (§5.3 step 2) with no ticket behind them — **and,
+  for a row killed between §5.3's step 4 and step 5, an orphan claim**: a `.ids/<n>` file with
+  no ticket behind it, on either path, because the claim precedes the write.
+- **Both are harmless but not invisible.** `allocateId` takes the max across disk, claims,
+  reservations and the remote (`:74`), so an orphan of either kind only advances the floor; it
+  can never cause a reissue, and no audit rule reports a claim without a ticket —
+  `missingClaimErrors` checks the converse, and the ledger already holds such claims by design
+  as tombstones for deleted tickets (`scripts/model/ids.mjs:62-63`). What either costs is a gap in the id sequence,
+  which on this board is meaningful — a gap is normally evidence a ticket was deleted. On
+  re-import the row is re-created and `writeClaim` overwrites an orphan claim with the same bytes
+  (§5.3).
 - **The receipt is what makes them findable, and the `allocated` phase is what makes them
   decidable.** An `intent` with no `done` (§5.3) names the rows whose reservation *may* be
   orphaned — a superset, since the ticket may have landed before the kill. Within that set, an
-  `allocated` entry gives the number; the inspection path then applies §5.3's **three-state**
-  rule — ticket absent is an orphan reservation; ticket present with no pair needs the pair
-  appended; ticket and pair present needs nothing. An earlier version of this sentence said
-  "ticket present means only the `done` is missing", which skipped the middle state and would
-  have left the duplicate-on-re-import window open from this section while §5.3 closed it. The `intent` is written *before* allocation so that a crash between reservation and
-  record still leaves the row named; the `allocated` is written *immediately after* so that the
-  number is never known to `.ids/` and unknown to the receipt.
+  `allocated` entry gives the number; `blaze import repair` then applies §5.3's rule, which is
+  the one copy — ticket absent and pair absent is an orphan reservation, re-created on
+  re-import; ticket present with no pair needs the pair appended; ticket and pair present needs
+  nothing; and ticket absent with a pair *present* is not a state the sequence produces, is
+  skipped rather than re-created by the lookup, and is left for a person. An earlier version of
+  this sentence said "ticket present means only the `done` is missing", which skipped the
+  second state and would have left the duplicate-on-re-import window open from this section
+  while §5.3 closed it; the version after it said "ticket absent ⇒ re-created", which is false
+  whenever a pair is present. The `intent` is written *before* allocation so that a crash
+  between reservation and record still leaves the row named; the `allocated` is written
+  *immediately after*, so the window in which a number is reserved but unrecorded is one append
+  wide. **That window is not zero, and an earlier draft said "never".** A kill between steps 2
+  and 3 leaves a reservation the receipt does not know by number: the row is still named — its
+  `intent` is there with `"id": null`, and §5.1's SIGKILL test keys on `seq` for exactly this
+  row — and the reservation itself is found by diffing the reservation directory against the
+  receipt's `allocated` set. One row per run at most, and it costs a gap, nothing else.
 
 ---
 
@@ -1569,9 +1687,9 @@ summary, because it is the part a reader trusts.
 | Path | What | Committed | Prunable |
 |---|---|---|---|
 | `import-mappings/<name>.json` | the confirmed column mapping (§4.2) | yes | no |
-| `source-ids/<mapping>.jsonl` | source key → blaze id, appended per row **between the ticket write and `done`** (§5.3 step 5) | yes | **never** |
-| `import-receipts/<ISO>-<name>.jsonl` | one run's intent / allocated / done record, plus `resolved` entries the inspection path appends (§5.3); `<name>` is the mapping's `name` or `canonical` | yes | after 90 days, **only** if every `intent` has a `done` **and** the file parsed completely — a `resolved` lifts the exit-5 refusal but never makes a receipt prunable |
-| `<receipt>.corrupt`, `<map>.corrupt` | raw bytes of a torn line, parked by the **inspection path only** (§5.3 item 3; §4.2) | yes | no — it is evidence |
+| `source-ids/<name>.jsonl` | source key → blaze id, appended per row **between the ticket write and `done`** (§5.3 step 6); `<name>` is the mapping's `name`, which equals its file's basename (§4.2) | yes | **never** |
+| `import-receipts/<ISO>-<name>.jsonl` | one run's intent / allocated / done record, plus the `resolved` entries `blaze import repair` appends — each **after** the pair it vouches for (§5.3); `<name>` is the mapping's `name` or the reserved `canonical` | yes | after 90 days, **only** if every `intent` has a `done` **and** the file parsed completely — a `resolved` lifts the exit-5 refusal but never makes a receipt prunable |
+| `<receipt>.corrupt`, `<map>.corrupt` | raw bytes of a torn line, parked by **`blaze import repair` only** (§5.3 item 3; §4.2) | yes | no — it is evidence |
 
 None of them is under `.blaze/`, which holds regenerable caches `scripts/reindex.mjs:1-4` calls
 safe to delete. All four are records or source; none is derivable from the corpus.
@@ -1583,8 +1701,14 @@ therefore also where help, the `BLAZE_READONLY` gate and the description come fr
   (`scripts/cli.mjs:36`);
 - `export` — `mutates: false`.
 
-`propose-mapping` is a **subcommand of `import`**, not a top-level verb, so it inherits the
-`mutates: true` gate — it does write a file.
+`propose-mapping` and `repair` are **subcommands of `import`**, not top-level verbs, so both
+inherit the `mutates: true` gate: `propose-mapping` writes a mapping file, and `repair` — the
+inspection path, §5.3 — writes up to four records (`<map>.corrupt`, the truncated map, the pair,
+the `resolved`). Neither adds an entry to `SUBCOMMANDS`; `import-runner.mjs` dispatches on its
+first argument — `repair` in-process, `propose-mapping` by spawning `import-mapping-runner.mjs`
+the way `cli.mjs:9` spawns a runner, so the proposer stays out of `import-runner.mjs`'s static
+graph and §4.3's surviving assertion holds. `repair` is not called `resolve` because
+`scripts/cli.mjs:50` already dispatches `blaze resolve` to a ticket's resolution.
 
 ---
 
@@ -1638,8 +1762,8 @@ cover, one of which (item 6) is an engine-wide defect this design merely ran int
    allocated or supplied in the CSV — because `writeClaim`'s only caller is `scripts/new.mjs:123`
    and neither write port writes one. An earlier draft scoped this to "every allocated row", which
    understated it: after `id` became required (§5.2) the *default* path is the explicit one, and
-   that is the path the narrower rule left uncovered. §5.5 closes it unconditionally; it needs to
-   be a criterion, not a footnote.
+   that is the path the narrower rule left uncovered. §5.3 step 4 closes it unconditionally, before
+   the ticket write, and §5.5 says why; it needs to be a criterion, not a footnote.
 2. **`status` is not a field.** BLZ-587 treats the schema as a column list and never says how a
    ticket reaches a non-initial status. `applyNew` forces `initialStatus(type)`
    (`scripts/new.mjs:30`) and `applyMove` enforces transitions, so the naive composition
@@ -1715,7 +1839,7 @@ from.
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
 | B1 | **The plan** (`scripts/model/import-plan.mjs`) | Whole-file read, id set, forward references, duplicate detection, create/update/skip/refuse classification, every §5.2 refusal. **Pure — no writes** | **BLZ-587** | A2 |
-| B2 | **The apply** (`scripts/model/import-apply.mjs` + `blaze import`) | Walk the plan through the injected write port; **a claim per created ticket on BOTH the explicit-id and `--allocate-ids` paths** (§5.5); the once-any-ticket-is-written-only-exit-4 invariant covering writes, staging **and** receipt appends (§5.1); the receipt (intent / allocated / done, plus the inspection path's `resolved`, whose presence is what lifts the exit-5 refusal; §5.3) and its **three-state** repair rule (orphan / pair-absent / nothing) with its **pre-write, best-effort, exit-code-neutral** 90-day prune and torn-line quarantine; exit codes 0–5 with 5 covering all four record-state cases; **a SIGKILL-mid-write test asserting the code AND that unmatched-`intent` ⊇ not-on-disk with the difference ≤ 1** (§5.1), which requires `appendRegularFileSync` for every receipt and map append (§5.1); the prune's read-only, never-quarantining reader with torn-`intent`-means-unmatched (§5.3); dry run by default | **BLZ-587** | B1, A3 |
+| B2 | **The apply** (`scripts/model/import-apply.mjs` + `blaze import`) | Walk the plan through the injected write port; **a claim per created ticket on BOTH the explicit-id and `--allocate-ids` paths, as its own step before the ticket write** (§5.3 step 4, §5.5); the once-any-ticket-is-written-only-exit-4 invariant covering writes, staging **and** receipt appends (§5.1); the receipt (intent / allocated / done, plus the `resolved` that C1's `blaze import repair` appends, whose presence is what lifts the exit-5 refusal; §5.3) and its **four-state** inspection rule (orphan / pair-absent / nothing / pair-without-ticket, the last left for a person) with its **pre-write, best-effort, exit-code-neutral** 90-day prune and torn-line quarantine; exit codes 0–5 with 5 covering all four record-state cases; **a SIGKILL-mid-write test asserting the code AND that unmatched-`intent` ⊇ not-on-disk with the difference ≤ 1** (§5.1), which requires `appendRegularFileSync` for every receipt and map append (§5.1); the prune's read-only, never-quarantining reader with torn-`intent`-means-unmatched (§5.3); dry run by default | **BLZ-587** | B1, A3 |
 | B3 | **The round-trip gate — gates 1, 2 and 3** | `tests/csv-round-trip.test.mjs` (a `node --test` suite, **not** `board-gate.yml` — it needs a temp board and must be runnable locally); the fixture, incl. `not_before`/`deadline`/`sprint` and a **`priority`-absent and `assignee`-absent row**, and a **`.ids/.cutover` marker plus per-ticket claim assertions** (without the marker `missingClaimErrors` returns early at `index.mjs:367` and the claim guard is structurally impossible), none of which any enum assertion can reach; **gate 2** with its `listTickets` wrapper (§3.3), since `zero-diff.mjs:81` hard-codes `listTickets(null)`; **gate 3**; the enum-coverage assertion; `zeroDiff`'s `compared`/`fieldsChecked` positive control | **BLZ-589** | B2 |
 | B4 | **The blanking revert test** | Blank — not remove — one exported column and assert **gate 2** goes red for the reason its name gives. Separated from B3 because it is the test that proves B3 discriminates, and a gate merged without it is a gate nobody has falsified | **BLZ-589** | B3 |
 
@@ -1723,7 +1847,7 @@ from.
 
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
-| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, and **`sourceIdColumn`** plus its durable **`source-ids/<mapping>.jsonl`** store — an **outcome** log appended per row **between the ticket write and `done`** (§5.3 step 5) through `appendRegularFileSync`, opened before any write under exit 5, append-only with first-occurrence lookup; the inspection path's park-truncate-append repair. **Two tests:** an unwritable map ⇒ exit 5 with nothing written; **the map append itself failed at row N** ⇒ ticket N on disk, N−1 pairs, no `done`; re-import refuses with 5; after resolution, rows above N created, 1..N skipped, no duplicate, no phantom. **No model** | **gap — new ticket** | B1 |
+| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, **`sourceIdColumn`**, the `name`-equals-basename rule with `canonical` reserved, and the durable **`source-ids/<name>.jsonl`** store — an **outcome** log appended per row **between the ticket write and `done`** (§5.3 step 6) through `appendRegularFileSync`, opened before any write under exit 5, append-only with first-occurrence lookup; **and the inspection verb `blaze import repair <receipt>`** (§5.3) — the receipt read, the four-state rule, park → truncate → pair → `resolved` in that order, non-zero exit on a pair-without-ticket row; **estimate 240 min** for the verb within C1. **Two tests:** an unwritable map ⇒ exit 5 with nothing written; **the map append itself failed at row N** ⇒ ticket N on disk, N−1 pairs, no `done`; re-import refuses with 5; `repair` ⇒ N pairs and a `pair-appended` `resolved` after the pair, with a kill between the two appends leaving the refusal in force; then rows above N created, 1..N skipped, no duplicate, no phantom. **No model** | **gap — new ticket** | B1, B2 |
 | C2 | **The proposer + the confirmation** (`scripts/model/import-mapping-propose.mjs`, `blaze import propose-mapping`) | Spawn `agentCommand`; render §4.4; write the mapping file and nothing else | **gap — new ticket** | C1 |
 | C3 | **The boundary guard** | §4.3's assertions over a **PATH-shadowed sentinel stub** (`stubGh` pattern, `tests/reconcile-delivery-truth.test.mjs:65-73`): **two** stubs with **two** sentinels; import succeeds leaving neither; `propose-mapping` fails with `ENV_HIT`; `propose-mapping` with `BLAZE_AGENT_COMMAND` **unset** fails with `PATH_HIT` (without which the PATH arm is never executed); both repointed at benign stubs, `propose-mapping` succeeds. Plus the one surviving static assertion. Explicitly **not** the first draft's three static assertions (two unsatisfiable) nor the second draft's in-process patch (`cli.mjs:9` spawns a separate process) | **gap — new ticket** | C2 |
 
