@@ -61,7 +61,12 @@ test("readForDrain on an absent ledger returns empty entries and zero bytes", ()
   // field-by-field check: a caller that destructures a key this function stopped returning
   // gets `undefined`, and on the drain path `undefined.length` is how a queue gets cleared
   // over a record nobody saved.
-  assert.deepEqual(readForDrain(root), { entries: [], bytes: 0, lines: [], dropped: [] });
+  // BLZ-608: `consumed` is the BYTES this read saw — the evidence `clearLedger` needs to
+  // prove the prefix it erases is still the prefix that was read. A byte COUNT cannot carry
+  // that, and a drain that clears a byte range it cannot prove it read is how two concurrent
+  // flushes shredded a 106-byte ledger into the 3-byte fragment `"}\n` at exit 0.
+  assert.deepEqual(readForDrain(root),
+    { entries: [], bytes: 0, lines: [], dropped: [], consumed: Buffer.alloc(0) });
   rmSync(root, { recursive: true, force: true });
 });
 
@@ -70,10 +75,10 @@ test("drain-exact: an op appended after the drain read survives clearLedger(byte
   const op1 = { id: "X-1", op: "new", message: "X-1: create task", files: ["projects/X/backlog/X-1.md"], ts: "t1" };
   const op2 = { id: "X-2", op: "new", message: "X-2: create task (late, mid-drain)", files: ["projects/X/backlog/X-2.md"], ts: "t2" };
   appendEntry(root, op1);
-  const { entries, bytes } = readForDrain(root);
+  const { entries, bytes, consumed } = readForDrain(root);
   assert.deepEqual(entries, [op1]);
   appendEntry(root, op2); // simulates another session appending while the drainer is mid-commit
-  clearLedger(root, null, bytes);
+  clearLedger(root, null, bytes, [], consumed);
   assert.deepEqual(readEntries(root), [op2]); // only the late op survives
   rmSync(root, { recursive: true, force: true });
 });
@@ -89,13 +94,13 @@ test("drain-exact: bytes measured on the raw buffer — a trailing partial multi
   // on the decoded string overstates the on-disk length by 2 here, and a later
   // clearLedger(bytes) subarray would chop the head off the next line.
   appendFileSync(ledgerPath(root), Buffer.from([0x7b, 0x22, 0xe6]));
-  const { entries, bytes } = readForDrain(root);
+  const { entries, bytes, consumed } = readForDrain(root);
   assert.deepEqual(entries, [op1]); // the corrupt partial line is skipped
   assert.equal(bytes, Buffer.byteLength(JSON.stringify(op1) + "\n") + 3); // raw on-disk bytes, not re-encoded length
   // The late op lands on its own clean line after the crash residue.
   appendFileSync(ledgerPath(root), "\n");
   appendEntry(root, op2);
-  clearLedger(root, null, bytes);
+  clearLedger(root, null, bytes, [], consumed);
   assert.deepEqual(readEntries(root), [op2]); // op2 survives intact — no head-chop
   rmSync(root, { recursive: true, force: true });
 });

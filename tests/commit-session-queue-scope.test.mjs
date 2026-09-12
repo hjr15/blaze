@@ -155,8 +155,8 @@ test("BLZ-498: a fully drained queue file is REMOVED, so a finished session stop
   try {
     appendEntry(root, { id: "ZZZ-1", op: "new", message: "m", files: [], ts: "t", session: "s1" }, "s1");
     assert.ok(existsSync(ledgerPath(root, "s1")));
-    const { bytes } = readForDrain(root, "s1");
-    clearLedger(root, "s1", bytes);
+    const { bytes, consumed } = readForDrain(root, "s1");
+    clearLedger(root, "s1", bytes, [], consumed);
     assert.equal(existsSync(ledgerPath(root, "s1")), false,
       "a queue with nothing left in it is not evidence of anything — it must not be left on disk");
     assert.deepEqual(readEntries(root, "s1"), []);   // and reads still answer cleanly
@@ -174,9 +174,9 @@ test("BLZ-498: a partially drained queue keeps its file and its un-drained bytes
     const op1 = { id: "ZZZ-1", op: "new", message: "first", files: [], ts: "t1", session: "s1" };
     const op2 = { id: "ZZZ-2", op: "new", message: "late, mid-drain", files: [], ts: "t2", session: "s1" };
     appendEntry(root, op1, "s1");
-    const { bytes } = readForDrain(root, "s1");
+    const { bytes, consumed } = readForDrain(root, "s1");
     appendEntry(root, op2, "s1");
-    clearLedger(root, "s1", bytes);
+    clearLedger(root, "s1", bytes, [], consumed);
     assert.ok(existsSync(ledgerPath(root, "s1")), "the late op's queue file must survive the drain");
     assert.deepEqual(readEntries(root, "s1"), [op2]);
   } finally { rmSync(root, { recursive: true, force: true }); }

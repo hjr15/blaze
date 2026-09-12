@@ -34,6 +34,7 @@ Each of these was reproduced against a fixture and is refused, not warned about:
 | A session queue literally named `pending-commit.jsonl` | routed to the store, not to the board's legacy ledger; `*/pending-commit.jsonl` matched both and the two sources then collided in the hold directory |
 | Byte-identical queues in two working copies | both migrate — the resume is keyed on the source **path** (a marker file), not on content, so an identical twin is not mistaken for an already-migrated file |
 | Any `blaze` process running, or a `commit.lock` held in **any** of the working copies | refuses, re-checked immediately before every write |
+| A ledger line that will not parse as JSON | refuses on the stamp, naming the line number — a field injected into text nothing parsed fuses two records into one |
 | A target that is not a board, or is a bare repo / `.git` dir | refuses |
 | The engine resolving a **different** store than the script derived | refuses |
 | Migrating the main checkout onto itself | refuses |
@@ -84,9 +85,44 @@ Re-run `count` after each one. A migrated working copy reads `ops=0`, and the bo
 rises by exactly what left. A filename collision between two working copies **merges** (the
 append is the correct handling, and is why `cp` appears nowhere).
 
-The ops need no rewriting — each already records the branch it was queued on, and git allows one
-branch to be checked out in at most one worktree, so the drain can tell whose they are. Do not
-edit the JSONL.
+### The lines are stamped on the way in (BLZ-602)
+
+`migrate` does **not** append byte-verbatim. Every line that does not already record `worktree` is
+stamped with one — **the source working copy's path relative to the store**, which is exactly the
+value the engine computes as its own `here.worktree` and compares against. `worktree` specifically:
+a line recording only `branch` **is** stamped. That turns a branch-claimable op into a
+worktree-claimable one, which is the stronger fact — the drain decides on `worktree` first, and a
+branch can move between checkouts while the path a file was written under cannot.
+
+This paragraph previously said the ops needed no rewriting, because each already records the
+branch it was queued on. That is true of every op queued **after** INF-673, and false of exactly
+the ones a migration exists to move. [ADR-0033](../decisions/0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md)'s
+drain makes the store's own working tree the **sole claimant** of an op recording neither
+`worktree` nor `branch`. So a pre-INF-673 op carried out of a lane and appended unchanged is
+claimed by the **main** tree, found in none of its three trees, classified `superseded`, and
+**cleared at exit 0** — while the lane's file sits uncommitted and the record that would lead
+anyone back to it is gone. Reproduced end to end, and pinned both ways, by
+`tests/queue-store-migration-provenance.test.mjs`.
+
+Three rules, and each is a way a stamp can destroy evidence instead of preserving it:
+
+| Line | What happens |
+|---|---|
+| Records no `worktree` (including one recording only `branch`) | stamped with the source copy's path relative to the store |
+| **Already** records `worktree` | passed through **byte-verbatim** — never overwritten, never re-serialised |
+| Will not parse as JSON | **refused**, naming the line number; nothing is written |
+
+**If you migrate by hand rather than with `migrate`,** stamp the same way — the script exposes the
+transform on its own so the two paths are one procedure, and it writes to stdout, changing nothing:
+
+```sh
+docs/operations/migrate-queue-store.sh stamp "<working-copy>" "<working-copy>/.blaze/pending/<session>.jsonl" \
+  >> "<board>/.blaze/pending/<session>.jsonl"
+```
+
+Do not hand-edit the JSONL with `sed` or an editor: a field injected into a line nothing parsed is
+how two records get fused into one invalid line, which the drain then cannot read and cannot
+recover.
 
 ## Step 3 — verify
 

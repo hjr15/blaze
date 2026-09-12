@@ -122,9 +122,24 @@ came to sit in four of them without anyone noticing.
   store moved, the scoping rule did not. Pinned by
   `tests/commit-session-queue-scope.test.mjs`, unchanged.
 - **The legacy shared fallback** `.blaze/pending-commit.jsonl` (session `null`) is still listed by
-  `listQueues` and still drained by `--all` — now from the shared store. The known gap that the
-  flush's `queueops=` counter does not count it is filed separately and is neither fixed nor
-  widened here.
+  `listQueues` and still drained by `--all` — now from the shared store.
+
+  **Closed by BLZ-558** (this paragraph previously recorded the gap as "filed separately and
+  neither fixed nor widened here"). `blaze commit` now states the count itself, on stdout, over
+  exactly the queues the run read:
+
+  ```
+  blaze commit: queueops=3 across 2 queue(s) read (the legacy shared fallback ledger included)
+  ```
+
+  The gap existed because the flush Job re-derived the number by globbing `.blaze/pending/`, and
+  that glob cannot see the fallback ledger, which sits beside that directory rather than in it. It
+  is closed at the engine and not at the consumer for the reason the gap appeared at all: any
+  consumer re-deriving it gets it wrong the same way, while the run itself knows exactly which
+  queues it read. Consumers read the line; they do not glob. ADR-0030 holds for the number as it
+  does for the report — it covers only queues actually read, says so when a store directory could
+  not be listed, and is printed even as `0`, because an absent measurement and a measured zero are
+  different facts. Pinned by `tests/commit-queueops-count.test.mjs`.
 - **INF-673's branch guard**, per the previous section.
 
 ## Consequences

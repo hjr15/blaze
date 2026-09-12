@@ -4,8 +4,10 @@
 #
 # Two subcommands:
 #   count                     report ops per working copy, across EVERY working copy of the repo
-#   migrate <working-copy>    append that working copy's queues into the store and move the
-#                             sources aside (never delete)
+#   stamp <wc> <queue-file>   write that queue file to stdout with `worktree` stamped onto
+#                             every line that does not already record `worktree` (BLZ-602)
+#   migrate <working-copy>    append that working copy's queues into the store, STAMPED, and
+#                             move the sources aside (never delete)
 #
 # Design notes, because each one is a defect this script exists to not have:
 #   * `set -euo pipefail` — an append that succeeds followed by an `mv` that fails must abort,
@@ -96,6 +98,81 @@ appended_prefix_lines() {
   printf 0
 }
 
+# --- provenance (BLZ-602) -----------------------------------------------------
+# STAMP `worktree` ONTO EVERY LINE THAT DOES NOT ALREADY RECORD `worktree`.
+#
+# `worktree` specifically, not "provenance": a line recording only `branch` IS stamped. That
+# converts a branch-claimable op into a worktree-claimable one, which is the stronger fact —
+# `queuedHere` decides on `worktree` first, and a branch can move between checkouts while the
+# path the file was written under cannot. On the live board measured 2026-09-09, 19 of 32 ops
+# were branch-only, so this is the common case, and it is said here rather than left implied.
+#
+# This script used to append lines byte-verbatim, and the runbook told the operator the ops
+# "need no rewriting". That is true of every op queued after INF-673 and false of exactly the
+# ones a migration exists to move. BLZ-590 made the store's own working tree the SOLE CLAIMANT
+# of an op recording neither `worktree` nor `branch`, so a pre-INF-673 op carried out of a
+# LANE's own .blaze/ and appended here unchanged is then claimed by the MAIN tree, found in
+# none of its three trees, classified `superseded`, and CLEARED AT EXIT 0 — while the lane's
+# file sits uncommitted and the record that would lead anyone back to it is destroyed.
+#
+# The stamp is the source copy's path RELATIVE TO THE STORE, which is exactly what the engine
+# computes as `here.worktree` (`relative(store, dataRoot)`) and compares against. It is
+# computed by node's own `path.relative` rather than by shell string surgery, so the two
+# derivations cannot drift apart.
+#
+# THREE RULES, and each one is a way this can destroy evidence rather than preserve it:
+#   * A line that ALREADY records `worktree` is emitted BYTE-VERBATIM. Overwriting it would
+#     replace the only fact that says where the work is; re-serialising it would normalise a
+#     line this engine did not write, and the ledger is append-only evidence.
+#   * A line that will not parse is REFUSED, and nothing is written. Injecting a field into
+#     text with a regex is how a migration fuses two records into one.
+#   * Bytes in, bytes out. `buf.toString()` maps an incomplete trailing multibyte sequence to
+#     U+FFFD, which re-encodes as three bytes that were never there — the same reason
+#     `parseRecords` splits the buffer rather than the string.
+stamp_stream() {  # usage: stamp_stream <board> <working-copy> <queue-file>   (stamped -> stdout)
+  node -e '
+const { readFileSync } = require("node:fs");
+const { relative } = require("node:path");
+function main([board, wc, file]) {
+  const rel = relative(board, wc);
+  const buf = readFileSync(file);
+  const out = [];
+  let start = 0, lineNo = 0;
+  while (start < buf.length) {
+    const nl = buf.indexOf(0x0a, start);
+    const end = nl === -1 ? buf.length : nl;
+    const raw = buf.subarray(start, end);
+    lineNo++;
+    const text = raw.toString("utf8");
+    if (text.trim() === "") out.push(Buffer.from(raw));
+    else {
+      let entry;
+      try { entry = JSON.parse(text); } catch {
+        process.stderr.write(`STOP: ${file} line ${lineNo} is not valid JSON — refusing to stamp text this migration could not read. Fix or quarantine that line, then re-run.\n`);
+        return 1;
+      }
+      out.push(entry.worktree === undefined || entry.worktree === null
+        ? Buffer.from(JSON.stringify({ ...entry, worktree: rel }), "utf8")
+        : Buffer.from(raw));
+    }
+    if (nl !== -1) out.push(Buffer.from("\n"));
+    start = end + 1;
+  }
+  process.stdout.write(Buffer.concat(out));
+  return 0;
+}
+process.exitCode = main(process.argv.slice(1));
+' "$1" "$2" "$3"
+}
+
+cmd_stamp() {
+  local wc=$1 f=$2 board
+  [ -d "$wc" ] || die "$wc is not a directory"
+  board=$(resolve_board "$wc")
+  assert_regular_readable "$f"
+  stamp_stream "$board" "$wc" "$f"
+}
+
 count_checked() {   # usage: assert_regular_readable "$f" first, in the caller
   local n; n=$(grep -c . -- "$1" || true)
   printf '%s' "${n:-0}"
@@ -140,7 +217,7 @@ cmd_count() {
 }
 
 cmd_migrate() {
-  local wc=$1 board store hold f rel dest holddest marker n lines done_lines rem expected actual moved=0 appended=0
+  local wc=$1 board store hold f rel dest holddest marker n lines done_lines rem stamped expected actual moved=0 appended=0
   [ -d "$wc" ] || die "$wc is not a directory"
   board=$(resolve_board "$wc")
   assert_engine_agrees "$board" "$wc"
@@ -188,10 +265,17 @@ cmd_migrate() {
     # made the second look already-migrated and its ops were dropped from the store (exit 0). A
     # marker exists only for a source THIS script has already begun, which is the only state in
     # which a resume may assume anything.
-    lines=$(wc -l < "$f")
+    # BLZ-602: everything below reasons about the STAMPED stream, because that is what lands
+    # in the store. The resume's prefix detection compares the destination's tail against the
+    # source's leading lines, so comparing the UNSTAMPED source would never match what was
+    # actually appended and every resume would append the whole file a second time. `$f`
+    # itself is never rewritten — the original is what gets moved aside, intact.
+    stamped="$hold/.stamped.$$"
+    stamp_stream "$board" "$wc" "$f" > "$stamped"
+    lines=$(wc -l < "$stamped")
     done_lines=0
     if [ -e "$marker" ]; then
-      done_lines=$(appended_prefix_lines "$dest" "$f")
+      done_lines=$(appended_prefix_lines "$dest" "$stamped")
       [ "$done_lines" -eq 0 ] \
         || note "resuming: $done_lines of $lines line(s) of $f are already in $dest"
     else
@@ -200,7 +284,7 @@ cmd_migrate() {
 
     if [ "$done_lines" -lt "$lines" ]; then
       rem="$hold/.remainder.$$"
-      tail -n +$((done_lines + 1)) -- "$f" > "$rem"
+      tail -n +$((done_lines + 1)) -- "$stamped" > "$rem"
       # What $dest must become, hashed BEFORE the append. `cat` failing on an unreadable or
       # unseekable source fails the whole substitution under `set -o pipefail`, so this cannot
       # pass vacuously the way a line count could.
@@ -220,7 +304,7 @@ cmd_migrate() {
   TAIL of $dest, so if another working copy appends to the same destination first, the tail no
   longer matches and this source is appended a SECOND time. Migrating this copy before any other
   is what keeps that impossible."
-    rm -f -- "$marker"
+    rm -f -- "$marker" "$stamped"
     moved=$((moved + 1))
   done < <(queue_files "$wc")
 
@@ -229,6 +313,7 @@ cmd_migrate() {
 
 case "${1:-}" in
   count)   shift; cmd_count "${1:-$PWD}" ;;
+  stamp)   shift; [ $# -eq 2 ] || die "usage: migrate-queue-store.sh stamp <working-copy> <queue-file>"; cmd_stamp "$1" "$2" ;;
   migrate) shift; [ $# -eq 1 ] || die "usage: migrate-queue-store.sh migrate <working-copy>"; cmd_migrate "$1" ;;
-  *) die "usage: migrate-queue-store.sh count [working-copy] | migrate <working-copy>" ;;
+  *) die "usage: migrate-queue-store.sh count [working-copy] | stamp <working-copy> <queue-file> | migrate <working-copy>" ;;
 esac
