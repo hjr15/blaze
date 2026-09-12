@@ -186,10 +186,15 @@ export function watchdogReport({ file, ms, types, peers, idleMs, elapsedMs = ms,
   const window = Math.max(1, Math.round(elapsedMs));
   const idle = Math.min(window, Math.max(0, Math.round(idleMs)));
   const busy = window - idle;
+  // "descendant", not "child": the walk goes generations deep, and a reap of a child and
+  // its grandchild used to read `reaped 2 still parented to this process` — only one was.
+  // "found by walking parent links" is the limit stated in the sentence: a process already
+  // reparented away from this tree is not found, and so is not claimed.
   const children = reap.checked
     ? (reap.killed
-        ? `reaped ${reap.killed} still parented to this process — process.exit() does not do this`
-        : "none still parented to this process")
+        ? `reaped ${reap.killed} descendant${reap.killed === 1 ? "" : "s"} found by walking parent links`
+          + " — process.exit() does not do this"
+        : "none found by walking parent links")
     : "the walk did not complete (no usable pgrep, or a lookup failed); anything this file "
       + "spawned may still be running";
   return [
@@ -204,7 +209,8 @@ export function watchdogReport({ file, ms, types, peers, idleMs, elapsedMs = ms,
     `Children:   ${children}`,
     "Neither number decides this: a leaked handle and a slow wait are both idle, and a file",
     "that works and THEN leaks is busy. The handles above are what tell them apart.",
-    "Two PipeWrap handles are this process's own stdout/stderr and are expected.",
+    "Handles for this process's own stdout/stderr — PipeWrap when piped, TTYWrap on a",
+    "terminal — are expected.",
     "A leaked database or HTTP client is the usual cause of a stuck file — close it on the",
     "failure path too, not only as the last statement of a passing test.",
     "Raise or disable the deadline with BLAZE_TEST_WATCHDOG_MS (0 = off).",

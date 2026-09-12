@@ -199,7 +199,23 @@ test("BLZ-534: the suite is actually run with a bound — the npm scripts carry 
 // would only pin the spelling and would have to be edited in lockstep with the thing it
 // claims to guard.
 
-test("BLZ-534: no CI step runs the test runner outside the two bounds", () => {
+/** Does this shell command invoke Node's test runner? `node` (or `$NODE`, `npx node`) followed
+ *  by ANY flags and then `--test`. The first version of this required `--test` to be the
+ *  flag immediately after `node`, so `node --max-old-space-size=4096 --test …` passed the
+ *  guard untouched — a bounded-looking evasion the guard exists to refuse. `--test-reporter`
+ *  is a prefix of `--test`, which is why the word boundary matters. */
+const RUNS_TEST_RUNNER = /(^|[^\w./-])(?:npx\s+)?(?:node|\$\{?NODE\}?)(?:\s+--?[^\s]+)*\s+--test(?![\w-])/;
+
+/** The two bounds, as a step must carry them when it invokes the runner itself. */
+function assertBounded(where, cmd) {
+  assert.match(cmd, /--import=\.\/tests\/setup\/hang-watchdog\.mjs/,
+    `${where}: runs the test runner with no hang watchdog:\n    ${cmd}`);
+  assert.match(cmd, /--test-timeout=\d+/,
+    `${where}: runs the test runner with no per-test timeout, which is Node's `
+    + `--test-timeout=0 — BLZ-534's own value:\n    ${cmd}`);
+}
+
+test("BLZ-534: no CI step runs the test runner outside the two bounds", (t) => {
   // REVIEW FINDING. `.github/workflows/board-gate.yml` ran `node --test tests/board-gate.test.mjs`
   // — no `--import`, and therefore Node's own `--test-timeout=0`. A whole CI job was running
   // the runner unbounded, and nothing said so: measured,
@@ -207,32 +223,71 @@ test("BLZ-534: no CI step runs the test runner outside the two bounds", () => {
   // for tests/hang-watchdog.test.mjs. The notice lives INSIDE that file, so it only ever
   // fires when that file is in the selected set — a run of any other file is silent. The
   // notice is for a human at a terminal; this is the check that covers CI, where nobody is
-  // reading. The fix in board-gate.yml is `npm test --`, which carries the bounds already
-  // declared once in package.json rather than a third copy of them that can drift.
+  // reading.
+  //
+  // SECOND REVIEW FINDING, against the first version of this test. It skipped every
+  // `npm … test*` line with a `continue` and checked only bare `node --test` lines — and on
+  // the real tree EVERY matching line was an npm one. The two assertions that were this
+  // test's only discriminating content executed ZERO times, while the "observation happened"
+  // guard was satisfied entirely by lines the loop then ignored. The same shape as the
+  // defect it was written to prevent, inside the test written to prevent it. So now: an npm
+  // step is RESOLVED to the package.json script it names and that script's command is
+  // checked; a `node` step is checked directly; and the number of commands actually checked
+  // is asserted, not the number of lines found.
+  const scripts = npmScripts();
   const dir = join(REPO, ".github", "workflows");
-  const steps = [];
+  const found = [];       // every workflow line that runs the runner, directly or via npm
+  let checked = 0;        // how many commands the two assertions actually saw
   for (const f of readdirSync(dir).filter((n) => n.endsWith(".yml") || n.endsWith(".yaml"))) {
-    for (const line of readFileSync(join(dir, f), "utf8").split("\n")) {
-      if (/^\s*#/.test(line)) continue;                       // a comment ABOUT a command is not one
-      if (/(^|[^\w-])node\s+--test\b|(^|[^\w-])npm\s+(run\s+)?test\b/.test(line)) steps.push({ f, line: line.trim() });
+    for (const raw of readFileSync(join(dir, f), "utf8").split("\n")) {
+      if (/^\s*#/.test(raw)) continue;                       // a comment ABOUT a command is not one
+      const line = raw.trim();
+      // `npm test` / `npm run <name>` / `npm run-script <name>`: resolve to the script.
+      const npm = /(^|[^\w./-])npm\s+(?:test\b|(?:run|run-script)\s+([^\s&|;]+))/.exec(line);
+      if (npm) {
+        const name = npm[2] ?? "test";
+        const cmd = scripts[name];
+        if (cmd === undefined) continue;                     // not a script of this package
+        if (!RUNS_TEST_RUNNER.test(cmd)) continue;           // e.g. `npm run lint` — not the runner
+        found.push({ f, line, via: name, cmd });
+        assertBounded(`${f} → npm script "${name}"`, cmd);
+        checked++;
+        continue;
+      }
+      if (RUNS_TEST_RUNNER.test(line)) {
+        found.push({ f, line, via: null, cmd: line });
+        assertBounded(f, line);
+        checked++;
+      }
     }
   }
-  // ASSERT THE OBSERVATION HAPPENED. A regex that silently stopped matching would report a
-  // clean sweep of nothing, which is the failure mode this whole file is about.
-  assert.ok(steps.length >= 2,
-    `only ${steps.length} test-running workflow step(s) were found; the scan is broken, and a `
-    + "sweep that found nothing is not a sweep that found nothing wrong");
+  t.diagnostic(`checked ${checked} runner invocation(s): ${found.map((s) => `${s.f}${s.via ? ` (npm ${s.via})` : ""}`).join(", ")}`);
 
-  for (const { f, line } of steps) {
-    // `npm test` / `npm run test:coverage` carry both bounds by definition — that is what the
-    // tests above pin. Anything invoking the runner directly must carry them itself.
-    if (/(^|[^\w-])npm\s+(run\s+)?test/.test(line)) continue;
-    assert.match(line, /--import=\.\/tests\/setup\/hang-watchdog\.mjs/,
-      `${f}: this step runs the test runner with no hang watchdog:\n    ${line}`);
-    assert.match(line, /--test-timeout=\d+/,
-      `${f}: this step runs the test runner with no per-test timeout, which is Node's `
-      + `--test-timeout=0 — BLZ-534's own value:\n    ${line}`);
-  }
+  // ASSERT THE OBSERVATION HAPPENED — and this time, that the DISCRIMINATING code ran. A
+  // count of lines found says nothing if every one of them was then skipped.
+  assert.ok(checked >= 2,
+    `only ${checked} runner invocation(s) were actually checked; the scan is broken, and a `
+    + "sweep that checked nothing is not a sweep that found nothing wrong");
+  assert.equal(checked, found.length, "every runner invocation found must have been checked");
+
+  // The detector itself, so a regex that quietly narrowed would be noticed. Each of these
+  // was an evasion of the first version.
+  for (const evasion of [
+    "node --test tests/x.test.mjs",
+    "node --max-old-space-size=4096 --test tests/x.test.mjs",
+    "node --test-reporter=spec --test tests/x.test.mjs",
+    "$NODE --test tests/x.test.mjs",
+    "npx node --experimental-strip-types --test",
+    "c8 node --test --test-concurrency=1",
+  ]) assert.ok(RUNS_TEST_RUNNER.test(evasion), `must recognise the runner in: ${evasion}`);
+  for (const notRunner of [
+    "node scripts/audit-runner.mjs tests/fixtures/board-gate-good/projects",
+    "node --test-reporter=spec scripts/run.mjs",
+    "node scripts/ci/hygiene-check.mjs origin/main",
+  ]) assert.ok(!RUNS_TEST_RUNNER.test(notRunner), `must not mistake for the runner: ${notRunner}`);
+  // An npm script that runs the runner unbounded must be caught THROUGH the npm step.
+  assert.throws(() => assertBounded("synthetic", "node --test"), /no hang watchdog/,
+    "an unbounded script reached through `npm run` must fail the same way a bare line does");
 });
 
 test("BLZ-534: both npm scripts declare the SAME per-test bound", () => {
@@ -367,7 +422,65 @@ test("BLZ-534: the window reported is the one that ELAPSED, not the one that was
     `the window reported (${elapsed}ms) is not the one that elapsed — this file blocked the `
     + "loop for over a second past a 500ms deadline, so anything near 500 is the flag being "
     + "read back rather than the clock");
-  assert.equal(idle + busy, elapsed, "the two halves must add up to the window they describe");
+  // NOT `idle + busy === elapsed`. That was the previous assertion here, and it is an
+  // algebraic identity: the report computes `busy = window - idle`, so it holds for EVERY
+  // value of idle — 0, a million, minus four thousand. Three fabrications of the idle
+  // measurement (`idleMs = 0`; 100% idle; the whole-process idle with no arm point) each
+  // left 21/21 green. This fixture spins for ~1.2s, so BUSY has a floor the loop must
+  // have really been measured to clear.
+  assert.ok(busy >= 1_000,
+    `busy=${busy}ms for a file that spun the loop for ~1200ms — the busy figure is not a `
+    + "measurement of this window");
+});
+
+test("BLZ-534: the idle figure is measured too — a file that WAITS reads as idle", (t) => {
+  // The other bound. `slow-but-honest` does 3s of 50ms timer waits and no work, so over a
+  // 1500ms window the loop was idle for very nearly all of it. `idleMs = 0` passes every
+  // assertion on the busy fixture (all busy, which it was) and is caught here.
+  const r = runWithWatchdog(SLOW, 1_500);
+  const out = `${r.stdout}${r.stderr}`;
+  const m = /Loop: +(\d+)ms idle, (\d+)ms busy, over the (\d+)ms actually elapsed/.exec(out);
+  assert.ok(m, `the report must state the window:\n${out}`);
+  const [, idle, busy, elapsed] = m.map(Number);
+  t.diagnostic(`idle=${idle} busy=${busy} elapsed=${elapsed} against a 1500ms deadline`);
+  assert.ok(idle >= 1_200,
+    `idle=${idle}ms for a file that only waited on timers for ${elapsed}ms — the idle figure `
+    + "is not a measurement of this window");
+  // And the other half of the same line, on the fixture where it must be SMALL. `busy` set
+  // to the whole window regardless of idle satisfied every floor above — the busy fixture
+  // is all busy, and this fixture's idle is printed independently — so the ceiling is here.
+  assert.ok(busy <= 300,
+    `busy=${busy}ms for a file that did nothing but wait — the busy figure is not derived from `
+    + "the idle that was measured");
+});
+
+test("BLZ-534: idle is measured FROM THE ARM POINT, not over the whole life of the process", async () => {
+  // The third fabrication: `performance.nodeTiming.idleTime` with no `idleAtArm`. In a
+  // fixture child the watchdog is armed at import, before anything has been idle, so that
+  // one is invisible from outside — it is caught here by arming late. Half a second of idle
+  // BEFORE arming, then a window that is entirely busy: the report must show the window.
+  await new Promise((resolve) => setTimeout(resolve, 500));       // idle, and NOT in the window
+  // The watchdog's timer is unref'd, so it only fires if something ELSE holds the loop open —
+  // in a test-file child that is the runner's IPC channel. Here nothing would be, and under
+  // Node 20 the loop drained with this promise pending and cancelled the rest of the file.
+  // A ref'd timer stands in for the IPC channel; it is cleared once the report is in.
+  const holdOpen = setTimeout(() => {}, 10_000);
+  const fired = new Promise((resolve) => {
+    installHangWatchdog({ ms: 100, file: "in-process", onFire: resolve });
+  });
+  const end = Date.now() + 300;
+  while (Date.now() < end) { /* spin: the timer cannot fire until this ends */ }
+  const report = await fired;
+  clearTimeout(holdOpen);
+  const m = /Loop: +(\d+)ms idle, (\d+)ms busy, over the (\d+)ms actually elapsed/.exec(report);
+  assert.ok(m, `the report must state the window:\n${report}`);
+  const [, idle, busy, elapsed] = m.map(Number);
+  assert.ok(elapsed >= 280, `the window must be the ~300ms the spin held it open, not ${elapsed}`);
+  assert.ok(busy >= 200,
+    `busy=${busy}ms of a ${elapsed}ms window that was one synchronous spin — the 500ms of `
+    + "idle BEFORE arming has been counted into a window it was never part of");
+  assert.ok(idle <= 100,
+    `idle=${idle}ms inside a window with no idle in it — measured from the wrong start`);
 });
 
 /** Every live pid running the long-lived helper fixture. */
@@ -401,12 +514,14 @@ test("BLZ-534: the watchdog says what it did about children — the COUNT, not a
   // spawns exactly one helper, so the report has exactly one number it can honestly print.
   const r = runWithWatchdog(SPAWNER, 1_500);
   const out = `${r.stdout}${r.stderr}`;
-  assert.match(out, /Children: +reaped 1 still parented to this process\b/,
+  assert.match(out, /Children: +reaped 1 descendant found by walking parent links/,
     "the report must state how many descendants were actually killed; this fixture leaves "
     + "exactly one, and any other answer means the reap did not happen as reported");
-  assert.doesNotMatch(out, /no children|nothing left running|clean exit/i,
+  assert.doesNotMatch(out, /no children|nothing left running|clean exit|still parented/i,
     "and must not upgrade a count into a claim that nothing was left behind — `pgrep -P` "
-    + "cannot see a grandchild that has already been reparented");
+    + "cannot see a grandchild that has already been reparented — nor call every one of them "
+    + "a direct child: the walk goes generations deep, so \"still parented to this process\" "
+    + "was false for any tree deeper than one");
 });
 
 test("BLZ-534: a reap that could not look never reads as a clean exit", () => {
@@ -415,12 +530,13 @@ test("BLZ-534: a reap that could not look never reads as a clean exit", () => {
   // written by. Three distinct outcomes, three distinct sentences; conflating "I looked and
   // found none" with "I could not look" is how a leaked process gets reported as no process.
   const say = (reap) => watchdogReport({ file: "f.mjs", ms: 1_000, types: [], peers: [], idleMs: 900, reap });
-  assert.match(say({ checked: true, killed: 2 }), /Children: +reaped 2 still parented/);
-  assert.match(say({ checked: true, killed: 0 }), /Children: +none still parented to this process/);
+  assert.match(say({ checked: true, killed: 2 }), /Children: +reaped 2 descendants found by walking parent links/);
+  assert.match(say({ checked: true, killed: 1 }), /Children: +reaped 1 descendant found/, "singular for one");
+  assert.match(say({ checked: true, killed: 0 }), /Children: +none found by walking parent links/);
   const blind = say({ checked: false, killed: 0 });
   assert.match(blind, /Children: +the walk did not complete/,
     "a watchdog whose walk did not finish must say so");
-  assert.doesNotMatch(blind, /none still parented|reaped \d/,
+  assert.doesNotMatch(blind, /none found|reaped \d/,
     "and must not report an outcome it never observed");
 
   // And the source of that flag: `null` from the walk, distinct from `[]`.

@@ -34,9 +34,9 @@ note; irrelevant once this repo is public, where required checks work normally).
 `package.json` declares `"engines": { "node": ">=24" }` — the floor exists because
 `node:sqlite` is built in from Node 24 and 34-odd suites import it. Nothing used to
 enforce that. Running the suite on Node 20 makes every `node:sqlite` file fail to LOAD,
-and the tally that produces says nothing about the engine: measured on 2026-09-10,
-`/usr/bin/node` v20.20.2 gave **3,953 tests / 3,780 pass / 173 fail** where v24.19.0 gave
-**4,472 / 4,470 / 0**. A real regression is invisible in the first of those (BLZ-601).
+and the tally that produces says nothing about the engine: measured on 2026-09-12,
+`/usr/bin/node` v20.20.2 gave **3,980 tests / 3,807 pass / 173 fail** where v24.19.0 gave
+**4,499 / 4,497 / 0**. A real regression is invisible in the first of those (BLZ-601).
 
 So `pretest` and `pretest:coverage` run
 [`scripts/ci/require-engine.mjs`](../scripts/ci/require-engine.mjs), which refuses with
@@ -100,6 +100,12 @@ and then hangs lands in that branch; the gate never separated the two cases.
 
 So the report now prints `Loop: <i>ms idle, <b>ms busy, over the <w>ms actually elapsed` and
 stops. Both numbers are facts; which one means "stuck" is a question the handle list answers.
+Both are **asserted as measurements**, not as a sum: `busy = window − idle` is an identity,
+so `idle + busy === elapsed` holds for any fabricated idle and was once the only check. A
+fixture that spins for ~1.2s must show `busy ≥ 1000`; one that only waits on timers must
+show `idle ≥ 1200`; and an in-process test that idles for half a second *before* arming and
+then spins must show that pre-arm idle excluded — the three fabrications (`idleMs = 0`, 100%
+idle, whole-process idle with no arm point) each redden exactly one of those.
 The window is the one that **elapsed**, not the deadline that was requested — a synchronous
 block holds the timer past its deadline, and an 8s block against a 1500ms deadline used to
 print `0ms of the last 1500ms idle`, a statement about the flag dressed as a measurement.
@@ -110,22 +116,25 @@ files give exactly three preloads, all with `NODE_TEST_CONTEXT` set. That is why
 job can run 388s against a 300s deadline without a watchdog report — the orchestrator, and
 the `c8` process above it, are not armed. It is the right scope (BLZ-534's failure was a
 per-file child that could not exit, and killing the orchestrator would take the whole run
-down) but it is a real limit: a runner that itself wedges is bounded by the CI job timeout
-and by nothing here.
+down) but it is a real limit: a runner that itself wedges is bounded by the job's
+`timeout-minutes` and by nothing here. `test.yml` sets that to **20** — the job takes about
+four minutes — where before it was unset, which on GitHub means a 360-minute default on the
+merge gate.
 
 **It reaps the process's children before exiting.** `process.exit()` does not, so a hung
 file that had spawned a helper used to leak one process per run — measured, and a real
 `scripts/serve.mjs` was found alive fifteen minutes after a probe. A process-*group* kill is
 not available (this process shares its group with the runner and npm), so descendants are
 walked with `pgrep -P` and killed deepest first. The report says which of the three things
-happened — `reaped <n> still parented to this process`, `none still parented to this
-process`, or `the walk did not complete` — because "I looked and found none" and "I could
-not look" are not the same answer, and a failure *anywhere* in the walk makes the whole walk
-unknown rather than the tree small. The wording is deliberately narrow: `pgrep -P` follows
-current parent links, so a grandchild whose own parent has already exited is reparented and
-is no longer visible as a descendant. Measured with a fixture spawning `sh -c '… & exit 0'`:
-0 live helpers before, 1 after, and the report said none were still parented — which was
-true, and is why it does not say the process was left with no children.
+happened — `reaped <n> descendants found by walking parent links`, `none found by walking
+parent links`, or `the walk did not complete` — because "I looked and found none" and "I
+could not look" are not the same answer, and a failure *anywhere* in the walk makes the whole
+walk unknown rather than the tree small. The wording is deliberately narrow, and says
+*descendants* rather than *children* because the walk goes generations deep. `pgrep -P`
+follows current parent links, so a grandchild whose own parent has already exited is
+reparented and is no longer visible as a descendant. Measured with a fixture spawning
+`sh -c '… & exit 0'`: 0 live helpers before, 1 after, and the report said none were found —
+which was true, and is why it does not say the process was left with no children.
 
 The deadline defaults to 300s and is set with `BLAZE_TEST_WATCHDOG_MS` (`0` disables it).
 An unparseable value keeps the default rather than silently removing the bound.
@@ -153,11 +162,15 @@ failure one level up. So each is read as a **number** and checked against the ot
   instead. That notice lives **inside that one file**, so it only appears when that file is
   in the selected set — `node --test tests/board-gate.test.mjs` prints nothing. It is a
   courtesy to someone at a terminal, not a gate.
-* Every **workflow step** that runs the test runner is therefore checked separately: a step
-  either goes through `npm test` / `npm run test:coverage`, which carry the bounds declared
-  once in `package.json`, or it must carry both flags itself. `board-gate.yml` ran a bare
+* Every **workflow step** that runs the test runner is therefore checked separately. A step
+  that goes through `npm test` or `npm run <script>` is **resolved to the script it names**
+  and that script's command is checked; a step invoking `node … --test` directly (any flags
+  before `--test`) is checked as it stands; and the number of commands actually checked is
+  asserted — not the number of lines found, since the first version of this check found both
+  real lines and then skipped both. `board-gate.yml` ran a bare
   `node --test tests/board-gate.test.mjs` — a whole CI job with neither bound and nothing
-  saying so — and now runs `npm test --` instead.
+  saying so — and now runs `npm test --` instead. Known limit: a step that runs the runner
+  through a shell script (`bash scripts/run-tests.sh`) is not followed.
 
 **The cause, for this one file, was found and fixed.** Each conformance test ended with
 `await s.close?.()`, the one statement a failing assertion never reaches — so a red

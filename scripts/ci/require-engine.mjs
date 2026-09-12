@@ -5,13 +5,13 @@
 // `package.json` declares `engines: { node: ">=24" }` and nothing enforced it. Under Node
 // 20 — which is what `node` resolves to on the author's machine — every file that imports
 // `node:sqlite` fails to LOAD with `No such built-in module: node:sqlite`. Measured on this
-// branch 2026-09-10: `/usr/bin/node` v20.20.2 gives 3,953 tests / 3,780 pass / 173 fail,
-// against 4,472 / 4,470 / 0 on v24.19.0. Nothing in those 173 says "wrong Node". Real
+// branch 2026-09-12: `/usr/bin/node` v20.20.2 gives 3,980 tests / 3,807 pass / 173 fail,
+// against 4,499 / 4,497 / 0 on v24.19.0. Nothing in those 173 says "wrong Node". Real
 // regressions hide behind that noise, and "the suite is green" stops being checkable.
 //
 // BLZ-601 was filed saying the machine had no conforming Node. That premise was wrong:
 // `~/.local/node24/bin/node` there is v24.19.0 with a working `node:sqlite`, and the suite
-// under it is 4,472 tests / 4,470 pass / 0 fail. What was missing was any way to
+// under it is 4,499 tests / 4,497 pass / 0 fail. What was missing was any way to
 // DISCOVER that. So when this guard refuses, it goes looking for a conforming Node in the
 // usual places and, if it finds one, hands over the exact line that selects it.
 //
@@ -136,8 +136,8 @@ export function describeEngine({ version, major, sqlite, required, conforming })
     `  node:sqlite: ${sqlite ? "available" : "MISSING"}`,
     "",
     "Every test file that imports `node:sqlite` fails to LOAD on this engine, and none of",
-    "the failures that produces mentions the engine. Measured on this repo 2026-09-10:",
-    "Node v20.20.2 gives 3,953 tests / 173 fail; Node v24.19.0 gives 4,472 / 0 fail. A real",
+    "the failures that produces mentions the engine. Measured on this repo 2026-09-12:",
+    "Node v20.20.2 gives 3,980 tests / 173 fail; Node v24.19.0 gives 4,499 / 0 fail. A real",
     "regression would be invisible in the first of those.",
     "",
   ];

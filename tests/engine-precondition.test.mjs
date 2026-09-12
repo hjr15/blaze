@@ -6,7 +6,7 @@
 // `engines: {node: ">=24"}`, nothing enforces it, and a developer who runs the suite under
 // the Node 20 that is first on `PATH` gets every `node:sqlite` file failing to LOAD and no
 // hint that the engine is why. Measured with `node --test` at this commit, twice, stably:
-// v20.20.2 gives 3,953 tests / 3,780 pass / 173 fail against v24.19.0’s 4,472 / 4,470 / 0.
+// v20.20.2 gives 3,980 tests / 3,807 pass / 173 fail against v24.19.0’s 4,499 / 4,497 / 0.
 // The ticket body in blaze-pm has been corrected to say this.
 //
 // So the fix is a precondition that fails FAST and says three things: what is required,
