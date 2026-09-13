@@ -18,7 +18,12 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync, spawnSync } from "node:child_process";
-import { ACTIVITY_SCRIPT, newFindingEvents, newForgeErrorEvents } from "../scripts/supervisor.mjs";
+import { activityScript, newFindingEvents, newForgeErrorEvents } from "../scripts/supervisor.mjs";
+
+// BLZ-578: the shipped renderer now takes the board page's per-response CSP nonce. These
+// tests read its SOURCE, not a rendered page, so any value serves — what matters is that
+// they still read the renderer that actually ships rather than a hand-copied twin.
+const ACTIVITY_SCRIPT = activityScript("test-nonce");
 
 const ESC = String.fromCharCode(27);
 const BEL = String.fromCharCode(7);

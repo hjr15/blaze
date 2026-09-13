@@ -31,6 +31,8 @@ import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admi
 import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
          ensureSetupTokenIgnored } from "./model/setup-token.mjs";
 import { actorFor } from "./model/identity.mjs";
+import { AttemptLimiter } from "./model/rate-limit.mjs";
+import { boardHeaders, cspNonce as boardNonce } from "./model/board-csp.mjs";
 import { handleSigninRoutes, readJsonBody, SIGNIN_PATH, preAuthHeaders, cspNonce,
          queryRefusalPageHtml } from "./model/signin.mjs";
 import { checkPasswordPolicy, MIN_PASSWORD_LENGTH } from "./model/passwords.mjs";
@@ -328,6 +330,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   // `let`, because completing setup adopts the identity it just created WITHOUT a
   // restart: leaving this null after setup would serve the new board with no credential
   // required, which is the refusal's own hole re-opened by the fix for it.
+  // BLZ-571. ONE LIMITER PER SERVER, not per request and not per module. Per request it
+  // would remember nothing; at module scope two boards served from one process would
+  // share (and evict) each other's buckets, and every test in a file would inherit the
+  // previous test's penalties. Its memory is capped — see rate-limit.mjs — so a long-
+  // lived board cannot grow it without bound.
+  const signinLimiter = new AttemptLimiter();
   let store = identity?.hasIdentity ? identity.store : null;
 
   return createServer(async (req, res) => {
@@ -544,7 +552,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // arrives here, so the fail-closed 404 for an unclassified API route is untouched.
     try {
       if (await handleSigninRoutes({ req, res, url: u, store, csrf: CSRF,
-                                     boardTitle: cfgFor(root).boardTitle })) return;
+                                     boardTitle: cfgFor(root).boardTitle,
+                                     limiter: signinLimiter,
+                                     trustedProxies: cfgFor(root).trustedProxies })) return;
     } catch {
       // The handler has its own try; this is the belt for the buckle. An uncaught throw
       // in an async handler ends the process for every connected session.
@@ -654,7 +664,15 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // AMBIENT board rather than the one this server was started against
       // (/view/<name> above already passes it) — a latent mismatch that
       // BLZ-133's stricter resolveRoots turns from wrong-data into a throw.
-      return send(req, res, 200, "text/html; charset=utf-8", pageHtml({ project, focus, flat, sprint, view, views, projectsDir }));
+      // BLZ-578. A FRESH NONCE PER RESPONSE, and the same value in the header and in the
+      // document — generated here, at the moment of the response, because that is the
+      // only place both halves are in one scope. Hoisting it to module or server scope
+      // would make it a constant an injected script could read off any element and copy,
+      // which is not a nonce at all.
+      const nonce = boardNonce();
+      return send(req, res, 200, "text/html; charset=utf-8",
+                  pageHtml({ project, focus, flat, sprint, view, views, projectsDir, nonce }),
+                  boardHeaders(nonce));
     }
     if (req.method === "POST") {
       // NOT authentication, and never was — ADR-0013 §7 and the ADR's own reproduction:

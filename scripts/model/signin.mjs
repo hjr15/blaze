@@ -25,6 +25,9 @@ import { SESSION_TTL_MS } from "./identity-store.mjs";
 import { hashToken } from "./identity.mjs";
 import { randomBytes } from "node:crypto";
 import { MIN_PASSWORD_LENGTH } from "./passwords.mjs";
+import { AttemptLimiter, clientAddressFor } from "./rate-limit.mjs";
+
+export { AttemptLimiter, clientAddressFor };
 
 export const SIGNIN_PATH = "/signin";
 export const SIGNOUT_PATH = "/signout";
@@ -259,8 +262,17 @@ document.getElementById("f").addEventListener("submit", async (e) => {
  *   on. Declining is how the routes stay ABSENT rather than hidden on a board with no
  *   users: there is nothing to sign in as, so the server's own 404 answers, and no new
  *   surface is added to an unconfigured board.
+ *
+ * BLZ-571. `limiter` and `trustedProxies` come from the SERVER, not from here, because
+ * the limiter must outlive the request and there are two servers that mount this handler
+ * (`serve.mjs` and `supervisor.mjs`). They are optional so that a caller constructing
+ * this handler directly is not broken by their absence — and because a limiter is a
+ * defence, not a correctness condition, both servers are pinned by their own tests as
+ * actually passing one. Without a limiter the route behaves exactly as it did before
+ * this ticket.
  */
-export async function handleSigninRoutes({ req, res, url, store, csrf, boardTitle }) {
+export async function handleSigninRoutes({ req, res, url, store, csrf, boardTitle,
+                                          limiter = null, trustedProxies = null }) {
   const path = url.pathname;
   if (path !== SIGNIN_PATH && path !== SIGNOUT_PATH) return false;
   // NO STORE MEANS NO ACCOUNTS, so there is no credential this could check and no session
@@ -315,6 +327,22 @@ export async function handleSigninRoutes({ req, res, url, store, csrf, boardTitl
       if (req.headers["x-blaze-csrf"] !== csrf) return json(403, { errors: ["bad csrf token"] });
 
       const secure = isSecureRequest(req);
+      // BLZ-571. CHARGED BEFORE scrypt, because the whole point is to stop paying for an
+      // attacker's attempts: ADR-0034 recorded that the KDF's ~50–100 ms was the only
+      // thing bounding a credential-stuffing run, and a limit applied after the verifier
+      // would leave that exactly as it was.
+      //
+      // `/signout` is deliberately outside this: it presents a session, mints nothing, and
+      // throttling it would strand a browser holding a cookie it is trying to give back.
+      const source = path === SIGNIN_PATH && limiter
+        ? clientAddressFor(req, { trustedProxies })
+        : null;
+      // NO CHECK BEFORE THE BODY IS READ, on purpose. The bucket is keyed on the (source,
+      // account) pair, and the account is IN the body — a pre-body check could only ever
+      // be per-source, and a per-source bucket is the one a viewer's correct password was
+      // able to wipe on the admin's behalf. Reading a size-capped JSON body is not the
+      // cost this limiter exists to stop paying; scrypt is, and scrypt sits below the
+      // charge. The one gate, at the one place it can be correct.
       if (path === SIGNOUT_PATH) {
         const presented = sessionFrom(req.headers);
         if (presented) {
@@ -339,8 +367,44 @@ export async function handleSigninRoutes({ req, res, url, store, csrf, boardTitl
       // something about what would have been right.
       if (typeof body?.email !== "string" || typeof body?.password !== "string") return refuse();
 
+      // BLZ-571. THE ATTEMPT IS COUNTED HERE, BEFORE THE AWAIT, NOT AFTER IT.
+      //
+      // Counting the FAILURE after `store.signIn` resolved left ~50-100 ms of scrypt with
+      // nothing accounting for the requests already in flight, so every request that
+      // arrived inside one KDF window read a zeroed bucket and went through: 200
+      // concurrent attempts from one address reached the KDF 200 times while 40 sequential
+      // ones reached it 5. See `AttemptLimiter.charge` for the measurements. `charge` is
+      // synchronous and indivisible — it decides and counts in one step that no other
+      // request can interleave with — so the (n+1)th concurrent attempt is refused while
+      // the first n are still inside the KDF.
+      //
+      // Only a CREDENTIAL CHECK moves the counter, which is why the charge sits below the
+      // body-shape checks: a malformed body or a bad CSRF token is refused without
+      // spending the source's allowance, so a misconfigured client cannot walk the
+      // operator into a wait they did not earn.
+      //
+      // THE BUCKET IS (SOURCE, ACCOUNT), and `body.email` is the account. A source-only
+      // bucket let any valid credential — a read-only viewer's — refund the guesses made
+      // at the ADMIN from the same address: four wrong guesses, one viewer sign-in, repeat,
+      // and 40 admin-password guesses reached the KDF in 3.1 s. The refund below can only
+      // ever touch the bucket the SAME account's guesses filled.
+      if (source !== null) {
+        const verdict = limiter.charge(source, body.email);
+        if (!verdict.ok) {
+          // Says no more about the account than the 401 does — an attacker learns only
+          // that they are being counted, which they were going to find out anyway. The
+          // `retry-after` is what keeps this a backoff rather than a lockout: the
+          // operator is told when to come back rather than left to guess.
+          return json(429, { errors: ["too many sign-in attempts from this address — wait and try again"] },
+            { "retry-after": String(Math.max(1, Math.ceil(verdict.retryAfterMs / 1000))) });
+        }
+      }
       const r = await store.signIn({ email: body.email, password: body.password });
       if (!r.ok) return refuse();
+      // The charge is REFUNDED on a correct password for THIS account, which is what keeps
+      // a burst of the operator's own mistyped passwords from outliving the moment they
+      // get it right — and nothing else.
+      if (source !== null) limiter.succeed(source, body.email);
       // The credential exists exactly here and is never logged, for the reason the setup
       // token is never logged: anything that reaches a log stream has to be rotated.
       return json(200, { ok: true, email: r.email, role: r.role, expiresAt: r.expiresAt },

@@ -21,6 +21,7 @@ import { CSRF } from "../scripts/views/page.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { loadIdentity } from "../scripts/model/identity-db.mjs";
 import { SESSION_COOKIE } from "../scripts/model/serve-auth.mjs";
+import { FREE_ATTEMPTS } from "../scripts/model/rate-limit.mjs";
 
 const PASSWORD = "correct horse battery staple";
 const dirs = [];
@@ -43,17 +44,36 @@ function board() {
 }
 after(() => { for (const d of dirs) rmSync(d, { recursive: true, force: true }); });
 
-async function app({ withUser = true } = {}) {
+const VIEWER_PASSWORD = "viewer viewer viewer viewer";
+
+async function app({ withUser = true, countSignIns = false, withViewer = false } = {}) {
   const root = board();
   if (withUser) {
     await addUser(root, { email: "op@example.com", role: "admin" });
+    if (withViewer) await addUser(root, { email: "eve@example.com", role: "viewer" });
     const id = loadIdentity(root);
     await id.store.setPassword({ email: "op@example.com", password: PASSWORD });
+    if (withViewer) await id.store.setPassword({ email: "eve@example.com", password: VIEWER_PASSWORD });
     id.close();
   }
-  const a = createApp(loadConfig({ root }), { root });
+  // BLZ-571. `counted.signIns` is how the concurrency test below observes the KDF itself
+  // rather than the status codes in front of it. MEASURED ON THIS SERVER, not inferred
+  // from the other one: supervisor.mjs mounts `handleSigninRoutes` verbatim, which is a
+  // reason to expect the same behaviour and not a reason to skip looking.
+  const counted = { signIns: 0 };
+  let identity;
+  if (countSignIns) {
+    const real = loadIdentity(root);
+    identity = { ...real, close: () => real.close(), store: new Proxy(real.store, {
+      get(target, prop, recv) {
+        if (prop !== "signIn") return Reflect.get(target, prop, recv);
+        return async (...args) => { counted.signIns += 1; return target.signIn(...args); };
+      },
+    }) };
+  }
+  const a = createApp(loadConfig({ root }), identity ? { root, identity } : { root });
   await new Promise((res) => a.server.listen(0, "127.0.0.1", res));
-  return { root, a, base: `http://127.0.0.1:${a.server.address().port}` };
+  return { root, a, counted, base: `http://127.0.0.1:${a.server.address().port}` };
 }
 
 const post = (base, path, body, headers = {}) =>
@@ -113,6 +133,71 @@ describe("`blaze start` has the same door as `blaze board`", () => {
       assert.equal((await fetch(`${base}/signin`)).status, 404);
     } finally { a.server.close(); }
   });
+
+  test("BLZ-571: a burst of failures is throttled on THIS server too", async () => {
+    // BLZ-359's lesson for the third time. The limiter is constructed per server, so a
+    // limiter wired into serve.mjs alone would leave `blaze start` — the DEFAULT command
+    // — with the unthrottled door this ticket exists to close, and every test in
+    // signin-rate-limit.test.mjs would still pass.
+    const { a, base } = await app();
+    try {
+      let throttled = null;
+      for (let n = 0; n < FREE_ATTEMPTS + 3 && !throttled; n++) {
+        const r = await post(base, "/signin", { email: "op@example.com", password: "nope nope nope" });
+        if (r.status === 429) throttled = r;
+      }
+      assert.ok(throttled, `no attempt was throttled within ${FREE_ATTEMPTS + 3} tries`);
+      assert.match(String(throttled.headers.get("retry-after")), /^\d+$/);
+      // Backoff, not lockout: it says when to come back, and the door is still servable.
+      assert.equal((await fetch(`${base}/signin`)).status, 200);
+    } finally { a.server.close(); }
+  });
+
+  test("BLZ-571: CONCURRENT failures are throttled on THIS server too, not just sequential ones",
+    async () => {
+      // MEASURED, NOT INFERRED. The blocking finding against the first version of this
+      // ticket was that the limit counted only attempts that waited their turn: 40
+      // sequential attempts cost the KDF 5 invocations, while 200 concurrent ones cost it
+      // 200 on this server (170 on `blaze board`) — and sustained, three bursts of 150
+      // reached it 419 times in 67 seconds against an intended 8. The reviewer verified
+      // serve.mjs only; this test is why "supervisor mounts the same handler, so it is
+      // probably fine" is not an answer.
+      const { a, base, counted } = await app({ countSignIns: true });
+      try {
+        const N = FREE_ATTEMPTS + 25;
+        const codes = await Promise.all(Array.from({ length: N }, () =>
+          post(base, "/signin", { email: "op@example.com", password: "nope nope nope" })
+            .then((r) => r.status)));
+        assert.equal(counted.signIns, FREE_ATTEMPTS,
+          `${counted.signIns} of ${N} concurrent attempts reached the password verifier, `
+          + `not ${FREE_ATTEMPTS} — the limit counts only attackers polite enough to wait `
+          + "their turn, so scrypt is still the only friction for everyone else");
+        assert.ok(codes.includes(429),
+          "not one concurrent attempt was refused, so nothing was limited at all");
+      } finally { a.server.close(); }
+    });
+
+  test("BLZ-571: a valid viewer cannot brute-force the admin from one address on THIS server either",
+    async () => {
+      // The refund-per-account fix on the OTHER server. supervisor.mjs shares the handler,
+      // and the re-review measured 40 admin guesses here too, so it is measured here too.
+      const { a, base, counted } = await app({ countSignIns: true, withViewer: true });
+      try {
+        let adminGuessesAtKdf = 0;
+        for (let round = 0; round < 4; round++) {
+          for (let g = 0; g <= FREE_ATTEMPTS; g++) {
+            const before = counted.signIns;
+            const r = await post(base, "/signin", { email: "op@example.com", password: "nope nope nope nope" });
+            if (counted.signIns > before) adminGuessesAtKdf += 1;
+            if (r.status === 429) break;
+          }
+          const v = await post(base, "/signin", { email: "eve@example.com", password: VIEWER_PASSWORD });
+          assert.equal(v.status, 200, "the viewer's own password must still work");
+        }
+        assert.ok(adminGuessesAtKdf <= FREE_ATTEMPTS,
+          `${adminGuessesAtKdf} admin guesses reached the KDF despite viewer sign-ins between rounds`);
+      } finally { a.server.close(); }
+    });
 
   test("a wrong password is refused identically here too", async () => {
     const { a, base } = await app();

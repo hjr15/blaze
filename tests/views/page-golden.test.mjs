@@ -18,10 +18,14 @@ function fixture() {
 }
 // CSRF is a per-process random UUID injected into the page — normalise it so the snapshot is deterministic.
 const norm = (h) => h.replace(/window\.__csrf = "[0-9a-f-]+"/, 'window.__csrf = "CSRF"');
+// BLZ-578: render WITH a nonce, so the snapshot guards that every <script> and <style>
+// carries it. A fixed value here (the real one is per response) keeps the bytes stable
+// while still making a tag that lost its stamp a visible diff.
+const NONCE = "GOLDEN-NONCE";
 const goldenPath = fileURLToPath(new URL("./page-golden.html", import.meta.url));
 
 test("pageHtml output matches the golden snapshot (byte-level; guards CSS + markup)", () => {
-  const html = norm(pageHtml({ project: "all", projectsDir: fixture(), now: 1751932800000, transitions: [] }));
+  const html = norm(pageHtml({ project: "all", projectsDir: fixture(), now: 1751932800000, transitions: [], nonce: NONCE }));
   if (!existsSync(goldenPath)) writeFileSync(goldenPath, html);  // first run captures the baseline
   assert.equal(html, readFileSync(goldenPath, "utf8"),
     "pageHtml output drifted from the golden snapshot — if this change is intended (e.g. Task 6 panel), delete tests/views/page-golden.html, re-run to regenerate, and review the diff.");

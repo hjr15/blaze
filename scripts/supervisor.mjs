@@ -13,6 +13,8 @@ import { reconcile } from "./reconcile.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
+import { AttemptLimiter } from "./model/rate-limit.mjs";
+import { boardHeaders, cspNonce as boardNonce } from "./model/board-csp.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { execFileSync } from "node:child_process";
 
@@ -55,7 +57,12 @@ export function supervisorScopeFor(method, pathname) {
 }
 
 // ---- the control strip + activity feed injected into the board page ----
-const CONTROLS_HTML = `
+// BLZ-578: FUNCTIONS OF THE NONCE, not constants. These two chunks carry the
+// supervisor's own `<style>` and `<script>`, and they reach the browser inside the same
+// document as the shell's — so under the board's nonce-only policy an un-stamped one is
+// dropped in silence: the control strip renders unstyled and the activity feed never
+// connects, with nothing on screen saying why.
+const controlsHtml = (nonce) => `
   <section id="blaze-app">
     <div class="ctl-strip">
       <strong>Loops</strong>
@@ -69,7 +76,7 @@ const CONTROLS_HTML = `
     </div>
     <ol id="activity" class="activity"></ol>
   </section>
-  <style>
+  <style nonce="${nonce}">
     #blaze-app { padding: 0 20px 8px; }
     .ctl-strip { display:flex; align-items:center; gap:12px; flex-wrap:wrap;
       padding:8px 10px; background:#161b22; border:1px solid #21262d; border-radius:8px; }
@@ -87,8 +94,8 @@ const CONTROLS_HTML = `
 // Exported so a test can run the SHIPPED renderer rather than a hand-copied twin —
 // a twin keeps passing after someone edits the real one, which is how the missing
 // warning branch survived review in the first place.
-export const ACTIVITY_SCRIPT = `
-  <script>
+export const activityScript = (nonce) => `
+  <script nonce="${nonce}">
     const act = document.getElementById("activity");
     const conn = document.getElementById("conn");
     function line(e) {
@@ -404,6 +411,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     bus.publish({ type: "status", loop: name, state: "stopped", ts: today() });
   }
 
+  // BLZ-571. `blaze start` is the DEFAULT command and mounts the same door, so it gets
+  // the same limit. BLZ-359's lesson, applied again: a control wired into one of these two
+  // servers is absent from the other.
+  const signinLimiter = new AttemptLimiter();
+
   const server = createServer(async (req, res) => {
     const u = new URL(req.url || "/", "http://localhost");
     const json = (code, obj) => {
@@ -424,7 +436,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     // route in either table is untouched.
     try {
       if (await handleSigninRoutes({ req, res, url: u, store, csrf: CSRF,
-                                     boardTitle: cfg.boardTitle })) return;
+                                     boardTitle: cfg.boardTitle,
+                                     limiter: signinLimiter,
+                                     trustedProxies: cfg.trustedProxies })) return;
     } catch {
       // Nothing wraps this async handler, and a throw would end the process for every
       // connected session rather than refuse one request.
@@ -546,16 +560,23 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // — matches serve.mjs's GET /, and a drilldown link is a full-page ?focus=
       // navigation, so matching on the PATH rather than the whole URL is what keeps it
       // from 404ing.
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8" });
+      // BLZ-578. `blaze start` is the DEFAULT command and renders the same board, so it
+      // carries the same policy — and its OWN two injected chunks need the same nonce as
+      // the shell's, which is why `controlsHtml` and `activityScript` take it rather
+      // than being constants. BLZ-359's lesson, applied again: a control wired into one
+      // of these two servers is absent from the other.
+      const nonce = boardNonce();
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...boardHeaders(nonce) });
       res.end(pageHtml({
         project: u.searchParams.get("project") || "all",
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
         sprint: u.searchParams.get("sprint") || null,
         view: u.searchParams.get("view") || "board",
-        afterHeader: CONTROLS_HTML,
-        beforeBodyEnd: ACTIVITY_SCRIPT,
+        afterHeader: controlsHtml(nonce),
+        beforeBodyEnd: activityScript(nonce),
         projectsDir,
+        nonce,
       }));
       return;
     }
