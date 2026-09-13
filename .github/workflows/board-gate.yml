@@ -55,5 +55,9 @@ jobs:
         env:
           BLAZE_PROJECTS_DIR: tests/fixtures/board-gate-real-shape/projects
 
+      # `npm test --` and not a bare `node --test`, so this step runs under the SAME two
+      # bounds as every other test job (BLZ-534) instead of declaring a third copy of them
+      # that can drift. A bare `node --test` gets neither: no hang watchdog, and Node's own
+      # `--test-timeout=0`, which is no per-test timeout at all.
       - name: Prove the gate discriminates (good passes; removed-key / bad-schemaVersion fail loud)
-        run: node --test tests/board-gate.test.mjs
+        run: npm test -- tests/board-gate.test.mjs

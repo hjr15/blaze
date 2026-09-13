@@ -62,3 +62,47 @@ describe("pg absent — the optional peer dependency is not installed", () => {
       "a corrupt install must not be reported as a missing package");
   });
 });
+
+// ── BLZ-534: THE SETUP WINDOW, ONE FRAME DEEPER ────────────────────────────────────────
+// `openPostgresRead` connects and THEN runs `checkDbSchema` and, on an empty database,
+// `createDbSchema`. Its two explicit refusals called `client.end()`; a THROW from either of
+// those calls did not, and both can throw for ordinary reasons — a connection dropped
+// mid-query, a permissions error, DDL that collides. What was left behind is a live
+// referenced TCP handle, and a Node process holding one of those cannot exit: BLZ-534's
+// hang, the same shape as the conformance suite's `seedPg` one frame up.
+//
+// Asserted here rather than through `openPostgresRead`, which cannot reach that window
+// without a real server — this file's whole point is that `pg` may not even be installed.
+describe("BLZ-534: a setup failure after connecting closes the connection", () => {
+  const fakeClient = () => { const c = { ended: 0 }; c.end = async () => { c.ended++; }; return c; };
+
+  test("a throw from setup closes the client and still surfaces the original failure", async () => {
+    const { closeOnSetupFailure } = await import("../../scripts/model/pg-storage.mjs");
+    const client = fakeClient();
+    await assert.rejects(
+      () => closeOnSetupFailure(client, async () => { throw new Error("schema check exploded"); }),
+      /schema check exploded/,
+      "closing must not swallow or replace the reason it is closing");
+    assert.equal(client.ended, 1,
+      "the connection was open when setup threw and nothing closed it — that is a live "
+      + "referenced socket, and the process holding it cannot exit");
+  });
+
+  test("a setup that succeeds hands back its value and leaves the client OPEN", async () => {
+    const { closeOnSetupFailure } = await import("../../scripts/model/pg-storage.mjs");
+    const client = fakeClient();
+    assert.equal(await closeOnSetupFailure(client, async () => "ready"), "ready");
+    assert.equal(client.ended, 0,
+      "the caller owns the connection once setup succeeds; closing it here would break "
+      + "every ordinary open");
+  });
+
+  test("a close that itself fails does not mask the failure that caused it", async () => {
+    const { closeOnSetupFailure } = await import("../../scripts/model/pg-storage.mjs");
+    const client = { end: async () => { throw new Error("end() failed too"); } };
+    await assert.rejects(
+      () => closeOnSetupFailure(client, async () => { throw new Error("the real problem"); }),
+      /the real problem/,
+      "the operator must be told what actually went wrong, not how the cleanup went");
+  });
+});

@@ -1,0 +1,257 @@
+// tests/engine-precondition.test.mjs — BLZ-601.
+//
+// THE CORRECTED PREMISE. BLZ-601 was filed saying this machine has no conforming Node.
+// It has one: `~/.local/node24/bin/node` is v24.19.0 and `node:sqlite` works there. The
+// defect is not absence, it is DISCOVERABILITY: `package.json` declares
+// `engines: {node: ">=24"}`, nothing enforces it, and a developer who runs the suite under
+// the Node 20 that is first on `PATH` gets every `node:sqlite` file failing to LOAD and no
+// hint that the engine is why. Measured with `node --test` at this commit, twice, stably:
+// v20.20.2 gives 3,980 tests / 3,807 pass / 173 fail against v24.19.0’s 4,499 / 4,497 / 0.
+// The ticket body in blaze-pm has been corrected to say this.
+//
+// So the fix is a precondition that fails FAST and says three things: what is required,
+// what is running, and how to get the required one — including, when the guard can find
+// one, the exact `export PATH=` line for a conforming Node already on the machine.
+//
+// Two places, because they catch different people:
+//   * `pretest` / `pretest:coverage` — `npm test` refuses to start at all.
+//   * this test file — someone running `node --test` directly bypasses npm, and gets one
+//     failure that explains the other 171.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, readFileSync, rmSync, symlinkSync } from "node:fs";
+import { homedir, tmpdir } from "node:os";
+import { dirname, join } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+import {
+  GUARD_EXIT_CODE, SYSTEM_NODE_ROOTS, candidateNodePaths, describeEngine, detectEngine,
+  discoverySources, requiredMajor,
+} from "../scripts/ci/require-engine.mjs";
+
+/** Hold the machine-global roots out, so an exact-list assertion is about the fake home
+ *  alone and not about whatever the machine running the suite happens to have installed. */
+const NO_SYSTEM_ROOTS = [];
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const GUARD = join(REPO, "scripts", "ci", "require-engine.mjs");
+
+test("BLZ-601: the required major comes from package.json, so it cannot drift from the declaration", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+  assert.equal(pkg.engines.node, ">=24");
+  assert.equal(requiredMajor(), 24);
+});
+
+test("BLZ-601: a Node below the floor is refused, and the refusal names required, detected, and a remedy", () => {
+  const d = describeEngine({ version: "v20.20.2", major: 20, sqlite: false, required: 24, conforming: [] });
+  assert.equal(d.ok, false);
+  assert.match(d.message, /Node 24/, "must name what is required");
+  // Anchored to the `detected:` line, not to the string appearing anywhere. An earlier
+  // version matched /v20\.20\.2/ loose and passed against a mutant that dropped the detected
+  // version entirely — the message quotes a measured v20.20.2 run elsewhere in its body.
+  assert.match(d.message, /detected: {2}v20\.20\.2$/m, "must name what is actually running");
+  assert.match(d.message, /node:sqlite/,
+    "must connect the engine to the symptom the developer is about to see");
+  assert.match(d.message, /nvm install 24|fnm install 24/, "must say how to get one");
+});
+
+test("BLZ-601: a conforming Node already on the machine is named with the exact PATH line", () => {
+  // The whole defect is discoverability. Telling someone to install Node 24 when they
+  // already have it, unfound, is the same failure one level up.
+  const d = describeEngine({
+    version: "v20.20.2", major: 20, sqlite: false, required: 24,
+    conforming: [{ path: "/opt/nodes/node24/bin/node", version: "24.19.0" }],
+  });
+  assert.equal(d.ok, false);
+  assert.match(d.message, /export PATH=\/opt\/nodes\/node24\/bin:\$PATH/,
+    "a conforming Node that was found must come with the line that selects it");
+  assert.match(d.message, /24\.19\.0/);
+});
+
+test("BLZ-601: a conforming Node passes, and the guard says nothing", () => {
+  const d = describeEngine({ version: "v24.19.0", major: 24, sqlite: true, required: 24, conforming: [] });
+  assert.equal(d.ok, true);
+  assert.equal(d.message, "");
+});
+
+test("BLZ-601: the floor is a major-version floor, not an equality — 25 must pass", () => {
+  assert.equal(describeEngine({ version: "v25.0.0", major: 25, sqlite: true, required: 24, conforming: [] }).ok, true);
+});
+
+test("BLZ-601: a Node at the floor whose node:sqlite is missing is still refused", () => {
+  // The floor exists BECAUSE of node:sqlite. A build without it satisfies the number and
+  // still fails 34 files, which is the confusing outcome this guard exists to prevent.
+  const d = describeEngine({ version: "v24.0.0", major: 24, sqlite: false, required: 24, conforming: [] });
+  assert.equal(d.ok, false);
+  assert.match(d.message, /node:sqlite/);
+});
+
+test("BLZ-601: THIS runtime satisfies the engine — a red suite here is a real failure, not the wrong Node", () => {
+  const engine = detectEngine();
+  const d = describeEngine({ ...engine, required: requiredMajor(), conforming: [] });
+  assert.equal(d.ok, true, d.message);
+});
+
+test("BLZ-601: the guard CLI exits 0 on a conforming runtime and prints nothing to stderr", () => {
+  const r = spawnSync(process.execPath, [GUARD], { encoding: "utf8", cwd: REPO });
+  assert.equal(r.status, 0, `stderr: ${r.stderr}`);
+  assert.equal(r.stderr.trim(), "");
+});
+
+test("BLZ-601: the guard CLI refuses loudly on a non-conforming runtime", () => {
+  // BLAZE_ENGINE_GUARD_FAKE_VERSION is a test seam, and the only one: it substitutes the
+  // detected version so the refusal path can be exercised anywhere, including on CI where
+  // every Node available is conforming. Without it this test could only run on a machine
+  // that happened to have an old Node, which is exactly the kind of check that quietly
+  // stops running.
+  const r = spawnSync(process.execPath, [GUARD], {
+    encoding: "utf8", cwd: REPO,
+    env: { ...process.env, BLAZE_ENGINE_GUARD_FAKE_VERSION: "v20.20.2" },
+  });
+  assert.equal(r.status, GUARD_EXIT_CODE, `stdout: ${r.stdout} stderr: ${r.stderr}`);
+  assert.match(r.stderr, /detected: {2}v20\.20\.2$/m);
+  assert.match(r.stderr, /^blaze requires Node 24 or newer/m);
+});
+
+test("BLZ-601: npm test cannot start under the wrong engine — the pre-scripts run the guard", () => {
+  const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
+  for (const name of ["pretest", "pretest:coverage"]) {
+    assert.match(pkg.scripts[name] ?? "", /scripts\/ci\/require-engine\.mjs/,
+      `npm run ${name.slice(3)} must refuse before running a suite whose failures would be `
+      + "the engine rather than the code");
+  }
+});
+
+// ── DISCOVERY, ON A MACHINE THAT IS NOT THIS ONE ───────────────────────────────────────
+// These tests assert the EXACT candidate list for a fabricated home, which only means
+// anything if every source the function reads is one the test controls. `candidateNodePaths`
+// also reads the machine-global roots, and those are not under `$HOME` — a fake home cannot
+// hold them out. Written without that, the four tests below were green on the author's box
+// and RED on a GitHub-hosted `ubuntu-latest` runner, which really does have `n` installed at
+// `/usr/local/n/versions/node`: the assertion was on the exact list, so a real Node the
+// runner happened to own read as a failure. The bug was in the test, not on the runner.
+// So the system roots are a parameter, every exact-list test passes `[]` for them, and the
+// one test below that is ABOUT them supplies its own root under the fake home.
+
+/** A throwaway home directory. `layout` is a list of relative `bin/node` paths to create,
+ *  each a symlink to a real Node so `findConformingNodes` can actually run it. */
+function fakeHome(t, layout) {
+  const home = mkdtempSync(join(tmpdir(), "blaze-engine-home-"));
+  t.after(() => rmSync(home, { recursive: true, force: true }));
+  for (const rel of layout) {
+    mkdirSync(join(home, dirname(rel)), { recursive: true });
+    symlinkSync(process.execPath, join(home, rel));
+  }
+  return home;
+}
+
+test("BLZ-601: a home with no ~/.local still finds an nvm Node — one absent directory must not end the search", (t) => {
+  // REVIEW FINDING. `candidateNodePaths` guarded only `existsSync(home)` and then read
+  // `join(home, ".local")` unconditionally. On a home without one that throws ENOENT,
+  // `safeCandidates()` swallowed it, and nvm/fnm/volta/n were never reached — so the guard
+  // told a developer who already had a conforming Node under nvm to go and install one.
+  // That is the headline feature failing on exactly the machines that need it: a fresh
+  // container, or a dev box that uses nvm and has no ~/.local at all. Reproduced before
+  // this fix: this same layout printed "No conforming Node was found".
+  const home = fakeHome(t, [".nvm/versions/node/v24.19.0/bin/node"]);
+  const found = candidateNodePaths(home, NO_SYSTEM_ROOTS);
+  assert.deepEqual(found, [join(home, ".nvm/versions/node/v24.19.0/bin/node")],
+    "an absent ~/.local must cost only ~/.local, not nvm, fnm, volta and n as well");
+});
+
+test("BLZ-601: every discovery source is independent — an unreadable one loses only itself", (t) => {
+  // The general form of the finding above. Each source is guarded on its own, so a home
+  // where any single location is missing or unreadable still yields the others.
+  const home = fakeHome(t, [
+    ".local/node24/bin/node",
+    ".nvm/versions/node/v24.19.0/bin/node",
+    ".fnm/node-versions/v24.19.0/installation/bin/node",
+    ".volta/tools/image/node/24.19.0/bin/node",
+  ]);
+  const found = candidateNodePaths(home, NO_SYSTEM_ROOTS);
+  assert.deepEqual(found.sort(), [
+    join(home, ".fnm/node-versions/v24.19.0/installation/bin/node"),
+    join(home, ".local/node24/bin/node"),
+    join(home, ".nvm/versions/node/v24.19.0/bin/node"),
+    join(home, ".volta/tools/image/node/24.19.0/bin/node"),
+  ].sort(), "all four home-rooted sources must be searched");
+});
+
+test("BLZ-601: ~/.local is searched for node* directories only, not every directory in it", (t) => {
+  // ~/.local also holds bin, lib, share and state. Widening the fix into "read everything
+  // under ~/.local" would spawn every one of them looking for a version string.
+  const home = fakeHome(t, [".local/node24/bin/node", ".local/share/bin/node"]);
+  assert.deepEqual(candidateNodePaths(home, NO_SYSTEM_ROOTS), [join(home, ".local/node24/bin/node")]);
+});
+
+test("BLZ-601: a home that does not exist at all yields no candidates and does not throw", () => {
+  assert.deepEqual(
+    candidateNodePaths(join(tmpdir(), "blaze-engine-home-does-not-exist"), NO_SYSTEM_ROOTS), []);
+});
+
+test("BLZ-601: the DEFAULTS a real run uses are the ones asserted, not just the parameters", () => {
+  // REVIEW FINDING, and the cost of the fix above. Parameterising `home` and `systemRoots`
+  // made the search testable — and then every test passed both explicitly, so nothing
+  // exercised the bindings a real run actually gets. Measured: with
+  // `candidateNodePaths(home = homedir(), systemRoots = [])` the suite was 49/49 GREEN, and
+  // with `home = "/nonexistent"` it was 49/49 GREEN. Production discovery could lose `n` and
+  // `$HOME` together without a single red test — green precisely because it was testing a
+  // configuration no real run uses. So the defaults are read with NO arguments here.
+  const parents = discoverySources().map((d) => d.parent);
+
+  const home = homedir();
+  assert.ok(parents.some((p) => p === join(home, ".nvm", "versions", "node")),
+    `nothing under this machine's actual home (${home}) is searched by default, so the guard `
+    + "would tell a developer with an nvm Node to go and install one");
+  assert.ok(parents.every((p) => p.startsWith(home) || SYSTEM_NODE_ROOTS.includes(p)),
+    "every source must be either home-rooted or one of the declared machine-global roots");
+  for (const root of SYSTEM_NODE_ROOTS) {
+    assert.ok(parents.includes(root),
+      `${root} is declared as a discovery root but is not bound into the default search`);
+  }
+
+  // The bindings are one thing; that the search USES them is another. `homedir()` reads
+  // `$HOME` on POSIX, so a child with a fabricated one shows the default actually resolving.
+  const rel = ".nvm/versions/node/v24.19.0/bin/node";
+  const fake = mkdtempSync(join(tmpdir(), "blaze-engine-defaulthome-"));
+  try {
+    mkdirSync(join(fake, dirname(rel)), { recursive: true });
+    symlinkSync(process.execPath, join(fake, rel));
+    // The module path travels in the ENVIRONMENT, not in argv: this file's guard runs its
+    // CLI when `process.argv[1]` is itself, so passing the path as an argument made the
+    // probe refuse under any Node below the floor and had nothing to do with what is
+    // being asserted here.
+    const r = spawnSync(process.execPath, ["--input-type=module", "-e",
+      'const m = await import(process.env.BLAZE_PROBE_MODULE);'
+      + ' console.log(JSON.stringify(m.candidateNodePaths()));'],
+      { encoding: "utf8", timeout: 30_000, env: {
+        ...process.env, HOME: fake,
+        BLAZE_PROBE_MODULE: pathToFileURL(join(REPO, "scripts", "ci", "require-engine.mjs")).href,
+      } });
+    assert.equal(r.status, 0, `the probe must run: ${r.stderr}`);
+    assert.ok(JSON.parse(r.stdout).includes(join(fake, rel)),
+      "called with no arguments, the search must actually read the running user's home — "
+      + `it did not find ${rel} under a home it was given as $HOME`);
+  } finally { rmSync(fake, { recursive: true, force: true }); }
+});
+
+test("BLZ-601: the machine-global roots are searched too, and `n`'s is one of them", (t) => {
+  // The half the four tests above deliberately hold out, asserted here instead so holding it
+  // out costs nothing. A root outside `$HOME` is searched on the same terms as a home-rooted
+  // one — found when it exists, skipped alone when it does not.
+  const home = fakeHome(t, ["fake-n/versions/node/v24.19.0/bin/node"]);
+  const root = join(home, "fake-n", "versions", "node");
+  assert.deepEqual(
+    candidateNodePaths(join(home, "no-such-home"), [root]),
+    [join(home, "fake-n/versions/node/v24.19.0/bin/node")],
+    "a machine-global root must be searched even when the home yields nothing");
+  assert.deepEqual(
+    candidateNodePaths(join(home, "no-such-home"), [join(home, "no-such-root"), root]),
+    [join(home, "fake-n/versions/node/v24.19.0/bin/node")],
+    "and an absent one must cost only itself, exactly as a home-rooted source does");
+
+  // The default list itself, so narrowing it silently is not free. `n` installs here, and a
+  // GitHub-hosted runner has it — which is how the portability bug in these tests was found.
+  assert.ok(SYSTEM_NODE_ROOTS.includes("/usr/local/n/versions/node"),
+    "dropping `n`'s install root would narrow discovery on exactly the machines that have it");
+});

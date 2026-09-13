@@ -17,11 +17,12 @@
 // When Postgres IS reachable the assertions are identical, not merely similar.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
+import { openDriver } from "../helpers/open-driver.mjs";
 
 const PG = process.env.BLAZE_TEST_PG_URL ?? null;
 
@@ -35,8 +36,13 @@ const CORPUS = [
   { id: "BLZ-4", num: 4, status: "defined", parent: "", links: [{ type: "Relates", target: "BLZ-1" }] },
 ];
 
-function seedFs() {
+// EVERY SEED RELEASES WHAT IT OPENS IN THE STATEMENT AFTER IT OPENS IT (BLZ-534). Each of
+// these does real work between creating a resource and returning, so a throw in that work —
+// a full disk here, a schema drift or a trigger in `seedPg` — must not strand the resource.
+// See tests/helpers/open-driver.mjs.
+function seedFs(release) {
   const dir = mkdtempSync(join(tmpdir(), "blaze-conf-"));
+  release(() => rmSync(dir, { recursive: true, force: true }));
   for (const t of CORPUS) {
     mkdirSync(join(dir, "BLZ", t.status), { recursive: true });
     writeFileSync(join(dir, "BLZ", t.status, `${t.id}-x.md`),
@@ -49,7 +55,8 @@ function seedFs() {
   return { s: fsReadStorage, root: dir };
 }
 
-function seedMem() {
+function seedMem(_release) {
+  // Nothing to release: an in-memory array holds no handle and no directory.
   return { s: memReadStorage(CORPUS.map((t) => ({
     frontmatter: { id: t.id, title: `${t.id} title`, type: "task", project: "BLZ",
                    created: "2026-01-01", updated: "2026-01-01",
@@ -58,8 +65,9 @@ function seedMem() {
   }))), root: null };
 }
 
-function seedSqlite() {
+function seedSqlite(release) {
   const s = openSqliteRead(":memory:", { create: true });
+  release(() => s.close?.());
   const ins = s.db.prepare(
     `INSERT INTO ticket (id,project_key,num,type,status,title,parent_id,parent_type,body,created_on,updated_on)
      VALUES (?,'BLZ',?,'task',?,?,?,?,?,'2026-01-01','2026-01-01')`);
@@ -70,9 +78,13 @@ function seedSqlite() {
   return { s, root: null };
 }
 
-async function seedPg() {
+async function seedPg(release) {
   const { openPostgresRead } = await import("../../scripts/model/pg-storage.mjs");
   const s = await openPostgresRead(PG, { create: true });
+  // THE LINE BLZ-534 TURNS ON. Everything below opens a live referenced TCP socket and then
+  // keeps working; a throw from any of those statements used to leave that socket open, and
+  // a `node --test` child holding one cannot exit.
+  release(async () => { await s.close?.(); });
   await s.client.query("TRUNCATE ticket_event, ticket_link, acceptance_criterion, worklog_entry, ticket CASCADE");
   for (const t of CORPUS)
     await s.client.query(
@@ -86,66 +98,60 @@ async function seedPg() {
 
 /** Every assertion the contract makes. Awaited, so sync and async drivers both pass. */
 async function conformance(make, name) {
-  await test(`${name}: getTicket resolves by id, with status and body`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: getTicket resolves by id, with status and body`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     const r = await s.getTicket(root, "BLZ-2");
     assert.equal(r.found?.frontmatter.id, "BLZ-2");
     assert.equal(r.found.status, "defined");
     assert.match(r.found.body, /body of BLZ-2/);
-    await s.close?.();
   });
 
-  await test(`${name}: getTicket returns found:null for an unknown id`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: getTicket returns found:null for an unknown id`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     assert.equal((await s.getTicket(root, "BLZ-999")).found, null);
-    await s.close?.();
   });
 
-  await test(`${name}: records carry project and status first-class`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: records carry project and status first-class`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     const r = (await s.getTicket(root, "BLZ-3")).found;
     assert.equal(r.project, "BLZ");
     assert.equal(r.status, "done");
-    await s.close?.();
   });
 
-  await test(`${name}: listChildren answers the drill`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: listChildren answers the drill`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     const kids = (await s.listChildren(root, "BLZ-1")).map((t) => t.frontmatter.id).sort();
     assert.deepEqual(kids, ["BLZ-2", "BLZ-3"]);
     assert.deepEqual(await s.listChildren(root, "BLZ-4"), []);
-    await s.close?.();
   });
 
-  await test(`${name}: blockersOf returns inbound Blocks only, never the ticket itself`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: blockersOf returns inbound Blocks only, never the ticket itself`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     const ids = (await s.blockersOf(root, "BLZ-1")).map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-2", "BLZ-3"], "BLZ-4 Relates; BLZ-1 blocks itself and must be excluded");
-    await s.close?.();
   });
 
-  await test(`${name}: listTickets yields the whole corpus`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: listTickets yields the whole corpus`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     const ids = [...await s.listTickets(root)].map((t) => t.frontmatter.id).sort();
     assert.deepEqual(ids, ["BLZ-1", "BLZ-2", "BLZ-3", "BLZ-4"]);
-    await s.close?.();
   });
 
-  await test(`${name}: listProjects returns the project keys`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: listProjects returns the project keys`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     assert.deepEqual(await s.listProjects(root), ["BLZ"]);
-    await s.close?.();
   });
 
-  await test(`${name}: dates are plain YYYY-MM-DD strings, not instants`, async () => {
+  await test(`${name}: dates are plain YYYY-MM-DD strings, not instants`, async (t) => {
     // Added after dual-write (BLZ-293) found what 32 assertions had missed: `pg`
     // decodes a Postgres `date` into a JS Date at LOCAL midnight, so 2026-01-01 read
     // from Sydney came back as "2025-12-31T13:00:00.000Z" — every created/updated date
     // shifted a day, in a direction that depends on the reader's timezone. Blaze stores
     // dates with no time and no zone; a driver that hands back an instant is wrong.
-    const { s, root } = await make();
-    const t = await s.getTicket(root, "BLZ-1");
-    const rec = t.found ?? t;
+    const { s, root } = await openDriver(make, t);
+    // `t` is the test context here, so the read is named for what it is.
+    const read = await s.getTicket(root, "BLZ-1");
+    const rec = read.found ?? read;
     // Assert the VALUE, not the shape. An earlier version of this checked only that the
     // string matched /\d{4}-\d{2}-\d{2}/ and passed against the bug: pg-storage's
     // `iso()` helper runs toISOString().slice(0,10) on a Date already parked at LOCAL
@@ -157,15 +163,13 @@ async function conformance(make, name) {
       assert.equal(v, "2026-01-01",
         `${field} must be the date the corpus stored, got ${JSON.stringify(v)}`);
     }
-    await s.close?.();
   });
 
-  await test(`${name}: changeToken is a stable opaque string`, async () => {
-    const { s, root } = await make();
+  await test(`${name}: changeToken is a stable opaque string`, async (t) => {
+    const { s, root } = await openDriver(make, t);
     const a = await s.changeToken(root);
     assert.equal(typeof a, "string");
     assert.equal(a, await s.changeToken(root));
-    await s.close?.();
   });
 }
 

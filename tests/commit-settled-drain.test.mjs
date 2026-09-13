@@ -18,6 +18,12 @@
 // The distinction that must survive, and the reason these are four tests and
 // not one: collapsing "settled" into "committed" would be WORSE than the bug,
 // because it would clear a ledger whose work never landed.
+// CLEANUP RUNS FROM `t.after`, NOT FROM THE LAST LINE OF THE TEST (BLZ-603). Every test
+// here mints a scratch repo under /tmp, and one of them a linked worktree beside it. Written
+// as a trailing `rmSync`, that cleanup is skipped by exactly the run you most want a clean
+// machine for — a failing one. Proved rather than argued: with a deliberately failing
+// assertion, the pre-BLZ-603 version of this file left `/tmp/blaze-settled-*` and
+// `/tmp/lane-*` behind and this version leaves none.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, cpSync, chmodSync, existsSync } from "node:fs";
@@ -80,8 +86,9 @@ function queueOutstanding(root, id, session = SESSION) {
 // ---------------------------------------------------------------------------
 // 1. The operator's exact case: every op already filed.
 // ---------------------------------------------------------------------------
-test("BLZ-590: a drain whose ops are ALL already filed clears the ledger and exits 0", () => {
+test("BLZ-590: a drain whose ops are ALL already filed clears the ledger and exits 0", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const id of ["OBA-1", "OBA-2", "OBA-3"]) queueAlreadyFiled(root, id);
   assert.equal(readEntries(root, SESSION).length, 3, "fixture must actually have queued three ops");
   const before = headOf(root);
@@ -95,15 +102,15 @@ test("BLZ-590: a drain whose ops are ALL already filed clears the ledger and exi
   assert.match(r.stdout, /3 op\(s\)/, "must name how many ops were settled");
   assert.deepEqual(readEntries(root, SESSION), [], "THE BUG: the ledger must be cleared, or the queue can never drain");
   assert.equal(headOf(root), before, "no commit was needed, so none may be invented");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
 // 2. The distinction that must survive. Same "nothing was committed" surface,
 //    opposite meaning — and the opposite handling.
 // ---------------------------------------------------------------------------
-test("BLZ-590: a genuine git commit failure (a refusing hook) still KEEPS the ledger and exits non-zero", () => {
+test("BLZ-590: a genuine git commit failure (a refusing hook) still KEEPS the ledger and exits non-zero", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   queueOutstanding(root, "OBA-4");
   const hook = join(root, ".git", "hooks", "pre-commit");
   writeFileSync(hook, "#!/bin/sh\nexit 1\n");
@@ -118,14 +125,14 @@ test("BLZ-590: a genuine git commit failure (a refusing hook) still KEEPS the le
   assert.doesNotMatch(r.stdout, /already filed/, "a hook refusal is not a settled op");
   assert.equal(readEntries(root, SESSION).length, 1, "the op must still be queued — its work never landed");
   assert.equal(headOf(root), before);
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
 // 3. Both at once: no op silently dropped, none committed twice.
 // ---------------------------------------------------------------------------
-test("BLZ-590: a partly settled drain commits the real part, settles the rest, and reports both", () => {
+test("BLZ-590: a partly settled drain commits the real part, settles the rest, and reports both", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const filed = queueAlreadyFiled(root, "OBA-5");
   const real = queueOutstanding(root, "OBA-6");
   const before = headOf(root);
@@ -140,7 +147,6 @@ test("BLZ-590: a partly settled drain commits the real part, settles the rest, a
   assert.match(shown, new RegExp(real.replace(/[.]/g, "\\.")), "the outstanding file is in the commit");
   assert.doesNotMatch(shown, new RegExp(filed.replace(/[.]/g, "\\.")), "the already-filed file must NOT be committed twice");
   assert.deepEqual(readEntries(root, SESSION), [], "both ops leave the queue — neither is silently dropped");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -154,8 +160,9 @@ test("BLZ-590: a partly settled drain commits the real part, settles the rest, a
 //    `diff --cached` and WITHOUT ever running `commit`. An implementation that
 //    ran the commit and read its output could not pass this.
 // ---------------------------------------------------------------------------
-test("BLZ-590: the settled verdict comes from asking the index, not from running git commit and reading its message", () => {
+test("BLZ-590: the settled verdict comes from asking the index, not from running git commit and reading its message", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const id of ["OBA-7", "OBA-8"]) queueAlreadyFiled(root, id);
   const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
   const shimDir = join(root, "gitshim");
@@ -184,7 +191,6 @@ test("BLZ-590: the settled verdict comes from asking the index, not from running
   assert.ok(!calls.includes("commit"), `git commit must never be run to find out: ${JSON.stringify(calls)}`);
   assert.equal(r.status, 0, `stderr: ${r.stderr}`);
   assert.deepEqual(readEntries(root, SESSION), []);
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -197,8 +203,9 @@ test("BLZ-590: the settled verdict comes from asking the index, not from running
 //     - a branch with its own upstream was measured against a ref it does not
 //       publish to, contradicting what git itself says about the branch.
 // ---------------------------------------------------------------------------
-test("BLZ-590: no divergence warning on a branch that is up to date with its OWN upstream", () => {
+test("BLZ-590: no divergence warning on a branch that is up to date with its OWN upstream", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   // origin/main one commit ahead of everything — the ref the warning used to hardcode.
   execFileSync("git", ["-C", root, "commit", "--allow-empty", "-q", "-m", "remote main only"]);
   execFileSync("git", ["-C", root, "update-ref", "refs/remotes/origin/main", "HEAD"]);
@@ -229,11 +236,11 @@ test("BLZ-590: no divergence warning on a branch that is up to date with its OWN
   assert.match(r.stdout, /flushed 1 op/, `stderr: ${r.stderr}`);
   assert.doesNotMatch(r.stderr, /behind/,
     `git calls this branch up to date with its upstream; blaze must not contradict it. stderr: ${r.stderr}`);
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: a master-based board still gets the divergence warning (the ref was hardcoded origin/main)", () => {
+test("BLZ-590: a master-based board still gets the divergence warning (the ref was hardcoded origin/main)", (t) => {
   const root = gitRepo(); // git init's default branch here is `master`
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   execFileSync("git", ["-C", root, "commit", "--allow-empty", "-q", "-m", "remote-only"]);
   execFileSync("git", ["-C", root, "update-ref", "refs/remotes/origin/master", "HEAD"]);
   execFileSync("git", ["-C", root, "reset", "-q", "--hard", "HEAD~1"]);
@@ -249,7 +256,6 @@ test("BLZ-590: a master-based board still gets the divergence warning (the ref w
   assert.match(r.stderr, /1 commit\(s\) behind origin\/master/,
     `a master board must get the same signal a main board gets. stderr: ${r.stderr}`);
   assert.match(r.stdout, /flushed 1 op/);
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -260,8 +266,9 @@ test("BLZ-590: a master-based board still gets the divergence warning (the ref w
 //    side. Reached by an ordinary environment state, not a theoretical one — a
 //    `git` that cannot run in this repo answers nothing at all.
 // ---------------------------------------------------------------------------
-test("BLZ-590: an op whose staged-ness probe cannot answer is never reported already filed — the ledger is kept", () => {
+test("BLZ-590: an op whose staged-ness probe cannot answer is never reported already filed — the ledger is kept", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   for (const id of ["OBA-11", "OBA-12"]) queueAlreadyFiled(root, id);
   const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
   const shimDir = join(root, "gitshim");
@@ -286,7 +293,6 @@ test("BLZ-590: an op whose staged-ness probe cannot answer is never reported alr
   assert.match(r.stderr, /ledger kept/);
   assert.doesNotMatch(r.stdout, /already filed/, "an unanswered probe is not evidence that an op was filed");
   assert.equal(readEntries(root, SESSION).length, 2, "the queue must survive a probe that could not look");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -321,8 +327,9 @@ function queueAbsent(root, id, { session = SESSION, branch = "master" } = {}) {
   return rel;
 }
 
-test("BLZ-590: an op recording only ABSENT paths is reported as superseded, never as matching HEAD", () => {
+test("BLZ-590: an op recording only ABSENT paths is reported as superseded, never as matching HEAD", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   queueAbsent(root, "OBA-20");
   const before = headOf(root);
 
@@ -339,11 +346,11 @@ test("BLZ-590: an op recording only ABSENT paths is reported as superseded, neve
   assert.equal(headOf(root), before, "there is nothing to stage, so no commit may be invented");
   assert.deepEqual(readEntries(root, SESSION), [],
     "cleared deliberately (ADR-0035): an unstageable op kept forever is the un-drainable queue this ticket removes");
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: settled and absent ops in one drain are reported as two different facts", () => {
+test("BLZ-590: settled and absent ops in one drain are reported as two different facts", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   queueAlreadyFiled(root, "OBA-21");
   queueAbsent(root, "OBA-22");
   const real = queueOutstanding(root, "OBA-23");
@@ -360,11 +367,11 @@ test("BLZ-590: settled and absent ops in one drain are reported as two different
   assert.match(shown, new RegExp(real.replace(/[.]/g, "\\.")));
   assert.doesNotMatch(shown, /OBA-21|OBA-22/, "neither the settled nor the absent op may enter the commit");
   assert.deepEqual(readEntries(root, SESSION), []);
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: the commit subject and body count only the ops that entered the commit", () => {
+test("BLZ-590: the commit subject and body count only the ops that entered the commit", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   queueAlreadyFiled(root, "OBA-24");
   queueAbsent(root, "OBA-25");
   queueOutstanding(root, "OBA-26");
@@ -379,7 +386,6 @@ test("BLZ-590: the commit subject and body count only the ops that entered the c
   assert.match(body, /OBA-26: create task/, "the committed op is in the body");
   assert.doesNotMatch(body, /OBA-24|OBA-25/,
     "the commit message must not list work this commit does not contain");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -403,8 +409,9 @@ test("BLZ-590: the commit subject and body count only the ops that entered the c
 // filesystem: superseded-here requires the op to say it was queued here.
 // ---------------------------------------------------------------------------
 
-test("BLZ-590: a git-rm'd path is committed as the deletion it is, never called absent", () => {
+test("BLZ-590: a git-rm'd path is committed as the deletion it is, never called absent", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const rel = "projects/OBA/backlog/OBA-92.md";
   writeFileSync(join(root, rel), "OBA-92 body");
   // A second tracked file, so `git rm` does not prune `projects/` out of existence and
@@ -432,11 +439,11 @@ test("BLZ-590: a git-rm'd path is committed as the deletion it is, never called 
   assert.equal(spawnSync("git", ["-C", root, "diff", "--cached", "--quiet"]).status, 0,
     "nothing of this op may be left staged after the run");
   assert.deepEqual(readEntries(root, SESSION), []);
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: an absent op queued on ANOTHER branch is held back and the ledger kept, not cleared", () => {
+test("BLZ-590: an absent op queued on ANOTHER branch is held back and the ledger kept, not cleared", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   appendEntry(root, {
     id: "OBA-93", op: "move", message: "OBA-93: in-review → done",
     files: ["projects/OBA/in-review/OBA-93.md"], ts: "t", session: SESSION, branch: "lane-v3",
@@ -454,11 +461,11 @@ test("BLZ-590: an absent op queued on ANOTHER branch is held back and the ledger
   assert.match(r.stderr, /lane-v3/, `the message must name where it belongs. stderr: ${r.stderr}`);
   assert.doesNotMatch(r.stdout, /superseded/, "this checkout established nothing about it");
   assert.equal(headOf(root), before);
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: an absent op queued on THIS branch still clears — holding everything back would be the old wall", () => {
+test("BLZ-590: an absent op queued on THIS branch still clears — holding everything back would be the old wall", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   queueAbsent(root, "OBA-94"); // branch defaults to this checkout's own
   const before = headOf(root);
 
@@ -468,11 +475,11 @@ test("BLZ-590: an absent op queued on THIS branch still clears — holding every
   assert.match(r.stdout, /superseded/, `stdout: ${r.stdout}`);
   assert.deepEqual(readEntries(root, SESSION), [], "its own checkout is the one place that CAN judge it");
   assert.equal(headOf(root), before);
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: the superseded sentence claims only the three trees this run actually read", () => {
+test("BLZ-590: the superseded sentence claims only the three trees this run actually read", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   queueAbsent(root, "OBA-95");
   const realGit = execFileSync("which", ["git"], { encoding: "utf8" }).trim();
   const shimDir = join(root, "gitshim");
@@ -492,11 +499,11 @@ test("BLZ-590: the superseded sentence claims only the three trees this run actu
   assert.ok(calls.includes("cat-file"),
     `HEAD must be READ before it is spoken about: ${JSON.stringify(calls)}`);
   assert.match(r.stdout, /HEAD/, "the sentence may mention HEAD, because HEAD was read");
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: a reconcile op's cleared tickets are named from its ids, not its synthetic entry id", () => {
+test("BLZ-590: a reconcile op's cleared tickets are named from its ids, not its synthetic entry id", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const ids = ["BLZ-1", "BLZ-2", "BLZ-3"];
   appendEntry(root, {
     id: "reconcile:BLZ", op: "reconcile", ids,
@@ -511,11 +518,11 @@ test("BLZ-590: a reconcile op's cleared tickets are named from its ids, not its 
     assert.match(r.stdout, new RegExp(id), `the line calls them "ticket(s)" — so name them. stdout: ${r.stdout}`);
   }
   assert.doesNotMatch(r.stdout, /reconcile:BLZ/, "the synthetic entry id is not a ticket");
-  rmSync(root, { recursive: true, force: true });
 });
 
-test("BLZ-590: an op recording no paths at all is held back, never declared absent over nothing", () => {
+test("BLZ-590: an op recording no paths at all is held back, never declared absent over nothing", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   appendEntry(root, { id: "OBA-96", op: "edit", message: "OBA-96: edit", files: [], ts: "t", session: SESSION, branch: "master" }, SESSION);
 
   const r = runCommit(root);
@@ -524,7 +531,6 @@ test("BLZ-590: an op recording no paths at all is held back, never declared abse
   assert.doesNotMatch(r.stdout, /superseded|absent/, "zero paths measured is not a measurement");
   assert.match(r.stderr, /recording no files/, `stderr: ${r.stderr}`);
   assert.equal(readEntries(root, SESSION).length, 1, "kept — there is nothing to establish either way");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -535,8 +541,9 @@ test("BLZ-590: an op recording no paths at all is held back, never declared abse
 //     one that really commits, so a rewrite that merely appends survivors would
 //     reorder them and be caught.
 // ---------------------------------------------------------------------------
-test("BLZ-590: held-back ops are written back byte-for-byte, in the queue's original order", () => {
+test("BLZ-590: held-back ops are written back byte-for-byte, in the queue's original order", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, "projects/OBA/backlog/OBA-1.md"), "real");
   appendEntry(root, { id: "OBA-A", op: "move", message: "OBA-A: lane", files: ["projects/OBA/gone-A.md"], ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
   appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: real", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t", session: SESSION, branch: "master" }, SESSION);
@@ -552,7 +559,6 @@ test("BLZ-590: held-back ops are written back byte-for-byte, in the queue's orig
   assert.match(r.stdout, /flushed 1 op\(s\)/, "the op this checkout CAN judge still commits");
   assert.equal(readFileSync(queue, "utf8"), expected,
     "the two lane ops must come back byte-for-byte, in their original order, and nothing else with them");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // The ordering above survives dropping the sort, because both survivors are appended in
@@ -566,8 +572,9 @@ test("BLZ-590: held-back ops are written back byte-for-byte, in the queue's orig
 // digits pins that A sort happens, not that it is NUMERIC. Survivors at indices 2 and 10
 // separate them: numeric gives [2, 10]; lexicographic gives ["10", "2"], and the queue comes
 // back with its two survivors swapped. Same bug, one order of magnitude up.
-test("BLZ-590: survivors at indices 2 and 10 come back in numeric order, not lexicographic", () => {
+test("BLZ-590: survivors at indices 2 and 10 come back in numeric order, not lexicographic", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   // 12 ops. Index 2 is held back at CLASSIFICATION (another branch, path in no tree);
   // index 10 is refused at PARTITION (another working tree) — so keepIdx is filled [10, 2].
   const lines = [];
@@ -595,7 +602,6 @@ test("BLZ-590: survivors at indices 2 and 10 come back in numeric order, not lex
   const after = readFileSync(queue, "utf8");
   assert.equal(after, expected,
     `survivors must come back as OBA-L2 then OBA-L10, byte-for-byte: ${JSON.stringify(after)}`);
-  rmSync(root, { recursive: true, force: true });
 });
 
 // The convention this gate inherits, pinned so changing it is a deliberate red rather than
@@ -603,8 +609,9 @@ test("BLZ-590: survivors at indices 2 and 10 come back in numeric order, not lex
 // `belongsHere` documents it as "treated as this tree's". The gate keeps that rather than
 // inventing a stricter rule than the guard running in front of it. 0 of the 210 live ops
 // are this shape.
-test("BLZ-590: an op with no recorded provenance at all is judged here, per belongsHere's convention", () => {
+test("BLZ-590: an op with no recorded provenance at all is judged here, per belongsHere's convention", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-97.md"), "legacy op, no provenance");
   appendEntry(root, { id: "OBA-97", op: "new", message: "OBA-97: legacy", files: ["projects/OBA/backlog/OBA-97.md"], ts: "t", session: SESSION }, SESSION);
 
@@ -614,7 +621,6 @@ test("BLZ-590: an op with no recorded provenance at all is judged here, per belo
   assert.match(r.stdout, /flushed 1 op\(s\)/,
     "a legacy op with no provenance still drains — a stricter gate would strand it forever");
   assert.deepEqual(readEntries(root, SESSION), []);
-  rmSync(root, { recursive: true, force: true });
 });
 
 // ---------------------------------------------------------------------------
@@ -707,17 +713,18 @@ const EVERY_STATE = [
 ];
 
 for (const c of EVERY_STATE) {
-  test(`BLZ-590: the fixture for '${c.state}' really reaches that state when the op is this checkout's`, () => {
+  test(`BLZ-590: the fixture for '${c.state}' really reaches that state when the op is this checkout's`, (t) => {
     const root = gitRepo();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
     const id = "OBA-100";
     c.seed(root, id);
     appendEntry(root, { id, op: "move", message: `${id}: m`, files: c.files(id), ts: "t", session: SESSION, branch: "master" }, SESSION);
     c.hereVerdict(runCommit(root, { env: c.env ? c.env(root) : {} }));
-    rmSync(root, { recursive: true, force: true });
   });
 
-  test(`BLZ-590: an op queued in ANOTHER checkout is held back whatever this tree says — the '${c.state}' case`, () => {
+  test(`BLZ-590: an op queued in ANOTHER checkout is held back whatever this tree says — the '${c.state}' case`, (t) => {
     const root = gitRepo();
+    t.after(() => rmSync(root, { recursive: true, force: true }));
     const id = "OBA-100";
     c.seed(root, id);
     appendEntry(root, { id, op: "move", message: `${id}: m`, files: c.files(id), ts: "t", session: SESSION, branch: "lane-x" }, SESSION);
@@ -732,7 +739,6 @@ for (const c of EVERY_STATE) {
     assert.doesNotMatch(r.stdout, /already filed|superseded|flushed/,
       `no verdict of any kind may be reached about it ('${c.state}'). stdout: ${r.stdout}`);
     assert.equal(headOf(root), before, "and nothing of it may reach a commit");
-    rmSync(root, { recursive: true, force: true });
   });
 }
 
@@ -753,8 +759,9 @@ for (const c of EVERY_STATE) {
 // collected at all. Provenance is a property of the RECORD, not of the tree, so
 // it needs no probe and can be asked before any path is gathered. May-not-judge
 // means may-not-touch.
-test("BLZ-590: a foreign op's file is not committed by this checkout, even when it is dirty here", () => {
+test("BLZ-590: a foreign op's file is not committed by this checkout, even when it is dirty here", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   // Ours — a real outstanding op, so the run genuinely reaches `git commit`.
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "ours");
   appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: ours", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t", session: SESSION, branch: "master" }, SESSION);
@@ -775,7 +782,6 @@ test("BLZ-590: a foreign op's file is not committed by this checkout, even when 
   assert.equal(
     spawnSync("git", ["-C", root, "diff", "--cached", "--quiet", "--", "projects/OBA/backlog/OBA-F.md"]).status, 0,
     "and it is not left staged in the index either");
-  rmSync(root, { recursive: true, force: true });
 });
 
 // Round 4's review found the cost of the leg above being unconditional: a DETACHED worktree
@@ -783,10 +789,18 @@ test("BLZ-590: a foreign op's file is not committed by this checkout, even when 
 // find its path in none of the three trees IT can see, call it superseded and clear it at
 // exit 0 — destroying the record while the real file sat uncommitted in the tree that
 // queued it. One checkout claims these ops, and it is the one the store sits beside.
-test("BLZ-590: a no-provenance op is held back by a worktree that is not the store's own", () => {
+test("BLZ-590: a no-provenance op is held back by a worktree that is not the store's own", (t) => {
   const root = gitRepo();
+  t.after(() => rmSync(root, { recursive: true, force: true }));
   const lane = join(root, "..", `lane-${Math.random().toString(36).slice(2)}`);
   execFileSync("git", ["-C", root, "worktree", "add", "-q", "--detach", lane]);
+  // `lane` is a sibling of `root` under /tmp, not a child of it, so removing `root` does
+  // not take it with it. `spawnSync` rather than `execFileSync` because this hook also
+  // runs after the root hook has already deleted the repo the command is `-C`'d into.
+  t.after(() => {
+    spawnSync("git", ["-C", root, "worktree", "remove", "--force", lane]);
+    rmSync(lane, { recursive: true, force: true });
+  });
   // The linked worktree needs its own copy of scripts/ (untracked in the fixture), and it
   // shares the store: `queueRoot` resolves through --git-common-dir back to `root`.
   cpSync(join(root, "scripts"), join(lane, "scripts"), { recursive: true });
@@ -803,6 +817,4 @@ test("BLZ-590: a no-provenance op is held back by a worktree that is not the sto
   assert.match(r.stderr, /record no provenance at all/,
     `and the reason names the field it does not have, not one it does. stderr: ${r.stderr}`);
   assert.doesNotMatch(r.stderr, /undefined|branch ''/, "never name a field the op never recorded");
-  execFileSync("git", ["-C", root, "worktree", "remove", "--force", lane]);
-  rmSync(root, { recursive: true, force: true });
 });
