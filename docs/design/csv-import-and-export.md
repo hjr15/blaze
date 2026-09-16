@@ -1901,6 +1901,13 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    set is the only evidence a signal-killed run leaves, exactly as ADR-0035 already rules for
    `blaze commit`: *"a caller that needs to know whether HEAD moved must read the stdout line or
    git, not the exit code."*
+7. **BLZ-587's Context is stale about `git add -A`, and this design does not repeat it.** The
+   ticket says `blaze migrate --live` *"is the one blaze command that runs `git add -A` over the
+   data repo rather than staging only what it wrote."* BLZ-139 had already scoped that call to a
+   pathspec (`scripts/migrate-runner.mjs:73`), and the comment above it is the record of that fix
+   (§5.4). The AC — *"staging is file-scoped — the importer never runs `git add -A`"* — still
+   stands and is met; only the justification is out of date. Worth correcting on the ticket so the
+   next reader does not go looking for a defect that was fixed.
 8. **Nothing serialises the write phase of two concurrent imports.** §7 states one-import-at-a-
    time as an operator constraint and says why the commit lock does not enforce it: it is taken
    inside `commitFile` after the writes (`scripts/serve-commit.mjs:9`) and never in batch mode.
@@ -1911,13 +1918,6 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    establish before it may write, which is that code's definition. One test: two `--apply` runs
    over one file, one exits 5 with nothing written, the board holds each source key once. Its
    own ticket, blocking nothing in this design's gates and everything in its concurrency claim.
-7. **BLZ-587's Context is stale about `git add -A`, and this design does not repeat it.** The
-   ticket says `blaze migrate --live` *"is the one blaze command that runs `git add -A` over the
-   data repo rather than staging only what it wrote."* BLZ-139 had already scoped that call to a
-   pathspec (`scripts/migrate-runner.mjs:73`), and the comment above it is the record of that fix
-   (§5.4). The AC — *"staging is file-scoped — the importer never runs `git add -A`"* — still
-   stands and is met; only the justification is out of date. Worth correcting on the ticket so the
-   next reader does not go looking for a defect that was fixed.
 
 One place the design is **stricter** than a ticket: BLZ-587 asks that an enum outside the registry
 be refused; this design also refuses a *silent coercion* of `priority`, which `blaze migrate`
@@ -1962,7 +1962,7 @@ from.
 
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
-| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, **`sourceIdColumn`**, the `name`-equals-basename rule with `canonical` reserved, and the durable **`source-ids/<name>.jsonl`** store — an **outcome** log appended per row **between the ticket write and `done`** (§5.3 step 6) through `appendRegularFileSync`, opened before any write under exit 5, append-only with first-occurrence lookup; **and the inspection verb `blaze import repair <receipt>`** (§5.3) — **dry run by default, writes under `--apply`** (ADR-0037 §4), the receipt read, the mapping-file check (absent ⇒ exit 3 before any write), the four-state rule, park → truncate → pair → `resolved` in that order, the torn-receipt `\n` + `torn-line-parked` rule, exit 5 whenever a row remains unresolved (dry run and apply alike), staging through `commitOrQueue` with a new `import-repair` `OP_LABEL` entry (§5.4); **estimate 240 min** for the verb within C1. **Two tests:** an unwritable map ⇒ exit 5 with nothing written; **the map append itself failed at row N** ⇒ ticket N on disk, N−1 pairs, no `done`; re-import refuses with 5; `repair` ⇒ N pairs and a `pair-appended` `resolved` after the pair, with a kill between the two appends leaving the refusal in force; then rows above N created, 1..N skipped, no duplicate, no phantom. **No model** | **gap — new ticket** | B1, B2 |
+| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, **`sourceIdColumn`**, the `name`-equals-basename rule with `canonical` reserved, and the durable **`source-ids/<name>.jsonl`** store — an **outcome** log appended per row **between the ticket write and `done`** (§5.3 step 6) through `appendRegularFileSync`, opened before any write under exit 5, append-only with first-occurrence lookup; **and the inspection verb `blaze import repair <receipt>`** (§5.3) — **dry run by default, writes under `--apply`** (ADR-0037 §4), the receipt read, the mapping-file check (absent ⇒ exit 3 before any write), the four-state rule, park → truncate → pair → `resolved` in that order, the torn-receipt `\n` + `torn-line-parked` rule, exit 5 whenever a row remains unresolved (dry run and apply alike), staging through `commitOrQueue` with a new `import-repair` `OP_LABEL` entry (§5.4); **estimate 240 min** for the verb within C1. **Two tests:** an unwritable map ⇒ exit 5 with nothing written; **the map append itself failed at row N** ⇒ ticket N on disk, N−1 pairs, no `done`; re-import refuses with 5; `repair --apply` ⇒ N pairs and a `pair-appended` `resolved` after the pair, with a kill between the two appends leaving the refusal in force; then rows above N created, 1..N skipped, no duplicate, no phantom. **No model** | **gap — new ticket** | B1, B2 |
 | C2 | **The proposer + the confirmation** (`scripts/model/import-mapping-propose.mjs`, `blaze import propose-mapping`) | Spawn `agentCommand`; render §4.4; write the mapping file and nothing else | **gap — new ticket** | C1 |
 | C3 | **The boundary guard** | §4.3's assertions over a **PATH-shadowed sentinel stub** (`stubGh` pattern, `tests/reconcile-delivery-truth.test.mjs:65-73`): **two** stubs with **two** sentinels; import succeeds leaving neither; `propose-mapping` fails with `ENV_HIT`; `propose-mapping` with `BLAZE_AGENT_COMMAND` **unset** fails with `PATH_HIT` (without which the PATH arm is never executed); both repointed at benign stubs, `propose-mapping` succeeds. Plus the one surviving static assertion. Explicitly **not** the first draft's three static assertions (two unsatisfiable) nor the second draft's in-process patch (`cli.mjs:9` spawns a separate process) | **gap — new ticket** | C2 |
 
