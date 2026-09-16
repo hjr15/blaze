@@ -14,11 +14,13 @@ import { readdirSync, readFileSync, statSync, realpathSync,
   // BLZ-535 F5a: the corpus-scope case needs a throwaway tree of its own
   mkdtempSync, writeFileSync, rmSync, symlinkSync } from "node:fs";
 import { tmpdir } from "node:os";
+import { execFileSync } from "node:child_process";
 // the whole surface of both fs modules, for BLZ-535's derived write-seam ledger
 import * as fsCallbacks from "node:fs";
 import * as fsPromises from "node:fs/promises";
 import { join, relative } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { createRequire, isBuiltin } from "node:module";
 // BLZ-535: a devDependency, never a dependency. This package ships zero runtime deps, and
 // this parser is loaded by one TEST. See the banner below for why a parser and not a reader.
 import { parse } from "acorn";
@@ -291,7 +293,9 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      because it reaches `openSync`, and it opens O_RDONLY|O_NONBLOCK and provably cannot
 //      create.
 //      The allowlist is 44 entries for it, and it now means what it says: THESE ARE THE
-//      MODULES THAT CAN CAUSE A WRITE. One of them is a VIEW — rendering the board refreshes
+//      MODULES THAT CAN CAUSE A WRITE THROUGH node:fs — round 10 measured three in-process
+//      writers that are not node:fs at all, and they are a stated residual below rather than
+//      a claim. One of them is a VIEW — rendering the board refreshes
 //      the git-derived transitions cache — which is the read path touching disk, the same
 //      class of defect as contentHash, named instead of invisible.
 //
@@ -340,6 +344,70 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //   same call is what makes a symlink resolve to its target, which IS testable here and is
 //   tested, so the arm is exercised rather than asserted.
 //
+// ROUND 11 — THE SAME THREE FINDINGS, REFUTED AGAIN, and the pattern named by the review: each
+// of rounds 9 and 10 closed the exact spellings the previous reviewer planted and left the
+// CLASS open. So this round wrote each arm's PROPERTY down first and then made the code
+// enforce it over every AST shape that can carry it — the shapes the review planted are rows
+// in the tests, and so are the ones it did not.
+//
+//   A. THE FLAG RULE WAS IMPLEMENTED OVER TWO CALLEE SHAPES. A bare identifier and one-level
+//      `ns.member`, with the options read out of an inline literal or one `const` hop to one,
+//      and the loop ran BEFORE the fixpoint that promotes `promises` into a namespace. Seven
+//      plants, each truncating a real 26-byte file to 0 at 20 pass / 0 fail: `fs.promises
+//      .readFile` (two levels), a named `promises` import (ordering), `.call`, `new
+//      ReadStream`, `readFileSync(...args)` off a const array, and `const o = {}; o.flag =
+//      "w+"` — an object that was empty when the hop read it.
+//      THE PROPERTY: any call or construction that REACHES an fs member — through any callee
+//      shape — carrying an options value whose `flag`/`flags` CANNOT BE PROVEN read-only is
+//      an offence. "Proven" is fail-closed: an argument this reader cannot see the inside of
+//      is not proven. The arm now runs LAST, after every namespace and alias is known; it
+//      walks member chains to any depth, `.call`/`.apply`/`.bind`/`Reflect.apply`, `new`,
+//      spread from a const array, sequence and optional-chain callees, and local aliases of a
+//      member; and it reads an options object only when it can prove nothing else touched
+//      it. Which members an OPAQUE options value matters for is not listed — it is DERIVED,
+//      by probing every read member against a missing path with `{ flag: "w+" }` and
+//      recording which ones create. `readdirSync(dir, opts)` cannot be turned into a write by
+//      any flag, and Node's own answer is what says so.
+//
+//   B. "REPORTED VS UNLOADABLE" WAS FALSE. The round-9 residual said a string resolving to
+//      nothing on disk was a module Node would not load. Node's resolution does more than
+//      check the exact path: an extensionless `require("../outside-writer")` loads
+//      `outside-writer.js`, a directory loads through its package.json `main`, and a
+//      `createRequire("file:///elsewhere/")` resolves its argument against ELSEWHERE. Five
+//      plants, five real writes, at 20 pass / 0 fail — plus the string parked in a `const`,
+//      which round 5 had claimed closed, and a `new Worker(new URL(...))` the loop never
+//      examined.
+//      THE PROPERTY: any constant string that NODE WOULD LOAD from outside this tree is an
+//      offence wherever it sits, and "would load" is answered by Node's own resolver rather
+//      than by `statSync` — `createRequire(from).resolve(spec)` does the extension search,
+//      the directory `main`, and the `node_modules` walk without loading anything. The base
+//      is the module, or the constant seed of the loader the string is handed to, through a
+//      `const` if the loader was parked in one. A string Node would NOT load is a path being
+//      built and is left alone: the residual is now between "reported" and "runs", and is
+//      stated as such below.
+//
+//   C. THE MAPPED PATH WAS RESOLVED AGAINST THE MODULE. package.json's `imports` returned
+//      `./scripts/loops/groomer.mjs`, the resolver saw a leading dot and based it on the
+//      importing module's URL, and `#g` landed at `scripts/scripts/loops/groomer.mjs` —
+//      matching no pin. A real `imports` map plus `import { saveState } from "#g"` wrote a
+//      state.json at 20 pass / 0 fail; the only red was the tripwire on the manifest, a
+//      canary on the package.json edit and not on the planted module. And a bare specifier
+//      was filed as somebody else's package before realpath ever ran, so
+//      `node_modules/self-link -> ..` walked straight back into the tree unjudged.
+//      THE PROPERTY: a mapped path is relative to the PACKAGE ROOT; a bare specifier is
+//      wherever Node's resolver and then realpath say it is, and only a package that really
+//      lives under node_modules is somebody else's. The map is read by this reader — it fails
+//      closed on a conditional object, which Node would resolve one way under `require` and
+//      another under `import` — and the filesystem half is Node's. Both are exercised END TO
+//      END through `writeSeamOffenders`, with the manifest swapped for a synthetic one and a
+//      real symlink under node_modules, and the assertion is `saveState`, not a lookup result.
+//
+//   And a scope gap the review measured that no residual named: `v8.writeHeapSnapshot(p)`,
+//   `process.report.writeReport(p)` and `new DatabaseSync(p)` each put bytes on disk with no
+//   fs specifier in the module, at 20 pass / 0 fail. This guard's subject is node:fs; the
+//   sentence that claimed more is narrowed, and every in-process writer this file knows of is
+//   named in the residual below.
+//
 // THIS FILE HARD-DEPENDS ON `acorn`, and that is a failure mode worth naming: without
 // `npm ci` the whole file dies at import with ERR_MODULE_NOT_FOUND — 1 test, 1 fail — which
 // is a MISSING GUARD wearing the clothes of a failing one. It is a devDependency, `npm ci`
@@ -348,16 +416,33 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //
 // WHAT THIS STILL CANNOT SEE, stated rather than left to look total. This guard now parses,
 // but it is not a scope analyser and not a linker, and each of those is a hole:
-//   * A CALL-ARGUMENT SPECIFIER NAMING A FILE THAT DOES NOT EXIST. Round 9 closed the case
-//     that matters — a string resolving to a real file outside the tree is reported wherever
-//     it sits — but a string that resolves to NOTHING is still not reported from a bare call
-//     argument, because `join(root, "../x")` is a path being built and reporting every string
-//     passed to every function would report the tree. A module that is not on disk is not a
-//     module Node will load, so the gap is between "reported" and "unloadable" rather than
-//     between "reported" and "runs".
-//   * AN OPTIONS OBJECT THIS READER CANNOT SEE. The flag rule reads an object literal, and
-//     one local `const` hop to reach one. `readFileSync(p, optionsFromSomewhereElse)` is not
-//     followed further: this reader does no dataflow, here or anywhere.
+//   * A STRING NODE WOULD LOAD THAT THIS READER CANNOT SEE OR CANNOT PLACE — the gap is
+//     between "reported" and "runs", and it has three edges. A string that is not constant
+//     (`import(name)`, `require(process.env.X)`) is reported as OPAQUE where the result reaches
+//     an fs member and not otherwise. A constant string is resolved against the MODULE, or
+//     against the constant seed of the loader it is handed to; a loader that resolves against
+//     the CURRENT DIRECTORY instead — `new Worker("../x.mjs")` with a plain path, `spawn(node,
+//     ["x.mjs"])` — is judged against the module, which is the wrong base, and a relative path
+//     that resolves to nothing there is left alone as a path being built. And a loader whose
+//     base is itself computed (`createRequire(someUrl)`) is judged against the module. What is
+//     no longer a residual: extension search, directory `main`, `file:` bases, `#imports`,
+//     self-references, symlinks under node_modules, and a string parked in a `const` — every
+//     one of those is resolved the way Node resolves it.
+//   * AN OPTIONS VALUE THIS READER CANNOT SEE INTO. The flag rule reads an object literal,
+//     and a local binding it can PROVE nothing else touched. `new Opts()`, `Object.assign({},
+//     …)`, `opts()` and a value from another module are not proven, and for a member Node
+//     has shown will create under a flag they are REPORTED — the fail-closed side — while
+//     for every other read member they are left alone. This reader does no dataflow beyond
+//     that proof, here or anywhere.
+//   * A WRITE THAT IS NOT node:fs. This guard's subject is the fs surface, and Node has
+//     other in-process writers: `v8.writeHeapSnapshot` and `v8.setHeapSnapshotNearHeapLimit`,
+//     `process.report.writeReport`, `node:sqlite`'s `DatabaseSync` (which creates the file it
+//     opens — `model/sqlite-storage.mjs` and `model/identity-db.mjs` use it, and one of them is
+//     the db storage driver), `node:trace_events`, `node:wasi` with a preopen, `module
+//     .enableCompileCache`, a `net`/`http` server listening on a socket PATH, `repl`'s `.save`
+//     and history, and `process.dlopen`. Each is a builtin this file does not read, and round
+//     10 measured three of them landing bytes at 20 pass / 0 fail. They are named here so the
+//     claim above is exact, not because this file covers them.
 //   * A WRITE REPACKAGED BY A MODULE THE ALLOWLIST DOES NOT NAME. Every module it DOES name
 //     is pinned export by export since D3, so that half is closed. A module the allowlist
 //     does not name cannot repackage a write without being an offender itself — it would
@@ -456,6 +541,73 @@ function deriveSurface(mods) {
 }
 const { write: WRITE_SURFACE, namespaces: FS_NAMESPACE_MEMBERS, members: FS_MEMBERS } =
   deriveSurface([fsCallbacks, fsPromises]);
+
+/** ROUND 11, Finding A. The READ members that CREATE when handed an open flag, derived by
+ *  asking Node rather than by listing them: every member the read-only ledger vouches for is
+ *  called against a path that does not exist with `{ flag: "w+", flags: "w+" }`, and the ones
+ *  that leave a file behind are the ones a caller can turn into a write. On Node 24 that is
+ *  `readFile`, `readFileSync`, `createReadStream`, `ReadStream` and `FileReadStream`, and the
+ *  test below asserts each is in the set — a probe that stopped probing would return an empty
+ *  set that exempts every read, and an empty set is what a dead derivation looks like.
+ *
+ *  The probe runs in a CHILD PROCESS, synchronously, for two reasons that are both about
+ *  this file. A top-level `await` here would suspend this module with its first tests already
+ *  registered, and `node:test` starts running them while the rest of the file — every `const`
+ *  below — is still in its temporal dead zone: MEASURED as two ReferenceErrors and a green
+ *  guard. And a probe of `watchFile` and the stream constructors leaves handles open that the
+ *  test runner reports as "activity after the test ended". A child owns its handles and takes
+ *  them with it when it exits. It creates its files under a `mkdtemp` directory and removes
+ *  them; nothing here touches the tree. */
+const FLAG_PROBE = `
+  import * as fsCallbacks from "node:fs";
+  import * as fsPromises from "node:fs/promises";
+  import { existsSync, mkdtempSync, rmSync, writeSync } from "node:fs";
+  import { join } from "node:path";
+  import { tmpdir } from "node:os";
+  const candidates = JSON.parse(process.env.BLZ535_FLAG_PROBE);
+  const dir = mkdtempSync(join(tmpdir(), "blz535-flag-"));
+  const probes = []; const pending = [];
+  const settle = (value) => new Promise((resolve) => {
+    if (!value || typeof value !== "object") return resolve();
+    if (typeof value.then === "function") return value.then(() => resolve(), () => resolve());
+    if (typeof value.on === "function") {           // a stream: opened, or refused
+      for (const ev of ["open", "ready", "error", "close"]) value.on(ev, () => resolve());
+      return;
+    }
+    resolve();
+  });
+  for (const [tag, mod] of [["c", fsCallbacks], ["p", fsPromises]]) {
+    for (const name of candidates) {
+      let fn; try { fn = mod[name]; } catch { continue; }
+      if (typeof fn !== "function") continue;
+      const path = join(dir, name + "-" + tag);
+      probes.push([name, path]);
+      const options = { flag: "w+", flags: "w+" };
+      try {
+        // a class is constructed; a function is called, with a callback in case it wants one
+        if (/^[A-Z]/.test(name)) pending.push(settle(new fn(path, options)));
+        else pending.push(new Promise((resolve) => {
+          const out = fn(path, options, () => resolve());
+          settle(out).then(resolve);
+        }));
+      } catch { /* a member that refuses the shape cannot create through it */ }
+    }
+  }
+  await Promise.race([Promise.allSettled(pending), new Promise((r) => setTimeout(r, 2000))]);
+  const takers = [...new Set(probes.filter(([, path]) => existsSync(path)).map(([name]) => name))].sort();
+  rmSync(dir, { recursive: true, force: true });
+  writeSync(1, JSON.stringify(takers));
+  process.exit(0);   // watchers and streams keep the loop alive; this child has nothing more to say
+`;
+function deriveFlagTakers() {
+  const candidates = [...NON_MUTATING];
+  const out = execFileSync(process.execPath, ["--input-type=module", "--no-warnings", "-e", FLAG_PROBE], {
+    env: { ...process.env, BLZ535_FLAG_PROBE: JSON.stringify(candidates) },
+    encoding: "utf8", stdio: ["ignore", "pipe", "ignore"], timeout: 20_000,
+  });
+  return new Set(JSON.parse(out));
+}
+const FLAG_TAKERS = deriveFlagTakers();
 
 /** Parse a module with acorn. EVERY executable file in this tree is ESM under
  *  `"type": "module"`, but a `.cjs` file is a script, so both goals are tried before giving
@@ -627,7 +779,8 @@ const unknownSeamMember = (name) => `an unpinned member \`${name}\` of the write
  *                 third rewording. It is gone, and with it every exemption it carried: if an
  *                 export writes, it is a `writes`, and every module that imports one is named
  *                 in the allowlist with its reason. The allowlist is longer for it, and it
- *                 now means what it says: these are the modules that can cause a write.
+ *                 now means what it says: these are the modules that can cause a write
+ *                 through node:fs.
  *    inert      — reaches nothing mutating in node:fs at all.
  *
  *  None of those three is taken on trust. `the allowlist's own modules are pinned, export by
@@ -670,7 +823,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // The pending ledger: an op queue under a caller-supplied root, appended to and cleared.
   ["pending-ledger.mjs", { writes: ["appendEntry", "clearLedger", "quarantineDropped"], sanctioned: [], inert: ["sessionId", "queueRoot", "ledgerPath", "readQueue", "readEntries",
       "readForDrain", "quarantinePath", "listQueues", "listQueuesResult", "strandedQueues",
-      "worktreeBranchOwners", "belongsHere", "outstandingFiles"] }],
+      "worktreeBranchOwners", "belongsHere", "outstandingFiles",
+      "consumedPrefixIntact"] }],   // BLZ-608 (#175): a byte comparison, and the pin caught it
   // The commit lock: a lockfile under a caller-supplied root, taken and released.
   ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock"], sanctioned: [],
     inert: ["lockPath"] }],
@@ -695,6 +849,11 @@ const SEAM_WRITE_PROVIDERS = new Map([
         "_existsSync"] }],
   ["ci/mutate-schedule.mjs", { writes: ["createSandbox", "discardSandbox"], sanctioned: [],
     inert: ["SANDBOX_CONTENTS", "MUTATIONS"] }],
+  // BLZ-603 (#170), caught by this guard on the rebase: the only write is `--write` in the
+  // CLI block, re-recording the debt ratchet beside the module. No export reaches it.
+  ["ci/temp-cleanup-guard.mjs", { writes: [], sanctioned: [],
+    inert: ["TESTS_DIR", "DEBT_FILE", "scanSource", "NOT_CORPUS", "testFiles", "scanCorpus",
+      "readDebt", "compareToDebt"] }],
   ["db-runner.mjs", { writes: ["runDb"], sanctioned: [], inert: ["USAGE"] }],
   // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
   // the loader that goes through it.
@@ -737,7 +896,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["new-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["resolve-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
-  ["supervisor.mjs", { writes: ["createApp", "startSupervisor"], sanctioned: [], inert: ["ACTIVITY_SCRIPT", "SHA_RE", "SUPERVISOR_HOST", "SUPERVISOR_SCOPES", "newFindingEvents", "newForgeErrorEvents", "newRunErrorEvent", "supervisorScopeFor"] }],
+  // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
+  // pin caught it on the rebase: a template of inline HTML, no fs in it.
+  ["supervisor.mjs", { writes: ["createApp", "startSupervisor"], sanctioned: [], inert: ["activityScript", "SHA_RE", "SUPERVISOR_HOST", "SUPERVISOR_SCOPES", "newFindingEvents", "newForgeErrorEvents", "newRunErrorEvent", "supervisorScopeFor"] }],
   ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml"] }],
   ["reconcile.mjs", { writes: ["buildBranchMap", "reconcile"], sanctioned: [],
     inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
@@ -766,48 +927,102 @@ const SEAM_WRITE_PROVIDERS = new Map([
  *  FAIL CLOSED: a specifier that resolves OUTSIDE `scripts/`, or one that will not resolve,
  *  is reported. A guard that returns "not one of mine" for what it cannot place is a guard
  *  with a documented way to be dodged, which is exactly what this finding was. */
-function resolveModule(rel, spec) {
+function resolveModule(rel, spec, { base = null, manifest = null } = {}) {
   if (typeof spec !== "string") return { offence: UNRESOLVABLE };
-  const scheme = /^([a-zA-Z][a-zA-Z0-9+.-]*):/.exec(spec)?.[1]?.toLowerCase() ?? null;
-  if (scheme === "node") return null;                     // a builtin: judged by the fs arms
+  // only the schemes a Node LOADER honours are schemes here: `file:`, `data:` and `node:`.
+  // `"http://localhost"` is a URL being parsed, not a module — Node 24 has no network
+  // imports — and `"BLZ-535: fixed"` is prose. Both read as bare strings and resolve to nothing.
+  const scheme = /^(file|data|node):/i.exec(spec)?.[1]?.toLowerCase() ?? null;
+  if (scheme === "node" || isBuiltin(spec)) return null;   // a builtin: judged by the fs arms
   if (scheme !== null && scheme !== "file") return { offence: UNRESOLVABLE };  // data:, http:
-  let path = spec;
-  if (scheme === null && !spec.startsWith(".") && !spec.startsWith("/")) {
-    // ROUND 9, Finding C. A `#name` is a PACKAGE-INTERNAL import and a bare specifier can be
-    // a self-reference, and BOTH are resolved by package.json rather than by the filesystem —
-    // which is the part of Node's resolution `new URL` is not. MEASURED by the review: with
-    // `"imports": { "#g": "./scripts/loops/groomer.mjs" }` added, `import { saveState } from
-    // "#g"` wrote a real state.json at 16 pass / 0 fail, because a `#` specifier was filed as
-    // "somebody else's package" and dropped.
-    const mapped = packageSubpath(spec);
-    if (mapped === null) return null;                     // a real third-party package
-    if (mapped.offence !== undefined) return mapped;      // named in package.json, unreadable
-    path = mapped.path;                                   // now a path relative to the root
+  // Node's definition of a relative or absolute specifier, not "starts with a dot":
+  // `.gitignore` and `.blaze` are BARE to Node, and were relative to the previous cut.
+  const bare = scheme === null && !/^(?:\.\.?(?:\/|$)|\/)/.test(spec);
+  // ...and Node's definition of a bare specifier it REFUSES: an empty name, one starting
+  // with a dot, or one with a percent-escape or backslash in its package name is
+  // ERR_INVALID_MODULE_SPECIFIER, not somebody else's package. `.%2Floops%2Fgroomer.mjs` is
+  // this, and so is `.gitignore` as a module specifier.
+  if (bare && (spec === "" || spec.startsWith(".") || /[%\\]/.test(spec.split("/")[0]))) {
+    return { offence: UNRESOLVABLE };
   }
-  let target;
-  try {
-    const base = path.startsWith(".") || path.startsWith("/") || /^file:/i.test(path)
-      ? pathToFileURL(join(SCRIPTS, rel)) : pathToFileURL(join(SCRIPTS, ".."));
-    target = fileURLToPath(new URL(path, base));
-  } catch { return { offence: UNRESOLVABLE }; }
-  // CASE. `./loops/Groomer.mjs` is ENOENT on this ext4 checkout and is the same file on a
-  // case-insensitive mount, which macOS is by default. A lexical path would place it at a
-  // `rel` the pin does not hold and hand it back as a non-offence — a hole nobody on Linux
-  // can even reproduce. `realpathSync` asks the filesystem, so wherever the module really is
-  // is where this reader looks it up. It throws when the path does not exist, which a
-  // FIXTURE specifier legitimately does not, so that falls back to the lexical answer.
+  const from = base ?? join(SCRIPTS, rel);
+  let target = null; let loadable = false;
+
+  // ROUND 11, Findings B and C. The previous cut called `new URL` + `fileURLToPath` "the way
+  // Node does it", and that is the FILESYSTEM half — and only the exact-path part of it: no
+  // extension search, no directory `main`/`index`, no `node_modules`, and package.json's
+  // `imports` resolved against the MODULE rather than the package root. MEASURED by the review
+  // at 20 pass / 0 fail, each with a real write landing: an extensionless
+  // `require("../outside-writer")` that Node loads as `.js`, a directory with a `main`, a
+  // `#g` import whose mapped path was resolved to `scripts/scripts/…`, and a self-link under
+  // node_modules that returned "not one of mine" before realpath ever ran.
+  //
+  // So the two halves are now done by the party that owns each. package.json's map is read by
+  // THIS reader, because it fails closed where Node picks: a conditional object resolves to
+  // one file under `require` and another under `import`, and a guard must report that rather
+  // than judge whichever one it happened to ask for. Everything on the FILESYSTEM is answered
+  // by Node's own resolver — `createRequire(from).resolve(spec)` — which does the extension
+  // search, the directory `main`, and the `node_modules` walk, and does not LOAD anything: it
+  // returns a path or throws. `loadable` records that Node found something, and it is what
+  // the loose-string arm reads to tell a module Node would run from a path being built.
+  if (bare) {
+    const mapped = packageSubpath(spec, manifest ?? packageManifest());
+    if (mapped !== null && mapped.offence !== undefined) return mapped;   // claimed, unfollowable
+    if (mapped !== null) {
+      // a `#name` or a self-reference: the mapped path is relative to the PACKAGE ROOT
+      try { target = fileURLToPath(new URL(mapped.path, pathToFileURL(join(PACKAGE_ROOT, "package.json")))); }
+      catch { return { offence: UNRESOLVABLE }; }
+      loadable = nodeCanLoad(target);
+    } else {
+      // somebody else's package, or nothing at all — Node's resolver walks node_modules, and
+      // realpath below says whether the package it found is really OUTSIDE this tree
+      try { target = requirerAt(from).resolve(spec); loadable = true; } catch { return null; }
+    }
+  } else {
+    try { target = requirerAt(from).resolve(spec); loadable = true; }
+    catch {
+      // Node would not load it: a fixture, or a path being built. Placed lexically so a pinned
+      // module named by a specifier that does not exist yet is still judged against the pin.
+      try { target = fileURLToPath(new URL(spec, pathToFileURL(from))); }
+      catch { return { offence: UNRESOLVABLE }; }
+    }
+  }
+
+  // CASE, AND SYMLINKS. `./loops/Groomer.mjs` is ENOENT on this ext4 checkout and is the same
+  // file on a case-insensitive mount, which macOS is by default; a `node_modules/self-link`
+  // pointing at `..` is a bare specifier that lands INSIDE this tree. A lexical path would
+  // place either at a `rel` the pin does not hold. `realpathSync` asks the filesystem, so
+  // wherever the module really is is where this reader looks it up. It throws when the path
+  // does not exist, which a fixture specifier legitimately does not, so that falls back to
+  // the lexical answer.
   try { target = realpathSync.native(target); } catch { /* not on disk: lexical it is */ }
   const inTree = relative(SCRIPTS, target).split("\\").join("/");
-  if (inTree === "" || inTree.startsWith("../")) return { offence: OUTSIDE, target };
-  return { rel: inTree, target };
+  // `..` exactly is the repo root — ROUND 11 found it filed as a module of this tree because
+  // it does not START WITH `../`, and the repo root is exactly the seed a loader is given.
+  // `""` exactly is `scripts/` itself, which is inside the tree and names no module.
+  const outside = inTree === ".." || inTree.startsWith("../");
+  if (!outside) return { rel: inTree, target, loadable };
+  // a third-party package that really lives under node_modules is not a module of this tree;
+  // one that realpath moved elsewhere is judged by where it really is
+  if (bare && /(^|[\\/])node_modules[\\/]/.test(target)) return null;
+  return { offence: OUTSIDE, target, loadable };
 }
 
-/** Does this resolved path name a file that actually exists? The filesystem is what separates
- *  `require("../outside-writer.cjs")`, a module Node will load, from `join(root, "../x")`,
- *  which is a path being built. */
-function isRealFile(target) {
-  if (typeof target !== "string") return false;
-  try { return statSync(target).isFile(); } catch { return false; }
+const PACKAGE_ROOT = join(SCRIPTS, "..");
+/** Node's CommonJS resolver, rooted at a module. Cached per root: the loose-string arm asks
+ *  this question for every constant string in the corpus. */
+const REQUIRERS = new Map();
+function requirerAt(from) {
+  let requirer = REQUIRERS.get(from);
+  if (requirer === undefined) { requirer = createRequire(pathToFileURL(from)); REQUIRERS.set(from, requirer); }
+  return requirer;
+}
+
+/** Would Node load this absolute path — as a file, with an extension it searches for, or as
+ *  a directory with a `main` or an `index`? Node answers, not this reader. */
+function nodeCanLoad(target) {
+  try { requirerAt(join(SCRIPTS, "x.mjs")).resolve(target); return true; }
+  catch { return false; }
 }
 
 /** package.json's `imports` and `exports` maps, which are the half of Node's resolution that
@@ -843,8 +1058,18 @@ function packageSubpath(spec, pkg = packageManifest()) {
 
 let PACKAGE_MANIFEST = null;
 function packageManifest() {
-  PACKAGE_MANIFEST ??= JSON.parse(readFileSync(join(SCRIPTS, "..", "package.json"), "utf8"));
+  PACKAGE_MANIFEST ??= JSON.parse(readFileSync(join(PACKAGE_ROOT, "package.json"), "utf8"));
   return PACKAGE_MANIFEST;
+}
+/** Run `fn` with the manifest REPLACED by a synthetic one, so the mapping arms are exercised
+ *  END TO END — a planted `import { saveState } from "#g"` through `writeSeamOffenders` — and
+ *  not by calling the map lookup on its own. ROUND 10 measured the difference: the lookup was
+ *  tested and right, the resolution of what it returned was wrong and untested, and a real
+ *  `imports` map plus a real `#g` import wrote a state.json at 20 pass / 0 fail. */
+function withManifest(pkg, fn) {
+  const real = packageManifest();
+  PACKAGE_MANIFEST = pkg;
+  try { return fn(); } finally { PACKAGE_MANIFEST = real; }
 }
 
 /** The pinned module a specifier names, or null when it names none of them. The offence a
@@ -1005,17 +1230,53 @@ function fsWritesIn(raw, rel) {
   const ns = new Set();      // local names holding an fs namespace
   const seenRef = new Set(); // identifier nodes already classified as a namespace reference
 
-  /** The object literal a name was declared with, so `const o = { flag: "w+" }` followed by
-   *  `readFileSync(p, o)` is read as the options it is. One hop, and no further: this reader
-   *  does not do dataflow, and says so in the banner. */
-  const objectBoundTo = (arg) => {
-    if (arg.type !== "Identifier") return null;
-    for (const candidate of nodes) {
-      if (candidate.type !== "VariableDeclarator") continue;
-      if (candidate.id.type !== "Identifier" || candidate.id.name !== arg.name) continue;
-      if (candidate.init?.type === "ObjectExpression") return candidate.init;
+  /** Every name that is CALLED somewhere in this module. */
+  const calleeNames = new Set();
+  for (const n of nodes) if (n.type === "CallExpression" && n.callee.type === "Identifier") calleeNames.add(n.callee.name);
+
+  /** The SEED of a loader: the first argument of the call that produced the callee.
+   *  `F(seed)(x)` reads it off the inner call; `const req = F(seed); req(x)` reads it off the
+   *  declaration of `req`. Spelling-free — the outer function's name is never consulted. */
+  const seedOf = (callee) => {
+    if (callee.type === "CallExpression") return callee.arguments[0] ?? null;
+    if (callee.type !== "Identifier") return null;
+    for (const d of nodes) {
+      if (d.type !== "VariableDeclarator" || d.id.type !== "Identifier" || d.id.name !== callee.name) continue;
+      if (d.init?.type === "CallExpression") return d.init.arguments[0] ?? null;
     }
     return null;
+  };
+
+  /** The base a string is resolved against when it is the argument of a call whose CALLEE was
+   *  itself built from a constant path — `createRequire("file:///elsewhere/")("./x.cjs")`
+   *  resolves `./x.cjs` against `/elsewhere/`, not against this module, and so does the same
+   *  loader parked in a `const` first. Null means "this module is the base". */
+  const loaderBaseOf = (node) => {
+    const parent = parents.get(node);
+    if (!parent || parent.type !== "CallExpression" || !parent.arguments.includes(node)) return null;
+    const seed = constantString(seedOf(parent.callee));
+    if (seed === null) return null;
+    try {
+      const url = /^(file|data|node):/i.test(seed) ? new URL(seed)
+        : new URL(seed, pathToFileURL(join(SCRIPTS, rel)));
+      if (url.protocol !== "file:") return null;
+      return fileURLToPath(url);
+    } catch { return null; }
+  };
+
+  /** Is this string the first argument of a call whose result is CALLED — on the spot, the
+   *  shape of `createRequire(base)(spec)`, or later through the name it was bound to — and
+   *  does it name something on disk outside the tree? That is a loader rooted outside the
+   *  corpus, whatever the outer function is called. */
+  const isLoaderSeed = (node, resolved) => {
+    const parent = parents.get(node);
+    if (!parent || parent.type !== "CallExpression" || parent.arguments[0] !== node) return false;
+    const grand = parents.get(parent);
+    const calledNow = grand && grand.type === "CallExpression" && grand.callee === parent;
+    const calledLater = grand && grand.type === "VariableDeclarator" && grand.init === parent
+      && grand.id.type === "Identifier" && calleeNames.has(grand.id.name);
+    if (!calledNow && !calledLater) return false;
+    try { statSync(resolved.target); return true; } catch { return false; }
   };
 
   const classifyMember = (at, name) => {
@@ -1204,80 +1465,62 @@ function fsWritesIn(raw, rel) {
       continue;
     }
 
-    // A DYNAMIC specifier is judged the same way when it is unambiguously one — the source of
-    // an `import()`.
-    if (parent && parent.type === "ImportExpression" && parent.source === node) {
-      const resolved = resolveModule(rel, folded);
-      if (resolved !== null && resolved.offence !== undefined) { hits.add(resolved.offence); continue; }
+    // ROUND 11, Finding B: what is left is a PATH OR A SPECIFIER, and the reader no longer
+    // asks where it sits. The previous cut judged an `import()` source fully, a call argument
+    // only if it named a file that existed, and a string anywhere else not at all — and the
+    // review put a specifier in a `const`, dropped the extension, pointed at a directory with
+    // a `main`, built a Worker URL off `import.meta.url`, and based a `createRequire` on an
+    // out-of-tree `file:` URL: five real writes at 20 pass / 0 fail. Every one of those is a
+    // constant string that NODE WOULD LOAD from outside this tree, and that property does not
+    // depend on the string's position. So: a constant string ANYWHERE that Node would load
+    // from outside `scripts/` is an offence, a constant string anywhere that names a PINNED
+    // module of this tree is judged where the reader can see how it is used and reported
+    // where it cannot, and a string Node would not load is a path being built and is left
+    // alone. MEASURED across the corpus on this commit (154 modules): of 4,493 constant
+    // strings handed to the resolver, ZERO are Node-loadable from outside the tree, 44
+    // resolve outside it to nothing Node would load (paths being built), 620 are names Node
+    // would refuse as a specifier, 38 land inside the tree, and ZERO name a pinned module
+    // outside a loader position. Nothing legitimate pays for this arm today.
+    if (parent && parent.source === node && DECLARATION_TYPES.has(parent.type)) continue;
+    const inLoaderPosition = parent && ((parent.type === "ImportExpression" && parent.source === node)
+      || ((parent.type === "CallExpression" || parent.type === "NewExpression")
+        && parent.arguments.includes(node)));
+    // a `#name` is package-internal only where a specifier can sit; anywhere else `#` opens a
+    // heading, a selector or a fragment, and this tree has hundreds of those
+    if (folded.startsWith("#") && !inLoaderPosition) continue;
+    const loaderBase = loaderBaseOf(node);
+    const resolved = resolveModule(rel, folded, loaderBase === null ? {} : { base: loaderBase });
+    if (resolved === null) continue;
+    if (resolved.offence !== undefined) {
+      // An `import()` source is a specifier and nothing else, so it is fully fail-closed. A
+      // string anywhere else is reported when Node would LOAD it from outside the tree, or
+      // when it is the SEED of a loader — `F("file:///elsewhere/")(x)` — whose result is
+      // called on the spot. A string Node would not load cannot run, so it is not reported:
+      // the gap that leaves is between "reported" and "runs", stated in the banner.
+      if (parent && parent.type === "ImportExpression" && parent.source === node) hits.add(resolved.offence);
+      else if (resolved.offence === OUTSIDE && (resolved.loadable || isLoaderSeed(node, resolved))) hits.add(OUTSIDE);
+      continue;
     }
-    // ROUND 9, Finding B. In a BARE CALL ARGUMENT the offence used to be computed and then
-    // dropped, because the provider lookup mapped every offence to null. So the same module,
-    // reached the same way, was reported as a static import and silent through
-    // `createRequire(import.meta.url)("../outside-writer.cjs")` — MEASURED by the review at
-    // 16 pass / 0 fail with the helper's `writeFileSync` landing a real file.
-    //
-    // The old justification — `join(root, "../x")` is a path, not a specifier — does not
-    // cover a string that resolves to a real module file Node then loads, and the difference
-    // is one the filesystem can settle. So the arm applies here too, narrowed to a string
-    // that RESOLVES TO A FILE THAT EXISTS outside the tree. MEASURED across the corpus: zero
-    // constant call-argument strings resolve to a real file outside `scripts/`, so this costs
-    // nothing today and closes the route.
-    if (parent && parent.type === "CallExpression" && parent.arguments.includes(node)) {
-      const resolved = resolveModule(rel, folded);
-      if (resolved !== null && resolved.offence === OUTSIDE && isRealFile(resolved.target)) {
-        hits.add(OUTSIDE);
-        continue;
-      }
+    const provider = SEAM_WRITE_PROVIDERS.get(resolved.rel) ?? null;
+    if (provider === null) continue;
+    if (!inLoaderPosition) {
+      // `const spec = "./loops/groomer.mjs"` — a pinned module named where this reader cannot
+      // see how it will be used. The same fail-closed answer as `const S = "node:fs"`.
+      hits.add(SEAM_WHOLESALE);
+      continue;
     }
-    const provider = resolveProvider(rel, folded);
-    if (provider && parent && ((parent.type === "ImportExpression" && parent.source === node)
-      || (parent.type === "CallExpression" && parent.arguments.includes(node)))) {
-      // `const { reconcile } = await import("./reconcile.mjs")` names its members exactly as
-      // a static import does, so it is judged member by member. Landing anywhere else takes
-      // the module wholesale, and that is an offence: nobody can say which member is used.
-      let at = parent; let up = parents.get(at);
-      while (up && ["AwaitExpression", "ChainExpression", "ParenthesizedExpression"]
-        .includes(up.type)) { at = up; up = parents.get(at); }
-      const target = up && up.type === "VariableDeclarator" && up.init === at ? up.id
-        : up && up.type === "AssignmentExpression" && up.right === at ? up.left : null;
-      if (target === null || target.type !== "ObjectPattern") { hits.add(SEAM_WHOLESALE); continue; }
-      for (const prop of target.properties) {
-        if (prop.type === "RestElement" || prop.computed) { hits.add(SEAM_WHOLESALE); continue; }
-        classifySeamMember(provider, nameOf(prop.key));
-      }
-    }
-  }
-
-  // ROUND 9, Finding A. A READ MEMBER THAT TAKES A FLAG IS A WRITE. `readFileSync` and
-  // `createReadStream` accept a caller-chosen open flag, so `readFileSync(p, { flag: "w+" })`
-  // TRUNCATES an existing file and CREATES a missing one — MEASURED by the review against a
-  // real 25-byte file, which came back 0 bytes with this guard at 16 pass / 0 fail. The
-  // read-only ledger was not merely incomplete there; it was WRONG, and a wrong entry is the
-  // one kind of ledger error that makes this guard blinder rather than noisier.
-  //
-  // Pinning it by deleting those four names would make every `readFileSync` in the tree an
-  // offence, which is not true and would get the guard deleted. So the PROPERTY is pinned
-  // instead: an fs call — any member, read or write — carrying a `flag`/`flags` option that
-  // is not a read-only mode is an offence in itself. `{ flag: "r" }` stays quiet;
-  // `"w+"`, `"a"`, `"wx"`, a computed key and a value this reader cannot fold do not.
-  for (const node of nodes) {
-    if (node.type !== "CallExpression") continue;
-    const callee = node.callee;
-    const onFs = callee.type === "Identifier" ? named.has(callee.name)
-      : callee.type === "MemberExpression" && !callee.computed
-        && callee.object.type === "Identifier" && ns.has(callee.object.name);
-    if (!onFs) continue;
-    for (const arg of node.arguments) {
-      const options = arg.type === "ObjectExpression" ? arg : objectBoundTo(arg);
-      if (options === null) continue;
-      for (const prop of options.properties) {
-        if (prop.type === "SpreadElement") { hits.add(OPEN_FLAG("a spread")); continue; }
-        if (prop.computed) { hits.add(OPEN_FLAG("a computed key")); continue; }
-        if (!["flag", "flags"].includes(nameOf(prop.key))) continue;
-        const mode = constantString(prop.value);
-        if (mode === null) { hits.add(OPEN_FLAG("one this guard cannot fold")); continue; }
-        if (!READ_ONLY_FLAGS.has(mode)) hits.add(OPEN_FLAG(mode));
-      }
+    // `const { reconcile } = await import("./reconcile.mjs")` names its members exactly as
+    // a static import does, so it is judged member by member. Landing anywhere else takes
+    // the module wholesale, and that is an offence: nobody can say which member is used.
+    let at = parent; let up = parents.get(at);
+    while (up && ["AwaitExpression", "ChainExpression", "ParenthesizedExpression"]
+      .includes(up.type)) { at = up; up = parents.get(at); }
+    const target = up && up.type === "VariableDeclarator" && up.init === at ? up.id
+      : up && up.type === "AssignmentExpression" && up.right === at ? up.left : null;
+    if (target === null || target.type !== "ObjectPattern") { hits.add(SEAM_WHOLESALE); continue; }
+    for (const prop of target.properties) {
+      if (prop.type === "RestElement" || prop.computed) { hits.add(SEAM_WHOLESALE); continue; }
+      classifySeamMember(provider, nameOf(prop.key));
     }
   }
 
@@ -1342,6 +1585,194 @@ function fsWritesIn(raw, rel) {
       hits.add(unknownMember(imported));
     }
   }
+
+  // ===========================================================================================
+  // ROUND 11, Finding A — THE PROPERTY, over every shape that can carry it.
+  //
+  // Round 9 pinned "an fs call carrying a `flag` that is not read-only" and implemented it
+  // over exactly two callee shapes — a bare identifier and one-level `ns.member` — with the
+  // options read only out of an inline object literal or one `const` hop to one. The review
+  // planted seven modules, each truncating a real 26-byte file to 0 with the guard at
+  // 20 pass / 0 fail: `fs.promises.readFile` (two levels), `promises.readFile` where the
+  // fixpoint that promotes `promises` into `ns` had not yet run, `readFileSync.call(null, …)`,
+  // `new ReadStream(p, { flags: "w+" })`, `readFileSync(...args)` off a const array, and
+  // `const o = {}; o.flag = "w+"` — a literal that was empty when the hop read it.
+  //
+  // The property this arm enforces, written down before the code: ANY call or construction
+  // that REACHES an fs member — through any callee shape — carrying an options value whose
+  // `flag`/`flags` CANNOT BE PROVEN read-only, is an offence. "Proven" is the load-bearing
+  // word and it is fail-closed: an argument this reader cannot see the inside of is not
+  // proven, and is reported as such. It runs LAST, after the fixpoint and after D1's
+  // unfoldable-acquisition scan, so every namespace this module can reach is known to it.
+  // ===========================================================================================
+
+  /** Is this expression an fs NAMESPACE: a binding in `ns`, an acquisition this reader could
+   *  not fold, or a nested namespace member (`promises`, `default`) off either, to any depth? */
+  const fsRooted = (expr) => {
+    if (expr.type === "Identifier") return ns.has(expr.name) || unfoldable.has(expr.name);
+    if (expr.type === "MemberExpression" && !expr.computed) {
+      return fsRooted(expr.object) && FS_NAMESPACE_MEMBERS.has(nameOf(expr.property));
+    }
+    return false;
+  };
+  /** The expression a callee position really holds: `(0, fs.readFileSync)(…)` calls the
+   *  last member of the sequence, `fs.readFileSync?.(…)` is a chain around the call. */
+  const unwrap = (expr) => {
+    for (;;) {
+      if (expr.type === "SequenceExpression") expr = expr.expressions[expr.expressions.length - 1];
+      else if (expr.type === "ChainExpression" || expr.type === "ParenthesizedExpression") expr = expr.expression;
+      else return expr;
+    }
+  };
+  /** The fs member an expression DENOTES, or null: a name bound to one, or a member off an
+   *  fs namespace at any depth. A computed member off a namespace is a member this reader
+   *  cannot name and is returned as one — it is still an fs member. */
+  const fsMemberOf = (expr) => {
+    expr = unwrap(expr);
+    if (expr.type === "Identifier") return named.has(expr.name) ? named.get(expr.name) : null;
+    if (expr.type !== "MemberExpression" || !fsRooted(expr.object)) return null;
+    return expr.computed ? "<computed>" : nameOf(expr.property);
+  };
+  /** ALIASES of a member: `const f = readFileSync`, `const f = fs.readFileSync`, and
+   *  `const b = readFileSync.bind(null, …)`, to a fixpoint, so the call site that carries the
+   *  flag is reached under whatever name it uses. A `.bind` alias may have swallowed the path
+   *  argument, so its calls are judged from the FIRST argument rather than the second. */
+  const boundAliases = new Set();
+  for (let grew = true; grew;) {
+    grew = false;
+    for (const node of nodes) {
+      let target = null; let value = null;
+      if (node.type === "VariableDeclarator" && node.id.type === "Identifier") { target = node.id.name; value = node.init; }
+      else if (node.type === "AssignmentExpression" && node.left.type === "Identifier") { target = node.left.name; value = node.right; }
+      if (target === null || !value || named.has(target)) continue;
+      value = unwrap(value);
+      let member = fsMemberOf(value); let bound = false;
+      if (member === null && value.type === "CallExpression" && value.callee.type === "MemberExpression"
+        && !value.callee.computed && nameOf(value.callee.property) === "bind") {
+        member = fsMemberOf(value.callee.object); bound = true;
+      }
+      if (member === null || member === "<computed>") continue;
+      named.set(target, member); if (bound) boundAliases.add(target); grew = true;
+    }
+  }
+  /** The declaration a name was given, IF this reader can prove nothing else has touched it:
+   *  one declarator with an init of the wanted type, and every other reference to the name is
+   *  an argument (or a spread argument) of a call that reaches an fs member. A read of a
+   *  member, an assignment into it, or a hand-off to any other function is a mutation this
+   *  reader cannot rule out, and the answer is then null: not proven. */
+  const pureBinding = (expr, type) => {
+    if (expr.type !== "Identifier") return null;
+    let init = null; let declared = 0;
+    for (const d of nodes) {
+      if (d.type !== "VariableDeclarator" || d.id.type !== "Identifier" || d.id.name !== expr.name) continue;
+      declared++; init = d.init ?? null;
+    }
+    if (declared !== 1 || init === null || init.type !== type) return null;
+    for (const id of nodes) {
+      if (id.type !== "Identifier" || id.name !== expr.name) continue;
+      const parent = parents.get(id);
+      if (parent.type === "VariableDeclarator" && parent.id === id) continue;
+      if (isBindingSite(id, parent)) continue;            // a property key, a param, a label
+      const holder = parent.type === "SpreadElement" ? parents.get(parent) : parent;
+      const handed = parent.type === "SpreadElement" ? parent : id;
+      if ((holder.type === "CallExpression" || holder.type === "NewExpression")
+        && holder.arguments.includes(handed) && fsMemberReached(holder) !== null) continue;
+      if (holder.type === "ArrayExpression" && parents.get(holder)?.type === "CallExpression"
+        && fsMemberReached(parents.get(holder)) !== null) continue;   // inside an `.apply` array
+      return null;
+    }
+    return init;
+  };
+  const UNSEEN = { type: "<unseen>" };
+  /** Arguments with spread EXPANDED: `[p, { flag: "w+" }]` spread in, or a pure const holding
+   *  such an array. Anything else spread in is an argument list this reader cannot see. */
+  const expandArgs = (args) => {
+    const out = [];
+    for (const arg of args) {
+      if (arg === null) continue;
+      if (arg.type !== "SpreadElement") { out.push(arg); continue; }
+      const array = arg.argument.type === "ArrayExpression" ? arg.argument
+        : pureBinding(arg.argument, "ArrayExpression");
+      if (array === null) { out.push(UNSEEN); continue; }
+      out.push(...expandArgs(array.elements));
+    }
+    return out;
+  };
+  const applyArray = (node) => {
+    if (!node) return [];
+    const array = node.type === "ArrayExpression" ? node : pureBinding(node, "ArrayExpression");
+    return array === null ? [UNSEEN] : expandArgs(array.elements);
+  };
+  /** The fs member a call or construction REACHES — directly, or through `.call`, `.apply`,
+   *  `.bind` and `Reflect.apply` — and how, or null. Reads the callee only, never the
+   *  arguments, so the purity check above can ask it without asking itself. */
+  const fsMemberReached = (node) => {
+    const callee = unwrap(node.callee); const args = node.arguments;
+    if (callee.type === "MemberExpression" && !callee.computed) {
+      const via = nameOf(callee.property);
+      if (["call", "apply", "bind"].includes(via)) {
+        const member = fsMemberOf(callee.object);
+        if (member !== null) return { member, via };
+      }
+      if (via === "apply" && callee.object.type === "Identifier" && callee.object.name === "Reflect"
+        && args[0] && fsMemberOf(args[0]) !== null) return { member: fsMemberOf(args[0]), via: "Reflect.apply" };
+    }
+    const member = fsMemberOf(callee);
+    return member === null ? null : { member, via: null };
+  };
+  /** The fs member a call or construction reaches, and the ARGUMENTS it hands it, with spread
+   *  expanded — or null. */
+  const fsCallOf = (node) => {
+    const reached = fsMemberReached(node);
+    if (reached === null) return null;
+    const args = node.arguments;
+    switch (reached.via) {
+      case "apply": return { member: reached.member, args: applyArray(args[1]) };
+      case "Reflect.apply": return { member: reached.member, args: applyArray(args[2]) };
+      case "call": case "bind": return { member: reached.member, args: expandArgs(args.slice(1)) };
+      default: return { member: reached.member, args: expandArgs(args) };
+    }
+  };
+  /** Why an argument is NOT proven flag-free, or null when it is. A string, a number, a
+   *  boolean, `null` and a function cannot carry a flag. An object literal — inline, or a pure
+   *  const holding one — is read property by property. Everything else is unseen. */
+  const notProvenReadOnly = (arg) => {
+    if (arg === UNSEEN) return "an argument list this guard cannot see";
+    if (arg.type === "Literal" || constantString(arg) !== null) return null;
+    if (arg.type === "FunctionExpression" || arg.type === "ArrowFunctionExpression") return null;
+    const options = arg.type === "ObjectExpression" ? arg : pureBinding(arg, "ObjectExpression");
+    if (options === null) return "an options value this guard cannot see";
+    for (const prop of options.properties) {
+      if (prop.type === "SpreadElement") return "a spread";
+      if (prop.computed) return "a computed key";
+      if (!["flag", "flags"].includes(nameOf(prop.key))) continue;
+      const mode = constantString(prop.value);
+      if (mode === null) return "one this guard cannot fold";
+      if (!READ_ONLY_FLAGS.has(mode)) return mode;
+    }
+    return null;
+  };
+  for (const node of nodes) {
+    if (node.type !== "CallExpression" && node.type !== "NewExpression") continue;
+    const reached = fsCallOf(node);
+    if (reached === null) continue;
+    // a mutating member, or one this reader cannot name, is an offence already
+    if (WRITE_SURFACE.has(reached.member) || reached.member === "<computed>") continue;
+    // The first argument is the path or descriptor, which no fs member reads a flag out of —
+    // unless the callee is a `.bind` alias that may already hold the path, in which case
+    // every argument is judged. For a member Node has SHOWN will create under a flag, an
+    // argument this reader cannot see the inside of is not proven and is reported. For every
+    // other read member, only an options object it CAN see is judged — `readdirSync(dir,
+    // opts)` cannot be turned into a write by any flag, and Node's own answer is what says so.
+    const callee = unwrap(node.callee);
+    const first = callee.type === "Identifier" && boundAliases.has(callee.name) ? 0 : 1;
+    for (const arg of reached.args.slice(first)) {
+      const why = notProvenReadOnly(arg);
+      if (why === null) continue;
+      const unseen = why.endsWith("cannot see");
+      if (!unseen || FLAG_TAKERS.has(reached.member)) hits.add(OPEN_FLAG(why));
+    }
+  }
   return [...hits].sort();
 }
 
@@ -1403,6 +1834,13 @@ const WRITE_ALLOWED = new Map([
   // checkout into a temp directory and mutates THERE, and it is excluded from the published
   // package (`files` in package.json drops `scripts/ci`). Not product code, not a ticket.
   ["ci/mutate-schedule.mjs", "*"],
+  // BLZ-603 (#170). `node scripts/ci/temp-cleanup-guard.mjs --write` re-records
+  // `scripts/ci/temp-cleanup-debt.json`, the cleanup-debt ratchet that
+  // `tests/temp-cleanup-guard.test.mjs` holds to equality. A CI artifact beside the tool
+  // that generates it, excluded from the published package like the rest of `scripts/ci`;
+  // not a ticket. Named to the one member, in the CLI block only: a write from any of its
+  // exports reddens the pin.
+  ["ci/temp-cleanup-guard.mjs", ["writeFileSync"]],
   // BLZ-535. The four below were invisible to the guard while it pinned two spellings, and
   // are listed now that it does not. None writes a ticket; each is named to its members
   // rather than starred, and the load-bearing test below now checks each NAMED MEMBER is
@@ -1534,6 +1972,17 @@ test("the mutating fs surface is DERIVED from node:fs, and derived fail-closed",
     "the first cut of this guard admitted only functions, so both were structurally invisible");
   assert.ok(WRITE_SURFACE.size > 55,
     `the surface came out at ${WRITE_SURFACE.size} — that is not node:fs, that is a bug here`);
+
+  // ROUND 11: the flag-takers are DERIVED by probing Node, and a probe that stopped probing
+  // returns an empty set that clears the tree. So the observation is asserted.
+  for (const name of ["readFileSync", "readFile", "createReadStream", "ReadStream", "FileReadStream"]) {
+    assert.ok(FLAG_TAKERS.has(name),
+      `${name} creates a file when handed { flag: "w+" } on this Node, and the probe did not ` +
+      "see it do so — the derivation is dead, and a dead derivation exempts every read");
+  }
+  for (const name of ["readdirSync", "statSync", "existsSync", "accessSync", "realpathSync"]) {
+    assert.ok(!FLAG_TAKERS.has(name), `${name} cannot create under any flag, and the probe says it did`);
+  }
 });
 
 test("the read-only ledger names only members node:fs actually has", () => {
@@ -1594,7 +2043,7 @@ test("the eleven routes an adversarial review drove a real write through", () =>
   // one. The corpus yielded `.mjs` only, so such a file was not scanned at all.
   //
   // Stated plainly, because a widening nobody can see is indistinguishable from one nobody
-  // made: the live tree is 150 files and every one of them is `.mjs`, so ONLY the synthetic
+  // made: the live tree is 154 files and every one of them is `.mjs`, so ONLY the synthetic
   // fixture below exercises this. It is a guard against the day somebody adds `scripts/x.js`,
   // not a claim that anything is being caught today.
   const tmp = mkdtempSync(join(tmpdir(), "blz535-corpus-"));
@@ -2074,6 +2523,63 @@ test("a read member that takes an open flag is a write", () => {
     assert.equal(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()).length, 1,
       `an open flag is an open flag wherever the member came from — ${src}`);
   }
+
+  // ROUND 11, Finding A. Round 9 pinned the property and implemented it over two callee
+  // shapes, and the review planted the rest of them: each row below TRUNCATED a real 26-byte
+  // file to 0 with this file at 20 pass / 0 fail on 247f960. They are one property — a call
+  // that REACHES an fs member carrying an options value that cannot be proven read-only —
+  // and the arm now walks every shape that can carry it, AFTER the namespace fixpoint.
+  const shapes = {
+    "A1: two member levels, the options literal inline":
+      'import * as fs from "node:fs";\nawait fs.promises.readFile(p, { flag: "w+" });',
+    "A7: a named `promises` import, which the fixpoint promotes AFTER the old loop had run":
+      'import { promises } from "node:fs";\nawait promises.readFile(p, { flag: "w+" });',
+    "A2: through `.call`":
+      'import { readFileSync } from "node:fs";\nreadFileSync.call(null, p, { flag: "w+" });',
+    "A2b: through `.apply`":
+      'import { readFileSync } from "node:fs";\nreadFileSync.apply(null, [p, { flag: "w+" }]);',
+    "A10: through `Reflect.apply`":
+      'import { readFileSync } from "node:fs";\nReflect.apply(readFileSync, null, [p, { flag: "w+" }]);',
+    "A4: a CONSTRUCTION, which the old loop skipped outright":
+      'import { ReadStream } from "node:fs";\nnew ReadStream(p, { flags: "w+" });',
+    "A3: the arguments spread in from a const array":
+      'import { readFileSync } from "node:fs";\nconst args = [p, { flag: "w+" }];\nreadFileSync(...args);',
+    "A6: an object that was empty when declared and assigned into afterwards":
+      'import { readFileSync } from "node:fs";\nconst o = {};\no.flag = "w+";\nreadFileSync(p, o);',
+    "A8: the member parked in a local alias":
+      'import { readFileSync } from "node:fs";\nconst f = readFileSync;\nf(p, { flag: "w+" });',
+    "A8b: the member taken off the namespace into an alias":
+      'import * as fs from "node:fs";\nconst f = fs.readFileSync;\nf(p, { flag: "w+" });',
+    "A9: a `.bind` that already holds the path, so the flag arrives FIRST":
+      'import * as fs from "node:fs";\nconst b = fs.readFileSync.bind(null, p);\nb({ flag: "w+" });',
+    "A11: a sequence-expression callee":
+      'import * as fs from "node:fs";\n(0, fs.readFileSync)(p, { flag: "w+" });',
+    "A12: an options value handed in from a parameter, which cannot be proven read-only":
+      'import { readFileSync } from "node:fs";\nexport function load(p, opts) { return readFileSync(p, opts); }',
+    "A13: an options object that is also handed to something else before the call":
+      'import { readFileSync } from "node:fs";\nconst o = { encoding: "utf8" };\nconfigure(o);\nreadFileSync(p, o);',
+    "A14: the namespace acquired in a shape this reader cannot fold, then a flag":
+      'const fs = process.getBuiltinModule(mode);\nfs.readFileSync(p, { flag: "w+" });',
+  };
+  for (const [why, src] of Object.entries(shapes)) {
+    const found = writeSeamOffenders(new Map([["fake.mjs", src]]), new Map());
+    assert.ok(found.length >= 1 && found.every((f) => /flag that is not read-only/.test(f)),
+      `${why}: this must be an offender under the flag rule, and it is not — ${src} -> ${found}`);
+  }
+  // ...and the discrimination on the same shapes: an options value that CAN be seen and
+  // carries no flag is a read, an opaque one handed to a member Node has shown cannot create
+  // under any flag is a read, and this tree is made of both.
+  for (const src of [
+    'import { readdirSync } from "node:fs";\nexport function ls(dir, opts) { return readdirSync(dir, opts); }',
+    'import { statSync } from "node:fs";\nexport const st = (p, o) => statSync(p, o);',
+    'import * as fs from "node:fs";\nconst o = { encoding: "utf8" };\nfs.promises.readFile(p, o);',
+    'import { readFileSync } from "node:fs";\nconst o = { flag: "r" };\nreadFileSync.call(null, p, o);',
+    'import { readFileSync } from "node:fs";\nconst args = [p, "utf8"];\nreadFileSync(...args);',
+    'import { readFileSync } from "node:fs";\nconst f = readFileSync;\nf(p, "utf8");',
+  ]) {
+    assert.deepEqual(writeSeamOffenders(new Map([["fake.mjs", src]]), new Map()), [],
+      `this reads through a shape the flag arm walks, and must stay quiet:\n${src}`);
+  }
   // ...and the discrimination, which is the whole reason this is a flag rule and not four
   // names deleted from the ledger: a read is still a read, and every `readFileSync` in this
   // tree is one.
@@ -2111,6 +2617,52 @@ test("a call argument that resolves to a real module outside the tree is an offe
       `a module of this repo that is not in the corpus is unjudged, and reaching one is an ` +
       `offence however it is spelled — ${src}`);
   }
+
+  // ROUND 11, Finding B. The property is "a string NODE WOULD LOAD from outside the tree",
+  // and round 9 implemented it as "a string that is an existing FILE, sitting in a call
+  // argument". The review planted the difference, five real writes at 20 pass / 0 fail:
+  // the string parked in a const first, an EXTENSIONLESS specifier Node completes to `.js`,
+  // a DIRECTORY Node enters through its package.json `main`, a Worker built off a `new URL`
+  // that the loop never examined, and a loader whose base is a `file:` URL outside the tree.
+  // Each fixture below is a real thing on disk outside `scripts/` that Node resolves: this
+  // test file, and `node_modules/acorn`, which is a directory with a `main` and holds a
+  // `dist/acorn.js` that an extensionless specifier completes to.
+  const root = pathToFileURL(join(SCRIPTS, "..") + "/").href;
+  const loadable = {
+    "B1: the specifier parked in a const, never in a loader position":
+      `const spec = "${outside}";\ncreateRequire(import.meta.url)(spec);`,
+    "B2: an extensionless specifier Node completes to `.js`":
+      'createRequire(import.meta.url)("../../node_modules/acorn/dist/acorn");',
+    "B3: a directory Node enters through its package.json `main`":
+      'createRequire(import.meta.url)("../../node_modules/acorn");',
+    "B4: a Worker, whose script is a `new URL` off this module":
+      `new Worker(new URL("${outside}", import.meta.url));`,
+    "B4b: `import.meta.resolve`, which is a loader position nobody has to name":
+      `const u = import.meta.resolve("${outside}");`,
+    "E8: a loader whose base is a `file:` URL outside the tree, so the relative part lands there":
+      `createRequire("${root}")("./tests/model/seam-closure.test.mjs");`,
+    "E9: the same loader parked in a const before it is called":
+      `const req = createRequire("${root}");\nreq("./tests/model/seam-closure.test.mjs");`,
+    "E10: a loader seeded INSIDE the tree whose argument climbs out through that base":
+      `createRequire("${root}scripts/")("../tests/model/seam-closure.test.mjs");`,
+    // the seed is the ONLY thing this reader can see when the argument will not fold
+    "E8b: a loader seeded outside the tree, handed an argument this reader cannot fold":
+      `createRequire("${root}")(name);`,
+    "E9b: the same, with the loader parked in a const before it is called":
+      `const req = createRequire("${root}");\nreq(name);`,
+  };
+  for (const [why, src] of Object.entries(loadable)) {
+    assert.deepEqual(writeSeamOffenders(new Map([["model/fake.mjs", src]]), new Map()),
+      [`model/fake.mjs :: ${OUTSIDE}`],
+      `${why}: Node would load this from outside the tree, and it was not reported — ${src}`);
+  }
+  // ...and the same shapes pointed INTO the tree name the pinned module they name: a Worker
+  // running the groomer wholesale is the groomer taken wholesale
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs",
+      'new Worker(new URL("./loops/groomer.mjs", import.meta.url));']]), new Map()),
+    [`fake.mjs :: ${SEAM_WHOLESALE}`],
+    "a pinned module handed to a Worker is the whole module, and nobody can say which member runs");
   // ...and the discrimination that kept this arm off call arguments until now: a string being
   // used as a PATH is not a specifier. MEASURED across the corpus: zero constant
   // call-argument strings resolve to a real file outside `scripts/`, so nothing legitimate
@@ -2119,10 +2671,23 @@ test("a call argument that resolves to a real module outside the tree is an offe
     'const p = join(root, "../x");\nreturn p;',
     'const p = resolve(root, "./nothing-of-the-sort.mjs");\nreturn p;',
     'log("../outside-writer.cjs is where it would go");',
+    // a real directory outside the tree that Node would NOT load — no `main`, no `index`
+    'const p = join("../..", ".blaze");\nreturn p;',
+    'const dot = ".gitignore";\nreturn dot;',
   ]) {
     assert.deepEqual(writeSeamOffenders(new Map([["model/fake.mjs", src]]), new Map()), [],
       `a path is not a module specifier:\n${src}`);
   }
+  // ...and the fail-closed edge of that line, stated rather than tuned away: `require` runs a
+  // file of ANY extension as JavaScript, so a real file outside the tree is loadable whatever
+  // it is called, and `/etc/hosts` is reported. MEASURED across the corpus: no constant
+  // string names an existing path outside `scripts/`, so nothing legitimate pays for this,
+  // and the day one does it is named in the allowlist with its reason.
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["model/fake.mjs", 'const hosts = readFileSync("/etc/hosts", "utf8");']]),
+      new Map()),
+    [`model/fake.mjs :: ${OUTSIDE}`],
+    "a real file outside the tree is something `require` would run, whatever its extension");
 });
 
 test("a specifier is resolved against the filesystem, not against its own text", () => {
@@ -2144,6 +2709,16 @@ test("a specifier is resolved against the filesystem, not against its own text",
       "a symlink pointing into the tree resolves to the module it points AT. Lexically this " +
       "specifier leaves `scripts/` and would be reported as an out-of-tree import instead — " +
       "a different offence, and on a case-insensitive filesystem, no offence at all.");
+    // ROUND 11: since Node's own resolver answers a relative specifier, it already follows
+    // the link above, and the `realpathSync` call was found to be load-bearing ONLY for a
+    // path that arrives through package.json's map — which Node's resolver never touches
+    // here, because this reader resolves the map itself. So that route has its own row.
+    withManifest({ name: "@hjr15/blaze-board", imports: { "#s": "./blz535-symlink-fixture.mjs" } }, () => {
+      assert.deepEqual(
+        writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "#s";']]), new Map()),
+        ["fake.mjs :: saveState"],
+        "a mapped path that is a symlink into the tree is the module it points at");
+    });
   } finally { rmSync(link, { force: true }); }
 });
 
@@ -2177,6 +2752,43 @@ test("a specifier package.json resolves is resolved through package.json", () =>
       `package.json claims ${spec} and this reader cannot follow it, so it must be reported`);
   }
 
+  // ROUND 11, Finding C. The lookup above was tested and right; what it RETURNED was resolved
+  // against the importing module instead of the package root, so `#g` landed at
+  // `scripts/scripts/loops/groomer.mjs`, matched no pin, and a real `imports` map plus a real
+  // `import { saveState } from "#g"` wrote a state.json at 20 pass / 0 fail. The only red was
+  // this test's tripwire on the manifest, which is a canary on the package.json EDIT and not
+  // on the planted module. So the arm is exercised END TO END, with the manifest swapped for
+  // a synthetic one, through the same resolver and the same pin the corpus scan uses.
+  const mapped = { name: "@hjr15/blaze-board",
+    imports: { "#g": "./scripts/loops/groomer.mjs" },
+    exports: { "./groomer": "./scripts/loops/groomer.mjs" } };
+  assert.equal(resolveModule("fake.mjs", "#g", { manifest: mapped }).rel, "loops/groomer.mjs",
+    "a mapped path is relative to the PACKAGE ROOT, wherever the importing module sits");
+  assert.equal(resolveModule("views/deep/x.mjs", "#g", { manifest: mapped }).rel, "loops/groomer.mjs",
+    "...and it is the same module from anywhere in the tree");
+  withManifest(mapped, () => {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "#g";']]), new Map()),
+      ["fake.mjs :: saveState"],
+      "C1: `#g` resolves to the groomer, and taking `saveState` off it is the write it is");
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs",
+        'import { saveState } from "@hjr15/blaze-board/groomer";']]), new Map()),
+      ["fake.mjs :: saveState"],
+      "a self-reference through `exports` is the same module");
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", 'const { saveState } = await import("#g");']]), new Map()),
+      ["fake.mjs :: saveState"], "...and so is a dynamic `#g`");
+  });
+  withManifest({ name: "@hjr15/blaze-board",
+    imports: { "#g": { import: "./scripts/loops/groomer.mjs", require: "./scripts/config.mjs" } } }, () => {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "#g";']]), new Map()),
+      [`fake.mjs :: ${UNRESOLVABLE}`],
+      "a CONDITIONAL mapping resolves to one file under `import` and another under `require`, " +
+      "and this reader reports it rather than judge whichever one it happened to ask for");
+  });
+
   // ...and end to end, against the manifest this repo actually has: it defines no `imports`,
   // so a `#` specifier is an offence rather than a shrug — which is what stops the edit that
   // adds one from being invisible.
@@ -2184,6 +2796,28 @@ test("a specifier package.json resolves is resolved through package.json", () =>
     writeSeamOffenders(new Map([["fake.mjs", 'import { saveState } from "#g";']]), new Map()),
     [`fake.mjs :: ${UNRESOLVABLE}`],
     "this package has no `imports` map, so `#g` names nothing and is reported");
+
+  // C2: a BARE specifier that lands inside the tree through a symlink under node_modules —
+  // what a `"file:."` dependency produces. Round 9 returned "somebody else's package" for
+  // every bare specifier before realpath ever ran, and the review wrote a state.json through
+  // `self-link/scripts/loops/groomer.mjs` at 20 pass / 0 fail. Node's resolver finds it and
+  // realpath says where it really is.
+  // (named per run so no pre-clean is needed — BLZ-603's ratchet reads a cleanup call after
+  // the first assertion as one a failing assertion would skip)
+  const selfName = `blz535-self-link-${process.pid}`;
+  const selfLink = join(SCRIPTS, "..", "node_modules", selfName);
+  symlinkSync("..", selfLink);
+  try {
+    assert.deepEqual(
+      writeSeamOffenders(new Map([["fake.mjs",
+        `import { saveState } from "${selfName}/scripts/loops/groomer.mjs";`]]), new Map()),
+      ["fake.mjs :: saveState"],
+      "C2: a package under node_modules that IS this tree is this tree");
+  } finally { rmSync(selfLink, { force: true }); }
+  // ...and a package that really lives under node_modules is still somebody else's
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["fake.mjs", 'import { parse } from "acorn/dist/acorn.js";']]), new Map()),
+    [], "a subpath of a real dependency is not a module of this tree");
   assert.deepEqual(
     writeSeamOffenders(new Map([["fake.mjs", 'import { parse } from "acorn";\nimport pg from "pg";']]),
       new Map()), [],
