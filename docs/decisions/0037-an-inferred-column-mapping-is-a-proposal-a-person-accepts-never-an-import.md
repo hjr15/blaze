@@ -144,7 +144,11 @@ at the top level for the same reason.
 
 `blaze import` reports what it would create, update and skip, and exits without writing. Writing
 requires `--apply`. This follows `reconcile`, whose CLI entry already reads *"dry run unless
---apply"* (`scripts/cli.mjs:36`).
+--apply"* (`scripts/cli.mjs:36`). **The rule covers every writing subcommand of `import`, not
+the top-level verb alone:** `blaze import repair <receipt>` (design §5.3) reports what it would
+park, truncate and append and writes only under `--apply`, and `propose-mapping` confirms
+interactively before its one write (§3) — so nothing reachable from `blaze import --help`'s
+*"dry run unless --apply"* writes without being asked to.
 
 ### 5. Export is part of this decision, not a follow-up
 
