@@ -35,7 +35,15 @@ const SEAM = new Set(["model/index.mjs", "model/read-storage.mjs"]);
 // this guard until BLZ-535's second pass. `.cjs` is here for the same reason: a file the
 // guard cannot see is a file the seam does not cover. Non-JS reach (`scripts/ci/smoke.sh`
 // and the one `.py`) is out of scope and stated in the banner below.
-const EXECUTABLE_JS = /\.(?:mjs|cjs|js)$/;
+//
+// CLOSE-OUT (round 12 review): Node 24 STRIPS TYPES BY DEFAULT, so a `.ts`, `.mts` or `.cts`
+// file under `scripts/` executes too — MEASURED: `scripts/attack-x1-helper.ts` holding a
+// `writeFileSync`, imported from an `.mjs`, overwrote a 26-byte file with 16 bytes at
+// 20 pass / 0 fail. Those three are in the corpus now. acorn does not parse TypeScript, so a
+// typed file is reported as "a module this guard cannot parse" — an OFFENCE in itself, the
+// fail-closed answer — and a `.ts` that happens to be plain JavaScript is judged like any
+// other module. No TypeScript parser is added; there is no `.ts` under `scripts/` today.
+const EXECUTABLE_JS = /\.(?:mjs|cjs|js|mts|cts|ts)$/;
 
 function* jsFiles(dir) {
   for (const e of readdirSync(dir)) {
@@ -347,8 +355,11 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 // ROUND 11 — THE SAME THREE FINDINGS, REFUTED AGAIN, and the pattern named by the review: each
 // of rounds 9 and 10 closed the exact spellings the previous reviewer planted and left the
 // CLASS open. So this round wrote each arm's PROPERTY down first and then made the code
-// enforce it over every AST shape that can carry it — the shapes the review planted are rows
-// in the tests, and so are the ones it did not.
+// enforce it over every AST shape it could name. Round 12 then planted eleven more shapes it
+// had not named and every one wrote at 20 pass / 0 fail. What is true of the file as merged
+// is narrower than the property: each arm pins the SHAPES listed in its tests, and the class
+// behind each arm is OPEN — see "THE THREE CLASSES ARE OPEN" at the end of the residuals
+// below. This banner stops claiming closure here.
 //
 //   A. THE FLAG RULE WAS IMPLEMENTED OVER TWO CALLEE SHAPES. A bare identifier and one-level
 //      `ns.member`, with the options read out of an inline literal or one `const` hop to one,
@@ -357,10 +368,12 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      .readFile` (two levels), a named `promises` import (ordering), `.call`, `new
 //      ReadStream`, `readFileSync(...args)` off a const array, and `const o = {}; o.flag =
 //      "w+"` — an object that was empty when the hop read it.
-//      THE PROPERTY: any call or construction that REACHES an fs member — through any callee
-//      shape — carrying an options value whose `flag`/`flags` CANNOT BE PROVEN read-only is
-//      an offence. "Proven" is fail-closed: an argument this reader cannot see the inside of
-//      is not proven. The arm now runs LAST, after every namespace and alias is known; it
+//      THE PROPERTY THIS ARM AIMS AT — pinned over the SHAPES its tests list, and NOT over the
+//      class, which is open: see "THE THREE CLASSES ARE OPEN" in the residuals below. Any call
+//      or construction that REACHES an fs member — through any callee shape — carrying an
+//      options value whose `flag`/`flags` CANNOT BE PROVEN read-only is an offence. "Proven"
+//      is fail-closed: an argument this reader cannot see the inside of is not proven. The
+//      arm runs LAST, after every namespace and alias is known; it
 //      walks member chains to any depth, `.call`/`.apply`/`.bind`/`Reflect.apply`, `new`,
 //      spread from a const array, sequence and optional-chain callees, and local aliases of a
 //      member; and it reads an options object only when it can prove nothing else touched
@@ -377,7 +390,8 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      plants, five real writes, at 20 pass / 0 fail — plus the string parked in a `const`,
 //      which round 5 had claimed closed, and a `new Worker(new URL(...))` the loop never
 //      examined.
-//      THE PROPERTY: any constant string that NODE WOULD LOAD from outside this tree is an
+//      THE PROPERTY THIS ARM AIMS AT, pinned over the shapes its tests list and not over the
+//      class: any constant string that NODE WOULD LOAD from outside this tree is an
 //      offence wherever it sits, and "would load" is answered by Node's own resolver rather
 //      than by `statSync` — `createRequire(from).resolve(spec)` does the extension search,
 //      the directory `main`, and the `node_modules` walk without loading anything. The base
@@ -394,7 +408,8 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //      canary on the package.json edit and not on the planted module. And a bare specifier
 //      was filed as somebody else's package before realpath ever ran, so
 //      `node_modules/self-link -> ..` walked straight back into the tree unjudged.
-//      THE PROPERTY: a mapped path is relative to the PACKAGE ROOT; a bare specifier is
+//      THE PROPERTY THIS ARM AIMS AT, pinned over the shapes its tests list and not over the
+//      class: a mapped path is relative to the PACKAGE ROOT; a bare specifier is
 //      wherever Node's resolver and then realpath say it is, and only a package that really
 //      lives under node_modules is somebody else's. The map is read by this reader — it fails
 //      closed on a conditional object, which Node would resolve one way under `require` and
@@ -425,9 +440,10 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //     ["x.mjs"])` — is judged against the module, which is the wrong base, and a relative path
 //     that resolves to nothing there is left alone as a path being built. And a loader whose
 //     base is itself computed (`createRequire(someUrl)`) is judged against the module. What is
-//     no longer a residual: extension search, directory `main`, `file:` bases, `#imports`,
-//     self-references, symlinks under node_modules, and a string parked in a `const` — every
-//     one of those is resolved the way Node resolves it.
+//     no longer a residual for the SHAPES pinned in the tests: extension search, directory
+//     `main`, `file:` bases in `F(seed)(x)`, `#imports`, self-references, symlinks under
+//     node_modules, and a string parked in a `const` — each of those is resolved the way Node
+//     resolves it. The class is still open; see below.
 //   * AN OPTIONS VALUE THIS READER CANNOT SEE INTO. The flag rule reads an object literal,
 //     and a local binding it can PROVE nothing else touched. `new Opts()`, `Object.assign({},
 //     …)`, `opts()` and a value from another module are not proven, and for a member Node
@@ -443,6 +459,27 @@ test("no module outside the seam stats or lists the projects tree directly", () 
 //     and history, and `process.dlopen`. Each is a builtin this file does not read, and round
 //     10 measured three of them landing bytes at 20 pass / 0 fail. They are named here so the
 //     claim above is exact, not because this file covers them.
+//   * THE THREE CLASSES ARE OPEN. After eleven review rounds this guard is merged with the
+//     classes behind Findings A, B and C stated as residuals rather than claimed closed. Each
+//     arm pins the shapes its tests list; each shape below was MEASURED by round 12 as a real
+//     write at 20 pass / 0 fail on c8d2cf8, and none of them is closed here. The open classes
+//     are tracked on the board as the successor to BLZ-535; PR #169 is the close-out record.
+//       (A) THE FLAG ARM FOLLOWS ONLY `Identifier = <fs member>` DECLARATORS AND ASSIGNMENTS.
+//           Any other carrier of a read member escapes it: `{ __proto__: { flag: "w+" } }`
+//           inline; `const api = { read: readFileSync }; api.read(p, o)`; a conditional
+//           `cond ? null : readFileSync`; an array destructure `const [read] =
+//           [readFileSync]`; `promisify(readFile)`; `Function.prototype.call.call(readFileSync,
+//           …)`; a default parameter `function run(p, read = readFileSync)`; a class static
+//           field `static read = fs.readFileSync`. Each of those truncated a real file with
+//           this guard green.
+//       (B) `loaderBaseOf` EXAMINES `F(seed)(x)` ONLY. A constant `file:` base inside a
+//           `NewExpression` — `new URL("./x.mjs", "file:///…/")` handed to `new Worker` — is
+//           judged against the module, not against the base it will actually load from, and
+//           ran a real write with this guard green.
+//       (C) ONLY THE ROOT package.json IS READ. A nearest-ancestor `scripts/**/package.json`
+//           with an `exports` conditional (`{ import: "./groomer.mjs", require: "./inert.mjs" }`)
+//           is resolved by Node through the `require` condition and passes the guard, while
+//           Node's ESM loader takes the `import` branch and writes.
 //   * A WRITE REPACKAGED BY A MODULE THE ALLOWLIST DOES NOT NAME. Every module it DOES name
 //     is pinned export by export since D3, so that half is closed. A module the allowlist
 //     does not name cannot repackage a write without being an offender itself — it would
@@ -2048,13 +2085,29 @@ test("the eleven routes an adversarial review drove a real write through", () =>
   // not a claim that anything is being caught today.
   const tmp = mkdtempSync(join(tmpdir(), "blz535-corpus-"));
   try {
-    for (const name of ["a.mjs", "b.js", "c.cjs", "d.txt", "e.sh"]) {
+    for (const name of ["a.mjs", "b.js", "c.cjs", "d.txt", "e.sh", "f.ts", "g.mts", "h.cts"]) {
       writeFileSync(join(tmp, name), "//\n");
     }
     assert.deepEqual([...jsFiles(tmp)].map((f) => relative(tmp, f)).sort(),
-      ["a.mjs", "b.js", "c.cjs"].sort(),
-      "F5a: every extension Node will EXECUTE from this tree must be scanned, not `.mjs` alone");
+      ["a.mjs", "b.js", "c.cjs", "f.ts", "g.mts", "h.cts"].sort(),
+      "F5a: every extension Node will EXECUTE from this tree must be scanned, not `.mjs` alone " +
+      "— and Node 24 type-strips, so the three TypeScript extensions execute too");
   } finally { rmSync(tmp, { recursive: true, force: true }); }
+  // ...and a TYPED file in the corpus is an offence in itself: acorn cannot read it, and a
+  // module this guard cannot read is a module the seam does not cover. A `.ts` that is plain
+  // JavaScript is judged like any other. Both halves, so the widening is load-bearing.
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["helper.ts",
+      'import { writeFileSync } from "node:fs";\nexport function w(p: string) { writeFileSync(p, "x"); }']]),
+      new Map()),
+    [`helper.ts :: ${unparseable("Unexpected token (2:19)")}`],
+    "a typed helper Node would run cannot be parsed here, so it is reported, not skipped");
+  assert.deepEqual(
+    writeSeamOffenders(new Map([["helper.ts",
+      'import { writeFileSync } from "node:fs";\nexport function w(p) { writeFileSync(p, "x"); }']]),
+      new Map()),
+    ["helper.ts :: writeFileSync"],
+    "a .ts that is plain JavaScript is judged on its contents");
 
   // F5b: `ci/` was skipped outright by the offender scan, and `ci/mutate-schedule.mjs` has
   // held a live `writeFileSync`, `rmSync` and `cpSync` the whole time.
