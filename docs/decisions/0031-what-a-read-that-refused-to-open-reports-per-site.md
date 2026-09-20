@@ -135,7 +135,23 @@ Site 8 goes the other way and reuses machinery rather than adding any: a plain `
 
 `liveModel` is the one site that reports rather than refuses, because it is `serve.mjs`'s
 `/api/live` route on a **long-lived process** — the site whose hang was reproduced as exit 137 —
-and a throw would take a route down over an optional feed. But `groups: []` **alone is the bug**:
+and a throw would take **the whole process** down over an optional feed.
+
+> **Corrected by BLZ-519.** This paragraph used to say "a throw would take a route down".
+> That understated it, and the difference is the whole of BLZ-519: `serve.mjs`'s request
+> handler is `async` and neither `/api/live` nor the page route had a `try`, so a throw was
+> an **unhandled rejection**, which Node ends the process for. Measured against a real
+> spawned server at `44b797f`: one unauthenticated `GET /api/live` over a board with a FIFO
+> ticket file → the client gets no response at all and the server is gone, taking every
+> other connected session with it. The wording is now true because the code makes it true —
+> both routes carry their own reporting catch, and the handler carries a last-resort one **in
+> the request's own scope** (deliberately not a process-level `unhandledRejection` handler,
+> which cannot see the response it owes an answer to and would keep a board serving in a
+> state nobody characterised). The crash class was **pre-existing and not a BLZ-493
+> regression**: before the guard the same board wedged the server forever with nothing on
+> stderr, and a loud crash is strictly better than a permanent silent wedge.
+
+But `groups: []` **alone is the bug**:
 `views/live.mjs` renders exactly `No recent activity.` for it. So `unreadable` travels out with
 the model, the way `forgeErrors` and `gitErrors` do (ADR-0030 §2), and the Live view branches on
 it **first**, before the empty state.

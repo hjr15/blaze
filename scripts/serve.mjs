@@ -115,6 +115,51 @@ function setupFailureReason(e) {
   try { return String(e?.message ?? e); } catch { return "(the error could not be rendered)"; }
 }
 
+// BLZ-519. The same rule for the BOARD's failures, and a separate function on purpose:
+// `setupFailureReason` guards the PRE-AUTH surface and its every caller must stay
+// obviously about that. This one is reached after the gate, on a board whose operator is
+// entitled to know which file could not be read.
+//
+// AND IT CANNOT THROW, for the reason its sibling cannot: it is called from inside the
+// catch blocks that exist to stop a throw ending the process, and `String()` raises
+// outright on an object with a poisoned `toString`.
+function boardFailureReason(e) {
+  try {
+    const where = e?.path ? ` (${String(e.path)})` : "";
+    return String(e?.message ?? e) + where;
+  } catch { return "(the error could not be rendered)"; }
+}
+
+/** The page a browser gets when the board could not be READ.
+ *
+ *  Self-contained, and that is the point rather than laziness: the board renderer is the
+ *  thing that just failed, so rendering this through it would fail the same way. It names
+ *  the file, because "something went wrong" sends an operator hunting; and it is
+ *  deliberately NOT an empty board, because zero tickets is the strongest claim this
+ *  product makes and a run that could not look must not make it (ADR-0030).
+ *
+ *  No `<script>`, no nonce, no CSRF token, nothing from the request: an error page is the
+ *  last place to start handing things out. */
+function boardUnreadablePageHtml(e) {
+  const esc = (v) => String(v).replace(/[&<>"]/g, (c) =>
+    ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c]));
+  return `<!doctype html><html lang="en"><head><meta charset="utf-8">`
+    + `<title>Blaze — the board could not be read</title>`
+    + `<style>body{background:#0d1117;color:#c9d1d9;font:14px/1.6 system-ui,sans-serif;`
+    + `margin:0;padding:48px 24px}main{max-width:52rem;margin:0 auto}`
+    + `h1{color:#ff7a00;font-size:20px;margin:0 0 12px}code{background:#161b22;`
+    + `border:1px solid #21262d;border-radius:6px;padding:2px 6px;word-break:break-all}`
+    + `p{margin:12px 0}</style></head><body><main>`
+    + `<h1>THE BOARD COULD NOT BE READ</h1>`
+    + `<p>This is <strong>not</strong> an empty board. Blaze refused to open, or could not `
+    + `parse, a file under this board, so nothing can be shown that would reflect what is `
+    + `actually on it.</p>`
+    + `<p><code>${esc(boardFailureReason(e))}</code></p>`
+    + `<p>The server is still running and every other route still answers. Fix or remove `
+    + `the file above and reload — no restart is needed.</p>`
+    + `</main></body></html>\n`;
+}
+
 // ---- first-run setup page (BLZ-358) -----------------------------------------
 // Deliberately self-contained and ugly: it is shown once, before any identity
 // exists, and it must not depend on the board renderer — which is precisely the
@@ -338,7 +383,26 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   const signinLimiter = new AttemptLimiter();
   let store = identity?.hasIdentity ? identity.store : null;
 
-  return createServer(async (req, res) => {
+  // BLZ-519. A LAST-RESORT CATCH IN THE REQUEST'S OWN SCOPE, and NOT a process-level
+  // `unhandledRejection` handler. The handler below is `async`, so every throw inside it —
+  // a refusing board file, a malformed ticket, anything a route forgot to wrap — is an
+  // unhandled rejection, and Node's default for one is to END THE PROCESS. Measured
+  // against a real spawned server at `44b797f`: one unauthenticated `GET /api/live` over a
+  // board with a FIFO ticket file took the whole server down for every connected session.
+  //
+  // WHY NOT `process.on("unhandledRejection")`. That handler runs with no idea what was
+  // happening: it cannot see the `res` that is owed an answer, so the socket hangs until
+  // the client times out; it cannot know whether `closeWritePort()`'s `finally` ran; and
+  // keeping a process alive after a rejection nobody characterised is how a board serves
+  // on for hours in a state no one has reasoned about. Here, in the handler's own scope,
+  // all three are answerable: there IS a response, the `finally` blocks below have run,
+  // and the only state carried across requests (`store`, `setupPending`, the limiter) is
+  // untouched by a throw out of a read.
+  //
+  // It is a BELT, not the fix. The routes that can actually produce this — `/api/live` and
+  // the page route — report the condition themselves, because a bare 500 from here tells
+  // the operator a request failed and not which file the board could not read.
+  const handle = async (req, res) => {
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
     // `new URL` THROWS on a request line it cannot parse — `GET // HTTP/1.1` is enough —
     // and this handler has no wrapping try, so that ended the process for every
@@ -621,7 +685,24 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {
-      return json(200, liveModel(root, projectsDir));
+      // BLZ-519. `liveModel` calls `buildIndex` on its second line, so a board file the
+      // walk REFUSES — or one `parseTicket` throws on — arrives here, not just an
+      // unreadable activity feed. Before this catch that throw ended the PROCESS.
+      //
+      // REPORTED on the seam the view already branches on, not swallowed. ADR-0030: a run
+      // that could not look must not report what a looking run reports, and `{ groups: [] }`
+      // with a 200 is precisely what `views/live.mjs` renders as "No recent activity." The
+      // status is 500 because the board genuinely failed to answer, and the `unreadable`
+      // field rides along so the Live view's existing FIRST branch names the file.
+      try {
+        return json(200, liveModel(root, projectsDir));
+      } catch (e) {
+        console.error("blaze: /api/live could not read the board:", boardFailureReason(e));
+        return json(500, {
+          errors: ["the board could not be read"],
+          unreadable: { path: (e && e.path) || projectsDir, detail: boardFailureReason(e) },
+        });
+      }
     }
     if (req.method === "GET" && u.pathname === "/api/panel") {
       // Guard the render: panelHtml re-reads the ticket file after the index
@@ -670,9 +751,20 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // would make it a constant an injected script could read off any element and copy,
       // which is not a nonce at all.
       const nonce = boardNonce();
-      return send(req, res, 200, "text/html; charset=utf-8",
-                  pageHtml({ project, focus, flat, sprint, view, views, projectsDir, nonce }),
-                  boardHeaders(nonce));
+      // BLZ-519, the same class on the page route: `pageHtml` reaches `loadSprints`,
+      // `loadTransitions` and the whole ticket walk, and an uncaught throw here ended the
+      // PROCESS rather than the page. It renders an error PAGE rather than falling back to
+      // an empty board, because a browser showing zero tickets is the strongest possible
+      // statement that the board is empty — made by a run that never read it.
+      let html;
+      try {
+        html = pageHtml({ project, focus, flat, sprint, view, views, projectsDir, nonce });
+      } catch (e) {
+        console.error("blaze: the board page could not be rendered:", boardFailureReason(e));
+        return send(req, res, 500, "text/html; charset=utf-8",
+                    boardUnreadablePageHtml(e), { "cache-control": "no-store" });
+      }
+      return send(req, res, 200, "text/html; charset=utf-8", html, boardHeaders(nonce));
     }
     if (req.method === "POST") {
       // NOT authentication, and never was — ADR-0013 §7 and the ADR's own reproduction:
@@ -763,6 +855,21 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       } finally { closeWritePort(); }
     }
     res.writeHead(404, { "content-type": "text/plain" }); res.end("not found");
+  };
+
+  return createServer((req, res) => {
+    handle(req, res).catch((e) => {
+      // The OPERATOR is told which file and why, on stderr — a 500 with nothing behind it
+      // is a support case with no evidence in it. The RESPONSE says nothing about the
+      // cause: this catch also covers the pre-auth surface, and a route that never got to
+      // decide what to disclose must not disclose by default.
+      console.error("blaze: request failed:", (e && e.stack) || String(e));
+      if (res.headersSent) { try { res.destroy(); } catch { /* already gone */ } return; }
+      try {
+        send(req, res, 500, "application/json",
+          JSON.stringify({ errors: ["the board could not answer this request"] }));
+      } catch { /* the socket went away first */ }
+    });
   }).listen(port, host);
 }
 
