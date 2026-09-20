@@ -1101,7 +1101,7 @@ Aligned with the codes already in use: `0` clean, `1` a refusal or a hard findin
 
 | Code | Meaning | Board state |
 |---|---|---|
-| **0** | Clean. A dry run that would succeed, or an `--apply` that did | unchanged, or fully imported — **for an in-process outcome.** Under signal death `cli.mjs:290` also yields 0 with the board partially written; see the limit below |
+| **0** | Clean. A dry run that would succeed, or an `--apply` that did | unchanged, or fully imported — **for an in-process outcome.** Signal death used to also yield 0 with the board partially written; **BLZ-639 fixed this** (`scripts/model/spawn-exit-code.mjs`), so a signal-killed run now exits non-zero — see the limit below for what the code still can't tell you |
 | **1** | **Data refused.** One or more rows fail validation | **unchanged** — nothing written |
 | **2** | **Could not look.** The **input** could not be read as the format it claims. Only the input — an earlier draft widened this to the `source-ids` map and thereby violated the rule two rows down that each code exists because its remedy differs | unchanged |
 | **3** | **Mapping incomplete.** A source column has no confirmed mapping, or the mapping's `source.sha256` does not match the file; **or, for `repair`,** `import-mappings/<name>.json` — the mapping file `repair` needs to know whether `sourceIdColumn` was in force — is absent for a receipt whose `<name>` is not `canonical` (§5.2, §5.3) | unchanged |
@@ -1114,10 +1114,12 @@ Four separations, each because the remedy differs:
   a distinction the code should.
 - `4` is the **only** code the importer *itself* exits with when the board changed. A
   formula-injection cell is therefore a `1`, not a `4` — it is a refusal like any other, and
-  nothing was written. The qualifier is load-bearing: a signal-killed run exits **0** through
-  `cli.mjs:290` with the board changed, so "only" is true of what the runner returns and false of
-  what the operator observes — the limit below, and finding it stated three times as an
-  unqualified universal is what this sentence corrects.
+  nothing was written. The qualifier was load-bearing before BLZ-639: a signal-killed run used to
+  exit **0** through `cli.mjs:290` with the board changed, so "only" was true of what the runner
+  returned and false of what the operator observed — finding it stated three times as an
+  unqualified universal is what this sentence corrected. **BLZ-639 shipped the fix** (the process
+  exit code and the runner's own `4` now agree that something went wrong), but the limit below —
+  the exit code still can't say *how much* was written — stands regardless.
 - `5` is not folded into `2`. This table defines `2` as *"the input could not be read as the format
   it claims"*, and *"I could not open my own log"* is a different fact about a different file with
   a different remedy. An earlier draft overloaded `2` with both — and a later one created `5` for
@@ -1144,18 +1146,21 @@ limit, not a bug to be argued away, and an earlier draft's §5.1/§5.3 reasoned 
 throws inside the runner without ever reaching the process boundary.
 
 `blaze import` is not the process that computes the exit code. `cli.mjs:9` dispatches it with
-`spawnSync(process.execPath, …)` and `cli.mjs:290` is `process.exit(r.status ?? 0)`. A child killed
-by a signal returns `status: null`, and `?? 0` maps that to **0**. Reproduced:
+`spawnSync(process.execPath, …)`, and until BLZ-639 shipped, `cli.mjs:290` was
+`process.exit(r.status ?? 0)`. A child killed by a signal returns `status: null`, and `?? 0` mapped
+that to **0**. Reproduced, before the fix:
 
 ```
 wrote 300 of 500 tickets
 spawnSync -> status=null signal="SIGKILL"
-cli.mjs:290 would exit with: 0
+cli.mjs (pre-BLZ-639) would exit with: 0
 ```
 
-So an OOM-killed import — and the runner, not the 40-line parent, is the large-RSS process — exits
-**0** with the board partially written. That is strictly worse than the exit-1 case the round-3
-fix was written to eliminate: 1 at least says something went wrong.
+So an OOM-killed import — and the runner, not the 40-line parent, is the large-RSS process — used
+to exit **0** with the board partially written. That was strictly worse than the exit-1 case the
+round-3 fix was written to eliminate: 1 at least says something went wrong. **BLZ-639 (this
+ticket) fixed it**: `cli.mjs`'s exit now goes through `exitCodeForSpawn` (`scripts/model/spawn-exit-code.mjs`),
+which maps any signal to `128 + signum`, so the reproduction above now exits `137`, not `0`.
 
 Two things follow, and neither is optional:
 
@@ -1192,12 +1197,12 @@ Two things follow, and neither is optional:
    any non-regular file. Each line is in the kernel's page cache before the call returns, which is
    what SIGKILL cannot take back. Its own header says *"a caller that is not best-effort would
    need it"* — this is that caller, and the `source-ids` map (§4.2) is the second.
-2. **Either `cli.mjs:290` learns about signals** (`r.signal ? 128 + signum : (r.status ?? 0)`, or
-   any explicit non-zero), **or this document states plainly that under signal death the exit code
-   carries no information and the receipt's unmatched-`intent` set is the sole evidence.** This
-   design takes the second as its floor and proposes the first as the fix, because changing
-   `cli.mjs` affects **every** verb and is not this lane's call to make unilaterally — it is filed
-   in §8.
+2. **`cli.mjs:290` now learns about signals — BLZ-639 shipped this** (`r.signal` maps through
+   `exitCodeForSpawn`, `scripts/model/spawn-exit-code.mjs`, to `128 + signum`), closing a gap this
+   design's first draft could only propose fixing, because changing `cli.mjs` affects **every**
+   verb and was not this lane's call to make unilaterally (filed in §8 item 6). The design's floor
+   still holds regardless of the fix: the receipt's unmatched-`intent` set is what says *how much*
+   was written; the exit code only ever said *something* went wrong.
 
 The repo has already settled the general form of this. ADR-0035's consequences: *"A caller that
 needs to know whether HEAD moved must read the stdout line or git, not the exit code."* The same
@@ -1947,6 +1952,13 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    transitions and a resolution. The doc contradicts running code rather than lagging it, so this
    is not the "one-line fix" an earlier draft called it — the paragraph has to be rewritten and
    the claim about `superseded` re-checked independently.
+
+   **BLZ-638 (this ticket) rewrote the paragraph and checked `superseded` independently.**
+   `verified` is shipped exactly as described above, gated by `gates.mjs`'s
+   `"requirement:verified"` rule (a `Verifies` link is required to resolve it). `approved` and
+   `superseded` (on `architecture`) are **not** shipped — neither name appears anywhere in
+   `workflows.mjs` or `gates.mjs`, and `architecture`'s only shipped statuses are
+   `proposed`/`accepted`/`rejected`.
 6. **`cli.mjs:290` maps a signal death to exit 0, for every verb — not just this one.**
    `process.exit(r.status ?? 0)` turns a `spawnSync` `status: null` (the shape a signal-killed
    child returns) into a clean success. Reproduced: an OOM-killed import that wrote 300 of 500
@@ -1958,6 +1970,12 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    set is the only evidence a signal-killed run leaves, exactly as ADR-0035 already rules for
    `blaze commit`: *"a caller that needs to know whether HEAD moved must read the stdout line or
    git, not the exit code."*
+
+   **BLZ-639 (this ticket) landed the fix**: `cli.mjs`'s final `process.exit` now calls
+   `exitCodeForSpawn(r)` (`scripts/model/spawn-exit-code.mjs`), which maps any signal name to
+   `128 + signum` via `node:os`'s `constants.signals`. A SIGKILL mid-verb now exits non-zero for
+   every one of the 21 subcommands. The receipt's unmatched-`intent` set remains the way to learn
+   *how much* was written — the exit code still doesn't say that, only that something did.
 7. **BLZ-587's Context is stale about `git add -A`, and this design does not repeat it.** The
    ticket says `blaze migrate --live` *"is the one blaze command that runs `git add -A` over the
    data repo rather than staging only what it wrote."* BLZ-139 had already scoped that call to a
@@ -2042,14 +2060,14 @@ from.
   the whole reason B3 needed rewriting is that its first version was green against a defect that
   blanked 21 of 31 columns.
 - **Claims on import** (§8 item 1) — either a new criterion on BLZ-587 or its own ticket.
-- **The two link vocabularies, and the `Precedes`-writer dependency** (§8 item 3) — its own ticket, and
-  it should carry a blocks/blocked-by edge to whoever lands BLZ-360 §5.5's writer, because that
-  is the change that silently invalidates §2.4's parity bound.
-- **`docs/guide/schema.md` contradicts shipped code** (§8 item 5) — a doc ticket, and larger than the
-  "one-line fix" an earlier draft called it: the paragraph denies that `verified` shipped, and the
-  neighbouring claim about `superseded` needs independent checking.
-- **`cli.mjs:290`'s signal handling** (§8 item 6) — its own ticket, engine-wide, blocking nothing
-  here but capping what §5.1 can promise. One-line fix, one SIGKILL test.
+- **The two link vocabularies, and the `Precedes`-writer dependency** (§8 item 3) —
+  **delivered as BLZ-637**: documented in item 3 above, with a note that whoever files the real
+  `Precedes`-writer ticket should carry a blocks/blocked-by edge back to BLZ-637, because that is
+  the change that silently invalidates §2.4's parity bound.
+- **`docs/guide/schema.md` contradicts shipped code** (§8 item 5) — **delivered as BLZ-638**: the
+  paragraph is rewritten and `superseded` independently checked (not shipped); see item 5 above.
+- **`cli.mjs:290`'s signal handling** (§8 item 6) — **delivered as BLZ-639**: the exit now goes
+  through `exitCodeForSpawn`; see item 6 above.
 - **BLZ-587's stale `git add -A` Context** (§8 item 7) — a ticket-text correction, not a code change.
 - **An import-scoped lock** (§8 item 8) — its own ticket, after C1, because until it lands the
   one-import-at-a-time rule in §7 is a sentence rather than a property.
