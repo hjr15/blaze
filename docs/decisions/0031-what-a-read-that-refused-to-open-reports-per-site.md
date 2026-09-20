@@ -34,16 +34,18 @@ killed. Line numbers are at `1b00f3a`, re-derived — the ticket's came from an 
 | 7 | `scripts/model/transitions.mjs:80` | `loadTransitions` ← `views/page.mjs:71` | **HANG** |
 | 8 | `scripts/config.mjs:169` | `loadConfig` — nearly every entry point | **HANG** |
 | 8b | `scripts/config.mjs:468` | `loadProject` — every verb that names a project | **HANG** |
-| 9 | `scripts/model/schema-config.mjs:478` | `loadProjectSchema` ← the audit's schema layer | **HANG** |
+| 9 | `scripts/model/schema-config.mjs:478` | `loadProjectSchema` ← **`blaze edit` / `blaze new`** — corrected, see §R.5 | **HANG** |
 
 Two corrections to the work order's inventory, both measured:
 
 - **The ticket said `claims.mjs` is reached from `buildIndex`. It is not.** `missingClaimErrors`
   was moved out of `buildIndex` by BLZ-274/ADR-0009 and is called by `reindex.mjs` alone. A
   FIFO `.cutover` under a `buildIndex` returns normally; under `blaze reindex` it hangs.
-- **Site 9 is not in the ticket, and without it site 2 is worthless.** `auditCorpus`'s schema
+- **Site 9 is not in the ticket.** ~~And without it site 2 is worthless: `auditCorpus`'s schema
   layer opens the same `project.json` a second time, so guarding only the runner's own read
-  moves the hang rather than removing it.
+  moves the hang rather than removing it.~~ **The struck sentence is FALSE and is corrected in
+  §R.5.** Site 9 is a real site and the guard on it is right; the *reason given for it here*
+  was not. `auditCorpus` never calls `loadProjectSchema`.
 
 ### `existsSync` is not a guard
 
@@ -219,7 +221,11 @@ just that one line turns the refusal into a tolerated parse failure, and its tes
 - **Two CLI outcomes change on a board that has a non-regular file where a regular one belongs.**
   `blaze audit` exits 2 (unreadable `project.json`) or 1 (unreadable `blaze.config.json`) instead
   of never returning. Both name the file. **This cannot fire on a healthy board:** every one of
-  the 4,201 tests, and the whole live board, reads regular files.
+  the **4,602** tests, and the whole live board, reads regular files. *(Was `4,201`. The
+  figure is pinned to a sha rather than to a branch, per ADR-0024's rule: measured with
+  `npm test`, no Postgres, at `a92e7ce` plus BLZ-520's own five cases — 4,602 tests,
+  4,600 pass, 0 fail, 2 skipped, 406 suites. The count moves on every lane, which is
+  exactly why the ref has to be a sha; the claim it supports does not move.)*
 - **`liveModel`'s payload grows `unreadable`.** It is `null` on every healthy board. The only
   consumer, `views/live.mjs`, renders it; the golden page snapshot moved by exactly that branch.
 - **`model/regular-file.mjs` is the shape ADR-0030 §4's rule should have had.** `classifyGitEntry`
@@ -346,6 +352,51 @@ has no pre-check in front of its appends, so that one is a live hang on a FIFO
 `.blaze/soak-ops.jsonl` or `.blaze/divergences.jsonl` — reproduced, and deliberately **not**
 covered by a passing test, because a test that goes green over an unfixed hang is worse than
 no test.
+
+### R.5 Site 9's reachability was recorded wrongly — BLZ-520 corrects the RECORD, not the decision
+
+**The decision stands. The guard on `loadProjectSchema` is right and stays.** What was wrong
+is the sentence saying *why* that site is reachable, and it was wrong in three places at once
+(this ADR's table, `schema-config.mjs`'s own comment, and a comment in
+`tests/read-path-fifo.test.mjs`), plus a fourth, related, in `audit-runner.mjs`.
+
+**The claim that was false:** that site 9 is reached from *"the audit's schema layer"*, and
+that `auditCorpus` *"opens the same `project.json` a second time"*.
+
+**Why it is false, structurally.** Nothing in the audit calls `loadProjectSchema`. Both
+`scripts/audit-runner.mjs` and `scripts/model/audit.mjs` call `resolveSchema({ config,
+project: projects[k] })` — they are **handed the already-parsed project object** by the
+runner's own read. There is no second read. The only callers of `loadProjectSchema` in the
+tree are `scripts/edit.mjs:55` (and `:66`) and `scripts/new.mjs:83`.
+
+> A note on the file paths, because the work order for this correction got them wrong too and
+> sent the fix at files that do not exist: it is **`scripts/edit.mjs`** and
+> **`scripts/new.mjs`**, not `scripts/model/edit.mjs` / `scripts/model/new.mjs`. And there are
+> three files named `audit*.mjs` — `scripts/audit-runner.mjs`, `scripts/model/audit.mjs`,
+> `scripts/migrate/audit.mjs` — so they are named by full path here.
+
+**The true path, and it is MEASURED rather than asserted.** In both callers the
+`loadProjectSchema` call happens **before** `loadProject` (`edit.mjs:55` before `:77`;
+`new.mjs:83` before `:90`), so the schema read is the *first* thing to touch `project.json`.
+The experiment: revert **only** `schema-config.mjs`'s guard to a bare `readFileSync`, leaving
+every other guard in place, and run each verb against a board whose `projects/BLZ/project.json`
+is a FIFO, under an 8-second `timeout -s KILL`.
+
+| command | guard REVERTED | guard IN PLACE |
+|---|---|---|
+| `blaze edit BLZ-1 title x` | **`EXIT=137`** — SIGKILL; the hang | `EXIT=1`, named refusal |
+| `blaze new --project BLZ --type task "t"` | **`EXIT=137`** — SIGKILL; the hang | (same refusal) |
+| `blaze audit` | `EXIT=2` — refuses at **`audit-runner.mjs`'s own** guarded read | `EXIT=2`, identical |
+
+`blaze audit` is the line that settles it: with site 9's guard gone it behaves **exactly as
+before**, because it never reaches `loadProjectSchema` at all. Had the old claim been true,
+reverting this guard would have moved the audit's hang rather than leaving it untouched.
+
+**What this changes about the original reasoning, stated plainly.** The stricken sentence
+above argued site 9 was necessary *because site 2 would otherwise be worthless*. That
+argument was wrong. Site 9 is necessary on its own merits — it is the first read of
+`project.json` on the `edit`/`new` path and a FIFO there hangs both verbs — and site 2 is
+fully effective without it. Two independent sites, not one site and its shadow.
 
 ## Alternatives rejected
 

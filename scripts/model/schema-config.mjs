@@ -479,8 +479,24 @@ export function loadProjectSchema(projectsDir, key, { config = null } = {}) {
   // tolerance that makes per-project customisation opt-in. A `project.json` it could not READ
   // is not that: resolving to the ambient registry would validate every ticket in the project
   // against a taxonomy nobody wrote. It refuses, for the same reason `audit-runner.mjs` does
-  // at its own read of this same file — and without this one, fixing that one only moves the
-  // hang here, since `auditCorpus`'s schema layer opens the path a second time. ADR-0031.
+  // at its own read of this same file.
+  //
+  // BLZ-520 CORRECTS WHAT THIS COMMENT USED TO SAY NEXT. It claimed that without this guard,
+  // fixing `audit-runner.mjs`'s "only moves the hang here, since `auditCorpus`'s schema layer
+  // opens the path a second time". THAT IS FALSE. Nothing in the audit calls this function:
+  // `scripts/audit-runner.mjs` and `scripts/model/audit.mjs` both call `resolveSchema({
+  // config, project })` with the ALREADY-PARSED project the runner read, so there is no
+  // second read to move a hang to.
+  //
+  // THE REAL CALLERS ARE `blaze edit` AND `blaze new` — `scripts/edit.mjs:55` (and `:66`) and
+  // `scripts/new.mjs:83` — and in both this call happens BEFORE `loadProject`, so it is the
+  // FIRST thing to touch `project.json` on those paths. Measured by reverting this one line
+  // to a bare `readFileSync` against a board with a FIFO `project.json`, under an 8s
+  // `timeout -s KILL`: `blaze edit` and `blaze new` both `EXIT=137`, while `blaze audit`
+  // exits 2 exactly as before, at `audit-runner.mjs`'s own guarded read, never reaching here.
+  //
+  // So this guard is load-bearing ON ITS OWN MERITS, not as `audit-runner.mjs`'s shadow.
+  // ADR-0031 §R.5.
   try { project = JSON.parse(readRegularFileSync(join(projectsDir, key, "project.json"))); }
   catch (e) {
     if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;

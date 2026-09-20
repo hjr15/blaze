@@ -92,8 +92,8 @@ const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 // whenever `configLoadError` was set, on the theory that a board whose config failed to
 // load has "nothing safe to keep running against". That was wrong, and the runner itself
 // disproves it two ways: `tickets` a few lines below comes from `fsReadStorage.listTickets`,
-// and `schema-invalid` is read from each project's `project.json` on disk by `auditCorpus`'s
-// own loop — NEITHER touches `config.projects`, so both are exactly as safe to compute with
+// and `schema-invalid` is computed by `auditCorpus`'s own loop from each project's taxonomy
+// — NEITHER touches `config.projects`, so both are exactly as safe to compute with
 // a bad key or a malformed schedule block as with none at all. `--projects <name>` already
 // proved this empirically: it reported the full corpus (tickets, `schema-invalid`,
 // everything) on a board whose config load had failed, while the flag-less path reported
@@ -106,6 +106,15 @@ const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 // stray directory the config never named, but that same risk exists, unremarked, for every
 // other reason `config` can come back empty or null, and singling out this one reason to
 // instead report a false zero was the actual defect.
+//
+// BLZ-520 CORRECTS ONE CLAUSE ABOVE. It used to read "`schema-invalid` is read from each
+// project's `project.json` ON DISK by `auditCorpus`'s own loop". `auditCorpus` reads nothing
+// from disk: THIS runner reads every `project.json` in the loop below and hands the PARSED
+// objects in as `projects`, which `auditCorpus` passes straight to `resolveSchema({ config,
+// project })`. The conclusion is unaffected — the taxonomy still does not come from
+// `config.projects` — but "reads it on disk" is the same wrong belief that put "the audit's
+// schema layer" in ADR-0031's table for the `loadProjectSchema` site. Nothing in the audit
+// calls that function; `blaze edit` and `blaze new` do, and measurably so. ADR-0031 §R.5.
 const keys = nonEmpty(opts.projects)
   ?? nonEmpty(config?.projects)
   ?? fsReadStorage.listProjects(projectsDir);
