@@ -188,7 +188,7 @@ starts. Use a distinct port per concurrent agent (55481, 55482, …).
 - **Never run bare `blaze`** — it defaults to `start` and loops forever. Always name a subcommand, `</dev/null`, under `timeout`.
 - **Never `git stash`** — repo-wide, shared across worktrees.
 - **One agent per worktree; never let a reviewer and a fix agent share one.** Each concurrent agent gets its own Postgres container and port.
-- **Do NOT reopen** ADR-0001, 0014's ruling, 0021, 0022's decision, 0023, 0024, 0025, 0026, 0027, 0028, 0029, 0030, 0031, 0032. Build ON them. **ADR-0033 is the next free number.**
+- **Do NOT reopen** ADR-0001, 0014's ruling, 0021, 0022's decision, 0023, 0024, 0025, 0026, 0027, 0028, 0029, 0030, 0031, 0032. Build ON them. **ADR-0033 is stale as a "next free number" claim — `docs/decisions/` has since filled through `0037` (`0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md`), re-verified 2026-09-20. `ADR-0038` is the next free number.**
 - The setup token's **PATH** may be logged; its **VALUE** never is, anywhere, ever. BLZ-512 touches `setup-token.mjs` — keep this true.
 - Never accept a secret pasted into chat; never base64-decode a Kubernetes secret value.
 - **Do NOT run `blaze schedule migrate-dates --write`** against the live board.

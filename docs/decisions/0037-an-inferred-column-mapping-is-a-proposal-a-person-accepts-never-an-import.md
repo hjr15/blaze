@@ -140,15 +140,22 @@ and is committed — not under `.blaze/`, which holds regenerable derived state
 (`scripts/reindex.mjs:1-5`). This is the same distinction BLZ-110 drew when it put `sprints.json`
 at the top level for the same reason.
 
-### 4. The dry run is the default, and the write is the flag
+### 4. The dry run is the default, and the write is either the flag or the operator's own "yes"
 
 `blaze import` reports what it would create, update and skip, and exits without writing. Writing
 requires `--apply`. This follows `reconcile`, whose CLI entry already reads *"dry run unless
 --apply"* (`scripts/cli.mjs:36`). **The rule covers every writing subcommand of `import`, not
-the top-level verb alone:** `blaze import repair <receipt>` (design §5.3) reports what it would
-park, truncate and append and writes only under `--apply`, and `propose-mapping` confirms
-interactively before its one write (§3) — so nothing reachable from `blaze import --help`'s
-*"dry run unless --apply"* writes without being asked to.
+the top-level verb alone — but "the write is the flag" is only half of it, because one of the
+three writing subcommands has no flag at all.** `blaze import repair <receipt>` (design §5.3)
+reports what it would park, truncate and append and writes only under `--apply`, same as
+`import` itself. `propose-mapping` (C2, ticket breakdown) is the exception the heading has to
+name rather than fold silently into "the flag": it takes no `--apply` and confirms
+**interactively** before its one write (§3) — the operator's answer at the prompt is the gate,
+not a command-line flag. So nothing reachable from `blaze import --help`'s *"dry run unless
+--apply"* writes without being asked to, but the asking is a flag for two of the three
+subcommands and a live confirmation for the third, and an implementation that reads this
+section's old heading as "add `--apply` to `propose-mapping`" would be adding the flag this ADR's
+own Alternatives Rejected section (*"A `--yes` flag..."*) already rejects.
 
 ### 5. Export is part of this decision, not a follow-up
 
