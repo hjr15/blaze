@@ -112,6 +112,17 @@ try {
     console.warn(`WARNING: ${identityDbPath(dataRoot)} is NOT covered by a gitignore rule`);
     console.warn("         (this board is not a git work tree, so none could be added).");
     console.warn("         Do not commit it — it holds your user roster and token hashes.");
+  } else if (ignored.state === "not-a-regular-file") {
+    // BLZ-512. Reported by NAME rather than folded into the branch above, because the
+    // remedy is different: that one says "there is no repo to add a rule to", and this one
+    // says "there is a repo, and the file the rule belongs in is not a file". Falling
+    // through in silence is what the pre-fix code would have done had it ever returned —
+    // it hung instead — and a silent skip here leaves a token-hash database committable.
+    console.warn("");
+    console.warn(`WARNING: ${identityDbPath(dataRoot)} is NOT covered by a gitignore rule`);
+    console.warn(`         (${ignored.path} is not a regular file, so no rule could be added).`);
+    console.warn("         Replace it with a real .gitignore containing '.blaze/'.");
+    console.warn("         Do not commit it — it holds your user roster and token hashes.");
   }
   console.log("");
   console.log("API token (shown once — copy it now, it is not recoverable):");

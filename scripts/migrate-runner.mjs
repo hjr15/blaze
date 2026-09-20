@@ -2,7 +2,11 @@
 // runs the audit pipeline over .migration-cache/ and writes migration/MIGRATION-
 // AUDIT.md + migration/disposition-ledger.json. The MCP pull that populates the
 // cache is performed by the jira-export-migrator agent, not this script.
-import { writeFileSync, mkdirSync, readFileSync, existsSync } from "node:fs";
+import { writeFileSync, mkdirSync, existsSync } from "node:fs";
+// BLZ-512 / ADR-0031. The disposition ledger is `existsSync`-gated, which a FIFO
+// satisfies, and `--live` WRITES TICKETS from it — so a hang here is a migration that
+// never starts and never says why.
+import { readRegularFileSync } from "./model/regular-file.mjs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { runDryRun, runLive } from "./migrate/jira-import.mjs";
@@ -62,7 +66,7 @@ if (mode === "dry-run") {
     console.error(`refusing --live: ${ledgerPath} not found. Run a --dry-run, review + edit the ledger first.`);
     process.exit(1);
   }
-  const ledger = JSON.parse(readFileSync(ledgerPath, "utf8"));
+  const ledger = JSON.parse(readRegularFileSync(ledgerPath, "utf8"));
   const res = runLive({ cacheDir: CACHE, projectsDir, keys, ledger });
   // BLZ-139: stage the projects tree ONLY, never the whole data root. A bare
   // `add -A` sweeps every unrelated change in the working tree into the migration

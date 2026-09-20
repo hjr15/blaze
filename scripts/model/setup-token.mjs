@@ -32,14 +32,33 @@
 // The VALUE is never logged, echoed, or rendered. The PATH is — that is the thing the
 // operator needs, and it discloses nothing.
 import { randomBytes, timingSafeEqual } from "node:crypto";
-import { appendFileSync, chmodSync, existsSync, lstatSync, mkdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, lstatSync, mkdirSync, rmSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
+// BLZ-512 / ADR-0031. THE HIGHEST-PRIORITY SITE IN THE RESIDUE, because this module is
+// reached PRE-AUTH: `serve.mjs`'s `POST /setup` calls `readSetupToken` before any
+// credential is checked, and `startServer` calls `ensureSetupTokenIgnored` at boot. A
+// `readFileSync`/`appendFileSync` on a FIFO blocks forever — no error, no timeout, no exit
+// — so an unauthenticated caller reaching a board whose `.blaze/setup-token` (or whose
+// `.gitignore`) is a FIFO wedged the one route that makes the install usable. Reproduced at
+// `44b797f` as `EXIT=137` under a 6s cap for both.
+import { readRegularFileSync, appendRegularFileSync, NotARegularFileError } from "./regular-file.mjs";
 
 /** Distinct from an API token's `blz_` on purpose: the two are not interchangeable, and
  *  a leaked one should be identifiable on sight. Still `blz_`-prefixed so the same
  *  secret-scanning rules catch it. */
 export const SETUP_TOKEN_PREFIX = "blz_setup_";
+
+/** BLZ-512. A ceiling on every `git` this module spawns, because `git` reads files this
+ *  process does not choose and can block on one of them — see `ensureSetupTokenIgnored`.
+ *  Generous rather than tight: it is a ceiling on a WEDGE, not a latency budget, and a
+ *  cold `git` on a large repository must never trip it.
+ *
+ *  NOT EXPORTED, deliberately. This module is a `"*"` member of the LOCAL write seam, so
+ *  every export of it is classified one-by-one by `seam-closure.test.mjs` — a file this
+ *  lane does not own. `user-admin.mjs` carries its own copy for the same reason, and
+ *  `tests/read-path-residue-fifo.test.mjs` pins the two EQUAL so they cannot drift. */
+const GIT_TIMEOUT_MS = 10_000;
 
 export function setupTokenPath(dataRoot) {
   return join(dataRoot, ".blaze", "setup-token");
@@ -63,11 +82,19 @@ export function issueSetupToken(dataRoot) {
   return { path, token };
 }
 
+/** BLZ-512: `null` is this function's word for **there is no token on disk**, and
+ *  `setupTokenMatches` treats it as "never a match". That is the right answer for an absent
+ *  file and a lie for a file that could not be read — so the refusal is NOT folded into it.
+ *  It propagates to `serve.mjs`'s pre-auth `try`, which answers 500 and names the reason on
+ *  stderr. `ENOENT` and `EACCES` keep the old `null`, unchanged. */
 export function readSetupToken(dataRoot) {
   try {
-    const v = readFileSync(setupTokenPath(dataRoot), "utf8").trim();
+    const v = readRegularFileSync(setupTokenPath(dataRoot), "utf8").trim();
     return v || null;
-  } catch { return null; }
+  } catch (e) {
+    if (e instanceof NotARegularFileError) throw e;
+    return null;
+  }
 }
 
 /** Idempotent: setup completing twice, or a token already cleared by hand, is not an
@@ -105,7 +132,31 @@ export function setupTokenMatches(presented, stored) {
  *  "The rule that hides one hides the other" was an assumption, and it was wrong. */
 export function ensureSetupTokenIgnored(dataRoot) {
   const rel = ".blaze/setup-token";
-  const git = (...args) => spawnSync("git", ["-C", dataRoot, ...args], { encoding: "utf8" });
+  const gitignore = join(dataRoot, ".gitignore");
+  // BLZ-512. THE SECOND HALF OF THIS SITE'S HANG IS NOT IN BLAZE — IT IS IN `git`.
+  // `git check-ignore` OPENS the root `.gitignore` itself, so on a FIFO the subprocess
+  // blocks in `open(2)` and `spawnSync` waits on it forever. Measured at `44b797f`:
+  // `git -C <board> check-ignore --no-index -q .blaze/setup-token` → `EXIT=137` under a
+  // 5s cap, while `rev-parse --is-inside-work-tree` beside it returns normally. No guard
+  // inside this process can fix a read inside another one, so BOTH are done:
+  //
+  //   1. the entry's type is settled ONCE, here, before any `git` that would read it —
+  //      a non-regular `.gitignore` means git cannot answer the pattern question either,
+  //      so it is not asked; and
+  //   2. every `git` here is bounded, so the shapes this function cannot enumerate (a
+  //      FIFO `.gitignore` in a SUBDIRECTORY, a FIFO `.git/info/exclude`) end as
+  //      `unavailable` — "git could not answer", which is already a state here — rather
+  //      than as a board that never finishes booting.
+  //
+  // SIGKILL rather than the default SIGTERM for the same reason `groomer.mjs` uses it: a
+  // timeout that can itself be deferred is not a timeout.
+  const git = (...args) => spawnSync("git", ["-C", dataRoot, ...args],
+    { encoding: "utf8", timeout: GIT_TIMEOUT_MS, killSignal: "SIGKILL" });
+  // `lstatSync`, not `existsSync`: the latter FOLLOWS a symlink, and a symlinked
+  // `.gitignore` has its own handling below that must not be captured here.
+  let st = null;
+  try { st = lstatSync(gitignore); } catch { /* genuinely absent */ }
+  const ignoreFileBlocksGit = Boolean(st) && !st.isFile() && !st.isSymbolicLink();
   const inside = git("rev-parse", "--is-inside-work-tree");
   if (inside.error) return { state: "unavailable", path: rel };
   if (inside.status !== 0 || inside.stdout.trim() !== "true") return { state: "not-a-repo", path: rel };
@@ -119,7 +170,11 @@ export function ensureSetupTokenIgnored(dataRoot) {
   //
   // The re-ask is the whole fix. "I wrote a rule" and "the path is ignored" are different
   // statements, and only the second is worth reporting.
-  const isIgnored = () => git("check-ignore", "--no-index", "-q", rel).status === 0;
+  // Not asked when the root `.gitignore` is a FIFO/socket/device: `check-ignore` would
+  // block reading it. `false` is the honest answer to give the caller either way — the
+  // path is NOT known to be ignored — and the branch below then names why.
+  const isIgnored = () => !ignoreFileBlocksGit
+    && git("check-ignore", "--no-index", "-q", rel).status === 0;
   let state;
   if (isIgnored()) {
     state = "already";
@@ -133,7 +188,9 @@ export function ensureSetupTokenIgnored(dataRoot) {
     // `lstatSync`, not `existsSync`: the latter FOLLOWS a symlink, so a dangling
     // `.gitignore` symlink read as "absent" had `appendFileSync` create the link's target
     // and the undo then delete the LINK, leaving an orphan file behind.
-    const gitignore = join(dataRoot, ".gitignore");
+    //
+    // (`gitignore` and `st` are settled at the top of the function now — BLZ-512 — because
+    // the type decides whether `git` may be asked about the file at all.)
     // `blocked` SKIPS THE APPEND — IT DOES NOT LEAVE THE FUNCTION. Review found the
     // difference the hard way: the first cut `return`ed from here, which jumped over the
     // `git rm --cached` untrack step below that base and every earlier cut always reached,
@@ -147,8 +204,6 @@ export function ensureSetupTokenIgnored(dataRoot) {
     // "absent" with "present but unreadable", and an unreadable file left `before` null,
     // so the undo took the `rmSync` branch and DELETED the operator's .gitignore — every
     // rule in it, not just the one blaze added.
-    let st = null;
-    try { st = lstatSync(gitignore); } catch { /* genuinely absent */ }
     if (st?.isSymbolicLink()) {
       // Writing through an operator's symlink, and undoing it, is not something a
       // boot-time hygiene check should attempt — and git does not read a symlinked
@@ -159,13 +214,31 @@ export function ensureSetupTokenIgnored(dataRoot) {
         + "add the rule to a real .gitignore by hand. (The token's VALUE is not shown here "
         + "or in any log.)");
     } else if (st?.isFile()) {
-      try { before = readFileSync(gitignore); } catch (e) {
-        blocked = "unreadable";
+      // `readRegularFileSync`, not `readFileSync`, and not because `lstat` above missed
+      // anything: `lstat` answers about the path a moment ago and the open takes whatever
+      // is there now. Losing that race is not a wrong answer, it is an unbounded hang.
+      try { before = readRegularFileSync(gitignore, null); } catch (e) {
+        blocked = e instanceof NotARegularFileError ? "not-a-regular-file" : "unreadable";
         console.error(`blaze: WARNING — blaze could not read .gitignore `
           + `(${e && e.code ? e.code : "read failed"}), so it did not modify it. ${rel} is `
           + "NOT ignored; add the rule by hand. (The token's VALUE is not shown here or in "
           + "any log.)");
       }
+    } else if (st) {
+      // BLZ-512. A FIFO, a socket or a device node where `.gitignore` belongs. It reaches
+      // here rather than the branch above — `isFile()` is false — with `before` still
+      // `null`, and the PRE-FIX code walked straight into `appendFileSync`, which blocks
+      // forever on a FIFO with no reader exactly as a read does. Reproduced at `44b797f`:
+      // `EXIT=137` under a 6s cap, at BOOT, on the pre-auth path.
+      //
+      // The read never runs here, so this is not "unreadable"; it is named for what it is,
+      // because `unwritable` and `unreadable` both suggest a permission an operator could
+      // fix with `chmod`, and this one is fixed by replacing the entry.
+      blocked = "not-a-regular-file";
+      console.error("blaze: WARNING — this board's root .gitignore is not a regular file, so "
+        + `blaze did not modify it. ${rel} is NOT ignored; replace the entry with a real `
+        + ".gitignore and add the rule by hand. (The token's VALUE is not shown here or in "
+        + "any log.)");
     }
     const existedBefore = before !== null;
     const existing = before ?? Buffer.alloc(0);
@@ -196,7 +269,11 @@ export function ensureSetupTokenIgnored(dataRoot) {
       // Newline probe on BYTES: 0x0a, not `String.endsWith`.
       const needsNl = existing.length > 0 && existing.at(-1) !== 0x0a;
       try {
-        appendFileSync(gitignore,
+        // `appendRegularFileSync`: the entry can become a FIFO between the `lstat` above
+        // and this line, and `appendFileSync` on one blocks in `open(2)` with no reader.
+        // A `try/catch` around a blocking call catches nothing; `O_NONBLOCK` turns it into
+        // an `ENXIO`/refusal this catch can actually see.
+        appendRegularFileSync(gitignore,
           `${needsNl ? "\n" : ""}\n# Blaze first-run setup token — a live credential. Never commit it.\n${rel}\n`);
       } catch (e) {
         // A write refusal must not throw out of a boot-time hygiene check — `serve.mjs`

@@ -4,7 +4,12 @@
 // they run ONLY on a real TTY — an agent session and CI are never a TTY, so a password
 // typed here can never reach a transcript. That matters concretely here: a secret in a
 // transcript forces a rotation.
-import { existsSync, mkdirSync, writeFileSync, appendFileSync, readFileSync, chmodSync } from "node:fs";
+import { existsSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
+// BLZ-512 / ADR-0031. The `.gitignore` step below is `existsSync`-gated, which a FIFO
+// satisfies, and it both READS and APPENDS — each blocks forever on one. Reproduced at
+// `44b797f` through the real `runInit`: `EXIT=137` under a 15s cap, with the board already
+// written to disk and the wizard never returning.
+import { readRegularFileSync, appendRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
 import { spawnSync } from "node:child_process";
 import { dirname, join, resolve } from "node:path";
 import { createInterface } from "node:readline";
@@ -221,12 +226,27 @@ export async function runInit(argv, io = {}) {
   // existing board that is true only because somebody added the rule; a new board has
   // no .gitignore at all, so without this the connection file would be committed on the
   // first `git add .` — precisely the outcome the ADR exists to prevent.
+  //
+  // BLZ-512: REPORTED, not refused, and not silent. By this line the board is already on
+  // disk — refusing would leave a good board looking broken, which is the same call
+  // `adminNote` below already makes. But a rule that was not written is a connection file
+  // that IS committable, so it goes on `err` as a named warning rather than nowhere.
   const ignorePath = join(plan.dataRoot, ".gitignore");
-  const existing = existsSync(ignorePath) ? readFileSync(ignorePath, "utf8") : "";
-  if (!/^\.blaze\/?\s*$/m.test(existing)) {
-    appendFileSync(ignorePath,
-      (existing && !existing.endsWith("\n") ? "\n" : "")
-      + "# Blaze runtime state and connection details — never commit these.\n.blaze/\n");
+  let ignoreNote = null;
+  try {
+    const existing = existsSync(ignorePath) ? readRegularFileSync(ignorePath, "utf8") : "";
+    if (!/^\.blaze\/?\s*$/m.test(existing)) {
+      appendRegularFileSync(ignorePath,
+        (existing && !existing.endsWith("\n") ? "\n" : "")
+        + "# Blaze runtime state and connection details — never commit these.\n.blaze/\n");
+    }
+  } catch (e) {
+    if (!(e instanceof NotARegularFileError)) throw e;
+    ignoreNote = e.message;
+    err(`\ngitignore   NOT written: ${ignorePath} is not a regular file.`);
+    err("            ADR-0012 puts the connection details in .blaze/ BECAUSE .blaze/ is");
+    err("            untracked. It is NOT untracked on this board. Replace that entry with");
+    err("            a real .gitignore containing '.blaze/' before committing anything.");
   }
 
   // BLZ-358 AC-6. ADR-0013 section 5: the first admin is a user, not an exception — so
@@ -249,7 +269,12 @@ export async function runInit(argv, io = {}) {
   log(`\nBoard ready at ${plan.dataRoot}`);
   log(`  project      ${plan.project}`);
   log(`  database     ${plan.config.database.driver}`);
-  if (plan.databasePath) log(`  connection   ${plan.databasePath} (gitignored)`);
+  // BLZ-512: `(gitignored)` is a CLAIM, and on a board where the rule could not be written
+  // it is a false one — about the file holding the database connection details, printed at
+  // the exact moment the operator decides whether to commit their new board.
+  if (plan.databasePath) {
+    log(`  connection   ${plan.databasePath}${ignoreNote ? " (NOT gitignored — see above)" : " (gitignored)"}`);
+  }
   if (gitNote) log(`  ${gitNote}`);
   if (adminNote) {
     log(`  admin        ${adminNote.user.email} (role: ${adminNote.user.role})`);

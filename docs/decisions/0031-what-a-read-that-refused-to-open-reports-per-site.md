@@ -208,6 +208,115 @@ just that one line turns the refusal into a tolerated parse failure, and its tes
   fails `ENXIO` before `fstat`). It is kept as a label and recorded as unreachable rather than
   left looking pinned.
 
+## Addendum — BLZ-512, the residue outside the shared read path
+
+The last bullet under *Alternatives rejected* deferred "twenty-odd" sites outside the shared
+read path. BLZ-512 is that ticket. **The inventory was re-derived rather than trusted**, and
+the count was wrong: there are **17 real sites in 10 modules**, not twenty-odd, and one of
+them was not on the original list at all.
+
+Every row below was reproduced at `44b797f` before a line of the fix was written, out of
+process under a 6-second `timeout -s KILL` cap. `HANG` means the child had to be killed
+(`EXIT=137`). The decision column follows §2's line unchanged; nothing here reopens it.
+
+| # | Site | Reached from | At `44b797f` | Decision |
+|---|---|---|---|---|
+| R1 | `model/setup-token.mjs` `readSetupToken` | `serve.mjs`'s **`POST /setup`** — pre-auth | **HANG** | **REFUSE** |
+| R2 | `model/setup-token.mjs` `ensureSetupTokenIgnored` (read + append) | `startServer`, at boot | **HANG** | **REPORT** — `state: "not-a-regular-file"` + stderr |
+| R3 | `commit-lock.mjs:14` `readOwner` | `acquireLock` ← every board git write | **HANG** | **REFUSE** |
+| R4 | `loops/groomer.mjs` `loadState` | `groomOnce`, every pass | **HANG** | **REFUSE** |
+| R5 | `loops/groomer.mjs` `selectNextTicket`'s `.md` | `groomOnce` | **HANG** | **REFUSE** |
+| R6 | `loops/groomer.mjs` `record()`'s `.md` | after the agent runs | **HANG** | **REFUSE** |
+| R7 | `loops/groomer.mjs` `afterRaw` | after the agent runs | **HANG** | **REFUSE** |
+| R8 | `loops/groomer.mjs` CLI's `AGENTS.md` | `node scripts/loops/groomer.mjs` | **HANG** | **REFUSE** |
+| R9 | `loops/groomer.mjs` `snapshotTree` ×2 | `groomOnce` | not constructible — §R.3 | **REPORT** into `state.unreadable` |
+| R10 | `supervisor.mjs:391` `AGENTS.md` | the supervisor's groomer loop | **HANG** | **REPORT** — an `error` event on the bus |
+| R11 | `model/user-admin.mjs` `ensureIdentityIgnored` | `blaze user add`; `serve.mjs` at boot | **HANG** | **REPORT** — `state: "not-a-regular-file"` |
+| R12 | `init-runner.mjs:225` `.gitignore` | `blaze init` | **HANG** | **REPORT** — named on stderr, and the summary stops claiming `(gitignored)` |
+| R13 | `model/write-port-resolve.mjs` `readSoakState` | `blaze db status`, first thing it reads | **HANG** | **REFUSE** |
+| R14 | `db-runner.mjs:180` divergence log | `blaze db status`, past R13 | reached only past R13 | **REFUSE** |
+| R15 | `migrate-runner.mjs:65` disposition ledger | `blaze migrate --live` | **HANG** | **REFUSE** |
+| R16 | `migrate/jira-client.mjs:24` `readRawCache` | `blaze migrate` | **HANG** | **REFUSE** |
+| R17 | `model/storage.mjs` `fsStorage.read` | **nothing** — see BLZ-510 | **HANG** | **REFUSE**, and recorded as unreachable |
+
+### R.1 Three corrections to the work order, one of which was already stale
+
+- **`commit-lock.mjs`'s `readOwner` is the ELEVENTH site and BLZ-493's inventory did not
+  have it.** Confirmed at HEAD. It is the worst of the eleven after R1: `readOwner`
+  returning `null` is read one line later as *"an acquirer between `mkdir` and write"*, and
+  after `OWNERLESS_GRACE_MS` that sentence **steals the lock**, which is two writers in the
+  board's git tree at once. So it refuses rather than laundering.
+- **`pending-ledger.mjs` IS ALREADY GUARDED and nothing was changed there.** The work order
+  carried lines `:69` and `:85` as live `existsSync`-gated hangs. At `44b797f` the module
+  imports `readRegularFileSync` / `writeRegularFileSync` / `appendRegularFileSync` and has
+  no bare `readFileSync` left. The claim was true when it was filed; it is not true now.
+- **`setup-token.mjs` is reachable PRE-AUTH, and that is the highest-priority site here.**
+  Confirmed at HEAD: `serve.mjs`'s `POST /setup` calls `readSetupToken` before any
+  credential is checked. An unauthenticated caller reaching a board whose
+  `.blaze/setup-token` is a FIFO wedged the one route that makes the install usable. The
+  token's **VALUE is still never logged**; the refusal names the **PATH**, which `/setup`
+  already renders.
+
+### R.2 Half of one site's hang is inside `git`, not inside Blaze
+
+The `.gitignore` hygiene checks (R2, R11) were not fixed by the guard alone, and the reason
+is worth recording because no amount of `O_NONBLOCK` in this process addresses it:
+**`git check-ignore` opens the root `.gitignore` itself**, so on a FIFO the *subprocess*
+blocks and `spawnSync` waits on it forever. Measured at `44b797f`:
+`git -C <board> check-ignore --no-index -q .blaze/setup-token` → `EXIT=137` at a 5s cap,
+while `rev-parse --is-inside-work-tree` beside it returns normally.
+
+Both functions therefore do two things: settle the entry's type **once, before any `git`
+that would read it**, and bound every `git` spawn (`GIT_TIMEOUT_MS`, SIGKILL). The bound is
+what covers the shapes neither function can enumerate — a FIFO `.gitignore` in a
+*subdirectory*, a FIFO `.git/info/exclude` — which end as the `unavailable` state these
+functions already had, meaning *"git could not answer"*.
+
+### R.3 What is reachable today, and what is not — stated, not implied
+
+**Genuinely reachable now:** R1–R8, R10–R13, R15, R16. Each was reproduced through the real
+product function or CLI.
+
+**Reachable only past another fixed site:** R14. `blaze db status` reads `readSoakState`
+(R13) before it reaches the divergence log, so R13's hang came first either way. Fixed on
+the same terms rather than left as the next thing to find.
+
+**Not constructible by the current call graph:** R9. `snapshotTree` classifies entries from
+the `readdir` **dirent**, so a FIFO is already `t: "o"` and never reaches either read. The
+guard there fires only inside the window between that dirent and the open, which no test
+constructs. It is the fd-checking shape because that window is the only way in, and both
+catches already report into `state.unreadable`.
+
+**Not a live defect at all:** R17 — see BLZ-510, which keeps it as defence in depth and says
+so in the code, the comment and the test's own name.
+
+**Out of scope, and why:** `scripts/ci/` (`tmp-scratch-attribution.mjs`,
+`temp-cleanup-guard.mjs`, `require-engine.mjs`, `mutate-schedule.mjs`) has four more bare
+`readFileSync` calls. `package.json`'s `files` array excludes `scripts/ci` from the
+published package: these run against a developer checkout under CI, never against a board,
+and no board file reaches them.
+
+### R.4 Two residuals this lane could not close, named rather than half-done
+
+Both are APPEND sites, both genuinely hang on a FIFO, and both need the same one-import fix
+(`appendRegularFileSync`, whose `O_NONBLOCK` turns the block into an immediate `ENXIO`).
+Neither can land without editing `tests/model/seam-closure.test.mjs`, whose *narrow
+exemption* for each module names `appendFileSync` by hand and whose "every named member is
+still reached" arm reddens the moment the call changes. That file belongs to **BLZ-642**, so
+the swap is recorded here for that lane instead of being made from this one:
+
+| Module | Line | Exemption entry that must move |
+|---|---|---|
+| `model/write-port-resolve.mjs` | `logDivergence`, `recordSoakOp` | `["model/write-port-resolve.mjs", ["appendFileSync", …]]` → `appendRegularFileSync` |
+| `model/user-admin.mjs` | `ensureIdentityIgnored`'s append | `["model/user-admin.mjs", ["appendFileSync", "openIdentityDb"]]` → `appendRegularFileSync` |
+
+`user-admin.mjs`'s is the smaller of the two: its **constructible** hang is already closed by
+the pre-check R.2 describes, and what remains is the TOCTOU window. `write-port-resolve.mjs`
+has no pre-check in front of its appends, so that one is a live hang on a FIFO
+`.blaze/soak-ops.jsonl` or `.blaze/divergences.jsonl` — reproduced, and deliberately **not**
+covered by a passing test, because a test that goes green over an unfixed hang is worse than
+no test.
+
 ## Alternatives rejected
 
 - **One blanket policy for all ten sites.** The ticket's own reason for deferring: a single

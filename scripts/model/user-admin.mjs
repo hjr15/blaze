@@ -7,7 +7,25 @@
 //
 // `serve-auth.mjs`'s bind refusal has named this command since BLZ-304. Until now it
 // named nothing — the message was accurate about the fix and wrong about the tool.
-import { existsSync, readFileSync, appendFileSync } from "node:fs";
+import { existsSync, lstatSync } from "node:fs";
+/** BLZ-512. A ceiling on every `git` this function spawns, because `git` reads files
+ *  this process does not choose — `check-ignore` opens the root `.gitignore` itself —
+ *  and can block on one of them.
+ *
+ *  DUPLICATED FROM `setup-token.mjs` RATHER THAN IMPORTED, and the reason is the write
+ *  seam, not preference: `model/setup-token.mjs` is a `"*"` member of the LOCAL write
+ *  seam, so importing anything at all from it here reads as taking a write primitive
+ *  off the seam (`seam-closure.test.mjs` reddens on exactly that). The two values are
+ *  pinned EQUAL by `tests/read-path-residue-fifo.test.mjs`, so the drift a single
+ *  definition would have prevented is prevented by a test instead. NOT EXPORTED: every
+ *  export of an allowlisted module is classified one-by-one by that same guard. */
+const GIT_TIMEOUT_MS = 10_000;
+// BLZ-512 / ADR-0031. `ensureIdentityIgnored` READS `.gitignore` and then APPENDS to it,
+// and both block forever on a FIFO — reproduced at `44b797f`, `EXIT=137` under a 6s cap,
+// through the real function. `serve.mjs` calls it at BOOT, so that hang is a board that
+// never finishes starting.
+import { appendFileSync } from "node:fs";
+import { readRegularFileSync, NotARegularFileError } from "./regular-file.mjs";
 import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ROLES, ROLE_SCOPES } from "./identity-schema.mjs";
@@ -209,10 +227,34 @@ export async function setUserPassword(dataRoot, { email, password } = {}) {
  * appending a duplicate in those cases would be noise.
  *
  * @returns { state, path } — 'already' | 'added' | 'not-a-repo' | 'unavailable'
+ *                          | 'not-a-regular-file'
+ *
+ * BLZ-512: `not-a-regular-file` REPORTS rather than throwing, and the shape is chosen by
+ * the callers, not by preference. `serve.mjs` wraps this in a bare `catch {}` at boot, so
+ * a throw here would be swallowed and the operator would be told nothing at all — while
+ * `added` would be the claim that `.blaze/` is now ignored, made by a run that wrote no
+ * rule and leaves identity.db one `git add -A` from a commit. A named state is the only
+ * option that is both survivable and true.
  */
 export function ensureIdentityIgnored(dataRoot) {
   const gitignore = join(dataRoot, ".gitignore");
-  const git = (...args) => spawnSync("git", ["-C", dataRoot, ...args], { encoding: "utf8" });
+  // BLZ-512. Bounded, and the type of `.gitignore` settled BEFORE `git` is asked about it.
+  // `git check-ignore` OPENS the root `.gitignore` itself, so on a FIFO the SUBPROCESS
+  // blocks in `open(2)` and `spawnSync` waits on it forever — measured at `44b797f`,
+  // `EXIT=137` under a 5s cap. No guard inside this process can fix a read inside another
+  // one. See `setup-token.mjs`'s `ensureSetupTokenIgnored` for the same two-part fix and
+  // the full reasoning; this is its sibling and they must not diverge.
+  const git = (...args) => spawnSync("git", ["-C", dataRoot, ...args],
+    { encoding: "utf8", timeout: GIT_TIMEOUT_MS, killSignal: "SIGKILL" });
+  // `lstatSync`, not `existsSync`: the latter follows a symlink, and a symlinked
+  // `.gitignore` is a regular file at the other end — git reads it and so may blaze.
+  let st = null;
+  try { st = lstatSync(gitignore); } catch { /* genuinely absent */ }
+  if (st && !st.isFile() && !st.isSymbolicLink()) {
+    return { state: "not-a-regular-file", path: gitignore,
+             detail: `${gitignore} is not a regular file, so no ignore rule could be added ` +
+               "and git cannot be asked whether one already applies" };
+  }
 
   const inside = git("rev-parse", "--is-inside-work-tree");
   if (inside.error) return { state: "unavailable", path: gitignore };
@@ -224,8 +266,25 @@ export function ensureIdentityIgnored(dataRoot) {
   if (git("check-ignore", "--no-index", "-q", ".blaze/identity.db").status === 0) {
     return { state: "already", path: gitignore };
   }
-  const existing = existsSync(gitignore) ? readFileSync(gitignore, "utf8") : "";
+  // `existsSync` IS NOT A GUARD — a FIFO satisfies it — so the read and the append are
+  // both taken through the open-fd guard, and a refusal from either is reported by name.
+  let existing;
+  try {
+    existing = existsSync(gitignore) ? readRegularFileSync(gitignore, "utf8") : "";
+  } catch (e) {
+    if (!(e instanceof NotARegularFileError)) throw e;
+    return { state: "not-a-regular-file", path: gitignore, detail: e.message };
+  }
   const prefix = existing && !existing.endsWith("\n") ? "\n" : "";
+  // STILL `appendFileSync`, AND THAT IS A NAMED RESIDUAL RATHER THAN AN OVERSIGHT.
+  // The constructible hang is closed above: the `lstatSync` pre-check returns before this
+  // line for every non-regular entry, and it HAD to, because `git check-ignore` blocks on
+  // one before blaze reaches any `fs` call at all. What this line still carries is the
+  // TOCTOU window — the entry becoming a FIFO between that `lstat` and this append.
+  // Closing it means importing `appendRegularFileSync`, which is a write primitive taken
+  // off the local write seam, and `seam-closure.test.mjs`'s narrow exemption for this
+  // module names `appendFileSync` by hand. That file is owned by BLZ-642, so the swap is
+  // recorded in ADR-0031's residual list for that lane instead of made here.
   appendFileSync(gitignore,
     `${prefix}\n# Blaze runtime state, including identity.db — never commit credentials\n.blaze/\n`);
   return { state: "added", path: gitignore };

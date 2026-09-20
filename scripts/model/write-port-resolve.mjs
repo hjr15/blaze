@@ -9,7 +9,13 @@
 // THE DEFAULT IS STILL THE FILESYSTEM. `fs` needs no database and opens none. Only
 // `dual` and `db` touch SQLite, and only `db` makes it the source of truth — which
 // remains a Phase 2 decision (BLZ-254), not a configuration accident.
-import { existsSync, mkdirSync, appendFileSync, readFileSync } from "node:fs";
+import { existsSync, mkdirSync } from "node:fs";
+// BLZ-512 / ADR-0031. Both instruments here are `existsSync`-gated, WHICH A FIFO SATISFIES,
+// and both were reproduced as hangs at `44b797f` (`EXIT=137` under a 6s cap). `blaze db
+// status` reaches `readSoakState` before anything else it prints, so one `mkfifo
+// .blaze/soak-ops.jsonl` wedged the command an operator runs to diagnose the soak.
+import { appendFileSync } from "node:fs";
+import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
 import { fsStorage } from "./storage.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write-port.mjs";
@@ -95,6 +101,7 @@ export async function openShadow(dataRoot, { create = false } = {}) {
 export function logDivergence(dataRoot, d, { now = new Date().toISOString() } = {}) {
   const path = divergenceLogPath(dataRoot);
   mkdirSync(dirname(path), { recursive: true });
+  // A NAMED RESIDUAL — see `readSoakState` below.
   appendFileSync(path, JSON.stringify({ at: now, ...d }) + "\n");
 }
 
@@ -112,6 +119,7 @@ export function recordSoakOp(dataRoot, { now = new Date().toISOString() } = {}) 
   // soak by undercounting the denominator.
   const path = soakStatePath(dataRoot);
   mkdirSync(dirname(path), { recursive: true });
+  // A NAMED RESIDUAL — see `readSoakState` below.
   appendFileSync(path, JSON.stringify({ at: now }) + "\n");
   return readSoakState(dataRoot);
 }
@@ -119,7 +127,21 @@ export function recordSoakOp(dataRoot, { now = new Date().toISOString() } = {}) 
 export function readSoakState(dataRoot) {
   const path = soakStatePath(dataRoot);
   if (!existsSync(path)) return null;
-  const lines = readFileSync(path, "utf8").split("\n").filter(Boolean);
+  // REFUSE — and the READ is the half that is fixed here.
+  //
+  // THE TWO APPENDS ABOVE STILL HANG ON A FIFO, stated rather than left to be discovered.
+  // `appendFileSync` on one with no reader blocks in `open(2)` exactly as a read does, and
+  // unlike the `.gitignore` writers there is no pre-check in front of them. The fix is one
+  // import — `appendRegularFileSync`, whose `O_NONBLOCK` turns that into an immediate
+  // ENXIO — but it is a write primitive taken off the local write seam, and
+  // `seam-closure.test.mjs`'s narrow exemption for this module names `appendFileSync` by
+  // hand, so the swap cannot land without editing that file. It is owned by BLZ-642.
+  // Recorded in ADR-0031's residual list for that lane rather than half-done here.
+  //
+  // `null` from here prints `operations 0 — nothing has been written through the
+  // dual port yet`, which is the soak's DENOMINATOR: a week of "no divergences" measured
+  // against a count this run never read looks exactly like a week of perfect agreement.
+  const lines = readRegularFileSync(path, "utf8").split("\n").filter(Boolean);
   if (!lines.length) return null;
   const at = (line) => { try { return JSON.parse(line).at; } catch { return null; } };
   return { operations: lines.length,
