@@ -39,6 +39,10 @@ const SUBCOMMANDS = {
   new: { file: "new-runner.mjs", desc: "create a ticket", mutates: true },
   sprint: { file: "sprint-runner.mjs", desc: "create/list/activate sprints", mutates: true },
   audit: { file: "audit-runner.mjs", desc: "report corpus hygiene (read-only; non-zero on a hard finding)", mutates: false },
+  // BLZ-627: the export half of the CSV format layer's round trip (design §3,
+  // docs/design/csv-import-and-export.md). Read-only — `csv` is the only
+  // format this build emits; the import side is a later PR.
+  export: { file: "export-runner.mjs", desc: "export the corpus as a canonical CSV (--format csv; read-only)", mutates: false },
   // `mutates: true` because `migrate-dates --write` rewrites tickets. Dry-run is the default
   // for both subcommands and `import-deps` has no --write at all, but the CLI gate is per-verb
   // and BLZ-121 refuses to even SPAWN a mutating runner under BLAZE_READONLY — declaring this
@@ -133,7 +137,7 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
 //            ALREADY relocated but not committed — the same hazard the read-only gate
 //            above cites for gating too late.
 //
-// That leaves 18 of the 21 subcommands in `SUBCOMMANDS` running this check.
+// That leaves 19 of the 22 subcommands in `SUBCOMMANDS` running this check.
 //
 // The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
