@@ -17,6 +17,16 @@ test("writeCsv quotes a field containing an embedded newline", () => {
   assert.equal(writeCsv([["line one\nline two", "x"]]), '"line one\nline two",x\n');
 });
 
+test("writeCsv quotes a field containing a lone carriage return, asserted on the emitted text", () => {
+  // Round-tripping writeCsv+parseCsv on "a\rb" is NOT evidence here: parseCsv treats a
+  // bare \r as ordinary cell data, so an unquoted "a\rb" round-trips to itself just as
+  // cleanly as a quoted one does — the pair is each other's oracle and both halves agree
+  // whether or not \r is quoted. An unquoted lone-\r cell is a silent ROW BREAK in Excel,
+  // LibreOffice, and any strict RFC 4180 reader, which is exactly the interop design §2.1
+  // exists to guarantee. Assert on the emitted bytes, not a round trip.
+  assert.equal(writeCsv([["a\rb"]]), '"a\rb"\n');
+});
+
 test("writeCsv does not quote a field with nothing hostile in it", () => {
   // design §2.5 example: an em-dash and a URL are not CSV hazards.
   assert.equal(writeCsv([["#63 — https://x/pull/63"]]), "#63 — https://x/pull/63\n");
