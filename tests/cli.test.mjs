@@ -10,6 +10,8 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendEntry, ledgerPath } from "../scripts/pending-ledger.mjs";
+import { constants as osConstants } from "node:os";
+import { exitCodeForSpawn } from "../scripts/model/spawn-exit-code.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(REPO, "scripts", "cli.mjs");
@@ -248,4 +250,46 @@ test("BLZ-432: the reconcile help line makes no unqualified whole-board `sync` c
   assert.match(r.stdout, /usage: blaze reconcile — /);
   assert.match(r.stdout, /dry run|dry-run/i, "the default being a dry run is load-bearing and was missing");
   assert.match(r.stdout, /branch|PR/i, "it must still say what evidence it reads");
+});
+
+// BLZ-639: cli.mjs's final `process.exit(r.status ?? 0)` read a signal-killed
+// child (r.status === null, r.signal === "SIGKILL") as exit 0 — a clean-looking
+// exit for a process an OOM-killer (or anything else) sent a signal to, for
+// every one of the ~21 subcommands this file dispatches. cli.mjs now maps the
+// spawnSync result through the shared exitCodeForSpawn() helper instead.
+test("BLZ-639: a signal-killed subcommand is not reported as exit 0 (real SIGKILL, real mapping)", () => {
+  // The child kills ITSELF with SIGKILL shortly after starting — this is the
+  // exact shape spawnSync({stdio: "inherit"}) sees for a real signal death
+  // (e.g. an OOM-killer hitting the child), reproduced deterministically and
+  // without any concurrent external killer process.
+  const r = spawnSync(process.execPath, ["-e", "setTimeout(() => process.kill(process.pid, 'SIGKILL'), 20)"]);
+  assert.equal(r.status, null, "a signal death must report a null status");
+  assert.equal(r.signal, "SIGKILL");
+
+  const code = exitCodeForSpawn(r);
+  assert.notEqual(code, 0, "signal death is not exit 0");
+  assert.equal(code, 128 + osConstants.signals.SIGKILL);
+});
+
+test("BLZ-639: exitCodeForSpawn maps a clean exit and any named signal generically (not just SIGKILL)", () => {
+  assert.equal(exitCodeForSpawn({ status: 0, signal: null }), 0);
+  assert.equal(exitCodeForSpawn({ status: 3, signal: null }), 3);
+  assert.equal(exitCodeForSpawn({ status: null, signal: "SIGTERM" }), 128 + osConstants.signals.SIGTERM);
+  assert.equal(exitCodeForSpawn({ status: null, signal: "SIGKILL" }), 128 + osConstants.signals.SIGKILL);
+  // An unrecognised signal name still falls back to a fixed non-zero code —
+  // never back to `?? 0`, which is the exact bug this ticket closes.
+  assert.equal(exitCodeForSpawn({ status: null, signal: "SIGNOTAREALSIGNAL" }), 1);
+});
+
+// Source-level guard, matching this file's existing convention (see the
+// SUBCOMMANDS-table and reconcile-help checks above): pins that cli.mjs's
+// dispatch actually ROUTES its exit through exitCodeForSpawn, so a future
+// edit can't quietly revert line 290 to the bare `r.status ?? 0` that this
+// ticket fixes while leaving spawn-exit-code.mjs merely unused.
+test("BLZ-639: cli.mjs's final process.exit routes the spawn result through exitCodeForSpawn", () => {
+  const src = readFileSync(cli, "utf8");
+  assert.match(src, /from ["']\.\/model\/spawn-exit-code\.mjs["']/,
+    "cli.mjs must import the shared signal-aware exit-code mapping");
+  assert.match(src, /process\.exit\(exitCodeForSpawn\(r\)\)/,
+    "cli.mjs's final process.exit must use exitCodeForSpawn(r), not a bare r.status ?? 0");
 });

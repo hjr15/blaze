@@ -4,6 +4,7 @@ import { spawnSync } from "node:child_process";
 import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { isReadonly } from "./readonly.mjs";
+import { exitCodeForSpawn } from "./model/spawn-exit-code.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
 const node = (file, args = []) => spawnSync(process.execPath, [join(here, file), ...args], { stdio: "inherit" });
@@ -287,4 +288,8 @@ if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
 }
 
 const r = node(sub.file, sub.noArgs ? [] : rest);
-process.exit(r.status ?? 0);
+// BLZ-639: r.status is null for a signal-killed child (SIGKILL from an
+// OOM-killer, SIGTERM from a supervisor, ...), and `r.status ?? 0` used to
+// read that as a clean exit 0. exitCodeForSpawn maps any signal name to a
+// non-zero code instead.
+process.exit(exitCodeForSpawn(r));
