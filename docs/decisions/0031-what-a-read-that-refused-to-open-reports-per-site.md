@@ -220,6 +220,15 @@ just that one line turns the refusal into a tolerated parse failure, and its tes
 - **`model/regular-file.mjs` is the shape ADR-0030 §4's rule should have had.** `classifyGitEntry`
   still uses `statSync`-then-open — correct as far as it goes, and it no longer hangs, but it
   keeps the race this module removes. Left for its own ticket rather than reopened here.
+  **CLOSED by BLZ-511:** it reads from the open descriptor now. The stale `st.size` went with
+  it — the `N-byte` sentence and the `git-file-empty` branch were both describing whatever
+  had been at the path earlier rather than the file the process opened, and both now come
+  from the bytes actually read. Pinned by making a descriptor and a path disagree
+  (`registerHooks`, scoped to `regular-file.mjs` alone so `index.mjs` keeps the real `fs`):
+  over a `.git` file holding a **valid `gitdir:` pointer**, taking the path's word classifies
+  `nested-repo-pointer` and asking the descriptor refuses — two different strings, so the
+  case cannot pass for the wrong reason. BLZ-497's `git-file-unreadable` shape still reaches
+  its finding through the real call path, unchanged.
 - **`kindOf`'s `isSocket` branch is unreachable from both callers** (`open` on a Unix socket
   fails `ENXIO` before `fstat`). It is kept as a label and recorded as unreachable rather than
   left looking pinned.
