@@ -363,7 +363,7 @@ Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is
 place every verb dispatches through. There are two more exemptions — **three in all** —
 **`blaze init`**, which runs before a board exists, and **`blaze commit`**, a git flush of
 the pending ledger that imports nothing from the model: refusing it would strand ticket
-files other verbs have already relocated but not committed. That leaves **18 of the 21
+files other verbs have already relocated but not committed. That leaves **19 of the 22
 subcommands** running the check.
 
 **The preflight judges the board the way `blaze audit` does**, and that is not a detail.
