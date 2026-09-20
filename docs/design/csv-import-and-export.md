@@ -408,9 +408,10 @@ would be destroyed by the ticket's next write.
 
 So the parity claim is bounded rather than dropped: **the two ports agree for as long as
 `ticket_link` is derived from frontmatter.** The day BLZ-360 §5.5 lands a real `Precedes` writer,
-this design's link grammar and gate 1 both need revisiting — and gate 2 (§3.1), which compares
-values through the read driver, is what would notice. That dependency is recorded in §8 rather
-than left for whoever lands the writer to discover.
+this design's link grammar and the round-trip gate 1 (§3.1; tracked by BLZ-630, not implemented by
+this ticket) both need revisiting — and gate 2 (§3.1), which compares values through the read
+driver, is what would notice. That dependency is recorded in §8 rather than left for whoever lands
+the writer to discover.
 
 ### 2.5 Escaping — comma, newline, quote, and a leading `=`
 
@@ -1835,8 +1836,9 @@ graph and §4.3's surviving assertion holds. `repair` is not called `resolve` be
   append a pair — the lookup's first-occurrence rule (§4.2) keeps one, and the other is a
   ticket with a pair nothing reads: a duplicate, by the mechanism §4.2 exists to prevent. The
   fix is an import-scoped lock and it is filed as §8 item 8 rather than specified here, because
-  it is one `wx` file and its own test, and this document has already spent six rounds on the
-  records it would protect.
+  it is one atomically-`mkdirSync`'ed lock directory (matching `scripts/commit-lock.mjs`, not a
+  `wx` file) and its own test, and this document has already spent six rounds on the records it
+  would protect.
 - **Streaming.** The file is read whole. Forward references and duplicate detection both need the
   full id set before any row is judged, and the live corpus is ~2,850 tickets — small enough that
   streaming buys nothing and costs the file-as-a-unit guarantee.
@@ -1879,8 +1881,20 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    declares a different six (§1.4). Beyond naming the split, §2.4 records a **live dependency**
    nobody has written down: this design's `fs`/`db` link parity holds only while `ticket_link` is
    derived from frontmatter. The day BLZ-360 §5.5 lands a real `Precedes` writer, the CSV link
-   grammar and gate 1 both need revisiting. That belongs on the `Precedes`-writer ticket as a
-   blocked-by, not in this document alone.
+   grammar and the round-trip gate 1 (tracked by BLZ-630, not this ticket) both need revisiting.
+   That belongs on the `Precedes`-writer ticket as a blocked-by, not in this document alone.
+
+   **BLZ-637 (this ticket) checked the board, and no such writer ticket exists today.** The two
+   candidates that come closest both stop short of writing an edge: BLZ-373 added the `Precedes`
+   link type and the `lag_minutes` column to the schema (`scripts/model/link-schema.mjs`) but
+   writes nothing itself — it is schema-only. BLZ-387 (`blaze schedule import-deps`) computes and
+   *proposes* a direction for each mutual `Blocks` pair, but `--dry-run` is its only mode; its own
+   last line says so (`scripts/schedule-runner.mjs:192`, quoted in §2.4) — resolving a proposal
+   into a committed `Precedes` edge is left to a human, by hand. Neither ticket commits a
+   `ticket_link` row, so the `fs`/`db` parity bound above is not yet at risk from either. Whoever
+   eventually files the real `Precedes`-writer ticket should add a blocks/blocked-by link back to
+   BLZ-637, so this paragraph (and gate 1, and the CSV link grammar in §2.3/§2.4) gets revisited in
+   step with that ticket rather than discovered stale afterwards.
 4. **`start`/`due` are scheduler outputs.** No ticket says whether they are exported. §2.7 says
    yes, and gives the two measured reasons.
 5. **`docs/guide/schema.md` does not merely omit `verified` — it affirmatively denies it.**
@@ -1911,9 +1925,12 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
 8. **Nothing serialises the write phase of two concurrent imports.** §7 states one-import-at-a-
    time as an operator constraint and says why the commit lock does not enforce it: it is taken
    inside `commitFile` after the writes (`scripts/serve-commit.mjs:9`) and never in batch mode.
-   The fix is an import-scoped lock: a `wx` lockfile under `import-receipts/` taken before the
-   pre-write phase (before the prune and the exit-5 check, since those are what a second run
-   must not race past), held until staging returns, stale-stolen on a dead owner PID the way
+   The fix is an import-scoped lock: an atomically-`mkdirSync`'ed lock directory under
+   `import-receipts/` (not a `wx` lockfile — `scripts/commit-lock.mjs:5` already takes its
+   `.blaze/commit.lock/` this way, via `mkdirSync(dir)` throwing `EEXIST` while held, plus an
+   `owner.json`; this reuses that mechanism rather than a second one) taken before the pre-write
+   phase (before the prune and the exit-5 check, since those are what a second run must not race
+   past), held until staging returns, stale-stolen on a dead owner PID the way
    `scripts/commit-lock.mjs` already does, and a contended lock is exit 5 — a record the run must
    establish before it may write, which is that code's definition. One test: two `--apply` runs
    over one file, one exits 5 with nothing written, the board holds each source key once. Its
