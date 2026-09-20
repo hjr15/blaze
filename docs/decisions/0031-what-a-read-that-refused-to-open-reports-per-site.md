@@ -209,7 +209,12 @@ just that one line turns the refusal into a tolerated parse failure, and its tes
   killed at `1b00f3a`; 1 of 16 is at HEAD.** The one that remains is `model/storage.mjs:104`
   (`fsStorage.read`), which is outside this ticket's scope and is raised as its own — and
   which no current call path reaches with a non-regular file, because its callers take the
-  file from a walk that now refuses. The 16th case, `readCutover` via `buildIndex`, never
+  file from a walk that now refuses. **CLOSED by BLZ-510**, and the unreachability is
+  unchanged: the guard is there because `fsStorage` is the driver INTERFACE, not because
+  anything reaches it. Reverting the line reddens exactly one test — one that calls the
+  function directly, because no product route can construct the input — so a
+  mutation-revert cannot establish that it protects anything, and the code comment, the
+  test's name and this line all say so rather than letting it look pinned. The 16th case, `readCutover` via `buildIndex`, never
   hung: `missingClaimErrors` is not on that path, which is the inventory correction above.
 - **Two CLI outcomes change on a board that has a non-regular file where a regular one belongs.**
   `blaze audit` exits 2 (unreadable `project.json`) or 1 (unreadable `blaze.config.json`) instead
