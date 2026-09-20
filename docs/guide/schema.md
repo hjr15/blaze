@@ -218,11 +218,22 @@ and re-adding it un-retires the type. If you are migrating a board that still
 holds epics, retype them to `feature` rather than widening the parent rules —
 see BLZ-249 for a branch that got this wrong.
 
-The `approved`/`verified` (on `requirement`) and `superseded` (on
-`architecture`) gates are designed but not shipped in the documented
-configuration — each needs a return visit after the triggering event has
-passed, and return-visit obligations measure far below fields captured at
-creation time on the board this model was developed against.
+`verified` (on `requirement`) **is** shipped: `scripts/model/workflows.mjs`
+declares it as a real status in the `requirement` workflow, reachable both
+from `proposed` and from `implemented`, and it can transition onward to
+`obsolete`. It resolves to `done`, and it carries its own gate —
+`requirement:verified` (`scripts/model/gates.mjs`) refuses the transition
+unless a `Verifies` link resolving to the requirement already exists.
+
+`approved` (on `requirement`) and `superseded` (on `architecture`) are the
+ones that are designed but not shipped: neither name appears as a status,
+transition, or gate anywhere in `scripts/model/workflows.mjs` or
+`scripts/model/gates.mjs` — `requirement`'s shipped statuses are `proposed`,
+`implemented`, `verified`, `rejected`, `obsolete`, and `architecture`'s are
+`proposed`, `accepted`, `rejected`. Each needs a return visit after the
+triggering event has passed, and return-visit obligations measure far below
+fields captured at creation time on the board this model was developed
+against.
 
 Full type reference, field requirements, link vocabulary, and what the
 engine can't yet express: [`../method/work-item-types.md`](../method/work-item-types.md).
