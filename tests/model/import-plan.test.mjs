@@ -57,8 +57,14 @@ function csv(...maps) {
   return writeCsv([COLUMN_NAMES.slice(), ...maps.map((m) => COLUMN_NAMES.map((n) => m[n] ?? ""))]);
 }
 
-/** An existing board ticket, in the read seam's shape. */
-function ticket(fm, { status = "defined", body = "body", file = null } = {}) {
+/** An existing board ticket, in the read seam's shape.
+ *
+ *  The body carries its trailing newline because that is what a ticket ON A
+ *  BOARD actually holds: `serializeTicket`/`parseTicket` normalise to exactly
+ *  one (measured), and the planner compares a row against what writing it
+ *  WOULD produce. A fixture without it would be a board state that cannot
+ *  exist, and the skip rule would look broken against it. */
+function ticket(fm, { status = "defined", body = "body\n", file = null } = {}) {
   return {
     frontmatter: { title: "t", type: "task", project: "BLZ", estimate: 30, ...fm },
     body, status, project: fm.project ?? "BLZ",

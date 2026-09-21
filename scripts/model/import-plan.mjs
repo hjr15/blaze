@@ -42,6 +42,7 @@ import { isHostileCell, exportRows } from "./export-rows.mjs";
 import { LINK_TYPES } from "./links.mjs";
 import { validateTicket } from "./rules.mjs";
 import { validateSprintFields } from "./sprints.mjs";
+import { parseTicket, serializeTicket } from "./ticket.mjs";
 
 /** Columns that are not frontmatter keys: the version constant, the directory
  *  and the body (design §1.1). Everything else in COLUMN_NAMES is a key. */
@@ -206,9 +207,20 @@ function canonicalCells(record) {
 /** The `allowed` set for an enum column, resolved per row (design §1.2/§2.2 —
  *  never a hardcoded list). `status` depends on the row's own `type`, so it is
  *  resolvable only once the type is known to be legal. */
-function allowedFor(column, board, type) {
+/**
+ * The resolved type registry for a row's OWN project (design §1.2/§2.2 —
+ * "the importer validates against the resolved registry for the target
+ * project, exactly as `applyNew` does via `loadProjectSchema`, never against
+ * a hardcoded list"). A board that hands one registry rather than a resolver
+ * — which every pure test here does — keeps working through `board.types`.
+ */
+function typesOf(board, project) {
+  return board.typesFor ? board.typesFor(project) : board.types;
+}
+
+function allowedFor(column, board, type, types) {
   switch (column) {
-    case "type": return new Set(Object.keys(board.types));
+    case "type": return new Set(Object.keys(types));
     case "priority": return new Set(board.priorities);
     case "resolution": return new Set(board.resolutions);
     case "status": return type == null ? null : new Set(board.statusesFor(type));
@@ -244,11 +256,15 @@ function decodeRow(entry, board) {
   }
 
   // `type` first: `status`'s legal set is a function of it.
+  // The registry is resolved against the row's OWN project, so a board whose
+  // `projects/<KEY>/project.json` declares a `schema.types` override is
+  // honoured on the import path exactly as it is on the create path.
+  const types = typesOf(board, entry.cells.project);
   const typeCell = entry.cells.type;
-  const typeOk = typeCell !== "" && Object.hasOwn(board.types, typeCell);
+  const typeOk = typeCell !== "" && Object.hasOwn(types, typeCell);
   if (!typeOk) {
     errors.push(
-      `${at}: \`type\` is not one of ${Object.keys(board.types).join(", ")} — a value outside the `
+      `${at}: \`type\` is not one of ${Object.keys(types).join(", ")} — a value outside the `
       + `resolved registry is a refusal, never a coercion. The cell is not echoed: \`type\` carries `
       + `no shape constraint, so a failing value can be anything at all (design §5.2)`);
   }
@@ -267,7 +283,7 @@ function decodeRow(entry, board) {
       values.id = null;
       continue;
     }
-    const allowed = allowedFor(name, board, typeOk ? typeCell : null);
+    const allowed = allowedFor(name, board, typeOk ? typeCell : null, types);
     if (col.type === "enum" && allowed === null) {
       // `status` with an unresolvable type: the type refusal above is the
       // actionable one, and a second message about a legal set nobody can
@@ -450,7 +466,8 @@ export function planImport(rows, board, opts = {}) {
       // validators. Three of their messages interpolate the cell, so those
       // three are dropped here and re-authored above, per the echo rule.
       const modelErrors = validateTicket(
-        { frontmatter: record.frontmatter, body: record.body }, lookup, { types: board.types });
+        { frontmatter: record.frontmatter, body: record.body }, lookup,
+        { types: typesOf(board, record.project) });
       for (const m of modelErrors) {
         if (/^parent not found:/.test(m)) continue;        // named above, with the echo rule applied
         if (/^invalid priority:/.test(m)) continue;        // named above
@@ -535,7 +552,26 @@ export function planImport(rows, board, opts = {}) {
       refusals.push({ seq, row: entry.row, message });
       continue;
     }
-    const after = canonicalCells({ ...record, file: existing.file });
+    // Compare the row AS IT WOULD BE ON DISK, not as it arrived. `serializeTicket`
+    // normalises — measured: a body of "body" reads back as "body\n" — so a
+    // hand-written CSV whose `description` lacks the trailing newline would
+    // otherwise classify as "differs" forever, and a second `--apply` of the
+    // same file would never reach the no-op §5.2 promises. Running the row
+    // through the same pure serialize/parse pair the fs write will perform
+    // makes "identical" mean *writing this row produces a ticket that exports
+    // to these cells* — which is precisely the re-run-is-a-no-op property, and
+    // is decidable without writing anything.
+    //
+    // A difference this erases is by definition one the board cannot hold. It
+    // models the `fs` port, which is the default and the store §3's round trip
+    // is defined against (§2.6 states the `db` port's two carve-outs).
+    const persisted = parseTicket(serializeTicket({
+      frontmatter: record.frontmatter, body: record.body,
+    }));
+    const after = canonicalCells({
+      project: record.project, status: record.status,
+      frontmatter: persisted.frontmatter, body: persisted.body, file: existing.file,
+    });
     const changedColumns = COLUMN_NAMES.filter((_, i) => before[i] !== after[i]);
 
     if (changedColumns.length === 0) {

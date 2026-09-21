@@ -43,6 +43,19 @@ const SUBCOMMANDS = {
   // docs/design/csv-import-and-export.md). Read-only — `csv` is the only
   // format this build emits; the import side is a later PR.
   export: { file: "export-runner.mjs", desc: "export the corpus as a canonical CSV (--format csv; read-only)", mutates: false },
+  // BLZ-629: the import half of the CSV round trip (design §5, §6,
+  // docs/design/csv-import-and-export.md). `mutates: true` unconditionally,
+  // exactly as `reconcile` is: the verb dry-runs by default and only writes
+  // under `--apply`, but BLZ-121 refuses to even SPAWN a mutating runner
+  // under BLAZE_READONLY, and declaring it read-only because the common path
+  // is a dry run would defeat that.
+  //
+  // The desc names what THIS build has. Design §6 specifies a longer string
+  // naming `propose-mapping` and `repair`; those are C1/C2 and do not exist
+  // yet, and `blaze import --help` prints nothing but `sub.desc`
+  // (cli.mjs:86) — so advertising them here would be a help text that lies.
+  // Whoever lands C1/C2 extends this string with them.
+  import: { file: "import-runner.mjs", desc: "import tickets from a canonical CSV (dry run unless --apply)", mutates: true },
   // `mutates: true` because `migrate-dates --write` rewrites tickets. Dry-run is the default
   // for both subcommands and `import-deps` has no --write at all, but the CLI gate is per-verb
   // and BLZ-121 refuses to even SPAWN a mutating runner under BLAZE_READONLY — declaring this
