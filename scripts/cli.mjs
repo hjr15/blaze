@@ -150,7 +150,7 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
 //            ALREADY relocated but not committed — the same hazard the read-only gate
 //            above cites for gating too late.
 //
-// That leaves 19 of the 22 subcommands in `SUBCOMMANDS` running this check.
+// That leaves 20 of the 23 subcommands in `SUBCOMMANDS` running this check.
 //
 // The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw

@@ -97,6 +97,12 @@ test("no module outside the seam stats or lists the projects tree directly", () 
     "migrate/jira-import.mjs",  // a migration path, not a live verb
     "loops/groomer.mjs",        // hashes file text against git porcelain
     "pending-ledger.mjs", "commit-lock.mjs", "reindex.mjs", "supervisor.mjs",
+    // BLZ-629: lists and stats `import-receipts/` — the run RECORDS, to find
+    // the latest receipt for a mapping and to prune the ones past retention.
+    // It never lists or stats the PROJECTS tree, which is what this guard is
+    // about: its own corpus read goes through `fsReadStorage.listTickets`
+    // (loadBoard), the seam, like every other reader.
+    "model/import-apply.mjs",
   ]);
   const offenders = [];
   for (const file of jsFiles(SCRIPTS)) {
@@ -932,6 +938,17 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["move-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["new-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["resolve-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["import-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
+  // BLZ-629. Three exports reach a write and say so: `runImport` is the verb,
+  // `applyImport` is the walk it delegates to, and `pruneReceipts` unlinks
+  // receipts past retention. Everything else is a reader or a pure
+  // classifier — `readReceipt` is read-only BY DESIGN (§5.3: parking is a
+  // write, and only `blaze import repair --apply` does it), and `loadBoard`
+  // reads through the seam.
+  ["model/import-apply.mjs", { writes: ["runImport", "applyImport", "pruneReceipts"],
+    sanctioned: [],
+    inert: ["RECEIPT_DIR", "CANONICAL_NAME", "receiptPathFor", "readReceipt",
+      "unresolvedIntents", "inspectReceipt", "latestReceiptFor", "loadBoard"] }],
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
@@ -1968,6 +1985,25 @@ const WRITE_ALLOWED = new Map([
   ["move-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
   ["new-runner.mjs", ["applyNew", "commitOrQueue", "resolveWritePort"]],
   ["resolve-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  // BLZ-629 / design §5.3-§5.5. `blaze import --apply` is `blaze new` done N
+  // times from a file, and it takes exactly what `new.mjs` and the six
+  // runners above take, for exactly their reasons: `allocateId` + `writeClaim`
+  // are the allocator (deleted at Phase 2, on the footing of ids.mjs and
+  // claims.mjs), `commitOrQueue` is the staging front door, `resolveWritePort`
+  // is how the runner OBTAINS the driver. No ticket is written outside the
+  // port — `applyImport` takes `writePort.write` and nothing else.
+  //
+  // The three direct node:fs members are the RUN'S OWN RECORDS, never a
+  // ticket: `appendRegularFileSync` writes the receipt (the FIFO-safe,
+  // unbuffered primitive §5.1 REQUIRES — a buffered receipt loses its lines
+  // under SIGKILL and the unmatched-intent set stops being evidence),
+  // `mkdirSync` creates `import-receipts/`, and `unlinkSync` is the 90-day
+  // prune. Named to those members: a ticket write, or a fourth primitive,
+  // appearing here still reddens.
+  ["model/import-apply.mjs", ["allocateId", "writeClaim", "commitOrQueue",
+    "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
+  // ...and `runImport` is the verb itself, exactly as new-runner.mjs takes `applyNew`.
+  ["import-runner.mjs", ["resolveWritePort", "runImport"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
