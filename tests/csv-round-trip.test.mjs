@@ -31,16 +31,11 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, copyFileSync, existsSync, rmSync, readdirSync,
-} from "node:fs";
-import { tmpdir } from "node:os";
-import { join, dirname } from "node:path";
-import { fileURLToPath } from "node:url";
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { join } from "node:path";
 import { exportCsv } from "../scripts/model/export-rows.mjs";
 import { parseCsv } from "../scripts/model/csv.mjs";
 import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
-import { runImport } from "../scripts/model/import-apply.mjs";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
 import { zeroDiff } from "../scripts/migrate/zero-diff.mjs";
 import { missingClaimErrors } from "../scripts/model/index.mjs";
@@ -48,47 +43,9 @@ import { claimPath, cutoverPath } from "../scripts/model/claims.mjs";
 import { TYPES, PRIORITIES } from "../scripts/model/schema.mjs";
 import { WORKFLOWS, RESOLUTIONS } from "../scripts/model/workflows.mjs";
 import { LINK_TYPES } from "../scripts/model/links.mjs";
-
-const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
-const FIXTURE = join(REPO, "tests", "fixtures", "csv-round-trip");
-const FIXTURE_PROJECTS = join(FIXTURE, "projects");
-
-/**
- * Run the whole loop once. Exported shape is what every gate below reads.
- *
- * `csvText` lets BLZ-631's revert test substitute a DEFECTIVE X — a column
- * blanked exactly as a broken exporter would blank it — and run the identical
- * import and comparison against it.
- */
-export function roundTrip({ csvText = null, cleanup = [] } = {}) {
-  const X = csvText ?? exportCsv(FIXTURE_PROJECTS).text;
-
-  const B = mkdtempSync(join(tmpdir(), "blaze-round-trip-"));
-  cleanup.push(B);
-  mkdirSync(join(B, "projects"), { recursive: true });
-  // The importer validates `sprint` against the target board's registry, so
-  // the fixture's registry has to travel with the corpus. It is NOT a ticket
-  // and CSV cannot carry it — design §2.8's "board state that is not a
-  // ticket", which import refuses rather than invents.
-  copyFileSync(join(FIXTURE, "sprints.json"), join(B, "sprints.json"));
-
-  const csvPath = join(B, "X.csv");
-  writeFileSync(csvPath, X);
-
-  return { X, B, csvPath, cleanup };
-}
-
-async function importInto({ csvPath, B }) {
-  return runImport({
-    file: csvPath,
-    projectsDir: join(B, "projects"),
-    dataRoot: B,
-    apply: true,
-    // Staging is §5.4's concern and is tested in tests/model/import-apply.test.mjs;
-    // a git tree here would only add a failure mode to a gate about data.
-    stage: () => ({ ok: true, committed: false, queued: true }),
-  });
-}
+import {
+  REPO, FIXTURE_PROJECTS, roundTrip, importInto, cleanUp,
+} from "./helpers/csv-round-trip.mjs";
 
 // --- one run, shared by every gate -------------------------------------------
 
@@ -104,9 +61,7 @@ before(async () => {
   Y = exportCsv(join(B, "projects")).text;
 });
 
-process.on("exit", () => {
-  for (const d of cleanup) { try { rmSync(d, { recursive: true, force: true }); } catch { /* gone */ } };
-});
+process.on("exit", () => cleanUp(cleanup));
 
 // --- the fixture itself ------------------------------------------------------
 
