@@ -334,7 +334,11 @@ describe("design §3.3's separate refusal fixture: export refuses a link with a 
         "links:", "  - { type: Relates }",
         "---", "", "body", "",
       ].join("\n"));
-      assert.throws(() => exportCsv(join(root, "projects")), /target/);
+      assert.throws(() => exportCsv(join(root, "projects")), (e) => {
+        assert.match(e.message, /target/);
+        assert.match(e.message, /BLZ-1/, "§5.2 requires the refusal to name the ticket");
+        return true;
+      });
     } finally {
       rmSync(root, { recursive: true, force: true });
     }

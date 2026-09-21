@@ -74,7 +74,18 @@ function cellFor(columnName, { fm, body, status, project }) {
     case "project": return project ?? "";
     case "labels": return encodeList(fm.labels ?? []);
     case "components": return encodeList(fm.components ?? []);
-    case "links": return encodePairList(fm.links ?? []);
+    case "links": {
+      // BLZ-654: encodePairList has no ticket context of its own, and design
+      // §5.2 requires this refusal to name the ticket (the same requirement
+      // the unknown-frontmatter-key refusal above already meets) — an
+      // operator bisecting a 2000+ ticket board by hand from an unattributed
+      // message is exactly the "unactionable" failure §5.2 exists to avoid.
+      try {
+        return encodePairList(fm.links ?? []);
+      } catch (e) {
+        throw new Error(`blaze export: ticket ${fm.id ?? "?"}: ${e.message}`);
+      }
+    }
     case "worklog": return encodeWorklog(fm.worklog ?? []);
     default: {
       const v = fm[columnName];

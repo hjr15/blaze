@@ -113,15 +113,21 @@ test("refuses the whole export when a ticket carries a frontmatter key outside t
   });
 });
 
-test("refuses the whole export when a ticket carries a link with a type but no target, not emitting 'Relates:undefined'", (t) => {
-  // BLZ-654: design §5.2 requires this refusal at export time — an exporter
-  // that dropped it would launder corruption into a clean-looking CSV.
+test("refuses the whole export when a ticket carries a link with a type but no target, naming the ticket, not emitting 'Relates:undefined'", (t) => {
+  // BLZ-654: design §5.2 requires this refusal at export time, "naming the
+  // ticket" verbatim — an exporter that dropped it would launder corruption
+  // into a clean-looking CSV, and an unnamed refusal on a 2000+ ticket board
+  // is unactionable (round-1 review finding on this same ticket).
   const root = board(t);
   writeTicket(root, "BLZ", "defined", "BLZ-1", {
     id: "BLZ-1", title: "t", type: "task", project: "BLZ", estimate: 5,
     links: "\n  - { type: Relates }",
   });
-  assert.throws(() => exportRows(join(root, "projects")), /target/);
+  assert.throws(() => exportRows(join(root, "projects")), (e) => {
+    assert.match(e.message, /target/);
+    assert.match(e.message, /BLZ-1/);
+    return true;
+  });
 });
 
 test("a hostile cell (leading '=' or '@' after stripping whitespace) is warned about, never mutated", (t) => {
