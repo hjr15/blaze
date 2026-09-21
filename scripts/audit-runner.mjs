@@ -92,8 +92,8 @@ const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 // whenever `configLoadError` was set, on the theory that a board whose config failed to
 // load has "nothing safe to keep running against". That was wrong, and the runner itself
 // disproves it two ways: `tickets` a few lines below comes from `fsReadStorage.listTickets`,
-// and `schema-invalid` is read from each project's `project.json` on disk by `auditCorpus`'s
-// own loop — NEITHER touches `config.projects`, so both are exactly as safe to compute with
+// and `schema-invalid` is computed by `auditCorpus`'s own loop from each project's taxonomy
+// — NEITHER touches `config.projects`, so both are exactly as safe to compute with
 // a bad key or a malformed schedule block as with none at all. `--projects <name>` already
 // proved this empirically: it reported the full corpus (tickets, `schema-invalid`,
 // everything) on a board whose config load had failed, while the flag-less path reported
@@ -106,6 +106,15 @@ const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 // stray directory the config never named, but that same risk exists, unremarked, for every
 // other reason `config` can come back empty or null, and singling out this one reason to
 // instead report a false zero was the actual defect.
+//
+// BLZ-520 CORRECTS ONE CLAUSE ABOVE. It used to read "`schema-invalid` is read from each
+// project's `project.json` ON DISK by `auditCorpus`'s own loop". `auditCorpus` reads nothing
+// from disk: THIS runner reads every `project.json` in the loop below and hands the PARSED
+// objects in as `projects`, which `auditCorpus` passes straight to `resolveSchema({ config,
+// project })`. The conclusion is unaffected — the taxonomy still does not come from
+// `config.projects` — but "reads it on disk" is the same wrong belief that put "the audit's
+// schema layer" in ADR-0031's table for the `loadProjectSchema` site. Nothing in the audit
+// calls that function; `blaze edit` and `blaze new` do, and measurably so. ADR-0031 §R.5.
 const keys = nonEmpty(opts.projects)
   ?? nonEmpty(config?.projects)
   ?? fsReadStorage.listProjects(projectsDir);
@@ -124,15 +133,40 @@ for (const k of keys) {
   // audit the project against the EMPTY taxonomy and print `schema-invalid` counts measured
   // against a file this run never opened — ADR-0030's defect exactly. So a non-regular file
   // is REFUSED, named, and exits before a single finding is reported. ADR-0031.
-  try { projects[k] = JSON.parse(readRegularFileSync(join(projectsDir, k, "project.json"))); }
+  //
+  // BLZ-514: AND IT MUST NOT SWALLOW "I COULD NOT PARSE IT" EITHER. That was the same
+  // defect by a quieter route. `{ key: k }` is the taxonomy of a project that DECLARES
+  // NOTHING, so a project with a genuinely empty taxonomy and a project whose taxonomy
+  // file is junk produced the SAME report — `off-taxonomy-component`, `off-taxonomy-label`
+  // and every schema check measured against a file this run could not read, with `ok`
+  // decided by those counts. Measured before the fix: a board with `{ this is not json` as
+  // its `project.json` exited 0 with `ok=true`.
+  //
+  // The treatment is the one its nearest neighbour already has, and §4's argument is why:
+  // this file is the taxonomy the ENTIRE report for the project is measured against, and
+  // there is no partial report left to attach a finding to. That reasoning does not care
+  // whether the file failed at `open` or at `JSON.parse`. So: the same exit 2, and a
+  // message that distinguishes the two, because "replace the FIFO" and "fix the JSON" are
+  // different things to go and do.
+  //
+  // ENOENT IS STILL TOLERATED, and that is the whole of the remaining tolerance. Most
+  // projects on most boards carry no `project.json` at all; folding "there is no file"
+  // into "I could not read the file" would turn every such board into a hard failure —
+  // the mirror image of the bug (ADR-0031, "ENOENT is deliberately untouched").
+  const projectFile = join(projectsDir, k, "project.json");
+  try { projects[k] = JSON.parse(readRegularFileSync(projectFile)); }
   catch (e) {
-    if (e instanceof NotARegularFileError) {
-      console.error(e.message);
-      console.error(`blaze audit: refusing to audit ${k} against a taxonomy this run could not ` +
-        `read — every schema finding it produced would be measured against a file it never opened.`);
-      process.exit(2);
-    }
-    projects[k] = { key: k };
+    if (e?.code === "ENOENT") { projects[k] = { key: k }; continue; }
+    const why = e instanceof NotARegularFileError
+      ? e.message
+      : (e instanceof SyntaxError
+        ? `${projectFile} is not valid JSON and could not be parsed: ${e.message}`
+        : `${projectFile} could not be read: ${(e && e.message) || e}`);
+    console.error(why);
+    console.error(`blaze audit: refusing to audit ${k} against a taxonomy this run could not ` +
+      `read — every schema finding it produced would be measured against a file it never ` +
+      `parsed, which is not a partial report but a wrong one.`);
+    process.exit(2);
   }
 }
 

@@ -386,6 +386,14 @@ describe("BLZ-493 site 2: `blaze audit` REFUSES a project.json it cannot read", 
   test("loadProjectSchema refuses the same file — the audit's OTHER project.json read", () => {
     // Site 9, found by this lane rather than by the ticket. Without it, fixing the runner's
     // own read only moves the hang: `auditCorpus`'s schema layer opens the same path.
+    //
+    // BLZ-520: THAT SENTENCE IS FALSE and is kept above only so this correction has something
+    // to point at. Nothing in the audit calls `loadProjectSchema` — `scripts/audit-runner.mjs`
+    // and `scripts/model/audit.mjs` both call `resolveSchema` with the already-parsed project
+    // — so there is no second read. THE REAL CALLERS ARE `blaze edit` and `blaze new`
+    // (`scripts/edit.mjs:55`, `:66`; `scripts/new.mjs:83`), where this call comes BEFORE
+    // `loadProject`. Measured by reverting this site's guard alone: `blaze edit` and
+    // `blaze new` both EXIT=137, `blaze audit` exits 2 unchanged. ADR-0031 §R.5.
     const tmp = mkdtempSync(join(tmpdir(), "blz493-schema-"));
     try {
       const projects = board(tmp);

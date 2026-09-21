@@ -34,16 +34,18 @@ killed. Line numbers are at `1b00f3a`, re-derived — the ticket's came from an 
 | 7 | `scripts/model/transitions.mjs:80` | `loadTransitions` ← `views/page.mjs:71` | **HANG** |
 | 8 | `scripts/config.mjs:169` | `loadConfig` — nearly every entry point | **HANG** |
 | 8b | `scripts/config.mjs:468` | `loadProject` — every verb that names a project | **HANG** |
-| 9 | `scripts/model/schema-config.mjs:478` | `loadProjectSchema` ← the audit's schema layer | **HANG** |
+| 9 | `scripts/model/schema-config.mjs:478` | `loadProjectSchema` ← **`blaze edit` / `blaze new`** — corrected, see §R.5 | **HANG** |
 
 Two corrections to the work order's inventory, both measured:
 
 - **The ticket said `claims.mjs` is reached from `buildIndex`. It is not.** `missingClaimErrors`
   was moved out of `buildIndex` by BLZ-274/ADR-0009 and is called by `reindex.mjs` alone. A
   FIFO `.cutover` under a `buildIndex` returns normally; under `blaze reindex` it hangs.
-- **Site 9 is not in the ticket, and without it site 2 is worthless.** `auditCorpus`'s schema
+- **Site 9 is not in the ticket.** ~~And without it site 2 is worthless: `auditCorpus`'s schema
   layer opens the same `project.json` a second time, so guarding only the runner's own read
-  moves the hang rather than removing it.
+  moves the hang rather than removing it.~~ **The struck sentence is FALSE and is corrected in
+  §R.5.** Site 9 is a real site and the guard on it is right; the *reason given for it here*
+  was not. `auditCorpus` never calls `loadProjectSchema`.
 
 ### `existsSync` is not a guard
 
@@ -135,7 +137,23 @@ Site 8 goes the other way and reuses machinery rather than adding any: a plain `
 
 `liveModel` is the one site that reports rather than refuses, because it is `serve.mjs`'s
 `/api/live` route on a **long-lived process** — the site whose hang was reproduced as exit 137 —
-and a throw would take a route down over an optional feed. But `groups: []` **alone is the bug**:
+and a throw would take **the whole process** down over an optional feed.
+
+> **Corrected by BLZ-519.** This paragraph used to say "a throw would take a route down".
+> That understated it, and the difference is the whole of BLZ-519: `serve.mjs`'s request
+> handler is `async` and neither `/api/live` nor the page route had a `try`, so a throw was
+> an **unhandled rejection**, which Node ends the process for. Measured against a real
+> spawned server at `44b797f`: one unauthenticated `GET /api/live` over a board with a FIFO
+> ticket file → the client gets no response at all and the server is gone, taking every
+> other connected session with it. The wording is now true because the code makes it true —
+> both routes carry their own reporting catch, and the handler carries a last-resort one **in
+> the request's own scope** (deliberately not a process-level `unhandledRejection` handler,
+> which cannot see the response it owes an answer to and would keep a board serving in a
+> state nobody characterised). The crash class was **pre-existing and not a BLZ-493
+> regression**: before the guard the same board wedged the server forever with nothing on
+> stderr, and a loud crash is strictly better than a permanent silent wedge.
+
+But `groups: []` **alone is the bug**:
 `views/live.mjs` renders exactly `No recent activity.` for it. So `unreadable` travels out with
 the model, the way `forgeErrors` and `gitErrors` do (ADR-0030 §2), and the Live view branches on
 it **first**, before the empty state.
@@ -193,20 +211,192 @@ just that one line turns the refusal into a tolerated parse failure, and its tes
   killed at `1b00f3a`; 1 of 16 is at HEAD.** The one that remains is `model/storage.mjs:104`
   (`fsStorage.read`), which is outside this ticket's scope and is raised as its own — and
   which no current call path reaches with a non-regular file, because its callers take the
-  file from a walk that now refuses. The 16th case, `readCutover` via `buildIndex`, never
+  file from a walk that now refuses. **CLOSED by BLZ-510**, and the unreachability is
+  unchanged: the guard is there because `fsStorage` is the driver INTERFACE, not because
+  anything reaches it. Reverting the line reddens exactly one test — one that calls the
+  function directly, because no product route can construct the input — so a
+  mutation-revert cannot establish that it protects anything, and the code comment, the
+  test's name and this line all say so rather than letting it look pinned. The 16th case, `readCutover` via `buildIndex`, never
   hung: `missingClaimErrors` is not on that path, which is the inventory correction above.
 - **Two CLI outcomes change on a board that has a non-regular file where a regular one belongs.**
   `blaze audit` exits 2 (unreadable `project.json`) or 1 (unreadable `blaze.config.json`) instead
   of never returning. Both name the file. **This cannot fire on a healthy board:** every one of
-  the 4,201 tests, and the whole live board, reads regular files.
+  the **4,602** tests, and the whole live board, reads regular files. *(Was `4,201`. The
+  figure is pinned to a sha rather than to a branch, per ADR-0024's rule: measured with
+  `npm test`, no Postgres, at `a92e7ce` plus BLZ-520's own five cases — 4,602 tests,
+  4,600 pass, 0 fail, 2 skipped, 406 suites. The count moves on every lane, which is
+  exactly why the ref has to be a sha; the claim it supports does not move.)*
 - **`liveModel`'s payload grows `unreadable`.** It is `null` on every healthy board. The only
   consumer, `views/live.mjs`, renders it; the golden page snapshot moved by exactly that branch.
 - **`model/regular-file.mjs` is the shape ADR-0030 §4's rule should have had.** `classifyGitEntry`
   still uses `statSync`-then-open — correct as far as it goes, and it no longer hangs, but it
   keeps the race this module removes. Left for its own ticket rather than reopened here.
+  **CLOSED by BLZ-511:** it reads from the open descriptor now. The stale `st.size` went with
+  it — the `N-byte` sentence and the `git-file-empty` branch were both describing whatever
+  had been at the path earlier rather than the file the process opened, and both now come
+  from the bytes actually read. Pinned by making a descriptor and a path disagree
+  (`registerHooks`, scoped to `regular-file.mjs` alone so `index.mjs` keeps the real `fs`):
+  over a `.git` file holding a **valid `gitdir:` pointer**, taking the path's word classifies
+  `nested-repo-pointer` and asking the descriptor refuses — two different strings, so the
+  case cannot pass for the wrong reason. BLZ-497's `git-file-unreadable` shape still reaches
+  its finding through the real call path, unchanged.
 - **`kindOf`'s `isSocket` branch is unreachable from both callers** (`open` on a Unix socket
   fails `ENXIO` before `fstat`). It is kept as a label and recorded as unreachable rather than
   left looking pinned.
+
+## Addendum — BLZ-512, the residue outside the shared read path
+
+The last bullet under *Alternatives rejected* deferred "twenty-odd" sites outside the shared
+read path. BLZ-512 is that ticket. **The inventory was re-derived rather than trusted**, and
+the count was wrong: there are **17 real sites in 10 modules**, not twenty-odd, and one of
+them was not on the original list at all.
+
+Every row below was reproduced at `44b797f` before a line of the fix was written, out of
+process under a 6-second `timeout -s KILL` cap. `HANG` means the child had to be killed
+(`EXIT=137`). The decision column follows §2's line unchanged; nothing here reopens it.
+
+| # | Site | Reached from | At `44b797f` | Decision |
+|---|---|---|---|---|
+| R1 | `model/setup-token.mjs` `readSetupToken` | `serve.mjs`'s **`POST /setup`** — pre-auth | **HANG** | **REFUSE** |
+| R2 | `model/setup-token.mjs` `ensureSetupTokenIgnored` (read + append) | `startServer`, at boot | **HANG** | **REPORT** — `state: "not-a-regular-file"` + stderr |
+| R3 | `commit-lock.mjs:14` `readOwner` | `acquireLock` ← every board git write | **HANG** | **REFUSE** |
+| R4 | `loops/groomer.mjs` `loadState` | `groomOnce`, every pass | **HANG** | **REFUSE** |
+| R5 | `loops/groomer.mjs` `selectNextTicket`'s `.md` | `groomOnce` | **HANG** | **REFUSE** |
+| R6 | `loops/groomer.mjs` `record()`'s `.md` | after the agent runs | **HANG** | **REFUSE** |
+| R7 | `loops/groomer.mjs` `afterRaw` | after the agent runs | **HANG** | **REFUSE** |
+| R8 | `loops/groomer.mjs` CLI's `AGENTS.md` | `node scripts/loops/groomer.mjs` | **HANG** | **REFUSE** |
+| R9 | `loops/groomer.mjs` `snapshotTree` ×2 | `groomOnce` | not constructible — §R.3 | **REPORT** into `state.unreadable` |
+| R10 | `supervisor.mjs:391` `AGENTS.md` | the supervisor's groomer loop | **HANG** | **REPORT** — an `error` event on the bus |
+| R11 | `model/user-admin.mjs` `ensureIdentityIgnored` | `blaze user add`; `serve.mjs` at boot | **HANG** | **REPORT** — `state: "not-a-regular-file"` |
+| R12 | `init-runner.mjs:225` `.gitignore` | `blaze init` | **HANG** | **REPORT** — named on stderr, and the summary stops claiming `(gitignored)` |
+| R13 | `model/write-port-resolve.mjs` `readSoakState` | `blaze db status`, first thing it reads | **HANG** | **REFUSE** |
+| R14 | `db-runner.mjs:180` divergence log | `blaze db status`, past R13 | reached only past R13 | **REFUSE** |
+| R15 | `migrate-runner.mjs:65` disposition ledger | `blaze migrate --live` | **HANG** | **REFUSE** |
+| R16 | `migrate/jira-client.mjs:24` `readRawCache` | `blaze migrate` | **HANG** | **REFUSE** |
+| R17 | `model/storage.mjs` `fsStorage.read` | **nothing** — see BLZ-510 | **HANG** | **REFUSE**, and recorded as unreachable |
+
+### R.1 Three corrections to the work order, one of which was already stale
+
+- **`commit-lock.mjs`'s `readOwner` is the ELEVENTH site and BLZ-493's inventory did not
+  have it.** Confirmed at HEAD. It is the worst of the eleven after R1: `readOwner`
+  returning `null` is read one line later as *"an acquirer between `mkdir` and write"*, and
+  after `OWNERLESS_GRACE_MS` that sentence **steals the lock**, which is two writers in the
+  board's git tree at once. So it refuses rather than laundering.
+- **`pending-ledger.mjs` IS ALREADY GUARDED and nothing was changed there.** The work order
+  carried lines `:69` and `:85` as live `existsSync`-gated hangs. At `44b797f` the module
+  imports `readRegularFileSync` / `writeRegularFileSync` / `appendRegularFileSync` and has
+  no bare `readFileSync` left. The claim was true when it was filed; it is not true now.
+- **`setup-token.mjs` is reachable PRE-AUTH, and that is the highest-priority site here.**
+  Confirmed at HEAD: `serve.mjs`'s `POST /setup` calls `readSetupToken` before any
+  credential is checked. An unauthenticated caller reaching a board whose
+  `.blaze/setup-token` is a FIFO wedged the one route that makes the install usable. The
+  token's **VALUE is still never logged**; the refusal names the **PATH**, which `/setup`
+  already renders.
+
+### R.2 Half of one site's hang is inside `git`, not inside Blaze
+
+The `.gitignore` hygiene checks (R2, R11) were not fixed by the guard alone, and the reason
+is worth recording because no amount of `O_NONBLOCK` in this process addresses it:
+**`git check-ignore` opens the root `.gitignore` itself**, so on a FIFO the *subprocess*
+blocks and `spawnSync` waits on it forever. Measured at `44b797f`:
+`git -C <board> check-ignore --no-index -q .blaze/setup-token` → `EXIT=137` at a 5s cap,
+while `rev-parse --is-inside-work-tree` beside it returns normally.
+
+Both functions therefore do two things: settle the entry's type **once, before any `git`
+that would read it**, and bound every `git` spawn (`GIT_TIMEOUT_MS`, SIGKILL). The bound is
+what covers the shapes neither function can enumerate — a FIFO `.gitignore` in a
+*subdirectory*, a FIFO `.git/info/exclude` — which end as the `unavailable` state these
+functions already had, meaning *"git could not answer"*.
+
+### R.3 What is reachable today, and what is not — stated, not implied
+
+**Genuinely reachable now:** R1–R8, R10–R13, R15, R16. Each was reproduced through the real
+product function or CLI.
+
+**Reachable only past another fixed site:** R14. `blaze db status` reads `readSoakState`
+(R13) before it reaches the divergence log, so R13's hang came first either way. Fixed on
+the same terms rather than left as the next thing to find.
+
+**Not constructible by the current call graph:** R9. `snapshotTree` classifies entries from
+the `readdir` **dirent**, so a FIFO is already `t: "o"` and never reaches either read. The
+guard there fires only inside the window between that dirent and the open, which no test
+constructs. It is the fd-checking shape because that window is the only way in, and both
+catches already report into `state.unreadable`.
+
+**Not a live defect at all:** R17 — see BLZ-510, which keeps it as defence in depth and says
+so in the code, the comment and the test's own name.
+
+**Out of scope, and why:** `scripts/ci/` (`tmp-scratch-attribution.mjs`,
+`temp-cleanup-guard.mjs`, `require-engine.mjs`, `mutate-schedule.mjs`) has four more bare
+`readFileSync` calls. `package.json`'s `files` array excludes `scripts/ci` from the
+published package: these run against a developer checkout under CI, never against a board,
+and no board file reaches them.
+
+### R.4 Two residuals this lane could not close, named rather than half-done
+
+Both are APPEND sites, both genuinely hang on a FIFO, and both need the same one-import fix
+(`appendRegularFileSync`, whose `O_NONBLOCK` turns the block into an immediate `ENXIO`).
+Neither can land without editing `tests/model/seam-closure.test.mjs`, whose *narrow
+exemption* for each module names `appendFileSync` by hand and whose "every named member is
+still reached" arm reddens the moment the call changes. That file belongs to **BLZ-642**, so
+the swap is recorded here for that lane instead of being made from this one:
+
+| Module | Line | Exemption entry that must move |
+|---|---|---|
+| `model/write-port-resolve.mjs` | `logDivergence`, `recordSoakOp` | `["model/write-port-resolve.mjs", ["appendFileSync", …]]` → `appendRegularFileSync` |
+| `model/user-admin.mjs` | `ensureIdentityIgnored`'s append | `["model/user-admin.mjs", ["appendFileSync", "openIdentityDb"]]` → `appendRegularFileSync` |
+
+`user-admin.mjs`'s is the smaller of the two: its **constructible** hang is already closed by
+the pre-check R.2 describes, and what remains is the TOCTOU window. `write-port-resolve.mjs`
+has no pre-check in front of its appends, so that one is a live hang on a FIFO
+`.blaze/soak-ops.jsonl` or `.blaze/divergences.jsonl` — reproduced, and deliberately **not**
+covered by a passing test, because a test that goes green over an unfixed hang is worse than
+no test.
+
+### R.5 Site 9's reachability was recorded wrongly — BLZ-520 corrects the RECORD, not the decision
+
+**The decision stands. The guard on `loadProjectSchema` is right and stays.** What was wrong
+is the sentence saying *why* that site is reachable, and it was wrong in three places at once
+(this ADR's table, `schema-config.mjs`'s own comment, and a comment in
+`tests/read-path-fifo.test.mjs`), plus a fourth, related, in `audit-runner.mjs`.
+
+**The claim that was false:** that site 9 is reached from *"the audit's schema layer"*, and
+that `auditCorpus` *"opens the same `project.json` a second time"*.
+
+**Why it is false, structurally.** Nothing in the audit calls `loadProjectSchema`. Both
+`scripts/audit-runner.mjs` and `scripts/model/audit.mjs` call `resolveSchema({ config,
+project: projects[k] })` — they are **handed the already-parsed project object** by the
+runner's own read. There is no second read. The only callers of `loadProjectSchema` in the
+tree are `scripts/edit.mjs:55` (and `:66`) and `scripts/new.mjs:83`.
+
+> A note on the file paths, because the work order for this correction got them wrong too and
+> sent the fix at files that do not exist: it is **`scripts/edit.mjs`** and
+> **`scripts/new.mjs`**, not `scripts/model/edit.mjs` / `scripts/model/new.mjs`. And there are
+> three files named `audit*.mjs` — `scripts/audit-runner.mjs`, `scripts/model/audit.mjs`,
+> `scripts/migrate/audit.mjs` — so they are named by full path here.
+
+**The true path, and it is MEASURED rather than asserted.** In both callers the
+`loadProjectSchema` call happens **before** `loadProject` (`edit.mjs:55` before `:77`;
+`new.mjs:83` before `:90`), so the schema read is the *first* thing to touch `project.json`.
+The experiment: revert **only** `schema-config.mjs`'s guard to a bare `readFileSync`, leaving
+every other guard in place, and run each verb against a board whose `projects/BLZ/project.json`
+is a FIFO, under an 8-second `timeout -s KILL`.
+
+| command | guard REVERTED | guard IN PLACE |
+|---|---|---|
+| `blaze edit BLZ-1 title x` | **`EXIT=137`** — SIGKILL; the hang | `EXIT=1`, named refusal |
+| `blaze new --project BLZ --type task "t"` | **`EXIT=137`** — SIGKILL; the hang | (same refusal) |
+| `blaze audit` | `EXIT=2` — refuses at **`audit-runner.mjs`'s own** guarded read | `EXIT=2`, identical |
+
+`blaze audit` is the line that settles it: with site 9's guard gone it behaves **exactly as
+before**, because it never reaches `loadProjectSchema` at all. Had the old claim been true,
+reverting this guard would have moved the audit's hang rather than leaving it untouched.
+
+**What this changes about the original reasoning, stated plainly.** The stricken sentence
+above argued site 9 was necessary *because site 2 would otherwise be worthless*. That
+argument was wrong. Site 9 is necessary on its own merits — it is the first read of
+`project.json` on the `edit`/`new` path and a FIFO there hangs both verbs — and site 2 is
+fully effective without it. Two independent sites, not one site and its shadow.
 
 ## Alternatives rejected
 

@@ -3,7 +3,10 @@
 // ADR-0012 makes schema creation an EXPLICIT, named operation: runtime `open()` reads
 // and refuses rather than writing DDL behind your back (BLZ-297). This is that named
 // operation, plus the command that reads back what a dual-write soak has found.
-import { existsSync, readFileSync, rmSync } from "node:fs";
+import { existsSync, rmSync } from "node:fs";
+// BLZ-512 / ADR-0031. `existsSync` is not a guard — a FIFO satisfies it — and the
+// divergence log is read with nothing between the check and the open.
+import { readRegularFileSync } from "./model/regular-file.mjs";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
          readSoakState } from "./model/write-port-resolve.mjs";
@@ -177,7 +180,9 @@ async function status({ dataRoot, log }) {
     log("and the database disagree, so this is also what a clean soak looks like.");
     return 0;
   }
-  const lines = readFileSync(logPath, "utf8").split("\n").filter(Boolean);
+  // REFUSE. Every line below is a count the operator reads as the soak's verdict; a
+  // count derived from a file this run could not open is not a verdict.
+  const lines = readRegularFileSync(logPath, "utf8").split("\n").filter(Boolean);
   log(`divergences: ${lines.length}  (${logPath})`);
   if (!lines.length) return 0;
 

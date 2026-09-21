@@ -34,7 +34,8 @@
 // real temp dir and a real git repo, so a module-level singleton would make them
 // order-dependent; an explicit parameter keeps every existing test working against
 // fsStorage unchanged while new tests inject memStorage.
-import { mkdirSync, writeFileSync, readFileSync, existsSync, renameSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, renameSync } from "node:fs";
+import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname, basename } from "node:path";
 
 /** Ticket-filename slug: lowercase, non-alphanumerics collapsed to single dashes, trimmed. */
@@ -100,8 +101,28 @@ export const fsStorage = {
   exists(file) {
     return existsSync(file);
   },
+  // BLZ-510 / ADR-0031. `readFileSync` opens whatever the path names, and on a FIFO with no
+  // writer that open BLOCKS FOREVER — no error, no timeout, no exit. ADR-0031's consequences
+  // named this as the one constructible hang left in `scripts/model/` after BLZ-493 ("1 of
+  // 16 is at HEAD") and raised it as its own ticket. This is that line.
+  //
+  // WHAT THIS GUARD DOES NOT DO, written here rather than left to look load-bearing: NO
+  // CURRENT CALL PATH REACHES IT WITH A NON-REGULAR FILE. Every caller takes `file` from a
+  // walk that already refuses one at ADR-0031 site 1, so reverting this line reddens exactly
+  // one test — `tests/storage-read-fd-guard.test.mjs`, which calls this function DIRECTLY
+  // because no product route can construct the input — and nothing else in the suite. That
+  // is a test and a line pinning each other, not evidence the guard protects anything
+  // reachable, and a mutation-revert cannot make it into evidence.
+  //
+  // It is kept anyway, and the trade is the honest reason rather than the flattering one:
+  // `fsStorage` is the DRIVER INTERFACE — where a second caller arrives, and where a future
+  // non-fs driver's contract is read off. One line that cannot fire today is a better trade
+  // than the last constructible hang in this directory sitting behind that interface with an
+  // ADR naming it in print.
+  //
+  // ENOENT is untouched: `exists` is a separate question and callers ask it.
   read(file) {
-    return readFileSync(file, "utf8");
+    return readRegularFileSync(file, "utf8");
   },
   write(file, text) {
     mkdirSync(dirname(file), { recursive: true });

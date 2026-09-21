@@ -1,5 +1,4 @@
 // scripts/views/data.mjs — pure, read-only board/live models.
-import { readRegularFileSync } from "../model/regular-file.mjs";
 import { fsReadStorage } from "../model/read-storage.mjs";
 import { join, basename } from "node:path";
 import { buildIndex } from "../model/index.mjs";
@@ -130,15 +129,18 @@ export function contentHash({ projectsDir = resolveRoots().projectsDir, project 
 //
 // A MISSING feed stays silent. Nearly every board has none, and a banner that is permanent
 // furniture is the gate people learn to skip. ADR-0031.
-export function liveModel(dataRoot, projectsDir, { now = Date.now() } = {}) {
-  const feed = join(dataRoot, ".blaze", "activity.jsonl");
-  let text = "";
-  let unreadable = null;
-  try { text = readRegularFileSync(feed); }
-  catch (e) {
-    text = "";
-    if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") unreadable = { path: feed, detail: e.message };
-  }
+//
+// BLZ-513: THE READ IS THE DRIVER'S, AND SO IS THE CONDITION. This used to open the file
+// here — its own `readRegularFileSync`, its own `try/catch`, its own two-field `unreadable`
+// — two lines below the `fsReadStorage` import this module was already using for
+// `contentHash`. The report was right and the route was not: ADR-0009 makes a read a NAMED
+// question the driver answers, and this was the one read on the board page that can fail
+// and the one that went round it. `readStorage` is injectable for the same reason
+// `contentHash`'s is, which is also what lets a test tell "asked the driver" from "opened
+// the file behind it" — a shape assertion alone cannot.
+export function liveModel(dataRoot, projectsDir,
+                          { now = Date.now(), readStorage = fsReadStorage } = {}) {
+  const { text, unreadable } = readStorage.activityFeed(dataRoot);
   const events = parseActivity(text);
   const statusByKey = {};
   for (const r of buildIndex(projectsDir).rows) if (r.id) statusByKey[r.id] = r.status;

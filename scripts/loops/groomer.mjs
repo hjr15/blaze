@@ -2,25 +2,35 @@
 // configured agent command to edit it, then auto-commit the change.
 import { createHash, randomBytes } from "node:crypto";
 import {
-  readdirSync, readFileSync, writeFileSync, existsSync, mkdirSync, rmSync,
+  readdirSync, writeFileSync, existsSync, mkdirSync, rmSync,
   lstatSync, readlinkSync, symlinkSync,
 } from "node:fs";
 import { join, dirname } from "node:path";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { parseTicket } from "../model/ticket.mjs";
+// BLZ-512 / ADR-0031. Seven `readFileSync` sites lived here, every one of them off the
+// shared read path BLZ-493 guarded and every one of them reproduced as a hang at `44b797f`
+// (`EXIT=137` under a 6s cap). The loop runs unattended, inside `supervisor.mjs`, so a hang
+// here is a board-keeper that stops keeping the board and never says so.
+import { readRegularFileSync, NotARegularFileError } from "../model/regular-file.mjs";
 
 export function hashContent(s) {
   return createHash("sha1").update(s).digest("hex");
 }
 
+/** BLZ-512: `existsSync` IS NOT A GUARD — a FIFO satisfies it. `{ groomed: {} }` is the
+ *  state of a board nothing has ever groomed, and returning it for a file this run could
+ *  not open sends the agent back over every ticket on the board. A MALFORMED state file
+ *  still resets, unchanged: that is an answer — Blaze looked, and the file is junk. */
 export function loadState(root) {
   const p = join(root, ".blaze", "state.json");
   if (!existsSync(p)) return { groomed: {} };
   try {
-    const s = JSON.parse(readFileSync(p, "utf8"));
+    const s = JSON.parse(readRegularFileSync(p, "utf8"));
     return s && s.groomed ? s : { groomed: {} };
-  } catch {
+  } catch (e) {
+    if (e instanceof NotARegularFileError) throw e;
     return { groomed: {} };
   }
 }
@@ -87,7 +97,11 @@ export function selectNextTicket(root, cfg, state) {
       files.sort();
       for (const file of files) {
         const rel = `${dir}/${file}`;
-        const raw = readFileSync(join(root, rel), "utf8");
+        // REFUSE, exactly as `walkTickets`'s own `.md` read does (ADR-0031 site 1). There
+        // is no honest degraded value for a ticket's text, and skipping it silently is the
+        // drop BLZ-470 exists to close — the ticket would simply never be groomed, with
+        // no finding and no counter.
+        const raw = readRegularFileSync(join(root, rel), "utf8");
         const m = idLineRegex.exec(raw);
         if (!m) continue;
         const id = m[1];
@@ -370,13 +384,20 @@ export function snapshotTree(root, {
         // Too big to hold for a restore. Still hashed, so the CHANGE is still detected —
         // it is only the automatic revert that degrades, and that is reported.
         let h = `size:${size}`;
-        try { h = hashContent(readFileSync(a)); } catch { state.unreadable.push(r); }
+        try { h = hashContent(readRegularFileSync(a, null)); } catch { state.unreadable.push(r); }
         entries.set(r, { t: "f", h, size });
         state.degraded = true;
         continue;
       }
+      // BLZ-512: DEFENCE IN DEPTH ONLY, and stated as such rather than left to look
+      // pinned. `d.isFile()` above comes from the `readdir` dirent, so a FIFO is already
+      // classified `t: "o"` and never reaches either read — this guard fires only inside
+      // the window between that dirent and this open, which no test constructs. It is the
+      // fd-checking shape rather than the dirent's because that window is the ONLY way
+      // here, and both catches already REPORT into `state.unreadable`, so a refusal lands
+      // in the same place a permission error does.
       try {
-        const buf = readFileSync(a);
+        const buf = readRegularFileSync(a, null);
         state.budget -= size;
         entries.set(r, { t: "f", h: hashContent(buf), size, content: buf });
       } catch { state.unreadable.push(r); }
@@ -661,7 +682,7 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   }
 
   const record = () => {
-    const raw = readFileSync(join(root, ticket.rel), "utf8");
+    const raw = readRegularFileSync(join(root, ticket.rel), "utf8");
     state.groomed[ticket.id] = hashContent(raw);
     saveState(root, state);
   };
@@ -674,7 +695,10 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   // Content lint on the groomed ticket itself: structural frontmatter fields must only be
   // mutated by an explicit `blaze move`/`blaze edit`. The rename case is already covered —
   // a rename shows up as an out-of-bounds path under file-level containment.
-  const afterRaw = existsSync(join(root, ticket.rel)) ? readFileSync(join(root, ticket.rel), "utf8") : "";
+  // The agent has just had write access to this tree, so `ticket.rel` may be a FIFO the
+  // AGENT created — which is what makes this read the loop's most exposed one, not its
+  // least. `existsSync` is satisfied by a FIFO and is not a guard.
+  const afterRaw = existsSync(join(root, ticket.rel)) ? readRegularFileSync(join(root, ticket.rel), "utf8") : "";
   if (isStructuralChange(ticket.raw, afterRaw)) return refuse("structural");
 
   git(root, ["add", "--", ...changed]);
@@ -698,7 +722,11 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
     throw e;
   }
   let agentsMd = "";
-  try { agentsMd = readFileSync(join(root, "AGENTS.md"), "utf8"); } catch {}
+  // The bare catch is for ENOENT: most boards have no AGENTS.md, and "" is then the true
+  // answer — no grooming rules were declared. A file that could not be OPENED is not that
+  // answer, so the refusal is rethrown rather than folded into the same empty string.
+  try { agentsMd = readRegularFileSync(join(root, "AGENTS.md"), "utf8"); }
+  catch (e) { if (e instanceof NotARegularFileError) throw e; }
   const today = new Date().toISOString().slice(0, 10);
   const evt = groomOnce({ root, cfg, agentsMd, today });
   console.log(evt ? JSON.stringify(evt) : "groomer: nothing to groom.");

@@ -2,17 +2,30 @@
 // Plain-file: an atomically-mkdir'ed .blaze/commit.lock/ directory holding
 // owner.json {pid, session, ts}. Bounded retry; stale locks (dead owner PID,
 // aged out, or long-ownerless) are stolen with a warning. Zero-dependency.
-import { mkdirSync, rmSync, writeFileSync, readFileSync, statSync } from "node:fs";
+import { mkdirSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join, dirname } from "node:path";
+// BLZ-512 / ADR-0031. THE ELEVENTH SITE, and BLZ-493's inventory did not have it at all.
+// Reproduced at `44b797f`: a FIFO `owner.json` in a contended `.blaze/commit.lock/` makes
+// `acquireLock` never return — `EXIT=137` under a 6s cap — so every board write behind the
+// lock (the CLI's commit, `/api/*`'s commitOrQueue, the reconcile drain) stops with nothing
+// on stderr. That is worse than any wrong answer: nothing reports at all.
+import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
 
 export function lockPath(root) {
   return join(root, ".blaze", "commit.lock");
 }
 
+/** REFUSE, never launder. `null` from here is read one line below as *"an acquirer between
+ *  mkdir and write"* — a sentence about ANOTHER PROCESS — and after `OWNERLESS_GRACE_MS`
+ *  that sentence STEALS the lock and lets two writers into the board's git tree at once.
+ *  A run that could not read `owner.json` has no business saying it. ENOENT, a truncated
+ *  write and a malformed body keep the old `null`: those ARE the ownerless state, and Blaze
+ *  looked to find them out. */
 function readOwner(dir) {
   try {
-    return JSON.parse(readFileSync(join(dir, "owner.json"), "utf8"));
-  } catch {
+    return JSON.parse(readRegularFileSync(join(dir, "owner.json"), "utf8"));
+  } catch (e) {
+    if (e instanceof NotARegularFileError) throw e;
     return null;
   }
 }

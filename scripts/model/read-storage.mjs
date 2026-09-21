@@ -18,6 +18,7 @@
 //   listProjects(root)            the project keys that exist
 //   changeToken(root, {project})  opaque "has anything changed?", for the poll
 //   listTickets(root)            everything, for the index and audit
+//   activityFeed(dataRoot)        the Live view's feed, and whether it could be read
 //
 // `listTickets` survives deliberately: `buildIndex` and `auditCorpus` genuinely do
 // need every ticket, and pretending otherwise would push a fake filter into them.
@@ -25,6 +26,7 @@
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { walkTickets } from "./index.mjs";
+import { readRegularFileSync, NotARegularFileError } from "./regular-file.mjs";
 
 /**
  * Resolve one id, or refuse.
@@ -140,6 +142,54 @@ export const fsReadStorage = {
   listTickets(root) {
     return walkTickets(root);
   },
+
+  /**
+   * The board's live-activity feed, and whether it could be READ.
+   *
+   * BLZ-513. This is the one read on the board page that can fail, and it was the one read
+   * that went round the seam: `views/data.mjs`'s `liveModel` opened the file itself, with
+   * its own guard and its own `try/catch`, and handed the view a bespoke `unreadable`
+   * field — two lines below an `import { fsReadStorage }` it was already using for
+   * `contentHash`. ADR-0009's whole point is that a read is a NAMED QUESTION the driver
+   * answers, and "what is in this board's activity feed, and could it be read" is one.
+   *
+   * THE ANSWER CARRIES THE CONDITION, which is what makes this the seam and not a
+   * relocated `readFileSync`. `{ text, unreadable }` is the same shape `getTicket` uses to
+   * carry `duplicates`: a fact the caller cannot re-derive travels WITH the result rather
+   * than through a second channel. A caller branches on `unreadable` or it does not, and
+   * either way it cannot mistake "the feed is empty" for "I could not read the feed"
+   * (ADR-0030).
+   *
+   * IT TAKES A dataRoot, NOT THE TICKET ROOT, and that is stated rather than left to be
+   * inferred from the parameter name. Every other operation here is a question about the
+   * ticket corpus under `projectsDir`. This one is about `<dataRoot>/.blaze/activity.jsonl`
+   * — an append-only feed written by an external hook, which `model/activity.mjs` is
+   * explicit is "no new source of truth". A database-backed board still has it as a local
+   * file, because the hook writes local files, so a SQLite or Postgres driver that
+   * implements this implements the same filesystem read. It is on the seam for the
+   * REPORTING contract — one shape for "could not read", answered by the driver — not on
+   * the theory that a database will one day answer it from a table.
+   *
+   * A MISSING feed is NOT an unreadable one (ADR-0031 §5): nearly every board has none,
+   * and a banner that is permanent furniture is the gate people learn to skip. Anything
+   * else — a refusal, a permission error — is a run that could not look, and says so.
+   *
+   * @returns { text, unreadable: { path, detail } | null }
+   */
+  activityFeed(dataRoot) {
+    const path = join(dataRoot, ".blaze", "activity.jsonl");
+    try { return { text: readRegularFileSync(path), unreadable: null }; }
+    catch (e) {
+      if (e?.code === "ENOENT") return { text: "", unreadable: null };
+      // `NotARegularFileError` names the type; anything else (EACCES, EIO) names its errno.
+      // Both are "there is something there and this run could not read it", which is the
+      // only distinction the view makes.
+      const detail = e instanceof NotARegularFileError
+        ? e.message
+        : `${path} could not be read (${(e && e.code) || e})`;
+      return { text: "", unreadable: { path, detail } };
+    }
+  },
 };
 
 /**
@@ -174,6 +224,12 @@ export function memReadStorage(records = []) {
     },
     listTickets(_root) {
       return rows[Symbol.iterator]();
+    },
+    // Answered so the operation is a CONTRACT rather than a filesystem detail a caller may
+    // assume. An in-memory corpus has no feed and no file that could fail, so the honest
+    // answer is the one a board with no feed gives: nothing to show, nothing unread.
+    activityFeed(_dataRoot) {
+      return { text: "", unreadable: null };
     },
   };
 }

@@ -2,7 +2,7 @@
 // supervisor.mjs — boots the Blaze app: serves the board + activity feed and runs
 // the loops. All loop effects go through git on the board repo.
 import { createServer } from "node:http";
-import { readFileSync } from "node:fs";
+import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
@@ -388,7 +388,16 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     loops.groomer.busy = true;
     try {
       let agentsMd = "";
-      try { agentsMd = readFileSync(join(root, "AGENTS.md"), "utf8"); } catch {}
+      // BLZ-512 / ADR-0031. This is the LONG-LIVED process, so the site REPORTS rather
+      // than refusing: the rethrown refusal lands in the `catch` below, which publishes an
+      // `{ type: "error", loop: "groomer" }` event on the bus, and the supervisor keeps
+      // serving. The bare catch stays for ENOENT — most boards have no AGENTS.md, and ""
+      // is the true answer for one that declares no rules. A file that could not be
+      // OPENED is not that answer, and before this line it did not even get that far: a
+      // FIFO `AGENTS.md` blocked here forever, taking every loop in the supervisor with
+      // it (reproduced at `44b797f`, `EXIT=137` under a 6s cap).
+      try { agentsMd = readRegularFileSync(join(root, "AGENTS.md"), "utf8"); }
+      catch (e) { if (e instanceof NotARegularFileError) throw e; }
       const evt = groomOnce({ root, cfg, agentsMd, today: today() });
       if (evt) bus.publish(evt);
     } catch (e) {

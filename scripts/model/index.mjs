@@ -3,7 +3,7 @@
 // (the source of truth). Pure-JS / zero-dep so it runs on blaze's Node floor.
 // The Index interface is storage-agnostic — a future node:sqlite implementation
 // must satisfy the same shape (spec §13, revised), so the swap stays contained.
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { readdirSync, statSync } from "node:fs";
 import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
 import { parseTicket } from "./ticket.mjs";
@@ -69,26 +69,46 @@ function classifyGitEntry(dirPath) {
                "and Blaze will not open it: a FIFO with no writer would block the read forever, " +
                "and the others cannot hold a git pointer" };
   }
-  let head;
-  try { head = readFileSync(p, "utf8").slice(0, GIT_FILE_PROBE_BYTES); }
+  // BLZ-511 / ADR-0031. THE READ IS `readRegularFileSync`, and the reason is the two lines
+  // above it. ADR-0030 §4 implemented its own rule as `statSync` then open, and ADR-0031
+  // recorded this as the one site left with that shape: "correct as far as it goes, and it
+  // no longer hangs, but it keeps the race this module removes."
+  //
+  // The race is real and it is not a wrong answer. `statSync` said REGULAR FILE about the
+  // entry that was there a moment ago; `readFileSync` then opens the entry that is there
+  // NOW, and if that is a FIFO the open BLOCKS FOREVER — no error, no timeout, no exit — on
+  // the predicate `blaze audit`, `buildIndex`, id resolution, the board view, `reconcile`
+  // and the long-lived server all share. `readRegularFileSync` reads the type from the OPEN
+  // DESCRIPTOR (`O_NONBLOCK` + `fstatSync`), so nothing can be swapped between the check and
+  // the read, and a descriptor that turns out not to be a regular file lands in the catch
+  // below as `git-file-unreadable` — a shape this function already reports and BLZ-497
+  // already pins through a real call path.
+  //
+  // BYTES, NOT A utf8 STRING, and the `st.size` uses below are gone with it. The size came
+  // from the STALE stat, so the "N-byte" sentence and the `git-file-empty` branch described
+  // whatever was at the path earlier rather than the file this process opened. `buf.length`
+  // is the file it actually read.
+  let buf;
+  try { buf = readRegularFileSync(p, null); }
   catch (e) {
     return { reason: "git-file-unreadable",
              detail: "it holds a `.git` FILE that could not be read " +
                `(${(e && e.code) || e}), so Blaze cannot tell a submodule pointer from junk` };
   }
+  const head = buf.toString("utf8", 0, Math.min(buf.length, GIT_FILE_PROBE_BYTES));
   if (/^gitdir:\s*\S/.test(head)) {
     return { reason: "nested-repo-pointer",
              detail: "it holds a `.git` FILE containing " +
                `${JSON.stringify(head.split("\n")[0].trim())} — the pointer \`git submodule add\` ` +
                "and `git worktree add` write" };
   }
-  if (st.size === 0) {
+  if (buf.length === 0) {
     return { reason: "git-file-empty",
              detail: "it holds a ZERO-BYTE `.git` file — git would not recognise that as a " +
                "repository, and Blaze cannot tell whether one was meant" };
   }
   return { reason: "git-file-unrecognised",
-           detail: `it holds a ${st.size}-byte \`.git\` file that is not a \`gitdir:\` pointer — ` +
+           detail: `it holds a ${buf.length}-byte \`.git\` file that is not a \`gitdir:\` pointer — ` +
              "Blaze cannot tell a repository from junk" };
 }
 
