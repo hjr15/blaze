@@ -31,7 +31,8 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportCsv } from "../scripts/model/export-rows.mjs";
 import { parseCsv } from "../scripts/model/csv.mjs";
@@ -311,5 +312,35 @@ describe("BLZ-630: the imported corpus passes blaze audit", () => {
     const r = spawnSync(process.execPath, [join(REPO, "scripts", "cli.mjs"), "audit"],
       { cwd: B, env, encoding: "utf8" });
     assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
+  });
+});
+
+// --- design §3.3's "separate refusal fixture" (BLZ-654) ----------------------
+//
+// A link entry deliberately malformed (`type`, no `target`) does NOT belong in
+// the main fixture above — it would corrupt every other gate's comparison. It
+// gets its own tiny, standalone board instead, existing only to exercise
+// §5.2's export refusal (which, per §1.6 fact 7, has no live instance on the
+// real board to drive it).
+describe("design §3.3's separate refusal fixture: export refuses a link with a type but no target", () => {
+  test("exportCsv throws rather than emitting 'Relates:undefined'", () => {
+    const root = mkdtempSync(join(tmpdir(), "blaze-csv-refusal-fixture-"));
+    try {
+      const dir = join(root, "projects", "BLZ", "defined");
+      mkdirSync(dir, { recursive: true });
+      writeFileSync(join(dir, "BLZ-1.md"), [
+        "---",
+        "id: BLZ-1", "title: t", "type: task", "project: BLZ", "estimate: 5",
+        "links:", "  - { type: Relates }",
+        "---", "", "body", "",
+      ].join("\n"));
+      assert.throws(() => exportCsv(join(root, "projects")), (e) => {
+        assert.match(e.message, /target/);
+        assert.match(e.message, /BLZ-1/, "§5.2 requires the refusal to name the ticket");
+        return true;
+      });
+    } finally {
+      rmSync(root, { recursive: true, force: true });
+    }
   });
 });
