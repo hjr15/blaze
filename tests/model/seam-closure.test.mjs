@@ -939,6 +939,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["new-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["resolve-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["import-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
+  ["import-mapping-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // likewise
   // BLZ-629. Three exports reach a write and say so: `runImport` is the verb,
   // `applyImport` is the walk it delegates to, and `pruneReceipts` unlinks
   // receipts past retention. Everything else is a reader or a pure
@@ -964,6 +965,16 @@ const SEAM_WRITE_PROVIDERS = new Map([
     inert: ["MAPPING_DIR", "SOURCE_IDS_DIR", "CANONICAL_MAPPING_NAME", "TRANSFORM_NAMES",
       "mappingPathFor", "sourceIdsPathFor", "headerDigest", "loadMapping", "bindMapping",
       "mapRows", "applyTransform", "readSourceIds", "nameFromReceiptPath"] }],
+  // BLZ-635 / design §4.3, §4.4. THE ONE MODULE IN THE TREE THAT SPAWNS
+  // `agentCommand` besides the groomer, and its entire effect on disk is ONE
+  // FILE: `runProposeMapping` writes `import-mappings/<name>.json` after the
+  // operator has said yes, and nothing else — no ticket, no id, no claim, no
+  // receipt, no staging (ADR-0037 §2, §3). `proposeMapping` spawns and parses
+  // and writes nothing; `renderProposal` and `sampleOf` are pure. That the
+  // spawn never happens on the IMPORT path is not this guard's job and is
+  // pinned dynamically in tests/import-agent-boundary.test.mjs.
+  ["model/import-mapping-propose.mjs", { writes: ["runProposeMapping"], sanctioned: [],
+    inert: ["SAMPLE_ROWS", "sampleOf", "proposeMapping", "renderProposal"] }],
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
@@ -2031,6 +2042,12 @@ const WRITE_ALLOWED = new Map([
   // mapped import walks the same injected write port the canonical one does.
   ["model/import-mapping.mjs", ["appendRegularFileSync", "mkdirSync", "truncateSync",
     "commitOrQueue", "applyImport", "pruneReceipts"]],
+  // BLZ-635. Two members, one file: `mkdirSync` creates `import-mappings/`
+  // and `writeRegularFileSync` puts the accepted mapping in it. There is no
+  // third, and a ticket write appearing here reddens — which is the whole of
+  // ADR-0037 §3 expressed as a guard rather than as a comment.
+  ["model/import-mapping-propose.mjs", ["mkdirSync", "writeRegularFileSync"]],
+  ["import-mapping-runner.mjs", ["runProposeMapping"]],
   // ...and `runImport` is the verb itself, exactly as new-runner.mjs takes `applyNew`.
   // BLZ-634 adds the mapped import and the repair verb to the same runner:
   // one `planImport`, two readers (§4.5), and `repair` writes records only.

@@ -180,10 +180,14 @@ function refuse(exitCode, ...errors) { return { ok: false, exitCode, errors, map
  * for every structural refusal: the remedy is "confirm a mapping", which is a
  * different action from "fix the file" (§5.1).
  */
-export function loadMapping(path) {
-  let text;
+export function loadMapping(path, opts = {}) {
+  let text = opts.text;
   try {
-    text = readRegularFileSync(path);
+    // BLZ-635: `text` lets the PROPOSER put a candidate through exactly these
+    // rules before it writes one, so a mapping the importer would refuse never
+    // reaches disk. It is the same function, not a second copy — two copies of
+    // "what a valid mapping is" is how the proposer and the importer drift.
+    if (text === undefined) text = readRegularFileSync(path);
   } catch (e) {
     if (e && e.code === "ENOENT") {
       return refuse(3,
