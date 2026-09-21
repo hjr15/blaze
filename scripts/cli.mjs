@@ -50,12 +50,16 @@ const SUBCOMMANDS = {
   // under BLAZE_READONLY, and declaring it read-only because the common path
   // is a dry run would defeat that.
   //
-  // The desc names what THIS build has. Design §6 specifies a longer string
-  // naming `propose-mapping` and `repair`; those are C1/C2 and do not exist
-  // yet, and `blaze import --help` prints nothing but `sub.desc`
-  // (cli.mjs:86) — so advertising them here would be a help text that lies.
-  // Whoever lands C1/C2 extends this string with them.
-  import: { file: "import-runner.mjs", desc: "import tickets from a canonical CSV (dry run unless --apply)", mutates: true },
+  // The desc names what THIS build has, because `blaze import --help` prints
+  // nothing but `sub.desc` (cli.mjs:86) and a help text that advertises a
+  // subcommand the build does not have is a help text that lies. BLZ-634/635
+  // landed both, so both are named — and the `(dry run unless --apply)`
+  // parenthetical attaches to `import` and `repair` ONLY. It is literally
+  // false for `propose-mapping`, which has no `--apply` flag at all: its one
+  // write is gated by an interactive confirmation the operator answers each
+  // run (design §4.4, §6), not by a flag, and ADR-0037's Alternatives
+  // Rejected turns down the `--yes` that would make it one.
+  import: { file: "import-runner.mjs", desc: "import tickets from CSV (dry run unless --apply), or `propose-mapping` (interactive) / `repair` (dry run unless --apply)", mutates: true },
   // `mutates: true` because `migrate-dates --write` rewrites tickets. Dry-run is the default
   // for both subcommands and `import-deps` has no --write at all, but the CLI gate is per-verb
   // and BLZ-121 refuses to even SPAWN a mutating runner under BLAZE_READONLY — declaring this

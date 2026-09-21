@@ -768,6 +768,16 @@ sprint definition is source, so it lives at top level and gets committed like ti
 - `source.columns` is the **verbatim header row** and `source.sha256` is its digest. Import checks
   both. A source export whose header has changed is a **refusal**, not a best-effort re-map —
   that is the case where silently continuing produces the wrong-but-plausible board.
+
+  **The digest is the HEADER's, not the file's, and BLZ-634 had to decide that rather than read
+  it here.** "Its digest" is ambiguous on its own and §5.2's row says *"does not match the file"*,
+  which reads as a whole-file digest. A whole-file digest would bind a mapping to exactly one
+  export and make the SECOND import of the same tracker a refusal — the opposite of what this
+  bullet asks for, and it would delete `sourceIdColumn`'s entire purpose, since a re-import of a
+  changed export is precisely the case the map exists to make idempotent. So: the digest is taken
+  over the header row's canonical CSV re-emission (`writeCsv([header])`-shaped), which is
+  insensitive to how a given file chose to quote it, and §5.2's *"the file"* is read as *"this
+  file's header"*.
 - **`name` is the mapping's identity, and it must equal the file's basename** —
   `import-mappings/<name>.json` carries `"name": "<name>"`, and a mismatch is a refusal (exit 3,
   §5.2). One spelling, because two other artifacts are keyed on it: the map is
@@ -915,9 +925,24 @@ sprint definition is source, so it lives at top level and gets committed like ti
   `split-comma`, `iso-date`, `dmy-date`, `mdy-date`. A mapping naming a transform outside the
   list is refused. An expression language here would be a second place a model's output becomes
   executable, and ADR-0037 §2 exists to have exactly one.
+
+  **`days-to-minutes` is 1440 — a LITERAL day**, recorded because this list names the transform
+  and not its constant. A "working day" of 8h is a scheduling policy, and a transform that
+  silently applied one would be inferring something about the source tracker, which is the one
+  thing this layer exists not to do. A tracker that means 8h uses `hours-to-minutes` on a column
+  it has already converted, or the mapping is wrong in a way a person can see in the diff.
 - `unmapped` is required to be **present and complete**: every source column is either in
   `columns` or in `unmapped`. A source column in neither is a refusal, so a column cannot be
   dropped by omission.
+
+  **`sourceIdColumn` is a THIRD declaration site, and BLZ-634 had to decide that too.** Read
+  strictly, "either in `columns` or in `unmapped`" makes a mapping that *"uses `sourceIdColumn`
+  alone"* — this section's own example of a tracker whose keys do not parse as `<KEY>-<N>` —
+  unloadable, because that column is in neither. Listing it in `unmapped` is worse than a
+  technicality: §4.4 renders `unmapped` as **`will be DISCARDED`**, and this is the one column
+  that is *not* discarded — it is the row's identity and the whole of what makes a re-import a
+  no-op. So the completeness rule is: every source column is in `columns`, in `unmapped`, **or
+  is `sourceIdColumn`**. Nothing is silently ignored, which is the property the rule is for.
 
 ### 4.3 Where the model runs, and the boundary that guarantees it does not
 
@@ -928,7 +953,16 @@ sprint definition is source, so it lives at top level and gets committed like ti
 | Model? | **yes**, once | **never** | **never** |
 | Dry run? | an interactive confirmation (§4.4) | **default**; writes under `--apply` (ADR-0037 §4) | **default**; writes under `--apply` (ADR-0037 §4) |
 | Writes | one file: `import-mappings/<name>.json` | tickets, under `--apply` | under `--apply` only: the map (park, truncate, pair) and the receipt (`resolved`) — never a ticket |
-| Sees the board? | no | yes | yes — a `stat` per examined row, nothing more |
+| Sees the board? | no | yes | yes — through the read seam, to decide "is this row's ticket on disk"; it writes none |
+
+**That last cell used to read *"a `stat` per examined row, nothing more"*, and BLZ-634 could not
+build it.** A `stat` needs a path, and the rows `repair` examines are exactly the ones with an
+`intent` and no `done` — so the receipt has no `file` for them (only a `done` carries one, §5.3
+step 7), and the id alone does not give a path: the filename carries the slug and the STATUS
+DIRECTORY, neither of which the `intent` records. `repair` therefore asks the same read seam the
+importer does (`loadBoard` → `fsReadStorage.listTickets`, ADR-0009) whether the id is on the
+board. It is one listing rather than N stats; it is still read-only, it still writes no ticket,
+and it is still the same seam every other reader goes through, which was the cell's point.
 
 The proposer **will be** `proposeMapping(header, sampleRows, { agentCommand })` in
 `scripts/model/import-mapping-propose.mjs` — a new module; nothing by that name exists at
