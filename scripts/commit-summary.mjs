@@ -21,6 +21,12 @@ export const OP_LABEL = {
   ac: "ac-toggled",
   sprint: "sprint updated",
   reconcile: "reconciled",
+  // BLZ-629 / design §5.4 (docs/design/csv-import-and-export.md): `blaze
+  // import --apply` stages exactly the files it wrote through commitOrQueue,
+  // which REFUSES an op it has no word for. Without this line the importer
+  // exits 1 on its first successful apply — §5.1's exit-4 argument made real
+  // by omission. (`import-repair`, the inspection verb, lands with C1.)
+  import: "imported",
 };
 
 /** The ticket ids ONE ledger entry covers.

@@ -42,9 +42,15 @@ export class UnknownFrontmatterKeyError extends Error {
  * design's "one character set, one predicate, used by both sides" fix.
  * Stripping leading whitespace FIRST is what stops a leading tab or space
  * from smuggling `=`/`@` past a first-character-only check.
+ *
+ * BLZ-628 EXPORTS it rather than letting the import side copy it. Design
+ * §2.5's whole fix is "one character set, one predicate, used by BOTH sides",
+ * and the defect it closes is two implementations drifting — export warning
+ * about a leading tab that import then accepted. A second copy reinstates
+ * that on the first edit to either one.
  */
 const LEADING_WS_RE = /^[ \t\r\n ]+/;
-function isHostileCell(cell) {
+export function isHostileCell(cell) {
   const stripped = cell.replace(LEADING_WS_RE, "");
   return stripped.length > 0 && (stripped[0] === "=" || stripped[0] === "@");
 }
