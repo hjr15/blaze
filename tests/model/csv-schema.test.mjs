@@ -140,6 +140,16 @@ test("pair list: encoding a link outside LINK_TYPES is refused", () => {
   assert.throws(() => encodePairList([{ type: "Precedes", target: "BLZ-1" }]), /Precedes/);
 });
 
+test("pair list: encoding a link with a type but no target is refused, not emitted as TYPE:undefined", () => {
+  // BLZ-654: design §5.2 requires the export to refuse this shape ("an exporter
+  // that dropped it would launder corruption into a clean-looking CSV"), and
+  // §2.8 gives it the same severity as the unknown-frontmatter-key refusal —
+  // the whole export refuses, nothing is silently coerced or dropped.
+  assert.throws(() => encodePairList([{ type: "Relates" }]), /target/);
+  assert.throws(() => encodePairList([{ type: "Relates", target: "" }]), /target/);
+  assert.throws(() => encodePairList([{ type: "Relates", target: null }]), /target/);
+});
+
 test("worklog: JSON array of objects, keys in fixed order date/minutes/note", () => {
   const cell = encodeWorklog([{ date: "2026-08-20", minutes: 240, note: "x" }]);
   assert.equal(cell, '[{"date":"2026-08-20","minutes":240,"note":"x"}]');

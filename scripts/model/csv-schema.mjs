@@ -154,6 +154,15 @@ export function encodePairList(pairs) {
         `csv-schema: link type ${JSON.stringify(p.type)} is not one of `
         + `${[...LINK_TYPES].join("/")} — the frontmatter link vocabulary (design §1.4)`);
     }
+    // design §5.2/§2.8: a link with no target is corruption, not an absent
+    // optional field. Emitting it anyway (`Relates:undefined`) launders that
+    // corruption into a clean-looking CSV — refuse instead, same severity as
+    // the unknown-frontmatter-key refusal (BLZ-654).
+    if (p.target === undefined || p.target === null || p.target === "") {
+      throw new Error(
+        `csv-schema: link of type ${JSON.stringify(p.type)} has no target — `
+        + `every link pair must have both a type and a target (design §5.2)`);
+    }
   }
   const sorted = list.slice().sort((a, b) =>
     a.type === b.type ? String(a.target).localeCompare(String(b.target)) : a.type.localeCompare(b.type));
