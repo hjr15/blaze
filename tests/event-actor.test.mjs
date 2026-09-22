@@ -22,6 +22,12 @@ import { applyEdit } from "../scripts/edit.mjs";
 import { actorFor } from "../scripts/model/identity.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { startServer, CSRF } from "../scripts/serve.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function sqliteExec() {
   const db = new DatabaseSync(":memory:");
@@ -88,7 +94,7 @@ describe("the database write port records who did it", () => {
 
 describe("the verbs pass the actor through to the port", () => {
   test("applyEdit forwards opts.actor as the port's context", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-actor-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-actor-")));
     mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
     writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
       ["---", "id: BLZ-1", "title: t", "type: task", "project: BLZ", "priority: medium",
@@ -118,7 +124,7 @@ describe("actorFor names the principal, and 'unknown' when there is none", () =>
 
 describe("end to end: an authenticated board write lands the principal in ticket_event", () => {
   test("POST /api/edit with an admin token records that admin as the actor", async () => {
-    const root = mkdtempSync(join(tmpdir(), "blaze-actor-e2e-"));
+    const root = scratch(mkdtempSync(join(tmpdir(), "blaze-actor-e2e-")));
     execFileSync("git", ["-C", root, "init", "-q"]);
     execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
     execFileSync("git", ["-C", root, "config", "user.name", "t"]);

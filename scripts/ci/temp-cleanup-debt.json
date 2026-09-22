@@ -5,7 +5,7 @@
     "audit-project-mismatch.test.mjs": 5,
     "audit.test.mjs": 2,
     "board-overstatement-oracle.test.mjs": 3,
-    "ci-mutation-sandbox.test.mjs": 3,
+    "ci-mutation-sandbox.test.mjs": 2,
     "claims-remote-all-refs.test.mjs": 10,
     "cli.test.mjs": 3,
     "commit-drain-quarantine.test.mjs": 1,

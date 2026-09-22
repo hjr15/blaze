@@ -14,6 +14,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { EDITABLE_FIELDS, derivedFieldRefusal } from "../../scripts/model/fields.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 test("start and due are NOT editable — the fields the scheduler owns", () => {
   assert.equal(EDITABLE_FIELDS.has("start"), false);
@@ -103,7 +109,7 @@ test("REVIEW — the index carries the migrated fields, so they do not vanish fr
   const { mkdtempSync, mkdirSync, writeFileSync } = await import("node:fs");
   const { tmpdir } = await import("node:os");
   const { join } = await import("node:path");
-  const root = mkdtempSync(join(tmpdir(), "idx-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "idx-")));
   mkdirSync(join(root, "TST", "defined"), { recursive: true });
   writeFileSync(join(root, "TST", "defined", "TST-1-x.md"),
     "---\nid: TST-1\ntitle: t\ntype: task\nproject: TST\nnot_before: 2026-08-11\ndeadline: 2026-08-16\n---\nb\n");

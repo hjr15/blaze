@@ -45,5 +45,22 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      # BLZ-516: the run is given its OWN empty temp directory so the scratch gate below can
+      # count what the suite left without answering for anything else on the runner. On a
+      # shared /tmp the count is not this repo's to make a claim about.
+      - name: Make the scratch box
+        run: |
+          mkdir -p "$RUNNER_TEMP/blaze-scratch-box"
+          echo "TMPDIR=$RUNNER_TEMP/blaze-scratch-box" >> "$GITHUB_ENV"
+
       - name: Run tests + coverage gate
         run: npm run test:coverage
+
+      # BLZ-503/516: the suite leaked 299 scratch directories a run at c355b9c and leaks none
+      # now. This is the only check that sees a suite nobody opted in — the static property in
+      # tests/tmp-scratch-attribution.test.mjs says a leak would be ATTRIBUTABLE, not that
+      # there is none, and BLZ-517's per-suite proof covers 35 suites BY NAME. Runs even when
+      # the suite failed: a red run is exactly when litter is worst and least examined.
+      - name: No scratch directory survived the run
+        if: always()
+        run: node scripts/ci/tmp-scratch-attribution.mjs --tmp "$RUNNER_TEMP/blaze-scratch-box" --max 0

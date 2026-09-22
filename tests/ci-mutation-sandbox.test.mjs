@@ -23,8 +23,56 @@ import { readFileSync, writeFileSync, mkdtempSync, mkdirSync, symlinkSync, rmSyn
   from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { parse } from "acorn";
 import { createSandbox, discardSandbox, MUTATIONS, SANDBOX_CONTENTS }
   from "../scripts/ci/mutate-schedule.mjs";
+
+/** Parse a module the way every executable file in this tree is written (BLZ-504).
+ *  `acorn` is a devDependency — this package ships zero runtime dependencies — and
+ *  `tests/model/seam-closure.test.mjs` already depends on it for the same reason: a source
+ *  property asked of raw text answers about prose as readily as about code. */
+const ast = (source) => parse(source, { ecmaVersion: "latest", sourceType: "module", locations: true });
+
+/** Every node in an acorn tree, in source order. */
+function* nodes(node) {
+  if (node === null || typeof node !== "object") return;
+  if (Array.isArray(node)) { for (const n of node) yield* nodes(n); return; }
+  if (typeof node.type === "string") yield node;
+  for (const key of Object.keys(node)) {
+    if (key === "loc" || key === "range" || key === "start" || key === "end") continue;
+    yield* nodes(node[key]);
+  }
+}
+
+/** Every REAL `rmSync(...)` call in `source`, as `[{ line }]`, in source order.
+ *
+ *  Both spellings count: the bare `rmSync(p)` of a named import and the `fs.rmSync(p)` of a
+ *  namespace one. A comment, a string, a template literal or a regex that merely names the
+ *  call is not a call and is not here — that is the whole of BLZ-504. */
+export function rmSyncCallSites(source) {
+  const out = [];
+  for (const n of nodes(ast(source))) {
+    if (n.type !== "CallExpression") continue;
+    const c = n.callee;
+    const name = c.type === "Identifier" ? c.name
+      : (c.type === "MemberExpression" && !c.computed && c.property.type === "Identifier"
+        ? c.property.name : null);
+    if (name === "rmSync") out.push({ line: n.loc.start.line });
+  }
+  return out.sort((a, b) => a.line - b.line);
+}
+
+/** `{ start, end }` — the 1-based line range of the function declared as `name`, or `null`.
+ *  Exported as a declaration or not; what matters is where its body begins and ends, so
+ *  "is the delete inside the guard" is a question about the parse rather than about where a
+ *  substring happened to fall in the file. */
+export function functionRange(source, name) {
+  for (const n of nodes(ast(source))) {
+    if (n.type !== "FunctionDeclaration" || n.id?.name !== name) continue;
+    return { start: n.loc.start.line, end: n.loc.end.line };
+  }
+  return null;
+}
 
 /** Teardown for a directory this file did not create itself, through the RUNNER's own
  *  guard rather than a second copy of it (BLZ-485). The thing under test is a function
@@ -258,20 +306,104 @@ describe("BLZ-485: the runner refuses to delete the checkout, on resolved real p
   test("the runner's teardown goes through the guard — there is no bare rmSync left", () => {
     // A source check, and stated as what it is. The guard is unreachable from
     // `runMutations` today (see the header), so no behavioural test can prove the runner
-    // calls it; what CAN be proved is that the runner contains exactly one `rmSync`, that
-    // it sits inside `discardSandbox`, and that the `finally` delegates to it. That is the
-    // property BLZ-485 is about: the safety is in the shipped runner, not in this file.
+    // calls it; what CAN be proved is that the runner contains exactly one `rmSync` CALL,
+    // that it sits inside `discardSandbox`, and that the `finally` delegates to it. That is
+    // the property BLZ-485 is about: the safety is in the shipped runner, not in this file.
     const src = readFileSync(join(REPO, "scripts", "ci", "mutate-schedule.mjs"), "utf8");
-    assert.equal(src.split("rmSync(").length - 1, 1,
-      "more than one rmSync call in the runner — every recursive delete must go through " +
-      "discardSandbox, which is the only place allowed to name a path to remove");
-    const guardAt = src.indexOf("export function discardSandbox");
-    assert.notEqual(guardAt, -1, "discardSandbox is not exported from the runner");
-    assert.ok(src.slice(guardAt).includes("rmSync("),
-      "the runner's single rmSync is not inside discardSandbox");
+    const calls = rmSyncCallSites(src);
+    assert.equal(calls.length, 1,
+      `${calls.length} rmSync CALLS in the runner (lines ${calls.map((c) => c.line).join(", ")}) ` +
+      "— every recursive delete must go through discardSandbox, which is the only place " +
+      "allowed to name a path to remove");
+    const guard = functionRange(src, "discardSandbox");
+    assert.notEqual(guard, null, "discardSandbox is not declared in the runner");
+    assert.ok(calls[0].line >= guard.start && calls[0].line <= guard.end,
+      `the runner's single rmSync is at line ${calls[0].line}, outside discardSandbox ` +
+      `(lines ${guard.start}–${guard.end})`);
     assert.match(src, /\}\s*finally\s*\{\s*\n\s*discardSandbox\(sandbox\);/,
       "runMutations' finally must delegate to discardSandbox — a bare rmSync there is the " +
       "defect BLZ-485 closes");
+  });
+});
+
+// BLZ-504 — the guard above counted a STRING, so a comment inflated it.
+//
+// It was `src.split("rmSync(").length - 1 === 1` over the whole file text. Writing
+// `rmSync(sandbox)` inside a COMMENT — explaining what the teardown used to be, which this
+// file's own headers do repeatedly — made the count 2 and failed the test on a change that
+// altered no code. That happened, and it was worked around by rewording the comment, which
+// is the wrong fix: it leaves the next person to discover the rule by tripping over it, and
+// it means the guard's number does not mean what its message says it means.
+//
+// The fix is the convention this corpus already reached for the same class of bug in
+// `tests/model/seam-closure.test.mjs`: parse, do not grep. That file records why —
+// stripping `//` lines only still left a JSDoc block or an error string naming a write as a
+// false offender — and it hard-depends on `acorn`, a devDependency, for exactly this.
+//
+// Counting CALL SITES also makes the check stricter, not just quieter. A raw-text count
+// cannot tell `rmSync(a)` from `fs.rmSync(a)` and would miss the second spelling entirely,
+// so the old guard could have been defeated by a bare delete written through a namespace
+// import. Both spellings are call sites here.
+/** The three spellings of one delete. At module scope, not inside a test body, because
+ *  `scripts/ci/temp-cleanup-guard.mjs` reads a delete-looking call inside a test as that
+ *  test's own trailing cleanup — these are fixtures for a parser, and recording them as
+ *  corpus debt would make that ratchet's number mean less than it says. */
+const SPELLINGS = [
+  ["a named import", 'import { rmSync } from "node:fs";\nrmSync(p);'],
+  ["a namespace import", 'import * as fs from "node:fs";\nfs.rmSync(p);'],
+  ["whitespace inside the call", "fs . rmSync (p);"],
+];
+const TWO_CALLS = 'import { rmSync } from "node:fs";\nrmSync(a);\nrmSync(b);';
+
+describe("BLZ-504: the teardown guard counts call sites, not occurrences of a word", () => {
+  const withCall = (extra) => `import { rmSync } from "node:fs";\n${extra}\nrmSync(p, { force: true });\n`;
+
+  for (const [what, source] of [
+    ["a line comment", "// rmSync(sandbox, { recursive: true, force: true }) used to live here"],
+    ["a JSDoc block", "/** Teardown. Was a bare `rmSync(sandbox)` before BLZ-485. */"],
+    ["a trailing comment on a real line", "const p = \"x\"; // not rmSync(p) any more"],
+    ["a string literal", 'const msg = "call rmSync(p) only inside the guard";'],
+    ["a template literal", "const msg = `rmSync(${1}) is refused here`;"],
+    ["a regex literal", "const RE = /\\brmSync\\s*\\(/;"],
+  ]) {
+    test(`${what} naming rmSync( is not a call site`, () => {
+      assert.deepEqual(rmSyncCallSites(source), [],
+        `${what} is prose, not a delete — counting it is the false positive BLZ-504 closes`);
+      assert.equal(rmSyncCallSites(withCall(source)).length, 1,
+        `…and it must not hide a REAL call on another line either`);
+    });
+  }
+
+  for (const [spelling, source] of SPELLINGS) {
+    test(`${spelling} is counted — a text match could not do all three`, () => {
+      assert.equal(rmSyncCallSites(source).length, 1,
+        "a delete is a delete however it is spelled. A raw `rmSync(` text count matches a " +
+        "namespace call only by accident, through the substring, and misses a spaced one " +
+        "outright — so the old guard could have been defeated by writing the delete " +
+        "differently rather than by not doing it");
+    });
+  }
+
+  test("the counter is not simply returning nothing — two calls count as two", () => {
+    // Non-vacuity. A `rmSyncCallSites` that always returned [] would pass every assertion
+    // above and turn the guard it serves into a test that can no longer fail.
+    const two = rmSyncCallSites(TWO_CALLS);
+    assert.equal(two.length, 2);
+    assert.deepEqual(two.map((c) => c.line), [2, 3], "…and it reports where, so a failure is actionable");
+  });
+
+  test("functionRange finds the guard's own extent, so 'inside it' is a real question", () => {
+    const src = 'function a() {\n  return 1;\n}\nexport function discardSandbox(s) {\n  rmSync(s);\n}\n';
+    const r = functionRange(src, "discardSandbox");
+    assert.deepEqual([r.start, r.end], [4, 6]);
+    assert.equal(functionRange(src, "nope"), null);
+    const [call] = rmSyncCallSites(src);
+    assert.ok(call.line >= r.start && call.line <= r.end);
+    // …and a call OUTSIDE it is outside it, which is the judgement the guard makes.
+    const moved = 'export function discardSandbox(s) {\n  return s;\n}\nrmSync(x);\n';
+    const [out] = rmSyncCallSites(moved);
+    const rr = functionRange(moved, "discardSandbox");
+    assert.ok(out.line < rr.start || out.line > rr.end);
   });
 });
 

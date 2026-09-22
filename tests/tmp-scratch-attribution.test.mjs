@@ -1,34 +1,31 @@
 // tests/tmp-scratch-attribution.test.mjs — BLZ-491.
 //
-// Two properties, and the second is the one the ticket is actually about.
+// A LEAKED DIRECTORY IS ATTRIBUTABLE TO THE TEST THAT MADE IT.
 //
-// 1. THE GUARDS SUITE CLEANS UP AFTER ITSELF. `tests/board-overstatement-guards.test.mjs`
-//    minted a `/tmp/blz-guards-board-*` directory in `tinyBoard()` on four call sites and
-//    removed none of them. 356 were on this machine when the fix was written, against 276
-//    counted by the review that raised it. The test below runs that suite in a CHILD with
-//    `TMPDIR` pointed at an empty directory and asserts the directory is empty afterwards —
-//    which is the only way to observe an `after()` hook from outside, and it is what goes
-//    red if the hook is removed.
+// `tests/board-overstatement-guards.test.mjs` minted a `/tmp/blz-guards-board-*` directory in
+// `tinyBoard()` on four call sites and removed none of them — 356 were on this machine when
+// the fix was written, against 276 counted by the review that raised it. Cleaning one suite
+// fixes one suite. What made the leak cost anything is that `/tmp` noise is indistinguishable
+// from a real leak — and BLZ-485's mutation runner now asserts ZERO leftover
+// `/tmp/blz-mutate-*` as the evidence its teardown works, so a corpus that litters
+// anonymously trains the reader of that assertion to ignore litter.
 //
-// 2. A LEAKED DIRECTORY IS ATTRIBUTABLE TO THE TEST THAT MADE IT. Cleaning one suite fixes
-//    one suite. What made the leak cost anything is that `/tmp` noise is indistinguishable
-//    from a real leak — and BLZ-485's mutation runner now asserts ZERO leftover
-//    `/tmp/blz-mutate-*` as the evidence its teardown works, so a corpus that litters
-//    anonymously trains the reader of that assertion to ignore litter.
+// `mkdtempSync(join(tmpdir(), PREFIX))` returns PREFIX plus exactly six characters, so a
+// leftover directory names its author precisely when the prefix belongs to one test file.
+// `scripts/ci/tmp-scratch-attribution.mjs` scans for that and the tests below pin it, in the
+// shape the oracles here use: the scan's own SIZE is asserted, every call site lands in a
+// named bucket, and the bucket for "this scan could not read it" is asserted EMPTY rather
+// than skipped. A scan that silently dropped what it could not parse would report a clean
+// registry over a corpus it never read, which is the failure mode being closed.
 //
-//    `mkdtempSync(join(tmpdir(), PREFIX))` returns PREFIX plus exactly six characters, so a
-//    leftover directory names its author precisely when the prefix belongs to one test file.
-//    `scripts/ci/tmp-scratch-attribution.mjs` scans for that and the tests below pin it, in
-//    the shape the oracles here use: the scan's own SIZE is asserted, every call site lands
-//    in a named bucket, and the bucket for "this scan could not read it" is asserted EMPTY
-//    rather than skipped. A scan that silently dropped what it could not parse would report
-//    a clean registry over a corpus it never read, which is the failure mode being closed.
+// THE OTHER HALF OF BLZ-491 MOVED. This file also carried a hand-written proof that the
+// guards suite leaves an empty `TMPDIR` behind. BLZ-503 fixed 34 more suites and BLZ-517
+// extracted that proof into `tests/helpers/no-leak.mjs`; the guards suite is covered there,
+// with the rest, in `tests/scratch-cleanup.test.mjs`. What remains here is the static
+// property — which is what gates a NEW suite's prefix on every run.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { spawnSync } from "node:child_process";
 
 import { scanScratchSites, attributeScratch, MKDTEMP_SUFFIX, SITE_BUCKETS }
   from "../scripts/ci/tmp-scratch-attribution.mjs";
@@ -36,45 +33,6 @@ import { scanScratchSites, attributeScratch, MKDTEMP_SUFFIX, SITE_BUCKETS }
 const REPO = join(import.meta.dirname, "..");
 const TESTS = join(REPO, "tests");
 const SCAN = scanScratchSites(TESTS);
-
-describe("BLZ-491: a suite removes the scratch directories it creates", () => {
-  test("the board-overstatement guards suite leaves an empty TMPDIR behind", () => {
-    const box = mkdtempSync(join(tmpdir(), "blz491-guardsbox-"));
-    try {
-      // `node --test` marks its children with NODE_TEST_CONTEXT and hands them a reporter
-      // that writes a serialised stream instead of readable output. Inheriting it here made
-      // the child's stdout arrive EMPTY, so the "did it actually run" check below could not
-      // see anything — the env is stripped rather than the check weakened.
-      const env = { ...process.env, TMPDIR: box };
-      for (const k of Object.keys(env)) if (k.startsWith("NODE_TEST")) delete env[k];
-      // Non-vacuity FIRST, because everything below is meaningless if the child does not
-      // actually mint its scratch directories in here: a `TMPDIR` the runtime ignored would
-      // make an empty box read as a clean suite.
-      const probe = spawnSync(process.execPath,
-        ["-e", "console.log(require('node:os').tmpdir())"], { env, encoding: "utf8" });
-      assert.equal(probe.status, 0, probe.stderr);
-      assert.equal(probe.stdout.trim(), box,
-        `TMPDIR was not honoured — the child resolved ${probe.stdout.trim()}, not ${box}. ` +
-        "Without that this test cannot see the suite's scratch directories at all");
-      assert.deepEqual(readdirSync(box), [], "the box starts empty");
-
-      const res = spawnSync(process.execPath,
-        ["--test", join("tests", "board-overstatement-guards.test.mjs")],
-        { cwd: REPO, env, encoding: "utf8" });
-      assert.equal(res.status, 0, `the guards suite must pass before its litter can be judged:\n${res.stdout}\n${res.stderr}`);
-      assert.match(res.stdout, /pass 2\d/,
-        "…and must have actually run its tests — an empty run leaves an empty box too");
-
-      const left = readdirSync(box);
-      assert.deepEqual(left, [],
-        `the guards suite left ${left.length} scratch director(ies) behind: ` +
-        `${JSON.stringify(left.slice(0, 5))}. Every directory a suite mints must be removed ` +
-        "by that suite, or `/tmp` noise cannot be told from a real leak");
-    } finally {
-      rmSync(box, { recursive: true, force: true });
-    }
-  });
-});
 
 describe("BLZ-491: a leaked scratch directory names the test file that made it", () => {
   test("every mkdtempSync call under tests/ lands in a named bucket — nothing is dropped", () => {

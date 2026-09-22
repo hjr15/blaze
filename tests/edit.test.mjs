@@ -5,9 +5,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { applyEdit } from "../scripts/edit.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function fixture(extraFm = "", body = "body") {
-  const root = mkdtempSync(join(tmpdir(), "blaze-edit-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-edit-")));
   const projects = join(root, "projects");
   mkdirSync(join(projects, "OBA", "defined"), { recursive: true });
   writeFileSync(join(projects, "OBA", "defined", "OBA-1.md"),

@@ -7,6 +7,12 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { dirname } from "node:path";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 import { startServer, CSRF } from "../scripts/serve.mjs";
@@ -14,7 +20,7 @@ import { startServer, CSRF } from "../scripts/serve.mjs";
 // BLZ-133: pageHtml takes its board from projectsDir; the ambient fallback to
 // the engine tree is gone. Chrome-only assertions render against a real, empty board.
 const EMPTY_BOARD = (() => {
-  const d = mkdtempSync(join(tmpdir(), "blaze-ep-empty-"));
+  const d = scratch(mkdtempSync(join(tmpdir(), "blaze-ep-empty-")));
   mkdirSync(join(d, "projects"), { recursive: true });
   return join(d, "projects");
 })();

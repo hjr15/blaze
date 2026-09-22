@@ -22,6 +22,12 @@ import { applyMove } from "../scripts/move.mjs";
 import { applyLog } from "../scripts/log.mjs";
 import { applyLink } from "../scripts/link.mjs";
 import { applyResolve } from "../scripts/resolve.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const TICKETS = [
   { id: "OBA-1", num: 1, status: "defined", type: "task", title: "First task" },
@@ -30,7 +36,7 @@ const TICKETS = [
 ];
 
 function board() {
-  const root = mkdtempSync(join(tmpdir(), "blaze-soak-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-soak-")));
   const projects = join(root, "projects");
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"] }));
   for (const t of TICKETS) {

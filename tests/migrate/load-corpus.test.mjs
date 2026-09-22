@@ -11,9 +11,15 @@ import { join } from "node:path";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
 import { loadCorpus } from "../../scripts/migrate/load-corpus.mjs";
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function board(tickets) {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-load-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-load-")));
   for (const t of tickets) {
     mkdirSync(join(dir, t.project, t.status), { recursive: true });
     writeFileSync(join(dir, t.project, t.status, `${t.id}-x.md`), t.text);

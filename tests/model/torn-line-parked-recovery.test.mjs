@@ -22,6 +22,12 @@ import { mkdtempSync, readFileSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { appendRegularFileSync } from "../../scripts/model/regular-file.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const tornLineParkedEntry = () =>
   `${JSON.stringify({ phase: "resolved", seq: null, state: "torn-line-parked" })}\n`;
@@ -42,7 +48,7 @@ function markParked(receiptPath) {
 }
 
 test("BLZ-641 T4: a kill between the receipt's \\n append and the torn-line-parked append still recovers cleanly", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-torn-receipt-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-torn-receipt-")));
   const receiptPath = join(root, "2026-09-20T00-00-00-canonical.jsonl");
   const corruptPath = `${receiptPath}.corrupt`;
   const goodLine = `${JSON.stringify({ seq: 1, phase: "done", id: "BLZ-1" })}\n`;

@@ -153,6 +153,34 @@ const UNSCOPEABLE_KINDS = new Set(["project-mismatch", "unreadable-ticket-direct
 const RECONCILE_SOURCE = readFileSync(
   join(import.meta.dirname, "..", "scripts", "reconcile.mjs"), "utf8");
 
+/** Where a real `//` line comment starts on `line`, or `-1` — BLZ-515.
+ *
+ *  BLZ-496's rule was `line.slice(0, at).includes("//")`, which reads any double slash as
+ *  the start of prose. A URL has one, so `findings.push({ url: "https://…", kind: "x" })`
+ *  was refused as a comment and the kind vanished: not in the roster, not in `unaccounted`.
+ *  A tripwire that fails open is a tripwire nobody learns is gone.
+ *
+ *  So the line is READ rather than searched. Quote state — `"`, `'` and `` ` ``, with
+ *  backslash escapes — decides whether a `//` is code or text. An UNTERMINATED string
+ *  swallows the rest of the line and yields `-1`: guessing that a comment begins inside an
+ *  open string is the same failure this replaces, made in the other direction. A `/*` is not
+ *  treated as a comment opener here, because on one line it is indistinguishable from a
+ *  regex literal, and the whole-line rule beside this one already catches the real shapes. */
+function lineCommentAt(line) {
+  let quote = null;
+  for (let i = 0; i < line.length; i++) {
+    const c = line[i];
+    if (quote !== null) {
+      if (c === "\\") { i += 1; continue; }
+      if (c === quote) quote = null;
+      continue;
+    }
+    if (c === '"' || c === "'" || c === "`") { quote = c; continue; }
+    if (c === "/" && line[i + 1] === "/") return i;
+  }
+  return -1;
+}
+
 /** The only `kind:` occurrences that are deliberately NOT finding-kind declarations. Each
  *  carries the reason it is refused, because "the extractor happens not to match it" is not
  *  one. Their counts are asserted individually below, so deleting a rule takes its count
@@ -160,7 +188,14 @@ const RECONCILE_SOURCE = readFileSync(
 const KIND_REJECTIONS = [
   { rule: "comment",
     why: "a `kind:` inside a comment declares nothing — this file's prose names the field",
-    test: (line, at) => /^\s*(?:\/\/|\*|\/\*)/.test(line) || line.slice(0, at).includes("//") },
+    // BLZ-515: the second clause was `line.slice(0, at).includes("//")`, which read the
+    // `//` of a URL as the start of a comment and dropped the declaration beside it.
+    // `lineCommentAt` finds where prose actually begins; a `kind:` before that point is code.
+    test: (line, at) => {
+      if (/^\s*(?:\/\/|\*|\/\*)/.test(line)) return true;
+      const comment = lineCommentAt(line);
+      return comment !== -1 && comment < at;
+    } },
   { rule: "remote-host-classifier",
     why: "`classifyRemote` returns `{ host, kind }` where `kind` is a FORGE (github, " +
       "unsupported, unknown, none), not a finding this run can raise",
@@ -1047,6 +1082,89 @@ describe("BLZ-486: only the project-mismatch finding is excepted from the scope-
       "…and it must be an ADDITION, not a replacement");
     assert.deepEqual(OLD(spliced).sort(), [...RECONCILE_FINDING_KINDS].sort(),
       "the pattern this replaced saw no change at all — that is the defect, reproduced");
+  });
+
+  // BLZ-515 — BLZ-496's comment rule failed open on a `//` that was never a comment.
+  //
+  // The rule was `line.slice(0, at).includes("//")`: ANY double slash before the `kind:`
+  // marked the occurrence as prose. A URL in the same object literal has one, so
+  //
+  //     findings.push({ url: "https://example.test/x", kind: "new-kind" })
+  //
+  // was classified as a comment and dropped — not counted in the roster, not reported as
+  // unaccounted. That is the exact fail-open this extractor exists to prevent: a new finding
+  // kind would inherit whatever `--project` does by default and every scope assertion below
+  // would go blind on it, silently, which is BLZ-486 again.
+  //
+  // A `//` inside a string literal is not a comment. `lineCommentAt` decides that by reading
+  // the line with quote state rather than by looking for two characters.
+  describe("BLZ-515: a `//` inside a string is not a comment", () => {
+    const URL_FORM = '      findings.push({ url: "https://example.test/x", kind: "new-kind" });';
+
+    test("a kind on a line carrying a URL reaches the roster", () => {
+      const { kinds, rejected, unaccounted } = extractFindingKinds(URL_FORM);
+      assert.deepEqual(rejected, [],
+        "the `//` here is inside a string literal — refusing the line as a comment is the bug");
+      assert.deepEqual(unaccounted, []);
+      assert.deepEqual(kinds.map((k) => k.kind), ["new-kind"]);
+    });
+
+    for (const [what, line, want] of [
+      ["a single-quoted URL", "      findings.push({ u: 'https://x.test/a', kind: \"q-single\" });", "q-single"],
+      ["a template-literal URL", '      findings.push({ u: `https://x.test/${id}`, kind: "q-template" });', "q-template"],
+      ["a protocol-relative string", '      const u = "//cdn.test/x"; findings.push({ kind: "q-bare" });', "q-bare"],
+      ["an escaped quote before the URL", '      const u = "a \\" https://x.test"; findings.push({ kind: "q-escaped" });', "q-escaped"],
+      ["two URLs", '      findings.push({ a: "https://x.test", b: "https://y.test", kind: "q-two" });', "q-two"],
+    ]) {
+      test(`${what} does not hide the declaration`, () => {
+        assert.deepEqual(extractFindingKinds(line).kinds.map((k) => k.kind), [want],
+          `${what}: the kind must still be read`);
+      });
+    }
+
+    test("…and a REAL line comment is still refused, which is the other half", () => {
+      // Without this the fix would be "stop rejecting comments", which widens the roster
+      // with prose and is a different silent wrong answer.
+      for (const line of [
+        '      // kind: "prose-whole-line"',
+        '      const u = "x"; // kind: "prose-trailing"',
+        '       * kind: "prose-jsdoc"',
+        '      findings.push({ id }); // https://x.test — kind: "prose-after-url"',
+      ]) {
+        const { kinds, rejected } = extractFindingKinds(line);
+        assert.deepEqual(kinds, [], `a comment declares nothing: ${line.trim()}`);
+        assert.equal(rejected.length, 1, `…and it must be REFUSED by a named rule, not dropped`);
+        assert.equal(rejected[0].rule, "comment");
+      }
+    });
+
+    test("lineCommentAt is the rule, and it reads quotes rather than counting slashes", () => {
+      assert.equal(lineCommentAt('const u = "https://x.test";'), -1);
+      assert.equal(lineCommentAt("const u = 'a//b';"), -1);
+      assert.equal(lineCommentAt("const u = `a//b`;"), -1);
+      assert.equal(lineCommentAt('const u = "a"; // here'), 15);
+      assert.equal(lineCommentAt("// here"), 0);
+      assert.equal(lineCommentAt('const u = "unterminated // still open'), -1,
+        "an unterminated string swallows the rest of the line — guessing a comment inside " +
+        "one is how this rule failed in the first place");
+    });
+
+    test("on the REAL file: a URL-carrying kind spliced in is caught, not dropped", () => {
+      // The wiring, not the regex. Against the extractor this replaces, `after.kinds` was
+      // unchanged and `after.unaccounted` was empty — the occurrence vanished into the
+      // comment bucket and nothing anywhere said so.
+      const spliced = RECONCILE_SOURCE.replace(
+        '        kind: "project-mismatch",',
+        `        kind: "project-mismatch",\n${URL_FORM}`);
+      assert.notEqual(spliced, RECONCILE_SOURCE, "the splice anchor must still exist in reconcile.mjs");
+      const after = extractFindingKinds(spliced);
+      assert.deepEqual(after.unaccounted, []);
+      assert.ok(after.kinds.map((k) => k.kind).includes("new-kind"),
+        "a kind declared on a line holding a URL must appear in the roster");
+      assert.equal(after.kinds.length, RECONCILE_KIND_SITES.kinds.length + 1);
+      assert.equal(after.rejected.length, RECONCILE_KIND_SITES.rejected.length,
+        "…and nothing already in the file may change bucket because of this fix");
+    });
   });
 
   test("a leak through any OTHER kind survives the filter — one line per kind, all still visible", () => {

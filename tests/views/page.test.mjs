@@ -4,12 +4,18 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pageHtml, viewEnvelope, CSRF } from "../../scripts/views/page.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // BLZ-133: pageHtml/viewEnvelope now take their board (and its config) from
 // projectsDir — the old silent fallback to the ambient engine tree is gone. Even
 // the chrome-only assertions therefore need a real, if empty, board to render.
 const EMPTY_BOARD = (() => {
-  const d = mkdtempSync(join(tmpdir(), "blaze-page-empty-"));
+  const d = scratch(mkdtempSync(join(tmpdir(), "blaze-page-empty-")));
   mkdirSync(join(d, "projects"), { recursive: true });
   return join(d, "projects");
 })();
@@ -55,7 +61,7 @@ test("pageHtml({view:'map'}) falls back to board when views.map is disabled (rev
 });
 
 test("pageHtml renders a board switcher when >1 workflow board has tickets", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-page-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-page-")));
   mkdirSync(join(dir, "INF", "identified"), { recursive: true });
   mkdirSync(join(dir, "INF", "defined"), { recursive: true });
   writeFileSync(join(dir, "INF", "identified", "INF-2.md"), "---\nid: INF-2\ntitle: r\ntype: risk\nproject: INF\n---\nx\n");
@@ -66,7 +72,7 @@ test("pageHtml renders a board switcher when >1 workflow board has tickets", () 
 });
 
 test("pageHtml shows a breadcrumb when focused and a drill-down link on parents", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-crumb-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-crumb-")));
   mkdirSync(join(dir, "INF", "defined"), { recursive: true });
   writeFileSync(join(dir, "INF", "defined", "INF-9.md"), "---\nid: INF-9\ntitle: epic\ntype: epic\nproject: INF\n---\nx\n");
   writeFileSync(join(dir, "INF", "defined", "INF-10.md"), "---\nid: INF-10\ntitle: kid\ntype: task\nproject: INF\nparent: INF-9\n---\nx\n");
@@ -79,7 +85,7 @@ test("pageHtml shows a breadcrumb when focused and a drill-down link on parents"
 });
 
 function mapFixture() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-mapfocus-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-mapfocus-")));
   mkdirSync(join(dir, "M", "defined"), { recursive: true });
   // M-1 Blocks M-2 (M-2 downstream of M-1); M-3 Relates M-1 (related). A real
   // dependency neighbourhood, not a hierarchy — the map now renders links.
@@ -112,7 +118,7 @@ test("viewEnvelope: the map with no focus shows the pick-a-ticket prompt and ign
 // Gantt reads the sprint registry from dirname(projectsDir), so the fixture is a
 // real data root (root/sprints.json + root/projects/<PROJ>/<status>/).
 function ganttFixture() {
-  const root = mkdtempSync(join(tmpdir(), "blaze-gantt-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-gantt-")));
   const pDir = join(root, "projects");
   writeFileSync(join(root, "sprints.json"), JSON.stringify({
     active: "S1",

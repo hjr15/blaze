@@ -5,6 +5,12 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawn } from "node:child_process";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // BLZ-133 regression: `scripts/serve.mjs`'s standalone entry block referenced
 // `root`, which is a destructured PARAMETER of startServer() and not in scope at
@@ -19,7 +25,7 @@ import { spawn } from "node:child_process";
 const SERVE = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "serve.mjs");
 
 const BOARD = (() => {
-  const d = mkdtempSync(join(tmpdir(), "blaze-serve-standalone-"));
+  const d = scratch(mkdtempSync(join(tmpdir(), "blaze-serve-standalone-")));
   mkdirSync(join(d, "projects"), { recursive: true });
   return d;
 })();

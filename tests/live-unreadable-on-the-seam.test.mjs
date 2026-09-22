@@ -25,6 +25,12 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { fsReadStorage, memReadStorage } from "../scripts/model/read-storage.mjs";
 import { liveModel } from "../scripts/views/data.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const fifo = (p) => execFileSync("mkfifo", [p]);
 
@@ -111,7 +117,7 @@ describe("BLZ-513: the activity feed is a NAMED question on the read seam", () =
   test("every in-tree driver answers it, so the operation is a contract and not an fs detail", () => {
     for (const [name, s] of [["fs", fsReadStorage], ["mem", memReadStorage([])]]) {
       assert.equal(typeof s.activityFeed, "function", `${name} does not answer activityFeed`);
-      const a = s.activityFeed(mkdtempSync(join(tmpdir(), "blz513-empty-")));
+      const a = s.activityFeed(scratch(mkdtempSync(join(tmpdir(), "blz513-empty-"))));
       assert.equal(typeof a.text, "string", `${name}: text must always be a string`);
       assert.ok(a.unreadable === null || typeof a.unreadable === "object",
         `${name}: unreadable is a record or null, never undefined — a consumer branches on it`);

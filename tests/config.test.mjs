@@ -7,12 +7,18 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { loadConfig, loadProject, ambientSchemaOverride } from "../scripts/config.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const ROOT = REPO;
 
 function withConfig(json) {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   if (json !== null) writeFileSync(join(dir, "blaze.config.json"), JSON.stringify(json));
   return dir;
 }
@@ -116,21 +122,21 @@ test("fileRegex matches ticket files only", () => {
 });
 
 test("throws a clear error on malformed JSON", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(dir, "blaze.config.json"), "{ not json");
   assert.throws(() => loadConfig({ root: dir, env: {} }), /cannot parse/);
   rmSync(dir, { recursive: true, force: true });
 });
 
 test("commitMode defaults to per-op", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   const cfg = loadConfig({ root, env: {} });
   assert.equal(cfg.commitMode, "per-op");
   rmSync(root, { recursive: true, force: true });
 });
 
 test("commitMode is read from blaze.config.json", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
   const cfg = loadConfig({ root, env: {} });
   assert.equal(cfg.commitMode, "batch");
@@ -138,7 +144,7 @@ test("commitMode is read from blaze.config.json", () => {
 });
 
 test("BLAZE_COMMIT_MODE env overrides the file", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
   const cfg = loadConfig({ root, env: { BLAZE_COMMIT_MODE: "per-op" } });
   assert.equal(cfg.commitMode, "per-op");
@@ -288,13 +294,13 @@ test("loadConfig accepts an un-versioned (legacy) config unchanged", () => {
 // arithmetic, and it is also spec 2 §3.2's capacity-bar denominator. One number, one
 // definition, two consumers — so nothing may hardcode 480 or Mon–Fri anywhere else.
 test("schedule defaults to 480 minutes/day and Mon–Fri", () => {
-  const cfg = loadConfig({ root: mkdtempSync(join(tmpdir(), "blaze-cfg-")), env: {} });
+  const cfg = loadConfig({ root: scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-"))), env: {} });
   assert.equal(cfg.schedule.minutes_per_day, 480);
   assert.deepEqual(cfg.schedule.working_days, [1, 2, 3, 4, 5]);
 });
 
 test("schedule deep-merges, so setting one key keeps the other's default", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(root, "blaze.config.json"),
     JSON.stringify({ schema_version: 2, schedule: { minutes_per_day: 300 } }));
   const cfg = loadConfig({ root, env: {} });
@@ -304,7 +310,7 @@ test("schedule deep-merges, so setting one key keeps the other's default", () =>
 });
 
 test("a working week may be redefined, including a six-day one", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(root, "blaze.config.json"),
     JSON.stringify({ schema_version: 2, schedule: { working_days: [0, 1, 2, 3, 4, 5, 6] } }));
   assert.deepEqual(loadConfig({ root, env: {} }).schedule.working_days, [0, 1, 2, 3, 4, 5, 6]);
@@ -314,7 +320,7 @@ test("a wrong-SHAPED schedule block is refused, not silently defaulted", () => {
   // The operator most likely to be wrong is the one a silent default leaves with no message
   // and a calendar they did not ask for. Absent is fine; present-and-not-an-object is not.
   // Deleting the shape guard broke NO test before this one existed.
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   for (const bad of ["8h", [480], 480, null, true]) {
     writeFileSync(join(root, "blaze.config.json"),
       JSON.stringify({ schema_version: 2, schedule: bad }));
@@ -326,7 +332,7 @@ test("a wrong-SHAPED schedule block is refused, not silently defaulted", () => {
 test("an unknown schedule key is refused, naming it and the legal ones", () => {
   // REMOVED_KEYS' rule, applied at the same altitude: a config key nothing reads is a
   // promise the software does not keep. `minutesPerDay` is the typo this actually catches.
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(root, "blaze.config.json"),
     JSON.stringify({ schema_version: 2, schedule: { minutesPerDay: 300 } }));
   assert.throws(() => loadConfig({ root, env: {} }), /minutesPerDay/);
@@ -334,13 +340,13 @@ test("an unknown schedule key is refused, naming it and the legal ones", () => {
 });
 
 test("an ABSENT schedule block is fine — only a present-and-wrong one is refused", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ schema_version: 2 }));
   assert.equal(loadConfig({ root, env: {} }).schedule.minutes_per_day, 480);
 });
 
 test("a non-positive minutes_per_day is refused, naming the key", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   for (const bad of [0, -1, "480", null]) {
     writeFileSync(join(root, "blaze.config.json"),
       JSON.stringify({ schema_version: 2, schedule: { minutes_per_day: bad } }));
@@ -350,7 +356,7 @@ test("a non-positive minutes_per_day is refused, naming the key", () => {
 });
 
 test("an empty or malformed working_days is refused — a week with no days is not a calendar", () => {
-  const root = mkdtempSync(join(tmpdir(), "blaze-cfg-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
   for (const bad of [[], [7], [-1], ["mon"], "Mon-Fri", {}]) {
     writeFileSync(join(root, "blaze.config.json"),
       JSON.stringify({ schema_version: 2, schedule: { working_days: bad } }));

@@ -6,11 +6,17 @@ import { join } from "node:path";
 import { boardModel, contentHash } from "../../scripts/views/data.mjs";
 import { buildIndex } from "../../scripts/model/index.mjs";
 import { viewEnvelope } from "../../scripts/views/page.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // Two-project fixture (T + U, one ticket each) for contentHash project-scoping
 // tests — follows the single-project inline style used by the tests above.
 function fixtureTwoProjects() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-hash-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-hash-")));
   mkdirSync(join(dir, "T", "todo"), { recursive: true });
   mkdirSync(join(dir, "U", "todo"), { recursive: true });
   writeFileSync(join(dir, "T", "todo", "T-1.md"),
@@ -21,7 +27,7 @@ function fixtureTwoProjects() {
 }
 
 test("boardModel groups tickets into status columns", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-data-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-data-")));
   mkdirSync(join(dir, "T", "todo"), { recursive: true });
   writeFileSync(join(dir, "T", "todo", "T-1.md"),
     "---\nid: T-1\ntitle: t\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");
@@ -31,7 +37,7 @@ test("boardModel groups tickets into status columns", () => {
 });
 
 test("boardModel returns the index it built, and reuses a prebuilt one when passed", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-data-idx-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-data-idx-")));
   mkdirSync(join(dir, "T", "todo"), { recursive: true });
   writeFileSync(join(dir, "T", "todo", "T-1.md"),
     "---\nid: T-1\ntitle: t\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");
@@ -46,7 +52,7 @@ test("boardModel returns the index it built, and reuses a prebuilt one when pass
 });
 
 test("boardModel adds per-workflow boards while leaving columns intact", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-data-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-data-")));
   mkdirSync(join(dir, "INF", "achieved"), { recursive: true });
   mkdirSync(join(dir, "INF", "identified"), { recursive: true });
   mkdirSync(join(dir, "INF", "defined"), { recursive: true });
@@ -71,7 +77,7 @@ test("boardModel adds per-workflow boards while leaving columns intact", () => {
 });
 
 test("boardModel omits an empty board (single visible board, no switcher)", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-onebo-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-onebo-")));
   mkdirSync(join(dir, "INF", "defined"), { recursive: true });
   writeFileSync(join(dir, "INF", "defined", "INF-3.md"), "---\nid: INF-3\ntitle: t\ntype: task\nproject: INF\n---\nx\n");
   const m = boardModel(dir, {});
@@ -80,7 +86,7 @@ test("boardModel omits an empty board (single visible board, no switcher)", () =
 });
 
 test("boardModel focus filters to a parent's descendants + exposes crumbs", () => {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-focus-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-focus-")));
   mkdirSync(join(dir, "INF", "defined"), { recursive: true });
   writeFileSync(join(dir, "INF", "defined", "INF-9.md"), "---\nid: INF-9\ntitle: epic\ntype: epic\nproject: INF\n---\nx\n");
   writeFileSync(join(dir, "INF", "defined", "INF-10.md"), "---\nid: INF-10\ntitle: kid\ntype: task\nproject: INF\nparent: INF-9\n---\nx\n");
@@ -95,7 +101,7 @@ test("boardModel focus filters to a parent's descendants + exposes crumbs", () =
 
 // Goals-first nesting fixture: G-1 (goal) ← E-1, E-2 (epics) ; E-1 ← T-1 (task).
 function fixtureNesting() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-nesting-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-nesting-")));
   mkdirSync(join(dir, "N", "defined"), { recursive: true });
   writeFileSync(join(dir, "N", "defined", "G-1.md"),
     "---\nid: G-1\ntitle: goal\ntype: goal\nproject: N\n---\nx\n");

@@ -15,6 +15,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { zeroDiff } from "../../scripts/migrate/zero-diff.mjs";
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const FULL = {
   id: "TST-1", title: "t", type: "task", priority: "medium", resolution: "",
@@ -24,7 +30,7 @@ const FULL = {
 };
 
 function board(extra = "") {   // `extra` appends raw frontmatter lines
-  const dir = mkdtempSync(join(tmpdir(), "ofc-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "ofc-")));
   mkdirSync(join(dir, "TST", "defined"), { recursive: true });
   const fm = Object.entries(FULL).map(([k, v]) => `${k}: ${v}`).join("\n");
   writeFileSync(join(dir, "TST", "defined", "TST-1-x.md"), `---\n${fm}\n${extra}---\nbody\n`);

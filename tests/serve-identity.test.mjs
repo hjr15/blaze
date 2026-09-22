@@ -18,9 +18,15 @@ import { createRequire } from "node:module";
 import { startServer, CSRF } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { openIdentityDb, identityDbPath, loadIdentity } from "../scripts/model/identity-db.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function board() {
-  const root = mkdtempSync(join(tmpdir(), "blaze-identity-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-identity-")));
   execFileSync("git", ["-C", root, "init", "-q"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);

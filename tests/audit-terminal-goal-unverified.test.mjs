@@ -23,6 +23,12 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HARD_KINDS } from "../scripts/model/audit.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const RUNNER = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "audit-runner.mjs");
 const KIND = "terminal-goal-unverified-requirement";
@@ -35,7 +41,7 @@ function write(dir, name, fm) {
 
 /** A board with one goal in `achieved/` and one requirement beneath it at `reqStatus`. */
 function board(reqStatus, { goalStatus = "achieved" } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "blaze-r48-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-r48-")));
   const projects = join(root, "projects");
   mkdirSync(join(projects, "PROJ"), { recursive: true });
   writeFileSync(join(projects, "PROJ", "project.json"),

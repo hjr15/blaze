@@ -186,7 +186,7 @@ Related, and the same shape one level down: cleanup written as the last statemen
 is skipped by a failing assertion (BLZ-603).
 [`scripts/ci/temp-cleanup-guard.mjs`](../scripts/ci/temp-cleanup-guard.mjs) scans `tests/`
 for that shape and `tests/temp-cleanup-guard.test.mjs` holds the corpus to the per-file
-counts recorded in `scripts/ci/temp-cleanup-debt.json` — **455 sites across 65 files** at
+counts recorded in `scripts/ci/temp-cleanup-debt.json` — **454 sites across 65 files** at
 the time of writing, pre-existing debt that is recorded rather than hidden. The check is an
 equality, so a file cannot gain a site and a file that is cleaned up must drop its entry in
 the same change (`node scripts/ci/temp-cleanup-guard.mjs --write` re-records).
@@ -211,6 +211,89 @@ registered before the seed is ever called. Whatever has been released by the tim
 propagates is torn down, in reverse, with every teardown attempted and the first error
 rethrown. The scanner cannot see cleanup inside a helper, so
 `tests/driver-setup-teardown.test.mjs` is the check that stands in its place.
+
+### A scratch directory is removed by the file that minted it
+
+The same rule again, one level down from the scanner: a suite that mints
+`mkdtempSync(join(tmpdir(), …))` and removes nothing leaves a directory per test per run.
+BLZ-491 fixed one such suite. BLZ-503 measured the rest, against `c355b9c`, by pointing
+`TMPDIR` at an empty directory and running the whole suite once:
+
+| | leftover directories in one full run |
+|---|---|
+| `c355b9c` (before) | **299**, from 56 `mkdtempSync` call sites in 34 test files |
+| after BLZ-503 | **0** |
+
+Worst offenders were `seam-` (29), `ofc-` (23), `blaze-readseam-` (22), `blaze-init-` (20)
+and `blaze-identity-` (18). The older per-machine figures — tens of thousands — are the
+same leak counted across weeks of accumulated runs rather than per run; the per-run number
+is the one a fix can move, so it is the one recorded here.
+
+[`tests/helpers/scratch.mjs`](../tests/helpers/scratch.mjs) is the fix, and it is BLZ-491's
+own shape extracted: a file-level list of everything minted plus one `after()` hook that
+empties it. A per-call `t.after()` does not reach these, because almost every site is inside
+a per-file seed helper that no test handle is passed to.
+
+```js
+import { scratchRegistry } from "./helpers/scratch.mjs";
+const scratch = scratchRegistry();
+const dir = scratch(mkdtempSync(join(tmpdir(), "seam-")));
+```
+
+**The wrapper goes outside `mkdtempSync`, never inside.** `tests/tmp-scratch-attribution.test.mjs`
+reads the prefix statically so a leftover directory still names the suite that made it;
+moving the prefix into a variable to shorten the line passes locally and reddens that guard
+on merge.
+
+Nothing here sweeps `/tmp`. The registry removes only paths it was handed, which is the
+whole of the destructive surface — a glob-based cleaner over a shared `/tmp` is the blast
+radius BLZ-394 is about.
+
+The proof is [`tests/helpers/no-leak.mjs`](../tests/helpers/no-leak.mjs) (BLZ-517), applied
+in `tests/scratch-cleanup.test.mjs` to a covered list that is **written out, never globbed**
+— a list that discovers its own members can shrink to nothing and still pass. It holds the
+34 files BLZ-503 fixed plus `board-overstatement-guards.test.mjs`, whose hand-written copy of
+this same proof BLZ-491 had left in `tests/tmp-scratch-attribution.test.mjs`; that copy is
+gone and the suite is covered here with the rest.
+
+All the covered suites run in **one** child under a redirected `TMPDIR` — 35 spawns for a
+property one spawn settles would be the wrong trade — and the leftovers are attributed back
+per file with the BLZ-491 registry, so each covered suite still gets its own named test.
+Reverting the cleanup in one suite reddens the test that names that suite and nothing else;
+verified on `init.test.mjs`, `serve-identity.test.mjs` and `board-overstatement-guards.test.mjs`.
+Non-vacuity is asserted first, because an ignored `TMPDIR` and a run that executed nothing
+both leave an empty box, and a leftover the proof cannot place on a covered suite fails its
+own test rather than being dropped.
+
+Adding a suite to that list is how a suite opts in; nothing there polices a suite that is
+not on it. The check that does is the run-level gate.
+
+### …and the run-level gate sees the suites nobody opted in
+
+BLZ-516 decided what to do with the dynamic half of
+[`scripts/ci/tmp-scratch-attribution.mjs`](../scripts/ci/tmp-scratch-attribution.mjs):
+**gate it**, not delete it. The two checks above leave a real hole between them — the static
+property says a leak would be *attributable*, not that there is none, and the per-suite proof
+covers 35 suites *by name*. A suite added tomorrow is on neither list and leaks past both.
+
+The tests workflow gives the run its own empty `TMPDIR` and then holds it to a budget:
+
+```
+node scripts/ci/tmp-scratch-attribution.mjs --tmp "$RUNNER_TEMP/blaze-scratch-box" --max 0
+```
+
+That redirect is what made gating possible at all. The objection was `/tmp` noise — a gate
+that failed over another program's directories is one that gets switched off within a week —
+and the answer is a different directory rather than a cleverer filter. In a fresh box,
+everything present arrived during the run, and the scan's existing split means something
+exact: **attributed** entries are this corpus's leaks and count against the budget,
+**unattributable** ones are reported and never count. Both halves are pinned by
+`tests/tmp-scratch-run-gate.test.mjs`, including the four shapes real machines carry
+(`systemd-private-*`, `node-compile-cache`, `.X11-unix`, `snap.*`). The step runs
+`if: always()`, because a red run is when litter is worst and least examined.
+
+Without `--max` the CLI still just reports and exits 0 — pointed at a real `/tmp` by hand it
+is a diagnostic, and that is the mode it stays in.
 
 ## Mutation testing is scoped
 
@@ -281,6 +364,58 @@ it through. Two things to be clear about:
 - The guard used to live in the test helper instead, where it protected the test run and
   not the thing that ships. A mutation runner that can delete the working tree on a bad
   refactor is worse than the race BLZ-472 removed.
+
+## A doc quote can opt in to being checked
+
+Docs quote the product — an exact CLI string, a count the code determines, the two files the
+mutation runner actually touches — and those sentences rot silently. BLZ-523's registry is
+the mechanism for that, and the shape of it was decided by ruling the obvious one out first.
+
+**A corpus-wide grep does not work here.** Investigated on 2026-08-30 against the real
+evidence: four sites quoted a stale figure while **two more quoted the same class of figure
+correctly**, pinned to the commit they were measured at. No grep separates those two
+populations, because the difference is not in the text — one is a claim about today, the
+other is history. A guard that cannot tell them apart fires on the correct ones, collects
+exceptions, and is excepted into uselessness.
+
+So the scope is a hand-written registry in
+[`scripts/ci/quoted-sources.mjs`](../scripts/ci/quoted-sources.mjs). An entry names the doc,
+the quote, a **deriver** that says what the source of truth reads right now, and *why* the
+quote is load-bearing. `tests/quoted-sources.test.mjs` gives every entry its own named test.
+Nothing outside the registry is touched — including quotes that are demonstrably stale —
+and that is proved by watching which files the checker opens, not by reading its silence as
+evidence.
+
+| Property | How it is held |
+|---|---|
+| a rotted quote fails | a test **named for the entry** goes red, saying what the source reads now |
+| reformatting cannot defeat it | both sides go through `normaliseQuote` — whitespace, newlines, `**bold**` and backticks are forgiven, a changed **word** is not |
+| a quote that LEFT the doc fails | `missing` is red. "If I find it, check it" reports clean exactly when the sentence was rewritten |
+| unregistered quotes are untouched | the checker opens only the docs the registry names |
+
+**Figures are in scope; SHA-pinned figures are not.** This boundary is deliberate — both
+already-fixed sibling tickets were figures, so it would otherwise have been set by accident.
+The distinction is what the sentence *claims*, not whether it is a number:
+
+- the cleanup-debt size above — *"N sites across M files"* — is a claim about HEAD. It rots
+  on the next commit that adds a test file. **In scope**, and registered. (Written with
+  placeholders here rather than repeated: a second copy of a live figure is a second thing
+  to keep in step, and this sentence is not the registered one.)
+- *"330 tests in `tests/reconcile-*.test.mjs` on `0c76712`"* (ADR-0030) is a measurement
+  reported with the commit it was taken at. It was true then and it is true now.
+  **Out of scope** — registering it would force a true sentence to change every time the
+  tree moves, which is the opposite of the point.
+
+Pinning a measurement to a SHA is therefore the cheaper remedy and stays the first thing to
+reach for, per [ADR-0024](decisions/0024-audit-and-the-load-path-agree-on-a-malformed-schema-override.md).
+The registry is for the quotes that cannot use it. A registered quote carrying a commit is
+refused outright, by `SHA_PIN`, so the two remedies cannot be confused.
+
+Registering a quote is two lines and is the only way anything becomes checked:
+
+```bash
+node scripts/ci/quoted-sources.mjs   # report every entry's status
+```
 
 ## Triage: is a red gate real or transient?
 
