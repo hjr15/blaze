@@ -59,7 +59,13 @@ const SUBCOMMANDS = {
   // write is gated by an interactive confirmation the operator answers each
   // run (design §4.4, §6), not by a flag, and ADR-0037's Alternatives
   // Rejected turns down the `--yes` that would make it one.
-  import: { file: "import-runner.mjs", desc: "import tickets from CSV (dry run unless --apply), or `propose-mapping` (interactive) / `repair` (dry run unless --apply)", mutates: true },
+  //
+  // BLZ-633 adds `--format markdown`, the second reader (design §4.5), and it
+  // is named here for the same reason the subcommands are: this is the only
+  // text `blaze import --help` prints. It is a READER, not a mode — same
+  // planner, same validator, same writer, same exit codes — so it sits inside
+  // the `import` clause rather than beside it.
+  import: { file: "import-runner.mjs", desc: "import tickets from CSV or markdown (--format csv|markdown; dry run unless --apply), or `propose-mapping` (interactive) / `repair` (dry run unless --apply)", mutates: true },
   // `mutates: true` because `migrate-dates --write` rewrites tickets. Dry-run is the default
   // for both subcommands and `import-deps` has no --write at all, but the CLI gate is per-verb
   // and BLZ-121 refuses to even SPAWN a mutating runner under BLAZE_READONLY — declaring this

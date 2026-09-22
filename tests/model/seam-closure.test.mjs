@@ -103,6 +103,15 @@ test("no module outside the seam stats or lists the projects tree directly", () 
     // about: its own corpus read goes through `fsReadStorage.listTickets`
     // (loadBoard), the seam, like every other reader.
     "model/import-apply.mjs",
+    // BLZ-633: `--format markdown <dir-or-glob>` walks the IMPORT SOURCE — an
+    // arbitrary directory of ticket documents an operator names on the command
+    // line — to find its `*.md` files. It never lists or stats the PROJECTS
+    // tree, which is what this guard is about: the board it plans against is
+    // read through `fsReadStorage.listTickets` (loadBoard) and its own export
+    // half goes through `storage.listTickets` too, both the seam. §4.5's
+    // "<dir-or-glob>" cannot be satisfied without a walk of the source, and
+    // the walk is confined to `collectMarkdownFiles`.
+    "model/import-markdown.mjs",
   ]);
   const offenders = [];
   for (const file of jsFiles(SCRIPTS)) {
@@ -869,8 +878,13 @@ const SEAM_WRITE_PROVIDERS = new Map([
       "worktreeBranchOwners", "belongsHere", "outstandingFiles",
       "consumedPrefixIntact"] }],   // BLZ-608 (#175): a byte comparison, and the pin caught it
   // The commit lock: a lockfile under a caller-supplied root, taken and released.
-  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock"], sanctioned: [],
-    inert: ["lockPath"] }],
+  // BLZ-640 added `acquireDirLock`/`releaseDirLock` — the SAME mkdir +
+  // owner.json + dead-PID-theft mechanism over a caller-supplied lock
+  // DIRECTORY, which is what design §8 item 8's "this reuses that mechanism
+  // rather than a second one" asks for. They create and remove a directory, so
+  // they are writes on exactly the footing `acquireLock`/`releaseLock` are.
+  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock", "acquireDirLock", "releaseDirLock"],
+    sanctioned: [], inert: ["lockPath"] }],
   ["migrate/jira-import.mjs", { writes: ["runLive"], sanctioned: [],
     inert: ["loadNormalized", "runDryRun"] }],
   ["migrate/jira-client.mjs", { writes: ["writeRawCache"], sanctioned: [],
@@ -975,6 +989,24 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // pinned dynamically in tests/import-agent-boundary.test.mjs.
   ["model/import-mapping-propose.mjs", { writes: ["runProposeMapping"], sanctioned: [],
     inert: ["SAMPLE_ROWS", "sampleOf", "proposeMapping", "renderProposal"] }],
+  // BLZ-640 / design §8 item 8. The import-scoped lock: one atomically
+  // `mkdirSync`'ed directory under `import-receipts/` holding an `owner.json`,
+  // created and removed. Three writers, and they are the whole module —
+  // `withImportLock` is the pair taken together, which is the only form the
+  // runner uses, because a lock acquired without a `finally` that releases it
+  // wedges every later import. `importLockPath` is a path join.
+  ["model/import-lock.mjs", { writes: ["acquireImportLock", "releaseImportLock", "withImportLock"],
+    sanctioned: [], inert: ["IMPORT_LOCK_NAME", "importLockPath"] }],
+  // BLZ-633's `model/import-markdown.mjs` is DELIBERATELY ABSENT from this map
+  // and from WRITE_ALLOWED alike, and the two absences are the same fact: the
+  // markdown medium reaches the mutating surface of node:fs nowhere at all, so
+  // it needs no exemption and therefore may not be pinned here (this map and
+  // the allowlist must name the same modules — the pin below says so). A
+  // second front end does not mean a second way tickets reach disk:
+  // `exportMarkdownDocs` returns `{ path, text }` and leaves placing the
+  // documents to its caller, and the import it feeds writes through BLZ-629's
+  // `applyImport` and the injected write port, unchanged. The day it grows a
+  // writer, that pin reddens and this comment is where to look.
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
@@ -2048,10 +2080,19 @@ const WRITE_ALLOWED = new Map([
   // ADR-0037 §3 expressed as a guard rather than as a comment.
   ["model/import-mapping-propose.mjs", ["mkdirSync", "writeRegularFileSync"]],
   ["import-mapping-runner.mjs", ["runProposeMapping"]],
+  // BLZ-640. The import lock reaches node:fs through `commit-lock.mjs`'s
+  // primitive and nowhere else: `acquireDirLock` does the atomic `mkdirSync`
+  // and writes `owner.json`, `releaseDirLock` removes the directory. There is
+  // no third member and no direct node:fs call in the module at all, which is
+  // the guard's way of saying "the same mechanism, not a second one".
+  ["model/import-lock.mjs", ["acquireDirLock", "releaseDirLock"]],
   // ...and `runImport` is the verb itself, exactly as new-runner.mjs takes `applyNew`.
   // BLZ-634 adds the mapped import and the repair verb to the same runner:
   // one `planImport`, two readers (§4.5), and `repair` writes records only.
-  ["import-runner.mjs", ["resolveWritePort", "runImport", "runMappedImport", "runRepair"]],
+  // BLZ-640 adds `withImportLock`, which the runner wraps all three verbs in
+  // under `--apply` — the seam design §8 item 8 puts the lock at.
+  ["import-runner.mjs",
+    ["resolveWritePort", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.

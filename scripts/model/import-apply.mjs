@@ -554,28 +554,43 @@ export async function runImport(opts) {
     writePort = undefined, readStorage = fsReadStorage,
     stage = commitOrQueue, appendReceipt = appendRegularFileSync,
     onPair = null,
+    // BLZ-633 / design §4.5: THE SECOND READER'S SEAM. "There is one
+    // `planImport(rows, board, opts)` and two readers that produce `rows`" —
+    // so the markdown front end substitutes the READ and inherits every
+    // decision below it: the plan, the report, the pre-write phase, the apply,
+    // the receipt and the exit codes. Injected rather than switched on a
+    // `format` string, because a switch here would put a decision about
+    // formats in the module that owns the write sequence.
+    readRows = null,
   } = opts;
 
   const out = [];
   const say = (...l) => out.push(...l);
   const done = (exitCode) => ({ exitCode, report: out.join("\n"), plan: null });
 
-  // The input, through `readRegularFileSync` per ADR-0031 — never opened
-  // blind, because a FIFO with no writer blocks forever, with no error, no
-  // timeout and nothing on stderr.
-  let text;
-  try {
-    text = readRegularFileSync(file);
-  } catch (e) {
-    say(`blaze import: cannot read ${relative(dataRoot, file) || file} — ${e.message}`);
-    return done(2);
+  let parsed;
+  if (readRows) {
+    parsed = readRows();
+  } else {
+    // The input, through `readRegularFileSync` per ADR-0031 — never opened
+    // blind, because a FIFO with no writer blocks forever, with no error, no
+    // timeout and nothing on stderr.
+    let text;
+    try {
+      text = readRegularFileSync(file);
+    } catch (e) {
+      say(`blaze import: cannot read ${relative(dataRoot, file) || file} — ${e.message}`);
+      return done(2);
+    }
+    parsed = parseCanonicalCsv(text);
   }
-
-  const parsed = parseCanonicalCsv(text);
   if (!parsed.ok) {
     say(...parsed.errors);
     return done(parsed.exitCode);
   }
+  // A reader whose rows did not come from numbered lines of one file says
+  // which row is which — "row 7" is not actionable over seven documents.
+  if (parsed.legend) say(...parsed.legend, "");
 
   const board = loadBoard(projectsDir, { dataRoot, readStorage });
   const plan = planImport(parsed.rows, board, { allocateIds, update });
