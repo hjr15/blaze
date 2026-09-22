@@ -939,6 +939,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["new-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["resolve-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["import-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
+  ["import-mapping-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // likewise
   // BLZ-629. Three exports reach a write and say so: `runImport` is the verb,
   // `applyImport` is the walk it delegates to, and `pruneReceipts` unlinks
   // receipts past retention. Everything else is a reader or a pure
@@ -949,6 +950,31 @@ const SEAM_WRITE_PROVIDERS = new Map([
     sanctioned: [],
     inert: ["RECEIPT_DIR", "CANONICAL_NAME", "receiptPathFor", "readReceipt",
       "unresolvedIntents", "inspectReceipt", "latestReceiptFor", "loadBoard"] }],
+  // BLZ-634 / design §4.2, §5.3. The mapping layer's DETERMINISTIC half, and
+  // a legitimate second writer of the run's own records — never a ticket.
+  // `openSourceIds` establishes `source-ids/<name>.jsonl` before any write
+  // (its failure is the caller's exit 5) and `appendPair` puts one pair on it
+  // between the ticket write and `done`; `repairReceipt` is the `blaze import
+  // repair --apply` verb, whose at-most-four files are the map, the receipt
+  // and their two `.corrupt` sidecars; `runMappedImport` is the verb. Every
+  // other export reads or classifies — `readSourceIds` is read-only BY DESIGN
+  // (§4.2: the lookup runs before any ticket write, and a park that failed
+  // there would fall under no exit code).
+  ["model/import-mapping.mjs", { writes: ["openSourceIds", "appendPair", "runMappedImport", "runRepair"],
+    sanctioned: [],
+    inert: ["MAPPING_DIR", "SOURCE_IDS_DIR", "CANONICAL_MAPPING_NAME", "TRANSFORM_NAMES",
+      "mappingPathFor", "sourceIdsPathFor", "headerDigest", "loadMapping", "bindMapping",
+      "mapRows", "applyTransform", "readSourceIds", "nameFromReceiptPath"] }],
+  // BLZ-635 / design §4.3, §4.4. THE ONE MODULE IN THE TREE THAT SPAWNS
+  // `agentCommand` besides the groomer, and its entire effect on disk is ONE
+  // FILE: `runProposeMapping` writes `import-mappings/<name>.json` after the
+  // operator has said yes, and nothing else — no ticket, no id, no claim, no
+  // receipt, no staging (ADR-0037 §2, §3). `proposeMapping` spawns and parses
+  // and writes nothing; `renderProposal` and `sampleOf` are pure. That the
+  // spawn never happens on the IMPORT path is not this guard's job and is
+  // pinned dynamically in tests/import-agent-boundary.test.mjs.
+  ["model/import-mapping-propose.mjs", { writes: ["runProposeMapping"], sanctioned: [],
+    inert: ["SAMPLE_ROWS", "sampleOf", "proposeMapping", "renderProposal"] }],
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
@@ -2002,8 +2028,30 @@ const WRITE_ALLOWED = new Map([
   // appearing here still reddens.
   ["model/import-apply.mjs", ["allocateId", "writeClaim", "commitOrQueue",
     "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
+  // BLZ-634 / design §4.2, §5.3, §5.4. The same footing, for the same two
+  // records: `appendRegularFileSync` writes the map's pairs, the parked
+  // `.corrupt` sidecars and the receipt's `resolved` entries (the FIFO-safe,
+  // unbuffered primitive §5.1 REQUIRES — a buffered pair is a pair that is
+  // not there when the process dies), `mkdirSync` creates `source-ids/`, and
+  // `truncateSync` is the ONE non-append write on the map: `repair --apply`
+  // truncating a torn last line back to its last complete one, after parking
+  // its bytes (§4.2 — park before you clear). `commitOrQueue` is the staging
+  // front door under the `import-repair` op, and `applyImport`/`runImport`
+  // are BLZ-629's verbs this one composes rather than reimplements. No
+  // ticket is written here at all: `repair` writes records only, and the
+  // mapped import walks the same injected write port the canonical one does.
+  ["model/import-mapping.mjs", ["appendRegularFileSync", "mkdirSync", "truncateSync",
+    "commitOrQueue", "applyImport", "pruneReceipts"]],
+  // BLZ-635. Two members, one file: `mkdirSync` creates `import-mappings/`
+  // and `writeRegularFileSync` puts the accepted mapping in it. There is no
+  // third, and a ticket write appearing here reddens — which is the whole of
+  // ADR-0037 §3 expressed as a guard rather than as a comment.
+  ["model/import-mapping-propose.mjs", ["mkdirSync", "writeRegularFileSync"]],
+  ["import-mapping-runner.mjs", ["runProposeMapping"]],
   // ...and `runImport` is the verb itself, exactly as new-runner.mjs takes `applyNew`.
-  ["import-runner.mjs", ["resolveWritePort", "runImport"]],
+  // BLZ-634 adds the mapped import and the repair verb to the same runner:
+  // one `planImport`, two readers (§4.5), and `repair` writes records only.
+  ["import-runner.mjs", ["resolveWritePort", "runImport", "runMappedImport", "runRepair"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.

@@ -201,9 +201,24 @@ function everyIntentHasDone(entries) {
  */
 export function inspectReceipt(entries, { hasTicket, hasPair = () => false, sourceIdColumn = null }) {
   const unresolved = unresolvedIntents({ entries, parsedCompletely: true });
+  // BLZ-634: the id comes from the `intent` on the explicit-id path and from
+  // the `allocated` on the allocate path — §5.3's second row says so in as
+  // many words ("`source` from the `intent`, `id` from the `allocated` (or
+  // from the `intent` on the explicit-id path)"), and `unresolvedIntents`
+  // reads only the `intent`, whose `id` is null exactly when step 2 ran.
+  // Without this merge EVERY `--allocate-ids` row classified as an orphan
+  // reservation — the state whose repair is "none" — so the ticket-without-
+  // pair window, the one state a re-import would DUPLICATE, was never
+  // detected on the one path that opens it. `unresolvedIntents` itself is
+  // left alone: §5.1's exit-5 check reads it for the SET, not for the ids.
+  const allocated = new Map();
+  for (const e of entries) {
+    if (e.phase === "allocated" && e.seq !== undefined && e.id) allocated.set(e.seq, e.id);
+  }
   const out = new Map();
   for (const u of unresolved) {
     if (u.seq === null) continue;
+    u.id = u.id ?? allocated.get(u.seq) ?? null;
     const ticket = u.id !== null && hasTicket(u.id);
     const pair = sourceIdColumn ? Boolean(u.source) && hasPair(u.source) : false;
     let state;

@@ -8,7 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, rmSync } from "node:fs";
+import {
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -16,6 +18,7 @@ import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
 import { writeCsv } from "../scripts/model/csv.mjs";
 import { claimPath } from "../scripts/model/claims.mjs";
 import { RECEIPT_DIR } from "../scripts/model/import-apply.mjs";
+import { headerDigest } from "../scripts/model/import-mapping.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(REPO, "scripts", "cli.mjs");
@@ -143,4 +146,89 @@ test("staging goes through commitOrQueue under the `import` op — scoped to wha
   // In batch mode commitOrQueue appends to the pending ledger rather than
   // committing — so exit 0 does NOT mean "committed", and the trailer says so.
   assert.match(r.stdout, /queued/i);
+});
+
+// =============================================================================
+// BLZ-634 — the mapping layer's CLI surface: `--mapping` and `repair`
+// =============================================================================
+
+test("blaze import --help names both subcommands, and the flag clause does NOT attach to propose-mapping", () => {
+  const r = spawnSync(process.execPath, [cli, "import", "--help"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /propose-mapping/);
+  assert.match(r.stdout, /repair/);
+  assert.match(r.stdout, /`propose-mapping` \(interactive\)/,
+    "ADR-0037 §4: `propose-mapping` has no --apply flag at all — its gate is the operator's own "
+    + "answer at the prompt, and a desc that folded it into 'the flag' would be literally false");
+});
+
+test("blaze import --mapping reads an arbitrary CSV and writes the source-ids pair", (t) => {
+  const root = board(t);
+  mkdirSync(join(root, "import-mappings"), { recursive: true });
+  writeFileSync(join(root, "import-mappings", "acme.json"), JSON.stringify({
+    mappingVersion: 1, schemaVersion: 1, name: "acme",
+    source: { columns: ["Key", "Name"], sha256: headerDigest(["Key", "Name"]) },
+    sourceIdColumn: "Key",
+    columns: {
+      title: { from: "Name" }, description: { from: "Name" },
+      type: { constant: "task" }, status: { constant: "defined" },
+      project: { constant: "BLZ" }, estimate: { constant: "30" },
+    },
+    unmapped: [],
+  }));
+  const src = join(root, "foreign.csv");
+  writeFileSync(src, "Key,Name\nACME-7,seven\n");
+
+  const dry = run(root, ["--allocate-ids", "--mapping", join(root, "import-mappings", "acme.json"), src]);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /WOULD CREATE/);
+  assert.equal(existsSync(join(root, "source-ids")), false, "a dry run writes no pair");
+
+  const r = run(root, ["--apply", "--allocate-ids", "--mapping",
+    join(root, "import-mappings", "acme.json"), src]);
+  assert.equal(r.status, 0, r.stderr);
+  const pairs = readFileSync(join(root, "source-ids", "acme.jsonl"), "utf8").trim().split("\n");
+  assert.equal(pairs.length, 1);
+  assert.equal(JSON.parse(pairs[0]).source, "ACME-7");
+  assert.match(readdirSync(join(root, RECEIPT_DIR))[0], /-acme\.jsonl$/,
+    "the receipt is keyed on the mapping's `name`, which equals its file's basename (§4.2)");
+});
+
+test("blaze import repair dry-runs by default and takes no CSV flags", (t) => {
+  const root = board(t);
+  mkdirSync(join(root, RECEIPT_DIR), { recursive: true });
+  const receipt = join(root, RECEIPT_DIR, "2026-09-22T00-00-00.000Z-canonical.jsonl");
+  writeFileSync(receipt, `${JSON.stringify({ seq: 1, phase: "intent", row: 1, id: "BLZ-9", op: "create" })}\n`);
+
+  const r = run(root, ["repair", receipt]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /ORPHAN RESERVATION/);
+  assert.match(r.stdout, /dry run/);
+  assert.equal(readFileSync(receipt, "utf8").includes("resolved"), false);
+
+  const bad = run(root, ["repair", "--allocate-ids", receipt]);
+  assert.notEqual(bad.status, 0, "`repair` reads a receipt, not a CSV — a CSV flag is a different verb");
+});
+
+test("blaze import repair --apply appends the `resolved` that lifts the refusal", (t) => {
+  const root = board(t);
+  mkdirSync(join(root, RECEIPT_DIR), { recursive: true });
+  const receipt = join(root, RECEIPT_DIR, "2026-09-22T00-00-00.000Z-canonical.jsonl");
+  writeFileSync(receipt, `${JSON.stringify({ seq: 1, phase: "intent", row: 1, id: "BLZ-9", op: "create" })}\n`);
+
+  const r = run(root, ["repair", "--apply", receipt]);
+  assert.equal(r.status, 0, r.stderr);
+  const last = JSON.parse(readFileSync(receipt, "utf8").trim().split("\n").pop());
+  assert.equal(last.phase, "resolved");
+  assert.equal(last.state, "orphan-reservation");
+});
+
+test("BLAZE_READONLY refuses `blaze import repair --apply` at the CLI gate", (t) => {
+  const root = board(t);
+  mkdirSync(join(root, RECEIPT_DIR), { recursive: true });
+  const receipt = join(root, RECEIPT_DIR, "2026-09-22T00-00-00.000Z-canonical.jsonl");
+  writeFileSync(receipt, `${JSON.stringify({ seq: 1, phase: "intent", row: 1, id: "BLZ-9", op: "create" })}\n`);
+  const r = run(root, ["repair", "--apply", receipt], { BLAZE_READONLY: "1" });
+  assert.notEqual(r.status, 0);
+  assert.equal(readFileSync(receipt, "utf8").includes("resolved"), false);
 });

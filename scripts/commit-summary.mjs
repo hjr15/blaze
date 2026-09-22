@@ -27,6 +27,14 @@ export const OP_LABEL = {
   // exits 1 on its first successful apply — §5.1's exit-4 argument made real
   // by omission. (`import-repair`, the inspection verb, lands with C1.)
   import: "imported",
+  // BLZ-634 / design §5.4: `blaze import repair --apply` stages the records it
+  // wrote — at most four files (`<receipt>.corrupt`, `<map>.corrupt`, the map,
+  // the receipt), never a ticket — through the same `commitOrQueue` call, and
+  // it is refused without a word here for exactly the same reason the line
+  // above exists. Its own op, not `import`'s: a repair changes no ticket, and
+  // a subject line saying "imported" about a run that imported nothing would
+  // be the summary printing a word nobody chose.
+  "import-repair": "import repaired",
 };
 
 /** The ticket ids ONE ledger entry covers.
