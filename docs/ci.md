@@ -266,7 +266,34 @@ both leave an empty box, and a leftover the proof cannot place on a covered suit
 own test rather than being dropped.
 
 Adding a suite to that list is how a suite opts in; nothing there polices a suite that is
-not on it.
+not on it. The check that does is the run-level gate.
+
+### …and the run-level gate sees the suites nobody opted in
+
+BLZ-516 decided what to do with the dynamic half of
+[`scripts/ci/tmp-scratch-attribution.mjs`](../scripts/ci/tmp-scratch-attribution.mjs):
+**gate it**, not delete it. The two checks above leave a real hole between them — the static
+property says a leak would be *attributable*, not that there is none, and the per-suite proof
+covers 35 suites *by name*. A suite added tomorrow is on neither list and leaks past both.
+
+The tests workflow gives the run its own empty `TMPDIR` and then holds it to a budget:
+
+```
+node scripts/ci/tmp-scratch-attribution.mjs --tmp "$RUNNER_TEMP/blaze-scratch-box" --max 0
+```
+
+That redirect is what made gating possible at all. The objection was `/tmp` noise — a gate
+that failed over another program's directories is one that gets switched off within a week —
+and the answer is a different directory rather than a cleverer filter. In a fresh box,
+everything present arrived during the run, and the scan's existing split means something
+exact: **attributed** entries are this corpus's leaks and count against the budget,
+**unattributable** ones are reported and never count. Both halves are pinned by
+`tests/tmp-scratch-run-gate.test.mjs`, including the four shapes real machines carry
+(`systemd-private-*`, `node-compile-cache`, `.X11-unix`, `snap.*`). The step runs
+`if: always()`, because a red run is when litter is worst and least examined.
+
+Without `--max` the CLI still just reports and exits 0 — pointed at a real `/tmp` by hand it
+is a diagnostic, and that is the mode it stays in.
 
 ## Mutation testing is scoped
 

@@ -26,6 +26,32 @@
 // It reports every scratch-looking directory it finds against the registry, and lists the
 // ones it CANNOT attribute separately rather than dropping them — an unattributable leak is
 // the finding, not an absence of one.
+//
+// BLZ-516: …AND WITH `--max N` IT IS A GATE.
+//
+//     node scripts/ci/tmp-scratch-attribution.mjs --tmp "$BOX" --max 0
+//
+// Without `--max` the run is a report and exits 0, which is right for a diagnostic pointed
+// at a real `/tmp`. With it, the ATTRIBUTED leftover count is held to a budget and the
+// process exits 1 over it. Unattributable entries never count: on a shared `/tmp` they are
+// other programs' directories and failing a build over them is how a gate gets switched off.
+//
+// That distinction is what made gating possible at all. The tests workflow points `TMPDIR`
+// at a fresh empty directory for the run and then holds it to `--max 0`, so everything in
+// the box arrived during the run and everything attributed to a suite is genuinely that
+// suite's. It is the only check that sees a suite nobody opted in: the static property below
+// says a leak would be ATTRIBUTABLE, not that there is none, and BLZ-517's per-suite proof
+// covers 35 suites by name. A suite added tomorrow is on neither list.
+//
+// WAS THIS SCRIPT APPROPRIATELY SCOPED UNDER BLZ-491? Half of it. BLZ-491 was "one suite
+// leaks 356 directories", and the scanner that makes a leak attributable is the general form
+// of that — it is the difference between fixing one suite and being able to find the next
+// one, and it belonged in the ticket. The 190 lines were not the problem. The run-level CLI
+// was: it answered a DIFFERENT question — how much is on this machine — which nothing asked
+// on any schedule, and shipping an ungated answer inside a ticket about a gated one is how
+// it sat unread for weeks until BLZ-516 was opened to decide its fate. It should have been
+// its own ticket, and would then have been asked the question that ticket had to ask
+// eventually: what fails when this number goes up?
 import { readdirSync, readFileSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -157,11 +183,35 @@ export function attributeScratch(name, registry) {
   return owners.size === 1 ? [...owners][0] : null;
 }
 
+/** What is left in `where` right now, judged against `max` — BLZ-516's gate.
+ *
+ *  Returns `{ byOwner, orphans, owned, max, failed }`. `owned` counts only the directories a
+ *  registered prefix attributes to a test file; `orphans` holds everything else and never
+ *  counts, because on a shared `/tmp` those belong to other programs and a build that failed
+ *  over them would be a build nobody trusts. `max === null` means no budget: the scan is a
+ *  report, which is what a run without `--max` is for.
+ *
+ *  Only DIRECTORIES are counted. `mkdtempSync` makes directories, so a plain file that
+ *  happens to carry a scratch-looking name is not one of this corpus's leaks. */
+export function leftoverGate({ where, registry, max = null }) {
+  const byOwner = new Map();
+  const orphans = [];
+  for (const entry of readdirSync(where, { withFileTypes: true })) {
+    const owner = entry.isDirectory() ? attributeScratch(entry.name, registry) : null;
+    if (owner === null) { orphans.push(entry.name); continue; }
+    if (!byOwner.has(owner)) byOwner.set(owner, []);
+    byOwner.get(owner).push(entry.name);
+  }
+  const owned = [...byOwner.values()].reduce((n, v) => n + v.length, 0);
+  return { byOwner, orphans, owned, max, failed: max !== null && owned > max };
+}
+
 // --- CLI ----------------------------------------------------------------------
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   const repo = join(import.meta.dirname, "..", "..");
-  const where = process.argv.includes("--tmp")
-    ? process.argv[process.argv.indexOf("--tmp") + 1] : tmpdir();
+  const arg = (flag) => (process.argv.includes(flag) ? process.argv[process.argv.indexOf(flag) + 1] : null);
+  const where = arg("--tmp") ?? tmpdir();
+  const max = arg("--max") === null ? null : Number(arg("--max"));
   const scan = scanScratchSites(join(repo, "tests"));
   console.log(`=== BLZ-491 scratch attribution: ${where} ===`);
   console.log(`  registry: ${scan.prefixes.size} prefixes over ${scan.sites.length} mkdtempSync call(s)`);
@@ -173,18 +223,18 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     console.log(`  ${scan.ambiguous.length} prefix(es) claimed by more than one file — a leak from these is NOT attributable:`);
     for (const [p, files] of scan.ambiguous) console.log(`    "${p}"  ${files.join(" , ")}`);
   }
-  const byOwner = new Map();
-  const orphans = [];
-  for (const name of readdirSync(where)) {
-    const owner = attributeScratch(name, scan.prefixes);
-    if (owner === null) { orphans.push(name); continue; }
-    if (!byOwner.has(owner)) byOwner.set(owner, []);
-    byOwner.get(owner).push(name);
+  const gate = leftoverGate({ where, registry: scan.prefixes, max });
+  console.log(`\n  ${gate.owned} leftover director(ies) attributed to a test file`
+    + `  (budget: ${max === null ? "none — reporting only" : max}):`);
+  for (const [owner, names] of [...gate.byOwner].sort(([a], [b]) => (a < b ? -1 : 1))) {
+    console.log(`    ${names.length.toString().padStart(5)}  ${owner.slice(repo.length + 1)}`);
   }
-  const owned = [...byOwner.values()].reduce((n, v) => n + v.length, 0);
-  console.log(`\n  ${owned} leftover director(ies) attributed to a test file:`);
-  for (const [owner, names] of [...byOwner].sort(([a], [b]) => (a < b ? -1 : 1))) {
-    console.log(`    ${names.length.toString().padStart(5)}  ${owner}`);
+  console.log(`\n  ${gate.orphans.length} entr(ies) no registered prefix explains — NOT counted `
+    + "(other programs' files live here too).");
+  if (gate.failed) {
+    console.log(`\nFAIL: ${gate.owned} leftover director(ies) over a budget of ${max}. Every `
+      + "directory a suite mints must be registered with tests/helpers/scratch.mjs so the "
+      + "file's after() hook removes it.");
+    process.exitCode = 1;
   }
-  console.log(`\n  ${orphans.length} entr(ies) no registered prefix explains (other programs' files live here too).`);
 }
