@@ -248,7 +248,10 @@ describe("dual-write against Postgres", { skip: PG ? false : "set BLAZE_TEST_PG_
         async run(sql, p) { return c.query(sql, p); },
         async all(sql, p) { return (await c.query(sql, p)).rows; },
       };
-      const dir = mkdtempSync(join(tmpdir(), "blaze-dualpg-"));
+      // BLZ-503: registered, like every other site in this file. This one runs ONLY with
+      // BLAZE_TEST_PG_URL set, so no local run can observe it leaking and only CI could —
+      // which is the case for BLZ-516's run-level gate, made by the gate itself.
+      const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dualpg-")));
       const port = dualWritePort(fsWritePort(dir), dbWritePort(exec, { dialect: "postgres" }),
                                  { strict: true });   // strict: any divergence fails the test
       const ctx = { readStorage: fsReadStorage };
