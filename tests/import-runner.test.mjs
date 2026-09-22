@@ -149,6 +149,60 @@ test("staging goes through commitOrQueue under the `import` op — scoped to wha
 });
 
 // =============================================================================
+// BLZ-633 — the second reader's CLI surface: `--format markdown` (design §4.5)
+// =============================================================================
+
+test("blaze import --format markdown --apply creates the ticket, the claim and the receipt", (t) => {
+  const root = board(t);
+  const src = join(root, "md", "defined");
+  mkdirSync(src, { recursive: true });
+  writeFileSync(join(src, "a.md"),
+    "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\nestimate: 30\n---\n\nbody\n");
+
+  const dry = run(root, ["--format", "markdown", join(root, "md")]);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.match(dry.stdout, /markdown: 1 document/, "the legend says which row is which file");
+  assert.match(dry.stdout, /WOULD CREATE/);
+  assert.equal(ticketExists(root), false, "ADR-0037 §4: the dry run is the default here too");
+
+  const r = run(root, ["--apply", "--format", "markdown", join(root, "md")]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(ticketExists(root), true);
+  assert.equal(existsSync(claimPath(join(root, "projects"), "BLZ", 1)), true,
+    "§5.5's claim-per-created-ticket is inherited, not reimplemented");
+  const receipts = readdirSync(join(root, RECEIPT_DIR));
+  assert.equal(receipts.length, 1);
+  assert.match(receipts[0], /-canonical\.jsonl$/,
+    "§4.5: frontmatter IS the canonical vocabulary, so a markdown import shares the reserved "
+    + "`canonical` receipt name rather than introducing a second one");
+
+  const again = run(root, ["--apply", "--format", "markdown", join(root, "md")]);
+  assert.equal(again.status, 0, again.stderr);
+  assert.match(again.stdout, /SKIPPED/, "re-run-is-a-no-op holds for the second reader too");
+  assert.equal(readdirSync(join(root, "projects", "BLZ", "defined")).length, 1);
+});
+
+test("blaze import --format markdown over a directory with no documents is exit 2", (t) => {
+  const root = board(t);
+  mkdirSync(join(root, "empty"), { recursive: true });
+  const r = run(root, ["--format", "markdown", join(root, "empty")]);
+  assert.equal(r.status, 2, "`could not look`, not `data refused` — the remedies differ");
+  assert.match(r.stderr, /no \.md files/);
+});
+
+test("blaze import --format markdown takes MORE THAN ONE path — what a shell glob expands to", (t) => {
+  const root = board(t);
+  for (const [n, id] of [["a", "BLZ-1"], ["b", "BLZ-2"]]) {
+    mkdirSync(join(root, n, "defined"), { recursive: true });
+    writeFileSync(join(root, n, "defined", `${n}.md`),
+      `---\nid: ${id}\ntitle: ${n}\ntype: task\nproject: BLZ\nestimate: 30\n---\n\nbody\n`);
+  }
+  const r = run(root, ["--apply", "--format", "markdown", join(root, "a"), join(root, "b")]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readdirSync(join(root, "projects", "BLZ", "defined")).length, 2);
+});
+
+// =============================================================================
 // BLZ-634 — the mapping layer's CLI surface: `--mapping` and `repair`
 // =============================================================================
 

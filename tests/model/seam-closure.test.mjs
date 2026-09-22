@@ -103,6 +103,15 @@ test("no module outside the seam stats or lists the projects tree directly", () 
     // about: its own corpus read goes through `fsReadStorage.listTickets`
     // (loadBoard), the seam, like every other reader.
     "model/import-apply.mjs",
+    // BLZ-633: `--format markdown <dir-or-glob>` walks the IMPORT SOURCE — an
+    // arbitrary directory of ticket documents an operator names on the command
+    // line — to find its `*.md` files. It never lists or stats the PROJECTS
+    // tree, which is what this guard is about: the board it plans against is
+    // read through `fsReadStorage.listTickets` (loadBoard) and its own export
+    // half goes through `storage.listTickets` too, both the seam. §4.5's
+    // "<dir-or-glob>" cannot be satisfied without a walk of the source, and
+    // the walk is confined to `collectMarkdownFiles`.
+    "model/import-markdown.mjs",
   ]);
   const offenders = [];
   for (const file of jsFiles(SCRIPTS)) {
@@ -988,6 +997,16 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // wedges every later import. `importLockPath` is a path join.
   ["model/import-lock.mjs", { writes: ["acquireImportLock", "releaseImportLock", "withImportLock"],
     sanctioned: [], inert: ["IMPORT_LOCK_NAME", "importLockPath"] }],
+  // BLZ-633's `model/import-markdown.mjs` is DELIBERATELY ABSENT from this map
+  // and from WRITE_ALLOWED alike, and the two absences are the same fact: the
+  // markdown medium reaches the mutating surface of node:fs nowhere at all, so
+  // it needs no exemption and therefore may not be pinned here (this map and
+  // the allowlist must name the same modules — the pin below says so). A
+  // second front end does not mean a second way tickets reach disk:
+  // `exportMarkdownDocs` returns `{ path, text }` and leaves placing the
+  // documents to its caller, and the import it feeds writes through BLZ-629's
+  // `applyImport` and the injected write port, unchanged. The day it grows a
+  // writer, that pin reddens and this comment is where to look.
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.

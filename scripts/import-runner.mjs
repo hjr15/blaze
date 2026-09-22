@@ -32,15 +32,21 @@ import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { runImport } from "./model/import-apply.mjs";
 import { runMappedImport, runRepair } from "./model/import-mapping.mjs";
 import { withImportLock } from "./model/import-lock.mjs";
+import { readMarkdownRows } from "./model/import-markdown.mjs";
 import { exitCodeForSpawn } from "./model/spawn-exit-code.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 function usage() {
   console.error("usage: blaze import [--apply] [--update] [--allocate-ids] [--mapping <m.json>] <file.csv>");
+  console.error("       blaze import --format markdown [--apply] [--update] <dir-or-glob>");
   console.error("       blaze import repair [--apply] <receipt>");
   console.error("       blaze import propose-mapping <file.csv>");
   console.error("  Reads a canonical 31-column CSV (design §2) and creates, updates or skips rows.");
   console.error("  DRY RUN unless --apply is given: without it nothing is written.");
+  console.error("  --format csv|markdown  the READER, and nothing else: `markdown` parses each");
+  console.error("                  ticket document's frontmatter and runs the identical planner,");
+  console.error("                  validator and writer (design §4.5). `status` is the containing");
+  console.error("                  directory, as it is on the board. Default: csv.");
   console.error("  --update        apply a row whose id exists on the board and differs.");
   console.error("  --allocate-ids  accept rows with an empty id; forfeits the re-run-is-a-no-op");
   console.error("                  guarantee, and the dry run says so.");
@@ -75,7 +81,7 @@ async function main() {
   const subcommand = argv[0] === "repair" ? "repair" : null;
   const rest = subcommand ? argv.slice(1) : argv;
 
-  const opts = { apply: false, update: false, allocateIds: false, mapping: null };
+  const opts = { apply: false, update: false, allocateIds: false, mapping: null, format: "csv" };
   const positional = [];
   for (const [i, a] of rest.entries()) {
     if (a === "--apply") { opts.apply = true; continue; }
@@ -83,11 +89,40 @@ async function main() {
     if (a === "--allocate-ids") { opts.allocateIds = true; continue; }
     if (a === "--mapping") { opts.mapping = rest[i + 1] ?? null; continue; }
     if (opts.mapping !== null && rest[i - 1] === "--mapping") continue;
+    // BLZ-633 / design §4.5. `--format markdown` selects the SECOND READER and
+    // nothing else: same planner, same validator, same writer, same exit
+    // codes. `--format=markdown` is accepted too, as `blaze export` accepts it.
+    if (a === "--format") { opts.format = rest[i + 1] ?? null; continue; }
+    if (a.startsWith("--format=")) { opts.format = a.slice("--format=".length); continue; }
+    if (opts.format !== null && rest[i - 1] === "--format") continue;
     if (a.startsWith("--")) { console.error(`blaze import: unknown flag: ${a}`); usage(); process.exit(1); }
     positional.push(a);
   }
   if (opts.mapping === null && rest.includes("--mapping")) {
     console.error("blaze import: --mapping takes the path of a confirmed mapping file");
+    usage();
+    process.exit(1);
+  }
+  const FORMATS = ["csv", "markdown"];
+  if (!FORMATS.includes(opts.format)) {
+    console.error(`blaze import: --format must be one of ${FORMATS.join(", ")} `
+      + `(got ${JSON.stringify(opts.format)})`);
+    usage();
+    process.exit(1);
+  }
+  if (opts.format === "markdown" && opts.mapping !== null) {
+    // Not an ignored flag — a refusal. §4.5: "frontmatter needs no mapping
+    // layer — it is already the canonical vocabulary — so `propose-mapping`
+    // does not apply to it." A `--mapping` that silently did nothing would
+    // leave an operator believing a mapping they confirmed was applied.
+    console.error("blaze import: --format markdown takes no --mapping — a ticket's frontmatter IS "
+      + "the canonical vocabulary (design §4.5), so there is nothing for a mapping to translate");
+    usage();
+    process.exit(1);
+  }
+  if (opts.format === "markdown" && subcommand === "repair") {
+    console.error("blaze import repair: --format is not a flag of this subcommand — it reads a "
+      + "receipt, not a source");
     usage();
     process.exit(1);
   }
@@ -103,8 +138,14 @@ async function main() {
       }
     }
   }
-  if (positional.length !== 1) {
-    const what = subcommand === "repair" ? "a receipt path" : "a CSV file";
+  // A markdown import takes `<dir-or-glob>` (§4.5), and a shell glob arrives
+  // here as several paths — so it accepts one OR MORE. Every other form still
+  // takes exactly one.
+  const manyAllowed = opts.format === "markdown" && subcommand === null;
+  if (manyAllowed ? positional.length < 1 : positional.length !== 1) {
+    const what = subcommand === "repair" ? "a receipt path"
+      : opts.format === "markdown" ? "a directory of ticket documents (or the paths a glob expanded to)"
+        : "a CSV file";
     console.error(positional.length === 0
       ? `blaze import${subcommand ? ` ${subcommand}` : ""}: ${what} is required`
       : `blaze import${subcommand ? ` ${subcommand}` : ""}: expected one argument, `
@@ -178,10 +219,15 @@ async function main() {
       writePort: wp.port,
     };
     // One `planImport`, two readers (design §4.5). The mapped path adds the
-    // mapping and the `source-ids` map and changes nothing else.
+    // mapping and the `source-ids` map and changes nothing else; the markdown
+    // path substitutes the READ and changes nothing else. Neither is a second
+    // importer.
+    const readRows = opts.format === "markdown"
+      ? () => readMarkdownRows(positional.map((p) => resolve(p)), { dataRoot })
+      : null;
     r = await guarded(() => (opts.mapping
       ? runMappedImport({ ...common, mappingPath: resolve(opts.mapping) })
-      : runImport(common)));
+      : runImport({ ...common, readRows })));
   } finally {
     wp.close();
   }

@@ -1123,6 +1123,49 @@ BLZ-588's "literally the same code path" criterion is met structurally: there is
 `planImport(rows, board, opts)` and two readers that produce `rows`. A test asserts the property
 by adding a rule once and observing both front ends enforce it.
 
+**BLZ-633 (this ticket) landed it**, as `scripts/model/import-markdown.mjs` plus an additive
+`--format csv|markdown` on the runner. There is no validation in that module at all — not one
+enum check and not one refusal message — and the frontmatter → cells step goes through
+`exportRows`, one record at a time, which is the same function `blaze export --format csv` uses
+and the same one `import-plan.mjs`'s `canonicalCells` uses to decide what "identical" means. So
+`encodeList`, `encodePairList`, `encodeWorklog`, §2.6's empty-means-absent rule and §2.8's
+unknown-frontmatter-key refusal all arrive with it rather than being re-decided. The
+shared-rule test (`tests/import-shared-rule.test.mjs`) compares the two readers' refusals **word
+for word** over eight rules, which is stronger than "both refuse": a message is only identical
+if it came from the one place messages are written.
+
+**Four things the medium had to decide, which this section did not specify.**
+
+1. **`status` is the containing DIRECTORY**, and the reader takes it from there. §1.1 is
+   explicit that `status` is not a frontmatter key, so a document carrying `status:` would be
+   inventing a 29th key and giving the reader two sources for one value — it is refused as a
+   29th key, by §2.8, from `exportRows`.
+2. **`project` comes from frontmatter**, which inverts BLZ-271's rule for this medium.
+   `exportRows` reads `project` off the walk because "frontmatter `.project` is NOT a
+   substitute: it is absent on some boards" — but a document that has left the corpus has no
+   walk to be read off, and `project` IS one of the canonical 28 keys. So the reader reads it
+   from frontmatter and the export **stamps** it from the walk.
+3. **A markdown import shares the reserved `canonical` receipt name.** It is mapping-less
+   precisely because frontmatter already IS the canonical vocabulary, so a second reserved name
+   would have bought nothing and risked colliding with a mapping an operator called `markdown`.
+   `--format markdown --mapping` is refused outright rather than ignored.
+4. **The markdown export is a FUNCTION, not a verb.** This section specifies a reader and no
+   export verb, so `exportMarkdownDocs` returns `{ path, text }` per ticket and leaves placing
+   them to its caller; `blaze export --format csv` remains the only export verb. That keeps the
+   second front end from being a second way tickets reach disk — the module reaches the mutating
+   surface of `node:fs` nowhere at all.
+
+**The round trip is narrower than §3's three gates, deliberately.** `tests/markdown-round-trip.test.mjs`
+asserts two things plus a gate-3 analogue: every document of a markdown export of the fixture
+classifies as **`skip`** against the fixture itself (the planner's own definition of identical —
+all 31 columns, `status` and `description` included), and importing that export into an empty
+board yields a canonical CSV byte-equal to the fixture's. Gate 2 has no analogue here because
+there is no second markdown exporter for a defect to cancel against: one side of every
+comparison is the canonical CSV exporter, which BLZ-630 and BLZ-631 already hold to all three
+gates against this same fixture. The gate-3 analogue is kept, because without it both
+comparisons compare corpora and neither notices a column the medium drops everywhere. A revert
+that blanks one optional, model-unconstrained column (`pr`) turns both red, in the same suite.
+
 ---
 
 ## 5. Failure modes, fail-closed behaviour, and exit codes
@@ -2104,7 +2147,7 @@ from.
 
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
-| D1 | **Markdown import** (`blaze import --format markdown`) | A second reader onto the same `planImport`; the shared-rule test; markdown export and its round trip | **BLZ-588** | B2, B3 |
+| D1 | **Markdown import** (`blaze import --format markdown`) | A second reader onto the same `planImport`; the shared-rule test; markdown export and its round trip | **BLZ-588**, delivered as **BLZ-633** | B2, B3 |
 
 ### Gaps the three tickets do not cover
 
