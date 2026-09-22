@@ -47,14 +47,15 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
 import {
-  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync,
+  mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync, readdirSync,
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
 import { writeCsv } from "../scripts/model/csv.mjs";
-import { MAPPING_DIR } from "../scripts/model/import-mapping.mjs";
+import { MAPPING_DIR, headerDigest } from "../scripts/model/import-mapping.mjs";
+import { RECEIPT_DIR } from "../scripts/model/import-apply.mjs";
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(REPO, "scripts", "cli.mjs");
@@ -170,6 +171,30 @@ function foreignCsv(root) {
   return p;
 }
 
+/** A foreign CSV with a valid, already-CONFIRMED mapping — the `--mapping`
+ *  and `repair` verbs, which §4.3's table also marks Model: never, and which
+ *  BLZ-636's original draft did not exercise: only `blaze import`'s plain
+ *  deterministic path was ever run, leaving these two entry points untested. */
+function mappedCsv(root) {
+  const header = ["Key", "Name"];
+  const csvPath = join(root, "vendor-mapped.csv");
+  writeFileSync(csvPath, `${header.join(",")}\nACME-1,first\n`);
+  mkdirSync(join(root, MAPPING_DIR), { recursive: true });
+  const mappingPath = join(root, MAPPING_DIR, "acme.json");
+  writeFileSync(mappingPath, `${JSON.stringify({
+    mappingVersion: 1, schemaVersion: 1, name: "acme",
+    source: { columns: header, sha256: headerDigest(header) },
+    sourceIdColumn: "Key",
+    columns: {
+      title: { from: "Name" }, description: { from: "Name" },
+      project: { constant: "BLZ" }, type: { constant: "task" }, status: { constant: "defined" },
+      estimate: { constant: "30" },
+    },
+    values: {}, unmapped: [],
+  }, null, 2)}\n`);
+  return { csvPath, mappingPath };
+}
+
 const hit = (h, which) => existsSync(h.sentinels[which]);
 
 // =============================================================================
@@ -189,6 +214,26 @@ test("BLZ-636/1: `blaze import --apply` succeeds and leaves BOTH sentinels untou
     + "That is the property: the configured agent command is not executed on the import path");
   assert.equal(hit(h, PATH_HIT), false,
     "and a `claude` shadowing the built-in default on PATH did not run either");
+});
+
+test("BLZ-636/1b: `blaze import --mapping` and `blaze import repair` ALSO leave both sentinels untouched", (t) => {
+  // §4.3's table says Model: never for THREE verbs, not one — the plain
+  // deterministic import, the mapped import, and repair. BLZ-636's original
+  // draft only ever exercised the first; a model spawned from either of the
+  // other two would have passed test 1 above vacuously.
+  const h = harness(t);
+  const { csvPath, mappingPath } = mappedCsv(h.root);
+
+  const mapped = runCli(h, ["--apply", "--mapping", mappingPath, csvPath, "--allocate-ids"]);
+  assert.equal(mapped.status, 0, `the mapped import must succeed, or absence proves nothing:\n${mapped.stderr}`);
+  assert.equal(hit(h, ENV_HIT), false, "a mapped import never spawns the agent command");
+  assert.equal(hit(h, PATH_HIT), false, "on either arm");
+
+  const receiptName = readdirSync(join(h.root, RECEIPT_DIR))[0];
+  const repaired = runCli(h, ["repair", join(h.root, RECEIPT_DIR, receiptName)]);
+  assert.notEqual(repaired.status, null, `repair must run to completion:\n${repaired.stderr}`);
+  assert.equal(hit(h, ENV_HIT), false, "repair never spawns the agent command either");
+  assert.equal(hit(h, PATH_HIT), false, "on either arm");
 });
 
 // =============================================================================
