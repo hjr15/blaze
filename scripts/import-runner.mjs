@@ -31,6 +31,7 @@ import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { resolveWritePort } from "./model/write-port-resolve.mjs";
 import { runImport } from "./model/import-apply.mjs";
 import { runMappedImport, runRepair } from "./model/import-mapping.mjs";
+import { withImportLock } from "./model/import-lock.mjs";
 import { exitCodeForSpawn } from "./model/spawn-exit-code.mjs";
 import { assertWritable } from "./readonly.mjs";
 
@@ -53,7 +54,8 @@ function usage() {
   console.error("                  file and nothing else — no ticket, no id, no staging.");
   console.error("  Exit: 0 clean · 1 data refused · 2 could not read the input · 3 mapping");
   console.error("        incomplete · 4 the board changed and the run did not finish cleanly");
-  console.error("        · 5 the run's own records are not in a state it may start from.");
+  console.error("        · 5 the run's own records are not in a state it may start from —");
+  console.error("        which includes another import holding the lock (design §7: one at a time).");
 }
 
 async function main() {
@@ -131,15 +133,30 @@ async function main() {
     } catch (e) { console.error(e.message); process.exit(1); }
   }
 
+  // BLZ-640 / design §8 item 8. THE IMPORT-SCOPED LOCK, and this is the seam:
+  // `runImport`, `runMappedImport` and `runRepair` each own their pre-write
+  // phase — the prune, the exit-5 check, the receipt, the map — so a lock
+  // taken around the CALL is a lock taken before all four, which is where §8
+  // item 8 puts it ("before the prune and the exit-5 check, since those are
+  // what a second run must not race past"). It is held until the verb returns,
+  // which is until staging has returned.
+  //
+  // ONLY UNDER `--apply`: a dry run writes nothing, opens no record and is a
+  // legitimate thing to run against a board mid-import. The lock guards the
+  // write phase, which is the one phase a dry run does not have.
+  const guarded = (fn) => (opts.apply ? withImportLock(dataRoot, fn) : fn());
+
   // `repair` writes the run's own RECORDS and never a ticket, so it needs no
-  // write port at all (design §4.3's table: "never a ticket").
+  // write port at all (design §4.3's table: "never a ticket") — but it is
+  // still under the lock: it appends pairs and `resolved` entries to the very
+  // records an import reads in its pre-write phase.
   if (subcommand === "repair") {
-    const rr = await runRepair({
+    const rr = await guarded(() => runRepair({
       receipt: resolve(positional[0]),
       projectsDir, dataRoot,
       apply: opts.apply,
       commitMode: cfg.commitMode,
-    });
+    }));
     const outR = rr.exitCode === 0 ? console.log : console.error;
     if (rr.report) outR(rr.report);
     process.exit(rr.exitCode);
@@ -162,9 +179,9 @@ async function main() {
     };
     // One `planImport`, two readers (design §4.5). The mapped path adds the
     // mapping and the `source-ids` map and changes nothing else.
-    r = opts.mapping
-      ? await runMappedImport({ ...common, mappingPath: resolve(opts.mapping) })
-      : await runImport(common);
+    r = await guarded(() => (opts.mapping
+      ? runMappedImport({ ...common, mappingPath: resolve(opts.mapping) })
+      : runImport(common)));
   } finally {
     wp.close();
   }

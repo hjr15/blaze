@@ -869,8 +869,13 @@ const SEAM_WRITE_PROVIDERS = new Map([
       "worktreeBranchOwners", "belongsHere", "outstandingFiles",
       "consumedPrefixIntact"] }],   // BLZ-608 (#175): a byte comparison, and the pin caught it
   // The commit lock: a lockfile under a caller-supplied root, taken and released.
-  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock"], sanctioned: [],
-    inert: ["lockPath"] }],
+  // BLZ-640 added `acquireDirLock`/`releaseDirLock` — the SAME mkdir +
+  // owner.json + dead-PID-theft mechanism over a caller-supplied lock
+  // DIRECTORY, which is what design §8 item 8's "this reuses that mechanism
+  // rather than a second one" asks for. They create and remove a directory, so
+  // they are writes on exactly the footing `acquireLock`/`releaseLock` are.
+  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock", "acquireDirLock", "releaseDirLock"],
+    sanctioned: [], inert: ["lockPath"] }],
   ["migrate/jira-import.mjs", { writes: ["runLive"], sanctioned: [],
     inert: ["loadNormalized", "runDryRun"] }],
   ["migrate/jira-client.mjs", { writes: ["writeRawCache"], sanctioned: [],
@@ -975,6 +980,14 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // pinned dynamically in tests/import-agent-boundary.test.mjs.
   ["model/import-mapping-propose.mjs", { writes: ["runProposeMapping"], sanctioned: [],
     inert: ["SAMPLE_ROWS", "sampleOf", "proposeMapping", "renderProposal"] }],
+  // BLZ-640 / design §8 item 8. The import-scoped lock: one atomically
+  // `mkdirSync`'ed directory under `import-receipts/` holding an `owner.json`,
+  // created and removed. Three writers, and they are the whole module —
+  // `withImportLock` is the pair taken together, which is the only form the
+  // runner uses, because a lock acquired without a `finally` that releases it
+  // wedges every later import. `importLockPath` is a path join.
+  ["model/import-lock.mjs", { writes: ["acquireImportLock", "releaseImportLock", "withImportLock"],
+    sanctioned: [], inert: ["IMPORT_LOCK_NAME", "importLockPath"] }],
   ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
@@ -2048,10 +2061,19 @@ const WRITE_ALLOWED = new Map([
   // ADR-0037 §3 expressed as a guard rather than as a comment.
   ["model/import-mapping-propose.mjs", ["mkdirSync", "writeRegularFileSync"]],
   ["import-mapping-runner.mjs", ["runProposeMapping"]],
+  // BLZ-640. The import lock reaches node:fs through `commit-lock.mjs`'s
+  // primitive and nowhere else: `acquireDirLock` does the atomic `mkdirSync`
+  // and writes `owner.json`, `releaseDirLock` removes the directory. There is
+  // no third member and no direct node:fs call in the module at all, which is
+  // the guard's way of saying "the same mechanism, not a second one".
+  ["model/import-lock.mjs", ["acquireDirLock", "releaseDirLock"]],
   // ...and `runImport` is the verb itself, exactly as new-runner.mjs takes `applyNew`.
   // BLZ-634 adds the mapped import and the repair verb to the same runner:
   // one `planImport`, two readers (§4.5), and `repair` writes records only.
-  ["import-runner.mjs", ["resolveWritePort", "runImport", "runMappedImport", "runRepair"]],
+  // BLZ-640 adds `withImportLock`, which the runner wraps all three verbs in
+  // under `--apply` — the seam design §8 item 8 puts the lock at.
+  ["import-runner.mjs",
+    ["resolveWritePort", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.

@@ -1907,8 +1907,11 @@ graph and §4.3's surviving assertion holds. `repair` is not called `resolve` be
   separate decision on a separate ticket.
 - **Cross-project id rewriting.** Import does not renumber. If two boards' `BLZ-1`s collide, that
   is a refusal, not a silent remap.
-- **Concurrent import.** One import at a time, **as an operator constraint — nothing enforces
-  it today, and an earlier draft said the commit lock did.** That lock is `acquireLock` inside
+- **Concurrent import.** One import at a time. **This was an operator constraint that nothing
+  enforced; BLZ-640 has since made it a property** — `scripts/model/import-lock.mjs`, taken by
+  `import-runner.mjs` around all three verbs under `--apply`, and a contended lock is exit 5.
+  The rest of this bullet is the record of why the commit lock never enforced it, which is still
+  worth keeping: an earlier draft said it did. That lock is `acquireLock` inside
   `commitFile` (`scripts/serve-commit.mjs:9`), taken at `git add` time *after* every write has
   landed, and not taken at all on a `commitMode: "batch"` board, where `commitOrQueue` returns
   from the ledger append before `commitFile` is ever called (`scripts/commit-or-queue.mjs:28-69`).
@@ -2031,6 +2034,25 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    over one file, one exits 5 with nothing written, the board holds each source key once. Its
    own ticket, blocking nothing in this design's gates and everything in its concurrency claim.
 
+   **BLZ-640 (this ticket) landed it.** `scripts/model/import-lock.mjs` takes
+   `import-receipts/import.lock/` through `commit-lock.mjs`'s own `acquireDirLock` — the same
+   atomic `mkdirSync`, the same `owner.json` `{pid, session, ts}`, the same
+   `process.kill(pid, 0)` theft of a dead owner's lock, generalised over the lock directory
+   rather than copied into a second implementation. The seam is `scripts/import-runner.mjs`,
+   which wraps `runImport`, `runMappedImport` and `runRepair` in `withImportLock` under
+   `--apply`: all three own their pre-write phase, so a lock around the call is a lock before
+   the prune, the exit-5 check, the receipt and the map alike. Two departures from the commit
+   lock's POLICY, both deliberate and both tested: `retries: 0`, because "a contended lock is
+   exit 5" is not "a contended lock waits" and a second run sleeping out a 2,850-ticket apply
+   would look hung rather than refused; and no age-out at all, because the commit lock's 60 s
+   window would hand a second importer the lock in the middle of a long apply, which is the
+   very race being closed (the DEAD-owner arm is untouched, so a crashed import does not wedge
+   every later one). A dry run takes no lock — the lock guards the write phase, which is the
+   one phase a dry run does not have. Generalising the primitive also exposed a latent defect
+   in it: the `continue` after a steal consumed an attempt, so a `retries: 0` caller could
+   never steal at all and the dead-owner arm was structurally unreachable; a steal is now
+   bounded separately from the retry budget.
+
 One place the design is **stricter** than a ticket: BLZ-587 asks that an enum outside the registry
 be refused; this design also refuses a *silent coercion* of `priority`, which `blaze migrate`
 performs today (`scripts/migrate/map.mjs:29-32`). That is a deliberate divergence from the
@@ -2103,8 +2125,8 @@ from.
 - **`cli.mjs:290`'s signal handling** (§8 item 6) — **delivered as BLZ-639**: the exit now goes
   through `exitCodeForSpawn`; see item 6 above.
 - **BLZ-587's stale `git add -A` Context** (§8 item 7) — a ticket-text correction, not a code change.
-- **An import-scoped lock** (§8 item 8) — its own ticket, after C1, because until it lands the
-  one-import-at-a-time rule in §7 is a sentence rather than a property.
+- **An import-scoped lock** (§8 item 8) — **delivered as BLZ-640**: the one-import-at-a-time
+  rule in §7 is now a property rather than a sentence. See item 8 above.
 
 **Sequencing.** A3 lands **with** B2, not after it — BLZ-589's round trip is the only honest
 verification of BLZ-587 and the plan is explicit that it is *"not optional and not last"*. **B4
