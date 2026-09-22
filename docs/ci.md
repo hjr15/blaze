@@ -186,7 +186,7 @@ Related, and the same shape one level down: cleanup written as the last statemen
 is skipped by a failing assertion (BLZ-603).
 [`scripts/ci/temp-cleanup-guard.mjs`](../scripts/ci/temp-cleanup-guard.mjs) scans `tests/`
 for that shape and `tests/temp-cleanup-guard.test.mjs` holds the corpus to the per-file
-counts recorded in `scripts/ci/temp-cleanup-debt.json` — **455 sites across 65 files** at
+counts recorded in `scripts/ci/temp-cleanup-debt.json` — **454 sites across 65 files** at
 the time of writing, pre-existing debt that is recorded rather than hidden. The check is an
 equality, so a file cannot gain a site and a file that is cleaned up must drop its entry in
 the same change (`node scripts/ci/temp-cleanup-guard.mjs --write` re-records).
@@ -397,8 +397,10 @@ evidence.
 already-fixed sibling tickets were figures, so it would otherwise have been set by accident.
 The distinction is what the sentence *claims*, not whether it is a number:
 
-- *"455 sites across 65 files"* is a claim about HEAD. It rots on the next commit that adds
-  a test file. **In scope**, and registered.
+- the cleanup-debt size above — *"N sites across M files"* — is a claim about HEAD. It rots
+  on the next commit that adds a test file. **In scope**, and registered. (Written with
+  placeholders here rather than repeated: a second copy of a live figure is a second thing
+  to keep in step, and this sentence is not the registered one.)
 - *"330 tests in `tests/reconcile-*.test.mjs` on `0c76712`"* (ADR-0030) is a measurement
   reported with the commit it was taken at. It was true then and it is true now.
   **Out of scope** — registering it would force a true sentence to change every time the

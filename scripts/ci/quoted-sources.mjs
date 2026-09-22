@@ -25,8 +25,11 @@
 // already-fixed sibling tickets were figures and the boundary would otherwise be set by
 // accident. The distinction is not "figure vs string", it is **what the sentence claims**:
 //
-//   - "455 sites across 65 files" is a claim about HEAD. It rots on the next commit that
-//     adds a test file, and nothing tells you. IN SCOPE.
+//   - "<n> sites across <m> files" — the cleanup-debt size in `docs/ci.md`, registered below
+//     — is a claim about HEAD. It rots on the next commit that adds a test file, and nothing
+//     tells you. IN SCOPE. (Written with placeholders here on purpose: an illustrative copy
+//     of a live figure in this header would be a second thing to keep in step, and nothing
+//     checks a header.)
 //   - "330 tests in tests/reconcile-*.test.mjs on `0c76712`" is a measurement reported with
 //     the commit it was taken at. It was true then and it is true now; it cannot rot. OUT OF
 //     SCOPE — and registering it would be worse than leaving it alone, because the guard
@@ -101,7 +104,7 @@ export const REGISTRY = [
   {
     id: "ci-doc-temp-cleanup-debt-size",
     doc: "docs/ci.md",
-    quote: "455 sites across 65 files",
+    quote: "454 sites across 65 files",
     deriver: "temp-cleanup-debt-size",
     why: "the number is the size of a ratchet the whole corpus is held to, quoted as a "
       + "current fact rather than pinned to a commit. It moves whenever a test file is "
