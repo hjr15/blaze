@@ -4,7 +4,7 @@ Written for: the operator. Updated 2026-09-22 (later same day). Every state belo
 
 ## Headline
 
-**Phases 1 and 2 fully done. Phase 3 (the entire CSV import build, all four PRs, sixteen tickets) is fully merged.** `main` is `beac597`. Both of the kickoff's named phases are complete; only Lane T (the test-machinery sweep) and phases 4/5 (out of scope for this session per the kickoff) remain. The board has 21+ unpushed commits on `BLZ-305-v4-spine` (blaze-pm is never pushed, per the standing constraint).
+**Phases 1 and 2 fully done. Phase 3 (the entire CSV import build, all four PRs, thirteen tickets) is fully merged in code.** `main` is `beac597`. Both of the kickoff's named phases are complete; only Lane T (the test-machinery sweep) and phases 4/5 (out of scope for this session per the kickoff) remain. The board has 21+ unpushed commits on `BLZ-305-v4-spine` (blaze-pm is never pushed, per the standing constraint).
 
 ## Merged (in order)
 
@@ -35,9 +35,9 @@ Kickoff Lanes C and L (BLZ-505/506/507/508/509, BLZ-500/498/518/502/124) closed 
 
 ## In flight (this session, 2026-09-20/22)
 
-- A board pass for BLZ-640/633 (Lane C PR-4's tickets: move to `done`, log time, plus a sanity check that all sixteen build tickets across PR-1–4 are genuinely `done`) was dispatched this session.
-- **The entire Lane C CSV import build is now merged**: PR-1 (BLZ-625/626/627), PR-2 (BLZ-628/629/630/631), BLZ-654, PR-3 (BLZ-634/635/636), PR-4 (BLZ-640/633) — sixteen tickets, four PRs, four adversarial reviews, each finding at least one real issue and each resulting in either an in-branch fix before merge or ticketed follow-ups.
-- Lane T (BLZ-503, 523, 516, 517, 504, 515) is next — runs alone, last, per the kickoff's stop rule (needs ~1/3 of context remaining before starting, since it edits test files corpus-wide). Both of its preconditions (phases 2 and 3 landed) are now met.
+- **The entire Lane C CSV import build is merged in code**: PR-1 (BLZ-625/626/627), PR-2 (BLZ-628/629/630/631), BLZ-654, PR-3 (BLZ-634/635/636), PR-4 (BLZ-640/633) — thirteen tickets (an earlier note in this doc miscounted "sixteen"; corrected), four PRs, four adversarial reviews, each finding at least one real issue and each resulting in either an in-branch fix before merge or ticketed follow-ups.
+- **Board correction, this session**: BLZ-625/626/627 (Lane C PR-1's tickets) were found still sitting in `defined/` despite PR #179 having merged sessions ago — the board pass for that PR was accidentally never dispatched. A correction board pass was dispatched this session to close them and re-run the full 13-ticket sanity check; check its outcome before trusting the Board section below as current.
+- Lane T (BLZ-503, 523, 516, 517, 504, 515) is next — runs alone, last, per the kickoff's stop rule (needs ~1/3 of context remaining before starting, since it edits test files corpus-wide). Both of its preconditions (phases 2 and 3 landed in code) are now met.
 
 ## The one deliberate compromise: the write-seam guard (#169)
 
@@ -50,7 +50,7 @@ Eleven adversarial rounds, every one of which found a real defect by planting a 
 ## Board
 
 - `BLZ-305-v4-spine`, 21+ commits ahead of origin, unpushed, working tree clean.
-- BLZ-639/638/637/641 (Lane G), BLZ-625/626/627 (Lane C PR-1), BLZ-512/519/514/513/511/510/520/567 (Lane R, including BLZ-567's split — delivered part `done`, deferred part spun off as **BLZ-653**, mirroring the BLZ-140/INF-749 precedent), BLZ-628/629/630/631 (Lane C PR-2), BLZ-654 (the export-link-refusal fix), BLZ-634/635/636 (Lane C PR-3), and BLZ-640/633 (Lane C PR-4) are all `done` — a board pass for the last two was dispatched this session, check its outcome before trusting that literally. BLZ-587 stays open deliberately: its design merged, its build is now fully landed across four PRs.
+- BLZ-639/638/637/641 (Lane G), BLZ-512/519/514/513/511/510/520/567 (Lane R, including BLZ-567's split — delivered part `done`, deferred part spun off as **BLZ-653**, mirroring the BLZ-140/INF-749 precedent), BLZ-628/629/630/631 (Lane C PR-2), BLZ-654 (the export-link-refusal fix), BLZ-634/635/636 (Lane C PR-3), and BLZ-640/633 (Lane C PR-4) are all `done`. **BLZ-625/626/627 (Lane C PR-1) were found NOT done** despite merging sessions ago (the board pass for that PR was accidentally skipped) — a correction pass was dispatched this session; check its outcome before trusting these three as `done`. BLZ-587 stays open deliberately: its design merged, its build is now fully landed across four PRs.
 - **Filed prior sessions:** BLZ-609–612, 614–616, 617–619 (PR-review residuals); BLZ-620–623 (#170); BLZ-624 (sign-in per-source ceiling, security/high); BLZ-625–641 (the whole Phase 3 build set + §8 gaps); BLZ-642 (seam successor); BLZ-643 (Lane-G review, hollow test); BLZ-644–649 (Lane-C-PR-1 review); BLZ-650–652 (Lane-R review); BLZ-653 (Lane-R, BLZ-567's deferred scope); BLZ-654–657 (Lane-C-PR-2 review — 654 is `done`; 655/656/657 still open, low-priority, not blocking); BLZ-658–660 (Lane-C-PR-3 review, all open, low/medium-priority, not blocking); BLZ-661–663 (Lane-C-PR-4 review, all open, low-priority, not blocking).
 - A board-wide reconcile sweep ran in a prior session and applied 17 status moves + 39 branch/PR backfills, each verified against a real merged PR across five repos. One decline still outstanding, unchanged, blocked on the operator: **OBA-154** is marked SUPERSEDED in its own body and reconcile wanted to move it to plain `done` — it needs a deliberate `blaze resolve`, not a bare move.
 - Also flagged (prior session, unchanged): `terminal_parent_scan.py` shows 65 terminal parents with open children board-wide (pre-existing); two applied moves (INF-247, OBA-812) add to it, both evidenced against the parent's own scope.
