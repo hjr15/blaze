@@ -1,95 +1,72 @@
-// tests/scratch-cleanup.test.mjs — BLZ-503.
+// tests/scratch-cleanup.test.mjs — BLZ-503, generalised by BLZ-517.
 //
-// THE CORPUS REMOVES THE SCRATCH DIRECTORIES IT MINTS.
+// THE CORPUS REMOVES THE SCRATCH DIRECTORIES IT MINTS, SUITE BY NAMED SUITE.
 //
-// BLZ-491 fixed one suite and measured that the rest of the corpus did not. This is that
+// BLZ-491 fixed one suite and measured that the rest of the corpus did not. That
 // measurement, taken against c355b9c with `TMPDIR` pointed at an empty directory and the
-// whole suite run once:
+// whole suite run once: **299 leftover directories, from 56 `mkdtempSync` call sites in 34
+// test files.** The same run after BLZ-503 leaves zero.
 //
-//     299 leftover directories, from 56 mkdtempSync call sites in 34 test files.
+// Nothing about 299 directories is dangerous on its own. What it costs is the ability to
+// read `/tmp` at all: BLZ-485's mutation runner asserts ZERO leftover `/tmp/blz-mutate-*` as
+// the evidence its teardown works, and a corpus that litters 299 a run trains everyone
+// reading that assertion to treat litter as background noise.
 //
-// Nothing about that is dangerous on its own. What it costs is the ability to read `/tmp`:
-// BLZ-485's mutation runner asserts ZERO leftover `/tmp/blz-mutate-*` as the evidence its
-// teardown works, and a corpus that litters 299 directories a run trains everyone reading
-// that assertion to treat litter as background noise. The same run after the fix leaves
-// zero — `node-compile-cache`, which Node's own compile cache creates, is the only entry in
-// the box and no scratch prefix claims it.
+// THE COVERED LIST BELOW IS THE CLAIM. It is written out, not globbed: a list that
+// discovered its own members could shrink to nothing and still pass, and the point of this
+// file is to be able to say exactly which suites are held to the property. It is the 34
+// files BLZ-503 fixed plus `board-overstatement-guards.test.mjs`, which BLZ-491 fixed and
+// proved with its own hand-written copy of this proof — that copy is gone now, and the suite
+// is covered here with the rest.
 //
-// The fix is `tests/helpers/scratch.mjs`: a file-level registry plus one `after()` hook, the
-// shape BLZ-491 established, applied to all 34 files. It is NOT a `/tmp` sweeper. Nothing
-// here or there removes a directory this corpus did not itself mint and record — BLZ-394 is
-// about exactly that blast radius, and `force: true` on a path the registry handed us is the
-// whole of the destructive surface.
-//
-// WHAT THIS TEST IS. The only way to observe an `after()` hook from outside is to run the
-// suite under a redirected `TMPDIR` and look at what is left, which is what BLZ-491 did for
-// its one suite. Three of the worst offenders are run here, in one child, and the box is
-// asserted empty. BLZ-517 extracts this into a shared helper and names the full covered set;
-// this file is the proof for the three that dominated the measurement.
-import { test, describe, before, after } from "node:test";
-import assert from "node:assert/strict";
-import { mkdtempSync, readdirSync, rmSync } from "node:fs";
-import { tmpdir } from "node:os";
-import { join } from "node:path";
-import { spawnSync } from "node:child_process";
+// Adding a suite to this list is how a suite opts in. Nothing here polices a suite that is
+// not on it; the corpus-wide gate is the run-level scan in CI, which sees every suite.
+import { proveNoLeak } from "./helpers/no-leak.mjs";
 
-const REPO = join(import.meta.dirname, "..");
-
-/** The three suites that produced 74 of the 299 directories, named rather than implied. */
-const COVERED = [
-  "tests/model/read-seam-projection.test.mjs", //  29 × "seam-" and four siblings
+/** Every suite held to "mints nothing it does not remove", named one per line so a removal
+ *  from this list is a visible line in a diff rather than a pattern that stopped matching. */
+export const COVERED = [
+  "tests/audit-terminal-goal-unverified.test.mjs",
+  "tests/board-overstatement-guards.test.mjs", // BLZ-491's suite, 356 directories when found
+  "tests/config.test.mjs",
+  "tests/db-runner.test.mjs",
+  "tests/edit.test.mjs",
+  "tests/event-actor.test.mjs",
+  "tests/identity-resilience.test.mjs",
+  "tests/init.test.mjs", //                       20 × "blaze-init-"
+  "tests/live-unreadable-on-the-seam.test.mjs",
+  "tests/migrate/date-migration-oracle.test.mjs",
+  "tests/migrate/load-corpus.test.mjs",
   "tests/migrate/oracle-field-coverage.test.mjs", // 23 × "ofc-"
-  "tests/model/read-seam.test.mjs", //             22 × "blaze-readseam-" and two siblings
+  "tests/migrate/transitions-and-oracle.test.mjs",
+  "tests/model/db-schema-version.test.mjs",
+  "tests/model/derived-dates-not-editable.test.mjs",
+  "tests/model/graph.test.mjs",
+  "tests/model/import-mapping.test.mjs",
+  "tests/model/index-cache.test.mjs",
+  "tests/model/index-fs-hatches.test.mjs",
+  "tests/model/read-seam-projection.test.mjs", //    29 × "seam-" and four siblings
+  "tests/model/read-seam.test.mjs", //               22 × "blaze-readseam-" and two siblings
+  "tests/model/storage.test.mjs",
+  "tests/model/torn-line-parked-recovery.test.mjs",
+  "tests/model/write-port.test.mjs",
+  "tests/schedule-runner.test.mjs",
+  "tests/serve-endpoints.test.mjs",
+  "tests/serve-host.test.mjs",
+  "tests/serve-identity.test.mjs", //                18 × "blaze-identity-"
+  "tests/serve-standalone-entry.test.mjs",
+  "tests/user-add.test.mjs",
+  "tests/verbs-dual-write.test.mjs",
+  "tests/views/data.test.mjs",
+  "tests/views/page-golden.test.mjs",
+  "tests/views/page.test.mjs",
+  "tests/write-port-resolve.test.mjs",
 ];
 
-describe("BLZ-503: the worst scratch offenders leave an empty TMPDIR behind", () => {
-  let box = null;
-  let run = null;
-
-  before(() => {
-    box = mkdtempSync(join(tmpdir(), "blz503-box-"));
-    // `node --test` marks its children with NODE_TEST_CONTEXT and swaps their reporter for a
-    // serialised stream, which arrives here as empty stdout — so the "did it actually run"
-    // check below could see nothing. BLZ-491 hit this; the env is stripped rather than the
-    // check weakened.
-    const env = { ...process.env, TMPDIR: box };
-    for (const k of Object.keys(env)) if (k.startsWith("NODE_TEST")) delete env[k];
-    run = { env, box };
-    run.result = spawnSync(process.execPath, ["--test", ...COVERED],
-      { cwd: REPO, env, encoding: "utf8" });
-  });
-
-  after(() => { if (box) rmSync(box, { recursive: true, force: true }); });
-
-  test("TMPDIR is honoured, or this test can see nothing at all", () => {
-    // Non-vacuity first: a TMPDIR the runtime ignored would make an empty box read as a
-    // clean corpus, and every assertion below would pass over a suite that never ran here.
-    const probe = spawnSync(process.execPath,
-      ["-e", "console.log(require('node:os').tmpdir())"], { env: run.env, encoding: "utf8" });
-    assert.equal(probe.status, 0, probe.stderr);
-    assert.equal(probe.stdout.trim(), run.box,
-      `TMPDIR was not honoured — the child resolved ${probe.stdout.trim()}, not ${run.box}`);
-  });
-
-  test("the covered suites pass and actually ran their tests", () => {
-    assert.equal(run.result.status, 0,
-      `the covered suites must pass before their litter can be judged:\n${run.result.stdout}\n${run.result.stderr}`);
-    // An empty run leaves an empty box too. The floor is well under the ~60 these three
-    // carry, so it pins non-vacuity without pinning a count that ordinary work moves.
-    // Matched against both summary spellings — `node --test` writes `ℹ pass N` through the
-    // spec reporter and `# pass N` through the TAP one, and which of the two a child gets
-    // depends on whether its stdout is a terminal.
-    const m = /^(?:#|ℹ)\s*pass\s+(\d+)\s*$/m.exec(run.result.stdout);
-    assert.ok(m && Number(m[1]) >= 40,
-      `the covered suites reported ${m ? m[1] : "no"} passing tests — an empty run proves nothing`);
-  });
-
-  test("…and left nothing behind", () => {
-    const left = readdirSync(run.box).filter((n) => n !== "node-compile-cache");
-    assert.deepEqual(left, [],
-      `${left.length} scratch director(ies) survived the run: ${JSON.stringify(left.slice(0, 8))}. ` +
-      "Every directory a suite mints must be registered with tests/helpers/scratch.mjs so " +
-      "the file's after() hook removes it — a trailing rmSync in the test body is skipped by " +
-      "the failing assertion above it");
-  });
+// The floor is well under the ~580 these suites carry between them, so it catches a run that
+// did not happen without pinning a count that ordinary work moves.
+proveNoLeak({
+  label: "BLZ-503/517: a suite removes every scratch directory it mints",
+  suites: COVERED,
+  minTests: 400,
 });

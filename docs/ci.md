@@ -249,9 +249,24 @@ Nothing here sweeps `/tmp`. The registry removes only paths it was handed, which
 whole of the destructive surface — a glob-based cleaner over a shared `/tmp` is the blast
 radius BLZ-394 is about.
 
-The proof is `tests/scratch-cleanup.test.mjs`, which runs the three worst suites in a child
-under a redirected `TMPDIR` and asserts the box is empty afterwards — the only way an
-`after()` hook can be observed from outside.
+The proof is [`tests/helpers/no-leak.mjs`](../tests/helpers/no-leak.mjs) (BLZ-517), applied
+in `tests/scratch-cleanup.test.mjs` to a covered list that is **written out, never globbed**
+— a list that discovers its own members can shrink to nothing and still pass. It holds the
+34 files BLZ-503 fixed plus `board-overstatement-guards.test.mjs`, whose hand-written copy of
+this same proof BLZ-491 had left in `tests/tmp-scratch-attribution.test.mjs`; that copy is
+gone and the suite is covered here with the rest.
+
+All the covered suites run in **one** child under a redirected `TMPDIR` — 35 spawns for a
+property one spawn settles would be the wrong trade — and the leftovers are attributed back
+per file with the BLZ-491 registry, so each covered suite still gets its own named test.
+Reverting the cleanup in one suite reddens the test that names that suite and nothing else;
+verified on `init.test.mjs`, `serve-identity.test.mjs` and `board-overstatement-guards.test.mjs`.
+Non-vacuity is asserted first, because an ignored `TMPDIR` and a run that executed nothing
+both leave an empty box, and a leftover the proof cannot place on a covered suite fails its
+own test rather than being dropped.
+
+Adding a suite to that list is how a suite opts in; nothing there polices a suite that is
+not on it.
 
 ## Mutation testing is scoped
 
