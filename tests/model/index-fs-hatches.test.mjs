@@ -15,9 +15,15 @@ import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { buildIndex, missingClaimErrors } from "../../scripts/model/index.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function board({ withClaim = true, duplicate = false } = {}) {
-  const root = mkdtempSync(join(tmpdir(), "blaze-hatch-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-hatch-")));
   const projects = join(root, "projects");
   mkdirSync(join(projects, "BLZ", "defined"), { recursive: true });
   mkdirSync(join(projects, "BLZ", ".ids"), { recursive: true });

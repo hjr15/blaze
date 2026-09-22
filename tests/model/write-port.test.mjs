@@ -17,9 +17,15 @@ import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mjs";
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
 import { memStorage } from "../../scripts/model/storage.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, selectWritePort, valueDiff,
          ticketValue, WRITE_PORT_ENV, COLUMN_FIELDS,
          extraFields } from "../../scripts/model/write-port.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const PG = process.env.BLAZE_TEST_PG_URL ?? null;
 
@@ -52,7 +58,7 @@ describe("the default is the filesystem, and it is unchanged", () => {
   });
 
   test("the fs port writes a real file at the path authority's location", () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-wp-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-wp-")));
     const port = fsWritePort(dir);
     const { file } = port.write(TICKET());
     assert.ok(existsSync(file), "a real file must appear");
@@ -61,7 +67,7 @@ describe("the default is the filesystem, and it is unchanged", () => {
   });
 
   test("an existing ticket keeps its filename — edit has never renamed one", () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-wp-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-wp-")));
     const port = fsWritePort(dir);
     const { file } = port.write(TICKET());
     const t = TICKET();
@@ -71,7 +77,7 @@ describe("the default is the filesystem, and it is unchanged", () => {
   });
 
   test("move relocates by the path authority, never by arithmetic on the handle", () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-wp-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-wp-")));
     const port = fsWritePort(dir);
     const { file } = port.write(TICKET());
     const t = { ...TICKET(), status: "in-progress", currentFile: file };
@@ -156,7 +162,7 @@ describe("dual-write proves the two agree, and CATCHES it when they do not", () 
   const ctx = { readStorage: fsReadStorage };
 
   function dual(opts = {}) {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-dual-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dual-")));
     const primary = fsWritePort(dir);
     const shadow = dbWritePort(sqliteExec());
     return { port: dualWritePort(primary, shadow, opts), dir, shadow };
@@ -176,7 +182,7 @@ describe("dual-write proves the two agree, and CATCHES it when they do not", () 
   });
 
   test("an injected divergence IS caught — the comparison is not decorative", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-dual-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dual-")));
     const shadow = dbWritePort(sqliteExec());
     // A shadow that quietly drops the body: the exact class of bug dual-write exists for.
     const lying = { ...shadow, write: (t) => shadow.write({ ...t, body: "" }) };
@@ -187,7 +193,7 @@ describe("dual-write proves the two agree, and CATCHES it when they do not", () 
   });
 
   test("a divergence does NOT fail the verb by default — the safety net is not the outage", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-dual-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dual-")));
     const shadow = dbWritePort(sqliteExec());
     const lying = { ...shadow, write: (t) => shadow.write({ ...t, body: "" }) };
     const port = dualWritePort(fsWritePort(dir), lying);
@@ -196,7 +202,7 @@ describe("dual-write proves the two agree, and CATCHES it when they do not", () 
   });
 
   test("strict mode turns a divergence into a throw, for the pre-cutover soak", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-dual-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dual-")));
     const shadow = dbWritePort(sqliteExec());
     const lying = { ...shadow, write: (t) => shadow.write({ ...t, body: "" }) };
     const port = dualWritePort(fsWritePort(dir), lying, { strict: true });
@@ -204,7 +210,7 @@ describe("dual-write proves the two agree, and CATCHES it when they do not", () 
   });
 
   test("a shadow that THROWS never takes the primary down with it", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-dual-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dual-")));
     const exploding = { name: "boom", write() { throw new Error("shadow is on fire"); },
                         move() { throw new Error("shadow is on fire"); },
                         read() { return null; }, close() {} };
@@ -215,7 +221,7 @@ describe("dual-write proves the two agree, and CATCHES it when they do not", () 
   });
 
   test("every divergence reaches the callback, not just the count", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-dual-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-dual-")));
     const shadow = dbWritePort(sqliteExec());
     const lying = { ...shadow, write: (t) => shadow.write({ ...t, body: "" }) };
     const seen = [];
@@ -337,7 +343,7 @@ describe("frontmatter that is not a column still round-trips (BLZ-295)", () => {
     // comparison must say so rather than quietly normalising it away. Every one of the
     // 2,562 live tickets carries an assignee, which is why the soak sees this zero
     // times; a hand-built ticket that omits it would surface here.
-    const dir = mkdtempSync(join(tmpdir(), "blaze-default-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-default-")));
     const port = dualWritePort(fsWritePort(dir), dbWritePort(sqliteExec()));
     const t = RICH();
     delete t.frontmatter.assignee;
@@ -347,7 +353,7 @@ describe("frontmatter that is not a column still round-trips (BLZ-295)", () => {
   });
 
   test("a full-fidelity write diverges on nothing against the filesystem", async () => {
-    const dir = mkdtempSync(join(tmpdir(), "blaze-rich-"));
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-rich-")));
     const port = dualWritePort(fsWritePort(dir), dbWritePort(sqliteExec()), { strict: true });
     await port.write(RICH(), { readStorage: fsReadStorage });
     assert.deepEqual(port.divergences, []);

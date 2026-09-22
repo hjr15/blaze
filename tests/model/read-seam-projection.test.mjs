@@ -14,6 +14,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
 import { loadCorpus } from "../../scripts/migrate/load-corpus.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // Every frontmatter key a ticket can carry, with a distinctive value for each.
 const FULL = {
@@ -27,7 +33,7 @@ const FULL = {
 };
 
 function loaded() {
-  const dir = mkdtempSync(join(tmpdir(), "seam-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "seam-")));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   // BLZ-2 must EXIST or `loadCorpus`'s pass-two link insert is skipped — the trap that made an
   // earlier measurement of this gap report `links` as unsurfaced when it always was surfaced.
@@ -95,7 +101,7 @@ test("NOTHING a ticket can carry is silently dropped — the whole point of BLZ-
 test("a ticket carrying none of the optional fields still round-trips cleanly", () => {
   // The widening must not invent values for a sparse ticket — 2,590 of the live corpus carry
   // no dates at all, and an empty child table must read as empty, not as undefined.
-  const dir = mkdtempSync(join(tmpdir(), "seam-min-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "seam-min-")));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-9.md"),
     "---\nid: BLZ-9\ntitle: bare\ntype: task\nproject: BLZ\n---\nb\n");
@@ -119,7 +125,7 @@ test("REVIEW D1 — a worklog entry with NO note round-trips WITHOUT one", () =>
   // tickets. Measured: 691 of 1,700 live worklog entries carry no `note` key at all.
   //
   // write-port.mjs:326 already had this right; the two new drivers did not.
-  const dir = mkdtempSync(join(tmpdir(), "seam-note-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "seam-note-")));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
     "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\n"
@@ -160,7 +166,7 @@ test("REVIEW D5/D6 — the write port persists not_before/deadline, and NOT into
 // fix is to round at the writers rather than to weaken the column.
 
 test("REVIEW — a fractional worklog `minutes` does not break the load under STRICT", () => {
-  const dir = mkdtempSync(join(tmpdir(), "frac-w-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "frac-w-")));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
     "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\n"
@@ -183,7 +189,7 @@ test("REVIEW — BOTH writers give the SAME answer for a non-storable estimate",
     assert.equal(storableEstimate(input), want, `storableEstimate(${input})`);
   }
   // And the mirror really uses it: a non-storable estimate lands as NULL, not as an invention.
-  const dir = mkdtempSync(join(tmpdir(), "est-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "est-")));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
     "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\nestimate: 7\n---\nb\n");
@@ -198,7 +204,7 @@ test("REVIEW — a worklog entry that rounds to zero is COUNTED, not silently dr
   // inserted cleanly and asserted only that `insertFailed` was an array. It passed pre-fix.
   // load-corpus.mjs's header promises "nothing is silently dropped — every skip is counted and
   // named", and Math.round(0.4) is 0.
-  const dir = mkdtempSync(join(tmpdir(), "drop-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "drop-")));
   mkdirSync(join(dir, "BLZ", "defined"), { recursive: true });
   writeFileSync(join(dir, "BLZ", "defined", "BLZ-1.md"),
     "---\nid: BLZ-1\ntitle: t\ntype: task\nproject: BLZ\n"

@@ -17,9 +17,15 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { addUser, parseUserArgv, ensureIdentityIgnored } from "../scripts/model/user-admin.mjs";
 import { identityDbPath, loadIdentity } from "../scripts/model/identity-db.mjs";
 import { TOKEN_PREFIX } from "../scripts/model/identity.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "cli.mjs");
-const boardRoot = () => mkdtempSync(join(tmpdir(), "blaze-useradd-"));
+const boardRoot = () => scratch(mkdtempSync(join(tmpdir(), "blaze-useradd-")));
 
 describe("blaze user add creates a user and issues its token", () => {
   test("the first user is created through the ordinary path and gets a `blz_` token",

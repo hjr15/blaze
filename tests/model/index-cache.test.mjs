@@ -6,9 +6,15 @@ import { mkdtempSync, mkdirSync, writeFileSync, utimesSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { walkTickets, buildIndex } from "../../scripts/model/index.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-cache-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-cache-")));
   mkdirSync(join(dir, "T", "todo"), { recursive: true });
   writeFileSync(join(dir, "T", "todo", "T-1.md"),
     "---\nid: T-1\ntitle: one\ntype: task\nproject: T\nestimate: 5\n---\nbody\n");

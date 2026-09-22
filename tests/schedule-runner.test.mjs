@@ -14,12 +14,18 @@ import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(REPO, "scripts", "cli.mjs");
 
 function board(tickets) {
-  const root = mkdtempSync(join(tmpdir(), "sched-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "sched-")));
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ schema_version: 2, projects: ["TST"] }));
   mkdirSync(join(root, "projects", "TST", "defined"), { recursive: true });
   mkdirSync(join(root, "projects", "TST", "done"), { recursive: true });

@@ -11,8 +11,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 import { slugify, ticketPath, fsStorage, memStorage } from "../../scripts/model/storage.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
 
-const root = () => mkdtempSync(join(tmpdir(), "blaze-storage-"));
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
+
+const root = () => scratch(mkdtempSync(join(tmpdir(), "blaze-storage-")));
 
 test("slugify matches the shape the corpus already uses", async () => {
   assert.equal(slugify("Top-level schema.types override ignored"), "top-level-schema-types-override-ignored");
@@ -125,7 +131,7 @@ import { applyMove } from "../../scripts/move.mjs";
 import { applyLog } from "../../scripts/log.mjs";
 
 function board() {
-  const d = mkdtempSync(join(tmpdir(), "blaze-seam-"));
+  const d = scratch(mkdtempSync(join(tmpdir(), "blaze-seam-")));
   execFileSync("git", ["-C", d, "init", "-q"]);
   mkdirSync(join(d, "projects", "BLZ"), { recursive: true });
   writeFileSync(join(d, "blaze.config.json"), JSON.stringify({

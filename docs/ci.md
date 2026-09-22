@@ -212,6 +212,47 @@ propagates is torn down, in reverse, with every teardown attempted and the first
 rethrown. The scanner cannot see cleanup inside a helper, so
 `tests/driver-setup-teardown.test.mjs` is the check that stands in its place.
 
+### A scratch directory is removed by the file that minted it
+
+The same rule again, one level down from the scanner: a suite that mints
+`mkdtempSync(join(tmpdir(), …))` and removes nothing leaves a directory per test per run.
+BLZ-491 fixed one such suite. BLZ-503 measured the rest, against `c355b9c`, by pointing
+`TMPDIR` at an empty directory and running the whole suite once:
+
+| | leftover directories in one full run |
+|---|---|
+| `c355b9c` (before) | **299**, from 56 `mkdtempSync` call sites in 34 test files |
+| after BLZ-503 | **0** |
+
+Worst offenders were `seam-` (29), `ofc-` (23), `blaze-readseam-` (22), `blaze-init-` (20)
+and `blaze-identity-` (18). The older per-machine figures — tens of thousands — are the
+same leak counted across weeks of accumulated runs rather than per run; the per-run number
+is the one a fix can move, so it is the one recorded here.
+
+[`tests/helpers/scratch.mjs`](../tests/helpers/scratch.mjs) is the fix, and it is BLZ-491's
+own shape extracted: a file-level list of everything minted plus one `after()` hook that
+empties it. A per-call `t.after()` does not reach these, because almost every site is inside
+a per-file seed helper that no test handle is passed to.
+
+```js
+import { scratchRegistry } from "./helpers/scratch.mjs";
+const scratch = scratchRegistry();
+const dir = scratch(mkdtempSync(join(tmpdir(), "seam-")));
+```
+
+**The wrapper goes outside `mkdtempSync`, never inside.** `tests/tmp-scratch-attribution.test.mjs`
+reads the prefix statically so a leftover directory still names the suite that made it;
+moving the prefix into a variable to shorten the line passes locally and reddens that guard
+on merge.
+
+Nothing here sweeps `/tmp`. The registry removes only paths it was handed, which is the
+whole of the destructive surface — a glob-based cleaner over a shared `/tmp` is the blast
+radius BLZ-394 is about.
+
+The proof is `tests/scratch-cleanup.test.mjs`, which runs the three worst suites in a child
+under a redirected `TMPDIR` and asserts the box is empty afterwards — the only way an
+`after()` hook can be observed from outside.
+
 ## Mutation testing is scoped
 
 `node scripts/ci/mutate-schedule.mjs` is **not** a whole-repo mutation gate, and reading

@@ -5,13 +5,19 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { startServer } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // BLZ-133: startServer no longer falls back to the ambient engine tree when no
 // board is given — serving a board that doesn't exist is now a loud failure
 // rather than an empty page. These tests only assert bind behaviour, so they
 // serve a real, empty board.
 const BOARD = (() => {
-  const d = mkdtempSync(join(tmpdir(), "blaze-servehost-"));
+  const d = scratch(mkdtempSync(join(tmpdir(), "blaze-servehost-")));
   mkdirSync(join(d, "projects"), { recursive: true });
   return d;
 })();

@@ -4,10 +4,16 @@ import { readFileSync, writeFileSync, existsSync, mkdtempSync, mkdirSync } from 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchRegistry } from "../helpers/scratch.mjs";
 import { pageHtml } from "../../scripts/serve.mjs";  // re-exported from page.mjs after Task 7
 
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
+
 function fixture() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-golden-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-golden-")));
   mkdirSync(join(dir, "T", "todo"), { recursive: true });
   mkdirSync(join(dir, "T", "in-review"), { recursive: true });
   writeFileSync(join(dir, "T", "todo", "T-1.md"),

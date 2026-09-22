@@ -16,8 +16,14 @@ import { resolveWritePort, openShadow, logDivergence, shadowDbPath,
 import { createDbSchemaSync } from "../scripts/model/db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "../scripts/model/config-schema.mjs";
 import { SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
-const root = () => mkdtempSync(join(tmpdir(), "blaze-wpr-"));
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
+
+const root = () => scratch(mkdtempSync(join(tmpdir(), "blaze-wpr-")));
 
 async function seededBoard() {
   const dataRoot = root();

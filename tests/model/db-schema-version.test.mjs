@@ -20,10 +20,16 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync, metaDdl,
          DB_SCHEMA_VERSION, MIN_DB_SCHEMA_VERSION } from "../../scripts/model/db-schema-version.mjs";
 
-const tmpDb = () => join(mkdtempSync(join(tmpdir(), "blaze-ver-")), "b.db");
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
+
+const tmpDb = () => join(scratch(mkdtempSync(join(tmpdir(), "blaze-ver-"))), "b.db");
 
 /** A database as an OLDER engine would have left it: real schema, no stamp. */
 function staleDb(path) {

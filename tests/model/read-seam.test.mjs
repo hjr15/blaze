@@ -16,9 +16,15 @@ import { join, dirname } from "node:path";
 
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function seedFs() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-readseam-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-readseam-")));
   const put = (status, name, body) => {
     mkdirSync(join(dir, "BLZ", status), { recursive: true });
     writeFileSync(join(dir, "BLZ", status, name), body);
@@ -208,7 +214,7 @@ import { applyResolve } from "../../scripts/resolve.mjs";
 import { execFileSync } from "node:child_process";
 
 function boardWithDuplicate() {
-  const root = mkdtempSync(join(tmpdir(), "blaze-dupe-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-dupe-")));
   execFileSync("git", ["-C", root, "init", "-q"]);
   writeFileSync(join(root, "blaze.config.json"),
     JSON.stringify({ projects: [{ key: "BLZ", name: "Blaze" }] }));
@@ -253,7 +259,7 @@ test("BLZ-271: a non-fs handle now throws instead of producing a bogus destinati
 
 test("BLZ-271: a real move still lands in the right directory with its filename intact", async () => {
   const { projectsDir } = (() => {
-    const root = mkdtempSync(join(tmpdir(), "blaze-reloc-"));
+    const root = scratch(mkdtempSync(join(tmpdir(), "blaze-reloc-")));
     execFileSync("git", ["-C", root, "init", "-q"]);
     writeFileSync(join(root, "blaze.config.json"),
       JSON.stringify({ projects: [{ key: "BLZ", name: "Blaze" }] }));

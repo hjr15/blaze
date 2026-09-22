@@ -1,6 +1,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { neighbourhood, layoutNeighbourhood, graphModel } from "../../scripts/model/graph.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // Index shim: rows + links, get() by id.
 function fullIdx(rows, links = []) {
@@ -177,7 +183,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 function fixtureDir() {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-nb-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-nb-")));
   mkdirSync(join(dir, "A", "todo"), { recursive: true });
   writeFileSync(join(dir, "A", "todo", "A-1.md"),
     "---\nid: A-1\ntitle: one\ntype: task\nproject: A\nlinks:\n  - { type: Blocks, target: A-2 }\n---\nbody\n");

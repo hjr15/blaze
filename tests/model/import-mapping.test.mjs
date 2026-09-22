@@ -18,11 +18,17 @@ import {
   loadMapping, bindMapping, mapRows, applyTransform,
   readSourceIds, openSourceIds, appendPair, nameFromReceiptPath,
 } from "../../scripts/model/import-mapping.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 const HEADER = ["Issue key", "Summary", "Issue Type", "Status", "Priority", "Story Points", "Reporter"];
 
 function tmp(t) {
-  const root = mkdtempSync(join(tmpdir(), "blaze-mapping-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-mapping-")));
   t.after(() => { try { chmodSync(join(root, SOURCE_IDS_DIR), 0o755); } catch { /* not there */ } });
   return root;
 }

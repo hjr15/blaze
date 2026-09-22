@@ -9,6 +9,12 @@ import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
 import { loadCorpus } from "../../scripts/migrate/load-corpus.mjs";
 import { importTransitions } from "../../scripts/migrate/import-transitions.mjs";
 import { zeroDiff } from "../../scripts/migrate/zero-diff.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 // BLZ-391 closed the gap this list existed for: the read seam projected 15 of a ticket's 28
 // frontmatter keys and now projects all of them. The list is kept, EMPTY, rather than deleted —
@@ -20,7 +26,7 @@ const doc = (fm, body = "body") =>
   ["---", ...Object.entries(fm).map(([k, v]) => `${k}: ${v}`), "---", "", body, ""].join("\n");
 
 function board(list) {
-  const dir = mkdtempSync(join(tmpdir(), "blaze-mig-"));
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blaze-mig-")));
   for (const t of list) {
     mkdirSync(join(dir, "BLZ", t.status), { recursive: true });
     writeFileSync(join(dir, "BLZ", t.status, `${t.id}-x.md`), t.text);

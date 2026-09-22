@@ -33,9 +33,15 @@ import { identityStore } from "../scripts/model/identity-store.mjs";
 import { identityDbPath, openIdentityDb, loadIdentity } from "../scripts/model/identity-db.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { startServer } from "../scripts/serve.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
 
 function board() {
-  const root = mkdtempSync(join(tmpdir(), "blaze-resil-"));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-resil-")));
   const projects = join(root, "projects");
   mkdirSync(join(projects, "OBA", "defined"), { recursive: true });
   writeFileSync(join(projects, "OBA", "defined", "OBA-1.md"),

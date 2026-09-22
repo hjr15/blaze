@@ -18,8 +18,14 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { planInit, questions, testConnection, OFFERED_DRIVERS } from "../scripts/init.mjs";
 import { parseArgs, runInit } from "../scripts/init-runner.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
-const dir = () => join(mkdtempSync(join(tmpdir(), "blaze-init-")), "board");
+// BLZ-503: every scratch directory this file mints, removed when the file is done with
+// it. Registered rather than written as a test's trailing statement, so a failing
+// assertion earlier in the test cannot skip it.
+const scratch = scratchRegistry();
+
+const dir = () => join(scratch(mkdtempSync(join(tmpdir(), "blaze-init-"))), "board");
 const silent = { isTTY: false, log: () => {}, err: () => {} };
 const capture = () => {
   const out = [];
