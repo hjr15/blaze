@@ -182,6 +182,11 @@ export function discardSandbox(sandbox, repo = REPO) {
   rmSync(s, { recursive: true, force: true });
 }
 
+/** The files a run mutates, in the order `docs/ci.md` names them. Exported because that page
+ *  quotes the scope in prose and BLZ-523 registers the sentence against this list, so a
+ *  third target cannot be added while the page still says two. */
+export const MUTATION_TARGETS = [SOLVE, AUDIT];
+
 export const MUTATIONS = [
   { n: 1, file: AUDIT, name: "EF > deadline flipped to EF >= deadline",
     from: "if (!row.deadline || !(row.due_date > row.deadline)) continue;",

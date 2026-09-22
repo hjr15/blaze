@@ -904,8 +904,10 @@ const SEAM_WRITE_PROVIDERS = new Map([
     { writes: ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored"], sanctioned: [],
       inert: ["SETUP_TOKEN_PREFIX", "setupTokenPath", "readSetupToken", "setupTokenMatches",
         "_existsSync"] }],
+  // `MUTATION_TARGETS` (BLZ-523) is two path STRINGS, read by `scripts/ci/quoted-sources.mjs`
+  // to check that docs/ci.md still names the files this runner mutates. It reaches no write.
   ["ci/mutate-schedule.mjs", { writes: ["createSandbox", "discardSandbox"], sanctioned: [],
-    inert: ["SANDBOX_CONTENTS", "MUTATIONS"] }],
+    inert: ["SANDBOX_CONTENTS", "MUTATIONS", "MUTATION_TARGETS"] }],
   // BLZ-603 (#170), caught by this guard on the rebase: the only write is `--write` in the
   // CLI block, re-recording the debt ratchet beside the module. No export reaches it.
   ["ci/temp-cleanup-guard.mjs", { writes: [], sanctioned: [],

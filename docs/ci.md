@@ -365,6 +365,56 @@ it through. Two things to be clear about:
   not the thing that ships. A mutation runner that can delete the working tree on a bad
   refactor is worse than the race BLZ-472 removed.
 
+## A doc quote can opt in to being checked
+
+Docs quote the product — an exact CLI string, a count the code determines, the two files the
+mutation runner actually touches — and those sentences rot silently. BLZ-523's registry is
+the mechanism for that, and the shape of it was decided by ruling the obvious one out first.
+
+**A corpus-wide grep does not work here.** Investigated on 2026-08-30 against the real
+evidence: four sites quoted a stale figure while **two more quoted the same class of figure
+correctly**, pinned to the commit they were measured at. No grep separates those two
+populations, because the difference is not in the text — one is a claim about today, the
+other is history. A guard that cannot tell them apart fires on the correct ones, collects
+exceptions, and is excepted into uselessness.
+
+So the scope is a hand-written registry in
+[`scripts/ci/quoted-sources.mjs`](../scripts/ci/quoted-sources.mjs). An entry names the doc,
+the quote, a **deriver** that says what the source of truth reads right now, and *why* the
+quote is load-bearing. `tests/quoted-sources.test.mjs` gives every entry its own named test.
+Nothing outside the registry is touched — including quotes that are demonstrably stale —
+and that is proved by watching which files the checker opens, not by reading its silence as
+evidence.
+
+| Property | How it is held |
+|---|---|
+| a rotted quote fails | a test **named for the entry** goes red, saying what the source reads now |
+| reformatting cannot defeat it | both sides go through `normaliseQuote` — whitespace, newlines, `**bold**` and backticks are forgiven, a changed **word** is not |
+| a quote that LEFT the doc fails | `missing` is red. "If I find it, check it" reports clean exactly when the sentence was rewritten |
+| unregistered quotes are untouched | the checker opens only the docs the registry names |
+
+**Figures are in scope; SHA-pinned figures are not.** This boundary is deliberate — both
+already-fixed sibling tickets were figures, so it would otherwise have been set by accident.
+The distinction is what the sentence *claims*, not whether it is a number:
+
+- *"455 sites across 65 files"* is a claim about HEAD. It rots on the next commit that adds
+  a test file. **In scope**, and registered.
+- *"330 tests in `tests/reconcile-*.test.mjs` on `0c76712`"* (ADR-0030) is a measurement
+  reported with the commit it was taken at. It was true then and it is true now.
+  **Out of scope** — registering it would force a true sentence to change every time the
+  tree moves, which is the opposite of the point.
+
+Pinning a measurement to a SHA is therefore the cheaper remedy and stays the first thing to
+reach for, per [ADR-0024](decisions/0024-audit-and-the-load-path-agree-on-a-malformed-schema-override.md).
+The registry is for the quotes that cannot use it. A registered quote carrying a commit is
+refused outright, by `SHA_PIN`, so the two remedies cannot be confused.
+
+Registering a quote is two lines and is the only way anything becomes checked:
+
+```bash
+node scripts/ci/quoted-sources.mjs   # report every entry's status
+```
+
 ## Triage: is a red gate real or transient?
 
 The job is structured so the failing **step** tells you which:
