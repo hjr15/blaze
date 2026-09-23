@@ -50,8 +50,23 @@ actually missing.
   `coverage.mjs`, `gates.mjs`, `wording-lint.mjs`, `matrix.mjs`, `ref-allocator.mjs`,
   `staleness.mjs` — all merged (BLZ-310–320, 330–337).
 - `ticketValue()` / `canonical()` in `write-port.mjs` — a value-level ticket comparator,
-  already built for dual-write divergence detection. §4 reuses it as the migration
-  oracle rather than building a second comparator.
+  already built for **ongoing dual-write divergence detection** (ticket-by-ticket, live).
+- **`blaze db init`** (BLZ-299/BLZ-280, `scripts/db-runner.mjs` + `scripts/migrate/load-corpus.mjs`)
+  — a shipped, tested CLI command that loads the entire live corpus into a shadow SQLite
+  database, tallies tickets/links/criteria/worklog/labels/components, names every
+  substitution and skip explicitly, and its own log output already instructs "Now run the
+  board with `BLAZE_WRITE_PORT=dual` to soak it." §3 and §4 execute this, not build it.
+- **`scripts/migrate/zero-diff.mjs`** (BLZ-281) — the **one-time migration-correctness
+  oracle**, already built and already doing exactly what §4 originally proposed building:
+  it separates `valueDiffs` (data loss — must be zero) from `byteDiffs` (field-order noise
+  — informational), citing the same 137-of-2,534 field-order finding BLZ-254's AC names.
+  It is not wired to a CLI command yet — see §4.
+- **`scripts/model/ac-blocks.mjs` + `scripts/migrate/ac-oracle-matcher.mjs`** (BLZ-296,
+  merged `fdefca0`) — the case-insensitive AC-heading matcher this document's first draft
+  called "still needed." It is not: `HEADING_EXACT` already matches any casing and 1–3
+  heading levels, and `ac-oracle-matcher.mjs` is a **second, independent** matcher
+  instance the importer doesn't share — satisfying BLZ-253's own "different matcher on
+  each side" requirement already.
 
 **A correction made during this brainstorm, recorded so it isn't repeated:** the
 `blaze` engine repo carries two local, unpushed, never-merged branches
@@ -64,29 +79,39 @@ plus `BLZ-308-v4-fields-baselines-api` (zero commits beyond what's already on `m
 are superseded duplicates of already-shipped work. **Delete all three** — there is
 nothing in them not already on `main` in a better form.
 
-**A pattern worth naming, not just working around:** this is the second time in this
-session that board ticket status materially lagged real code state on `main` — first the
-three stale branches (initially misread as the opposite: done-on-board, unmerged-in-code;
-actually done-on-board, done-and-superseded-in-code, just via different commits), second
-BLZ-253 ("Phase 1", board status `in-progress`) whose own worklog and the schema files
-above show its storage-adapter deliverables are substantially complete. **Recommend a
-board-vs-`main` reconciliation pass for BLZ-253 and BLZ-310–320 as a small tracked item**
-(§8) rather than treating this document's read of `main` as the reconciliation itself —
-a reconciliation is a board-write action and belongs with `blaze-board-operator`, not with
-a design document.
+**A pattern worth naming, not just working around — this happened three times in one
+session, not one:** board/ticket status materially lagged real code state on `main`
+every time this document's own author checked. (1) The three stale branches — initially
+misread as the opposite of their true state: actually done-on-board, done-and-superseded-
+in-code via different commits, not unmerged. (2) BLZ-253 ("Phase 1", board status
+`in-progress`), whose storage-adapter deliverables are substantially complete. (3) **This
+document's own first draft** claimed the migration script, the oracle, and the AC-heading
+fix were "not yet built" — all three already exist, merged, tested (BLZ-280/281/296), and
+were found only because a second research pass happened to grep for them before the plan
+shipped. **Recommend a board-vs-`main` reconciliation pass for BLZ-253 and BLZ-310–320 as
+a small tracked item** (§8) rather than treating this document's read of `main` as the
+reconciliation itself — a reconciliation is a board-write action and belongs with
+`blaze-board-operator`, not with a design document. Anyone executing the plan this
+document leads to should independently re-verify §2's tables against `main` before
+trusting them, rather than compounding a fourth instance of the same pattern.
 
-**Not yet built — this is what BLZ-254 actually still requires:**
+**Not yet built — this is what BLZ-254 actually still requires, corrected against the
+real inventory above:**
 
-1. The dual-write soak has not been run against production traffic.
-2. No migration script exists to move the live 2,497-ticket corpus into the `ticket`
-   table (distinct from BLZ-309/324's requirement/architecture-into-artifact migration).
-3. The migration-correctness oracle is broken as specified (empty `git diff`) and unfixed.
-4. `missingClaimErrors()` / its `errors` channel in `buildIndex` (`index.mjs:137-162`)
+1. The dual-write soak has not been *run* against production traffic — the mechanism
+   (`blaze db init`, `BLAZE_WRITE_PORT=dual`) is built; only the operational run and its
+   recorded evidence are missing.
+2. `zero-diff.mjs`'s oracle is not wired to a CLI command or run against the live corpus
+   — the oracle logic itself is built; what's missing is a driver invoking it against
+   `blaze db init`'s shadow database and the real corpus, and recording the result.
+3. `missingClaimErrors()` / its `errors` channel in `buildIndex` (`index.mjs:137-162`)
    still exists and is still called from the read path.
-5. `commit-lock.mjs`, the pending ledgers, `claims.mjs` (the three-layer id allocator),
+4. `commit-lock.mjs`, the pending ledgers, `claims.mjs` (the three-layer id allocator),
    `commit-or-queue.mjs`, and the daily squash-flush CronJob are all still live.
-6. The six governance scripts are still bespoke Python/JS with no DB-backed successor.
-7. `.blaze/pending/` has not been flushed ahead of a migration.
+5. The six governance scripts are still bespoke Python/JS with no DB-backed successor.
+6. `.blaze/pending/` has not been flushed ahead of a migration.
+7. BLZ-309/324's artifact-migration script (`migrateArtifacts`) does not exist yet —
+   confirmed by search; unlike items 1–2, this one genuinely has no prior art.
 
 ## 3. The dual-write soak
 
@@ -110,30 +135,35 @@ queue is measuring divergence against an incomplete baseline.
 
 ## 4. Migration-correctness oracle
 
-**Replace "empty `git diff`" with value-level comparison via the existing
-`ticketValue()`/`canonical()` functions in `write-port.mjs`.** These already normalize
-field order and treat `links` as an unordered set of `(type, target)` pairs. They are not
-new: BLZ-295's prior soak already exercised this exact comparator against real production
-data and found the eight-field gap fixed in §2's schema — it is proven against the live
-corpus's actual shape, even though §3's forthcoming soak (using the *current* schema) has
-not yet run. Reusing it here means the migration oracle and the soak's own pass/fail check
-are the *same* code, not two comparators that can silently disagree with each other.
+**Use the existing `scripts/migrate/zero-diff.mjs` (BLZ-281), not a new comparator.**
+This document's first draft proposed building a value-level comparator to replace "empty
+`git diff`" — that comparator already exists, already separates `valueDiffs` (data loss,
+must be zero) from `byteDiffs` (field-order noise, informational), and already cites the
+same 137-of-2,534 finding BLZ-254's own AC names. It also already accepts an optional
+`criteriaFor` callback that compares acceptance criteria using
+`ac-oracle-matcher.mjs` — a matcher **independently written from the importer's** (per
+BLZ-253's AC requirement that the two sides of the oracle not share a blind spot), and
+the underlying case-insensitive heading match (BLZ-296, `ac-blocks.mjs`'s `HEADING_EXACT`)
+is also already merged. There is no remaining parser defect gating this oracle — §2's
+correction on this point stands.
 
-This resolves the 137-of-2,534-tickets field-order failure named in both BLZ-254's AC and
-BLZ-253's AC (`serializeTicket` normalizes to `FIELD_ORDER`; on-disk files preserve
-authored order — a byte diff was never going to pass, independent of migration
-correctness) and BLZ-253's separate, still-open case-sensitive AC-heading-match defect
-(153 tickets spell `## Acceptance criteria` lower-case; a case-sensitive importer drops
-their AC content silently, and a byte-diff oracle would not catch it even if the field-
-order problem were fixed). **Both defects must be fixed in the shared parser/serializer
-before the oracle is trustworthy — fixing only the comparator and not the 153-ticket
-parsing gap would make the oracle pass while silently dropping data**, which is the exact
-failure mode BLZ-253's AC was written to prevent.
+**What's actually missing is operational, not a parser fix:** `zero-diff.mjs` is proven
+by its own test suite (`ac-oracle.test.mjs`, `date-migration-oracle.test.mjs`,
+`oracle-field-coverage.test.mjs`, `transitions-and-oracle.test.mjs`) but has never been
+run as a driver script against the **real, current, full live corpus** loaded via
+`blaze db init` — only against fixtures and historical snapshots. §9's plan is: run
+`blaze db init` to load the live corpus into the shadow database, then call `zeroDiff()`
+with `fsReadStorage` as the source and the shadow database as `loaded`, over every ticket
+id, and assert `report.valueDiffs.length === 0`. `blaze audit` against the migrated
+corpus separately reports zero hard findings (BLZ-254's own AC).
 
-**Migration acceptance, concretely:** for every ticket in the pre-migration tree,
-`ticketValue(loadFromFilesystem(id)) === ticketValue(loadFromDatabase(id))`, run over the
-full corpus, zero mismatches, re-run after the AC-heading fix lands. `blaze audit` against
-the migrated corpus reports zero hard findings (BLZ-254's own AC).
+**`ticketValue()`/`canonical()` in `write-port.mjs` remain relevant, but for a different,
+narrower job:** they're the *live* dual-write divergence detector (§3, ongoing, one
+ticket at a time as writes happen), not the *one-time* corpus migration oracle (this
+section, `zero-diff.mjs`, run once against the whole corpus at migration time). Keeping
+these as two separate mechanisms is correct, not an inconsistency to resolve — they check
+different things at different times, and `zero-diff.mjs` already existing is exactly why
+this document doesn't need to build a second one that does the live-comparison job badly.
 
 ## 5. Concurrent-write guarantee and the fate of git-era mechanisms
 
@@ -176,10 +206,11 @@ BLZ-240.)
 Executes the companion design's §6 exactly as specified there, now that this document
 specifies its stated prerequisite. Sequenced **strictly after** §3's soak passes and the
 default flips (BLZ-309's own AC: "a document has no status directory, so the filesystem
-write port cannot represent it at all"). Uses the same `ticketValue`-style value
-comparison as §4, but against the derived matrix rather than the raw ticket — BLZ-324's
-own AC already specifies `diff` against `docs/matrices/requirements.md` as zero, which
-this document endorses rather than replaces.
+write port cannot represent it at all"). Confirmed via search (§2, item 7): unlike §4's
+oracle, no `migrateArtifacts`-shaped script exists yet — this is genuinely new work, not
+another instance of the pattern in §2. BLZ-324's own AC already specifies `diff` against
+`docs/matrices/requirements.md` as zero, which this document endorses rather than
+replaces.
 
 ## 8. Phase 5 — retirement
 
@@ -202,17 +233,19 @@ operator already settled.
 ## 9. Sequencing
 
 1. Flush `.blaze/pending/` (all machines).
-2. Fix the 153-ticket case-sensitive AC-heading parser gap (shared by BLZ-253's own AC).
-3. Run the dual-write soak, one week, zero divergences (§3).
-4. Migrate the corpus using the `ticketValue`-based oracle (§4); `blaze audit` clean.
-5. Flip the default write port; delete the six git-era mechanisms in one change (§5).
-6. Re-home the six governance scripts (§6) — can run in parallel with steps 3–5, since
+2. Run `blaze db init` against the live corpus; run the dual-write soak,
+   `BLAZE_WRITE_PORT=dual`, one week, zero divergences (§3).
+3. Run `zero-diff.mjs`'s oracle against the shadow database and the live corpus (§4);
+   zero `valueDiffs`; `blaze audit` clean.
+4. Flip the default write port; delete the six git-era mechanisms in one change (§5).
+5. Re-home the six governance scripts (§6) — can run in parallel with steps 2–4, since
    none of them depend on the cutover having landed.
-7. Migrate requirement/architecture tickets into the v4 artifact model (§7, BLZ-309/324).
-8. Execute the Phase 5 retirement criterion (§8); archive `blaze-pm`.
+6. Build `migrateArtifacts` and migrate requirement/architecture tickets into the v4
+   artifact model (§7, BLZ-309/324) — the one step in this sequence with no prior art.
+7. Execute the Phase 5 retirement criterion (§8); archive `blaze-pm`.
 
-Steps 1–5 are BLZ-254 itself. Step 6 is independent and may run earlier. Step 7 is
-BLZ-309/324, hard-blocked on step 5. Step 8 is Phase 5, hard-blocked on step 7 (the
+Steps 1–4 are BLZ-254 itself. Step 5 is independent and may run earlier. Step 6 is
+BLZ-309/324, hard-blocked on step 4. Step 7 is Phase 5, hard-blocked on step 6 (the
 corpus-diff criterion needs the v4 migration done to be meaningful for
 requirement/architecture tickets).
 
@@ -229,9 +262,10 @@ items surfaced during this brainstorm that aren't covered by an existing ticket:
 2. **Delete the three superseded local branches** in the `blaze` engine repo
    (`BLZ-306-v4-document-model`, `BLZ-307-v4-traceability-enforcement`,
    `BLZ-308-v4-fields-baselines-api`) — confirmed superseded, per §2.
-3. **Fix the 153-ticket case-sensitive AC-heading parser gap** — currently an open item
-   on BLZ-253's own AC, not new work, but worth calling out here since §4's oracle
-   depends on it being fixed before the oracle can be trusted.
+3. **Write a small operational driver script that runs `zero-diff.mjs`'s oracle against
+   `blaze db init`'s shadow database and the live corpus, and records the result** — the
+   oracle itself is built (§4); only this driver and its evidence record are missing.
+   Right-sized as a subtask of BLZ-254 rather than its own ticket.
 
 Whether to file (1) as a ticket now, or hand it directly to a `blaze-board-operator`
 dispatch without a ticket wrapper, is left to whoever executes this plan — both are
