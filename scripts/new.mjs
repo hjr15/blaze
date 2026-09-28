@@ -19,7 +19,19 @@ import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
 export async function applyNew(projectsDir, opts = {}) {
   const { project, type, title, priority = "medium", labels = [], today = null, extra = {},
           storage = fsStorage, readStorage = fsReadStorage,
-          writePort = fsWritePort(projectsDir, storage) } = opts;
+          // BLZ-667: the same allocator closure resolveWritePort's fs/dual branches build —
+          // duplicated deliberately (see write-port-resolve.mjs). `title` arrives at call time.
+          writePort = fsWritePort(projectsDir, storage, readStorage, {
+            allocate: async (proj, { title: t } = {}) => {
+              const root = dirname(projectsDir);
+              // null = the remote could not be read (stale view): the claim is provisional.
+              const remoteMax = remoteMaxClaim(root, proj);
+              const { id, n } = allocateId(projectsDir, proj, { dataRoot: root, remoteMax: remoteMax ?? 0 });
+              const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
+                                           { provisional: remoteMax === null });
+              return { id, n, claimFile };
+            },
+          }) } = opts;
   const pre = [];
   if (!project) pre.push("missing project (use --project <KEY>)");
   if (!isType(type)) pre.push(`unknown or missing type: ${type}`);
@@ -107,8 +119,11 @@ export async function applyNew(projectsDir, opts = {}) {
   // null = the remote could not be read, so this allocation is against a
   // possibly stale view. A numeric 0 means the remote WAS read and simply has no
   // claims yet — a known-empty set, not a stale one.
-  const remoteMax = remoteMaxClaim(dataRoot, project);
-  const { id, n } = allocateId(projectsDir, project, { dataRoot, remoteMax: remoteMax ?? 0 });
+  //
+  // BLZ-667: the allocation (and its claim) now sits behind the write port, so a db port
+  // can allocate from its own counter. The claim is therefore written as part of
+  // allocation — BEFORE the exists-check below, where it used to follow the write.
+  const { id, claimFile } = await writePort.allocate(project, { title });
   frontmatter.id = id;
 
   const target = { project, status, frontmatter, body };
@@ -116,11 +131,6 @@ export async function applyNew(projectsDir, opts = {}) {
     return { ok: false, errors: [`refusing to overwrite ${ticketPath(projectsDir, project, status, id, title)}`] };
   }
   const { file } = await writePort.write(target);
-  // The claim has to land WITH the ticket — new-runner stages both. A ticket
-  // that reaches upstream without its claim merges as silently as it did before
-  // this existed. remoteMax === 0 means the remote could not be read, so the
-  // allocation was made against a possibly stale view: mark it provisional.
-  const claimFile = writeClaim(projectsDir, project, n, slugify(title), { provisional: remoteMax === null });
   const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
   return { ok: true, id, type, project, status, file, claimFile, warnings };
 }

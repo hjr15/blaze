@@ -17,7 +17,9 @@ import { existsSync, mkdirSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
-import { fsStorage } from "./storage.mjs";
+import { fsStorage, slugify } from "./storage.mjs";
+import { allocateId } from "./ids.mjs";
+import { remoteMaxClaim, writeClaim } from "./claims.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write-port.mjs";
 import { resolveDatabaseConfig } from "./database-config.mjs";
 import { openPostgresClient } from "../init-pg.mjs";
@@ -160,6 +162,25 @@ export function readSoakState(dataRoot) {
 }
 
 /**
+ * The fs allocator `fsWritePort` is handed (BLZ-667): seed from the remote's published
+ * claims, reserve the next id, write the claim. `title` is a CALL-time argument — this
+ * port is built before `applyNew` knows the ticket's title. The same closure lives in
+ * `applyNew`'s default `writePort` (new.mjs); duplicated deliberately rather than shared,
+ * since a shared export would add a cross-module edge the seam guard must pin either way.
+ */
+function fsAllocator(projectsDir) {
+  return async (proj, { title: t } = {}) => {
+    const dataRoot = dirname(projectsDir);
+    // null = the remote could not be read (stale view): the claim is provisional.
+    const remoteMax = remoteMaxClaim(dataRoot, proj);
+    const { id, n } = allocateId(projectsDir, proj, { dataRoot, remoteMax: remoteMax ?? 0 });
+    const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
+                                 { provisional: remoteMax === null });
+    return { id, n, claimFile };
+  };
+}
+
+/**
  * The port a verb should write through, for this board and this environment.
  *
  * @returns { port, mode, close } — `close` releases the shadow database, and is a no-op
@@ -171,7 +192,8 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
                                          openPostgresClient: openPgClient = openPostgresClient } = {}) {
   const mode = (env[WRITE_PORT_ENV] ?? "fs").trim();
   if (mode === "fs") {
-    return { port: fsWritePort(projectsDir, storage), mode, close() {} };
+    return { port: fsWritePort(projectsDir, storage, undefined,
+                               { allocate: fsAllocator(projectsDir) }), mode, close() {} };
   }
   if (mode !== "dual" && mode !== "db") {
     throw new Error(
@@ -199,7 +221,9 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
   // fatal — refusing a legitimate write because a shadow disagreed would make the
   // safety net the outage.
   const report = onDivergence ?? ((d) => logDivergence(dataRoot, d));
-  const port = dualWritePort(fsWritePort(projectsDir, storage), db, { onDivergence: report });
+  const port = dualWritePort(
+    fsWritePort(projectsDir, storage, undefined, { allocate: fsAllocator(projectsDir) }),
+    db, { onDivergence: report });
   // Count every operation, so a week of "no divergences" can be told apart from a week
   // of the soak not running at all.
   const counted = {

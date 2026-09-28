@@ -16,7 +16,7 @@ import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mjs";
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
-import { memStorage } from "../../scripts/model/storage.mjs";
+import { memStorage, fsStorage } from "../../scripts/model/storage.mjs";
 import { scratchRegistry } from "../helpers/scratch.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, selectWritePort, valueDiff,
          ticketValue, WRITE_PORT_ENV, COLUMN_FIELDS,
@@ -421,4 +421,20 @@ describe("dbWritePort.allocate (BLZ-667)", () => {
     const rows = await exec.all("SELECT 1 AS hit FROM ticket WHERE id = ?", [id]);
     assert.equal(rows.length, 0, "a half-written ticket row survived a mid-sequence failure");
   });
+});
+
+// BLZ-667 Task 5: fsWritePort.allocate is an injected seam, `title` passed at CALL time —
+// resolveWritePort builds the port before the ticket's title is known.
+test("fsWritePort.allocate calls the injected function with project and title", async () => {
+  const calls = [];
+  const fakeAllocate = async (project, { title }) => { calls.push([project, title]); return { id: `${project}-9`, n: 9, claimFile: "/tmp/fake-claim" }; };
+  const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage, { allocate: fakeAllocate });
+  const result = await port.allocate("BLZ", { title: "A test ticket" });
+  assert.deepEqual(calls, [["BLZ", "A test ticket"]]);
+  assert.deepEqual(result, { id: "BLZ-9", n: 9, claimFile: "/tmp/fake-claim" });
+});
+
+test("fsWritePort.allocate with no injected function refuses clearly, not silently", async () => {
+  const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage);
+  await assert.rejects(() => port.allocate("BLZ", { title: "x" }), /no allocate function was injected/);
 });

@@ -1980,7 +1980,11 @@ const WRITE_ALLOWED = new Map([
   // the single place in the tree where D1's fail-closed arm fires on something innocent.
   // Named rather than tuned away: a rule loosened until this module goes quiet is a rule
   // loosened for every module.
-  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE, "fsStorage"]],
+  // BLZ-667: `allocateId` + `writeClaim` are fsWritePort's injected allocator (the id
+  // reservation and its claim file), on exactly `new.mjs`'s footing below. `remoteMaxClaim`
+  // and `slugify` are imported too but only read/compute, so they reach no write.
+  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE, "fsStorage",
+    "allocateId", "writeClaim"]],
   // `writeSync(2, ...)` — a partial-write loop onto STDERR, which is a terminal, not a file.
   // Named to that one member: a path-taking write appearing in the CLI still reddens.
   ["cli.mjs", ["writeSync"]],

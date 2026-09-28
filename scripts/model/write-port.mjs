@@ -73,10 +73,23 @@ export function ticketValue(rec) {
   };
 }
 
-/** Filesystem adapter — today's behaviour, byte for byte. */
-export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsReadStorage) {
+/**
+ * Filesystem adapter — today's behaviour, byte for byte.
+ *
+ * `allocate` is INJECTED, not imported: the allocator (ids.mjs + claims.mjs) is a
+ * git-common-dir reservation plus a claim-file write, and both real construction sites —
+ * `applyNew`'s default and `resolveWritePort`'s fs/dual branches — build it. `title` is a
+ * CALL-time argument because `resolveWritePort` builds this port before the ticket's
+ * title is known (BLZ-667: a construction-time closure broke `blaze new` outright).
+ */
+export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsReadStorage,
+                            { allocate } = {}) {
   return {
     name: "fs",
+    async allocate(project, opts = {}) {
+      if (!allocate) throw new Error("fsWritePort: no allocate function was injected");
+      return allocate(project, opts);
+    },
     write({ project, status, frontmatter, body, currentFile }) {
       const text = serializeTicket({ frontmatter, body });
       // An existing ticket keeps its filename: `blaze edit` has never renamed one, and
