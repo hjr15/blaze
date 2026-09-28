@@ -216,9 +216,21 @@ describe("the soak has a denominator (BLZ-300)", () => {
 });
 
 describe("resolveWritePort opens real Postgres when database.driver is postgres", () => {
+  // A fake client whose schema looks stamped at the current version — the tests below
+  // that need a REFUSAL build their own fake with a different answer to these same queries.
+  const stampedCurrentClient = () => ({
+    async query(sql) {
+      if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
+      if (sql.includes("blaze_meta")) return { rows: [{ value: "5" }] };
+      return { rows: [] };
+    },
+    async end() {},
+  });
+
   test("resolveWritePort opens Postgres when configured, not the SQLite shadow", async () => {
     const calls = [];
-    const fakeOpenPostgresClient = async (conn) => { calls.push(conn); return { query: async () => ({ rows: [] }), end: async () => {} }; };
+    const client = stampedCurrentClient();
+    const fakeOpenPostgresClient = async (conn) => { calls.push(conn); return client; };
     const { port, mode, close } = await resolveWritePort({
       dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
       env: { BLAZE_WRITE_PORT: "db" },
@@ -229,6 +241,48 @@ describe("resolveWritePort opens real Postgres when database.driver is postgres"
     assert.equal(calls.length, 1);
     assert.equal(port.name, "db");
     await close();
+  });
+
+  test("an empty Postgres database is refused, not silently written through", async () => {
+    const ended = [];
+    const client = {
+      async query() { return { rows: [] }; }, // no tables at all — judgeDbSchema's "empty" state
+      async end() { ended.push(true); },
+    };
+    await assert.rejects(
+      () => resolveWritePort({
+        dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
+        env: { BLAZE_WRITE_PORT: "db" },
+        resolveDbConfig: () => ({ driver: "postgres",
+                                   connection: { host: "h", port: 5432, database: "d", user: "u", password: "p" } }),
+        openPostgresClient: async () => client,
+      }),
+      /no Blaze schema/,
+    );
+    assert.deepEqual(ended, [true]); // the socket is live the moment connect() returns — must close on refusal
+  });
+
+  test("a Postgres database stamped below this engine's floor is refused, not written through", async () => {
+    const ended = [];
+    const client = {
+      async query(sql) {
+        if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
+        if (sql.includes("blaze_meta")) return { rows: [{ value: "4" }] }; // below MIN_DB_SCHEMA_VERSION
+        return { rows: [] };
+      },
+      async end() { ended.push(true); },
+    };
+    await assert.rejects(
+      () => resolveWritePort({
+        dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
+        env: { BLAZE_WRITE_PORT: "db" },
+        resolveDbConfig: () => ({ driver: "postgres",
+                                   connection: { host: "h", port: 5432, database: "d", user: "u", password: "p" } }),
+        openPostgresClient: async () => client,
+      }),
+      /older than this engine supports/,
+    );
+    assert.deepEqual(ended, [true]);
   });
 });
 

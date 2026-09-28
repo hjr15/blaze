@@ -23,6 +23,8 @@ import { remoteMaxClaim, writeClaim } from "./claims.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write-port.mjs";
 import { resolveDatabaseConfig } from "./database-config.mjs";
 import { openPostgresClient } from "../init-pg.mjs";
+import { checkDbSchema } from "./db-schema-version.mjs";
+import { closeOnSetupFailure } from "./pg-storage.mjs";
 
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
@@ -216,7 +218,19 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
   let db, close;
   if (dbConfig.driver === "postgres") {
     const client = await openPgClient(dbConfig.connection);
-    db = dbWritePort(pgExec(client), { dialect: "postgres" });
+    const exec = pgExec(client);
+    // Never creates a schema silently, same refusal as openShadow (BLZ-297) — a missing
+    // or out-of-range Postgres schema is an instruction, not an accident to write through.
+    await closeOnSetupFailure(client, async () => {
+      const state = await checkDbSchema(exec, { dialect: "postgres" });
+      if (!state.ok) throw new Error(`blaze: ${state.error}`);
+      if (state.state === "empty") {
+        throw new Error(
+          "blaze: this Postgres database has no Blaze schema. Create it first:\n\n"
+          + "    blaze db init\n");
+      }
+    });
+    db = dbWritePort(exec, { dialect: "postgres" });
     close = async () => { try { await client.end(); } catch { /* already closed */ } };
   } else {
     const shadow = await openShadow(dataRoot);
