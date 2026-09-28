@@ -10,6 +10,7 @@
 //      comparison that cannot fail is not a comparison.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -449,4 +450,50 @@ test("dualWritePort.allocate delegates to the primary only, forwarding title", a
   const result = await port.allocate("BLZ", { title: "A test ticket" });
   assert.deepEqual(result, { id: "BLZ-1", n: 1, title: "A test ticket" });
   assert.equal(shadowCalled, false);
+});
+
+// BLZ-667 Task 7: `allocate()` proven identical across both write dialects. One assertion
+// function, run against a real SQLite driver and (when BLAZE_TEST_PG_URL is set) a real
+// Postgres server — the same behaviour, not just the same code path.
+async function assertAllocateSequential(exec, dialect, key) {
+  const port = dbWritePort(exec, { dialect });
+  const results = [];
+  for (let i = 0; i < 5; i++) results.push(await port.allocate(key));
+  assert.deepEqual(results.map((r) => r.n), [1, 2, 3, 4, 5]);
+  assert.deepEqual(results.map((r) => r.id), [1, 2, 3, 4, 5].map((n) => `${key}-${n}`));
+}
+
+test("dbWritePort.allocate is sequential on sqlite", async () => {
+  await assertAllocateSequential(sqliteExec(), "sqlite", "SEQ");
+});
+
+test("dbWritePort.allocate is sequential on postgres", { skip: PG ? false : "set BLAZE_TEST_PG_URL" }, async () => {
+  // Real schema setup, per this repo's own established pattern (tests/model/config-install
+  // .test.mjs's "BLZ-377: Postgres installs the same namespace" test): a DEDICATED database
+  // per test run, not a shared one — schema creation itself collides if two runs race it
+  // against one database.
+  const pg = (await import("pg")).default;
+  const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+  const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+  const dbName = `blz_allocate_seq_${process.pid}`;
+  const admin = new pg.Client(PG);
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+  await admin.query(`CREATE DATABASE ${dbName}`);
+  await admin.end();
+  const dbUrl = new URL(PG);
+  dbUrl.pathname = `/${dbName}`;
+  const client = new pg.Client(dbUrl.toString());
+  await client.connect();
+  try {
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    const key = `SQ${randomUUID().slice(0, 6).toUpperCase()}`;
+    await assertAllocateSequential(pgExec(client), "postgres", key);
+  } finally {
+    await client.end(); // runs even if an assertion above throws
+    const cleanup = new pg.Client(PG);
+    await cleanup.connect();
+    await cleanup.query(`DROP DATABASE IF EXISTS ${dbName}`);
+    await cleanup.end();
+  }
 });
