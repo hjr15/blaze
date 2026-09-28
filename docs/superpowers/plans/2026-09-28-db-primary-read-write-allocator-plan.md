@@ -387,9 +387,8 @@ Write a failing test in whichever file already covers `loadConfig`
 `database.url`, a `database.password`, or a `database.host` containing `@` — regardless
 of `BLAZE_WRITE_PORT`. Run it, confirm it fails, then add the check to `loadConfig`
 (`scripts/config.mjs:173`), immediately after it parses `blaze.config.json`, before it
-returns. Reuse the exact error-message wording below so `resolveDatabaseConfig`'s own
-test (Step 1 above) still matches, since that test's assertions were written against
-these strings:
+returns, using this exact wording (this step's own new test asserts against it — Step 1's
+test file no longer covers these three cases at all, since they moved here):
 
 ```js
 // Inside loadConfig, after parsing but before returning:
@@ -806,13 +805,15 @@ test("a rejected ticket insert burns its allocated number — accepted, per the 
 test("allocated id round-trips through dbWritePort's own num() parsing", async () => {
   const exec = sqliteExec();
   const port = dbWritePort(exec, { dialect: "sqlite" });
-  await port.allocate("BLZ"); // burn n=1 first — TICKET()'s own default frontmatter.id
-                              // is confirmed to already be "BLZ-1", so testing against
-                              // n=1 again wouldn't discriminate "the override worked"
-                              // from "it happened to match the fixture's default".
-  const { id } = await port.allocate("BLZ"); // n=2, genuinely different from the default
-  const t2 = TICKET();
-  await port.write({ ...t2, frontmatter: { ...t2.frontmatter, id } }); // must not throw "cannot derive num from id"
+  const { id } = await port.allocate("BLZ"); // n=1
+  const t = TICKET();
+  await port.write({ ...t, frontmatter: { ...t.frontmatter, id } }); // must not throw "cannot derive num from id"
+  // Corrected after a fifth-round review: merely not-throwing doesn't prove the
+  // override took effect — the review found a MIS-placed top-level override (the exact
+  // bug this test exists to catch) still passed the prior draft, because nothing read
+  // the written row back. Read it back and assert on it directly.
+  const written = await port.read(id);
+  assert.equal(written.frontmatter.id, id);
 });
 ```
 
@@ -904,15 +905,27 @@ export const MIN_DB_SCHEMA_VERSION = 5;
 ```
 
 Also update `docs/schema-versioning.md` (confirmed to state "Both are 4 as of BLZ-377" at
-line 112, with supporting detail through line 140) — change it to "Both are 5 as of
-`<TICKET>`" **using the real ticket id Task 0 created, substituted literally into the
-docs prose, not the placeholder text `<TICKET>` left as-is.** The review found the
-placeholder text itself fails `schema-versioning-docs.test.mjs`'s own regex, which
-expects a real ticket-id shape (e.g. `BLZ-\d+`) — this is a direct instance of the
-"substitute `<TICKET>` throughout" instruction every task's commit message already
-carries, applied here to prose rather than a commit message, which is easy to miss.
+line 112, with supporting detail through line 140) — change it to
+**`**Both are 5 as of <TICKET>.**`** (keep the `**` bold markers and the exact sentence
+shape the existing "Both are 4 as of BLZ-377" line uses — a fifth-round review confirmed
+`schema-versioning-docs.test.mjs`'s regex needs both), **substituting the real ticket id
+Task 0 created for `<TICKET>` literally, not leaving the placeholder text or its
+surrounding backticks in the actual file.**
 
-- [ ] **Step 10: Run the schema-version test suite to confirm both bumps are consistent**
+- [ ] **Step 10: Update the four existing assertions this repo already hard-codes to `4`
+      — confirmed by a fifth-round review to be the one real remaining blocker, and the
+      sole cause of every full-suite failure it found.** Bumping the two constants
+      (Step 9) without also updating these leaves the suite red:
+      - `tests/model/config-install.test.mjs:55-56` and `:210` (the last one Postgres-only)
+      - `tests/model/db-schema-version.test.mjs:175`, `:180`, and `:242`
+
+      Read each cited line in the real file and change its hard-coded `4` to `5` (or
+      whatever the assertion's own wording requires — e.g. "the stamp is 4" becomes "the
+      stamp is 5"). These are pins on this plan's OWN change, not pre-existing tests to
+      leave alone — a version bump that doesn't move its own test suite's expectations
+      forward is not actually verified.
+
+- [ ] **Step 11: Run the schema-version test suite to confirm all bumps are consistent**
 
 ```
 node --test tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs
@@ -920,10 +933,11 @@ node --test tests/model/db-schema-version.test.mjs tests/model/config-install.te
 
 (confirm these three exact file paths before running — locate via
 `grep -rl "DB_SCHEMA_VERSION\|schema-versioning" tests/` if any don't exist as named.)
-Expected: PASS — the review found these three specifically go red when only one of the
-two constants (or the docs) is updated.
+Expected: PASS, all three files — a fifth-round review confirmed this exact set of
+changes (both constants, the four assertions, and the docs sentence) takes the full
+suite from failing to 0 failures with Postgres up.
 
-- [ ] **Step 11: Seed `project_counter` from the live corpus during `blaze db init`**
+- [ ] **Step 12: Seed `project_counter` from the live corpus during `blaze db init`**
 
 **Corrected after review: `num()` cannot literally be reused as first drafted** — it's a
 closure private to `dbWritePort` (write-port.mjs:161-165), not an export, and exporting
@@ -943,13 +957,13 @@ the max ticket number per project from the ticket list already being iterated (u
 `INSERT ... ON CONFLICT (project_key) DO UPDATE SET n = <max>` for each project. Run the
 test, confirm it fails, implement, confirm it passes.
 
-- [ ] **Step 12: Run the full existing `load-corpus` test suite** to confirm no regression
+- [ ] **Step 13: Run the full existing `load-corpus` test suite** to confirm no regression
       in `blaze db init`'s existing tallies/behavior.
 
 Run: `node --test tests/migrate/load-corpus.test.mjs`
 Expected: PASS, no regressions.
 
-- [ ] **Step 13: File two follow-up tickets for what this task does not close** — the
+- [ ] **Step 14: File two follow-up tickets for what this task does not close** — the
       review found both, and neither is fixable inside this task's own scope without
       expanding it into a separate body of work:
       1. **Postgres itself is never seeded.** `blaze db init` only ever loads the local
@@ -966,10 +980,10 @@ Expected: PASS, no regressions.
       File both via `blaze-board-operator`, parented under this plan's own ticket
       (Task 0), before closing this task out.
 
-- [ ] **Step 14: Commit**
+- [ ] **Step 15: Commit**
 
 ```bash
-git add scripts/model/pg-schema.mjs scripts/model/sqlite-schema.mjs scripts/model/write-port.mjs scripts/model/db-schema-version.mjs docs/schema-versioning.md scripts/migrate/load-corpus.mjs tests/model/write-port.test.mjs tests/migrate/load-corpus.test.mjs
+git add scripts/model/pg-schema.mjs scripts/model/sqlite-schema.mjs scripts/model/write-port.mjs scripts/model/db-schema-version.mjs docs/schema-versioning.md tests/model/config-install.test.mjs tests/model/db-schema-version.test.mjs scripts/migrate/load-corpus.mjs tests/model/write-port.test.mjs tests/migrate/load-corpus.test.mjs
 git commit -m "<TICKET>: add project_counter, dbWritePort.allocate(), persist() transactions, schema-version bump, and corpus seeding"
 ```
 
@@ -1058,7 +1072,9 @@ expected and resolves once Task 6 lands two commits later on the same branch (th
 tasks are sequential commits toward one PR, not independent deployments — see Task 10),
 but **no existing test in this repo covers `blaze new` under dual mode at all**, so
 neither this task's own test run nor its full-suite run would have caught the gap if
-Task 6 were skipped or broke differently. Task 6 adds the missing coverage.
+Task 6 were skipped or broke differently. Task 6 adds a manual smoke-test step for this —
+run by hand and recorded in that commit's message, not an automated `node:test` case
+(confirmed by a fifth-round review: Task 6's own commit stages no new test file).
 
 - [ ] **Step 1: Write the failing injection-only test (no git fixture)**
 
@@ -1292,15 +1308,21 @@ Expected: PASS.
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 mkdir -p /tmp/blaze-dual-smoke-$$/projects/BLZ/defined
 cd /tmp/blaze-dual-smoke-$$ && git init -q
+node <path-to-blaze-cli>/cli.mjs db init   # a fifth-round review found the command below
+                                            # fails with "no shadow database ... run
+                                            # blaze db init" without this first
 BLAZE_WRITE_PORT=dual node <path-to-blaze-cli>/cli.mjs new --project BLZ --type task "Dual-mode probe" --estimate 30
 ```
 
-Expected: exit 0, a real ticket created — matching `fs`-mode behavior, not the
-`TypeError: writePort.allocate is not a function` a fourth-round review found when this
-was tried against Tasks 1-5 alone (before this task's own fix lands). If this CLI smoke
-test doesn't fit this repo's existing automated-test shape cleanly, at minimum run it by
-hand and record the result in the commit message — do not skip verifying dual mode simply
-because no prior test happened to cover it.
+Expected: exit 0, a real ticket created, and the shadow reports no divergences — matching
+`fs`-mode behavior, not the `TypeError: writePort.allocate is not a function` a
+fourth-round review found when this was tried against Tasks 1-5 alone (before this task's
+own fix lands). **This is a manual smoke test, not an automated one — a fifth-round
+review confirmed this task's commit stages no new test file, so Task 5's earlier claim
+that "Task 6 adds the missing coverage" overstated what actually lands.** Run it by hand
+and record the exact output in the commit message; if this repo's existing test
+conventions make it straightforward to automate as a real `node:test` case during
+implementation, do so, but do not claim automated coverage exists if it doesn't.
 
 - [ ] **Step 6: Commit**
 
@@ -1371,6 +1393,14 @@ test("dbWritePort.allocate is sequential on postgres",
     await assertAllocateSequential(pgExec(client), "postgres", key);
   } finally {
     await client.end(); // runs even if an assertion above throws
+    // A fifth-round review found this test (unlike config-install.test.mjs's own
+    // dedicated-database test, which this pattern is copied from) never dropped its
+    // database — confirmed to leave blz_allocate_seq_<pid> behind after every run. Drop
+    // it here, matching the pattern it was copied from.
+    const cleanup = new pg.Client(process.env.BLAZE_TEST_PG_URL);
+    await cleanup.connect();
+    await cleanup.query(`DROP DATABASE IF EXISTS ${dbName}`);
+    await cleanup.end();
   }
 });
 ```
@@ -1455,7 +1485,15 @@ import { createDbSchema } from "../../scripts/model/db-schema-version.mjs";
 
 /** One fresh, isolated database, schema applied, two connections into it — mirrors
  *  config-install.test.mjs's own dedicated-database pattern, since two tests (or two
- *  connections) sharing ONE database collide on schema creation. */
+ *  connections) sharing ONE database collide on schema creation.
+ *
+ *  Corrected after a fifth-round review reproduced a leak-then-hang: if `createDbSchema`
+ *  (or either `connect()`) throws, the caller's OWN try/finally never starts (its
+ *  destructuring assignment hasn't run yet), so any client already opened here is never
+ *  closed and the test process hangs. This function now closes whatever it opened,
+ *  itself, on its own failure — the caller's try/finally only needs to cover the
+ *  ordinary post-setup path. Also returns `dbName` so the caller can drop the database
+ *  on cleanup, which the second-to-last review round found this test never did. */
 async function isolatedDbTwoConnections(name) {
   const dbName = `blz_allocate_${name}_${process.pid}`;
   const admin = new pg.Client(process.env.BLAZE_TEST_PG_URL);
@@ -1467,15 +1505,28 @@ async function isolatedDbTwoConnections(name) {
   dbUrl.pathname = `/${dbName}`;
   const clientA = new pg.Client(dbUrl.toString());
   const clientB = new pg.Client(dbUrl.toString());
-  await Promise.all([clientA.connect(), clientB.connect()]);
-  await createDbSchema(pgExec(clientA), { dialect: "postgres" });
-  return { clientA, clientB };
+  try {
+    await Promise.all([clientA.connect(), clientB.connect()]);
+    await createDbSchema(pgExec(clientA), { dialect: "postgres" });
+  } catch (e) {
+    await Promise.allSettled([clientA.end(), clientB.end()]); // close whatever opened, even on failure
+    throw e;
+  }
+  return { clientA, clientB, dbName };
+}
+
+/** Drops the database this helper created — call in the test's own `finally`. */
+async function dropDb(dbName) {
+  const admin = new pg.Client(process.env.BLAZE_TEST_PG_URL);
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+  await admin.end();
 }
 
 test("50x50 concurrent allocations on one project, across two real connections: exactly {1..100}, no dup, no gap",
      { skip: !process.env.BLAZE_TEST_PG_URL }, async () => {
   const key = `CT${randomUUID().slice(0, 8).toUpperCase()}`;
-  const { clientA, clientB } = await isolatedDbTwoConnections("onekey");
+  const { clientA, clientB, dbName } = await isolatedDbTwoConnections("onekey");
   try {
     const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
     const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
@@ -1487,6 +1538,7 @@ test("50x50 concurrent allocations on one project, across two real connections: 
     assert.deepEqual(all, Array.from({ length: 100 }, (_, i) => i + 1));
   } finally {
     await Promise.all([clientA.end(), clientB.end()]); // runs even if an assertion above throws
+    await dropDb(dbName);
   }
 });
 
@@ -1494,7 +1546,7 @@ test("concurrent allocations on two DIFFERENT projects, across two connections, 
      { skip: !process.env.BLAZE_TEST_PG_URL }, async () => {
   const keyA = `CT${randomUUID().slice(0, 8).toUpperCase()}`;
   const keyB = `CT${randomUUID().slice(0, 8).toUpperCase()}`;
-  const { clientA, clientB } = await isolatedDbTwoConnections("twokeys"); // its OWN database, not the prior test's
+  const { clientA, clientB, dbName } = await isolatedDbTwoConnections("twokeys"); // its OWN database, not the prior test's
   try {
     const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
     const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
@@ -1506,6 +1558,7 @@ test("concurrent allocations on two DIFFERENT projects, across two connections, 
     assert.deepEqual(resB.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));
   } finally {
     await Promise.all([clientA.end(), clientB.end()]);
+    await dropDb(dbName);
   }
 });
 ```
@@ -1541,7 +1594,7 @@ keep catching: claiming a task is scoped to something achievable when it isn't. 
 task's real, honest scope shrinks to exactly one thing: extract and pin
 `resolveWriteMode()`, a genuinely useful, small, synchronous building block — and defer
 *all* actual read-source wiring, at all five call sites, to the follow-up ticket already
-being filed for `views/data.mjs`'s async conversion.** That ticket's scope (Step 5 below)
+being filed for `views/data.mjs`'s async conversion.** That ticket's scope (Step 4 below)
 grows to include all five sites, not just `views/data.mjs`, since they share the same
 root blocker.
 
@@ -1570,10 +1623,9 @@ for this task to absorb, plus a real bug in the design this task must fix:**
    but which is its own body of work, not a sub-step of wiring one config value. The
    Postgres reader is also confirmed **missing an `activityFeed` method** entirely (that
    exists only on `read-storage.mjs`'s filesystem reader, lines 179/231) — a second,
-   separate gap. **This task does not attempt either fix.** File a follow-up ticket,
-   parented under Task 0's ticket, scoped exactly as: "convert `views/data.mjs`'s read
-   path to async and add `activityFeed` to the Postgres reader" — do not silently expand
-   this task's scope to cover it, and do not leave it unticketed either.
+   separate gap. **This task does not attempt either fix — both fold into the single
+   follow-up ticket Step 4 below files**, which covers this gap plus the five call sites
+   named in point 3, as one piece of work, not two separately-scoped tickets.
 3. **The locate list was both wrong and incomplete, twice over now.** `scripts/views/graph.mjs:139`
    is actually `scripts/model/graph.mjs:139` (wrong directory). `scripts/views/data.mjs:146`
    (`liveModel`) is a real site the second draft missed; `scripts/views/data.mjs:35`
@@ -1591,7 +1643,7 @@ connection-opening**, since it's independently useful (any future caller, sync o
 needs a cheap way to ask "what write mode is configured" without opening a database
 connection just to find out) and carries no dependency on solving the sync/async problem.
 **Everything about actually loading tickets from a database, for all five call sites, is
-deferred to the follow-up ticket (Step 5 below)** — not narrowed to "four of five" or "the
+deferred to the follow-up ticket (Step 4 below)** — not narrowed to "four of five" or "the
 easy one first," since round 4 found there is no easy one.
 
 **Files:**
@@ -1720,14 +1772,18 @@ node scripts/ci/hygiene-check.mjs origin/main
   that would have shipped a real defect, not a citation error, into production. Every one
   is fixed above, each with the specific evidence that found it, not merely patched to
   look complete.
-- **Task 9 was narrowed, not just fixed — stated plainly rather than smoothed over.**
-  The original scope (wire `views/data.mjs`, `audit-runner.mjs`, and `buildIndex`'s
-  callers all in one task) turned out to require an async conversion of `views/data.mjs`'s
-  synchronous internals and a missing `activityFeed` method on the Postgres reader —
-  real, separate bodies of work this plan does not attempt. Task 9 now delivers only
-  `buildIndex`'s read-source wiring, correctly derived from the write port's own resolved
-  mode (fixing the read/write inconsistency bug), and files the rest as a named follow-up
-  ticket rather than silently dropping it or falsely claiming to close it.
+- **Task 9 was narrowed twice, not just fixed — stated plainly rather than smoothed
+  over.** The original scope (wire `views/data.mjs`, `audit-runner.mjs`, and
+  `buildIndex`'s callers all in one task) turned out to require an async conversion of
+  `views/data.mjs`'s synchronous internals and a missing `activityFeed` method on the
+  Postgres reader. A second draft narrowed to "wire `buildIndex`'s five callers to the
+  write port's resolved mode," but a fifth-round review found even that overstated what's
+  achievable: every one of the five real call sites is synchronous, including
+  `reindex.mjs`, which this plan wrongly called "an async CLI runner" twice before that
+  was checked for real. **Task 9 now delivers exactly one thing — `resolveWriteMode()`, a
+  small synchronous mode-check, pinned in the seam-closure guard** — and files everything
+  about actually reading from a database at any of the five call sites as one follow-up
+  ticket, rather than a third overstated partial-completion claim.
 - **Type/name consistency:** `allocate(project, { title }) → { id, n }` (`fsWritePort`
   additionally returning `claimFile`, `dbWritePort` ignoring `title`) is used identically
   across Tasks 4, 5, 6, and the conformance/concurrency tests in 7-8. This is the THIRD
