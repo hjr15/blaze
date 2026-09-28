@@ -232,6 +232,31 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   cfg.schedule = { ...DEFAULTS.schedule, ...(file.schedule || {}) };
   checkSchedule(cfg.schedule);
 
+  // ADR-0012 §2/§4: blaze.config.json is TRACKED — a connection credential committed
+  // there would sit in git history forever. This check is UNCONDITIONAL (it does not
+  // depend on database.driver, or on BLAZE_WRITE_PORT/write mode) so a board running the
+  // default fs mode still refuses a stray database.url rather than loading it silently
+  // and only discovering the mistake the day someone flips to dual/db mode. The rest of
+  // connection resolution — reading .blaze/database.json (untracked), BLAZE_DB_* env vars
+  // — lives in scripts/model/database-config.mjs's resolveDatabaseConfig, which is only
+  // reached in dual/db write mode; this refusal is the one piece that must fire always.
+  const dbConfig = cfg.database ?? {};
+  if ("url" in dbConfig) {
+    throw new Error(
+      "blaze: blaze.config.json's database block may not carry 'database.url' — "
+      + "connection details belong in .blaze/database.json, never in tracked config.");
+  }
+  if ("password" in dbConfig) {
+    throw new Error(
+      "blaze: blaze.config.json's database block may not carry 'password' — "
+      + "connection details belong in .blaze/database.json, never in tracked config.");
+  }
+  if (typeof dbConfig.host === "string" && dbConfig.host.includes("@")) {
+    throw new Error(
+      "blaze: blaze.config.json's database.host may not carry a 'user:pass@' form — "
+      + "a credential belongs in .blaze/database.json, never in tracked config.");
+  }
+
   // Env overrides (highest precedence).
   let keySource = "blaze.config.json's 'key' field";
   // BLZ-410: PRESENCE, not truthiness. `if (env.BLAZE_KEY)` discarded `BLAZE_KEY=""` as
