@@ -181,6 +181,15 @@ function fsAllocator(projectsDir) {
 }
 
 /**
+ * Which write mode `BLAZE_WRITE_PORT` configures, with no database opened to find out.
+ * Synchronous and cheap — any future caller, sync or async, that just needs to know
+ * "what write mode is configured" can call this instead of resolving a full port.
+ */
+export function resolveWriteMode(env = process.env) {
+  return (env[WRITE_PORT_ENV] ?? "fs").trim();
+}
+
+/**
  * The port a verb should write through, for this board and this environment.
  *
  * @returns { port, mode, close } — `close` releases the shadow database, and is a no-op
@@ -190,7 +199,7 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
                                          env = process.env, onDivergence,
                                          resolveDbConfig = resolveDatabaseConfig,
                                          openPostgresClient: openPgClient = openPostgresClient } = {}) {
-  const mode = (env[WRITE_PORT_ENV] ?? "fs").trim();
+  const mode = resolveWriteMode(env);
   if (mode === "fs") {
     return { port: fsWritePort(projectsDir, storage, undefined,
                                { allocate: fsAllocator(projectsDir) }), mode, close() {} };

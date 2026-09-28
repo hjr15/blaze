@@ -11,7 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveWritePort, openShadow, logDivergence, shadowDbPath,
+import { resolveWritePort, resolveWriteMode, openShadow, logDivergence, shadowDbPath,
          divergenceLogPath, sqliteExec, pgExec } from "../scripts/model/write-port-resolve.mjs";
 import { createDbSchemaSync } from "../scripts/model/db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "../scripts/model/config-schema.mjs";
@@ -38,6 +38,14 @@ async function seededBoard() {
   db.close();
   return dataRoot;
 }
+
+describe("resolveWriteMode reads BLAZE_WRITE_PORT synchronously, with no database touched", () => {
+  test("resolveWriteMode reads BLAZE_WRITE_PORT synchronously, defaulting to fs", () => {
+    assert.equal(resolveWriteMode({}), "fs");
+    assert.equal(resolveWriteMode({ BLAZE_WRITE_PORT: "db" }), "db");
+    assert.equal(resolveWriteMode({ BLAZE_WRITE_PORT: "dual" }), "dual");
+  });
+});
 
 describe("the default is the filesystem, and it opens no database", () => {
   test("unset means fs", async () => {

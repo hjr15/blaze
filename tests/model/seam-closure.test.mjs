@@ -924,10 +924,12 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // The soak's artifacts under gitignored .blaze/. `resolveWritePort` is how a verb OBTAINS
   // the driver — the front door again, not a bypass. `pgExec` is the same adapter shape as
   // `sqliteExec`, over a caller-supplied client — reaches no node:fs write itself.
+  // `resolveWriteMode` (BLZ-667) is `resolveWritePort`'s own mode detection, extracted: it
+  // reads an env var and returns a string — reaches no write of any kind.
   ["model/write-port-resolve.mjs",
     { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
-        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace"] }],
+        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
