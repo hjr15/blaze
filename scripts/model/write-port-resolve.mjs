@@ -37,6 +37,14 @@ export function sqliteExec(db) {
   };
 }
 
+/** An async {run, all} over a connected pg.Client, the shape dbWritePort expects. */
+export function pgExec(client) {
+  return {
+    async run(sql, params = []) { await client.query(sql, params); },
+    async all(sql, params = []) { return (await client.query(sql, params)).rows; },
+  };
+}
+
 /**
  * Open the shadow database. Never creates a schema silently — BLZ-297 — so a missing
  * one is an instruction rather than an accident.

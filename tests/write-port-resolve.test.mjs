@@ -12,7 +12,7 @@ import { mkdtempSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveWritePort, openShadow, logDivergence, shadowDbPath,
-         divergenceLogPath, sqliteExec } from "../scripts/model/write-port-resolve.mjs";
+         divergenceLogPath, sqliteExec, pgExec } from "../scripts/model/write-port-resolve.mjs";
 import { createDbSchemaSync } from "../scripts/model/db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "../scripts/model/config-schema.mjs";
 import { SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
@@ -204,5 +204,27 @@ describe("the soak has a denominator (BLZ-300)", () => {
     const r = await resolveWritePort({ dataRoot, projectsDir: join(dataRoot, "projects"), env: {} });
     r.close();
     assert.equal(readSoakState(dataRoot), null);
+  });
+});
+
+describe("pgExec mirrors sqliteExec's shape, over a caller-supplied client", () => {
+  test("pgExec.all returns rows from client.query", async () => {
+    const calls = [];
+    const fakeClient = {
+      async query(sql, params) {
+        calls.push([sql, params]);
+        return { rows: [{ n: 1 }] };
+      },
+    };
+    const exec = pgExec(fakeClient);
+    const rows = await exec.all("SELECT $1 AS n", [1]);
+    assert.deepEqual(rows, [{ n: 1 }]);
+    assert.deepEqual(calls, [["SELECT $1 AS n", [1]]]);
+  });
+
+  test("pgExec.run executes without returning rows", async () => {
+    const fakeClient = { async query() { return { rows: [] }; } };
+    const exec = pgExec(fakeClient);
+    await assert.doesNotReject(() => exec.run("SELECT 1", []));
   });
 });
