@@ -438,3 +438,15 @@ test("fsWritePort.allocate with no injected function refuses clearly, not silent
   const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage);
   await assert.rejects(() => port.allocate("BLZ", { title: "x" }), /no allocate function was injected/);
 });
+
+// BLZ-667 Task 6: dualWritePort.allocate delegates to the primary only — "the primary
+// decides every outcome" applies to allocation exactly as it does to write/move/exists.
+test("dualWritePort.allocate delegates to the primary only, forwarding title", async () => {
+  let shadowCalled = false;
+  const primary = { name: "fs", allocate: async (p, { title }) => ({ id: `${p}-1`, n: 1, title }) };
+  const shadow = { name: "db", allocate: async () => { shadowCalled = true; return { id: "X-99", n: 99 }; } };
+  const port = dualWritePort(primary, shadow);
+  const result = await port.allocate("BLZ", { title: "A test ticket" });
+  assert.deepEqual(result, { id: "BLZ-1", n: 1, title: "A test ticket" });
+  assert.equal(shadowCalled, false);
+});

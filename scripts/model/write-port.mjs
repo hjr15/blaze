@@ -481,6 +481,9 @@ export function dualWritePort(primary, shadow, { onDivergence, strict = false } 
     write(t, ctx) { return both("write", t, ctx); },
     move(t, ctx) { return both("move", t, ctx); },
     read(id, ctx) { return primary.read(id, ctx); },
+    // Allocation, like existence, is decided entirely by the primary — the shadow never
+    // sees it, per this function's own principle above ("the primary decides every outcome").
+    allocate(project, opts) { return primary.allocate(project, opts); },
     close() { primary.close?.(); shadow.close?.(); },
   };
 }
