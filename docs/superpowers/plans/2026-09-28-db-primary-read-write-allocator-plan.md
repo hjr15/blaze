@@ -234,19 +234,32 @@ git commit -m "<TICKET>: add pgExec, the async write-side Postgres adapter"
 
 ## Task 2: Config plumbing — `resolveDatabaseConfig()`
 
-**Corrected after adversarial review, on three points, each cited:** (1) this task's
+**Corrected after adversarial review, on four points, each cited:** (1) this task's
 `Files` list no longer claims to modify `scripts/config.mjs` — no step ever did, and the
 review caught the discrepancy; (2) Step 3's `database.url` refusal message now literally
 contains the string `database.url`, since Step 1's own test asserts against that exact
 pattern and the review ran the two together and got 4 pass / 1 fail; (3) this task now
 also implements the `BLAZE_DB_*` env-var precedence tier and the `user:pass@` host
 refusal ADR-0012 §2 and §4 require — the first draft's implementation only handled two
-of ADR-0012's four precedence tiers while claiming to implement "§2–4 exactly."
+of ADR-0012's four precedence tiers while claiming to implement "§2–4 exactly"; (4) the
+review found the `database.url`/`user:pass@` refusal only fired when
+`resolveDatabaseConfig` was actually called — which Task 3 only does in `dual`/`db` write
+mode — so a committed `database.url` in `blaze.config.json` would go **unrefused** on a
+board running the default `fs` mode, contradicting ADR-0012's literal text ("`loadConfig`
+throws"). **This draft moves that specific refusal into `config.mjs`'s own `loadConfig`**,
+so it fires unconditionally, exactly as ADR-0012 states, while the rest of connection
+resolution stays in `resolveDatabaseConfig` (only reached in `dual`/`db` mode, which is
+correct — there's no connection to resolve in `fs` mode).
 
 **Files:**
-- Create: `scripts/model/database-config.mjs` — separate from `config.mjs`, since this
-  reads a tracked file, an untracked file, and env vars together, a different shape of
-  concern from `config.mjs`'s existing single-tracked-file job.
+- Modify: `scripts/config.mjs`'s `loadConfig` (confirmed at line 173) — add the
+  `database.url`/`database.password`/`user:pass@` refusal here, unconditionally.
+- Create: `scripts/model/database-config.mjs` — the rest of connection resolution
+  (untracked-file reading, env-var precedence), separate from `config.mjs` since it reads
+  a tracked file, an untracked file, and env vars together, a different shape of concern
+  from `config.mjs`'s existing single-tracked-file job. It no longer re-checks
+  `url`/`password`/`user:pass@` itself — `loadConfig` already refused those before this
+  function is ever reached with a config object.
 - Test: `tests/model/database-config.test.mjs`.
 
 **Interfaces:**
@@ -255,32 +268,46 @@ of ADR-0012's four precedence tiers while claiming to implement "§2–4 exactly
   `{ driver: "sqlite" | "postgres", connection: null | { host, port, database, user, password } }`.
   Task 3 and Task 9 both call this — its shape is load-bearing for both.
 
-- [ ] **Step 1: Write the failing tests** (eight cases now, covering Review Focus items
-      2-3 plus the env-precedence and `user:pass@` gaps the review found missing)
+- [ ] **Step 1: Write the failing tests** (six cases for `resolveDatabaseConfig` itself —
+      covering Review Focus items 2-3 plus the env-precedence gap the review found
+      missing; the `database.url`/`user:pass@` refusal tests live in Step 3a instead,
+      against `loadConfig`, per this round's correction)
+
+**Corrected after adversarial review: this file's temp-directory cleanup used manual
+trailing `rmSync` calls, which the review found breaks two other repo guards** — a
+trailing statement is skipped whenever an earlier assertion throws (exactly the red-run
+case where cleanup matters most, per `scripts/ci/temp-cleanup-guard.mjs`'s own BLZ-603
+finding), and this file's un-registered temp directories also tripped the
+`quoted-sources` doc-count guard. This repo already has the right tool for this —
+`tests/helpers/scratch.mjs`'s `scratchRegistry()`, used elsewhere in this test suite
+(`tests/config.test.mjs`, `tests/db-runner.test.mjs`) for exactly this shape of problem —
+so this draft uses that instead of hand-rolled cleanup:
 
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, writeFileSync, chmodSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 import { resolveDatabaseConfig } from "../../scripts/model/database-config.mjs";
 
+const scratch = scratchRegistry();
+
 function withDatabaseJson(dataRoot, obj) {
+  mkdirSync(join(dataRoot, ".blaze"));
   writeFileSync(join(dataRoot, ".blaze", "database.json"), JSON.stringify(obj));
   chmodSync(join(dataRoot, ".blaze", "database.json"), 0o600);
 }
 
 test("defaults to sqlite with no config anywhere", () => {
-  const dataRoot = mkdtempSync(join(tmpdir(), "blaze-dbcfg-"));
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
   const result = resolveDatabaseConfig({ dataRoot, config: {}, env: {} });
   assert.deepEqual(result, { driver: "sqlite", connection: null });
-  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("postgres driver with a complete .blaze/database.json resolves a connection", () => {
-  const dataRoot = mkdtempSync(join(tmpdir(), "blaze-dbcfg-"));
-  require("node:fs").mkdirSync(join(dataRoot, ".blaze"));
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
   withDatabaseJson(dataRoot, { host: "db.example", port: 5432, database: "blaze",
                                user: "blaze", passwordEnv: "BLZ_DB_PW" });
   const result = resolveDatabaseConfig({
@@ -289,47 +316,31 @@ test("postgres driver with a complete .blaze/database.json resolves a connection
   assert.equal(result.driver, "postgres");
   assert.deepEqual(result.connection,
     { host: "db.example", port: 5432, database: "blaze", user: "blaze", password: "secret" });
-  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("postgres driver with passwordEnv pointing at an unset var refuses", () => {
-  const dataRoot = mkdtempSync(join(tmpdir(), "blaze-dbcfg-"));
-  require("node:fs").mkdirSync(join(dataRoot, ".blaze"));
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
   withDatabaseJson(dataRoot, { host: "db.example", port: 5432, database: "blaze",
                                user: "blaze", passwordEnv: "BLZ_DB_PW_UNSET" });
   assert.throws(
     () => resolveDatabaseConfig({ dataRoot, config: { database: { driver: "postgres" } }, env: {} }),
     /blaze:.*BLZ_DB_PW_UNSET/);
-  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("postgres driver with no .blaze/database.json at all refuses, not silently falls back", () => {
-  const dataRoot = mkdtempSync(join(tmpdir(), "blaze-dbcfg-"));
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
   assert.throws(
     () => resolveDatabaseConfig({ dataRoot, config: { database: { driver: "postgres" } }, env: {} }),
     /blaze:.*\.blaze\/database\.json/);
-  rmSync(dataRoot, { recursive: true, force: true });
 });
 
-test("blaze.config.json carrying database.url is refused at load, per ADR-0012 §2", () => {
-  assert.throws(
-    () => resolveDatabaseConfig({ dataRoot: "/nonexistent",
-                                   config: { database: { driver: "postgres", url: "postgres://x" } },
-                                   env: {} }),
-    /blaze:.*database\.url/);
-});
-
-test("a user:pass@ host in blaze.config.json is refused, per ADR-0012 §2", () => {
-  assert.throws(
-    () => resolveDatabaseConfig({ dataRoot: "/nonexistent",
-                                   config: { database: { driver: "postgres", host: "user:pass@db.example" } },
-                                   env: {} }),
-    /blaze:.*user:pass@/);
-});
+// The `database.url` / `user:pass@` refusal tests moved to Step 3a below — they test
+// `loadConfig`, not `resolveDatabaseConfig`, since that's where the refusal now lives
+// (unconditionally, matching ADR-0012's literal text) rather than only when this
+// function happens to be called.
 
 test("BLAZE_DB_* env vars override .blaze/database.json, per ADR-0012 §4 precedence", () => {
-  const dataRoot = mkdtempSync(join(tmpdir(), "blaze-dbcfg-"));
-  mkdirSync(join(dataRoot, ".blaze"));
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
   withDatabaseJson(dataRoot, { host: "file-host", port: 5432, database: "file-db",
                                user: "file-user", passwordEnv: "FILE_PW" });
   const result = resolveDatabaseConfig({
@@ -339,35 +350,72 @@ test("BLAZE_DB_* env vars override .blaze/database.json, per ADR-0012 §4 preced
   assert.equal(result.connection.host, "env-host");   // env wins over the file
   assert.equal(result.connection.password, "from-env");
   assert.equal(result.connection.database, "file-db"); // untouched fields still come from the file
-  rmSync(dataRoot, { recursive: true, force: true });
 });
 
 test("with no .blaze/database.json, BLAZE_DB_* env vars alone are sufficient", () => {
-  const dataRoot = mkdtempSync(join(tmpdir(), "blaze-dbcfg-"));
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
   const result = resolveDatabaseConfig({
     dataRoot, config: { database: { driver: "postgres" } },
     env: { BLAZE_DB_HOST: "h", BLAZE_DB_PORT: "5432", BLAZE_DB_NAME: "d",
            BLAZE_DB_USER: "u", ENV_PW: "p", BLAZE_DB_PASSWORD_ENV: "ENV_PW" } });
   assert.deepEqual(result.connection, { host: "h", port: 5432, database: "d", user: "u", password: "p" });
-  rmSync(dataRoot, { recursive: true, force: true });
 });
 ```
 
-The full import list this test file needs at its top:
-`import { mkdtempSync, writeFileSync, chmodSync, mkdirSync, rmSync } from "node:fs";`
-(the earlier snippets above call `mkdirSync` directly, not via `require` — this is the
-one real import line, stated once here rather than repeated per snippet).
+`withDatabaseJson` now creates `.blaze/` itself (folded in, since every real call site
+needs it and the review found the first draft's separate `require("node:fs").mkdirSync`
+calls were themselves invalid — `require` doesn't exist in an ESM test file).
 
 - [ ] **Step 2: Run tests to verify they fail**
 
 Run: `node --test tests/model/database-config.test.mjs`
 Expected: FAIL, module not found.
 
-- [ ] **Step 3: Write minimal implementation**
+- [ ] **Step 3a: Move the credential refusal into `loadConfig` first, unconditionally**
+
+Write a failing test in whichever file already covers `loadConfig`
+(`grep -rl "loadConfig" tests/`), asserting `loadConfig` itself throws on a
+`database.url`, a `database.password`, or a `database.host` containing `@` — regardless
+of `BLAZE_WRITE_PORT`. Run it, confirm it fails, then add the check to `loadConfig`
+(`scripts/config.mjs:173`), immediately after it parses `blaze.config.json`, before it
+returns. Reuse the exact error-message wording below so `resolveDatabaseConfig`'s own
+test (Step 1 above) still matches, since that test's assertions were written against
+these strings:
+
+```js
+// Inside loadConfig, after parsing but before returning:
+const dbConfig = cfg.database ?? {};
+if ("url" in dbConfig) {
+  throw new Error(
+    "blaze: blaze.config.json's database block may not carry 'database.url' — "
+    + "connection details belong in .blaze/database.json, never in tracked config.");
+}
+if ("password" in dbConfig) {
+  throw new Error(
+    "blaze: blaze.config.json's database block may not carry 'password' — "
+    + "connection details belong in .blaze/database.json, never in tracked config.");
+}
+if (typeof dbConfig.host === "string" && dbConfig.host.includes("@")) {
+  throw new Error(
+    "blaze: blaze.config.json's database.host may not carry a 'user:pass@' form — "
+    + "a credential belongs in .blaze/database.json, never in tracked config.");
+}
+```
+
+Run the new test, confirm it passes. Run `loadConfig`'s full existing test suite to
+confirm no regression for boards with no `database` block at all (the common case).
+
+- [ ] **Step 3b: Write `resolveDatabaseConfig` itself — no credential checks here anymore**
+
+Since `loadConfig` (Step 3a) already refuses `url`/`password`/`user:pass@` before this
+function ever sees a config object, `resolveDatabaseConfig` only handles driver
+validation and connection resolution:
 
 ```js
 // scripts/model/database-config.mjs — ADR-0012's config shape: the driver name is
-// repo config, the connection is not.
+// repo config, the connection is not. Credential refusal lives in loadConfig (Step 3a),
+// unconditionally — this function only runs the resolution loadConfig has already
+// validated the inputs for.
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { readRegularFileSync } from "./regular-file.mjs";
@@ -377,21 +425,6 @@ const ENV_KEYS = { host: "BLAZE_DB_HOST", port: "BLAZE_DB_PORT", database: "BLAZ
 
 export function resolveDatabaseConfig({ dataRoot, config = {}, env = process.env }) {
   const dbConfig = config.database ?? {};
-  if ("url" in dbConfig) {
-    throw new Error(
-      "blaze: blaze.config.json's database block may not carry 'database.url' — "
-      + "connection details belong in .blaze/database.json, never in tracked config.");
-  }
-  if ("password" in dbConfig) {
-    throw new Error(
-      "blaze: blaze.config.json's database block may not carry 'password' — "
-      + "connection details belong in .blaze/database.json, never in tracked config.");
-  }
-  if (typeof dbConfig.host === "string" && dbConfig.host.includes("@")) {
-    throw new Error(
-      "blaze: blaze.config.json's database.host may not carry a 'user:pass@' form — "
-      + "a credential belongs in .blaze/database.json, never in tracked config.");
-  }
   const driver = dbConfig.driver ?? "sqlite";
   if (driver !== "sqlite" && driver !== "postgres") {
     throw new Error(`blaze: database.driver=${JSON.stringify(driver)} is not supported — expected 'sqlite' or 'postgres'.`);
@@ -427,13 +460,13 @@ export function resolveDatabaseConfig({ dataRoot, config = {}, env = process.env
 
 - [ ] **Step 4: Run tests to verify they pass**
 
-Run: same as Step 2. Expected: PASS, 8 tests.
+Run: same as Step 2. Expected: PASS, 6 tests (two moved to Step 3a's `loadConfig` suite).
 
 - [ ] **Step 5: Commit**
 
 ```bash
-git add scripts/model/database-config.mjs tests/model/database-config.test.mjs
-git commit -m "<TICKET>: implement ADR-0012's database config resolution"
+git add scripts/config.mjs scripts/model/database-config.mjs tests/model/database-config.test.mjs tests/config.test.mjs
+git commit -m "<TICKET>: implement ADR-0012's database config resolution, refusal in loadConfig"
 ```
 
 ## Task 3: A production Postgres client, and wiring `resolveWritePort()` to it
@@ -509,15 +542,16 @@ test("openPostgresClient connects via the injected Client and returns it", async
   assert.equal(typeof client.query, "function");
 });
 
-test("openPostgresClient without an injected Client, and 'pg' unavailable, refuses clearly", async () => {
-  // No Client injected and no real 'pg' package assumed installed in the test environment
-  // — this exercises the ERR_MODULE_NOT_FOUND branch for real, not by injection, so it
-  // only asserts loosely on the message shape rather than the exact 'pg' import outcome,
-  // which depends on whether 'pg' happens to be installed where the suite runs.
-  // Skip cleanly if 'pg' IS installed (the error path this test targets can't fire then).
+test("openPostgresClient without an injected Client, and 'pg' unavailable, refuses clearly", async (t) => {
+  // No Client injected, exercising the real ERR_MODULE_NOT_FOUND branch rather than a
+  // mock — only meaningful when 'pg' genuinely isn't installed where the suite runs.
+  // Corrected after review: an early `return` here reports as a PASS with nothing
+  // asserted, not a SKIP — use node:test's own t.skip() so a run where 'pg' IS installed
+  // (asserting nothing) is visibly distinguishable from one that actually proved the
+  // refusal, per this repo's own "assert the observation happened" rule.
   let pgInstalled = true;
   try { await import("pg"); } catch { pgInstalled = false; }
-  if (pgInstalled) { return; } // nothing to assert in this environment; not a false pass — the OTHER test above proves the connect path
+  if (pgInstalled) { t.skip("'pg' is installed in this environment; the other test above already proves the connect path"); return; }
   await assert.rejects(
     () => openPostgresClient({ host: "h", port: 5432, database: "d", user: "u", password: "p" }),
     /npm install pg/);
@@ -750,8 +784,14 @@ test("a rejected ticket insert burns its allocated number — accepted, per the 
   // An empty title genuinely rejects, via the schema's own CHECK (btrim(title) <> '') —
   // an earlier draft of this test used an invalid parent, which the review's own probe
   // found persist() silently NULLs rather than rejecting, so that case never exercised
-  // a real rejection at all.
-  await assert.rejects(() => port.write(TICKET({ id, title: "" })));
+  // a real rejection at all. A SECOND earlier draft called `TICKET({ id, title: "" })`,
+  // which the review confirmed fails because TICKET() takes no arguments at all
+  // (tests/model/write-port.test.mjs:32) — read that fixture's real return shape first,
+  // then override via spread, the pattern below, which works regardless of TICKET()'s
+  // exact internal shape as long as it returns a plain object (confirm this holds before
+  // relying on it — if TICKET() does something more elaborate, adapt accordingly and
+  // note the adaptation in the commit).
+  await assert.rejects(() => port.write({ ...TICKET(), id, title: "" }));
   const { n: nextN } = await port.allocate("BLZ");
   assert.equal(nextN, n + 1); // the failed attempt's number is NOT reused — a gap, and
                               // gaps are already tolerated by design (ADR-0018).
@@ -761,14 +801,17 @@ test("allocated id round-trips through dbWritePort's own num() parsing", async (
   const exec = sqliteExec();
   const port = dbWritePort(exec, { dialect: "sqlite" });
   const { id } = await port.allocate("BLZ");
-  await port.write(TICKET({ id })); // must not throw "cannot derive num from id"
+  await port.write({ ...TICKET(), id }); // must not throw "cannot derive num from id"
 });
 ```
 
-(`TICKET(...)` and `sqliteExec()` are this file's real existing fixture helpers, per this
-plan's own verified research — re-confirm their exact call shape by reading
-`tests/model/write-port.test.mjs` in full immediately before writing these tests, since
-this plan's research read them by citation rather than transcribing their full bodies.)
+(`TICKET(...)` and `sqliteExec()` are this file's real existing fixture helpers. **Read
+`tests/model/write-port.test.mjs` in full, specifically `TICKET`'s definition at line 32,
+before writing these tests** — the review confirmed `TICKET()` takes zero arguments, so
+the spread-and-override pattern above (`{ ...TICKET(), id, title: "" }`) is used instead
+of a parameterized call; verify this actually produces a valid target object shape for
+`port.write()` before trusting it, since this plan's own research read the fixture by
+citation, not by transcribing its full body.)
 
 - [ ] **Step 3: Run tests to verify they fail**
 
@@ -778,7 +821,9 @@ Expected: FAIL, `allocate is not a function`.
       alongside `persist`/`recordEvent` and exposed on the returned object:
 
 ```js
-async function allocate(project) {
+// `title` is accepted for call-site uniformity with fsWritePort.allocate (Task 5) and
+// ignored here — db mode has no claim file, so there is nothing to slug it into.
+async function allocate(project, { title } = {}) {
   const rows = await exec.all(
     `INSERT INTO project_counter (project_key, n) VALUES (${ph(0)}, 1)
      ON CONFLICT (project_key) DO UPDATE SET n = project_counter.n + 1
@@ -792,122 +837,218 @@ async function allocate(project) {
 Add `allocate,` to the returned object (alongside `name: "db"`, `exists`, `write`,
 `move`, `read`).
 
-- [ ] **Step 5: Wrap `persist()`'s body in a transaction** (confirmed by this plan's own
-      review to not exist today — `grep -n "BEGIN\|COMMIT\|ROLLBACK" write-port.mjs`
-      returns nothing). Wrap `persist()`'s existing sequence (ticket upsert, link
+- [ ] **Step 5: Write the failing test proving `persist()` is transactional** —
+      **the review found the original Step 5 had no such test at all**, and a manual
+      probe confirmed the property empirically true only after wrapping: forcing a
+      duplicate-label failure partway through `persist()`'s sequence left **zero** ticket
+      rows when wrapped in a transaction, versus **one** (a half-written ticket) with the
+      wrap removed. Pin that exact property as a real test, not an unverified claim:
+
+```js
+test("a mid-sequence failure in persist() leaves no partial ticket row", async () => {
+  const exec = sqliteExec();
+  const port = dbWritePort(exec, { dialect: "sqlite" });
+  const { id } = await port.allocate("BLZ");
+  // Duplicate labels violate whichever constraint this schema enforces on ticket_label —
+  // read pg-schema.mjs's/sqlite-schema.mjs's ticket_label DDL to confirm the exact
+  // constraint shape before relying on this specific trigger; the property under test is
+  // "a failure partway through persist() rolls back the whole statement sequence,"
+  // and any genuine mid-sequence failure proves it equally well.
+  await assert.rejects(() => port.write({ ...TICKET(), id, labels: ["a", "a"] }));
+  const rows = await exec.all("SELECT 1 AS hit FROM ticket WHERE id = ?", [id]);
+  assert.equal(rows.length, 0, "a half-written ticket row survived a mid-sequence failure");
+});
+```
+
+- [ ] **Step 6: Run the test to verify it fails** (no transaction exists yet — expect a
+      surviving row, i.e. `rows.length === 1`, failing the assertion above).
+
+- [ ] **Step 7: Implement** — wrap `persist()`'s existing sequence (ticket upsert, link
       delete/insert, label/component delete/insert, worklog delete/insert, event insert)
       between `await exec.run("BEGIN")` and `await exec.run("COMMIT")`, with a
       `try`/`catch` that runs `await exec.run("ROLLBACK")` and re-throws on any failure.
-      **This protects `persist()`'s own multi-statement sequence** (e.g. a worklog insert
-      failing after the ticket row already wrote) — it does **not** make `allocate()` and
-      a subsequent `write()` call atomic with each other, since they're invoked from two
-      different call sites (this task and Task 5's `new.mjs`, respectively). State this
-      distinction in the commit message, not just in this plan, so a future reader doesn't
-      assume more than what's actually built.
+      **This protects `persist()`'s own multi-statement sequence only** — it does **not**
+      make `allocate()` and a subsequent `write()` call atomic with each other, since
+      they're invoked from two different call sites (this task and Task 5's `new.mjs`,
+      respectively). State this distinction in the commit message.
 
-- [ ] **Step 6: Run tests to verify they pass**
+- [ ] **Step 8: Run all tests to verify they pass**
 
-Expected: PASS, all four tests.
+Expected: PASS, all five tests (the four from Step 2 plus this step's new one).
 
-- [ ] **Step 7: Add the schema-version bump**
+- [ ] **Step 9: Bump BOTH schema-version constants and the docs they're described in**
+      — **the review found the first draft bumped only `DB_SCHEMA_VERSION`, leaving
+      `MIN_DB_SCHEMA_VERSION` at 4, so an existing v4 shadow (with no `project_counter`
+      table) would still be silently ACCEPTED and `allocate` would fail on "no such
+      table" instead of the named refusal this whole module exists to produce.** Both
+      constants are confirmed at `scripts/model/db-schema-version.mjs:39` and `:59`
+      respectively — change both `4` to `5`:
 
-In `scripts/model/db-schema-version.mjs`, change `export const DB_SCHEMA_VERSION = 4;`
-(currently line 34) to `5`, with a comment following the file's own established
-per-version rationale style, e.g.: `// 5 under <TICKET>, which adds project_counter for
-database-native id allocation. An existing v4 shadow has no such table, and blaze db
-init --force recreates it from the corpus — same precedent as version 3's own comment:
-there is no upgrade to write and no data to lose.`
+```js
+// Line 39:
+export const DB_SCHEMA_VERSION = 5;
+// Line 59, with a comment matching the file's own established per-version style
+// (its existing version-4 comment is directly above this constant, in the same file):
+// Rises again to 5 under <TICKET>: a v4 shadow has no project_counter table, so a v5
+// engine that accepted one would fail later with a raw "no such table" error instead of
+// this module's own named refusal — the same failure class every prior version bump
+// here exists to replace.
+export const MIN_DB_SCHEMA_VERSION = 5;
+```
 
-- [ ] **Step 8: Seed `project_counter` from the live corpus during `blaze db init`**
+Also update `docs/schema-versioning.md` (confirmed to state "Both are 4 as of BLZ-377" at
+line 112, with supporting detail through line 140) — add this version's own entry
+following that file's existing per-version prose pattern, so the docs and the code agree
+(the review found a real test, `schema-versioning-docs.test.mjs:63`, that fails precisely
+when they don't).
 
-Write a failing test in `tests/migrate/load-corpus.test.mjs` first, asserting that after
-`loadCorpus` runs against a fixture corpus containing `BLZ-3` and `BLZ-7` (and no
-`project_counter` row), `project_counter`'s row for `BLZ` holds `n = 7` (the max, not the
-count) — then implement: as the last step of `loadCorpus` (`scripts/migrate/load-corpus.mjs`),
-after all tickets are inserted, compute the max ticket number per project from the
-in-memory ticket list already being iterated (parse each `id`'s numeric suffix, the same
-way `dbWritePort`'s own `num()` helper does — reuse that exact parsing rule, don't
-re-derive a second one) and `INSERT ... ON CONFLICT (project_key) DO UPDATE SET n = <max>`
-for each project. Run the test, confirm it fails, implement, confirm it passes.
+- [ ] **Step 10: Run the schema-version test suite to confirm both bumps are consistent**
 
-- [ ] **Step 9: Run the full existing `load-corpus` test suite** to confirm no regression
+```
+node --test tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs
+```
+
+(confirm these three exact file paths before running — locate via
+`grep -rl "DB_SCHEMA_VERSION\|schema-versioning" tests/` if any don't exist as named.)
+Expected: PASS — the review found these three specifically go red when only one of the
+two constants (or the docs) is updated.
+
+- [ ] **Step 11: Seed `project_counter` from the live corpus during `blaze db init`**
+
+**Corrected after review: `num()` cannot literally be reused as first drafted** — it's a
+closure private to `dbWritePort` (write-port.mjs:161-165), not an export, and exporting
+it would trip the seam-closure guard's export-classification test the same way an earlier
+attempt did. `load-corpus.mjs` already has its own numeric-suffix parsing (confirmed at
+line 91, its own `split("-")` rule) — **use that existing rule, in the same file, rather
+than importing anything new.** The review confirmed this step is achievable without
+restructuring: `load-corpus.mjs`'s ticket list is fully available before its own
+`COMMIT` (confirmed around line 177), so seeding fits naturally as the last step before
+that commit. A manual test with `BLZ-3` and `BLZ-7` (no `project_counter` row) correctly
+seeded `n = 7` (the max, not the count) when implemented this way.
+
+Write a failing test in `tests/migrate/load-corpus.test.mjs` first, asserting the above,
+then implement: as the last step of `loadCorpus`, before its own final `COMMIT`, compute
+the max ticket number per project from the ticket list already being iterated (using
+`load-corpus.mjs`'s own existing numeric-suffix parsing, not a new import) and
+`INSERT ... ON CONFLICT (project_key) DO UPDATE SET n = <max>` for each project. Run the
+test, confirm it fails, implement, confirm it passes.
+
+- [ ] **Step 12: Run the full existing `load-corpus` test suite** to confirm no regression
       in `blaze db init`'s existing tallies/behavior.
 
 Run: `node --test tests/migrate/load-corpus.test.mjs`
 Expected: PASS, no regressions.
 
-- [ ] **Step 10: Commit**
+- [ ] **Step 13: File two follow-up tickets for what this task does not close** — the
+      review found both, and neither is fixable inside this task's own scope without
+      expanding it into a separate body of work:
+      1. **Postgres itself is never seeded.** `blaze db init` only ever loads the local
+         SQLite shadow (`db-runner.mjs`, confirmed) — a real production Postgres instance
+         needs its own seeding step before it can safely serve `db`-mode allocation. This
+         is properly an operational runbook step for whoever executes the eventual
+         BLZ-254 cutover's soak, not something `blaze db init` itself can do today.
+      2. **The counter can drift stale during a dual-write soak.** Tickets created via the
+         filesystem path after seeding continue to advance `claims.mjs`'s ledger, not
+         `project_counter` — so the counter must be re-seeded immediately before flipping
+         `BLAZE_WRITE_PORT` to `db`, not only once at the soak's start. Name this
+         explicitly in whatever runbook governs the eventual cutover (the companion
+         cutover plan/spec, not this one).
+      File both via `blaze-board-operator`, parented under this plan's own ticket
+      (Task 0), before closing this task out.
+
+- [ ] **Step 14: Commit**
 
 ```bash
-git add scripts/model/pg-schema.mjs scripts/model/sqlite-schema.mjs scripts/model/write-port.mjs scripts/model/db-schema-version.mjs scripts/migrate/load-corpus.mjs tests/model/write-port.test.mjs tests/migrate/load-corpus.test.mjs
-git commit -m "<TICKET>: add project_counter, dbWritePort.allocate(), persist() transactions, and corpus seeding"
+git add scripts/model/pg-schema.mjs scripts/model/sqlite-schema.mjs scripts/model/write-port.mjs scripts/model/db-schema-version.mjs docs/schema-versioning.md scripts/migrate/load-corpus.mjs tests/model/write-port.test.mjs tests/migrate/load-corpus.test.mjs
+git commit -m "<TICKET>: add project_counter, dbWritePort.allocate(), persist() transactions, schema-version bump, and corpus seeding"
 ```
 
-## Task 5: `fsWritePort.allocate()` via dependency injection, and `new.mjs`'s call-site change
+## Task 5: `fsWritePort.allocate()`, constructed at BOTH real call sites, `title` at call time
 
-**Redesigned after adversarial review, to avoid a much larger side effect the first
-draft would have caused.** Importing `allocateId`/`claims.mjs` directly into
-`write-port.mjs` (as the first draft did) turns `tests/model/seam-closure.test.mjs` red:
-confirmed, `write-port.mjs`'s import allowlist in that guard (line 2099) permits only
-`["fsStorage"]` — adding `allocateId` there is a new import edge the guard doesn't
-recognize, and `write-port.mjs` is a much larger module (nine current exports, all
-classified `inert`) than `write-port-resolve.mjs` was in Task 1, so pinning it properly
-would be a disproportionate side task. **The fix is dependency injection, not a bigger
-guard change:** `fsWritePort` takes an injected `allocate` function; `new.mjs` (which
-**already** imports `allocateId`/`writeClaim`/`remoteMaxClaim` today, and is **already**
-pinned in the guard for exactly those imports — line 2024, `["allocateId", "writeClaim",
-"fsStorage"]`, unchanged by this task) supplies the real implementation as a closure. No
-new import edge is created anywhere, so no guard change is needed for this task at all.
+**Redesigned a second time after adversarial review — the first redesign's injection
+point was wrong for production.** The DI approach (an `allocate` closure baked into
+`applyNew`'s own default parameter, closing over `title`) was proven broken by an actual
+CLI run: `new-runner.mjs` calls `resolveWritePort()` to get its `writePort` and always
+passes that explicit object into `applyNew`, so `applyNew`'s *default* parameter — where
+the first redesign put the real closure — **never runs in production**. The review ran
+`blaze new --project BLZ --type task "Probe ticket" --estimate 30` against the patched
+code and got `Error: fsWritePort: no allocate function was injected`; the same command
+against unpatched code created `BLZ-1` normally. Worse, closing over `title` was never
+going to work here regardless: in the real call chain, `resolveWritePort()` constructs
+`writePort` **before** `applyNew` even runs, so `title` isn't known yet at construction
+time in production, only at `applyNew`'s own call time.
 
-This also resolves the first draft's open "two options" fork cleanly: the injected
-closure is defined inside `new.mjs`'s own `applyNew`, where `title` is already in scope
-(it's destructured earlier in the same parameter list `writePort`'s default is part of —
-JS evaluates default parameter expressions left-to-right within one destructuring
-pattern), so the closure can call `writeClaim` itself and return `{ id, n, claimFile }`
-in one step. There is exactly one design now, not two to choose between.
+**The fix: `allocate` takes `title` as a call-time argument, not a construction-time
+closure capture, and the real implementation is constructed at BOTH places `fsWritePort`
+is actually built** — `applyNew`'s own default parameter (for direct/test callers) *and*
+`resolveWritePort()`'s `fs`/`dual` branches (the actual production path). This means
+`write-port-resolve.mjs` needs three new imports (`allocateId`, `remoteMaxClaim`,
+`writeClaim`) it doesn't have today, plus `slugify` from a module it already partially
+imports (`./storage.mjs`, currently only for `fsStorage`) — a real, needed guard change,
+not one to route around a second time. `resolveWritePort` is **already** classified
+`writes` in the seam-closure guard's export list (line 926's entry lists it under
+`writes: [..., "resolveWritePort"]`, confirmed), so this does not change its
+classification — only its **import allowlist** (a separate list, line 1982:
+`["appendFileSync", "mkdirSync", OPAQUE, "fsStorage"]`) needs the four new names added.
+This is smaller and more honest than either of the first two attempts to avoid it.
 
 **Files:**
-- Modify: `scripts/model/write-port.mjs:77-115` (`fsWritePort`) — add an `allocate`
-  parameter, no new imports.
-- Modify: `scripts/new.mjs` — the allocation sequence (confirmed by this plan's review to
-  actually be at **lines 110-111** for `remoteMaxClaim`/`allocateId`, not 105 as the first
-  draft cited, and `writeClaim` at **line 123**, not folded into the 105-118 range the
-  first draft claimed).
-- Test: `tests/model/write-port.test.mjs` (fs port section, injection-only — no git
-  fixture needed, see below) and `tests/new.test.mjs` (the real end-to-end path, which
-  **does** need a git fixture — confirmed the file's own `root()` helper at line 14
-  already provides one, since `allocateId` reaches into a git worktree via
-  `git-common.mjs`; `write-port.test.mjs` has no such fixture, so the end-to-end case
-  belongs in `tests/new.test.mjs`, not there).
+- Modify: `scripts/model/write-port.mjs:77-115` (`fsWritePort`) — `allocate` now forwards
+  `(project, { title })` to the injected function; no new imports here.
+- Modify: `scripts/model/write-port-resolve.mjs` — imports `allocateId` (from
+  `./ids.mjs`), `remoteMaxClaim`/`writeClaim` (from `./claims.mjs`), `slugify` (added to
+  the existing `./storage.mjs` import line); construct the real `allocate` closure in the
+  `fs`/`dual` branches of `resolveWritePort` (currently around lines 161-162 for `fs` and
+  the dual branch further down).
+- Modify: `tests/model/seam-closure.test.mjs`'s import-allowlist entry for
+  `"model/write-port-resolve.mjs"` (line 1982) — add `"allocateId"`, `"remoteMaxClaim"`,
+  `"writeClaim"`, `"slugify"`.
+- Modify: `scripts/new.mjs` — the allocation sequence (confirmed at **lines 110-111** for
+  `remoteMaxClaim`/`allocateId`, and `writeClaim` at **line 123**) becomes a call to
+  `writePort.allocate(project, { title })`, and `applyNew`'s own default `writePort`
+  parameter supplies the same closure shape (duplicated, deliberately — see below).
+- Test: `tests/model/write-port.test.mjs` (fs port, injection-only) and
+  `tests/new.test.mjs` (the real end-to-end path — **its `root()` fixture returns a
+  string path, not `{ projectsDir }`**, and `applyNew`'s `estimate` option belongs under
+  `extra.estimate`, not top-level; both corrected below after the review caught both).
+
+**On the duplication between `new.mjs`'s default parameter and
+`resolveWritePort`'s construction:** both build the same four-line closure
+(`remoteMaxClaim` → `allocateId` → `writeClaim` → return). This is small, deliberate
+duplication rather than a shared export, because the alternative (a shared helper
+exported from one module and imported by the other) adds a new cross-module edge that
+would need its own guard pin either way, for a four-line function. If this bothers a
+future reader, factoring it out is a clean, low-risk refactor once both sites are proven
+correct independently — not a precondition for this task.
 
 **Interfaces:**
-- Produces: `fsWritePort(projectsDir, storage, readStorage, { allocate })` — the fourth
-  parameter's `allocate` is `(project) => Promise<{ id, n, claimFile }>`, supplied by the
-  caller. `fsWritePort(...).allocate(project)` calls it.
-- Produces: `applyNew`'s default `writePort` now supplies a real `allocate` closure
-  inline; `dbWritePort.allocate` (Task 4) returns `{ id, n }` with no `claimFile` —
-  `applyNew`'s return object includes `claimFile: undefined` in db/dual-mode, which is
-  harmless (existing db-mode git-staging behavior in `new-runner.mjs` is unaffected by
-  this task either way, since `write()` already returns an opaque id handle rather than a
-  path in db mode — a pre-existing BLZ-299 design point, not something this task changes).
+- Produces: `fsWritePort(projectsDir, storage, readStorage, { allocate })` — `allocate` is
+  now `(project, { title }) => Promise<{ id, n, claimFile }>`.
+- Produces: `dbWritePort.allocate(project, { title })` (Task 4) — `title` is accepted and
+  ignored (db mode has no claim file), keeping the call-site signature uniform across all
+  three ports so `applyNew`'s one call site never branches on port type.
 
 - [ ] **Step 1: Write the failing injection-only test (no git fixture)**
 
 ```js
-test("fsWritePort.allocate calls the injected function and returns its result", async () => {
+test("fsWritePort.allocate calls the injected function with project and title", async () => {
   const calls = [];
-  const fakeAllocate = async (project) => { calls.push(project); return { id: `${project}-9`, n: 9, claimFile: "/tmp/fake-claim" }; };
+  const fakeAllocate = async (project, { title }) => { calls.push([project, title]); return { id: `${project}-9`, n: 9, claimFile: "/tmp/fake-claim" }; };
   const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage, { allocate: fakeAllocate });
-  const result = await port.allocate("BLZ");
-  assert.deepEqual(calls, ["BLZ"]);
+  const result = await port.allocate("BLZ", { title: "A test ticket" });
+  assert.deepEqual(calls, [["BLZ", "A test ticket"]]);
   assert.deepEqual(result, { id: "BLZ-9", n: 9, claimFile: "/tmp/fake-claim" });
 });
 
 test("fsWritePort.allocate with no injected function refuses clearly, not silently", async () => {
   const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage);
-  await assert.rejects(() => port.allocate("BLZ"), /no allocate function was injected/);
+  await assert.rejects(() => port.allocate("BLZ", { title: "x" }), /no allocate function was injected/);
 });
 ```
+
+(Confirm `fsStorage` and `fsReadStorage` are already imported in this test file before
+using them here — the second review found the first draft's test used `fsStorage` in a
+file that never imported it; if it isn't imported, add the import rather than assuming.)
 
 - [ ] **Step 2: Run test to verify it fails**
 
@@ -920,9 +1061,9 @@ export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsRe
                              { allocate } = {}) {
   return {
     name: "fs",
-    async allocate(project) {
+    async allocate(project, opts = {}) {
       if (!allocate) throw new Error("fsWritePort: no allocate function was injected");
-      return allocate(project);
+      return allocate(project, opts);
     },
     write({ project, status, frontmatter, body, currentFile }) { /* unchanged */ },
     move({ project, status, frontmatter, body, currentFile }) { /* unchanged */ },
@@ -933,75 +1074,119 @@ export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsRe
 }
 ```
 
-(Elide only the four bodies already shown verified in this plan's spec §2 research —
-copy them unchanged from the current file; do not retype them from memory.)
+(Elide only the four bodies already verified in this plan's spec §2 research — copy them
+unchanged from the current file; do not retype them from memory.)
 
 - [ ] **Step 4: Run test to verify it passes**
 
 Expected: PASS, 2 tests.
 
 - [ ] **Step 5: Write the failing end-to-end test in `tests/new.test.mjs`**, using its
-      existing `root()` git fixture (read it first — don't reinvent it):
+      real fixture shape (read `root()`'s actual return value first — confirmed by review
+      to be a bare string path, not `{ projectsDir }`):
 
 ```js
 test("applyNew's default writePort allocates via fsWritePort.allocate and writes a claim file", async () => {
-  const { projectsDir } = root(); // this file's existing git-backed fixture
-  const result = await applyNew(projectsDir, { project: "BLZ", type: "task", title: "A test ticket", estimate: 30 });
+  const projectsDir = root(); // confirmed: root() returns the path directly
+  const result = await applyNew(projectsDir, { project: "BLZ", type: "task", title: "A test ticket",
+                                                extra: { estimate: 30 } }); // estimate under extra, confirmed by review
   assert.equal(result.ok, true);
   assert.match(result.id, /^BLZ-\d+$/);
   assert.ok(result.claimFile);
 });
 ```
 
-- [ ] **Step 6: Run to verify it fails**, then **implement** — in `scripts/new.mjs`,
-      replace the current direct sequence (lines 110-111's `remoteMaxClaim`/`allocateId`
-      call, and line 123's `writeClaim` call) with the injected default and a single call
-      site:
+- [ ] **Step 6: Run to verify it fails**, then **implement in `scripts/new.mjs`** —
+      replace the current direct sequence (lines 110-111, line 123) with a call to
+      `writePort.allocate(project, { title })`, and give the default `writePort` parameter
+      the same closure shape:
 
 ```js
-// In the opts-destructuring line, add the writePort default's fourth argument:
+// In the opts-destructuring line, the writePort default's fourth argument:
 writePort = fsWritePort(projectsDir, storage, readStorage, {
-  allocate: async (proj) => {
+  allocate: async (proj, { title: t } = {}) => {
     const dataRoot = dirname(projectsDir);
     const remoteMax = remoteMaxClaim(dataRoot, proj);
     const { id, n } = allocateId(projectsDir, proj, { dataRoot, remoteMax: remoteMax ?? 0 });
-    const claimFile = writeClaim(projectsDir, proj, n, slugify(title),
+    const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
                                   { provisional: remoteMax === null });
     return { id, n, claimFile };
   },
 })
 
 // Replacing the body's old sequence:
-const { id, n, claimFile } = await writePort.allocate(project);
+const { id, n, claimFile } = await writePort.allocate(project, { title });
 frontmatter.id = id;
 // ... existing target/exists/write logic, unchanged ...
-// (claimFile is already computed — no separate writeClaim call remains in the body)
 return { ok: true, id, type, project, status, file, claimFile, warnings };
 ```
 
-`new.mjs`'s imports of `allocateId`, `remoteMaxClaim`, `writeClaim` are unchanged — they
-move from the function body into the default-parameter closure, staying in the same
-file, so the seam-closure guard's existing pin for `new.mjs` (already permitting exactly
-these three imports) needs no change.
+- [ ] **Step 7: Implement the production path in `write-port-resolve.mjs`** — add the
+      three new imports plus `slugify` to the existing `./storage.mjs` import line, then
+      in `resolveWritePort`'s `fs` branch (and the `fsWritePort(...)` call inside its dual
+      branch), construct `fsWritePort` with the identical closure shape from Step 6:
 
-- [ ] **Step 7: Run tests to verify they pass**, including re-running `new.mjs`'s full
-      existing test suite to confirm zero regression in `blaze new`'s default (fs) path —
-      the highest-risk regression surface in this whole plan.
+```js
+// Added imports at the top of write-port-resolve.mjs:
+import { allocateId } from "./ids.mjs";
+import { remoteMaxClaim, writeClaim } from "./claims.mjs";
+import { fsStorage, slugify } from "./storage.mjs"; // slugify added to the existing line
 
-Run: `node --test tests/new.test.mjs tests/model/write-port.test.mjs`
-Expected: PASS, zero regressions in `blaze new`'s existing test count.
+// Both the `mode === "fs"` early-return AND the fs half of the dual branch construct:
+fsWritePort(projectsDir, storage, undefined, {
+  allocate: async (proj, { title: t } = {}) => {
+    const dataRoot = dirname(projectsDir);
+    const remoteMax = remoteMaxClaim(dataRoot, proj);
+    const { id, n } = allocateId(projectsDir, proj, { dataRoot, remoteMax: remoteMax ?? 0 });
+    const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
+                                  { provisional: remoteMax === null });
+    return { id, n, claimFile };
+  },
+})
+```
 
-- [ ] **Step 8: Run the seam-closure guard**, to confirm this task's prediction (no
-      change needed) is actually true, not merely argued:
+- [ ] **Step 8: Update the seam-closure guard's import allowlist** for
+      `"model/write-port-resolve.mjs"` (line 1982): add `"allocateId"`, `"remoteMaxClaim"`,
+      `"writeClaim"`, `"slugify"` to its existing array.
+
+- [ ] **Step 9: Run tests to verify they pass**, including re-running `new.mjs`'s full
+      existing test suite AND a real CLI smoke test — this is the exact regression the
+      review caught by running the CLI directly, not just the test suite:
+
+```
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+node --test tests/new.test.mjs tests/model/write-port.test.mjs
+# Real CLI smoke test against a scratch board — must succeed, not throw:
+mkdir -p /tmp/blaze-smoke-$$/projects/BLZ/defined
+cd /tmp/blaze-smoke-$$ && git init -q
+node <path-to-blaze-cli>/cli.mjs new --project BLZ --type task "Smoke test ticket" --estimate 30
+```
+
+Expected: all tests PASS, and the CLI smoke test creates a real ticket with exit 0 — not
+the `no allocate function was injected` error the review found.
+
+- [ ] **Step 10: Run the seam-closure guard**, confirming the import-allowlist update
+      actually closes the gap rather than merely arguing it does:
 
 Run: `node --test tests/model/seam-closure.test.mjs`
-Expected: PASS, unchanged.
+Expected: PASS.
 
-- [ ] **Step 9: Commit**
+- [ ] **Step 11: Run the FULL suite**, not just this task's own files — the review found
+      15 unrelated test failures (`new-runner.test.mjs`, `cli-key-refusal`,
+      `commit-status`, `runner-dataroot`, and others) from the first redesign's breakage,
+      which this task's own narrow test run would not have caught:
+
+```
+npm test 2>&1 | tail -20
+```
+
+Expected: zero regressions anywhere in the suite, not just in the files this task touched.
+
+- [ ] **Step 12: Commit**
 
 ```bash
-git add scripts/model/write-port.mjs scripts/new.mjs tests/new.test.mjs tests/model/write-port.test.mjs
-git commit -m "<TICKET>: fsWritePort.allocate via injection, new.mjs supplies the real allocator"
+git add scripts/model/write-port.mjs scripts/model/write-port-resolve.mjs scripts/new.mjs tests/new.test.mjs tests/model/write-port.test.mjs tests/model/seam-closure.test.mjs
+git commit -m "<TICKET>: fsWritePort.allocate constructed at both real call sites, title at call time"
 ```
 
 ## Task 6: `dualWritePort.allocate()`
@@ -1022,20 +1207,20 @@ task's one-line delegation is correct unconditionally.
 
 **Interfaces:**
 - Consumes: Task 4's `dbWritePort.allocate`, Task 5's `fsWritePort.allocate`.
-- Produces: `dualWritePort(primary, shadow, opts).allocate(project)` → delegates to
-  `primary.allocate(project)` only, per the function's own stated principle ("the primary
-  decides every outcome").
+- Produces: `dualWritePort(primary, shadow, opts).allocate(project, { title })` →
+  delegates to `primary.allocate(project, { title })` only, per the function's own stated
+  principle ("the primary decides every outcome").
 
 - [ ] **Step 1: Write the failing test**
 
 ```js
-test("dualWritePort.allocate delegates to the primary only", async () => {
+test("dualWritePort.allocate delegates to the primary only, forwarding title", async () => {
   let shadowCalled = false;
-  const primary = { name: "fs", allocate: async (p) => ({ id: `${p}-1`, n: 1 }) };
+  const primary = { name: "fs", allocate: async (p, { title }) => ({ id: `${p}-1`, n: 1, title }) };
   const shadow = { name: "db", allocate: async () => { shadowCalled = true; return { id: "X-99", n: 99 }; } };
   const port = dualWritePort(primary, shadow);
-  const result = await port.allocate("BLZ");
-  assert.deepEqual(result, { id: "BLZ-1", n: 1 });
+  const result = await port.allocate("BLZ", { title: "A test ticket" });
+  assert.deepEqual(result, { id: "BLZ-1", n: 1, title: "A test ticket" });
   assert.equal(shadowCalled, false);
 });
 ```
@@ -1048,7 +1233,7 @@ Expected: FAIL, `allocate is not a function`.
       `write`, `move`, `read`, `close`, per the pattern already there):
 
 ```js
-allocate(project) { return primary.allocate(project); },
+allocate(project, opts) { return primary.allocate(project, opts); },
 ```
 
 - [ ] **Step 4: Run test to verify it passes**
@@ -1082,28 +1267,32 @@ available — a smaller, honest target rather than forcing a fit into the wrong 
 - [ ] **Step 1: Write one assertion function, called against both dialects**
 
 ```js
-async function assertAllocateSequential(exec, dialect) {
+import { randomUUID } from "node:crypto";
+
+async function assertAllocateSequential(exec, dialect, key) {
   const port = dbWritePort(exec, { dialect });
   const results = [];
-  for (let i = 0; i < 5; i++) results.push(await port.allocate("SEQ"));
+  for (let i = 0; i < 5; i++) results.push(await port.allocate(key));
   assert.deepEqual(results.map((r) => r.n), [1, 2, 3, 4, 5]);
-  assert.deepEqual(results.map((r) => r.id), ["SEQ-1", "SEQ-2", "SEQ-3", "SEQ-4", "SEQ-5"]);
+  assert.deepEqual(results.map((r) => r.id), [1, 2, 3, 4, 5].map((n) => `${key}-${n}`));
 }
 
 test("dbWritePort.allocate is sequential on sqlite", async () => {
-  await assertAllocateSequential(sqliteExec(), "sqlite");
+  await assertAllocateSequential(sqliteExec(), "sqlite", "SEQ");
 });
 
 test("dbWritePort.allocate is sequential on postgres",
      { skip: !process.env.BLAZE_TEST_PG_URL }, async () => {
   // Reuse whatever this file's own (or the pg conformance suite's) Postgres schema-setup
   // helper already exists — locate via `grep -rn "BLAZE_TEST_PG_URL" tests/` before
-  // writing a new one; a project key unique to this test ("SEQPG") avoids collision with
-  // other Postgres-backed tests sharing the same CI database.
+  // writing a new one. A run-unique project key (not a fixed "SEQPG") is required, not
+  // optional — the review confirmed a fixed key fails on a second run against a shared
+  // CI Postgres database that already has a row for it from the first run.
   const client = new (await import("pg")).default.Client(process.env.BLAZE_TEST_PG_URL);
   await client.connect();
   // ... apply schema via the located helper ...
-  await assertAllocateSequential(pgExec(client), "postgres");
+  const key = `SQ${randomUUID().slice(0, 6).toUpperCase()}`;
+  await assertAllocateSequential(pgExec(client), "postgres", key);
   await client.end();
 });
 ```
@@ -1158,6 +1347,12 @@ from leftover state.
 - [ ] **Step 2: Write the test**, using two independent connections and a run-unique
       project key:
 
+**Corrected after adversarial review: the schema-setup call was left commented out, and
+run verbatim the test failed with `relation "project_counter" does not exist` — then
+hung indefinitely (exit 124 under a timeout) because neither client was closed on
+failure.** This draft actually calls Step 1's located helper and wraps each test body in
+`try`/`finally` so a failed assertion still closes both connections.
+
 ```js
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -1165,8 +1360,9 @@ import pg from "pg";
 import { randomUUID } from "node:crypto";
 import { dbWritePort } from "../../scripts/model/write-port.mjs";
 import { pgExec } from "../../scripts/model/write-port-resolve.mjs";
-// import Step 1's located schema-setup helper here, e.g.:
-// import { applySchema } from "./<located-helper>.mjs";
+// Step 1's located helper, actually imported and actually called below — not commented
+// out. Replace with the real name/path Step 1 found:
+import { applySchema } from "./<located-helper>.mjs";
 
 async function connect() {
   const client = new pg.Client(process.env.BLAZE_TEST_PG_URL);
@@ -1178,16 +1374,19 @@ test("50x50 concurrent allocations on one project, across two real connections: 
      { skip: !process.env.BLAZE_TEST_PG_URL }, async () => {
   const key = `CT${randomUUID().slice(0, 8).toUpperCase()}`; // run-unique — never collides across CI runs
   const [clientA, clientB] = await Promise.all([connect(), connect()]);
-  // await applySchema(clientA); // Step 1's helper, run once against either connection
-  const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
-  const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
-  const [a, b] = await Promise.all([
-    Promise.all(Array.from({ length: 50 }, () => portA.allocate(key))),
-    Promise.all(Array.from({ length: 50 }, () => portB.allocate(key))),
-  ]);
-  const all = [...a, ...b].map((r) => r.n).sort((x, y) => x - y);
-  assert.deepEqual(all, Array.from({ length: 100 }, (_, i) => i + 1));
-  await Promise.all([clientA.end(), clientB.end()]);
+  try {
+    await applySchema(clientA); // run once — schema is shared by both connections' database
+    const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
+    const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
+    const [a, b] = await Promise.all([
+      Promise.all(Array.from({ length: 50 }, () => portA.allocate(key))),
+      Promise.all(Array.from({ length: 50 }, () => portB.allocate(key))),
+    ]);
+    const all = [...a, ...b].map((r) => r.n).sort((x, y) => x - y);
+    assert.deepEqual(all, Array.from({ length: 100 }, (_, i) => i + 1));
+  } finally {
+    await Promise.all([clientA.end(), clientB.end()]); // runs even if an assertion above throws
+  }
 });
 
 test("concurrent allocations on two DIFFERENT projects, across two connections, never collide",
@@ -1195,15 +1394,19 @@ test("concurrent allocations on two DIFFERENT projects, across two connections, 
   const keyA = `CT${randomUUID().slice(0, 8).toUpperCase()}`;
   const keyB = `CT${randomUUID().slice(0, 8).toUpperCase()}`;
   const [clientA, clientB] = await Promise.all([connect(), connect()]);
-  const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
-  const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
-  const [resA, resB] = await Promise.all([
-    Promise.all(Array.from({ length: 20 }, () => portA.allocate(keyA))),
-    Promise.all(Array.from({ length: 20 }, () => portB.allocate(keyB))),
-  ]);
-  assert.deepEqual(resA.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));
-  assert.deepEqual(resB.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));
-  await Promise.all([clientA.end(), clientB.end()]);
+  try {
+    await applySchema(clientA);
+    const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
+    const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
+    const [resA, resB] = await Promise.all([
+      Promise.all(Array.from({ length: 20 }, () => portA.allocate(keyA))),
+      Promise.all(Array.from({ length: 20 }, () => portB.allocate(keyB))),
+    ]);
+    assert.deepEqual(resA.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));
+    assert.deepEqual(resB.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));
+  } finally {
+    await Promise.all([clientA.end(), clientB.end()]);
+  }
 });
 ```
 
@@ -1256,25 +1459,44 @@ for this task to absorb, plus a real bug in the design this task must fix:**
    parented under Task 0's ticket, scoped exactly as: "convert `views/data.mjs`'s read
    path to async and add `activityFeed` to the Postgres reader" — do not silently expand
    this task's scope to cover it, and do not leave it unticketed either.
-3. **The locate list was incomplete.** The review found four more `buildIndex(projectsDir)`
-   call sites this task's first draft didn't name: `scripts/views/graph.mjs:139`,
-   `scripts/views/data.mjs:146`, `scripts/rollup-runner.mjs:60`,
-   `scripts/views/panel-content.mjs:81` (re-verify all line numbers at implementation
-   time — confirm via `grep -rn "buildIndex(" scripts/`, not by trusting this list).
+3. **The locate list was both wrong and incomplete.** `scripts/views/graph.mjs:139` is
+   actually `scripts/model/graph.mjs:139` (wrong directory) — re-verified this round. The
+   review also found two more real sites this task's prior draft missed:
+   `scripts/reindex.mjs:67` and `scripts/views/data.mjs:35`; `scripts/rollup-runner.mjs:60`
+   and `scripts/views/panel-content.mjs:81` were correctly named. **None of these call
+   sites call `resolveWritePort` today, and four of the five are synchronous functions**
+   (`panelHtml`, `graphModel`, `liveModel`, and rollup's `main`) — confirmed by the review,
+   contradicting this task's own earlier claim that "most" run in async contexts. Getting
+   the write mode by calling the full, async, connection-opening `resolveWritePort()` from
+   a synchronous function isn't an option, and would be wasteful even from an async one
+   (it would open a real database connection just to read one field).
 
-**This task's actual, completable scope: wire `buildIndex`'s ticket source to
-`resolveWritePort`'s resolved mode, everywhere `buildIndex` is called with a
-`projectsDir` and no pre-supplied `tickets` array.** `buildIndex` itself needs no
-change (it already accepts an optional `tickets` array) — only its callers do.
+**The fix: extract mode detection from connection-opening.** Add a small, synchronous,
+zero-connection function — `resolveWriteMode(env = process.env)` returning just the
+`"fs" | "dual" | "db"` string, reading `BLAZE_WRITE_PORT` exactly as `resolveWritePort`'s
+own first few lines already do (`write-port-resolve.mjs:160`) — and have `resolveWritePort`
+call this new function internally instead of duplicating the same three lines. Every
+synchronous `buildIndex` caller calls `resolveWriteMode()` directly (cheap, no I/O); async
+callers may use either. **This task's actual, completable scope: wire `buildIndex`'s
+ticket source to `resolveWriteMode()`'s result, everywhere `buildIndex` is called with a
+`projectsDir` and no pre-supplied `tickets` array.** `buildIndex` itself needs no change
+(it already accepts an optional `tickets` array) — only its callers do.
 
 **Files:**
-- Modify: every real call site the corrected locate command finds (at minimum the four
-  above, re-verified, plus whatever `serve.mjs`/`reindex.mjs`/`cli.mjs` already had).
+- Modify: `scripts/model/write-port-resolve.mjs` — extract `resolveWriteMode(env)` from
+  `resolveWritePort`'s first few lines (currently around line 160), have
+  `resolveWritePort` call it internally.
+- Modify: each real `buildIndex(projectsDir)` call site (`scripts/reindex.mjs:67`,
+  `scripts/model/graph.mjs:139`, `scripts/views/data.mjs:35`, `scripts/rollup-runner.mjs:60`,
+  `scripts/views/panel-content.mjs:81` — re-verify all five via
+  `grep -rn "buildIndex(" scripts/` before trusting this list, five more days may have
+  passed).
 - Create: a small SQLite-mode ticket loader analogous to what `openPostgresRead` provides
   for Postgres — **locate whether one already exists first**
   (`grep -rn "openSqliteRead" scripts/model/*.mjs`; if it exists, this task calls it
   rather than building a second one).
-- Test: whichever existing test files cover the located callers' current behavior.
+- Test: whichever existing test files cover the located callers' current behavior, plus a
+  new one for `resolveWriteMode` itself.
 
 - [ ] **Step 1: Run the corrected locate command and read every result in full.**
 
@@ -1282,14 +1504,29 @@ change (it already accepts an optional `tickets` array) — only its callers do.
 grep -rn "buildIndex(" scripts/
 ```
 
-Do not proceed until you can answer, with a specific file:line citation for each real
-call site: does it already receive a `tickets` array, or does it rely on `buildIndex`'s
-own `walkTickets` fallback? Which of these run in an `async` context already (most do,
-since they're request handlers or CLI runners), and which — if any — are synchronous
-call sites that would need converting to call an async loader (a real, separate finding
-to report if found, not silently worked around).
+For each of the five sites, confirm with a citation: does it already receive a `tickets`
+array, or rely on `buildIndex`'s own `walkTickets` fallback? Confirmed this round: four of
+the five (`panelHtml`, `graphModel`, `liveModel`, rollup's `main`) are **synchronous**
+functions — this is why Step 2 extracts a synchronous mode-check rather than assuming an
+async context each site can use `resolveWritePort` from directly.
 
-- [ ] **Step 2: Confirm `openSqliteRead`'s existence and shape**
+- [ ] **Step 2: Write the failing test for `resolveWriteMode`, extract it, run to pass**
+
+```js
+test("resolveWriteMode reads BLAZE_WRITE_PORT synchronously, defaulting to fs", () => {
+  assert.equal(resolveWriteMode({}), "fs");
+  assert.equal(resolveWriteMode({ BLAZE_WRITE_PORT: "db" }), "db");
+  assert.equal(resolveWriteMode({ BLAZE_WRITE_PORT: "dual" }), "dual");
+});
+```
+
+Implement by lifting the existing `const mode = (env[WRITE_PORT_ENV] ?? "fs").trim();`
+line out of `resolveWritePort` into its own exported function, then have
+`resolveWritePort` call it instead of duplicating the logic. Run
+`tests/write-port-resolve.test.mjs` afterward to confirm zero regression in
+`resolveWritePort`'s own existing behavior.
+
+- [ ] **Step 3: Confirm `openSqliteRead`'s existence and shape**
 
 ```
 grep -rn "openSqliteRead" scripts/model/*.mjs
@@ -1297,31 +1534,36 @@ grep -rn "openSqliteRead" scripts/model/*.mjs
 
 The review confirmed it exists at `scripts/model/sqlite-storage.mjs:65` and is already
 imported by `driver-conformance.test.mjs:24` — re-confirm this citation directly rather
-than trusting it secondhand, then read its return shape before Step 4.
+than trusting it secondhand, then read its return shape before Step 5.
 
-- [ ] **Step 3: Write the failing test**, at one representative call site (pick the one
-      Step 1's reading judges least risky to change first — likely `reindex.mjs`, since
-      it's a batch CLI runner rather than a live request path):
+- [ ] **Step 4: Write the failing test**, at `scripts/reindex.mjs` first (confirmed to be
+      an async CLI runner, unlike four of the other five sites, so it's the least
+      structurally risky place to prove the pattern before repeating it four more times):
 
 ```js
-test("buildIndex's caller loads tickets from the database when write mode is db", async () => {
-  // Shape depends on the real call site's own test conventions, located in Step 1 —
-  // assert that with a fake resolveWritePort reporting mode: "db", the tickets fed to
-  // buildIndex come from a database loader, not walkTickets; and with mode: "fs" (the
-  // default), behavior is byte-for-byte unchanged from today.
+test("reindex loads tickets from the database when write mode is db", async () => {
+  // Read tests/reindex.test.mjs's real existing conventions first — this sketch shows
+  // the property to prove, not verified working code: with resolveWriteMode() reporting
+  // "db" (inject via whatever this file's own env-override pattern is), the ticket set
+  // buildIndex receives comes from the new database loader, not walkTickets; with the
+  // default ("fs"), reindex's behavior is byte-for-byte unchanged from today. Write this
+  // against the real file's actual test harness, not invented from scratch here.
 });
 ```
 
-- [ ] **Step 4: Run to verify it fails, then implement** for that one call site: thread
-      `resolveWritePort`'s already-resolved `mode` through (not a fresh
-      `resolveDatabaseConfig()` call — reuse the same resolution the write path already
-      computed, per this task's own corrected framing above) to decide `walkTickets` vs.
-      the database loader.
-- [ ] **Step 5: Run to verify it passes.**
-- [ ] **Step 6: Repeat Steps 3-5 for each remaining real call site** Step 1 found,
-      one at a time, each with its own fail-then-pass cycle — not batched, so a failure in
-      one doesn't mask a false pass in another.
-- [ ] **Step 7: Run the full suite** to confirm no regression in the filesystem-mode
+- [ ] **Step 5: Run to verify it fails, then implement** for `reindex.mjs`: call
+      `resolveWriteMode()` (Step 2 — synchronous, no connection opened) to decide
+      `walkTickets` vs. the database loader.
+- [ ] **Step 6: Run to verify it passes.**
+- [ ] **Step 7: Repeat Steps 4-6 for each of the remaining four call sites**, one at a
+      time, each with its own fail-then-pass cycle — not batched, so a failure in one
+      doesn't mask a false pass in another. All four are synchronous functions (per
+      Step 1's finding), so each calls `resolveWriteMode()` the same way `reindex.mjs`
+      does — no async conversion needed for the mode check itself, only for actually
+      loading tickets from the database when the mode says to, which each of these
+      functions' own callers already handle asynchronously somewhere upstream (confirm
+      this per site — do not assume it transfers automatically from `reindex.mjs`'s case).
+- [ ] **Step 8: Run the full suite** to confirm no regression in the filesystem-mode
       behavior of every call site touched — the highest-risk task in this plan for silent
       regressions, since the review already found this task's first draft would have
       shipped a real read/write inconsistency bug.
@@ -1333,12 +1575,12 @@ npm run test:coverage
 node scripts/ci/hygiene-check.mjs origin/main
 ```
 
-- [ ] **Step 8: File the follow-up ticket** for `views/data.mjs`'s async conversion and
+- [ ] **Step 9: File the follow-up ticket** for `views/data.mjs`'s async conversion and
       the missing `activityFeed` method (point 2 above), via `blaze-board-operator`,
       parented under Task 0's ticket, before closing this task out — an unticketed known
       gap is exactly the kind of silent scope-narrowing this plan's own review process
       exists to catch.
-- [ ] **Step 9: Commit** (one commit per call site converted is reasonable, given each is
+- [ ] **Step 10: Commit** (one commit per call site converted is reasonable, given each is
       independently testable and independently reviewable per this plan's own task-sizing
       rule — do not batch all call sites into one commit):
 
@@ -1399,21 +1641,41 @@ node scripts/ci/hygiene-check.mjs origin/main
   `buildIndex`'s read-source wiring, correctly derived from the write port's own resolved
   mode (fixing the read/write inconsistency bug), and files the rest as a named follow-up
   ticket rather than silently dropping it or falsely claiming to close it.
-- **Type/name consistency:** `allocate(project) → { id, n }` (with `fsWritePort`'s
-  injected closure adding `claimFile`, `dbWritePort` not) is used identically across
-  Tasks 4, 5, 6, and the conformance/concurrency tests in 7-8 — Task 5's redesign
-  (dependency injection, resolved during this second draft) removed the two-option fork
-  the first draft left open, so there is exactly one shape now, not a choice Task 6 had
-  to remain conditional on.
-- **Resolved during this plan's own writing (first draft):** `scripts/init-pg.mjs`'s full
-  46-line body was read and confirmed `openPostgres()` is wizard-connection-test-shaped,
-  not query-shaped — Task 3 adds a separate `openPostgresClient()`. **Resolved during the
-  second draft:** that function is now built with an injectable `Client` so its own test
-  never opens a real socket, closing the exact defect (`EAI_AGAIN`) the review found when
-  it actually ran the first draft's test.
+- **Type/name consistency:** `allocate(project, { title }) → { id, n }` (`fsWritePort`
+  additionally returning `claimFile`, `dbWritePort` ignoring `title`) is used identically
+  across Tasks 4, 5, 6, and the conformance/concurrency tests in 7-8. This is the THIRD
+  shape this signature has held across three drafts — closure-captured `title` (draft 2)
+  was proven wrong by an actual CLI run, not just reasoning, before landing on `title` as
+  a call-time argument (draft 3), which is now consistent with how the real production
+  call chain actually constructs a write port before a ticket's title is known.
+- **This is this plan's THIRD draft.** Draft 2's adversarial review (run against a scratch
+  copy of live `main`, not just read) found something more severe than draft 1's citation
+  errors: draft 2's Task 5 redesign, run as a live CLI command
+  (`blaze new --project BLZ --type task ...`), threw `no allocate function was injected`
+  and would have broken ticket creation for every user — because the real production
+  construction site (`resolveWritePort`, not `applyNew`'s default parameter) never got
+  the fix. This draft constructs the real `allocate` closure at **both** places
+  `fsWritePort` is actually built, verified against the exact production call chain
+  (`new-runner.mjs` → `resolveWritePort` → `applyNew`), and Task 5 now includes a real CLI
+  smoke test specifically to catch a regression of this class again, not just a unit-test
+  run. Also fixed this round: `persist()`'s transaction has a real discriminating test
+  (draft 2's had none); the schema-version bump now updates the floor
+  (`MIN_DB_SCHEMA_VERSION`) and the docs, not just the version number; `num()`'s reuse
+  claim was corrected to describe what's actually possible (load-corpus.mjs's own
+  parsing, not an export from a closure); the concurrency test's schema setup and
+  connection cleanup are real rather than commented-out placeholders; Task 2's temp-file
+  cleanup uses this repo's own `scratchRegistry()` convention instead of manual `rmSync`
+  calls that broke two other guards; the `database.url` refusal moved into `loadConfig`
+  so it fires unconditionally, matching ADR-0012's literal text, not only when
+  `resolveDatabaseConfig` happens to be reached; and Task 9's citations and its
+  sync/async mismatch are resolved via an extracted `resolveWriteMode()` rather than
+  assumed away.
 - **Genuinely still open, correctly left to implementation, and small enough that
-  guessing wrong costs one task's rework, not the whole plan's premise:** Task 1/Task 3's
-  exact schema-setup helper names in the Postgres-backed tests (Steps explicitly say
-  "locate before writing," per the review's own finding that helper names invented
-  without checking don't exist), and the follow-up ticket Task 9 files is scoped but not
-  designed — a future plan, not this one.
+  guessing wrong costs one task's rework, not the whole plan's premise:** the exact
+  schema-setup helper names in the Postgres-backed tests (Steps explicitly say "locate
+  before writing"), and the two follow-up tickets Tasks 4 and 9 file are scoped but not
+  designed — future plans, not this one. **Two operational gaps this plan deliberately
+  does not close, ticketed instead:** seeding a real production Postgres instance's
+  `project_counter` (only the local SQLite shadow gets seeded by `blaze db init`), and
+  re-seeding the counter immediately before a dual-write soak flips to `db` mode (the
+  counter can otherwise drift stale against ongoing filesystem-path ticket creation).
