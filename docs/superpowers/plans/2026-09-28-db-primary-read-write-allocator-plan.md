@@ -912,12 +912,20 @@ shape the existing "Both are 4 as of BLZ-377" line uses — a fifth-round review
 Task 0 created for `<TICKET>` literally, not leaving the placeholder text or its
 surrounding backticks in the actual file.**
 
-- [ ] **Step 10: Update the four existing assertions this repo already hard-codes to `4`
-      — confirmed by a fifth-round review to be the one real remaining blocker, and the
-      sole cause of every full-suite failure it found.** Bumping the two constants
-      (Step 9) without also updating these leaves the suite red:
-      - `tests/model/config-install.test.mjs:55-56` and `:210` (the last one Postgres-only)
-      - `tests/model/db-schema-version.test.mjs:175`, `:180`, and `:242`
+- [ ] **Step 10: Update the seven existing assertions this repo already hard-codes to
+      `4`** — confirmed by a sixth-round review to be the one real remaining blocker
+      (round 5's own line citations were off by one on several, and missed three
+      assertions entirely — round 6 re-read every line for real and confirmed this exact
+      list against HEAD). Bumping the two constants (Step 9) without also updating these
+      leaves the suite red — verified: changing only the previously-cited lines leaves
+      **3 failing tests**; changing exactly this list gives **0 failures**, 45/45 with
+      Postgres up:
+      - `tests/model/config-install.test.mjs:56` (`assert.equal(DB_SCHEMA_VERSION, 4)`),
+        `:57` (`assert.equal(MIN_DB_SCHEMA_VERSION, 4)`), and `:211`
+        (`assert.equal(Number(v), 4)`, Postgres-only)
+      - `tests/model/db-schema-version.test.mjs:175` (the test's own title string), `:180`,
+        `:182` (`assert.equal(v, "4")`, SQLite-only), and `:243`
+        (`assert.equal(MIN_DB_SCHEMA_VERSION, 4)`)
 
       Read each cited line in the real file and change its hard-coded `4` to `5` (or
       whatever the assertion's own wording requires — e.g. "the stamp is 4" becomes "the
@@ -1510,6 +1518,9 @@ async function isolatedDbTwoConnections(name) {
     await createDbSchema(pgExec(clientA), { dialect: "postgres" });
   } catch (e) {
     await Promise.allSettled([clientA.end(), clientB.end()]); // close whatever opened, even on failure
+    // A sixth-round review found this path left the just-created database behind
+    // (cosmetic, since it only fires when the test is already failing, but free to fix):
+    await dropDb(dbName).catch(() => {}); // best-effort — don't mask the real error below
     throw e;
   }
   return { clientA, clientB, dbName };
