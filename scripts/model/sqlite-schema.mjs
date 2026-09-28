@@ -248,6 +248,14 @@ CREATE INDEX IF NOT EXISTS worklog_ticket_idx ON worklog_entry (ticket_id);
 CREATE VIEW IF NOT EXISTS ticket_transition AS
   SELECT ticket_id AS id, from_status AS "from", to_status AS "to", at AS ts, actor, source
     FROM ticket_event WHERE kind = 'transition';
+
+-- BLZ-667. The db-mode id allocator: one row per project, holding the LAST number issued.
+-- Advanced by a single upsert (dbWritePort.allocate), so two concurrent allocations never
+-- return the same number. Seeded from the corpus's max per project by \`blaze db init\`.
+CREATE TABLE IF NOT EXISTS project_counter (
+  project_key TEXT PRIMARY KEY,
+  n           INTEGER NOT NULL DEFAULT 0 CHECK (n >= 0)
+) STRICT;
 `;
 
 /** Applied per connection: SQLite does not enforce foreign keys without it (V3). */

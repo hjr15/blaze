@@ -172,14 +172,15 @@ describe("DB schema version 2", () => {
   const tables = (db) =>
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
 
-  test("the stamp is 4", () => {
+  test("the stamp is 5", () => {
     // 2 -> 3 under BLZ-390, when the seven v3 tables gained STRICT.
     // 3 -> 4 under BLZ-377, which installs the blaze_config namespace and view/view_type in it.
     // BLZ-377's own AC said "probably wants version 3"; 3 had already shipped, and adding
     // tables to a shipped version retroactively is the silent change the stamp exists to stop.
-    assert.equal(DB_SCHEMA_VERSION, 4);
+    // 4 -> 5 under BLZ-667, which adds project_counter — the same rule, applied again.
+    assert.equal(DB_SCHEMA_VERSION, 5);
     const v = fresh().prepare("SELECT value FROM blaze_meta WHERE key='schema_version'").get().value;
-    assert.equal(v, "4");
+    assert.equal(v, "5");
   });
 
   test("a fresh create installs the v4 link tables — this is what Precedes needs", () => {
@@ -234,13 +235,16 @@ describe("DB schema version 2", () => {
   // version. That is safe because the shadow database is DERIVED: it lives under .blaze/,
   // `blaze db init` rebuilds it from the filesystem corpus, and the fs write port is the
   // default, so a stranded v1 shadow is deleted and recreated rather than migrated.
-  test("the floor rises to 4 — an older database is refused, not half-opened", () => {
+  test("the floor rises to 5 — an older database is refused, not half-opened", () => {
     // 2 -> 3 under BLZ-390. A v2 shadow's tables are NOT STRICT, so accepting one would silently
     // drop the guarantee the version exists to add.
     // 3 -> 4 under BLZ-377. A v3 shadow has no `blaze_config` at all, so a v4 engine that
     // accepted one would fail later on "no such table: blaze_config.view" — the raw-SQL-error-
     // instead-of-a-named-refusal failure this module exists to replace.
-    assert.equal(MIN_DB_SCHEMA_VERSION, 4);
+    // 4 -> 5 under BLZ-667. A v4 shadow has no `project_counter`, the same failure class again.
+    assert.equal(MIN_DB_SCHEMA_VERSION, 5);
+    assert.equal(judgeDbSchema({ hasTicket: true, hasMeta: true, version: 4 }).ok, false,
+      "a v4 shadow must be refused too — it has no project_counter table");
     assert.equal(judgeDbSchema({ hasTicket: true, hasMeta: true, version: 3 }).ok, false,
       "a v3 shadow must be refused too — it has no blaze_config namespace");
     assert.equal(judgeDbSchema({ hasTicket: true, hasMeta: true, version: 2 }).ok, false,

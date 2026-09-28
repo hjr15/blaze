@@ -109,7 +109,7 @@ guarded by `judgeDbSchema`, and the two move independently — a config bump is
 not an engine-schema bump. `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` both
 live in `scripts/model/db-schema-version.mjs`.
 
-**Both are 4 as of BLZ-377.** Version 2 (BLZ-370) installed the v4 `link`/`link_type`
+**Both are 5 as of BLZ-667.** Version 2 (BLZ-370) installed the v4 `link`/`link_type`
 and `hierarchy`/`hierarchy_membership` tables and five new `ticket` columns.
 Version 3 (BLZ-390) puts `STRICT` on the seven `SQLITE_DDL` tables and on `blaze_meta`:
 that changes their definitions, and an existing version-2 shadow's tables are NOT
@@ -118,11 +118,15 @@ to add. Version 4 (BLZ-377) installs the `blaze_config` namespace — a second S
 file at `.blaze/config.db`, ATTACHed by the opener, or a Postgres schema — together
 with `view` and `view_type` inside it. Before it, `blaze_config` was a namespace
 **nothing created**: `configDdl` was exported and called only from its own test.
+Version 5 (BLZ-667) adds `project_counter`, the per-project counter db-mode id
+allocation advances; `blaze db init` seeds it from the corpus's highest ticket number
+per project.
 
-The floor rises with each of these, which is why **a version-1, -2 or -3 shadow is all
+The floor rises with each of these, which is why **a version-1, -2, -3 or -4 shadow is all
 refused**. A version-3 shadow has no `blaze_config` at all, so a version-4 engine that
 accepted one would fail later on `no such table: blaze_config.view` — the raw SQL error
-this guard exists to replace with a named refusal.
+this guard exists to replace with a named refusal. A version-4 shadow has no
+`project_counter`, and the same reasoning applies at version 5.
 
 `blaze db init --force` removes **both** files. The config namespace is as derived as the
 shadow is, and a fresh `blaze.db` beside a stale `config.db` is a half-replaced pair —
@@ -130,14 +134,14 @@ which is what `--force` exists to avoid.
 
 - **"database schema version N is newer than this engine supports"** — the
   shadow was written by a newer engine. Upgrade this install.
-- **"database schema version 1, 2 or 3 is older than this engine supports"** — **this
-  one does occur**, for every shadow created before BLZ-377. There is no
+- **"database schema version 1, 2, 3 or 4 is older than this engine supports"** — **this
+  one does occur**, for every shadow created before BLZ-667. There is no
   migration and none is needed: the shadow is **derived**, not authoritative.
   The filesystem is the source of truth, so rebuild it:
 
       blaze db init --force
 
-  That drops the old shadow and reloads the board into a version-4 one. No board
+  That drops the old shadow and reloads the board into a version-5 one. No board
   data lives only in the shadow, which is why raising the floor is safe and why
   a migration path would be machinery for nothing.
 - **"this database holds tables but no Blaze schema stamp"** — it predates

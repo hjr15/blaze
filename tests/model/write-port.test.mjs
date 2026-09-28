@@ -362,3 +362,63 @@ describe("frontmatter that is not a column still round-trips (BLZ-295)", () => {
     assert.deepEqual(port.divergences, []);
   });
 });
+
+// BLZ-667: db-mode id allocation. `allocate` advances project_counter by one upsert and
+// returns the same { id, n } shape as ids.mjs's allocateId, so callers need no adapter.
+describe("dbWritePort.allocate (BLZ-667)", () => {
+  test("dbWritePort.allocate returns sequential numbers for one project", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const a = await port.allocate("BLZ");
+    const b = await port.allocate("BLZ");
+    assert.deepEqual([a.n, b.n], [1, 2]);
+    assert.deepEqual([a.id, b.id], ["BLZ-1", "BLZ-2"]);
+  });
+
+  test("dbWritePort.allocate keeps separate projects independent", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const a = await port.allocate("BLZ");
+    const b = await port.allocate("OBA");
+    assert.equal(a.n, 1);
+    assert.equal(b.n, 1); // OBA's own counter, not BLZ's
+  });
+
+  test("a rejected ticket insert burns its allocated number — accepted, per the design's own risk table", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const { id, n } = await port.allocate("BLZ");
+    // An empty title genuinely rejects, via the schema's CHECK on title. Overridden
+    // INSIDE frontmatter: write() reads frontmatter.id/.title, not top-level keys.
+    const t1 = TICKET();
+    await assert.rejects(() => port.write({ ...t1, frontmatter: { ...t1.frontmatter, id, title: "" } }));
+    const { n: nextN } = await port.allocate("BLZ");
+    // Allocation and the insert are two separately-committed operations, so the failed
+    // attempt's number is NOT reused — a gap, and gaps are tolerated by design (ADR-0018).
+    assert.equal(nextN, n + 1);
+  });
+
+  test("allocated id round-trips through dbWritePort's own num() parsing", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    await port.allocate("BLZ");
+    const { id } = await port.allocate("BLZ"); // BLZ-2, so the fixture's own BLZ-1 cannot mask a misplaced override
+    const t = TICKET();
+    await port.write({ ...t, frontmatter: { ...t.frontmatter, id } }); // must not throw "cannot derive num from id"
+    // Read it back: merely not throwing does not prove the override took effect.
+    const written = await port.read(id);
+    assert.equal(written.frontmatter.id, id);
+  });
+
+  test("a mid-sequence failure in persist() leaves no partial ticket row", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const { id } = await port.allocate("BLZ");
+    // Duplicate labels violate ticket_label's PRIMARY KEY (ticket_id, label), AFTER the
+    // ticket row itself has been upserted — the half-written state a transaction prevents.
+    const t = TICKET();
+    await assert.rejects(() => port.write({ ...t, frontmatter: { ...t.frontmatter, id, labels: ["a", "a"] } }));
+    const rows = await exec.all("SELECT 1 AS hit FROM ticket WHERE id = ?", [id]);
+    assert.equal(rows.length, 0, "a half-written ticket row survived a mid-sequence failure");
+  });
+});

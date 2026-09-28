@@ -82,6 +82,10 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   const insAc = db.prepare("INSERT INTO acceptance_criterion (ticket_id,ord,kind,text,checked) VALUES (?,?,?,?,?)");
 
   const typeById = new Map();
+  // BLZ-667: the highest number the corpus holds, per id prefix — what project_counter is
+  // seeded from. Taken from every well-formed id, INCLUDING a row the database then refused:
+  // that ticket still exists on disk, so its number is still taken.
+  const maxNum = new Map();
 
   db.exec("BEGIN");
   for (const t of rows) {
@@ -91,6 +95,7 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
     const [key, numRaw] = id.split("-");
     const num = Number(numRaw);
     if (!key || !Number.isFinite(num) || num <= 0) { report.skipped.badId++; continue; }
+    if (Number.isInteger(num) && num > (maxNum.get(key) ?? 0)) maxNum.set(key, num);
 
     const ac = parseAcBlocks(t.body);
     const title = String(fm.title ?? "").trim() || id;
@@ -174,6 +179,14 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
       report.links++;
     }
   }
+
+  // BLZ-667: seed the db-mode allocator, so its first number follows the corpus's last
+  // rather than colliding with it. The MAX, not the count — numbering has gaps. And never
+  // lower an existing counter: a number already issued must not be issued twice.
+  const seedCounter = db.prepare(
+    `INSERT INTO project_counter (project_key, n) VALUES (?, ?)
+     ON CONFLICT (project_key) DO UPDATE SET n = max(project_counter.n, excluded.n)`);
+  for (const [key, n] of maxNum) seedCounter.run(key, n);
   db.exec("COMMIT");
   return report;
 }
