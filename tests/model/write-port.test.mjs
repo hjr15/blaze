@@ -10,13 +10,14 @@
 //      comparison that cannot fail is not a comparison.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
+import { randomUUID } from "node:crypto";
 import { mkdtempSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mjs";
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
-import { memStorage } from "../../scripts/model/storage.mjs";
+import { memStorage, fsStorage } from "../../scripts/model/storage.mjs";
 import { scratchRegistry } from "../helpers/scratch.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, selectWritePort, valueDiff,
          ticketValue, WRITE_PORT_ENV, COLUMN_FIELDS,
@@ -361,4 +362,138 @@ describe("frontmatter that is not a column still round-trips (BLZ-295)", () => {
     await port.write(RICH(), { readStorage: fsReadStorage });
     assert.deepEqual(port.divergences, []);
   });
+});
+
+// BLZ-667: db-mode id allocation. `allocate` advances project_counter by one upsert and
+// returns the same { id, n } shape as ids.mjs's allocateId, so callers need no adapter.
+describe("dbWritePort.allocate (BLZ-667)", () => {
+  test("dbWritePort.allocate returns sequential numbers for one project", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const a = await port.allocate("BLZ");
+    const b = await port.allocate("BLZ");
+    assert.deepEqual([a.n, b.n], [1, 2]);
+    assert.deepEqual([a.id, b.id], ["BLZ-1", "BLZ-2"]);
+  });
+
+  test("dbWritePort.allocate keeps separate projects independent", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const a = await port.allocate("BLZ");
+    const b = await port.allocate("OBA");
+    assert.equal(a.n, 1);
+    assert.equal(b.n, 1); // OBA's own counter, not BLZ's
+  });
+
+  test("a rejected ticket insert burns its allocated number — accepted, per the design's own risk table", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const { id, n } = await port.allocate("BLZ");
+    // An empty title genuinely rejects, via the schema's CHECK on title. Overridden
+    // INSIDE frontmatter: write() reads frontmatter.id/.title, not top-level keys.
+    const t1 = TICKET();
+    await assert.rejects(() => port.write({ ...t1, frontmatter: { ...t1.frontmatter, id, title: "" } }));
+    const { n: nextN } = await port.allocate("BLZ");
+    // Allocation and the insert are two separately-committed operations, so the failed
+    // attempt's number is NOT reused — a gap, and gaps are tolerated by design (ADR-0018).
+    assert.equal(nextN, n + 1);
+  });
+
+  test("allocated id round-trips through dbWritePort's own num() parsing", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    await port.allocate("BLZ");
+    const { id } = await port.allocate("BLZ"); // BLZ-2, so the fixture's own BLZ-1 cannot mask a misplaced override
+    const t = TICKET();
+    await port.write({ ...t, frontmatter: { ...t.frontmatter, id } }); // must not throw "cannot derive num from id"
+    // Read it back: merely not throwing does not prove the override took effect.
+    const written = await port.read(id);
+    assert.equal(written.frontmatter.id, id);
+  });
+
+  test("a mid-sequence failure in persist() leaves no partial ticket row", async () => {
+    const exec = sqliteExec();
+    const port = dbWritePort(exec, { dialect: "sqlite" });
+    const { id } = await port.allocate("BLZ");
+    // Duplicate labels violate ticket_label's PRIMARY KEY (ticket_id, label), AFTER the
+    // ticket row itself has been upserted — the half-written state a transaction prevents.
+    const t = TICKET();
+    await assert.rejects(() => port.write({ ...t, frontmatter: { ...t.frontmatter, id, labels: ["a", "a"] } }));
+    const rows = await exec.all("SELECT 1 AS hit FROM ticket WHERE id = ?", [id]);
+    assert.equal(rows.length, 0, "a half-written ticket row survived a mid-sequence failure");
+  });
+});
+
+// BLZ-667 Task 5: fsWritePort.allocate is an injected seam, `title` passed at CALL time —
+// resolveWritePort builds the port before the ticket's title is known.
+test("fsWritePort.allocate calls the injected function with project and title", async () => {
+  const calls = [];
+  const fakeAllocate = async (project, { title }) => { calls.push([project, title]); return { id: `${project}-9`, n: 9, claimFile: "/tmp/fake-claim" }; };
+  const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage, { allocate: fakeAllocate });
+  const result = await port.allocate("BLZ", { title: "A test ticket" });
+  assert.deepEqual(calls, [["BLZ", "A test ticket"]]);
+  assert.deepEqual(result, { id: "BLZ-9", n: 9, claimFile: "/tmp/fake-claim" });
+});
+
+test("fsWritePort.allocate with no injected function refuses clearly, not silently", async () => {
+  const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage);
+  await assert.rejects(() => port.allocate("BLZ", { title: "x" }), /no allocate function was injected/);
+});
+
+// BLZ-667 Task 6: dualWritePort.allocate delegates to the primary only — "the primary
+// decides every outcome" applies to allocation exactly as it does to write/move/exists.
+test("dualWritePort.allocate delegates to the primary only, forwarding title", async () => {
+  let shadowCalled = false;
+  const primary = { name: "fs", allocate: async (p, { title }) => ({ id: `${p}-1`, n: 1, title }) };
+  const shadow = { name: "db", allocate: async () => { shadowCalled = true; return { id: "X-99", n: 99 }; } };
+  const port = dualWritePort(primary, shadow);
+  const result = await port.allocate("BLZ", { title: "A test ticket" });
+  assert.deepEqual(result, { id: "BLZ-1", n: 1, title: "A test ticket" });
+  assert.equal(shadowCalled, false);
+});
+
+// BLZ-667 Task 7: `allocate()` proven identical across both write dialects. One assertion
+// function, run against a real SQLite driver and (when BLAZE_TEST_PG_URL is set) a real
+// Postgres server — the same behaviour, not just the same code path.
+async function assertAllocateSequential(exec, dialect, key) {
+  const port = dbWritePort(exec, { dialect });
+  const results = [];
+  for (let i = 0; i < 5; i++) results.push(await port.allocate(key));
+  assert.deepEqual(results.map((r) => r.n), [1, 2, 3, 4, 5]);
+  assert.deepEqual(results.map((r) => r.id), [1, 2, 3, 4, 5].map((n) => `${key}-${n}`));
+}
+
+test("dbWritePort.allocate is sequential on sqlite", async () => {
+  await assertAllocateSequential(sqliteExec(), "sqlite", "SEQ");
+});
+
+test("dbWritePort.allocate is sequential on postgres", { skip: PG ? false : "set BLAZE_TEST_PG_URL" }, async () => {
+  // Real schema setup, per this repo's own established pattern (tests/model/config-install
+  // .test.mjs's "BLZ-377: Postgres installs the same namespace" test): a DEDICATED database
+  // per test run, not a shared one — schema creation itself collides if two runs race it
+  // against one database.
+  const pg = (await import("pg")).default;
+  const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+  const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+  const dbName = `blz_allocate_seq_${process.pid}`;
+  const admin = new pg.Client(PG);
+  await admin.connect();
+  await admin.query(`DROP DATABASE IF EXISTS ${dbName}`);
+  await admin.query(`CREATE DATABASE ${dbName}`);
+  await admin.end();
+  const dbUrl = new URL(PG);
+  dbUrl.pathname = `/${dbName}`;
+  const client = new pg.Client(dbUrl.toString());
+  await client.connect();
+  try {
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    const key = `SQ${randomUUID().slice(0, 6).toUpperCase()}`;
+    await assertAllocateSequential(pgExec(client), "postgres", key);
+  } finally {
+    await client.end(); // runs even if an assertion above throws
+    const cleanup = new pg.Client(PG);
+    await cleanup.connect();
+    await cleanup.query(`DROP DATABASE IF EXISTS ${dbName}`);
+    await cleanup.end();
+  }
 });

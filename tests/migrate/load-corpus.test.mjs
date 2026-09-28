@@ -157,3 +157,36 @@ test("a malformed date falls back rather than aborting the load", () => {
   assert.equal(loadCorpus(s.db, dir, { today: "2026-08-20" }).tickets, 1);
   assert.equal(s.db.prepare("SELECT created_on c FROM ticket").get().c, "2026-08-20");
 });
+
+// --- BLZ-667 -----------------------------------------------------------------
+// db-mode allocation reads `project_counter`. A shadow loaded from a corpus that already
+// runs past BLZ-666 but left the counter at 0 would hand out BLZ-1 again — a collision
+// with a real ticket. So the load seeds the counter from the corpus itself.
+const counters = (db) => Object.fromEntries(
+  db.prepare("SELECT project_key, n FROM project_counter ORDER BY project_key").all()
+    .map((r) => [r.project_key, r.n]));
+
+test("BLZ-667: the load seeds project_counter with each project's MAX number, not its count", () => {
+  const dir = board([
+    { project: "BLZ", status: "defined", id: "BLZ-3",
+      text: doc({ id: "BLZ-3", title: "Three", type: "task", project: "BLZ" }) },
+    { project: "BLZ", status: "done", id: "BLZ-7",
+      text: doc({ id: "BLZ-7", title: "Seven", type: "task", project: "BLZ" }) },
+    { project: "OBA", status: "defined", id: "OBA-12",
+      text: doc({ id: "OBA-12", title: "Twelve", type: "task", project: "OBA" }) },
+  ]);
+  const s = openSqliteRead(":memory:", { create: true });
+  loadCorpus(s.db, dir);
+  assert.deepEqual(counters(s.db), { BLZ: 7, OBA: 12 });
+});
+
+test("BLZ-667: seeding never moves an existing counter BACKWARDS", () => {
+  // A number already issued in db mode must never be issued again, even if a later load
+  // runs over a corpus that does not (yet) contain that ticket.
+  const dir = board([{ project: "BLZ", status: "defined", id: "BLZ-3",
+    text: doc({ id: "BLZ-3", title: "Three", type: "task", project: "BLZ" }) }]);
+  const s = openSqliteRead(":memory:", { create: true });
+  s.db.prepare("INSERT INTO project_counter (project_key, n) VALUES ('BLZ', 40)").run();
+  loadCorpus(s.db, dir);
+  assert.deepEqual(counters(s.db), { BLZ: 40 });
+});

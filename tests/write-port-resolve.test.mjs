@@ -11,8 +11,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { resolveWritePort, openShadow, logDivergence, shadowDbPath,
-         divergenceLogPath, sqliteExec } from "../scripts/model/write-port-resolve.mjs";
+import { resolveWritePort, resolveWriteMode, openShadow, logDivergence, shadowDbPath,
+         divergenceLogPath, sqliteExec, pgExec } from "../scripts/model/write-port-resolve.mjs";
 import { createDbSchemaSync } from "../scripts/model/db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "../scripts/model/config-schema.mjs";
 import { SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
@@ -38,6 +38,14 @@ async function seededBoard() {
   db.close();
   return dataRoot;
 }
+
+describe("resolveWriteMode reads BLAZE_WRITE_PORT synchronously, with no database touched", () => {
+  test("resolveWriteMode reads BLAZE_WRITE_PORT synchronously, defaulting to fs", () => {
+    assert.equal(resolveWriteMode({}), "fs");
+    assert.equal(resolveWriteMode({ BLAZE_WRITE_PORT: "db" }), "db");
+    assert.equal(resolveWriteMode({ BLAZE_WRITE_PORT: "dual" }), "dual");
+  });
+});
 
 describe("the default is the filesystem, and it opens no database", () => {
   test("unset means fs", async () => {
@@ -204,5 +212,98 @@ describe("the soak has a denominator (BLZ-300)", () => {
     const r = await resolveWritePort({ dataRoot, projectsDir: join(dataRoot, "projects"), env: {} });
     r.close();
     assert.equal(readSoakState(dataRoot), null);
+  });
+});
+
+describe("resolveWritePort opens real Postgres when database.driver is postgres", () => {
+  // A fake client whose schema looks stamped at the current version — the tests below
+  // that need a REFUSAL build their own fake with a different answer to these same queries.
+  const stampedCurrentClient = () => ({
+    async query(sql) {
+      if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
+      if (sql.includes("blaze_meta")) return { rows: [{ value: "5" }] };
+      return { rows: [] };
+    },
+    async end() {},
+  });
+
+  test("resolveWritePort opens Postgres when configured, not the SQLite shadow", async () => {
+    const calls = [];
+    const client = stampedCurrentClient();
+    const fakeOpenPostgresClient = async (conn) => { calls.push(conn); return client; };
+    const { port, mode, close } = await resolveWritePort({
+      dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
+      env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres",
+                                 connection: { host: "h", port: 5432, database: "d", user: "u", password: "p" } }),
+      openPostgresClient: fakeOpenPostgresClient,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(port.name, "db");
+    await close();
+  });
+
+  test("an empty Postgres database is refused, not silently written through", async () => {
+    const ended = [];
+    const client = {
+      async query() { return { rows: [] }; }, // no tables at all — judgeDbSchema's "empty" state
+      async end() { ended.push(true); },
+    };
+    await assert.rejects(
+      () => resolveWritePort({
+        dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
+        env: { BLAZE_WRITE_PORT: "db" },
+        resolveDbConfig: () => ({ driver: "postgres",
+                                   connection: { host: "h", port: 5432, database: "d", user: "u", password: "p" } }),
+        openPostgresClient: async () => client,
+      }),
+      /no Blaze schema/,
+    );
+    assert.deepEqual(ended, [true]); // the socket is live the moment connect() returns — must close on refusal
+  });
+
+  test("a Postgres database stamped below this engine's floor is refused, not written through", async () => {
+    const ended = [];
+    const client = {
+      async query(sql) {
+        if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
+        if (sql.includes("blaze_meta")) return { rows: [{ value: "4" }] }; // below MIN_DB_SCHEMA_VERSION
+        return { rows: [] };
+      },
+      async end() { ended.push(true); },
+    };
+    await assert.rejects(
+      () => resolveWritePort({
+        dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
+        env: { BLAZE_WRITE_PORT: "db" },
+        resolveDbConfig: () => ({ driver: "postgres",
+                                   connection: { host: "h", port: 5432, database: "d", user: "u", password: "p" } }),
+        openPostgresClient: async () => client,
+      }),
+      /older than this engine supports/,
+    );
+    assert.deepEqual(ended, [true]);
+  });
+});
+
+describe("pgExec mirrors sqliteExec's shape, over a caller-supplied client", () => {
+  test("pgExec.all returns rows from client.query", async () => {
+    const calls = [];
+    const fakeClient = {
+      async query(sql, params) {
+        calls.push([sql, params]);
+        return { rows: [{ n: 1 }] };
+      },
+    };
+    const exec = pgExec(fakeClient);
+    const rows = await exec.all("SELECT $1 AS n", [1]);
+    assert.deepEqual(rows, [{ n: 1 }]);
+    assert.deepEqual(calls, [["SELECT $1 AS n", [1]]]);
+  });
+
+  test("pgExec.run executes without returning rows", async () => {
+    const fakeClient = { async query() { return { rows: [] }; } };
+    const exec = pgExec(fakeClient);
+    await assert.doesNotReject(() => exec.run("SELECT 1", []));
   });
 });

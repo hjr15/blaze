@@ -44,3 +44,27 @@ export async function openPostgres({ host, port, database, user, password }) {
     async close() { await client.end(); },
   };
 }
+
+/** The production write-port's connection: the raw, connected client, no test wrapper.
+ *  Separate from openPostgres() above, which is testConnection-shaped for the wizard —
+ *  reusing that wrapper here would give write-port callers no .query to call.
+ *  `Client` is injectable so tests never open a real socket. */
+export async function openPostgresClient({ host, port, database, user, password }, { Client } = {}) {
+  if (!Client) {
+    let pg;
+    try {
+      pg = (await import("pg")).default;
+    } catch (cause) {
+      if (cause?.code !== "ERR_MODULE_NOT_FOUND") throw cause;
+      throw new Error(
+        "The Postgres driver needs the 'pg' package, which Blaze does not install by "
+        + "default. Install it alongside Blaze to use a Postgres board:\n\n"
+        + "    npm install pg\n\n"
+        + "No other driver requires it — sqlite works without.", { cause });
+    }
+    Client = pg.Client;
+  }
+  const client = new Client({ host, port, database, user, password });
+  await client.connect();
+  return client;
+}

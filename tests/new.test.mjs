@@ -6,6 +6,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { applyNew } from "../scripts/new.mjs";
+import { resolveWritePort } from "../scripts/model/write-port-resolve.mjs";
 
 // BLZ-136: allocation reserves ids in the shared git common dir, so a board root
 // must be a real git worktree. commonDirFor fails loud rather than degrading to
@@ -319,4 +320,31 @@ test("INF-791: a parentless non-goal is still allowed (missing parent is soft)",
     today: "2026-08-07", extra: { estimate: 30 } });
   assert.equal(res.ok, true, JSON.stringify(res.errors));
   rmSync(r, { recursive: true, force: true });
+});
+
+// BLZ-667 Task 5: allocation moved behind writePort.allocate(project, { title }). BOTH real
+// construction sites of fsWritePort must inject the allocator — applyNew's own default AND
+// resolveWritePort's fs branch, which is what new-runner.mjs actually passes in production.
+test("applyNew's default writePort allocates via fsWritePort.allocate and writes a claim file", async (t) => {
+  const r = root(); const projectsDir = join(r, "projects");
+  t.after(() => rmSync(r, { recursive: true, force: true }));
+  const result = await applyNew(projectsDir, { project: "BLZ", type: "task", title: "A test ticket",
+                                               extra: { estimate: 30 } });
+  assert.equal(result.ok, true, JSON.stringify(result.errors));
+  assert.match(result.id, /^BLZ-\d+$/);
+  assert.ok(result.claimFile);
+  assert.ok(existsSync(result.claimFile), "the claim file was not written");
+});
+
+test("applyNew through resolveWritePort's fs port (the production path) allocates and claims", async () => {
+  const r = root(); const projectsDir = join(r, "projects");
+  const { port: writePort, close } = await resolveWritePort({ dataRoot: r, projectsDir, env: {} });
+  try {
+    const result = await applyNew(projectsDir, { project: "BLZ", type: "task", title: "A test ticket",
+                                                 extra: { estimate: 30 }, writePort });
+    assert.equal(result.ok, true, JSON.stringify(result.errors));
+    assert.equal(result.id, "BLZ-1");
+    assert.ok(existsSync(result.file));
+    assert.ok(result.claimFile && existsSync(result.claimFile), "the claim file was not written");
+  } finally { close(); rmSync(r, { recursive: true, force: true }); }
 });

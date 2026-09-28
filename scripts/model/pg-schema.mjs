@@ -195,4 +195,12 @@ CREATE TRIGGER ticket_event_no_delete BEFORE DELETE ON ticket_event
 CREATE OR REPLACE VIEW ticket_transition AS
   SELECT ticket_id AS id, from_status AS "from", to_status AS "to", at AS ts, actor, source
     FROM ticket_event WHERE kind = 'transition';
+
+-- BLZ-667. The db-mode id allocator: one row per project, holding the LAST number issued.
+-- Advanced by a single upsert (dbWritePort.allocate), so two concurrent allocations never
+-- return the same number. Seeded from the corpus's max per project by \`blaze db init\`.
+CREATE TABLE IF NOT EXISTS project_counter (
+  project_key text PRIMARY KEY,
+  n           integer NOT NULL DEFAULT 0 CHECK (n >= 0)
+);
 `;

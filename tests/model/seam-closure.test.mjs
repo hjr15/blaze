@@ -922,11 +922,14 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // not this guard's surface at all. `ensureIdentityIgnored` appends the .gitignore line.
   ["model/user-admin.mjs", { writes: ["ensureIdentityIgnored", "addUser", "setUserPassword"], sanctioned: [], inert: ["USER_VERBS", "parseUserArgv"] }],
   // The soak's artifacts under gitignored .blaze/. `resolveWritePort` is how a verb OBTAINS
-  // the driver — the front door again, not a bypass.
+  // the driver — the front door again, not a bypass. `pgExec` is the same adapter shape as
+  // `sqliteExec`, over a caller-supplied client — reaches no node:fs write itself.
+  // `resolveWriteMode` (BLZ-667) is `resolveWritePort`'s own mode detection, extracted: it
+  // reads an env var and returns a string — reaches no write of any kind.
   ["model/write-port-resolve.mjs",
     { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
-        "sqliteExec", "readSoakState", "assertConfigNamespace"] }],
+        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
@@ -1979,7 +1982,11 @@ const WRITE_ALLOWED = new Map([
   // the single place in the tree where D1's fail-closed arm fires on something innocent.
   // Named rather than tuned away: a rule loosened until this module goes quiet is a rule
   // loosened for every module.
-  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE, "fsStorage"]],
+  // BLZ-667: `allocateId` + `writeClaim` are fsWritePort's injected allocator (the id
+  // reservation and its claim file), on exactly `new.mjs`'s footing below. `remoteMaxClaim`
+  // and `slugify` are imported too but only read/compute, so they reach no write.
+  ["model/write-port-resolve.mjs", ["appendFileSync", "mkdirSync", OPAQUE, "fsStorage",
+    "allocateId", "writeClaim"]],
   // `writeSync(2, ...)` — a partial-write loop onto STDERR, which is a terminal, not a file.
   // Named to that one member: a path-taking write appearing in the CLI still reddens.
   ["cli.mjs", ["writeSync"]],

@@ -49,12 +49,13 @@ const cfgTables = (db) => db
   .all().map((r) => r.name);
 
 describe("BLZ-377: the config namespace has a production install path", () => {
-  test("the version is 4, and the floor rises with it", () => {
+  test("the version is 5, and the floor rises with it", () => {
     // 3 was taken by BLZ-390 (STRICT on the seven SQLITE_DDL tables). Adding tables to an
     // already-shipped version retroactively is the silent schema change the stamp exists to
-    // prevent, so this is 4 — the precedent versions 2 and 3 both set.
-    assert.equal(DB_SCHEMA_VERSION, 4);
-    assert.equal(MIN_DB_SCHEMA_VERSION, 4);
+    // prevent, so BLZ-377 took 4 — the precedent versions 2 and 3 both set — and BLZ-667's
+    // project_counter took 5 by the same rule.
+    assert.equal(DB_SCHEMA_VERSION, 5);
+    assert.equal(MIN_DB_SCHEMA_VERSION, 5);
   });
 
   test("a fresh create installs the blaze_config tables", () => {
@@ -206,9 +207,9 @@ describe("BLZ-377: Postgres installs the same namespace through the same create"
       assert.ok(seeded > 0, "the config seed did not run on Postgres");
 
       // The version stamp and the namespace must land in the SAME create, or a database can
-      // exist that is stamped 4 without the tables version 4 is defined by.
+      // exist that is stamped 5 without the tables version 5 is defined by.
       const v = (await c.query("SELECT value FROM blaze_meta WHERE key='schema_version'")).rows[0].value;
-      assert.equal(Number(v), 4);
+      assert.equal(Number(v), 5);
 
       // THE REGRESSION TEST FOR THE DEFECT THAT WEDGED CI (BLZ-377).
       //

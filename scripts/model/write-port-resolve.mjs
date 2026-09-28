@@ -17,8 +17,14 @@ import { existsSync, mkdirSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
-import { fsStorage } from "./storage.mjs";
+import { fsStorage, slugify } from "./storage.mjs";
+import { allocateId } from "./ids.mjs";
+import { remoteMaxClaim, writeClaim } from "./claims.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write-port.mjs";
+import { resolveDatabaseConfig } from "./database-config.mjs";
+import { openPostgresClient } from "../init-pg.mjs";
+import { checkDbSchema } from "./db-schema-version.mjs";
+import { closeOnSetupFailure } from "./pg-storage.mjs";
 
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
@@ -34,6 +40,14 @@ export function sqliteExec(db) {
   return {
     run(sql, params = []) { return params.length ? db.prepare(sql).run(...params) : db.exec(sql); },
     all(sql, params = []) { return db.prepare(sql).all(...params); },
+  };
+}
+
+/** An async {run, all} over a connected pg.Client, the shape dbWritePort expects. */
+export function pgExec(client) {
+  return {
+    async run(sql, params = []) { await client.query(sql, params); },
+    async all(sql, params = []) { return (await client.query(sql, params)).rows; },
   };
 }
 
@@ -150,16 +164,47 @@ export function readSoakState(dataRoot) {
 }
 
 /**
+ * The fs allocator `fsWritePort` is handed (BLZ-667): seed from the remote's published
+ * claims, reserve the next id, write the claim. `title` is a CALL-time argument — this
+ * port is built before `applyNew` knows the ticket's title. The same closure lives in
+ * `applyNew`'s default `writePort` (new.mjs); duplicated deliberately rather than shared,
+ * since a shared export would add a cross-module edge the seam guard must pin either way.
+ */
+function fsAllocator(projectsDir) {
+  return async (proj, { title: t } = {}) => {
+    const dataRoot = dirname(projectsDir);
+    // null = the remote could not be read (stale view): the claim is provisional.
+    const remoteMax = remoteMaxClaim(dataRoot, proj);
+    const { id, n } = allocateId(projectsDir, proj, { dataRoot, remoteMax: remoteMax ?? 0 });
+    const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
+                                 { provisional: remoteMax === null });
+    return { id, n, claimFile };
+  };
+}
+
+/**
+ * Which write mode `BLAZE_WRITE_PORT` configures, with no database opened to find out.
+ * Synchronous and cheap — any future caller, sync or async, that just needs to know
+ * "what write mode is configured" can call this instead of resolving a full port.
+ */
+export function resolveWriteMode(env = process.env) {
+  return (env[WRITE_PORT_ENV] ?? "fs").trim();
+}
+
+/**
  * The port a verb should write through, for this board and this environment.
  *
  * @returns { port, mode, close } — `close` releases the shadow database, and is a no-op
  *          for `fs` so every caller can call it unconditionally.
  */
 export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStorage,
-                                         env = process.env, onDivergence } = {}) {
-  const mode = (env[WRITE_PORT_ENV] ?? "fs").trim();
+                                         env = process.env, onDivergence,
+                                         resolveDbConfig = resolveDatabaseConfig,
+                                         openPostgresClient: openPgClient = openPostgresClient } = {}) {
+  const mode = resolveWriteMode(env);
   if (mode === "fs") {
-    return { port: fsWritePort(projectsDir, storage), mode, close() {} };
+    return { port: fsWritePort(projectsDir, storage, undefined,
+                               { allocate: fsAllocator(projectsDir) }), mode, close() {} };
   }
   if (mode !== "dual" && mode !== "db") {
     throw new Error(
@@ -168,9 +213,30 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
       + "filesystem behaviour Blaze has always had.");
   }
 
-  const shadow = await openShadow(dataRoot);
-  const db = dbWritePort(shadow.exec, { dialect: "sqlite" });
-  const close = () => { try { shadow.db.close(); } catch { /* already closed */ } };
+  const { loadConfig } = await import("../config.mjs");
+  const dbConfig = resolveDbConfig({ dataRoot, config: loadConfig({ root: dataRoot }) });
+  let db, close;
+  if (dbConfig.driver === "postgres") {
+    const client = await openPgClient(dbConfig.connection);
+    const exec = pgExec(client);
+    // Never creates a schema silently, same refusal as openShadow (BLZ-297) — a missing
+    // or out-of-range Postgres schema is an instruction, not an accident to write through.
+    await closeOnSetupFailure(client, async () => {
+      const state = await checkDbSchema(exec, { dialect: "postgres" });
+      if (!state.ok) throw new Error(`blaze: ${state.error}`);
+      if (state.state === "empty") {
+        throw new Error(
+          "blaze: this Postgres database has no Blaze schema. Create it first:\n\n"
+          + "    blaze db init\n");
+      }
+    });
+    db = dbWritePort(exec, { dialect: "postgres" });
+    close = async () => { try { await client.end(); } catch { /* already closed */ } };
+  } else {
+    const shadow = await openShadow(dataRoot);
+    db = dbWritePort(shadow.exec, { dialect: "sqlite" });
+    close = () => { try { shadow.db.close(); } catch { /* already closed */ } };
+  }
 
   if (mode === "db") return { port: db, mode, close };
 
@@ -178,7 +244,9 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
   // fatal — refusing a legitimate write because a shadow disagreed would make the
   // safety net the outage.
   const report = onDivergence ?? ((d) => logDivergence(dataRoot, d));
-  const port = dualWritePort(fsWritePort(projectsDir, storage), db, { onDivergence: report });
+  const port = dualWritePort(
+    fsWritePort(projectsDir, storage, undefined, { allocate: fsAllocator(projectsDir) }),
+    db, { onDivergence: report });
   // Count every operation, so a week of "no divergences" can be told apart from a week
   // of the soak not running at all.
   const counted = {

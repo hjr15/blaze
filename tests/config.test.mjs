@@ -365,6 +365,30 @@ test("an empty or malformed working_days is refused — a week with no days is n
   }
 });
 
+// --- ADR-0012: credential refusal lives in loadConfig, unconditionally --------
+// BLZ-667. Moved here from resolveDatabaseConfig (which only runs in dual/db write
+// mode) so it fires for every board, including one running the default fs mode with
+// a committed database.url — matching ADR-0012's literal text ("loadConfig throws").
+test("loadConfig refuses a database.url in blaze.config.json, regardless of write mode", () => {
+  const dir = withConfig({ key: "PROJ", database: { url: "postgres://h/db" } });
+  assert.throws(() => loadConfig({ root: dir, env: {} }), /database\.url/);
+});
+
+test("loadConfig refuses a database.password in blaze.config.json", () => {
+  const dir = withConfig({ key: "PROJ", database: { driver: "postgres", password: "hunter2" } });
+  assert.throws(() => loadConfig({ root: dir, env: {} }), /password/);
+});
+
+test("loadConfig refuses a database.host carrying a user:pass@ form", () => {
+  const dir = withConfig({ key: "PROJ", database: { driver: "postgres", host: "user:pass@db.example" } });
+  assert.throws(() => loadConfig({ root: dir, env: {} }), /user:pass@/);
+});
+
+test("loadConfig does not throw for a board with no database block at all", () => {
+  const dir = withConfig({ key: "PROJ" });
+  assert.doesNotThrow(() => loadConfig({ root: dir, env: {} }));
+});
+
 test("NOTHING hardcodes the schedule defaults outside config.mjs", async () => {
   // The second definition ADR-0022 §2.3 forbids. Spec 4's amended §8.3 makes the same point
   // about the roll-up: a value the software could read and instead hardcodes is a second

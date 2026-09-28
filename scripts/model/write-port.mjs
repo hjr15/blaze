@@ -73,10 +73,23 @@ export function ticketValue(rec) {
   };
 }
 
-/** Filesystem adapter — today's behaviour, byte for byte. */
-export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsReadStorage) {
+/**
+ * Filesystem adapter — today's behaviour, byte for byte.
+ *
+ * `allocate` is INJECTED, not imported: the allocator (ids.mjs + claims.mjs) is a
+ * git-common-dir reservation plus a claim-file write, and both real construction sites —
+ * `applyNew`'s default and `resolveWritePort`'s fs/dual branches — build it. `title` is a
+ * CALL-time argument because `resolveWritePort` builds this port before the ticket's
+ * title is known (BLZ-667: a construction-time closure broke `blaze new` outright).
+ */
+export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsReadStorage,
+                            { allocate } = {}) {
   return {
     name: "fs",
+    async allocate(project, opts = {}) {
+      if (!allocate) throw new Error("fsWritePort: no allocate function was injected");
+      return allocate(project, opts);
+    },
     write({ project, status, frontmatter, body, currentFile }) {
       const text = serializeTicket({ frontmatter, body });
       // An existing ticket keeps its filename: `blaze edit` has never renamed one, and
@@ -201,7 +214,50 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
        transition ? prior : null, transition ? status : null]);
   }
 
-  async function persist({ project, status, frontmatter: fm, body }, ctx) {
+  /**
+   * BLZ-667: db-mode id allocation. One upsert on `project_counter`, so the increment and
+   * the read of the new value are a single statement — two concurrent allocations can never
+   * be handed the same number. Returns the same `{ id, n }` shape as ids.mjs's `allocateId`.
+   *
+   * Allocation commits on its own, separately from the `write()` that later uses the id: a
+   * write that then fails BURNS the number. That gap is accepted, not fixed — ADR-0018
+   * already tolerates gaps, and the design's risk table names this case.
+   *
+   * `title` is accepted for call-site uniformity with fsWritePort.allocate and ignored here
+   * — db mode has no claim file, so there is nothing to slug it into.
+   */
+  async function allocate(project, { title } = {}) {
+    const rows = await exec.all(
+      `INSERT INTO project_counter (project_key, n) VALUES (${ph(0)}, 1)
+       ON CONFLICT (project_key) DO UPDATE SET n = project_counter.n + 1
+       RETURNING n`,
+      [project]);
+    const n = Number(rows[0].n);
+    return { id: `${project}-${n}`, n };
+  }
+
+  /**
+   * BLZ-667: persist() is one transaction. Its sequence — ticket upsert, link/label/
+   * component/worklog replace, event insert — is several statements, and a failure partway
+   * (a duplicate label, say) used to leave the ticket row committed with the rest missing.
+   * Measured before wrapping: one half-written row survived; after: none.
+   *
+   * This protects persist()'s OWN sequence only. It does not make `allocate()` and the
+   * write that uses its id atomic with each other — they are separate calls from the verb.
+   */
+  async function persist(t, ctx) {
+    await exec.run("BEGIN", []);
+    try {
+      const r = await persistRows(t, ctx);
+      await exec.run("COMMIT", []);
+      return r;
+    } catch (e) {
+      try { await exec.run("ROLLBACK", []); } catch { /* the original error is what matters */ }
+      throw e;
+    }
+  }
+
+  async function persistRows({ project, status, frontmatter: fm, body }, ctx) {
     const id = fm.id;
     // Read BEFORE the upsert: afterwards there is no way to tell a create from an edit,
     // and no way to recover the status a transition came from.
@@ -296,6 +352,7 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
 
   return {
     name: "db",
+    allocate,
     async exists({ frontmatter }) {
       const rows = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [frontmatter.id]);
       return Boolean(rows?.length);
@@ -424,6 +481,9 @@ export function dualWritePort(primary, shadow, { onDivergence, strict = false } 
     write(t, ctx) { return both("write", t, ctx); },
     move(t, ctx) { return both("move", t, ctx); },
     read(id, ctx) { return primary.read(id, ctx); },
+    // Allocation, like existence, is decided entirely by the primary — the shadow never
+    // sees it, per this function's own principle above ("the primary decides every outcome").
+    allocate(project, opts) { return primary.allocate(project, opts); },
     close() { primary.close?.(); shadow.close?.(); },
   };
 }

@@ -36,7 +36,11 @@ import { viewDdl, viewTypeSeedSql } from "./view-schema.mjs";
 // before BLZ-390 shipped 3. Adding tables to an ALREADY-SHIPPED version retroactively is
 // exactly the silent schema change the stamp exists to prevent: a v3 shadow created last week
 // has no blaze_config, a v3 shadow created today would, and nothing could tell them apart.
-export const DB_SCHEMA_VERSION = 4;
+//
+// 5 under BLZ-667, which adds `project_counter`, the db-mode id allocator. Same rule as 4:
+// `openShadow` creates schema only on an EMPTY database, so an existing v4 shadow would never
+// gain the table, and a v4 shadow and a v5 one would otherwise carry the same stamp.
+export const DB_SCHEMA_VERSION = 5;
 /**
  * The oldest stamp this engine can still read.
  *
@@ -56,7 +60,11 @@ export const DB_SCHEMA_VERSION = 4;
 // under BLZ-377: a v3 shadow has no `blaze_config` at all, so a v4 engine that accepted one
 // would fail later on `no such table: blaze_config.view` — the raw-SQL-error-instead-of-a-named-
 // refusal failure this whole module exists to replace.
-export const MIN_DB_SCHEMA_VERSION = 4;
+// Rises again to 5 under BLZ-667: a v4 shadow has no project_counter table, so a v5
+// engine that accepted one would fail later with a raw "no such table" error instead of
+// this module's own named refusal — the same failure class every prior version bump
+// here exists to replace.
+export const MIN_DB_SCHEMA_VERSION = 5;
 
 const DOCS = "https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md";
 
