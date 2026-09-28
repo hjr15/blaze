@@ -19,6 +19,8 @@ import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
 import { fsStorage } from "./storage.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write-port.mjs";
+import { resolveDatabaseConfig } from "./database-config.mjs";
+import { openPostgresClient } from "../init-pg.mjs";
 
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
@@ -164,7 +166,9 @@ export function readSoakState(dataRoot) {
  *          for `fs` so every caller can call it unconditionally.
  */
 export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStorage,
-                                         env = process.env, onDivergence } = {}) {
+                                         env = process.env, onDivergence,
+                                         resolveDbConfig = resolveDatabaseConfig,
+                                         openPostgresClient: openPgClient = openPostgresClient } = {}) {
   const mode = (env[WRITE_PORT_ENV] ?? "fs").trim();
   if (mode === "fs") {
     return { port: fsWritePort(projectsDir, storage), mode, close() {} };
@@ -176,9 +180,18 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
       + "filesystem behaviour Blaze has always had.");
   }
 
-  const shadow = await openShadow(dataRoot);
-  const db = dbWritePort(shadow.exec, { dialect: "sqlite" });
-  const close = () => { try { shadow.db.close(); } catch { /* already closed */ } };
+  const { loadConfig } = await import("../config.mjs");
+  const dbConfig = resolveDbConfig({ dataRoot, config: loadConfig({ root: dataRoot }) });
+  let db, close;
+  if (dbConfig.driver === "postgres") {
+    const client = await openPgClient(dbConfig.connection);
+    db = dbWritePort(pgExec(client), { dialect: "postgres" });
+    close = async () => { try { await client.end(); } catch { /* already closed */ } };
+  } else {
+    const shadow = await openShadow(dataRoot);
+    db = dbWritePort(shadow.exec, { dialect: "sqlite" });
+    close = () => { try { shadow.db.close(); } catch { /* already closed */ } };
+  }
 
   if (mode === "db") return { port: db, mode, close };
 

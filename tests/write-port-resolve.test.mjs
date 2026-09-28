@@ -207,6 +207,23 @@ describe("the soak has a denominator (BLZ-300)", () => {
   });
 });
 
+describe("resolveWritePort opens real Postgres when database.driver is postgres", () => {
+  test("resolveWritePort opens Postgres when configured, not the SQLite shadow", async () => {
+    const calls = [];
+    const fakeOpenPostgresClient = async (conn) => { calls.push(conn); return { query: async () => ({ rows: [] }), end: async () => {} }; };
+    const { port, mode, close } = await resolveWritePort({
+      dataRoot: "/tmp/does-not-matter", projectsDir: "/tmp/does-not-matter/projects",
+      env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres",
+                                 connection: { host: "h", port: 5432, database: "d", user: "u", password: "p" } }),
+      openPostgresClient: fakeOpenPostgresClient,
+    });
+    assert.equal(calls.length, 1);
+    assert.equal(port.name, "db");
+    await close();
+  });
+});
+
 describe("pgExec mirrors sqliteExec's shape, over a caller-supplied client", () => {
   test("pgExec.all returns rows from client.query", async () => {
     const calls = [];
