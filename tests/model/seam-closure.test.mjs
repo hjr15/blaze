@@ -3138,3 +3138,41 @@ test("the write-seam scan OBSERVED the corpus, and its allowlist is all load-bea
     "writes through node:fs, or a NAMED member of its narrow exemption is no longer reached " +
     "— which is how a narrow exemption silently becomes a wide one. Delete them.");
 });
+
+// BLZ-670: the READ-SOURCE guard. `walkTickets` above keeps reads on the seam; this keeps them
+// on the RESOLVED seam. A module that names `fsReadStorage` reads the filesystem whatever
+// BLAZE_WRITE_PORT says — that is how every verb read files while writing the database.
+const FS_READER_ALLOWED = new Map([
+  ["model/read-storage.mjs", "defines it"],
+  ["model/index.mjs", "locateTicket's library default"],
+  ["model/write-port-resolve.mjs", "the resolver returns it for fs and dual"],
+  ["model/write-port.mjs", "fsWritePort's default reader, fs mode only"],
+  ["db-runner.mjs", "blaze db init seeds FROM the filesystem by definition"],
+  ["migrate/load-corpus.mjs", "the seed source"],
+  ["cli.mjs", "preflight lists projects before any runner, from config first"],
+  ["views/data.mjs", "library default for callers that pass no tickets"],
+  ["move.mjs", "library default; runners inject"], ["edit.mjs", "library default; runners inject"],
+  ["new.mjs", "library default; runners inject"], ["log.mjs", "library default; runners inject"],
+  ["resolve.mjs", "library default; runners inject"], ["link.mjs", "library default; runners inject"],
+  ["reconcile.mjs", "library default; entry points inject"],
+  ["model/import-apply.mjs", "library default; the runner injects"],
+  ["model/import-mapping.mjs", "library default; the runner injects"],
+  ["model/export-rows.mjs", "library default; the runner passes tickets"],
+  ["model/import-markdown.mjs", "no production caller (spec §4.3)"],
+]);
+
+test("BLZ-670: only allowlisted modules name fsReadStorage; entry points resolve their reader", () => {
+  const offenders = [], unused = [];
+  const named = new Set();
+  for (const file of jsFiles(SCRIPTS)) {
+    const rel = relative(SCRIPTS, file).split("\\").join("/");
+    const { ast } = parseModule(readFileSync(file, "utf8"));
+    if (!ast) { offenders.push(`${rel} (unparseable)`); continue; }
+    if (astIndex(ast).nodes.some((n) => n.type === "Identifier" && n.name === "fsReadStorage")) named.add(rel);
+  }
+  for (const rel of named) if (!FS_READER_ALLOWED.has(rel)) offenders.push(rel);
+  for (const rel of FS_READER_ALLOWED.keys()) if (!named.has(rel)) unused.push(rel);
+  assert.deepEqual(offenders, [],
+    "Resolve the reader with resolveReadStorage/resolvePorts (write-port-resolve.mjs) instead.");
+  assert.deepEqual(unused, [], "An allowlist entry for a module that no longer names fsReadStorage is stale — remove it.");
+});
