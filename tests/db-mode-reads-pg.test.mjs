@@ -58,7 +58,7 @@ if (PG) {
       assert.equal((await readStorage.getTicket(null, "ENG-1")).found.status, "in-review");
 
       const n = await applyNew(projectsDir, {
-        project: "ENG", type: "task", title: "B task", writePort, readStorage,
+        project: "ENG", type: "task", title: "B task", writePort, readStorage, extra: { estimate: 15 },
       });
       assert.equal(n.ok, true, JSON.stringify(n.errors));
       assert.equal(n.id, "ENG-2");
