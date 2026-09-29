@@ -1,7 +1,8 @@
 // scripts/commit-or-queue.mjs — single decision point for board-mutating CLI
 // verbs: in `batch` mode queue the op onto the pending ledger; otherwise commit
 // scoped to exactly the touched files (never `git add -A`).
-import { relative } from "node:path";
+import { existsSync } from "node:fs";
+import { relative, isAbsolute, join } from "node:path";
 import { commitFile } from "./serve-commit.mjs";
 import { appendEntry, sessionId, queueRoot } from "./pending-ledger.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -87,4 +88,20 @@ export function commitSuffix(c) {
   if (c.queued) return " (queued for blaze commit)";
   if (c.noop) return " (no commit created — the file already matched HEAD)";
   return "";
+}
+
+/** BLZ-670 (spec §4.4a). In `db` mode the database is the store: a verb's `file` is an id
+ *  handle, not a path, and there is nothing for git to stage. Only paths that EXIST are kept —
+ *  so a verb commits nothing, while `blaze import`'s receipt and source-id map (real record
+ *  files, "a record, not a cache") are still committed. `fs` and `dual` are untouched. */
+export function stageFor(mode) {
+  if (mode !== "db") return commitOrQueue;
+  return (args) => {
+    // `typeof` first: db-mode `blaze new` passes `r.claimFile`, which is undefined there (the
+    // db allocator writes no claim), and isAbsolute(undefined) throws.
+    const real = (args.files ?? []).filter((f) => typeof f === "string"
+      && existsSync(isAbsolute(f) ? f : join(args.root, f)));
+    return real.length ? commitOrQueue({ ...args, files: real })
+                       : { ok: true, committed: false, queued: false };
+  };
 }

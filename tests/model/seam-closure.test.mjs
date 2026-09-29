@@ -926,10 +926,14 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // `sqliteExec`, over a caller-supplied client — reaches no node:fs write itself.
   // `resolveWriteMode` (BLZ-667) is `resolveWritePort`'s own mode detection, extracted: it
   // reads an env var and returns a string — reaches no write of any kind.
+  // BLZ-670: `resolvePorts` returns resolveWritePort's port (and opens the shadow for write),
+  // so it is a write; `resolveReadStorage` / `withReadStorage` only open readers — inert.
   ["model/write-port-resolve.mjs",
-    { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort"], sanctioned: [],
+    { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort",
+      "resolvePorts"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
-        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode"] }],
+        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode",
+        "resolveReadStorage", "withReadStorage"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
@@ -938,7 +942,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
-  ["commit-or-queue.mjs", { writes: ["commitOrQueue"], sanctioned: [],
+  // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
+  ["commit-or-queue.mjs", { writes: ["commitOrQueue", "stageFor"], sanctioned: [],
     inert: ["commitSuffix"] }],
   ["serve-commit.mjs", { writes: ["commitFile"], sanctioned: [], inert: [] }],
   ["serve.mjs", { writes: ["startServer"], sanctioned: [],
