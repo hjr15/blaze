@@ -15,7 +15,7 @@
 //
 // It is SOFT, deliberately and against BLZ-353's own initial expectation — see the note
 // beside HARD_KINDS in scripts/model/audit.mjs. It flips to hard once NCA-39 is resolved.
-import { test } from "node:test";
+import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
@@ -24,6 +24,8 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HARD_KINDS } from "../scripts/model/audit.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
+import { runDb } from "../scripts/db-runner.mjs";
+import { dbBoard, runner, QUIET } from "./helpers/db-board.mjs";
 
 // BLZ-503: every scratch directory this file mints, removed when the file is done with
 // it. Registered rather than written as a test's trailing statement, so a failing
@@ -105,4 +107,45 @@ test("R48: the finding is SOFT, and that is a recorded decision, not an oversigh
 test("R48: a soft finding does not fail the run", () => {
   const report = audit(board("implemented"));
   assert.equal(report.ok, true, "a fill-queue finding must never fail the gate");
+});
+
+// BLZ-670. R48's finding is raised from `statusOf`, keyed off each ticket's status — and until
+// this task that status was read as `basename(dirname(t.file))`, which only means anything when
+// `t.file` is a FILESYSTEM PATH. In `db` mode, `t.file` is an opaque ROW ID (BLZ-271's own
+// comment on the sqlite/postgres readers), so `dirname` collapses to "." for every ticket and
+// the finding goes silently blind. The R48 tests above never catch this — they run the runner
+// with no `BLAZE_WRITE_PORT`, so `t.file` is a real path there and the bug hides. `audit-runner`
+// is a CLI/subprocess entry point with no exported function to unit-test the walk in isolation,
+// so this drives it the same way Task 1's own coverage does: through the runner, in `db` mode.
+describe("BLZ-670: R48's finding still fires when statuses come from the database, not paths", () => {
+  async function dbBoardWithR48() {
+    const roots = dbBoard();
+    assert.equal(0, await runDb(["init"], { ...QUIET, roots }));
+    // ENG-2: a goal, moved to its terminal status.
+    let r = runner("new-runner.mjs", ["--project", "ENG", "--type", "goal", "The goal"], roots);
+    assert.equal(r.status, 0, r.stderr);
+    r = runner("move-runner.mjs", ["ENG-2", "in-progress"], roots);
+    assert.equal(r.status, 0, r.stderr);
+    r = runner("move-runner.mjs", ["ENG-2", "achieved"], roots);
+    assert.equal(r.status, 0, r.stderr);
+    // ENG-3: a requirement under it, left at its initial (non-satisfying) status.
+    r = runner("new-runner.mjs",
+      ["--project", "ENG", "--type", "requirement", "--parent", "ENG-2", "The requirement"], roots);
+    assert.equal(r.status, 0, r.stderr);
+    return roots;
+  }
+
+  test("an achieved goal over an unverified requirement is reported in db mode too", async () => {
+    const roots = await dbBoardWithR48();
+    const r = runner("audit-runner.mjs", ["--json"], roots);
+    const report = JSON.parse(r.stdout);
+    const hits = report.findings.filter((f) => f.kind === KIND);
+    assert.equal(hits.length, 1,
+      `expected one ${KIND} in db mode, got ${JSON.stringify(report.findings)}`);
+    assert.equal(hits[0].ticket, "ENG-2", "the finding names the GOAL, by id, not a filesystem path");
+    assert.match(hits[0].detail, /ENG-3/, "and names the requirement that blocks it");
+    assert.match(hits[0].detail, /proposed/,
+      "and the requirement's STATUS, read from the row rather than mis-derived from its opaque " +
+      "db handle — `dirname(t.file)` on a db id collapses to \".\" and this assertion catches it");
+  });
 });

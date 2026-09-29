@@ -107,8 +107,8 @@ function cellFor(columnName, { fm, body, status, project }) {
  * the excerpt — for the caller to print. Export never mutates a value and
  * never refuses on this account; only import does.
  */
-export function exportRows(projectsDir, { storage = fsReadStorage } = {}) {
-  const tickets = [...storage.listTickets(projectsDir)];
+export function exportRows(projectsDir, { storage = fsReadStorage, tickets: given = null } = {}) {
+  const tickets = given ? [...given] : [...storage.listTickets(projectsDir)];
   const sorted = tickets.slice().sort((a, b) => {
     const pa = a.project ?? "", pb = b.project ?? "";
     if (pa !== pb) return pa < pb ? -1 : 1;

@@ -9,6 +9,7 @@ import { buildIndex, missingClaimErrors } from "./model/index.mjs";
 import { buildTransitions } from "./model/transitions.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 import { assertWritable } from "./readonly.mjs";
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 
 const positional = [];
 let allowDuplicateIds = false;
@@ -64,7 +65,10 @@ try {
   // gate for the normal `blaze reindex` path.
   assertWritable("rebuild the index/transitions cache");
   mkdirSync(dbDir, { recursive: true });
-  const idx = buildIndex(projectsDir);
+  const rs = await resolveReadStorage({ dataRoot, projectsDir });
+  let tickets;
+  try { tickets = [...(await rs.readStorage.listTickets(projectsDir))]; } finally { await rs.close(); }
+  const idx = buildIndex(projectsDir, { tickets });
   // BLZ-274 / ADR-0009: the missing-claim check is path-dependent — it reads the
   // id-claims ledger off disk — so it runs HERE rather than inside the pure index,
   // following the precedent at audit-runner.mjs:64-72. Keeping it in buildIndex made
@@ -74,7 +78,11 @@ try {
   // BOTH kinds while this message called all of them duplicate ids. A board with one
   // unclaimed id and no collisions was told "1 duplicate ticket id — renumber one side
   // of each collision", naming a collision that did not exist.
-  const claimErrors = missingClaimErrors(projectsDir, idx.rows);
+  //
+  // BLZ-670: db mode: the claims ledger is the FILESYSTEM allocator's; the database's
+  // project_counter is the id authority there (BLZ-667). Removing claims altogether is
+  // BLZ-254.
+  const claimErrors = rs.mode === "db" ? [] : missingClaimErrors(projectsDir, idx.rows);
   for (const e of claimErrors) console.error(`error: ${e}`);
   // BLZ-134: refuse to write an index built over colliding ids. Writing it would
   // bake the collision into every consumer while looking like a clean rebuild —

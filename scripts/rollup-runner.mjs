@@ -7,6 +7,7 @@ import { buildIndex } from "./model/index.mjs";
 import { rollUp } from "./model/rollup.mjs";
 import { formatMinutes } from "./model/time.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 
 // Pure formatter (exported for tests). index needs { rows, get(id) }.
 export function rollupLines(index, rollupMap, id) {
@@ -42,7 +43,7 @@ export function rollupLines(index, rollupMap, id) {
   return out;
 }
 
-function main() {
+async function main() {
   const { dataRoot, projectsDir } = resolveRoots();
   // Config-schema version guard (ADR-0002): buildIndex transitively pulls
   // schema.mjs → TYPES via ambientSchemaOverride(), whose catch-all silently
@@ -57,14 +58,17 @@ function main() {
     positional.push(a);
   }
   const id = positional[0] || null;
-  const index = buildIndex(projectsDir);
+  const rs = await resolveReadStorage({ dataRoot, projectsDir });
+  let tickets;
+  try { tickets = [...(await rs.readStorage.listTickets(projectsDir))]; } finally { await rs.close(); }
+  const index = buildIndex(projectsDir, { tickets });
   const lines = rollupLines(index, rollUp(index), id);
   console.log(lines.join("\n"));
 }
 
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
-    main();
+    await main();
   } catch (e) {
     console.error(`blaze rollup failed: ${e.message}`);
     process.exit(1);

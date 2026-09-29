@@ -55,7 +55,7 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
     ok(runner("move-runner.mjs", ["ENG-2", "in-progress"], roots));
   });
 
-  test("reindex writes the database's statuses", { todo: "BLZ-670 Task 8" }, async () => {
+  test("reindex writes the database's statuses", async () => {
     const roots = await initialised();
     ok(runner("move-runner.mjs", ["ENG-1", "in-progress"], roots));
     ok(runner("reindex.mjs", [], roots));
@@ -63,7 +63,7 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
     assert.equal(idx.tickets.find((t) => t.id === "ENG-1").status, "in-progress");
   });
 
-  test("audit, rollup, export and schedule see a ticket that exists only in the db", { todo: "BLZ-670 Task 8" }, async () => {
+  test("audit, rollup, export and schedule see a ticket that exists only in the db", async () => {
     const roots = await initialised();
     ok(runner("new-runner.mjs", ["--project", "ENG", "--type", "task", "--estimate", "15", "Only in the db"], roots));
     const audit = runner("audit-runner.mjs", ["--json"], roots);
@@ -76,7 +76,7 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
     ok(sch); assert.match(sch.stdout, /\b2 tickets\b/, "schedule sees both tickets");
   });
 
-  test("schedule migrate-dates --write refuses in db mode", { todo: "BLZ-670 Task 8" }, async () => {
+  test("schedule migrate-dates --write refuses in db mode", async () => {
     const roots = await initialised();
     const r = runner("schedule-runner.mjs", ["migrate-dates", "--write"], roots);
     assert.equal(r.status, 1);
