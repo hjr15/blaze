@@ -194,6 +194,13 @@ async function conformance(make, name) {
     const { s } = await openDriver(make, t);
     assert.equal(typeof s.close, "function");
   });
+
+  await test(`${name}: listTickets returns the same records getTicket returns, id for id`, async (t) => {
+    const { s, root } = await openDriver(make, t);
+    for (const rec of [...await s.listTickets(root)]) {
+      assert.deepEqual(rec, (await s.getTicket(root, rec.frontmatter.id)).found);
+    }
+  });
 }
 
 describe("driver conformance — one suite, every driver", async () => {
