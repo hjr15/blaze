@@ -13,7 +13,7 @@ both HTTP servers) is answered by the database the writes go to, SQLite or Postg
 `database.driver`. When the mode is `fs` or `dual`, behaviour is byte-for-byte what it is today.
 
 Success is observable: with `BLAZE_WRITE_PORT=db`, `blaze new` → `blaze move <id> in-progress`
-→ `blaze move <id> done` succeeds (the second move sees the first), and `blaze reindex`,
+→ `blaze move <id> in-review` succeeds (the second move sees the first), and `blaze reindex`,
 `blaze rollup`, `blaze audit`, `GET /`, `GET /api/panel` and `GET /api/live` all report the
 database's state. Today the second move reads the ticket's stale status from its file.
 
@@ -198,8 +198,20 @@ is worse still: with no injected `writePort` it builds `fsWritePort` itself
 (`reconcile.mjs:1870`), so in `db` mode `reconcile --apply` writes **files**, not the database.
 
 Fix:
-- `commit-or-queue.mjs` gains `stageFor(mode)`. It returns `commitOrQueue` for `fs` and `dual`,
-  and a no-op stage returning `{ ok: true, committed: false, queued: false }` for `db`.
+- `commit-or-queue.mjs` gains `stageFor(mode)`. It returns `commitOrQueue` for `fs` and `dual`.
+  For `db` it returns a stage that keeps only the paths that **exist on disk**, commits those
+  through `commitOrQueue`, and returns `{ ok: true, committed: false, queued: false }` when none
+  are left. So a verb's id handles drop out and nothing is committed, while `blaze import`'s
+  receipt and source-id map, which are real record files (`import-apply.mjs:494`: "a record, not
+  a cache"), are still committed.
+- `reconcile --apply` in `db` mode reports a distinct `db` commit outcome ("moved in the
+  database; db mode makes no git commit"), never the "NO COMMIT CREATED — already matched HEAD"
+  sentence, which would be false.
+- `blaze schedule migrate-dates --write` rewrites ticket files directly through `fsStorage`, so
+  in `db` mode it **refuses** by name (exit 1). Routing it through the write port is left to
+  BLZ-254. The dry run still works and reads the database.
+- `blaze audit` takes a ticket's status from the record's `status`, not from
+  `basename(dirname(t.file))`, which is meaningless for an id handle.
 - Every runner, `serve.mjs` mutating route, `import` and `reconcile` stages through
   `stageFor(mode)`. `reconcile` gains a `stage` parameter (default `commitOrQueue`), and its
   entry points pass it the resolved `writePort`.
@@ -239,7 +251,7 @@ decision.
    - No path ever passes `create: true`.
 3. **The split-brain regression, end to end.**
    - In a scratch board with `BLAZE_WRITE_PORT=db` on SQLite, run: `new` → `move in-progress` →
-     `move done` → `reindex` → `rollup` → `audit` → `GET /api/panel`, `/api/live`, `/`.
+     `move in-review` → `reindex` → `rollup` → `audit` → `GET /api/panel`, `/api/live`, `/`.
    - Assert that every read reflects the database, including a case where the database and the
      files deliberately disagree.
    - **Proven discriminating:** run it first against the unfixed tree, where it must fail.
