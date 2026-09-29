@@ -25,8 +25,28 @@
 // What ADR-0009 rejects is `listTickets` being the ONLY affordance.
 import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
-import { walkTickets } from "./index.mjs";
+import { walkTickets, unreadableTicketDirs as walkUnreadable } from "./index.mjs";
 import { readRegularFileSync, NotARegularFileError } from "./regular-file.mjs";
+
+/**
+ * The board's live-activity feed, and whether it could be READ. Extracted so every
+ * driver — not only the filesystem one — can answer the same named question the same
+ * way: the feed is a hook-written LOCAL file regardless of board type (see
+ * `fsReadStorage.activityFeed`'s doc comment below for the full ADR-0031 rationale).
+ *
+ * @returns { text, unreadable: { path, detail } | null }
+ */
+export function readActivityFeed(dataRoot) {
+  const path = join(dataRoot, ".blaze", "activity.jsonl");
+  try { return { text: readRegularFileSync(path), unreadable: null }; }
+  catch (e) {
+    if (e?.code === "ENOENT") return { text: "", unreadable: null };
+    const detail = e instanceof NotARegularFileError
+      ? e.message
+      : `${path} could not be read (${(e && e.code) || e})`;
+    return { text: "", unreadable: { path, detail } };
+  }
+}
 
 /**
  * Resolve one id, or refuse.
@@ -176,20 +196,13 @@ export const fsReadStorage = {
    *
    * @returns { text, unreadable: { path, detail } | null }
    */
-  activityFeed(dataRoot) {
-    const path = join(dataRoot, ".blaze", "activity.jsonl");
-    try { return { text: readRegularFileSync(path), unreadable: null }; }
-    catch (e) {
-      if (e?.code === "ENOENT") return { text: "", unreadable: null };
-      // `NotARegularFileError` names the type; anything else (EACCES, EIO) names its errno.
-      // Both are "there is something there and this run could not read it", which is the
-      // only distinction the view makes.
-      const detail = e instanceof NotARegularFileError
-        ? e.message
-        : `${path} could not be read (${(e && e.code) || e})`;
-      return { text: "", unreadable: { path, detail } };
-    }
-  },
+  activityFeed(dataRoot) { return readActivityFeed(dataRoot); },
+
+  // index.mjs's KNOWN GAP, closed: "which directories could this run not read" is a named
+  // question the driver answers. The walk stays in index.mjs; database drivers answer [].
+  unreadableTicketDirs(root) { return walkUnreadable(root); },
+
+  close() {},
 };
 
 /**
@@ -231,5 +244,7 @@ export function memReadStorage(records = []) {
     activityFeed(_dataRoot) {
       return { text: "", unreadable: null };
     },
+    unreadableTicketDirs(_root) { return []; },
+    close() {},
   };
 }

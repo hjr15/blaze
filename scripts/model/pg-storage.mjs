@@ -13,6 +13,7 @@
 // `pg` is an optionalDependency loaded through a dynamic import (design C2), so the
 // npx + SQLite path installs nothing.
 import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
+import { readActivityFeed } from "./read-storage.mjs";
 
 // BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
 // one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
@@ -228,5 +229,10 @@ export async function openPostgresRead(connection, { create = false } = {}) {
       const s = rows[0];
       return `${s.n}:${s.v}:${s.u}`;
     },
+
+    // The feed is a hook-written LOCAL file on every board type (read-storage.mjs says why),
+    // so the database driver answers it with the same filesystem read, not from a table.
+    async activityFeed(dataRoot) { return readActivityFeed(dataRoot); },
+    async unreadableTicketDirs(_root) { return []; },
   };
 }

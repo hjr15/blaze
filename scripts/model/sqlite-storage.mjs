@@ -18,6 +18,7 @@ import { SQLITE_PRAGMAS } from "./sqlite-schema.mjs";
 import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-schema-version.mjs";
 import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
 import { assertConfigNamespace } from "./write-port-resolve.mjs";
+import { readActivityFeed } from "./read-storage.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
 // BLZ-391. This projected 15 of a ticket's 28 frontmatter keys: `loadCorpus` WROTE the other
@@ -216,5 +217,9 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
       const s = rowStamp.get(project, project);
       return `${Object.values(dv)[0]}:${s.n}:${s.v}:${s.u}`;
     },
+
+    activityFeed(dataRoot) { return readActivityFeed(dataRoot); },
+    unreadableTicketDirs(_root) { return []; },
+    close() { try { db.close(); } catch { /* already closed */ } },
   };
 }
