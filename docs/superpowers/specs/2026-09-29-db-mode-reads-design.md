@@ -154,7 +154,8 @@ use `resolveReadStorage`.
 | `exportRows`/`exportCsv` | take `tickets` (an array), never a storage object |
 | `boardModel` | takes `{ tickets }` (required from server callers); falls back to `fsReadStorage.listTickets` only when absent, so existing tests and library callers are unchanged |
 | `graphModel`, `panelHtml`, `pageHtml`/`viewEnvelope`/`renderView` | take `tickets` (and pass it through), used for `buildIndex(projectsDir, { tickets })` |
-| `liveModel` | takes `{ tickets, feed }`; the caller awaits both reads |
+| `liveModel` | gains optional `{ tickets, feed }`; the servers await both reads and pass them in; without them it keeps today's synchronous `readStorage` path, so existing tests and callers are unchanged |
+| `panelHtml` | gains optional `{ tickets }`; when given, it renders the record's own `frontmatter`/`body` instead of re-reading `row.file` from disk, because in `db` mode `row.file` is an id handle, not a path |
 | `contentHash` | unchanged signature; the server calls `await readStorage.changeToken(...)` directly |
 
 `exportMarkdownDocs` (`import-markdown.mjs:264`) has no production caller and is left alone.
@@ -173,7 +174,10 @@ use `resolveReadStorage`.
 `reindex.mjs` also writes `.blaze/index.json`. In `db` mode it writes the database-derived index
 to that same path. `missingClaimErrors` stays filesystem-based and runs only in `fs`/`dual` mode:
 claims are the filesystem allocator's ledger, and in `db` mode they are not the id authority.
-Removing claims entirely is BLZ-254's job.
+Removing claims entirely is BLZ-254's job. `reindex`'s second cache,
+`.blaze/transitions.json`, is still built from git rename history in every mode. In `db` mode
+that history stops growing; deriving it from `ticket_event` is BLZ-254's scope and is named here
+so it is not mistaken for covered.
 
 **Deliberately filesystem regardless of mode:**
 - `blaze db init` / `migrate/load-corpus.mjs` / `migrate/zero-diff.mjs`: they seed or compare
@@ -182,6 +186,28 @@ Removing claims entirely is BLZ-254's job.
   any runner starts, and in `db` mode the project list comes from config first.
 - The `sprints.json` registry: there is no database table for it, and BLZ-254 decides its fate.
 - `.blaze/activity.jsonl`: a hook-written local file (§4.2).
+
+### 4.4a No git commit in `db` mode (added 2026-09-29, operator decision)
+
+In `db` mode, `dbWritePort` returns `{ file: "<id>" }`, an opaque handle
+(`write-port.mjs:350`). Every verb runner, `blaze import`, `reconcile --apply` and every mutating
+`serve.mjs` route then passes that to `commitOrQueue`, which tries to `git add` a path that does
+not exist. The database write has already happened, and then the verb exits 1 with "commit
+failed". No test covers `db`-mode verbs at CLI level, so this has never been seen. `reconcile`
+is worse still: with no injected `writePort` it builds `fsWritePort` itself
+(`reconcile.mjs:1870`), so in `db` mode `reconcile --apply` writes **files**, not the database.
+
+Fix:
+- `commit-or-queue.mjs` gains `stageFor(mode)`. It returns `commitOrQueue` for `fs` and `dual`,
+  and a no-op stage returning `{ ok: true, committed: false, queued: false }` for `db`.
+- Every runner, `serve.mjs` mutating route, `import` and `reconcile` stages through
+  `stageFor(mode)`. `reconcile` gains a `stage` parameter (default `commitOrQueue`), and its
+  entry points pass it the resolved `writePort`.
+- The success line carries no commit suffix.
+- `fs` and `dual` modes are unchanged.
+
+This does **not** decide whether `commit-or-queue.mjs` is deleted; that stays BLZ-254's explicit
+decision.
 
 ### 4.5 Errors
 
