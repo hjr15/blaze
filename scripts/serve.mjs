@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
-import { resolveWritePort } from "./model/write-port-resolve.mjs";
+import { resolveWritePort, withReadStorage } from "./model/write-port-resolve.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
@@ -76,7 +76,9 @@ function aheadCount(root) {
 // (the route below) always call this with no `projects`.
 export async function reconcilePreview({ root, projectsDir, projects = null } = {}) {
   const { reconcile } = await import("./reconcile.mjs");
-  const r = await reconcile({ fetch: false, commit: false, dryRun: true, root, projectsDir, projects });
+  // BLZ-670: the preview reads the board the mode names (a db-mode board is rows, not files).
+  const r = await withReadStorage({ dataRoot: root, projectsDir }, (readStorage, mode) =>
+    reconcile({ fetch: false, commit: false, dryRun: true, root, projectsDir, projects, readStorage, mode }));
   if (!r.ok) return { ok: false, error: r.error, changes: [] };
   // BLZ-395: findings travel with the preview. The preview is where a person looks before
   // believing the board, and a conflict reconcile refuses to act on is exactly what it
@@ -719,7 +721,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
       // BLZ-405: `reconcilePreview` is the one place this shape is built — see its own
       // comment for why `r.ok` matters and why `projects` is never passed here.
-      return json(200, await reconcilePreview({ root, projectsDir }));
+      // BLZ-670: a board whose ports cannot be resolved is a 503 (fixable), not a crash.
+      try { return json(200, await reconcilePreview({ root, projectsDir })); }
+      catch (e) { if (e?.blazeResolve) return json(503, { errors: [String(e.message)] }); throw e; }
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {

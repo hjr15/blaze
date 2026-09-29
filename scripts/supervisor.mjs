@@ -10,6 +10,8 @@ import { pageHtml, contentHash } from "./serve.mjs";
 import { viewEnvelope, CSRF } from "./views/page.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
+import { resolvePorts, resolveReadStorage, resolveWriteMode } from "./model/write-port-resolve.mjs";
+import { stageFor } from "./commit-or-queue.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
@@ -285,13 +287,19 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   async function runReconcile({ dryRun = false } = {}) {
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
+    let ports = null;
     try {
+      // BLZ-670: the same rule as reconcile's CLI — only db mode opens a database port, fs and
+      // dual resolve a reader alone (dual unchanged). A resolver refusal lands in the catch.
+      ports = await (resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)({ dataRoot: root, projectsDir });
       // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
       // BLZ-404 AC-4: `push` deleted — reconcile() never read it and hardcodes
       // `pushed: false` regardless, so passing `push: true` told nothing but a lie.
-      const r = await reconcile({ fetch: true, commit: true, dryRun, root, projectsDir });
+      const r = await reconcile({ fetch: true, commit: true, dryRun, root, projectsDir,
+        readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,
+        stage: stageFor(ports.mode), mode: ports.mode });
       // BLZ-350: an unreadable forge is the loop's version of the silence the CLI
       // now breaks. Without this the app runs reconcile every tick, never reaches
       // "in-review", and the activity feed shows a healthy board.
@@ -380,6 +388,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       if (evt) bus.publish({ ...evt, ts: today() });
     } finally {
       loops.reconcile.busy = false;
+      if (ports) await ports.close();
     }
   }
 

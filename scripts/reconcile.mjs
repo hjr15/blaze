@@ -22,12 +22,12 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, loadProject, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { appendRegularFileSync } from "./model/regular-file.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { unreadableTicketDirs } from "./model/index.mjs";
 import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { commitOrQueue, stageFor } from "./commit-or-queue.mjs";
+import { resolvePorts, resolveReadStorage, resolveWriteMode } from "./model/write-port-resolve.mjs";
 import { commitOutcomeFrom, applySummary } from "./reconcile-commit-report.mjs";
 import { assertWritable } from "./readonly.mjs";
 
@@ -1853,6 +1853,13 @@ export async function reconcile({
   fetch = false, commit = false, dryRun = true, root, projectsDir,
   readStorage = fsReadStorage, storage = fsStorage, writePort = null, projects = null,
   tickets = null,
+  // BLZ-670: `stage` is how this pass files its writes (stageFor(mode) from the CLI and the
+  // supervisor), and `mode` is the write mode it runs under. A db-mode pass writes rows, so
+  // its outcome is "db", never a git no-op dressed up as "already matched HEAD". `mode` has no
+  // literal default: a bare `"fs"` in a default-parameter position is an fs specifier to the
+  // seam guard (tests/model/seam-closure.test.mjs), and only `mode === "db"` is ever asked, so
+  // an omitted mode already behaves as fs.
+  stage = commitOrQueue, mode,
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
@@ -2005,7 +2012,7 @@ export async function reconcile({
   // BLZ-451: MATERIALISED, because the existence check below has to run BEFORE anything
   // is written and the loop has to read the same list it was checked against. Reading the
   // walk twice would let a concurrent write make the check and the loop disagree.
-  const allTickets = [...readStorage.listTickets(projectsDir)];
+  const allTickets = [...(await readStorage.listTickets(projectsDir))];
   if (wantedTickets) {
     // An id naming no ticket on this board is the TYPO case, and it refuses for the same
     // reason `--project NOPE` does: a scoped run that quietly reconciles nothing is
@@ -2043,7 +2050,7 @@ export async function reconcile({
   // this board" (see above) — a run that could not look, reporting what a run that looked
   // and found nothing reports. This finding is what turns that refusal from a lie into a
   // half-truth beside an explanation.
-  for (const u of unreadableTicketDirs(projectsDir)) {
+  for (const u of await readStorage.unreadableTicketDirs(projectsDir)) {
     findings.push({
       kind: "unreadable-ticket-directory",
       id: null,
@@ -2488,7 +2495,7 @@ export async function reconcile({
     // than folding them into (or hiding them from) the moved count.
     const movedCount = changes.filter((c) => c.moved).length;
     const nonMovedCount = changes.length - movedCount;
-    const c = commitOrQueue({
+    const c = stage({
       root, mode: cfg.commitMode, op: "reconcile",
       id: `reconcile:${keys.join(",")}` + (wantedTickets ? `:${wantedTickets.join(",")}` : ""),
       // BLZ-427: one reconcile op covers EVERY ticket this pass wrote. `id` names the
@@ -2507,6 +2514,10 @@ export async function reconcile({
     // BLZ-422: the classification lives in reconcile-commit-report.mjs so it can be
     // driven directly — see that file for why `ok: true` alone was not enough.
     ({ outcome: commitOutcome, error: commitError } = commitOutcomeFrom(c));
+    // BLZ-670: in db mode the moves ARE the database write; stageFor("db") stages only files
+    // that exist on disk, so git answering "nothing to commit" (or committing a stray real
+    // file) is not this pass's outcome. An error outcome (locked/failed/queued) is kept as-is.
+    if (mode === "db" && (commitOutcome === "no-op" || commitOutcome === "committed")) commitOutcome = "db";
     committed = commitOutcome === "committed";
   }
   // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
@@ -2605,14 +2616,29 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // entirely, and this CLI block previously let the throw reach the top level unwrapped.
   // (`push` is gone as of BLZ-404: reconcile never pushed, and the parameter said it might.)
   let r;
+  // BLZ-670: resolve the board's ports once. Only db mode opens a database port; fs and dual
+  // resolve a reader alone (dual unchanged).
+  const roots = resolveRoots();
+  let ports;
+  try {
+    ports = await (apply && resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)(
+      { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir });
+  }
+  catch (e) { console.error(e.message); process.exit(1); }
   try {
     r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
       projects: sawProject ? projectKeys : null,
-      tickets: sawTicket ? ticketIds : null });
+      tickets: sawTicket ? ticketIds : null,
+      // DUAL UNCHANGED: reconcile has always ignored BLAZE_WRITE_PORT and built fsWritePort
+      // itself. Only `db` hands it the database port; fs and dual keep null.
+      readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,
+      stage: stageFor(ports.mode), mode: ports.mode });
   } catch (e) {
+    await ports.close();
     if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
     throw e;
   }
+  await ports.close();
   if (!r.ok) { console.error(`reconcile: ${r.error}`); process.exit(1); }
   // AC-5: say what was looked at BEFORE saying what was found, so "nothing to do" can never
   // be read as "the board is in sync" when it means "I only looked at one project".

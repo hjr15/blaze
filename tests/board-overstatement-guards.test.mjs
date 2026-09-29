@@ -205,6 +205,13 @@ describe("BLZ-422: a no-op is never reported as a commit", () => {
     }
   });
 
+  test("BLZ-670: a db-mode apply says the moves are in the database, never 'already matched HEAD'", () => {
+    const out = applySummary({ outcome: "db", error: null, movedCount: 2, nonMovedCount: 0 });
+    assert.match(out.text, /database/);
+    assert.doesNotMatch(out.text, /matched HEAD/);
+    assert.equal(out.exit, 0);
+  });
+
   test("each per-ticket verb says so when no commit was created", () => {
     assert.equal(commitSuffix({ ok: true, committed: true }), "");
     assert.equal(commitSuffix({ ok: true, committed: false, queued: true }), " (queued for blaze commit)");
