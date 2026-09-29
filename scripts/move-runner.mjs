@@ -1,9 +1,9 @@
 // scripts/move-runner.mjs — CLI entry for `blaze move <id> <status>`: applyMove
 // against the resolved data tree, then commit (or queue) the relocation.
 import { applyMove } from "./move.mjs";
-import { resolveWritePort } from "./model/write-port-resolve.mjs";
+import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
+import { stageFor, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -50,9 +50,11 @@ const today = new Date().toISOString().slice(0, 10);
 // printed it as a stack trace — making the guard read as an engine bug. Same shape as
 // the assertWritable catch this file already uses.
 let __wp;
-try { __wp = await resolveWritePort({ dataRoot, projectsDir }); }
+// BLZ-670: both ports resolved once — under BLAZE_WRITE_PORT=db the reader is the database
+// too, so the verb reads what the previous verb wrote. Other modes: unchanged.
+try { __wp = await resolvePorts({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
-const { port: writePort, close: closeWritePort } = __wp;
+const { writePort, readStorage, mode, close: closePorts } = __wp;
 // BLZ-402 review finding 3, defence-in-depth: `applyMove`'s own `loadProject
 // (found.frontmatter.project, ...)` call (scripts/move.mjs) is already locally
 // try/caught there (falls back to `requireWorklogBeforeTerminal: false` on ANY
@@ -61,16 +63,16 @@ const { port: writePort, close: closeWritePort } = __wp;
 // corrupt `project:` value, per scripts/edit-runner.mjs. This wrap costs nothing and
 // keeps this file symmetric with that one if move.mjs's internal guard ever changes.
 let r;
-try { r = await applyMove(projectsDir, id, toStatus, { today, writePort }); }
+try { r = await applyMove(projectsDir, id, toStatus, { today, writePort, readStorage }); }
 catch (e) {
-  closeWritePort();
-  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
-  throw e;
+  if (e instanceof InvalidProjectKeyError) { await closePorts(); console.error(e.message); process.exit(1); }
+  await closePorts(); throw e;
 }
-closeWritePort();
+await closePorts();
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 
-const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "move", id, message: `${id}: ${r.from} → ${r.to}`, files: [r.fromFile, r.file] });
+// BLZ-670: db mode stages only files that exist on disk — the ticket is a row, not a file.
+const c = stageFor(mode)({ root: dataRoot, mode: cfg.commitMode, op: "move", id, message: `${id}: ${r.from} → ${r.to}`, files: [r.fromFile, r.file] });
 if (!c.ok) { console.error(`blaze move: file relocated but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
 console.log(`${id}: ${r.from} → ${r.to}${r.resolution ? ` (resolution: ${r.resolution})` : ""}${commitSuffix(c)}`);

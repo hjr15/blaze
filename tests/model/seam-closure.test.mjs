@@ -2051,12 +2051,14 @@ const WRITE_ALLOWED = new Map([
   ["resolve.mjs", ["fsStorage"]],
   ["schedule-runner.mjs", ["fsStorage"]],
   // ...their six CLI runners resolve the write port and hand the result to the commit queue.
-  ["edit-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["link-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["log-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["move-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["new-runner.mjs", ["applyNew", "commitOrQueue", "resolveWritePort"]],
-  ["resolve-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  // BLZ-670: each resolves BOTH ports once (resolvePorts) and stages by mode (stageFor), so a
+  // db-mode verb reads the database and never stages a ticket that is only a row.
+  ["edit-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["link-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["log-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["move-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["new-runner.mjs", ["applyNew", "stageFor", "resolvePorts"]],
+  ["resolve-runner.mjs", ["stageFor", "resolvePorts"]],
   // BLZ-629 / design §5.3-§5.5. `blaze import --apply` is `blaze new` done N
   // times from a file, and it takes exactly what `new.mjs` and the six
   // runners above take, for exactly their reasons: `allocateId` + `writeClaim`
@@ -2105,8 +2107,10 @@ const WRITE_ALLOWED = new Map([
   // one `planImport`, two readers (§4.5), and `repair` writes records only.
   // BLZ-640 adds `withImportLock`, which the runner wraps all three verbs in
   // under `--apply` — the seam design §8 item 8 puts the lock at.
+  // BLZ-670: the apply path resolves both ports (resolvePorts) and hands `stageFor(mode)` in as
+  // the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.
   ["import-runner.mjs",
-    ["resolveWritePort", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
+    ["resolvePorts", "stageFor", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.

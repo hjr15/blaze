@@ -2,9 +2,9 @@
 // applyNew against the resolved data tree, then commits (or queues) the ticket.
 import { applyNew } from "./new.mjs";
 import { derivedFieldRefusal } from "./model/fields.mjs";
-import { resolveWritePort } from "./model/write-port-resolve.mjs";
+import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
+import { stageFor, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -98,24 +98,26 @@ if (!opts.project || !opts.type || !opts.title) {
 // printed it as a stack trace — making the guard read as an engine bug. Same shape as
 // the assertWritable catch this file already uses.
 let __wp;
-try { __wp = await resolveWritePort({ dataRoot, projectsDir }); }
+// BLZ-670: both ports resolved once — under BLAZE_WRITE_PORT=db the reader is the database
+// too, so the verb reads what the previous verb wrote. Other modes: unchanged.
+try { __wp = await resolvePorts({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
-const { port: writePort, close: closeWritePort } = __wp;
+const { writePort, readStorage, mode, close: closePorts } = __wp;
 // BLZ-402 review finding 3: `applyNew` -> `loadProject(project, { allowMissing: true })`
 // is the actual reproduced crash site for `blaze new --project 'A(' ...` — an
 // UNCONFIGURED --project value that `cli.mjs`'s preflight never sees (it only validates
 // projects blaze.config.json already names), so the refusal has to be caught here.
 let r;
-try { r = await applyNew(projectsDir, { ...opts, writePort }); }
+try { r = await applyNew(projectsDir, { ...opts, writePort, readStorage }); }
 catch (e) {
-  closeWritePort();
-  if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
-  throw e;
+  if (e instanceof InvalidProjectKeyError) { await closePorts(); console.error(e.message); process.exit(1); }
+  await closePorts(); throw e;
 }
-closeWritePort();
+await closePorts();
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 
-const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile] });
+// BLZ-670: db mode stages only files that exist on disk — the ticket is a row, not a file.
+const c = stageFor(mode)({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile] });
 if (!c.ok) { console.error(`blaze new: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
 console.log(`created ${r.id} → ${r.file}${commitSuffix(c)}`);

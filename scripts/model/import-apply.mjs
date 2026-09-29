@@ -306,7 +306,7 @@ export function pruneReceipts(dataRoot, { now = new Date(), days = RETENTION_DAY
  * `WORKFLOWS`); matching the engine's existing resolution beats inventing a
  * second one on the import path.
  */
-export function loadBoard(projectsDir, { dataRoot, readStorage = fsReadStorage, config = undefined } = {}) {
+export async function loadBoard(projectsDir, { dataRoot, readStorage = fsReadStorage, config = undefined } = {}) {
   const root = dataRoot ?? dirname(projectsDir);
   let cfg = config;
   if (cfg === undefined) {
@@ -314,7 +314,7 @@ export function loadBoard(projectsDir, { dataRoot, readStorage = fsReadStorage, 
   }
 
   const byId = new Map();
-  for (const t of readStorage.listTickets(projectsDir)) {
+  for (const t of await readStorage.listTickets(projectsDir)) {
     const id = t.frontmatter?.id;
     if (id) byId.set(String(id), t);
   }
@@ -592,7 +592,7 @@ export async function runImport(opts) {
   // which row is which — "row 7" is not actionable over seven documents.
   if (parsed.legend) say(...parsed.legend, "");
 
-  const board = loadBoard(projectsDir, { dataRoot, readStorage });
+  const board = await loadBoard(projectsDir, { dataRoot, readStorage });
   const plan = planImport(parsed.rows, board, { allocateIds, update });
 
   if (!plan.ok) {

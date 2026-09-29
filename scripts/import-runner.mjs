@@ -28,7 +28,8 @@ import { fileURLToPath } from "node:url";
 import { resolve, join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
-import { resolveWritePort } from "./model/write-port-resolve.mjs";
+import { resolvePorts, resolveReadStorage } from "./model/write-port-resolve.mjs";
+import { stageFor } from "./commit-or-queue.mjs";
 import { runImport } from "./model/import-apply.mjs";
 import { runMappedImport, runRepair } from "./model/import-mapping.mjs";
 import { withImportLock } from "./model/import-lock.mjs";
@@ -192,12 +193,24 @@ async function main() {
   // still under the lock: it appends pairs and `resolved` entries to the very
   // records an import reads in its pre-write phase.
   if (subcommand === "repair") {
-    const rr = await guarded(() => runRepair({
-      receipt: resolve(positional[0]),
-      projectsDir, dataRoot,
-      apply: opts.apply,
-      commitMode: cfg.commitMode,
-    }));
+    // BLZ-670: a READER only, never a write port — a `dual`-mode repair must not demand
+    // the shadow. Under BLAZE_WRITE_PORT=db the board it checks tickets against is the
+    // database, and staging keeps only the record files that exist on disk.
+    let rs;
+    try { rs = await resolveReadStorage({ dataRoot, projectsDir }); }
+    catch (e) { console.error(e.message); process.exit(1); }
+    let rr;
+    try {
+      rr = await guarded(() => runRepair({
+        receipt: resolve(positional[0]),
+        projectsDir, dataRoot,
+        apply: opts.apply,
+        commitMode: cfg.commitMode,
+        readStorage: rs.readStorage, stage: stageFor(rs.mode),
+      }));
+    } finally {
+      await rs.close();
+    }
     const outR = rr.exitCode === 0 ? console.log : console.error;
     if (rr.report) outR(rr.report);
     process.exit(rr.exitCode);
@@ -205,8 +218,10 @@ async function main() {
 
   // ADR-0037 §1: the port is injected, never assumed, so the same importer
   // writes rows instead of files under BLAZE_WRITE_PORT=db.
+  // BLZ-670: both ports at once, so the board the plan is built against is read from
+  // the same store the rows are written to; staging goes by mode.
   let wp;
-  try { wp = await resolveWritePort({ dataRoot, projectsDir }); }
+  try { wp = await resolvePorts({ dataRoot, projectsDir }); }
   catch (e) { console.error(e.message); process.exit(1); }
 
   let r;
@@ -216,7 +231,8 @@ async function main() {
       projectsDir, dataRoot,
       apply: opts.apply, update: opts.update, allocateIds: opts.allocateIds,
       commitMode: cfg.commitMode,
-      writePort: wp.port,
+      writePort: wp.writePort,
+      readStorage: wp.readStorage, stage: stageFor(wp.mode),
     };
     // One `planImport`, two readers (design §4.5). The mapped path adds the
     // mapping and the `source-ids` map and changes nothing else; the markdown
@@ -229,7 +245,7 @@ async function main() {
       ? runMappedImport({ ...common, mappingPath: resolve(opts.mapping) })
       : runImport({ ...common, readRows })));
   } finally {
-    wp.close();
+    await wp.close();
   }
 
   // The report goes to stdout on success and stderr on a refusal, so a

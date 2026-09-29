@@ -626,7 +626,7 @@ export async function runMappedImport(opts) {
     }
   }
 
-  const board = loadBoard(projectsDir, { dataRoot, readStorage });
+  const board = await loadBoard(projectsDir, { dataRoot, readStorage });
   const plan = planImport(rows, board, { allocateIds, update });
   if (!plan.ok) {
     say(`blaze import: refusing ${plan.counts.refuse} row(s) — nothing was written.`);
@@ -884,7 +884,7 @@ export async function runRepair(opts) {
     }
   }
 
-  const byId = loadBoard(projectsDir, { dataRoot, readStorage }).byId;
+  const byId = (await loadBoard(projectsDir, { dataRoot, readStorage })).byId;
   const states = inspectReceipt(read.entries, {
     hasTicket: (id) => byId.has(id),
     hasPair: (source) => store.pairs.has(source),
