@@ -3,15 +3,16 @@
 // Worklog minutes round to 1m and must be positive (model/time.roundWorklog).
 import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { basename, dirname } from "node:path";
 import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { roundWorklog } from "./model/time.mjs";
 
 export async function applyLog(projectsDir, id, minutes, opts = {}) {
-  const { date = null, note = null, today = null, storage = fsStorage,
+  const { date = null, note = null, today = null, storage = fsStorage, readStorage = fsReadStorage,
           writePort = fsWritePort(projectsDir, storage) } = opts;
-  const { found, duplicates } = locateTicket(projectsDir, id);
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 

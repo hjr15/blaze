@@ -83,7 +83,7 @@ export async function applyNew(projectsDir, opts = {}) {
   // apply. Ids are allocated in order, so a parent that does not exist yet cannot
   // be named correctly anyway.
   const all = new Map();
-  for (const t of readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  for (const t of await readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   // Validate against the TARGET PROJECT's registry, not the ambient one (BLZ-238).
   // BLZ-246: the registry is `default → top-level → project`, so the data root's config has
   // to be passed in. Without it `loadProjectSchema` defaults `config` to null, the top-level
