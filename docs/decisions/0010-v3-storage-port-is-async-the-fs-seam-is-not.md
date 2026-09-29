@@ -80,3 +80,15 @@ had misled a reviewer who trusted them:
 
 A planning document elsewhere still states a Node 22 runtime floor; the engine floor
 is Node 24 as of BLZ-264. That document is corrected separately.
+
+## Addendum (2026-09-29, BLZ-670)
+
+BLZ-670 closed the read-side half of this decision: every entry point — verb, CLI runner, both
+HTTP servers — now resolves a reader at the entry point and **awaits every seam call**
+([ADR-0038](0038-reads-resolve-from-the-write-mode-at-the-entry-point.md)). This decision's rule
+stands unchanged: the synchronous filesystem seam and the synchronous `node:sqlite` driver are
+themselves not reworked. `await`ing their plain return values is a no-op, exactly as the
+conformance suite — one suite mandated across every driver, sync or async — already relied on.
+What changed is only that callers stopped defaulting to the synchronous seam regardless of
+`BLAZE_WRITE_PORT`; the seam itself, and the case this ADR argued (converting it would touch 22
+exported functions across 15 files for code Phase 2 deletes), is untouched.

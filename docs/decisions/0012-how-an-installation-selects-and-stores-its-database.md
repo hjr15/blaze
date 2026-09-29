@@ -198,3 +198,11 @@ tracked as blaze-pm BLZ-297. Schema creation becomes an explicit, named operatio
 runtime open reads and refuses. That defect exists independently of this decision, but
 this decision is what makes it unacceptable: an installation that can be *pointed* at an
 arbitrary database must be able to tell whether that database is one it understands.
+
+**Addendum (2026-09-29, BLZ-670).** Under `BLAZE_WRITE_PORT=db`, the `database.driver` chosen
+here — SQLite or Postgres — serves reads as well as writes: every verb, CLI runner and server
+resolves its reader through `resolvePorts`/`resolveReadStorage`
+([ADR-0038](0038-reads-resolve-from-the-write-mode-at-the-entry-point.md)), which reads the mode
+from `resolveWriteMode(env)` alone and opens the same driver this decision's config resolves,
+never `database.driver` independently. `fs` and `dual` modes are unaffected; this decision's
+config precedence and connection-handling rules are unchanged for all three modes.

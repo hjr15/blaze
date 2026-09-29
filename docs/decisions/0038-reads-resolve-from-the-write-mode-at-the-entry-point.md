@@ -1,0 +1,144 @@
+# 38. Reads resolve from the write mode, at the entry point
+
+Date: 2026-09-29
+
+## Status
+
+Accepted (BLZ-670)
+
+## Context
+
+BLZ-670 started as five named `buildIndex` call sites. Inventorying the read path
+(`docs/superpowers/specs/2026-09-29-db-mode-reads-design.md` §2, verified against `5d3476c`)
+found those five are a symptom of a much larger defect: with `BLAZE_WRITE_PORT=db`, **every**
+production read — every verb, every CLI runner, both HTTP servers — still comes from the
+filesystem, while every write goes to the database. `blaze new` → `blaze move <id> in-progress`
+→ `blaze move <id> in-review` split-brains: the second move reads the ticket's stale status from
+its (unwritten) file and fails, even though the first move succeeded in the database. No
+production code even constructs a non-filesystem reader; `openSqliteRead` and `openPostgresRead`
+were reached only from tests and migration tooling.
+
+This is the same split ADR-0010 anticipated and left open: ADR-0010 settled that the v3 storage
+port is async while the transitional filesystem seam stays synchronous, but it did not say where
+a *reader* comes from on each request. That gap is what let every entry point default to the
+synchronous filesystem seam regardless of `BLAZE_WRITE_PORT`.
+
+## Decision
+
+**Resolve the reader at the entry point, await the seam, keep the core pure.** Two new exports in
+`scripts/model/write-port-resolve.mjs`, beside `resolveWritePort`:
+
+- `resolveReadStorage({ dataRoot, projectsDir, env, ... }) → { readStorage, mode, close }` — the
+  mode comes from `resolveWriteMode(env)` **only**, never independently from `database.driver`
+  (BLZ-667 Task 9 settled that). `fs` and `dual` both return `fsReadStorage` (in `dual` mode the
+  filesystem decides every outcome, so it also answers the reads); `db` opens the SQLite shadow or
+  the Postgres connection per `resolveDbConfig`, with no path ever passing `create: true` — a
+  missing shadow or an empty Postgres schema is refused with the same message `openShadow`/
+  `resolveWritePort` already give.
+- `resolvePorts({ dataRoot, projectsDir, env, ... }) → { writePort, readStorage, mode, close }` —
+  resolves the mode once and returns both ports from that single resolution, which makes
+  read/write drift impossible by construction. On Postgres the two ports share one `pg.Client`
+  (the write port is built over `pgExec(reader.client)`); on SQLite they are two handles on the
+  same shadow file, which is safe because `node:sqlite` commits synchronously before a write
+  returns. Every verb entry point uses `resolvePorts`; read-only entry points (`reindex`,
+  `rollup`, `audit`, `schedule`, `export`, the reconcile preview, board/panel/live rendering) use
+  `resolveReadStorage`.
+
+Every entry point was already async, or can become async at its own top level: the runners are
+ESM and take top-level `await`, both servers' handlers are async, and every verb is already async.
+The functions that are genuinely synchronous are pure transforms over a ticket list —
+`buildIndex` already accepts `{ tickets, sprints }` (BLZ-274) and `boardModel` already accepts
+`index` — so the async boundary goes where the I/O is, at the edge, and the pure core does not
+change. Consumers now `await` every seam call; awaiting the synchronous filesystem seam's and the
+synchronous SQLite driver's plain values is a no-op, which the conformance suite already relied
+on (see the ADR-0010 addendum below).
+
+### Alternatives rejected
+
+- **Full async cascade.** Make `boardModel`, `graphModel`, `pageHtml` and the other builders
+  async and have them call the reader themselves. Rejected: it touches more code, puts I/O inside
+  the view layer (which ADR-0009 and ADR-0010 keep out), and buys nothing over resolving once at
+  the entry point and threading `tickets` through.
+- **Synchronous SQLite-only path that refuses Postgres.** Rejected: it makes BLZ-254's acceptance
+  criterion unreachable — two agents on two machines need a shared Postgres served through the
+  verbs and `serve`.
+- **A blocking shim** (`worker_threads` + `SharedArrayBuffer` + `Atomics.wait`, blocking the main
+  thread on an async call). Already rejected by ADR-0010 for any HTTP server, and this design adds
+  nothing that reopens it.
+
+### The `db`-mode staging rule, and why it is a separate decision from `commit-or-queue.mjs`'s fate
+
+In `db` mode `dbWritePort` returns an opaque `{ file: "<id>" }` handle, not a path. Before this
+change, every verb runner, `blaze import`, `reconcile --apply` and every mutating `serve.mjs`
+route passed that handle to `commitOrQueue`, which tried to `git add` a path that does not exist —
+the database write had already succeeded, and the verb then exited 1 with "commit failed" (no
+test exercised `db`-mode verbs at CLI level, so this had never been seen). `reconcile --apply`
+was worse: with no injected write port it built `fsWritePort` itself, so in `db` mode it wrote
+**files**, not the database.
+
+The fix is `stageFor(mode)` in `commit-or-queue.mjs`: for `fs` and `dual` it is `commitOrQueue`
+unchanged; for `db` it keeps only the paths that **exist on disk**, commits those through
+`commitOrQueue`, and returns `{ ok: true, committed: false, queued: false }` when none are left.
+A verb's opaque id handles drop out of staging and nothing is committed for them, while
+`blaze import`'s receipt and source-id map — real record files, not caches — are still committed
+because they genuinely exist on disk. `reconcile` gains a `stage` parameter (default
+`commitOrQueue`) so every entry point can pass it the resolved write port, and `reconcile --apply`
+in `db` mode reports a distinct outcome, "moved in the database; db mode makes no git commit",
+never the "NO COMMIT CREATED — already matched HEAD" sentence, which would be false there.
+
+**This decides staging, not deletion.** `stageFor(mode)` makes `db`-mode writes stop corrupting
+the git tree; it does not decide whether `commit-or-queue.mjs` itself is deleted once the
+filesystem seam is gone. That stays BLZ-254's explicit decision — this ADR only makes the current
+staging code behave correctly under a mode it was never written for.
+
+One more `db`-mode consequence follows from the same handle problem: `blaze schedule
+migrate-dates --write` rewrites ticket files directly through `fsStorage`, so in `db` mode it now
+**refuses by name, exit 1**, rather than silently doing nothing or writing files a database
+install does not read. The dry run is unaffected — it reads the database like everything else.
+Routing `--write` through the write port is left to BLZ-254. Separately, `blaze audit` now takes
+a ticket's status from the record's own `status` field, not from `basename(dirname(t.file))`,
+which is meaningless once `file` is an id handle instead of a path.
+
+### Named residuals
+
+Three things this design deliberately does not touch, so they are not mistaken for covered:
+
+- **`.blaze/transitions.json`** is still built from git rename history, in every mode, including
+  `db`. In `db` mode that history stops growing once moves stop touching files. Deriving it from
+  `ticket_event` instead is BLZ-254's scope.
+- **`sprints.json`** has no database table in any mode; it stays a plain-text registry read from
+  the data root. Its fate is BLZ-254's to decide.
+- **Connection pooling.** Each request opens and closes its own reader, mirroring the write port
+  — no pool. This is YAGNI for a solo board; it is revisited only on a measured problem, not
+  preemptively.
+
+## Consequences
+
+- **The split-brain defect is closed.** Every read a verb, CLI runner, or server makes now comes
+  from the same store its writes go to, in every mode. `fs` and `dual` behaviour is unchanged
+  byte-for-byte.
+- **ADR-0010's rule stands**, and is now stated as an addendum there: the port is async, the
+  filesystem seam is unchanged, and consumers await every seam call.
+- **A malformed `BLAZE_WRITE_PORT` now surfaces**, uniformly, wherever it previously would not
+  have: `resolveReadStorage`/`resolvePorts` throw the same "not a write port — expected 'fs',
+  'dual' or 'db'" refusal `resolveWritePort` already threw, and every entry point that now goes
+  through them reports it in that entry point's own idiom rather than silently defaulting to `fs`
+  — `reconcile`'s CLI and the other read-only CLI scripts (`reindex`, `rollup`, `audit`,
+  `schedule`, `export`) print the message and exit 1; `supervisor.mjs`'s reconcile loop surfaces
+  it as a run-error feed event; `serve.mjs`'s `/api/reconcile-preview` and the mutating routes
+  answer 503 with `{ errors: [message] }`, the same status and shape the write side already used.
+  Before this change, a bad value could go unnoticed on a read-only path that never resolved a
+  port at all.
+- **Two known `db`-mode write defects remain, tracked separately, outside this read-path ticket:**
+  `blaze import` in `db` mode allocates ids from the filesystem allocator rather than the
+  database's `project_counter` (BLZ-671), and it fails on a row with a blank `created` because
+  `created_on` binds `undefined` (BLZ-672). Both block BLZ-254's real cutover and are filed under
+  BLZ-667.
+- **Batched Postgres reads.** `listTickets` moves from per-ticket hydration (about 10,000 round
+  trips on the live ~2,500-ticket corpus) to one `SELECT` per field group over `ticket_id =
+  ANY($1)`, rows grouped in JS in the same order per-ticket hydration produced. The same batching
+  goes into the SQLite reader only if the conformance suite shows its `listTickets` does N+1
+  queries.
+- **A read-seam guard** (beside `tests/model/seam-closure.test.mjs`) now fails CI if a production
+  module outside a named allowlist imports `fsReadStorage` or calls `walkTickets` directly, so a
+  future bypass of `resolveReadStorage`/`resolvePorts` is caught before it reaches production.
