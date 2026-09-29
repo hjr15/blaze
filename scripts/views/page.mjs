@@ -62,7 +62,7 @@ function writeOutcomeSource() {
 // How to render each view's fragment. metrics/map compute their models
 // lazily — only when that view is actually requested — so GET / (which
 // always renders "board") never pays for the metrics/graph walk.
-export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false, sprint = null }) {
+export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false, sprint = null, tickets = null }) {
   switch (name) {
     case "board": return board.render(m);
     case "list": return list.render(m);
@@ -79,7 +79,7 @@ export function renderView(name, { m, pDir, project, now, transitions, focus = n
       // actually being rendered, which in the ordinary single-board case is the same value
       // `resolveRoots()` returned -- which is why no test noticed.
       const txns = transitions === undefined ? loadTransitions({ root: dirname(pDir) }).transitions : transitions;
-      const mFlat = boardModel(pDir, { project, flat: true, index: m.index }); // cheap post-cache; whole project scope
+      const mFlat = boardModel(pDir, { project, flat: true, index: m.index, tickets }); // cheap post-cache; whole project scope
       return `<div class="metricsview">${metrics.render(metricsModel({ board: mFlat, transitions: txns, now, project }))}</div>`;
     }
     case "map": return `<div class="mapview">${map.render(graphModel({ projectsDir: pDir, index: m.index, focus }))}</div>`;
@@ -133,17 +133,17 @@ export function sublineHtml(m) {
 
 // ---- JSON fragment envelope (client swap target) ---------------------------
 
-export function viewEnvelope({ project = "all", focus = null, flat = false, sprint = null, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views } = {}) {
+export function viewEnvelope({ project = "all", focus = null, flat = false, sprint = null, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views, tickets = null } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   // Clamp: board must always be enabled regardless of what the caller passes
   // (config.mjs already forces this for cfg.views, but a direct caller — e.g.
   // a future supervisor — could pass { board: false } and strand every view).
   const V = { ...(views ?? cfgFor(pDir).views), board: true };
   if (!VIEW_NAMES.includes(view) || !V[view]) return null;
-  const m = boardModel(pDir, { project, focus, flat });
+  const m = boardModel(pDir, { project, focus, flat, tickets });
   return {
     view,
-    html: renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint }),
+    html: renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint, tickets }),
     chipbar: chipbarHtml(m),
     crumbs: crumbsHtml(m, project, flat),
     total: m.total,
@@ -166,6 +166,7 @@ export function pageHtml({
   now = Date.now(),
   transitions,
   views,
+  tickets = null,
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const cfg = cfgFor(pDir);
@@ -186,7 +187,7 @@ export function pageHtml({
   // model compute happens, exactly what a disabled view is meant to avoid).
   // board is guaranteed on above, so falling back to it is always safe.
   if (!V[view]) view = "board";
-  const m = boardModel(pDir, { project, focus, flat });
+  const m = boardModel(pDir, { project, focus, flat, tickets });
   const { columns: cols, projects, selected } = m;
   const boards = m.boards || [];
   const boardToggle = boards.length > 1
@@ -336,7 +337,7 @@ export function pageHtml({
   ${chipbar}
   ${crumbs}
   ${afterHeader}
-  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint })}</div>
+  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint, tickets })}</div>
   <script${nonceAttr}>
     // View toggle (Board / List), persisted to localStorage. Synchronous only —
     // flips data-view + pill state + localStorage. Fetching/swapping the actual
