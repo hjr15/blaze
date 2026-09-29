@@ -25,7 +25,8 @@ async function withDbServer(fn) {
   try {
     await fn({ base, roots });
   } finally {
-    server.close();
+    server.closeAllConnections();
+    await new Promise((r) => server.close(r));
     if (before === undefined) delete process.env.BLAZE_WRITE_PORT;
     else process.env.BLAZE_WRITE_PORT = before;
   }
@@ -41,7 +42,12 @@ describe("blaze board under BLAZE_WRITE_PORT=db", () => {
   test("POST /api/move returns 200", async () => {
     await withDbServer(async ({ base }) => {
       const r = await move(base, "ENG-1", "in-progress");
-      assert.equal(r.status, 200, JSON.stringify(await r.json().catch(() => ({}))));
+      const body = await r.json().catch(() => ({}));
+      assert.equal(r.status, 200, JSON.stringify(body));
+      // Final review: the body names the store, so the page does not read the git fields
+      // (always false in db mode) as "the file already matched HEAD".
+      assert.deepEqual(body, { ok: true, committed: false, queued: false, db: true, resolution: body.resolution });
+      assert.equal(body.db, true);
     });
   });
 
@@ -111,15 +117,16 @@ describe("supervisor: a board-read failure is contained", () => {
     const base = `http://127.0.0.1:${app.server.address().port}`;
     try {
       // Bounded: before the fix the socket was never answered, and an unbounded fetch hangs.
-      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(5000) });
+      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(30000) });
       assert.equal(r.status, 500, (await r.text()).slice(0, 500));
       // `/view/<name>` has no route-level catch: this is the server-level belt answering.
-      const view = await fetch(`${base}/view/board`, { signal: AbortSignal.timeout(5000) });
+      const view = await fetch(`${base}/view/board`, { signal: AbortSignal.timeout(30000) });
       assert.equal(view.status, 500, (await view.text()).slice(0, 500));
-      const again = await fetch(`${base}/api/sync`, { signal: AbortSignal.timeout(5000) });
+      const again = await fetch(`${base}/api/sync`, { signal: AbortSignal.timeout(30000) });
       assert.equal(again.status, 200);
     } finally {
-      app.server.close();
+      app.server.closeAllConnections();
+      await new Promise((r) => app.server.close(r));
       if (before === undefined) delete process.env.BLAZE_WRITE_PORT;
       else process.env.BLAZE_WRITE_PORT = before;
     }

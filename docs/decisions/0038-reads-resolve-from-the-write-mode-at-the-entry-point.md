@@ -84,7 +84,10 @@ A verb's opaque id handles drop out of staging and nothing is committed for them
 because they genuinely exist on disk. `reconcile` gains a `stage` parameter (default
 `commitOrQueue`) so every entry point can pass it the resolved write port, and `reconcile --apply`
 in `db` mode reports a distinct outcome, "moved in the database; db mode makes no git commit",
-never the "NO COMMIT CREATED — already matched HEAD" sentence, which would be false there.
+never the "NO COMMIT CREATED — already matched HEAD" sentence, which would be false there. The
+browser gets the same treatment: `serve.mjs`'s mutating routes add `db: true` to their 200 body in
+`db` mode, and the page's `writeOutcome` checks it before the `committed === false` arm, so a
+board click in `db` mode says nothing rather than "the file already matched HEAD".
 
 **This decides staging, not deletion.** `stageFor(mode)` makes `db`-mode writes stop corrupting
 the git tree; it does not decide whether `commit-or-queue.mjs` itself is deleted once the
@@ -101,13 +104,19 @@ which is meaningless once `file` is an id handle instead of a path.
 
 ### Named residuals
 
-Three things this design deliberately does not touch, so they are not mistaken for covered:
+Four things this design deliberately does not touch, so they are not mistaken for covered:
 
 - **`.blaze/transitions.json`** is still built from git rename history, in every mode, including
   `db`. In `db` mode that history stops growing once moves stop touching files. Deriving it from
   `ticket_event` instead is BLZ-254's scope.
 - **`sprints.json`** has no database table in any mode; it stays a plain-text registry read from
   the data root. Its fate is BLZ-254's to decide.
+- **The groomer loop** (`scripts/loops/groomer.mjs`, run by `supervisor.mjs`'s `runGroomer`)
+  picks a ticket by reading `projects/<KEY>/<col>/*.md`, has an agent edit that file, and commits
+  it. It never reads or writes through the port. In `db` mode it is therefore **refused**: each
+  tick publishes a `{ type: "error", loop: "groomer" }` event saying the groomer edits ticket
+  files and under `BLAZE_WRITE_PORT=db` the database is the store, and no groom runs. Routing it
+  through the port is BLZ-673 (under BLZ-254).
 - **Connection pooling.** Each request opens and closes its own reader, mirroring the write port
   — no pool. This is YAGNI for a solo board; it is revisited only on a measured problem, not
   preemptively.
@@ -115,7 +124,9 @@ Three things this design deliberately does not touch, so they are not mistaken f
 ## Consequences
 
 - **The split-brain defect is closed.** Every read a verb, CLI runner, or server makes now comes
-  from the same store its writes go to, in every mode. `fs` and `dual` behaviour is unchanged
+  from the same store its writes go to, in every mode — with one named exception: the groomer
+  loop still reads and edits ticket files, so in `db` mode it is refused rather than run (see
+  Named residuals; BLZ-673). `fs` and `dual` behaviour is unchanged
   byte-for-byte.
 - **ADR-0010's rule stands**, and is now stated as an addendum there: the port is async, the
   filesystem seam is unchanged, and consumers await every seam call.
@@ -127,7 +138,9 @@ Three things this design deliberately does not touch, so they are not mistaken f
   `schedule`, `export`) print the message and exit 1; `supervisor.mjs`'s reconcile loop surfaces
   it as a run-error feed event; `serve.mjs`'s `/api/reconcile-preview` and the mutating routes
   answer 503 with `{ errors: [message] }`, the same status and shape the write side already used.
-  Before this change, a bad value could go unnoticed on a read-only path that never resolved a
+  So does every board GET on `serve.mjs` and `supervisor.mjs` — `/`, `/view/*`, `/api/hash`,
+  `/api/live`, `/api/panel` — which now resolve a reader per request: a malformed value makes
+  them answer 503 where they used to render the filesystem board. Before this change, a bad value could go unnoticed on a read-only path that never resolved a
   port at all.
 - **Two known `db`-mode write defects remain, tracked separately, outside this read-path ticket:**
   `blaze import` in `db` mode allocates ids from the filesystem allocator rather than the
@@ -135,8 +148,11 @@ Three things this design deliberately does not touch, so they are not mistaken f
   `created_on` binds `undefined` (BLZ-672). Both block BLZ-254's real cutover and are filed under
   BLZ-667.
 - **Batched Postgres reads.** `listTickets` moves from per-ticket hydration (about 10,000 round
-  trips on the live ~2,500-ticket corpus) to one `SELECT` per field group over `ticket_id =
-  ANY($1)`, rows grouped in JS in the same order per-ticket hydration produced. The same batching
+  trips on the live ~2,500-ticket corpus) to five queries for the whole corpus: the live tickets,
+  plus one unfiltered `SELECT` of each of the whole `ticket_link`, `ticket_label`,
+  `ticket_component` and `worklog_entry` tables, rows grouped by ticket in JS in the same order
+  per-ticket hydration produced. Rows belonging to a deleted ticket are read and simply not
+  joined to anything. The same batching
   goes into the SQLite reader only if the conformance suite shows its `listTickets` does N+1
   queries.
 - **A read-seam guard** (beside `tests/model/seam-closure.test.mjs`) now fails CI if a production

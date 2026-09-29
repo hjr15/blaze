@@ -186,6 +186,11 @@ so it is not mistaken for covered.
   any runner starts, and in `db` mode the project list comes from config first.
 - The `sprints.json` registry: there is no database table for it, and BLZ-254 decides its fate.
 - `.blaze/activity.jsonl`: a hook-written local file (§4.2).
+- The groomer loop (`loops/groomer.mjs`, `supervisor.mjs` `runGroomer`): it selects, and has an
+  agent edit, ticket **files**, then commits them. It is not routed through the port here. In `db`
+  mode it is **refused** — `runGroomer` publishes a `{ type: "error", loop: "groomer" }` event
+  saying the groomer edits ticket files and under `BLAZE_WRITE_PORT=db` the database is the store
+  (BLZ-254), and returns without grooming. Porting it is BLZ-673. (Added at final review.)
 
 ### 4.4a No git commit in `db` mode (added 2026-09-29, operator decision)
 
@@ -215,7 +220,11 @@ Fix:
 - Every runner, `serve.mjs` mutating route, `import` and `reconcile` stages through
   `stageFor(mode)`. `reconcile` gains a `stage` parameter (default `commitOrQueue`), and its
   entry points pass it the resolved `writePort`.
-- The success line carries no commit suffix.
+- The success line carries no commit suffix, and names no path (`blaze new` prints `created
+  <id>`, not `created <id> → <id>`).
+- `serve.mjs`'s mutating routes add `db: true` to the 200 body, and the page's `writeOutcome`
+  checks it before the `committed === false` arm, so a browser write says nothing rather than
+  "the file already matched HEAD". (Added at final review.)
 - `fs` and `dual` modes are unchanged.
 
 This does **not** decide whether `commit-or-queue.mjs` is deleted; that stays BLZ-254's explicit

@@ -497,6 +497,17 @@ describe("BLZ-449: the dashboard surfaces the git outcome of a write", () => {
       "a deferred commit is not an absent one");
   });
 
+  // BLZ-670 (final review): under BLAZE_WRITE_PORT=db `stageFor("db")` answers
+  // {committed:false, queued:false} for EVERY write — there is no file to commit — so the
+  // committed===false arm told the operator "the file already matched HEAD" on every click.
+  // A db write is the database's ordinary case, like a real commit: it says nothing.
+  test("a database-mode write is not reported as an idempotent no-op", () => {
+    const note = writeOutcome({ ok: true, committed: false, queued: false, db: true });
+    assert.doesNotMatch(note, /already matched HEAD/, `got ${JSON.stringify(note)}`);
+    assert.doesNotMatch(note, /no commit created/, `got ${JSON.stringify(note)}`);
+    assert.equal(note, "");
+  });
+
   test("a real commit says nothing — one op, one commit is the board's ordinary case", () => {
     assert.equal(writeOutcome({ ok: true, committed: true, queued: false }), "");
     assert.equal(writeOutcome({ ok: false, errors: ["nope"] }), "");

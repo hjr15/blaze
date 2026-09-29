@@ -126,6 +126,10 @@ public repo.
 **Trigger:** a filesystem watch on the groomed columns (default: `backlog/`) plus a
 timer (default 300s) plus a manual "run groomer now" button in the web app.
 
+**Not under `BLAZE_WRITE_PORT=db`:** the groomer reads and edits ticket *files*, so when the
+database is the store each pass is refused with a `{ type: "error", loop: "groomer" }` feed event
+and grooms nothing (ADR-0038's named residuals; porting it is BLZ-673).
+
 **What it does** (one ticket at a time, defined once in `AGENTS.md` so the human rules
 and the agent prompt share a source):
 - triage a new backlog ticket — set `type` and `priority`,

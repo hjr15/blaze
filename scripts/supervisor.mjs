@@ -396,6 +396,15 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     if (loops.groomer.busy) return;
     loops.groomer.busy = true;
     try {
+      // BLZ-670 (final review). The groomer picks a ticket by reading `.md` files, has an
+      // agent edit that FILE, and commits it. Under BLAZE_WRITE_PORT=db the database is the
+      // store, so it would groom stale files that nothing reads. Refused — and said on the
+      // bus, in the shape every groomer error takes — until it goes through the port (BLZ-673).
+      if (resolveWriteMode() === "db") {
+        bus.publish({ type: "error", loop: "groomer", ts: today(),
+          message: "groomer not run: it edits ticket files, and under BLAZE_WRITE_PORT=db the database is the store (BLZ-254)" });
+        return;
+      }
       let agentsMd = "";
       // BLZ-512 / ADR-0031. This is the LONG-LIVED process, so the site REPORTS rather
       // than refusing: the rethrown refusal lands in the `catch` below, which publishes an

@@ -829,7 +829,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // re-write — `/api/edit` to the value already there, `/api/ac` re-checking a
       // box) returned the same shape as a real commit, so this body said the same
       // thing for both. `committed` and `queued` name the git outcome, alongside it.
-      const gitOutcome = (c) => ({ committed: Boolean(c.committed), queued: Boolean(c.queued) });
+      // BLZ-670: `db` names the store, so the page's writeOutcome does not read db mode's
+      // always-false git fields as "the file already matched HEAD" (spec §4.4a).
+      const gitOutcome = (c) => ({ committed: Boolean(c.committed), queued: Boolean(c.queued), db: mode === "db" });
       // BLZ-670: resolved below, inside the try, but declared here because `done` stages by
       // the resolved mode.
       let writePort, readStorage, mode, closeWritePort;

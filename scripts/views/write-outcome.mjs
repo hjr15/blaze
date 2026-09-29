@@ -35,6 +35,12 @@ export function writeOutcome(j) {
   // reconcileSummary checks it (BLZ-446): a body this consumer does not understand
   // must produce no sentence at all rather than a confident one.
   if (body.ok !== true) return "";
+  // BLZ-670: under BLAZE_WRITE_PORT=db the database is the store and there is no file to
+  // commit, so the git fields are false on EVERY write. Checked before the
+  // `committed === false` arm, which would otherwise say "the file already matched HEAD"
+  // on every click (spec §4.4a). A db write is the ordinary case, like a real commit, and
+  // says nothing.
+  if (body.db === true) return "";
   // ORDER MATTERS. A queued write is `committed: false` too, and it is not a no-op —
   // the commit is deferred to `blaze commit`, not absent because there was nothing to
   // commit. Testing `committed` first would report a real pending write as an

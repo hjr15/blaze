@@ -269,14 +269,15 @@ for (const t of tickets) {
 // but it is not this ticket's, and resolving it as a side effect here would be exactly the
 // silent reconciliation the ACs warn against.
 //
-// KNOWN LIMITATION: `parent` is the only association this sees, because the markdown corpus
-// is the only thing on disk. A requirement associated with a goal ONLY through a v4
+// KNOWN LIMITATION: `parent` is the only association this sees, because it reads ticket
+// RECORDS — from the markdown corpus, or from the database under BLAZE_WRITE_PORT=db
+// (BLZ-670) — and a ticket record carries no `hierarchy_membership` rows. A requirement associated with a goal ONLY through a v4
 // `hierarchy_membership` row would not be found. BLZ-374 made the table SHIP —
 // `createDbSchema` now installs `hierarchy` and `hierarchy_membership` at DB schema version
 // 2 — so this limitation is now reachable in principle. It is not reachable in practice yet:
 // nothing WRITES a membership row (BLZ-360 section 8.3's roll-up and spec 4's seed are both
-// unbuilt), and this runner reads the markdown corpus rather than the database. It becomes
-// real the moment either lands, which is what BLZ-377 and spec 4's hierarchy seed do.
+// unbuilt), and even in db mode this runner reads ticket records, not the membership table.
+// It becomes real the moment either lands, which is what BLZ-377 and spec 4's hierarchy seed do.
 const statusOf = new Map();
 const fmById = new Map();
 for (const t of tickets) {

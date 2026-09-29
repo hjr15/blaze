@@ -52,6 +52,7 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
     const committed = git("log", "-1", "--name-only", "--format=");
     assert.match(committed, new RegExp(`^${RECEIPT_DIR}/\\S+\\.jsonl$`, "m"),
       `the receipt is committed:\n${committed}`);
+    assert.doesNotMatch(committed, /\.md$/m, `no ticket file is committed in db mode:\n${committed}`);
     ok(runner("move-runner.mjs", ["ENG-2", "in-progress"], roots));
   });
 
@@ -65,7 +66,11 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
 
   test("audit, rollup, export and schedule see a ticket that exists only in the db", async () => {
     const roots = await initialised();
-    ok(runner("new-runner.mjs", ["--project", "ENG", "--type", "task", "--estimate", "15", "Only in the db"], roots));
+    const made = runner("new-runner.mjs", ["--project", "ENG", "--type", "task", "--estimate", "15", "Only in the db"], roots);
+    ok(made);
+    // Final review: in db mode `r.file` is the id, so "created ENG-2 → ENG-2" named no path.
+    assert.match(made.stdout, /^created ENG-2\b/m);
+    assert.doesNotMatch(made.stdout, /→/, `no path to name in db mode:\n${made.stdout}`);
     const audit = runner("audit-runner.mjs", ["--json"], roots);
     assert.match(audit.stdout, /ENG-2/, "audit");
     const roll = runner("rollup-runner.mjs", ["ENG-2"], roots);

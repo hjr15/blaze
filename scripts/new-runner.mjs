@@ -120,4 +120,5 @@ for (const w of r.warnings) console.error(`warning: ${w}`);
 // BLZ-670: db mode stages only files that exist on disk — the ticket is a row, not a file.
 const c = stageFor(mode)({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile] });
 if (!c.ok) { console.error(`blaze new: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`created ${r.id} → ${r.file}${commitSuffix(c)}`);
+// BLZ-670: in db mode `r.file` is the id handle, so there is no path to name.
+console.log(`created ${r.id}${mode === "db" ? "" : ` → ${r.file}`}${commitSuffix(c)}`);
