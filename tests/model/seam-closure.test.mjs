@@ -926,10 +926,14 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // `sqliteExec`, over a caller-supplied client — reaches no node:fs write itself.
   // `resolveWriteMode` (BLZ-667) is `resolveWritePort`'s own mode detection, extracted: it
   // reads an env var and returns a string — reaches no write of any kind.
+  // BLZ-670: `resolvePorts` returns resolveWritePort's port (and opens the shadow for write),
+  // so it is a write; `resolveReadStorage` / `withReadStorage` only open readers — inert.
   ["model/write-port-resolve.mjs",
-    { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort"], sanctioned: [],
+    { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort",
+      "resolvePorts"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
-        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode"] }],
+        "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode",
+        "resolveReadStorage", "withReadStorage"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
@@ -938,7 +942,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
-  ["commit-or-queue.mjs", { writes: ["commitOrQueue"], sanctioned: [],
+  // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
+  ["commit-or-queue.mjs", { writes: ["commitOrQueue", "stageFor"], sanctioned: [],
     inert: ["commitSuffix"] }],
   ["serve-commit.mjs", { writes: ["commitFile"], sanctioned: [], inert: [] }],
   ["serve.mjs", { writes: ["startServer"], sanctioned: [],
@@ -2003,7 +2008,9 @@ const WRITE_ALLOWED = new Map([
   // claim on it, and it must be the FIFO-safe primitive precisely because the operator may
   // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
   // primitive, appearing in reconcile still reddens.
-  ["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage"]],
+  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts) and hands `stageFor(mode)`
+  // in as the stage; `commitOrQueue` stays as reconcile()'s default stage.
+  ["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage", "resolvePorts", "stageFor"]],
   // BLZ-535 round 5, D3. The seven below take a WRITE PRIMITIVE off an allowlisted module —
   // `saveState`, `appendEntry`, `acquireLock` and their kin, each of which puts caller-chosen
   // bytes at a caller-chosen root. Round 4 could not see any of them, because it pinned one
@@ -2022,9 +2029,10 @@ const WRITE_ALLOWED = new Map([
   // completes, and keeps both it and the identity database out of git. `blaze user add` does
   // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
   // themselves, which are allowlisted for the same files.
+  // BLZ-670: the mutating block resolves both ports per request (resolvePorts) and stages by mode (stageFor).
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
-    "ensureIdentityIgnored", "addUser", "commitOrQueue", "loadIdentity", "reconcile",
-    "resolveWritePort", "pageHtml", "viewEnvelope"]],
+    "ensureIdentityIgnored", "addUser", "stageFor", "loadIdentity", "reconcile",
+    "resolvePorts", "pageHtml", "viewEnvelope"]],
   ["user-runner.mjs", ["ensureIdentityIgnored", "addUser", "setUserPassword"]],
   // `blaze new` allocates the id and writes its claim — the allocator, deleted at Phase 2,
   // and on exactly the footing of ids.mjs and claims.mjs above.
@@ -2046,12 +2054,14 @@ const WRITE_ALLOWED = new Map([
   ["resolve.mjs", ["fsStorage"]],
   ["schedule-runner.mjs", ["fsStorage"]],
   // ...their six CLI runners resolve the write port and hand the result to the commit queue.
-  ["edit-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["link-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["log-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["move-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
-  ["new-runner.mjs", ["applyNew", "commitOrQueue", "resolveWritePort"]],
-  ["resolve-runner.mjs", ["commitOrQueue", "resolveWritePort"]],
+  // BLZ-670: each resolves BOTH ports once (resolvePorts) and stages by mode (stageFor), so a
+  // db-mode verb reads the database and never stages a ticket that is only a row.
+  ["edit-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["link-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["log-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["move-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["new-runner.mjs", ["applyNew", "stageFor", "resolvePorts"]],
+  ["resolve-runner.mjs", ["stageFor", "resolvePorts"]],
   // BLZ-629 / design §5.3-§5.5. `blaze import --apply` is `blaze new` done N
   // times from a file, and it takes exactly what `new.mjs` and the six
   // runners above take, for exactly their reasons: `allocateId` + `writeClaim`
@@ -2100,12 +2110,15 @@ const WRITE_ALLOWED = new Map([
   // one `planImport`, two readers (§4.5), and `repair` writes records only.
   // BLZ-640 adds `withImportLock`, which the runner wraps all three verbs in
   // under `--apply` — the seam design §8 item 8 puts the lock at.
+  // BLZ-670: the apply path resolves both ports (resolvePorts) and hands `stageFor(mode)` in as
+  // the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.
   ["import-runner.mjs",
-    ["resolveWritePort", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
+    ["resolvePorts", "stageFor", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
-  ["supervisor.mjs", ["groomOnce", "loadIdentity", "reconcile", "viewEnvelope"]],
+  // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts) and stages by mode (stageFor).
+  ["supervisor.mjs", ["groomOnce", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.
@@ -3124,4 +3137,42 @@ test("the write-seam scan OBSERVED the corpus, and its allowlist is all load-bea
     "an exemption nobody needs reads as one somebody does. Either the module no longer " +
     "writes through node:fs, or a NAMED member of its narrow exemption is no longer reached " +
     "— which is how a narrow exemption silently becomes a wide one. Delete them.");
+});
+
+// BLZ-670: the READ-SOURCE guard. `walkTickets` above keeps reads on the seam; this keeps them
+// on the RESOLVED seam. A module that names `fsReadStorage` reads the filesystem whatever
+// BLAZE_WRITE_PORT says — that is how every verb read files while writing the database.
+const FS_READER_ALLOWED = new Map([
+  ["model/read-storage.mjs", "defines it"],
+  ["model/index.mjs", "locateTicket's library default"],
+  ["model/write-port-resolve.mjs", "the resolver returns it for fs and dual"],
+  ["model/write-port.mjs", "fsWritePort's default reader, fs mode only"],
+  ["db-runner.mjs", "blaze db init seeds FROM the filesystem by definition"],
+  ["migrate/load-corpus.mjs", "the seed source"],
+  ["cli.mjs", "preflight lists projects before any runner, from config first"],
+  ["views/data.mjs", "library default for callers that pass no tickets"],
+  ["move.mjs", "library default; runners inject"], ["edit.mjs", "library default; runners inject"],
+  ["new.mjs", "library default; runners inject"], ["log.mjs", "library default; runners inject"],
+  ["resolve.mjs", "library default; runners inject"], ["link.mjs", "library default; runners inject"],
+  ["reconcile.mjs", "library default; entry points inject"],
+  ["model/import-apply.mjs", "library default; the runner injects"],
+  ["model/import-mapping.mjs", "library default; the runner injects"],
+  ["model/export-rows.mjs", "library default; the runner passes tickets"],
+  ["model/import-markdown.mjs", "no production caller (spec §4.3)"],
+]);
+
+test("BLZ-670: only allowlisted modules name fsReadStorage; entry points resolve their reader", () => {
+  const offenders = [], unused = [];
+  const named = new Set();
+  for (const file of jsFiles(SCRIPTS)) {
+    const rel = relative(SCRIPTS, file).split("\\").join("/");
+    const { ast } = parseModule(readFileSync(file, "utf8"));
+    if (!ast) { offenders.push(`${rel} (unparseable)`); continue; }
+    if (astIndex(ast).nodes.some((n) => n.type === "Identifier" && n.name === "fsReadStorage")) named.add(rel);
+  }
+  for (const rel of named) if (!FS_READER_ALLOWED.has(rel)) offenders.push(rel);
+  for (const rel of FS_READER_ALLOWED.keys()) if (!named.has(rel)) unused.push(rel);
+  assert.deepEqual(offenders, [],
+    "Resolve the reader with resolveReadStorage/resolvePorts (write-port-resolve.mjs) instead.");
+  assert.deepEqual(unused, [], "An allowlist entry for a module that no longer names fsReadStorage is stale — remove it.");
 });

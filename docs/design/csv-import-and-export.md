@@ -495,6 +495,14 @@ A `db` run reports the two columns as port-defaulted in its trailer rather than 
 `zeroDiff` already having a carve-out named for precisely these two fields is the evidence that
 this is the engine's long-standing behaviour, not something this design introduced.
 
+**Reads, since BLZ-670.** Under `BLAZE_WRITE_PORT=db`, `import`'s own read of the board — the
+`loadBoard`/`listTickets` call that decides create vs. update vs. skip per row — comes from the
+database itself, not the filesystem, per
+[ADR-0038](../decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md). What it
+commits to git is unchanged by that: only the receipt and the `source-ids/<name>.jsonl` map are
+real record files on disk, so those are what `stageFor(mode)` (ADR-0038) stages — the ticket
+writes themselves are opaque id handles in `db` mode and are never passed to git.
+
 ### 2.7 The two fields that are outputs, not inputs
 
 `start` and `due` are **scheduler outputs** under ADR-0022. `EDITABLE_FIELDS`
@@ -1741,6 +1749,13 @@ durable at `done`; the receipt means the same thing on both.** The dry-run trail
 port in force, and nothing about the guarantee changes with it. If a transactional `db` import is
 ever wanted, `done` must move to after the commit — one entry per run, not per row — and that is
 a different receipt shape, not this one with a `BEGIN` in front.
+
+**Reads, since BLZ-670.** The board `import` reads to decide create/update/skip come from the
+database in `db` mode, per
+[ADR-0038](../decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md); this section's
+atomicity claim is about the *write* side only and is unchanged by that. What `import` commits to
+git in `db` mode is unchanged too: only its receipt and the source-id map, never the ticket
+writes themselves — see §5.4.
 
 ### 5.4 Staging
 

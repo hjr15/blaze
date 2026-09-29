@@ -13,6 +13,7 @@
 // `pg` is an optionalDependency loaded through a dynamic import (design C2), so the
 // npx + SQLite path installs nothing.
 import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
+import { readActivityFeed } from "./read-storage.mjs";
 
 // BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
 // one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
@@ -129,6 +130,20 @@ export async function openPostgresRead(connection, { create = false } = {}) {
     }
   });
 
+  return postgresReader(client);
+}
+
+/**
+ * The Postgres reader itself, over an already-connected `client`. Synchronous
+ * construction and no schema check — `openPostgresRead` already ran that (BLZ-297)
+ * before handing the connected client here; a caller that constructs directly (the
+ * batched-`listTickets` test, and later tasks) is expected to have checked first.
+ *
+ * BLZ-670: split out of `openPostgresRead` so a caller (a fake client in a test, or a
+ * future pooled-connection path) can get a reader over a client it already holds,
+ * without going through connect + schema-check again.
+ */
+export function postgresReader(client) {
   const linksFor = async (id) =>
     (await client.query(
       "SELECT link_type, target_id FROM ticket_link WHERE src_id = $1 ORDER BY link_type, target_id", [id]
@@ -187,8 +202,32 @@ export async function openPostgresRead(connection, { create = false } = {}) {
     },
 
     async listTickets(_root) {
-      const { rows } = await client.query(`SELECT ${COLS} FROM ticket WHERE ${ALIVE} ORDER BY id`);
-      return hydrateAll(rows);
+      // Five queries for the whole corpus, not 1 + 4N. Ordered exactly as the per-id fetches
+      // order them (links by type,target; labels/components by ord; worklog by on_date,id) —
+      // driver-conformance.test.mjs pins the two paths against each other.
+      const [t, l, lb, cp, wl] = await Promise.all([
+        client.query(`SELECT ${COLS} FROM ticket WHERE ${ALIVE} ORDER BY id`),
+        client.query("SELECT src_id, link_type, target_id FROM ticket_link ORDER BY src_id, link_type, target_id"),
+        client.query("SELECT ticket_id, label, ord FROM ticket_label ORDER BY ticket_id, ord"),
+        client.query("SELECT ticket_id, component, ord FROM ticket_component ORDER BY ticket_id, ord"),
+        client.query("SELECT ticket_id, on_date::text AS on_date, minutes, note FROM worklog_entry ORDER BY ticket_id, on_date, id"),
+      ]);
+      // Array.prototype.sort is stable, so rows without `ord` (links, worklog) keep SQL order.
+      const group = (rows, key, map) => {
+        const m = new Map();
+        for (const r of [...rows].sort((a, b) => (a.ord ?? 0) - (b.ord ?? 0))) {
+          if (!m.has(r[key])) m.set(r[key], []);
+          m.get(r[key]).push(map(r));
+        }
+        return m;
+      };
+      const links = group(l.rows, "src_id", (r) => ({ type: r.link_type, target: r.target_id }));
+      const labels = group(lb.rows, "ticket_id", (r) => r.label);
+      const comps = group(cp.rows, "ticket_id", (r) => r.component);
+      const work = group(wl.rows, "ticket_id", (w) => ({ date: w.on_date, minutes: w.minutes,
+        ...(w.note == null ? {} : { note: w.note }) }));
+      return t.rows.map((row) => toRecord(row, links.get(row.id) ?? [], labels.get(row.id) ?? [],
+        comps.get(row.id) ?? [], work.get(row.id) ?? []));
     },
 
     async listProjects(_root) {
@@ -228,5 +267,10 @@ export async function openPostgresRead(connection, { create = false } = {}) {
       const s = rows[0];
       return `${s.n}:${s.v}:${s.u}`;
     },
+
+    // The feed is a hook-written LOCAL file on every board type (read-storage.mjs says why),
+    // so the database driver answers it with the same filesystem read, not from a table.
+    async activityFeed(dataRoot) { return readActivityFeed(dataRoot); },
+    async unreadableTicketDirs(_root) { return []; },
   };
 }

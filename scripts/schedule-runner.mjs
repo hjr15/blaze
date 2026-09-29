@@ -8,13 +8,13 @@
 // DRY-RUN IS THE DEFAULT for both, and `--write` exists only on migrate-dates. §4.1: the dry-run
 // "is reviewed by a human before the write", and §5.5's import is operator-driven by design —
 // the tool never guesses a direction, so it has nothing to write on its own.
-import { fsReadStorage } from "./model/read-storage.mjs";
 import { fsStorage } from "./model/storage.mjs";
 import { parseTicket, serializeTicket } from "./model/ticket.mjs";
 import { planDateMigration } from "./model/migrate-dates.mjs";
 import { planDependencyImport, DISPOSITION } from "./model/import-deps.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -49,6 +49,22 @@ const sameLines = (a, b) =>
   a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 
 const { projectsDir, dataRoot } = resolveRoots();
+// BLZ-670: reads go through the resolver — `fs`/`dual` read the filesystem, `db` reads the
+// database the writes go to.
+const rs = await resolveReadStorage({ dataRoot, projectsDir }).catch((e) => {
+  console.error(e.message);
+  process.exit(1);
+});
+// BLZ-670: `--write` rewrites ticket files directly through `fsStorage`, which is the
+// filesystem, not the store `BLAZE_WRITE_PORT=db` names as authoritative — writing there
+// would silently diverge from what every read now sees.
+if (rs.mode === "db" && write) {
+  await rs.close();
+  console.error("blaze schedule: --write rewrites ticket files directly, and under "
+    + "BLAZE_WRITE_PORT=db the database is the store — refusing. Run the dry run to see the "
+    + "plan; writing it through the port is BLZ-254's.");
+  process.exit(1);
+}
 // BLZ-392. Tolerated the way audit-runner tolerates it: a config that will not load leaves the
 // shipped endpoint kinds in force rather than taking the command down, because import-deps is a
 // read-only planner and refusing to plan would be the worse failure.
@@ -64,7 +80,9 @@ let unparseable = 0;
 // Through the READ SEAM (ADR-0009), not a bespoke walk. tests/model/seam-closure.test.mjs
 // enforces this and caught an earlier version of this file calling walkTickets directly —
 // "a bespoke directory walk outside the seam is how contentHash hid for four slices".
-for (const t of fsReadStorage.listTickets(projectsDir)) {
+const allTickets = [...(await rs.readStorage.listTickets(projectsDir))];
+await rs.close();
+for (const t of allTickets) {
   const fm = t.frontmatter ?? {};
   if (fm.id == null) { unparseable++; continue; }
   tickets.push({

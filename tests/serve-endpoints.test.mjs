@@ -543,6 +543,8 @@ test("BLZ-301: every mutating handler passes a writePort to its verb", () => {
 
 test("BLZ-301: the resolved port is closed, so a long-lived server does not hold it", () => {
   const src = readFileSync(join(REPO, "scripts", "serve.mjs"), "utf8");
-  assert.match(src, /finally\s*\{\s*closeWritePort\(\);\s*\}/,
+  // BLZ-670: awaited — a db-mode close (Postgres `client.end()`) is async, and an unawaited
+  // one could outlive the request it belonged to.
+  assert.match(src, /finally\s*\{\s*await closeWritePort\(\);\s*\}/,
     "the shadow database must be released after each request");
 });

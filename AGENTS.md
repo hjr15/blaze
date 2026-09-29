@@ -270,6 +270,11 @@ history derived from git rename history, powering the Metrics view's cumulative-
 diagram) are both derived, regenerable caches — safe to delete any time. `blaze
 reindex` rebuilds both from `projects/` and git history respectively.
 
+Under `BLAZE_WRITE_PORT=db`, `blaze reindex` rebuilds `.blaze/index.json` from the
+database instead — every read resolves from the write mode, not from `projects/`, see
+[ADR-0038](https://github.com/hjr15/blaze/blob/main/docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md).
+`.blaze/transitions.json` still comes from git history in every mode, `db` included.
+
 While building the index, `blaze reindex` also lints every ticket's `links`
 (`scripts/model/links.mjs` → `lintLinks`) and prints one warning per issue —
 never a hard failure: a link entry using `to:` instead of `target:` (previously

@@ -32,7 +32,7 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
       ?? `field(s) not editable: ${k}`) };
   }
 
-  const { found, duplicates } = locateTicket(projectsDir, id);
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 
@@ -45,7 +45,7 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
 
   // Validate the merged ticket. lookup spans every ticket for parent-pair + cycle checks.
   const all = new Map();
-  for (const t of readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  for (const t of await readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
   all.set(id, { frontmatter: fm, body: found.body });
   // The edited ticket is validated against ITS OWN project's registry (BLZ-238).
   // BLZ-246: `config` carries the data root's top-level `schema.types` layer — omitting it
@@ -97,7 +97,7 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
 export async function applyToggleAc(projectsDir, id, { index, checked }, opts = {}) {
   const { today = null, storage = fsStorage, readStorage = fsReadStorage,
           writePort = fsWritePort(projectsDir, storage) } = opts;
-  const { found, duplicates } = locateTicket(projectsDir, id);
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 

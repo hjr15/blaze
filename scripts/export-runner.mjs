@@ -10,6 +10,7 @@
 import { fileURLToPath } from "node:url";
 import { resolveRoots, loadConfig } from "./config.mjs";
 import { exportCsv } from "./model/export-rows.mjs";
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 
 function usage() {
   console.error("usage: blaze export --format csv");
@@ -17,7 +18,7 @@ function usage() {
   console.error("  'csv' is the only format this build emits.");
 }
 
-function main() {
+async function main() {
   const args = process.argv.slice(2);
   let format = null;
   const positional = [];
@@ -46,7 +47,10 @@ function main() {
   // than exporting against config this build cannot actually honour.
   loadConfig({ root: dataRoot });
 
-  const { text, warnings } = exportCsv(projectsDir);
+  const rs = await resolveReadStorage({ dataRoot, projectsDir });
+  let tickets;
+  try { tickets = [...(await rs.readStorage.listTickets(projectsDir))]; } finally { await rs.close(); }
+  const { text, warnings } = exportCsv(projectsDir, { tickets });
   // design §2.5: export never refuses and never mutates a hostile cell — it
   // only names every one, with the ticket, the column and (below) the total,
   // so the operator learns before opening the file in a spreadsheet.
@@ -59,7 +63,7 @@ function main() {
 
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   try {
-    main();
+    await main();
   } catch (e) {
     console.error(`blaze export failed: ${e.message}`);
     process.exit(1);

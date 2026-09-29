@@ -23,6 +23,9 @@ import { join } from "node:path";
 import { fsReadStorage, memReadStorage } from "../../scripts/model/read-storage.mjs";
 import { openSqliteRead } from "../../scripts/model/sqlite-storage.mjs";
 import { openDriver } from "../helpers/open-driver.mjs";
+import { scratchRegistry } from "../helpers/scratch.mjs";
+
+const scratch = scratchRegistry();
 
 const PG = process.env.BLAZE_TEST_PG_URL ?? null;
 
@@ -67,7 +70,7 @@ function seedMem(_release) {
 
 function seedSqlite(release) {
   const s = openSqliteRead(":memory:", { create: true });
-  release(() => s.close?.());
+  release(() => s.close());
   const ins = s.db.prepare(
     `INSERT INTO ticket (id,project_key,num,type,status,title,parent_id,parent_type,body,created_on,updated_on)
      VALUES (?,'BLZ',?,'task',?,?,?,?,?,'2026-01-01','2026-01-01')`);
@@ -170,6 +173,33 @@ async function conformance(make, name) {
     const a = await s.changeToken(root);
     assert.equal(typeof a, "string");
     assert.equal(a, await s.changeToken(root));
+  });
+
+  await test(`${name}: activityFeed reads <dataRoot>/.blaze/activity.jsonl; a missing feed is not unreadable`, async (t) => {
+    const { s } = await openDriver(make, t);
+    const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-conf-feed-")));
+    assert.deepEqual(await s.activityFeed(dataRoot), { text: "", unreadable: null });
+    if (name === "mem") return;   // the in-memory driver has no feed by contract
+    mkdirSync(join(dataRoot, ".blaze"), { recursive: true });
+    writeFileSync(join(dataRoot, ".blaze", "activity.jsonl"), '{"key":"BLZ-1"}\n');
+    assert.deepEqual(await s.activityFeed(dataRoot), { text: '{"key":"BLZ-1"}\n', unreadable: null });
+  });
+
+  await test(`${name}: unreadableTicketDirs is a seam operation`, async (t) => {
+    const { s, root } = await openDriver(make, t);
+    assert.deepEqual(await s.unreadableTicketDirs(root), []);
+  });
+
+  await test(`${name}: close() exists`, async (t) => {
+    const { s } = await openDriver(make, t);
+    assert.equal(typeof s.close, "function");
+  });
+
+  await test(`${name}: listTickets returns the same records getTicket returns, id for id`, async (t) => {
+    const { s, root } = await openDriver(make, t);
+    for (const rec of [...await s.listTickets(root)]) {
+      assert.deepEqual(rec, (await s.getTicket(root, rec.frontmatter.id)).found);
+    }
   });
 }
 

@@ -312,12 +312,12 @@ export function* walkTickets(projectsDir) {
 // visible once every candidate is known, so an early return is precisely the bug.
 //
 // @returns { found } | { found: null } | { found: null, duplicates: [path, ...] }
-export function locateTicket(projectsDir, id, { storage = fsReadStorage } = {}) {
+export async function locateTicket(projectsDir, id, { storage = fsReadStorage } = {}) {
   // ADR-0009: this is now a NAMED read the driver answers, not a walk the caller
   // filters. On the filesystem the driver still walks — that is the fs
   // implementation of the name, not the contract. On a database it is a primary-key
   // lookup, which is the 578x this seam exists to make reachable.
-  return storage.getTicket(projectsDir, id);
+  return await storage.getTicket(projectsDir, id);
 }
 
 /** The refusal message, shared so every verb names the paths the same way. */

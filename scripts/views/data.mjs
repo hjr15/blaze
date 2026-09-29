@@ -21,8 +21,10 @@ const title = (s) => s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase(
 // Pure board model: read every ticket under projectsDir, optionally filter to one
 // project, and group into status columns. Read-only (the editable board is Phase 6).
 export function boardModel(projectsDir, { project = "all", focus = null, flat = false, index = null,
-                                          readStorage = fsReadStorage } = {}) {
-  const walked = [...readStorage.listTickets(projectsDir)];
+                                          tickets = null, readStorage = fsReadStorage } = {}) {
+  // BLZ-670: db mode's server has already awaited the read and hands the records straight in —
+  // `tickets` skips the filesystem walk entirely rather than re-reading through readStorage.
+  const walked = tickets ? [...tickets] : [...readStorage.listTickets(projectsDir)];
   const all = walked.map((t) => ({
     file: basename(t.file), meta: t.frontmatter, body: t.body,
     status: t.status, project: t.frontmatter.project,
@@ -139,10 +141,12 @@ export function contentHash({ projectsDir = resolveRoots().projectsDir, project 
 // `contentHash`'s is, which is also what lets a test tell "asked the driver" from "opened
 // the file behind it" — a shape assertion alone cannot.
 export function liveModel(dataRoot, projectsDir,
-                          { now = Date.now(), readStorage = fsReadStorage } = {}) {
-  const { text, unreadable } = readStorage.activityFeed(dataRoot);
+                          { now = Date.now(), tickets = null, feed = null, readStorage = fsReadStorage } = {}) {
+  // BLZ-670: db mode's server has already awaited both reads — the feed and the ticket list —
+  // and hands them straight in, skipping the filesystem read-storage calls entirely.
+  const { text, unreadable } = feed ?? readStorage.activityFeed(dataRoot);
   const events = parseActivity(text);
   const statusByKey = {};
-  for (const r of buildIndex(projectsDir).rows) if (r.id) statusByKey[r.id] = r.status;
+  for (const r of buildIndex(projectsDir, tickets ? { tickets } : {}).rows) if (r.id) statusByKey[r.id] = r.status;
   return { groups: groupByTicket(events, { now, statusByKey }), unreadable };
 }

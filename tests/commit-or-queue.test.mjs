@@ -4,7 +4,8 @@ import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
-import { commitOrQueue } from "../scripts/commit-or-queue.mjs";
+import { commitOrQueue, stageFor } from "../scripts/commit-or-queue.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 
 function gitRepo() {
@@ -128,4 +129,16 @@ test("batch mode with neither BLAZE_SESSION nor a harness id queues to the share
   assert.equal(entries[0].id, "X-3");
   assert.ok(!("session" in entries[0]), "no session field stamped when there is no identity");
   rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-670 (spec §4.4a): the db-mode staging adapter.
+const scratch = scratchRegistry();
+test("BLZ-670 stageFor: fs and dual are commitOrQueue itself", () => {
+  assert.equal(stageFor("fs"), commitOrQueue);
+  assert.equal(stageFor("dual"), commitOrQueue);
+});
+test("BLZ-670 stageFor(db): id handles are dropped; nothing real left means no commit", () => {
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz670-stage-")));
+  assert.deepEqual(stageFor("db")({ root, mode: "per-op", op: "move", id: "ENG-1", message: "m",
+    files: ["ENG-1", undefined] }), { ok: true, committed: false, queued: false });
 });

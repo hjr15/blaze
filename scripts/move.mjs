@@ -15,7 +15,7 @@ import { isType } from "./model/schema.mjs";
 export async function applyMove(projectsDir, id, toStatus, opts = {}) {
   const { today = null, storage = fsStorage, readStorage = fsReadStorage,
           writePort = fsWritePort(projectsDir, storage) } = opts;
-  const { found, duplicates } = locateTicket(projectsDir, id);
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
 
@@ -48,7 +48,7 @@ export async function applyMove(projectsDir, id, toStatus, opts = {}) {
     // filtering here. This was the engine's worst read — a full 2,534-ticket walk to
     // answer a two-row question, ~22 ms and ~5.6 MiB per invocation against 0.06 ms
     // from an index.
-    for (const t of readStorage.blockersOf(projectsDir, id)) {
+    for (const t of await readStorage.blockersOf(projectsDir, id)) {
       // A blocker whose type is unresolvable can't be classified terminal/open —
       // treat it as non-blocking rather than let isTerminal() throw and abort the move.
       if (isType(t.frontmatter.type) && !isTerminal(t.frontmatter.type, t.status)) {

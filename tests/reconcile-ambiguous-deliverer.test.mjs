@@ -688,6 +688,8 @@ test("BLZ-398: clearing does not flap when a storage projects an absent record a
       listTickets: (dir) => [...fsReadStorage.listTickets(dir)].map((t) => ({
         ...t, frontmatter: { ...t.frontmatter, branch: t.frontmatter.branch ?? "", pr: t.frontmatter.pr ?? "" },
       })),
+      // BLZ-670: reconcile asks its reader which directories it could not read.
+      unreadableTicketDirs: () => [],
     };
     const r1 = await reconcile({ root, dryRun: false, readStorage: projecting });
     const r2 = await reconcile({ root, dryRun: false, readStorage: projecting });

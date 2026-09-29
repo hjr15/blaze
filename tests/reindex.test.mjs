@@ -1,13 +1,15 @@
 // tests/reindex.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
 const runner = fileURLToPath(new URL("../scripts/reindex.mjs", import.meta.url));
+const scratch = scratchRegistry();
 
 test("reindex runner builds .blaze/index.json and prints a count", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reidx-"));
@@ -52,6 +54,29 @@ test("reindex fails loud on a board stamped newer than the engine", () => {
   assert.match(r.stderr, /docs\/schema-versioning\.md/);
   assert.ok(!existsSync(join(root, ".blaze", "index.json")), "no index written for an incompatible board");
   rmSync(root, { recursive: true, force: true });
+});
+
+// BLZ-670: no FIFO test existed for reindex before this task wired reads through the
+// resolver (`resolveReadStorage`) — the walk now runs inside `resolveReadStorage`'s reader
+// rather than directly in `buildIndex`, and that refusal must still surface as a plain
+// `blaze reindex failed: …` line, not an uncaught-rejection stack trace from the top-level
+// `await` this task added.
+test("reindex fails loud, with no stack trace, on a FIFO where a ticket file should be", () => {
+  // Through the scratch registry, not a manual rmSync/finally: its cleanup lives in
+  // tests/helpers/scratch.mjs's own after() hook, so this adds zero cleanup sites to THIS
+  // file for scripts/ci/temp-cleanup-guard.mjs to count (it only scans *.test.mjs), and the
+  // dir is still removed on a failing assertion — a refused run is exactly the branch most
+  // likely to need one.
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-reidx-fifo-")));
+  const dir = join(root, "projects", "OBA", "defined");
+  mkdirSync(dir, { recursive: true });
+  execFileSync("mkfifo", [join(dir, "OBA-1.md")]);
+  const r = spawnSync(process.execPath, [runner, join(root, "projects")],
+    { encoding: "utf8", env: { ...process.env, BLAZE_DB_DIR: join(root, ".blaze") } });
+  assert.equal(r.status, 1, `expected a refusal, got stdout: ${r.stdout}`);
+  assert.match(r.stderr, /^blaze reindex failed: /m);
+  assert.doesNotMatch(r.stderr, /^\s+at /m, `stack trace leaked to stderr:\n${r.stderr}`);
+  assert.ok(!existsSync(join(root, ".blaze", "index.json")), "no index written on refusal");
 });
 
 test("reindex works normally on a board stamped with the current schema version", () => {

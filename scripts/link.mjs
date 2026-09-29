@@ -3,24 +3,25 @@
 // add) that the target resolves to a real ticket. fs-only; the runner commits.
 import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
+import { fsReadStorage } from "./model/read-storage.mjs";
 import { basename, dirname } from "node:path";
 import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { LINK_TYPES, addLink, removeLink } from "./model/links.mjs";
 
 export async function applyLink(projectsDir, id, { type, target, remove = false }, opts = {}) {
-  const { today = null, storage = fsStorage,
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage,
           writePort = fsWritePort(projectsDir, storage) } = opts;
   if (!LINK_TYPES.has(type)) {
     return { ok: false, errors: [`unknown link type '${type}' (expected ${[...LINK_TYPES].join("/")})`] };
   }
-  const { found, duplicates } = locateTicket(projectsDir, id);
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
   if (!remove) {
     // A target resolving to two files is not a resolved target: the link would point at two
     // different tickets, and which one it meant is unrecoverable from the frontmatter alone.
-    const t = locateTicket(projectsDir, target);
+    const t = await locateTicket(projectsDir, target, { storage: readStorage });
     if (t.duplicates) return { ok: false, errors: [ambiguousIdError(target, t.duplicates)] };
     if (!t.found) return { ok: false, errors: [`link target does not resolve: ${target}`] };
   }

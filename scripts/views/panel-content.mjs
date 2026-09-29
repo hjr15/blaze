@@ -77,10 +77,16 @@ export function panelContentHtml(model) {
 
 // IO wrapper for the /api/panel route: resolve the ticket file, parse it, and
 // render. Returns null (→ 404) for an unknown id.
-export function panelHtml(projectsDir, id) {
-  const index = buildIndex(projectsDir);
+export function panelHtml(projectsDir, id, { tickets = null } = {}) {
+  const index = buildIndex(projectsDir, tickets ? { tickets } : {});
   const row = index.get(id);
   if (!row) return null;
+  // BLZ-670: a database record already carries frontmatter and body, and its `file` is an id,
+  // not a path. Re-reading it from disk is the filesystem's answer to "give me the ticket".
+  if (tickets) {
+    const t = tickets.find((x) => x.frontmatter?.id === id);
+    return panelContentHtml(panelModel(index, id, { frontmatter: t.frontmatter, body: t.body }));
+  }
   // BLZ-493: REFUSE a ticket file that is not a regular file. `serve.mjs` already wraps this
   // call and says why — "panelHtml re-reads the ticket file after the index walk, so a
   // concurrent move/edit could ENOENT between the two — catch it as a 500". A FIFO arriving

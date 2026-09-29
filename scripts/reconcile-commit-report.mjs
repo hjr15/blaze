@@ -22,8 +22,10 @@
 //                 one (`git add` or `git commit`), read from `commitFile`'s `step` field
 //                 rather than assumed, because `git add` returns first and its failure was
 //                 being reported under `git commit`'s name.
+//   "db"        — BLZ-670: a db-mode pass. The moves were written to the database, which
+//                 IS the record; no git commit is made, and none is claimed.
 
-export const COMMIT_OUTCOMES = ["none", "committed", "no-op", "queued", "locked", "failed"];
+export const COMMIT_OUTCOMES = ["none", "committed", "no-op", "queued", "locked", "failed", "db"];
 
 /** Classifies a `commitOrQueue` / `commitFile` result. Returns
  *  `{ outcome, error }`; `error` is null on every non-error outcome. */
@@ -97,6 +99,11 @@ export function applySummary({ outcome, error, movedCount, nonMovedCount }) {
   }
   if (outcome === "committed") {
     return { stream: "out", exit: 0, text: `reconcile: committed ${movedCount} ticket(s) moved${suffix}.` };
+  }
+  if (outcome === "db") {
+    // BLZ-670: db mode's moves are rows, not files — "already matched HEAD" would be false.
+    return { stream: "out", exit: 0,
+      text: `reconcile: ${movedCount} ticket(s) moved${suffix} in the database — db mode makes no git commit.` };
   }
   if (outcome === "no-op") {
     // BLZ-422: benign, and said out loud rather than dressed up as a commit. Not an

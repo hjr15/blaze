@@ -61,11 +61,11 @@ function csvFile(root, ...maps) {
 }
 
 /** A plan built the way the verb builds one, against a real temp board. */
-function planFor(root, ...maps) {
+async function planFor(root, ...maps) {
   const projectsDir = join(root, "projects");
   const parsed = parseCanonicalCsv(csv(...maps));
   assert.equal(parsed.ok, true, (parsed.errors ?? []).join("\n"));
-  return planImport(parsed.rows, loadBoard(projectsDir, { dataRoot: root }));
+  return planImport(parsed.rows, await loadBoard(projectsDir, { dataRoot: root }));
 }
 
 // `applyImport` does NOT decide exit 5: establishing the receipt is the
@@ -92,7 +92,7 @@ const receiptLines = (p) =>
 describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH paths", () => {
   test("an explicit-id create writes a claim (§5.5 — writeClaim's only other caller is blaze new)", async (t) => {
     const root = boardRoot(t);
-    const plan = planFor(root, cells({ id: "BLZ-1" }));
+    const plan = await planFor(root, cells({ id: "BLZ-1" }));
     const r = await applyImport(plan, ctxFor(root));
     assert.equal(r.exitCode, 0, JSON.stringify(r.errors));
     assert.equal(existsSync(claimPath(join(root, "projects"), "BLZ", 1)), true,
@@ -111,7 +111,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
         return real.write(target);
       },
     };
-    const plan = planFor(root, cells({ id: "BLZ-1" }));
+    const plan = await planFor(root, cells({ id: "BLZ-1" }));
     const r = await applyImport(plan, ctxFor(root, { writePort: port }));
     assert.equal(r.exitCode, 0);
     assert.deepEqual(claimSeenAtWrite, [true],
@@ -122,10 +122,10 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
     // `allocateId` reserves under <common>/blaze/ids/<KEY>/ and refuses
     // outside a git worktree, so this is the one case that needs a real one.
     const root = boardRoot(t, { git: true });
-    const plan = planFor(root, cells({ id: "" }));
+    const plan = await planFor(root, cells({ id: "" }));
     // The planner refuses an id-less row by default; --allocate-ids accepts it.
     const parsed = parseCanonicalCsv(csv(cells({ id: "" })));
-    const allocPlan = planImport(parsed.rows, loadBoard(join(root, "projects"), { dataRoot: root }),
+    const allocPlan = planImport(parsed.rows, await loadBoard(join(root, "projects"), { dataRoot: root }),
       { allocateIds: true });
     assert.equal(plan.ok, false, "the default path refuses an id-less row");
     const ctx = ctxFor(root);
@@ -143,7 +143,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
   test("a supplied id writes NO `allocated` entry — the id is already in the intent", async (t) => {
     const root = boardRoot(t);
     const ctx = ctxFor(root);
-    const r = await applyImport(planFor(root, cells({ id: "BLZ-4" })), ctx);
+    const r = await applyImport(await planFor(root, cells({ id: "BLZ-4" })), ctx);
     assert.equal(r.exitCode, 0);
     const lines = receiptLines(ctx.receiptPath);
     assert.equal(lines.filter((l) => l.phase === "allocated").length, 0);
@@ -153,7 +153,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
   test("the receipt's per-row sequence is intent → (allocated) → done, in that order", async (t) => {
     const root = boardRoot(t);
     const ctx = ctxFor(root);
-    await applyImport(planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" })), ctx);
+    await applyImport(await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" })), ctx);
     const lines = receiptLines(ctx.receiptPath);
     assert.deepEqual(lines.map((l) => `${l.seq}:${l.phase}`),
       ["1:intent", "1:done", "2:intent", "2:done"]);
@@ -168,7 +168,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
       "---\nid: BLZ-1\ntitle: old\ntype: task\nproject: BLZ\nestimate: 30\n---\n\nbody\n");
     const projectsDir = join(root, "projects");
     const parsed = parseCanonicalCsv(csv(cells({ id: "BLZ-1", title: "new" })));
-    const plan = planImport(parsed.rows, loadBoard(projectsDir, { dataRoot: root }), { update: true });
+    const plan = planImport(parsed.rows, await loadBoard(projectsDir, { dataRoot: root }), { update: true });
     assert.equal(plan.rows[0].op, "update");
     const ctx = ctxFor(root);
     const r = await applyImport(plan, ctx);
@@ -181,11 +181,11 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
   test("a SKIP row writes nothing at all — not even an intent", async (t) => {
     const root = boardRoot(t);
     const ctx = ctxFor(root);
-    await applyImport(planFor(root, cells({ id: "BLZ-1" })), ctx);
+    await applyImport(await planFor(root, cells({ id: "BLZ-1" })), ctx);
     // Re-plan against the now-populated board: the row is identical, so it skips.
     const projectsDir = join(root, "projects");
     const parsed = parseCanonicalCsv(csv(cells({ id: "BLZ-1" })));
-    const plan2 = planImport(parsed.rows, loadBoard(projectsDir, { dataRoot: root }));
+    const plan2 = planImport(parsed.rows, await loadBoard(projectsDir, { dataRoot: root }));
     assert.equal(plan2.rows[0].op, "skip", "a re-run of the same file is a no-op");
     const ctx2 = ctxFor(root, { receiptPath: join(root, RECEIPT_DIR, "second.jsonl") });
     const r = await applyImport(plan2, ctx2);
@@ -323,7 +323,7 @@ describe("BLZ-629: the exit codes", () => {
         return real.write(target);
       },
     };
-    const plan = planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }),
+    const plan = await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }),
       cells({ id: "BLZ-3" }), cells({ id: "BLZ-4" }));
     const ctx = ctxFor(root, { writePort: port });
     const r = await applyImport(plan, ctx);
@@ -340,7 +340,7 @@ describe("BLZ-629: the exit codes", () => {
 
   test("exit 4 — every write landed and STAGING failed", async (t) => {
     const root = boardRoot(t);
-    const plan = planFor(root, cells({ id: "BLZ-1" }));
+    const plan = await planFor(root, cells({ id: "BLZ-1" }));
     const r = await applyImport(plan, ctxFor(root, {
       stage: () => { throw new Error("git add failed"); },
     }));
@@ -351,7 +351,7 @@ describe("BLZ-629: the exit codes", () => {
 
   test("exit 4 — a receipt append that fails AFTER a ticket write is under the same invariant", async (t) => {
     const root = boardRoot(t);
-    const plan = planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
+    const plan = await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
     const ctx = ctxFor(root);
     let appends = 0;
     const r = await applyImport(plan, {
@@ -566,7 +566,7 @@ describe("BLZ-629: staging", () => {
   test("staging names exactly the files the run wrote — the tickets, the claims and the receipt", async (t) => {
     const root = boardRoot(t);
     const staged = [];
-    const plan = planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
+    const plan = await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
     const ctx = ctxFor(root, { stage: (args) => { staged.push(args); return { ok: true, queued: true }; } });
     await applyImport(plan, ctx);
     assert.equal(staged.length, 1, "one commitOrQueue for the run, never git add -A");
@@ -583,7 +583,7 @@ describe("BLZ-629: staging", () => {
     const root = boardRoot(t);
     let called = 0;
     const ctx = ctxFor(root, { stage: () => { called++; return { ok: true }; } });
-    await applyImport(planFor(root), ctx);
+    await applyImport(await planFor(root), ctx);
     assert.equal(called, 0);
   });
 });

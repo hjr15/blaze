@@ -6,10 +6,12 @@ import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
-import { pageHtml, contentHash } from "./serve.mjs";
+import { pageHtml } from "./serve.mjs";
 import { viewEnvelope, CSRF } from "./views/page.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
+import { resolvePorts, resolveReadStorage, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
+import { stageFor } from "./commit-or-queue.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
@@ -285,13 +287,19 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   async function runReconcile({ dryRun = false } = {}) {
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
+    let ports = null;
     try {
+      // BLZ-670: the same rule as reconcile's CLI — only db mode opens a database port, fs and
+      // dual resolve a reader alone (dual unchanged). A resolver refusal lands in the catch.
+      ports = await (resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)({ dataRoot: root, projectsDir });
       // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
       // BLZ-404 AC-4: `push` deleted — reconcile() never read it and hardcodes
       // `pushed: false` regardless, so passing `push: true` told nothing but a lie.
-      const r = await reconcile({ fetch: true, commit: true, dryRun, root, projectsDir });
+      const r = await reconcile({ fetch: true, commit: true, dryRun, root, projectsDir,
+        readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,
+        stage: stageFor(ports.mode), mode: ports.mode });
       // BLZ-350: an unreadable forge is the loop's version of the silence the CLI
       // now breaks. Without this the app runs reconcile every tick, never reaches
       // "in-review", and the activity feed shows a healthy board.
@@ -380,6 +388,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       if (evt) bus.publish({ ...evt, ts: today() });
     } finally {
       loops.reconcile.busy = false;
+      if (ports) await ports.close();
     }
   }
 
@@ -387,6 +396,15 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     if (loops.groomer.busy) return;
     loops.groomer.busy = true;
     try {
+      // BLZ-670 (final review). The groomer picks a ticket by reading `.md` files, has an
+      // agent edit that FILE, and commits it. Under BLAZE_WRITE_PORT=db the database is the
+      // store, so it would groom stale files that nothing reads. Refused — and said on the
+      // bus, in the shape every groomer error takes — until it goes through the port (BLZ-673).
+      if (resolveWriteMode() === "db") {
+        bus.publish({ type: "error", loop: "groomer", ts: today(),
+          message: "groomer not run: it edits ticket files, and under BLAZE_WRITE_PORT=db the database is the store (BLZ-254)" });
+        return;
+      }
       let agentsMd = "";
       // BLZ-512 / ADR-0031. This is the LONG-LIVED process, so the site REPORTS rather
       // than refusing: the rethrown refusal lands in the `catch` below, which publishes an
@@ -425,12 +443,27 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   // servers is absent from the other.
   const signinLimiter = new AttemptLimiter();
 
-  const server = createServer(async (req, res) => {
+  // BLZ-670 review: the handler is a named function and the server CATCHES it, in serve.mjs's
+  // style. An async request callback with no catch turns any throw — a ticket that will not
+  // parse, a database query that fails mid-request — into an unhandled rejection that ends
+  // `blaze start` for every connected session rather than refusing one request.
+  const handle = async (req, res) => {
     const u = new URL(req.url || "/", "http://localhost");
     const json = (code, obj) => {
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+    // BLZ-670: every board READ resolves its reader per request and closes it however the
+    // request ends — serve.mjs's helper, for BLZ-359's reason: a control wired into one of
+    // these two servers is absent from the other. A resolver refusal is a 503 (fixable).
+    const reading = async (fn) => {
+      try { return await withReadStorage({ dataRoot: root, projectsDir }, fn); }
+      catch (e) {
+        if (e?.blazeResolve) return json(503, { errors: [String(e.message)] });
+        throw e;
+      }
+    };
+    const allTickets = async (rs) => [...(await rs.listTickets(projectsDir))];
 
     // ---- the browser's door (BLZ-566) ---------------------------------------------
     // MOUNTED HERE TOO, AND THAT IS THE POINT. BLZ-359 learned that `blaze board` and
@@ -520,9 +553,12 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
 
     if (req.method === "GET" && u.pathname === "/api/hash") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(contentHash({ projectsDir }));
-      return;
+      // The token is awaited BEFORE the head is written, so a failed read is still answerable.
+      return reading(async (rs) => {
+        const token = await rs.changeToken(projectsDir, { project: null });
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(token);
+      });
     }
     if (req.method === "GET" && u.pathname === "/api/sync") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -547,22 +583,24 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {
-      const envelope = viewEnvelope({
-        view: vm[1],
-        project: u.searchParams.get("project") || "all",
-        focus: u.searchParams.get("focus") || null,
-        flat: u.searchParams.get("flat") === "1",
-        sprint: u.searchParams.get("sprint") || null,
-        projectsDir,
+      return reading(async (rs) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          project: u.searchParams.get("project") || "all",
+          focus: u.searchParams.get("focus") || null,
+          flat: u.searchParams.get("flat") === "1",
+          sprint: u.searchParams.get("sprint") || null,
+          projectsDir,
+          tickets: await allTickets(rs),
+        });
+        if (!envelope) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ errors: ["unknown view"] }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(envelope));
       });
-      if (!envelope) {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ errors: ["unknown view"] }));
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(envelope));
-      return;
     }
     if (req.method === "GET" && u.pathname === "/") {
       // The query scopes the initial full-page render (?project=/?focus=/?flat=/?view=)
@@ -575,18 +613,38 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // than being constants. BLZ-359's lesson, applied again: a control wired into one
       // of these two servers is absent from the other.
       const nonce = boardNonce();
+      // Rendered BEFORE the head is written; `reading` answers a 503 itself when the reader
+      // cannot be resolved, and then there is nothing left to send.
+      // BLZ-519's rule, as serve.mjs's `/` applies it: a board that could not be read is an
+      // error page, never an empty board. A plain page here — serve.mjs's renderer for it is
+      // module-private — and the cause goes to stderr, not to the browser.
+      let html;
+      try {
+        html = await reading(async (rs) => pageHtml({
+          project: u.searchParams.get("project") || "all",
+          focus: u.searchParams.get("focus") || null,
+          flat: u.searchParams.get("flat") === "1",
+          sprint: u.searchParams.get("sprint") || null,
+          view: u.searchParams.get("view") || "board",
+          afterHeader: controlsHtml(nonce),
+          beforeBodyEnd: activityScript(nonce),
+          projectsDir,
+          nonce,
+          tickets: await allTickets(rs),
+        }));
+      } catch (e) {
+        let reason;
+        try { reason = String(e?.message ?? e); } catch { reason = "(the error could not be rendered)"; }
+        console.error("blaze: the board page could not be rendered:", reason);
+        res.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+        res.end("The board could not be read. This is not an empty board: a file under it could "
+          + "not be opened or parsed. The cause is in the server's log; fix or remove the file "
+          + "and reload.\n");
+        return;
+      }
+      if (res.headersSent) return;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...boardHeaders(nonce) });
-      res.end(pageHtml({
-        project: u.searchParams.get("project") || "all",
-        focus: u.searchParams.get("focus") || null,
-        flat: u.searchParams.get("flat") === "1",
-        sprint: u.searchParams.get("sprint") || null,
-        view: u.searchParams.get("view") || "board",
-        afterHeader: controlsHtml(nonce),
-        beforeBodyEnd: activityScript(nonce),
-        projectsDir,
-        nonce,
-      }));
+      res.end(html);
       return;
     }
     const ctl = u.pathname.match(/^\/control\/(reconcile|groomer)\/(start|stop|run)$/);
@@ -629,6 +687,17 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
+  };
+  const server = createServer((req, res) => {
+    handle(req, res).catch((e) => {
+      // The operator is told why on stderr; the response names no cause, as in serve.mjs.
+      console.error("blaze: request failed:", (e && e.stack) || String(e));
+      if (res.headersSent) { try { res.destroy(); } catch { /* already gone */ } return; }
+      try {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ errors: ["the board could not answer this request"] }));
+      } catch { /* the socket went away first */ }
+    });
   });
 
   return { server, bus, startLoop, stopLoop, runReconcile, runGroomer, identity };

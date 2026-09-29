@@ -4,13 +4,12 @@
 // Read-only. Exits non-zero only on a HARD finding — a soft finding is a fill queue and
 // must never fail a run (blaze-pm ADR-0011). BLZ-137.
 import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
-import { join, dirname, basename, resolve as resolvePath } from "node:path";
-import { fsReadStorage } from "./model/read-storage.mjs";
-import { unreadableTicketDirs } from "./model/index.mjs";
+import { join, dirname, resolve as resolvePath } from "node:path";
 import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
 import { resolveRoots, loadConfig, ConfigParseError, IncompatibleSchemaVersionError } from "./config.mjs";
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 
 const positional = [];
 const opts = { projects: null, kind: null, json: false };
@@ -115,15 +114,27 @@ const nonEmpty = (a) => (Array.isArray(a) && a.length ? a : null);
 // `config.projects` — but "reads it on disk" is the same wrong belief that put "the audit's
 // schema layer" in ADR-0031's table for the `loadProjectSchema` site. Nothing in the audit
 // calls that function; `blaze edit` and `blaze new` do, and measurably so. ADR-0031 §R.5.
+// BLZ-670: reads go through the resolver — `fs`/`dual` read the filesystem, `db` reads the
+// database the writes go to. Resolution failure (e.g. a `db` mode with no shadow) is reported
+// and exits before anything else runs.
+const rs = await resolveReadStorage({ dataRoot, projectsDir }).catch((e) => {
+  console.error(e.message);
+  process.exit(1);
+});
+
 const keys = nonEmpty(opts.projects)
   ?? nonEmpty(config?.projects)
-  ?? fsReadStorage.listProjects(projectsDir);
+  ?? (await rs.readStorage.listProjects(projectsDir));
 
 // And having resolved them, refuse to report success over an empty corpus — UNLESS the
 // reason nothing resolved is a config load failure, in which case that failure IS the
 // report (the config-unloadable finding pushed below turns `ok` false and exits 1); a bare
 // stderr line here would just be a second, incompatible way of saying it.
-if (!keys.length && !configLoadError) { console.error(`no projects found under ${projectsDir}`); process.exit(2); }
+if (!keys.length && !configLoadError) {
+  await rs.close();
+  console.error(`no projects found under ${projectsDir}`);
+  process.exit(2);
+}
 
 const projects = {};
 for (const k of keys) {
@@ -166,6 +177,7 @@ for (const k of keys) {
     console.error(`blaze audit: refusing to audit ${k} against a taxonomy this run could not ` +
       `read — every schema finding it produced would be measured against a file it never ` +
       `parsed, which is not a partial report but a wrong one.`);
+    await rs.close();
     process.exit(2);
   }
 }
@@ -178,7 +190,8 @@ const tickets = [];
 // the WALK — which paths exist — and the pure function is a function of frontmatter, which
 // carries no path. BLZ-122 / REQ-035.
 const filesById = new Map();
-for (const t of fsReadStorage.listTickets(projectsDir)) {
+const allTickets = [...(await rs.readStorage.listTickets(projectsDir))];
+for (const t of allTickets) {
   const id = t.frontmatter?.id;
   if (!id || !wanted.has(String(id).split("-")[0])) continue;
   tickets.push(t);
@@ -196,7 +209,8 @@ const report = auditCorpus({ tickets, projects, config });
 //
 // Raised HERE rather than in `auditCorpus` for the same reason `duplicate-status` is: which
 // directories exist and which of them could be read is a property of the WALK.
-const unreadable = unreadableTicketDirs(projectsDir);
+const unreadable = await rs.readStorage.unreadableTicketDirs(projectsDir);
+await rs.close();
 for (const u of unreadable) {
   report.findings.push({ ticket: null, kind: "unreadable-ticket-directory", detail: u.message });
 }
@@ -255,20 +269,21 @@ for (const t of tickets) {
 // but it is not this ticket's, and resolving it as a side effect here would be exactly the
 // silent reconciliation the ACs warn against.
 //
-// KNOWN LIMITATION: `parent` is the only association this sees, because the markdown corpus
-// is the only thing on disk. A requirement associated with a goal ONLY through a v4
+// KNOWN LIMITATION: `parent` is the only association this sees, because it reads ticket
+// RECORDS — from the markdown corpus, or from the database under BLAZE_WRITE_PORT=db
+// (BLZ-670) — and a ticket record carries no `hierarchy_membership` rows. A requirement associated with a goal ONLY through a v4
 // `hierarchy_membership` row would not be found. BLZ-374 made the table SHIP —
 // `createDbSchema` now installs `hierarchy` and `hierarchy_membership` at DB schema version
 // 2 — so this limitation is now reachable in principle. It is not reachable in practice yet:
 // nothing WRITES a membership row (BLZ-360 section 8.3's roll-up and spec 4's seed are both
-// unbuilt), and this runner reads the markdown corpus rather than the database. It becomes
-// real the moment either lands, which is what BLZ-377 and spec 4's hierarchy seed do.
+// unbuilt), and even in db mode this runner reads ticket records, not the membership table.
+// It becomes real the moment either lands, which is what BLZ-377 and spec 4's hierarchy seed do.
 const statusOf = new Map();
 const fmById = new Map();
 for (const t of tickets) {
   const id = t.frontmatter?.id;
   if (!id) continue;
-  statusOf.set(id, basename(dirname(t.file)));
+  statusOf.set(id, t.status);
   fmById.set(id, t.frontmatter);
 }
 const GOAL_TERMINAL = new Set(["done", "achieved", "accepted", "canceled", "duplicate"]);

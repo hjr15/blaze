@@ -205,6 +205,13 @@ describe("BLZ-422: a no-op is never reported as a commit", () => {
     }
   });
 
+  test("BLZ-670: a db-mode apply says the moves are in the database, never 'already matched HEAD'", () => {
+    const out = applySummary({ outcome: "db", error: null, movedCount: 2, nonMovedCount: 0 });
+    assert.match(out.text, /database/);
+    assert.doesNotMatch(out.text, /matched HEAD/);
+    assert.equal(out.exit, 0);
+  });
+
   test("each per-ticket verb says so when no commit was created", () => {
     assert.equal(commitSuffix({ ok: true, committed: true }), "");
     assert.equal(commitSuffix({ ok: true, committed: false, queued: true }), " (queued for blaze commit)");
@@ -488,6 +495,17 @@ describe("BLZ-449: the dashboard surfaces the git outcome of a write", () => {
     assert.match(note, /queued for blaze commit/, `got ${JSON.stringify(note)}`);
     assert.doesNotMatch(note, /already matched HEAD/,
       "a deferred commit is not an absent one");
+  });
+
+  // BLZ-670 (final review): under BLAZE_WRITE_PORT=db `stageFor("db")` answers
+  // {committed:false, queued:false} for EVERY write — there is no file to commit — so the
+  // committed===false arm told the operator "the file already matched HEAD" on every click.
+  // A db write is the database's ordinary case, like a real commit: it says nothing.
+  test("a database-mode write is not reported as an idempotent no-op", () => {
+    const note = writeOutcome({ ok: true, committed: false, queued: false, db: true });
+    assert.doesNotMatch(note, /already matched HEAD/, `got ${JSON.stringify(note)}`);
+    assert.doesNotMatch(note, /no commit created/, `got ${JSON.stringify(note)}`);
+    assert.equal(note, "");
   });
 
   test("a real commit says nothing — one op, one commit is the board's ordinary case", () => {

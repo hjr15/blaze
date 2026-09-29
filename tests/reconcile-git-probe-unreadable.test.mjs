@@ -133,7 +133,7 @@ describe("BLZ-484: a git probe that could not RUN is not a git probe that found 
     }
   });
 
-  test("the condition TRAVELS WITH THE RESULT, not only to the terminal", () => {
+  test("the condition TRAVELS WITH THE RESULT, not only to the terminal", async () => {
     // AC-2's other half, and what makes `serve.mjs`'s preview and any other consumer able
     // to tell the two outcomes apart without re-running anything.
     const tmp = mkdtempSync(join(tmpdir(), "blz484-result-"));
@@ -141,7 +141,9 @@ describe("BLZ-484: a git probe that could not RUN is not a git probe that found 
     try {
       const root = board(tmp);
       process.env.PATH = ghOnlyBin(tmp);
-      return reconcile({ root, dryRun: true }).then((r) => {
+      // BLZ-670: awaited INSIDE the try — reconcile now awaits its reader, so a returned
+      // promise let the finally restore PATH and remove the board before the run read it.
+      await reconcile({ root, dryRun: true }).then((r) => {
         assert.equal(r.ok, true, "the run still returns a result — this is a report, not a throw");
         assert.ok(r.gitErrors.length > 0, "the git conditions are on the result");
         for (const e of r.gitErrors) {
@@ -271,7 +273,7 @@ describe("BLZ-484: a single probe can fail while its siblings answer", () => {
     }
   });
 
-  test("a non-zero exit from the log walk is NOT an answer — BLZ-484's stated AC", () => {
+  test("a non-zero exit from the log walk is NOT an answer — BLZ-484's stated AC", async () => {
     // `exitIsAnAnswer: !resolved` on the `git log` probe. `main` resolves here, so the probe
     // is told its failure is not an answer; mutating that to `true` makes an exit-128 log
     // walk silent, the shipped set reads as empty, and the run reports a clean board — this
@@ -284,7 +286,9 @@ describe("BLZ-484: a single probe can fail while its siblings answer", () => {
       // `git` stays REACHABLE here — that is the point. The probe must run, exit 128, and
       // still be reported; a PATH without `git` would prove only what the suite above proves.
       process.env.PATH = `${ghOnlyBin(tmp)}:${prev}`;
-      return reconcile({ root, dryRun: true }).then((r) => {
+      // BLZ-670: awaited INSIDE the try — reconcile now awaits its reader, so a returned
+      // promise let the finally restore PATH and remove the board before the run read it.
+      await reconcile({ root, dryRun: true }).then((r) => {
         const logProbe = r.gitErrors.filter((e) => /^git log main/.test(e.command || ""));
         assert.equal(logProbe.length, 1,
           "the log walk failed and must be reported, even though `git` ran and exited");

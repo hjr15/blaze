@@ -138,8 +138,8 @@ describe("BLZ-633 the gate-3 analogue: no column is dropped EVERYWHERE", () => {
 });
 
 describe("BLZ-633 MG1: every document of M classifies as `skip` against A", () => {
-  test("no create, no update, no refuse — the planner's own definition of identical", () => {
-    const board = loadBoard(FIXTURE_PROJECTS, { dataRoot: FIXTURE });
+  test("no create, no update, no refuse — the planner's own definition of identical", async () => {
+    const board = await loadBoard(FIXTURE_PROJECTS, { dataRoot: FIXTURE });
     const plan = planImport(readBack.rows, board, {});
     assert.deepEqual(plan.refusals.map((r) => r.message), [],
       "a refusal here means the markdown medium produced a row the board would not accept");
@@ -168,7 +168,7 @@ describe("BLZ-633 MG2: M imported into an empty board exports to the SAME canoni
 const blankPr = (d) => ({ ...d, text: d.text.replace(/^pr: .*$\n?/m, "") });
 
 describe("BLZ-633: the gates DISCRIMINATE — the revert BLZ-631 is to BLZ-630", () => {
-  test("blanking one exported field turns MG1 red, for the reason its name gives", () => {
+  test("blanking one exported field turns MG1 red, for the reason its name gives", async () => {
     // Exactly what a broken exporter or a broken reader would do: lose one
     // field. `pr` is chosen deliberately: it is optional at the COLUMN level
     // (csv-schema.mjs) AND carries no model rule of its own (rules.mjs), so a
@@ -180,7 +180,7 @@ describe("BLZ-633: the gates DISCRIMINATE — the revert BLZ-631 is to BLZ-630",
     const { M: bad } = markdownExportDir({ mutate: blankPr });
     const read = readMarkdownRows([bad], { dataRoot: bad });
     assert.equal(read.ok, true);
-    const plan = planImport(read.rows, loadBoard(FIXTURE_PROJECTS, { dataRoot: FIXTURE }), {});
+    const plan = planImport(read.rows, await loadBoard(FIXTURE_PROJECTS, { dataRoot: FIXTURE }), {});
     assert.ok(plan.counts.skip < read.rows.length,
       "MG1 must not be green against a markdown export that dropped a field");
     const named = plan.refusals.some((m) => /differs in .*\bpr\b/.test(m.message));

@@ -24,7 +24,12 @@ import { fsWritePort, dbWritePort, dualWritePort, WRITE_PORT_ENV } from "./write
 import { resolveDatabaseConfig } from "./database-config.mjs";
 import { openPostgresClient } from "../init-pg.mjs";
 import { checkDbSchema } from "./db-schema-version.mjs";
-import { closeOnSetupFailure } from "./pg-storage.mjs";
+import { closeOnSetupFailure, postgresReader } from "./pg-storage.mjs";
+// BLZ-670: sqlite-storage.mjs imports `assertConfigNamespace` from here, so this closes a
+// cycle. Harmless — only function references, used at call time — and kept at module top so
+// the evaluation order does not change.
+import { openSqliteRead as defaultOpenSqliteRead } from "./sqlite-storage.mjs";
+import { fsReadStorage } from "./read-storage.mjs";
 
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
@@ -207,31 +212,18 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
                                { allocate: fsAllocator(projectsDir) }), mode, close() {} };
   }
   if (mode !== "dual" && mode !== "db") {
-    throw new Error(
-      `blaze: ${WRITE_PORT_ENV}=${JSON.stringify(mode)} is not a write port — `
-      + "expected 'fs', 'dual' or 'db'. Leaving it unset uses 'fs', which is the "
-      + "filesystem behaviour Blaze has always had.");
+    throw unknownMode(mode);
   }
 
-  const { loadConfig } = await import("../config.mjs");
-  const dbConfig = resolveDbConfig({ dataRoot, config: loadConfig({ root: dataRoot }) });
+  const dbConfig = await dbConfigFor(dataRoot, resolveDbConfig);
   let db, close;
   if (dbConfig.driver === "postgres") {
-    const client = await openPgClient(dbConfig.connection);
-    const exec = pgExec(client);
     // Never creates a schema silently, same refusal as openShadow (BLZ-297) — a missing
     // or out-of-range Postgres schema is an instruction, not an accident to write through.
-    await closeOnSetupFailure(client, async () => {
-      const state = await checkDbSchema(exec, { dialect: "postgres" });
-      if (!state.ok) throw new Error(`blaze: ${state.error}`);
-      if (state.state === "empty") {
-        throw new Error(
-          "blaze: this Postgres database has no Blaze schema. Create it first:\n\n"
-          + "    blaze db init\n");
-      }
-    });
+    const client = await openCheckedPg(dbConfig.connection, openPgClient);
+    const exec = pgExec(client);
     db = dbWritePort(exec, { dialect: "postgres" });
-    close = async () => { try { await client.end(); } catch { /* already closed */ } };
+    close = endQuietly(client);
   } else {
     const shadow = await openShadow(dataRoot);
     db = dbWritePort(shadow.exec, { dialect: "sqlite" });
@@ -255,6 +247,100 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
     move(t, ctx) { recordSoakOp(dataRoot); return port.move(t, ctx); },
   };
   return { port: counted, mode, close };
+}
+
+/**
+ * BLZ-670. Reads resolve from the WRITE mode (`resolveWriteMode`), never independently from
+ * `database.driver`: under `db` every read comes from the database the writes go to, while
+ * `fs` and `dual` read the filesystem — in `dual` the filesystem decides the outcome.
+ */
+const unknownMode = (mode) => new Error(
+  `blaze: ${WRITE_PORT_ENV}=${JSON.stringify(mode)} is not a write port — `
+  + "expected 'fs', 'dual' or 'db'. Leaving it unset uses 'fs', which is the "
+  + "filesystem behaviour Blaze has always had.");
+
+/** Connect, and refuse a missing or out-of-range schema, closing the socket on refusal. */
+async function openCheckedPg(connection, openPgClient) {
+  const client = await openPgClient(connection);
+  await closeOnSetupFailure(client, async () => {
+    const state = await checkDbSchema(pgExec(client), { dialect: "postgres" });
+    if (!state.ok) throw new Error(`blaze: ${state.error}`);
+    if (state.state === "empty") {
+      throw new Error(
+        "blaze: this Postgres database has no Blaze schema. Create it first:\n\n"
+        + "    blaze db init\n");
+    }
+  });
+  return client;
+}
+
+async function dbConfigFor(dataRoot, resolveDbConfig) {
+  const { loadConfig } = await import("../config.mjs");
+  return resolveDbConfig({ dataRoot, config: loadConfig({ root: dataRoot }) });
+}
+
+function openShadowRead(dataRoot, openSqliteRead) {
+  const path = shadowDbPath(dataRoot);
+  // existsSync FIRST: `new DatabaseSync(path)` would CREATE an empty file, and a read must
+  // never write one (BLZ-297). Same message openShadow gives.
+  if (!existsSync(path)) {
+    throw new Error(`blaze: no shadow database at ${path}.\n`
+      + "Create it and load the board into it first:\n\n    blaze db init\n");
+  }
+  return openSqliteRead(path);
+}
+
+const endQuietly = (client) => async () => { try { await client.end(); } catch { /* already closed */ } };
+
+/** @returns { readStorage, mode, close } — `close` is a no-op for `fs` and `dual`. */
+export async function resolveReadStorage({ dataRoot, projectsDir, env = process.env,
+                                           resolveDbConfig = resolveDatabaseConfig,
+                                           openPostgresClient: openPgClient = openPostgresClient,
+                                           openSqliteRead = defaultOpenSqliteRead } = {}) {
+  const mode = resolveWriteMode(env);
+  if (mode === "fs" || mode === "dual") return { readStorage: fsReadStorage, mode, close() {} };
+  if (mode !== "db") throw unknownMode(mode);
+  const dbConfig = await dbConfigFor(dataRoot, resolveDbConfig);
+  if (dbConfig.driver === "postgres") {
+    const client = await openCheckedPg(dbConfig.connection, openPgClient);
+    return { readStorage: postgresReader(client), mode, close: endQuietly(client) };
+  }
+  const readStorage = openShadowRead(dataRoot, openSqliteRead);
+  return { readStorage, mode, close: () => readStorage.close() };
+}
+
+/** Resolve, run `fn(readStorage, mode)`, and always close. */
+export async function withReadStorage(opts, fn) {
+  let resolved;
+  // Only RESOLUTION failures are tagged: a server answers those 503 (fixable, not the caller's
+  // fault), while a failure reading the board after resolution keeps each route's own report.
+  try { resolved = await resolveReadStorage(opts); }
+  catch (e) { if (e && typeof e === "object") e.blazeResolve = true; throw e; }
+  try { return await fn(resolved.readStorage, resolved.mode); }
+  finally { await resolved.close(); }
+}
+
+/** One resolution, one source: the write port and the reader over the SAME store. */
+export async function resolvePorts(opts = {}) {
+  const env = opts.env ?? process.env;
+  const mode = resolveWriteMode(env);
+  if (mode !== "db") {
+    const w = await resolveWritePort({ ...opts, env });
+    return { writePort: w.port, readStorage: fsReadStorage, mode, close: w.close };
+  }
+  const dbConfig = await dbConfigFor(opts.dataRoot, opts.resolveDbConfig ?? resolveDatabaseConfig);
+  if (dbConfig.driver === "postgres") {
+    const client = await openCheckedPg(dbConfig.connection, opts.openPostgresClient ?? openPostgresClient);
+    return { writePort: dbWritePort(pgExec(client), { dialect: "postgres" }),
+             readStorage: postgresReader(client), mode, close: endQuietly(client) };
+  }
+  // SQLite: two handles on one file (spec §4.1) — node:sqlite commits before a write returns.
+  const readStorage = openShadowRead(opts.dataRoot, opts.openSqliteRead ?? defaultOpenSqliteRead);
+  let shadow;
+  try { shadow = await openShadow(opts.dataRoot); }
+  catch (e) { readStorage.close(); throw e; }
+  return { writePort: dbWritePort(shadow.exec, { dialect: "sqlite" }), readStorage, mode,
+           close: () => { readStorage.close(); try { shadow.db.close(); } catch { /* closed */ } } };
 }
 
 /**
