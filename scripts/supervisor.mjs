@@ -434,7 +434,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   // servers is absent from the other.
   const signinLimiter = new AttemptLimiter();
 
-  const server = createServer(async (req, res) => {
+  // BLZ-670 review: the handler is a named function and the server CATCHES it, in serve.mjs's
+  // style. An async request callback with no catch turns any throw — a ticket that will not
+  // parse, a database query that fails mid-request — into an unhandled rejection that ends
+  // `blaze start` for every connected session rather than refusing one request.
+  const handle = async (req, res) => {
     const u = new URL(req.url || "/", "http://localhost");
     const json = (code, obj) => {
       res.writeHead(code, { "content-type": "application/json" });
@@ -602,18 +606,33 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       const nonce = boardNonce();
       // Rendered BEFORE the head is written; `reading` answers a 503 itself when the reader
       // cannot be resolved, and then there is nothing left to send.
-      const html = await reading(async (rs) => pageHtml({
-        project: u.searchParams.get("project") || "all",
-        focus: u.searchParams.get("focus") || null,
-        flat: u.searchParams.get("flat") === "1",
-        sprint: u.searchParams.get("sprint") || null,
-        view: u.searchParams.get("view") || "board",
-        afterHeader: controlsHtml(nonce),
-        beforeBodyEnd: activityScript(nonce),
-        projectsDir,
-        nonce,
-        tickets: await allTickets(rs),
-      }));
+      // BLZ-519's rule, as serve.mjs's `/` applies it: a board that could not be read is an
+      // error page, never an empty board. A plain page here — serve.mjs's renderer for it is
+      // module-private — and the cause goes to stderr, not to the browser.
+      let html;
+      try {
+        html = await reading(async (rs) => pageHtml({
+          project: u.searchParams.get("project") || "all",
+          focus: u.searchParams.get("focus") || null,
+          flat: u.searchParams.get("flat") === "1",
+          sprint: u.searchParams.get("sprint") || null,
+          view: u.searchParams.get("view") || "board",
+          afterHeader: controlsHtml(nonce),
+          beforeBodyEnd: activityScript(nonce),
+          projectsDir,
+          nonce,
+          tickets: await allTickets(rs),
+        }));
+      } catch (e) {
+        let reason;
+        try { reason = String(e?.message ?? e); } catch { reason = "(the error could not be rendered)"; }
+        console.error("blaze: the board page could not be rendered:", reason);
+        res.writeHead(500, { "content-type": "text/plain; charset=utf-8", "cache-control": "no-store" });
+        res.end("The board could not be read. This is not an empty board: a file under it could "
+          + "not be opened or parsed. The cause is in the server's log; fix or remove the file "
+          + "and reload.\n");
+        return;
+      }
       if (res.headersSent) return;
       res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...boardHeaders(nonce) });
       res.end(html);
@@ -659,6 +678,17 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
     res.writeHead(404, { "content-type": "text/plain" });
     res.end("not found");
+  };
+  const server = createServer((req, res) => {
+    handle(req, res).catch((e) => {
+      // The operator is told why on stderr; the response names no cause, as in serve.mjs.
+      console.error("blaze: request failed:", (e && e.stack) || String(e));
+      if (res.headersSent) { try { res.destroy(); } catch { /* already gone */ } return; }
+      try {
+        res.writeHead(500, { "content-type": "application/json" });
+        res.end(JSON.stringify({ errors: ["the board could not answer this request"] }));
+      } catch { /* the socket went away first */ }
+    });
   });
 
   return { server, bus, startLoop, stopLoop, runReconcile, runGroomer, identity };

@@ -6,10 +6,12 @@
 // its own board and server, so none depends on another's order.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { rmSync } from "node:fs";
+import { rmSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runDb } from "../scripts/db-runner.mjs";
 import { startServer, CSRF } from "../scripts/serve.mjs";
+import { createApp } from "../scripts/supervisor.mjs";
+import { loadConfig } from "../scripts/config.mjs";
 import { dbBoard, QUIET } from "./helpers/db-board.mjs";
 
 async function withDbServer(fn) {
@@ -92,5 +94,34 @@ describe("blaze board under BLAZE_WRITE_PORT=db", () => {
       assert.equal(r.status, 503, body.slice(0, 500));
       assert.match(body, /blaze db init/);
     });
+  });
+});
+
+// Review round 1: the supervisor's request callback had no catch, so a board-read failure
+// AFTER the reader resolved rejected out of the handler and ended `blaze start` for every
+// session. Reproduced in fs mode — the same path db mode reaches on a failed query.
+describe("supervisor: a board-read failure is contained", () => {
+  test("GET / with an unreadable ticket answers 500, and the server still answers the next request", async () => {
+    const roots = dbBoard();
+    writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-99-evil.md"), "no frontmatter here\n");
+    const before = process.env.BLAZE_WRITE_PORT;
+    process.env.BLAZE_WRITE_PORT = "fs";
+    const app = createApp(loadConfig({ root: roots.dataRoot }), { root: roots.dataRoot });
+    await new Promise((res) => app.server.listen(0, "127.0.0.1", res));
+    const base = `http://127.0.0.1:${app.server.address().port}`;
+    try {
+      // Bounded: before the fix the socket was never answered, and an unbounded fetch hangs.
+      const r = await fetch(`${base}/`, { signal: AbortSignal.timeout(5000) });
+      assert.equal(r.status, 500, (await r.text()).slice(0, 500));
+      // `/view/<name>` has no route-level catch: this is the server-level belt answering.
+      const view = await fetch(`${base}/view/board`, { signal: AbortSignal.timeout(5000) });
+      assert.equal(view.status, 500, (await view.text()).slice(0, 500));
+      const again = await fetch(`${base}/api/sync`, { signal: AbortSignal.timeout(5000) });
+      assert.equal(again.status, 200);
+    } finally {
+      app.server.close();
+      if (before === undefined) delete process.env.BLAZE_WRITE_PORT;
+      else process.env.BLAZE_WRITE_PORT = before;
+    }
   });
 });

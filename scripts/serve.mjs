@@ -36,7 +36,7 @@ import { boardHeaders, cspNonce as boardNonce } from "./model/board-csp.mjs";
 import { handleSigninRoutes, readJsonBody, SIGNIN_PATH, preAuthHeaders, cspNonce,
          queryRefusalPageHtml } from "./model/signin.mjs";
 import { checkPasswordPolicy, MIN_PASSWORD_LENGTH } from "./model/passwords.mjs";
-export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests + supervisor.mjs
+export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat for tests; supervisor.mjs takes pageHtml
 
 // BLZ-133: config is read lazily, and from the board being SERVED rather than
 // the ambient engine tree. Import-time resolution broke merely importing this
