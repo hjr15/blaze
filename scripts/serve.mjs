@@ -15,12 +15,12 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
-import { resolveWritePort, withReadStorage } from "./model/write-port-resolve.mjs";
+import { resolvePorts, withReadStorage } from "./model/write-port-resolve.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
 import { applyEdit, applyToggleAc } from "./edit.mjs";
-import { commitOrQueue } from "./commit-or-queue.mjs";
+import { stageFor } from "./commit-or-queue.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
@@ -406,6 +406,17 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   // the operator a request failed and not which file the board could not read.
   const handle = async (req, res) => {
     const json = (code, obj) => send(req, res, code, "application/json", JSON.stringify(obj));
+    // BLZ-670: every board READ resolves its reader per request, exactly as the write port
+    // already is (BLZ-301), and closes it however the request ends. A resolver refusal is the
+    // write side's 503 — the caller is not at fault and the condition is fixable.
+    const reading = async (fn) => {
+      try { return await withReadStorage({ dataRoot: root, projectsDir }, fn); }
+      catch (e) {
+        if (e?.blazeResolve) return json(503, { errors: [String(e.message)] });
+        throw e;
+      }
+    };
+    const allTickets = async (rs) => [...(await rs.listTickets(projectsDir))];
     // `new URL` THROWS on a request line it cannot parse — `GET // HTTP/1.1` is enough —
     // and this handler has no wrapping try, so that ended the process for every
     // connected session. The line predates BLZ-358; serving setup is what made it
@@ -682,8 +693,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     const actor = actorFor(principal);
 
     if (req.method === "GET" && u.pathname === "/api/hash") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(contentHash({ projectsDir, project: u.searchParams.get("project") || null })); return;
+      // The token is awaited BEFORE the head is written, so a failed read is still answerable.
+      return reading(async (rs) => {
+        const token = await rs.changeToken(projectsDir, { project: u.searchParams.get("project") || null });
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(token);
+      });
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {
@@ -697,7 +712,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // status is 500 because the board genuinely failed to answer, and the `unreadable`
       // field rides along so the Live view's existing FIRST branch names the file.
       try {
-        return json(200, liveModel(root, projectsDir));
+        return await reading(async (rs) => json(200, liveModel(root, projectsDir,
+          { tickets: await allTickets(rs), feed: await rs.activityFeed(root) })));
       } catch (e) {
         console.error("blaze: /api/live could not read the board:", boardFailureReason(e));
         return json(500, {
@@ -711,9 +727,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // walk, so a concurrent move/edit could ENOENT between the two — catch it
       // as a 500 rather than letting the async handler crash the process.
       try {
-        const html = panelHtml(projectsDir, u.searchParams.get("id"));
-        if (html === null) return json(404, { errors: ["not found"] });
-        res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(html); return;
+        return await reading(async (rs) => {
+          const html = panelHtml(projectsDir, u.searchParams.get("id"), { tickets: await allTickets(rs) });
+          if (html === null) return json(404, { errors: ["not found"] });
+          res.writeHead(200, { "content-type": "text/html; charset=utf-8" }); res.end(html);
+        });
       } catch {
         return json(500, { errors: ["panel render failed"] });
       }
@@ -727,17 +745,20 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {
-      const envelope = viewEnvelope({
-        view: vm[1],
-        project: u.searchParams.get("project") || "all",
-        focus: u.searchParams.get("focus") || null,
-        flat: u.searchParams.get("flat") === "1",
-        sprint: u.searchParams.get("sprint") || null,
-        projectsDir,
-        views,
+      return reading(async (rs) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          project: u.searchParams.get("project") || "all",
+          focus: u.searchParams.get("focus") || null,
+          flat: u.searchParams.get("flat") === "1",
+          sprint: u.searchParams.get("sprint") || null,
+          projectsDir,
+          views,
+          tickets: await allTickets(rs),
+        });
+        if (!envelope) return json(404, { errors: ["unknown view"] });
+        return send(req, res, 200, "application/json", JSON.stringify(envelope));
       });
-      if (!envelope) return json(404, { errors: ["unknown view"] });
-      return send(req, res, 200, "application/json", JSON.stringify(envelope));
     }
     if (req.method === "GET" && u.pathname === "/") {
       const project = u.searchParams.get("project") || "all";
@@ -762,12 +783,15 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // statement that the board is empty — made by a run that never read it.
       let html;
       try {
-        html = pageHtml({ project, focus, flat, sprint, view, views, projectsDir, nonce });
+        html = await reading(async (rs) => pageHtml({ project, focus, flat, sprint, view, views,
+          projectsDir, nonce, tickets: await allTickets(rs) }));
       } catch (e) {
         console.error("blaze: the board page could not be rendered:", boardFailureReason(e));
         return send(req, res, 500, "text/html; charset=utf-8",
                     boardUnreadablePageHtml(e), { "cache-control": "no-store" });
       }
+      // `reading` already answered (a 503) when the reader could not be resolved.
+      if (res.headersSent) return;
       return send(req, res, 200, "text/html; charset=utf-8", html, boardHeaders(nonce));
     }
     if (req.method === "POST") {
@@ -806,9 +830,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // box) returned the same shape as a real commit, so this body said the same
       // thing for both. `committed` and `queued` name the git outcome, alongside it.
       const gitOutcome = (c) => ({ committed: Boolean(c.committed), queued: Boolean(c.queued) });
+      // BLZ-670: resolved below, inside the try, but declared here because `done` stages by
+      // the resolved mode.
+      let writePort, readStorage, mode, closeWritePort;
       const done = (r, msg, op, extra = {}) => {
         if (!r.ok) return json(422, { errors: r.errors });
-        const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
+        const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
         return json(200, { ok: true, ...gitOutcome(c), ...extra });
       };
@@ -818,45 +845,46 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // evidence would have been silently partial. Resolved per request, and closed
       // after, so a long-lived server does not hold the shadow open.
       // Wrapped, and the file states the rule twice already: "an uncaught throw here ends the
-      // process for every connected session rather than refusing one request". `resolveWritePort`
+      // process for every connected session rather than refusing one request". `resolvePorts`
       // THROWS when the shadow's schema version is out of range — a named, correct refusal — and
       // it was outside the try, so one ordinary POST against a stale shadow killed the server for
       // everyone. 503 for the same reason the identity gate uses it: the caller is not at fault
       // and the condition is fixable (`blaze db init --force`).
-      let writePort, closeWritePort;
+      // BLZ-670: `resolvePorts` resolves the reader over the SAME store as the write port, so a
+      // db-mode write reads the row it is about to change rather than the file.
       try {
-        ({ port: writePort, close: closeWritePort } =
-          await resolveWritePort({ dataRoot: root, projectsDir }));
+        ({ writePort, readStorage, mode, close: closeWritePort } =
+          await resolvePorts({ dataRoot: root, projectsDir }));
       } catch (e) {
         return json(503, { errors: [String(e?.message ?? e)] });
       }
       try {
       if (u.pathname === "/api/move") {
-        const r = await applyMove(projectsDir, payload.id, payload.to, { today, writePort, actor, source: "api" });
+        const r = await applyMove(projectsDir, payload.id, payload.to, { today, writePort, readStorage, actor, source: "api" });
         if (!r.ok) return json(422, { errors: r.errors });
         const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
-        const c = commitOrQueue({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
+        const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
         return json(200, { ok: true, ...gitOutcome(c), resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {
-        const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today, writePort, actor, source: "api" });
+        const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today, writePort, readStorage, actor, source: "api" });
         return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`, "edit");
       }
       if (u.pathname === "/api/resolve") {
-        const r = await applyResolve(projectsDir, payload.id, payload.resolution, { today, writePort, actor, source: "api" });
+        const r = await applyResolve(projectsDir, payload.id, payload.resolution, { today, writePort, readStorage, actor, source: "api" });
         return done(r, `${payload.id}: resolve ${payload.resolution}`, "resolve");
       }
       if (u.pathname === "/api/log") {
-        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today, writePort, actor, source: "api" });
+        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today, writePort, readStorage, actor, source: "api" });
         return done(r, `${payload.id}: log ${payload.minutes}m`, "log");
       }
       if (u.pathname === "/api/ac") {
-        const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort, actor, source: "api" });
+        const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort, readStorage, actor, source: "api" });
         return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
       }
       return json(404, { errors: ["not found"] });
-      } finally { closeWritePort(); }
+      } finally { await closeWritePort(); }
     }
     res.writeHead(404, { "content-type": "text/plain" }); res.end("not found");
   };

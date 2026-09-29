@@ -6,11 +6,11 @@ import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
-import { pageHtml, contentHash } from "./serve.mjs";
+import { pageHtml } from "./serve.mjs";
 import { viewEnvelope, CSRF } from "./views/page.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
-import { resolvePorts, resolveReadStorage, resolveWriteMode } from "./model/write-port-resolve.mjs";
+import { resolvePorts, resolveReadStorage, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
 import { stageFor } from "./commit-or-queue.mjs";
 import { groomOnce } from "./loops/groomer.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
@@ -440,6 +440,17 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       res.writeHead(code, { "content-type": "application/json" });
       res.end(JSON.stringify(obj));
     };
+    // BLZ-670: every board READ resolves its reader per request and closes it however the
+    // request ends — serve.mjs's helper, for BLZ-359's reason: a control wired into one of
+    // these two servers is absent from the other. A resolver refusal is a 503 (fixable).
+    const reading = async (fn) => {
+      try { return await withReadStorage({ dataRoot: root, projectsDir }, fn); }
+      catch (e) {
+        if (e?.blazeResolve) return json(503, { errors: [String(e.message)] });
+        throw e;
+      }
+    };
+    const allTickets = async (rs) => [...(await rs.listTickets(projectsDir))];
 
     // ---- the browser's door (BLZ-566) ---------------------------------------------
     // MOUNTED HERE TOO, AND THAT IS THE POINT. BLZ-359 learned that `blaze board` and
@@ -529,9 +540,12 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
 
     if (req.method === "GET" && u.pathname === "/api/hash") {
-      res.writeHead(200, { "content-type": "text/plain" });
-      res.end(contentHash({ projectsDir }));
-      return;
+      // The token is awaited BEFORE the head is written, so a failed read is still answerable.
+      return reading(async (rs) => {
+        const token = await rs.changeToken(projectsDir, { project: null });
+        res.writeHead(200, { "content-type": "text/plain" });
+        res.end(token);
+      });
     }
     if (req.method === "GET" && u.pathname === "/api/sync") {
       res.writeHead(200, { "content-type": "application/json" });
@@ -556,22 +570,24 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {
-      const envelope = viewEnvelope({
-        view: vm[1],
-        project: u.searchParams.get("project") || "all",
-        focus: u.searchParams.get("focus") || null,
-        flat: u.searchParams.get("flat") === "1",
-        sprint: u.searchParams.get("sprint") || null,
-        projectsDir,
+      return reading(async (rs) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          project: u.searchParams.get("project") || "all",
+          focus: u.searchParams.get("focus") || null,
+          flat: u.searchParams.get("flat") === "1",
+          sprint: u.searchParams.get("sprint") || null,
+          projectsDir,
+          tickets: await allTickets(rs),
+        });
+        if (!envelope) {
+          res.writeHead(404, { "content-type": "application/json" });
+          res.end(JSON.stringify({ errors: ["unknown view"] }));
+          return;
+        }
+        res.writeHead(200, { "content-type": "application/json" });
+        res.end(JSON.stringify(envelope));
       });
-      if (!envelope) {
-        res.writeHead(404, { "content-type": "application/json" });
-        res.end(JSON.stringify({ errors: ["unknown view"] }));
-        return;
-      }
-      res.writeHead(200, { "content-type": "application/json" });
-      res.end(JSON.stringify(envelope));
-      return;
     }
     if (req.method === "GET" && u.pathname === "/") {
       // The query scopes the initial full-page render (?project=/?focus=/?flat=/?view=)
@@ -584,8 +600,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // than being constants. BLZ-359's lesson, applied again: a control wired into one
       // of these two servers is absent from the other.
       const nonce = boardNonce();
-      res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...boardHeaders(nonce) });
-      res.end(pageHtml({
+      // Rendered BEFORE the head is written; `reading` answers a 503 itself when the reader
+      // cannot be resolved, and then there is nothing left to send.
+      const html = await reading(async (rs) => pageHtml({
         project: u.searchParams.get("project") || "all",
         focus: u.searchParams.get("focus") || null,
         flat: u.searchParams.get("flat") === "1",
@@ -595,7 +612,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         beforeBodyEnd: activityScript(nonce),
         projectsDir,
         nonce,
+        tickets: await allTickets(rs),
       }));
+      if (res.headersSent) return;
+      res.writeHead(200, { "content-type": "text/html; charset=utf-8", ...boardHeaders(nonce) });
+      res.end(html);
       return;
     }
     const ctl = u.pathname.match(/^\/control\/(reconcile|groomer)\/(start|stop|run)$/);
