@@ -13,7 +13,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-29-db-mode-reads-design.md`. Read it first; §2 is the verified inventory and §4.4a is the `db`-mode staging rule.
 
-**Revision:** rev 2, after two adversarial reviews (2026-09-29). Every confirmed finding is folded in; the review records are in this session's history.
+**Revision:** rev 3, after three adversarial reviews (2026-09-29; round 2 prototyped Tasks 1–9 and 11 in a scratch clone, full suite 5178 / 0 fail with the stageFor fix). Every confirmed finding is folded in; the review records are in this session's history.
 
 ## Global Constraints
 
@@ -113,7 +113,7 @@ export function runner(name, args, { projectsDir }, extraEnv = {}) {
 }
 ```
 
-`tests/tmp-scratch-attribution.test.mjs` scans for a literal prefix at each `mkdtempSync`; `"blz670-board-"` satisfies it. If that guard only scans `*.test.mjs` or objects to helpers, follow what it says; `tests/helpers/scratch.mjs` is itself a helper, so helpers are allowed.
+`tests/tmp-scratch-attribution.test.mjs` scans only `*.test.mjs`, so the helper's prefix is not registered. It passes, and `tests/helpers/csv-round-trip.mjs` sets the same precedent. The literal prefix still names the suite in any leftover directory.
 
 - [ ] **Step 2: Write the regression test.** It is marked `todo`; each marker is removed by the task that fixes it.
 
@@ -184,7 +184,7 @@ Expected: 4 failures.
 - Tests 1–3 fail at the first mutating runner with `blaze move: file relocated but commit failed (status 128)` or `blaze new: file written but commit failed (status 128)`. That is the commit half of the defect (spec §4.4a).
 - Test 4 fails because `--write` is not refused.
 
-The **read** half becomes reachable only after Task 6 fixes the commit. At that point, re-running with the markers removed shows `illegal transition: defined → in-review`, `index.json` saying `defined`, and no ENG-2 in audit (both reviewers reproduced this on a git-initialised board). Record each run's real messages in the task report. Restore the markers.
+The **read** half becomes observable only after Task 6. Tasks 5 and 6 fix `move`'s read together, so `illegal transition` never shows in this sequence. After Task 6, test 2 shows `index.json` saying `defined`, which is the read-half red. Record each run's real messages in the task report. Restore the markers.
 
 - [ ] **Step 4: Run with the markers on.** Expected: 4 todo, 0 fail. Also run `node --test tests/tmp-scratch-attribution.test.mjs tests/model/seam-closure.test.mjs`; both must pass.
 - [ ] **Step 5: Commit.** Subject: `BLZ-670: db-mode split-brain regression test and shared db-board helpers`.
@@ -228,7 +228,7 @@ In `seedSqlite`, change `release(() => s.close?.());` to `release(() => s.close(
 
 - [ ] **Step 2: Run the tests and watch them fail.**
 Run: `node --test tests/model/driver-conformance.test.mjs`
-Expected: `s.activityFeed is not a function` (sqlite), `s.unreadableTicketDirs is not a function` (fs, mem, sqlite), and `close` failures for fs and mem.
+Expected: **every** sqlite conformance test fails (`s.close is not a function`, thrown by `seedSqlite`'s release); fs and mem fail `unreadableTicketDirs` and `close`.
 
 - [ ] **Step 3: Implement.** In `read-storage.mjs`, extend the existing `./index.mjs` import (the circular import already exists and is safe) and extract the feed read. Keep the existing comment block above the new function:
 
@@ -552,11 +552,11 @@ test("BLZ-670 stageFor: fs and dual are commitOrQueue itself", () => {
 test("BLZ-670 stageFor(db): id handles are dropped; nothing real left means no commit", () => {
   const root = scratch(mkdtempSync(join(tmpdir(), "blz670-stage-")));
   assert.deepEqual(stageFor("db")({ root, mode: "per-op", op: "move", id: "ENG-1", message: "m",
-    files: ["ENG-1", "ENG-1"] }), { ok: true, committed: false, queued: false });
+    files: ["ENG-1", undefined] }), { ok: true, committed: false, queued: false });
 });
 ```
 
-If `tests/commit-or-queue.test.mjs` has no `scratch` registry or these fs imports, add them in the file's existing style. The positive half, "db mode still commits a real file", is exercised end-to-end by `import` in Task 6.
+If `tests/commit-or-queue.test.mjs` has no `scratch` registry or these fs imports, add them in the file's existing style. The positive half, "db mode still commits a real file", gets its own end-to-end test in Task 6, Step 1b.
 
 - [ ] **Step 2: Run them and watch them fail.** Expected: `SyntaxError: … does not provide an export named 'resolveReadStorage'` (and `'stageFor'`).
 
@@ -669,7 +669,10 @@ In `scripts/commit-or-queue.mjs` (add `existsSync` to a `node:fs` import and `is
 export function stageFor(mode) {
   if (mode !== "db") return commitOrQueue;
   return (args) => {
-    const real = (args.files ?? []).filter((f) => existsSync(isAbsolute(f) ? f : join(args.root, f)));
+    // `typeof` first: db-mode `blaze new` passes `r.claimFile`, which is undefined there (the
+    // db allocator writes no claim), and isAbsolute(undefined) throws.
+    const real = (args.files ?? []).filter((f) => typeof f === "string"
+      && existsSync(isAbsolute(f) ? f : join(args.root, f)));
     return real.length ? commitOrQueue({ ...args, files: real })
                        : { ok: true, committed: false, queued: false };
   };
@@ -794,6 +797,12 @@ Expected: all pass. If the guard flags the new `fsReadStorage` import in `log.mj
 - Consumes: `resolvePorts`, `stageFor` (Task 4); `apply*`'s `readStorage` (Task 5).
 
 - [ ] **Step 1: The failing test exists.** Run test 1 with its marker removed: it fails with `commit failed (status 128)`.
+- [ ] **Step 1b: Write the db-mode import test** (`stageFor`'s positive half). Add it to `tests/db-mode-reads.test.mjs`:
+  - Board: `dbBoard()`, then `git init`, `git add -A` and `git commit -m seed` (use `execFileSync("git", [...], { cwd: dataRoot })` with `-c user.name=t -c user.email=t@t`), then `runDb(["init"])`.
+  - Write a one-row CSV with **`created` and `updated` filled in**. A blank `created` hits a separate pre-existing bind error, filed as its own ticket (see Finish); keep that out of this test.
+  - Run `runner("import-runner.mjs", [<csv>, "--apply", …], roots)` with the real `import` argv. Read it from `tests/import-runner.test.mjs` and copy the smallest apply invocation.
+  - Assert exit 0; `git log -1 --name-only` includes the import receipt path; `runner("move-runner.mjs", ["<new id>", "in-progress"], roots)` exits 0, which proves the ticket is readable from the database.
+  - It fails before this task: import resolves no reader and stages through `commitOrQueue` with id handles.
 - [ ] **Step 2: Implement each runner.** The shared shape is: resolve both ports once; pass `readStorage` into `apply*`; always close in `finally`; stage through `stageFor(mode)`. Keep every existing comment. Only the lines shown change.
 
   **`move-runner.mjs`** and **`edit-runner.mjs`** (both already wrap `apply*` in try/catch):
@@ -828,20 +837,21 @@ finally { await closePorts(); }
 
   Read each file's existing `apply*` call and keep its arguments byte-for-byte apart from adding `readStorage`. Replace its `commitOrQueue(` with `stageFor(mode)(`.
 
-  **`new-runner.mjs`** passes `{ ...opts, writePort }`. Make it `{ ...opts, writePort, readStorage }`, wrap it in `try { … } finally { await closePorts(); }`, and stage through `stageFor(mode)`.
+  **`new-runner.mjs`** already has a try/catch around `applyNew`. Use the move/edit shape: add `readStorage` to the `{ ...opts, writePort }` object, and `await closePorts()` in both the catch and after it. Stage through `stageFor(mode)`. Its `files: [r.file, r.claimFile]` carries `undefined` in `db` mode, and `stageFor` filters it (Task 4).
 
   **`import-runner.mjs`:**
-  - Move port resolution **above** the repair branch (`:194`). Change `try { wp = await resolveWritePort(...) }` at `:209` to `resolvePorts`, placed before the `if` that selects repair.
-  - The repair branch passes `readStorage: wp.readStorage, stage: stageFor(wp.mode)` into `runRepair`, and calls `await wp.close()` **before** its `process.exit`.
-  - The apply path's `common` object uses `writePort: wp.writePort` (it was `wp.port` at `:219`), and adds `readStorage: wp.readStorage` and `stage: stageFor(wp.mode)`.
-  - Close in `finally` around `guarded(...)`.
-  - Read `:180-235` first. If `runRepair`'s options don't accept `stage`/`readStorage`, check `import-mapping.mjs:803-807`; they do (`readStorage`, `stage`).
+  - **Repair needs a reader, never a write port.** Today it resolves no port at all, and a write port in `dual` mode would demand the shadow, which breaks "dual unchanged". Directly above the repair branch (`:194`), resolve `const rs = await resolveReadStorage({ dataRoot, projectsDir })` (catch → print the message, exit 1). Pass `readStorage: rs.readStorage, stage: stageFor(rs.mode)` into `runRepair`, and `await rs.close()` before its `process.exit`.
+  - The apply path keeps its own resolution at `:209`, changed to `resolvePorts`. Its `common` object uses `writePort: wp.writePort` (it was `wp.port` at `:219`) and adds `readStorage: wp.readStorage, stage: stageFor(wp.mode)`. Close in `finally` around `guarded(...)`.
+  - `runRepair` accepts `readStorage` and `stage` (`import-mapping.mjs:803-807`).
+  - The seam ledger entry for `import-runner.mjs` swaps `resolveWritePort` → `resolvePorts` and **adds** `stageFor` (it never took `commitOrQueue`), giving `["resolvePorts", "stageFor", "runImport", "runMappedImport", "runRepair", "withImportLock"]`. Add `resolveReadStorage` only if the guard asks for it (it classes it inert).
 
   **`loadBoard`:**
   - `import-apply.mjs:309` becomes `export async function loadBoard(…)`, and `:317` becomes `for (const t of await readStorage.listTickets(projectsDir))`.
   - `:595` becomes `const board = await loadBoard(…)`.
   - `import-mapping.mjs:629` becomes `await loadBoard(…)`, and `:887` becomes `(await loadBoard(…)).byId`.
-  - Test callers: `tests/model/import-apply.test.mjs` (`planFor` becomes async, and each of its 11 callers awaits it) and `tests/markdown-round-trip.test.mjs:142,183`.
+  - Test callers:
+    - `tests/model/import-apply.test.mjs`: `planFor` becomes async, and each of its 11 callers awaits it. Four of them are inline, `applyImport(planFor(...))` at `:146`, `:156`, `:184` and `:586`, which become `applyImport(await planFor(...))`. There are also direct `loadBoard` calls at `:128`, `:171` and `:188`.
+    - `tests/markdown-round-trip.test.mjs:142,183`: the enclosing test callbacks at `:141` and `:182` must become `async`.
   - Re-grep with `grep -rn "loadBoard(" scripts tests` and list every changed line in the report.
 
   **Seam ledger:** each of the seven runner entries swaps `resolveWritePort` → `resolvePorts` and `commitOrQueue` → `stageFor`, keeping any other names (e.g. new-runner's `applyNew`). Each gets a `// BLZ-670:` comment. Run the guard; the runner entries must match what the modules take exactly.
@@ -904,18 +914,16 @@ test("reconcile asks the reader which directories it could not read", async () =
 });
 ```
 
-  Add to the existing `reconcile-commit-report` test file (`ls tests | grep commit-report`):
+  Add to `tests/board-overstatement-guards.test.mjs`, where `applySummary` is already tested. Match its existing import of `applySummary`:
 
 ```js
 test("BLZ-670: a db-mode apply says the moves are in the database, never 'already matched HEAD'", () => {
-  const out = /* the report function that file already calls, with outcome "db" and movedCount 2 */;
+  const out = applySummary({ outcome: "db", error: null, movedCount: 2, nonMovedCount: 0 });
   assert.match(out.text, /database/);
   assert.doesNotMatch(out.text, /matched HEAD/);
   assert.equal(out.exit, 0);
 });
 ```
-
-  Fill the report call from that test file's existing calls, using the same function and argument shape with `outcome: "db"`.
 
   For the `--apply` write path in `db` mode, add a third test to `tests/reconcile-db-mode.test.mjs`. Build it from the smallest existing apply fixture: `grep -ln "commit: true\|dryRun: false" tests/reconcile*.test.mjs`, pick the shortest, and copy its board and git setup. Assert that with `mode: "db"`, a capturing `writePort` (as in Task 5) and `stage: stageFor("db")`:
   - the move goes through `writePort.move`;
@@ -931,18 +939,22 @@ test("BLZ-670: a db-mode apply says the moves are in the database, never 'alread
   - `:2008`: `const allTickets = [...(await readStorage.listTickets(projectsDir))];`
   - `:2046`: `for (const u of await readStorage.unreadableTicketDirs(projectsDir))`. Remove the `unreadableTicketDirs` import if `grep` shows no other use.
   - Signature: add `stage = commitOrQueue, mode = "fs"`. At `:2491`, `commitOrQueue(` → `stage(`. Where `commitOutcome` is computed from the stage's result (read `:2482-2530`), set `commitOutcome = "db"` when `mode === "db"`.
-  - `reconcile-commit-report.mjs`: add, before the `no-op` branch, `if (outcome === "db") return { stream: "out", exit: 0, text: \`reconcile: ${movedCount} ticket(s) moved${suffix} in the database — db mode makes no git commit.\` };`. Match that file's variable names.
+  - `reconcile-commit-report.mjs`: add `"db"` to `COMMIT_OUTCOMES` (`:26`), and add, before the `no-op` branch, `if (outcome === "db") return { stream: "out", exit: 0, text: \`reconcile: ${movedCount} ticket(s) moved${suffix} in the database — db mode makes no git commit.\` };`. Match that file's variable names.
   - CLI block (`:2607`):
 
 ```js
   const roots = resolveRoots();
   let ports;
-  try { ports = await (apply ? resolvePorts : resolveReadStorage)({ dataRoot: roots.dataRoot, projectsDir: roots.projectsDir }); }
+  // Only db mode opens a database port; fs and dual resolve a reader alone (dual unchanged).
+  const opener = apply && resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage;
+  try { ports = await opener({ dataRoot: roots.dataRoot, projectsDir: roots.projectsDir }); }
   catch (e) { console.error(e.message); process.exit(1); }
   try {
     r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
       projects: sawProject ? projectKeys : null, tickets: sawTicket ? ticketIds : null,
-      readStorage: ports.readStorage, writePort: ports.writePort ?? null,
+      // DUAL UNCHANGED: reconcile has always ignored BLAZE_WRITE_PORT and built fsWritePort
+      // itself (:1870). Only `db` hands it the database port; fs and dual keep null.
+      readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,
       stage: stageFor(ports.mode), mode: ports.mode });
   } catch (e) {
     if (e instanceof InvalidProjectKeyError) { await ports.close(); console.error(e.message); process.exit(1); }
@@ -951,7 +963,10 @@ test("BLZ-670: a db-mode apply says the moves are in the database, never 'alread
   await ports.close();
 ```
 
-  - `supervisor.mjs` `runReconcile` (`:294`): resolve `resolvePorts({ dataRoot: root, projectsDir })` inside its existing try; pass `readStorage`, `writePort`, `stage: stageFor(mode)` and `mode`; `finally { await ports.close(); }`. A resolver refusal flows into its existing catch.
+  - `supervisor.mjs` `runReconcile` (`:294`) uses the same rule, so dual stays unchanged. Resolve `const ports = await (resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)({ dataRoot: root, projectsDir })` inside its existing try, then pass `readStorage`, `writePort: ports.mode === "db" ? ports.writePort : null`, `stage: stageFor(ports.mode)` and `mode`, with `finally { await ports.close(); }`. A resolver refusal flows into its existing catch. The CLI block above already makes the same choice. Import `resolveWriteMode` alongside `resolvePorts`/`resolveReadStorage` in both files.
+  - **Existing tests that change (spec §5.5; list each in the PR):**
+    - `tests/reconcile-ambiguous-deliverer.test.mjs:687` ("clearing does not flap") uses a hand-rolled reader with only `listTickets`. Add `unreadableTicketDirs: () => []`.
+    - `tests/reconcile-git-probe-unreadable.test.mjs:136` and `:274` return `reconcile(...).then(...)` inside a `try`/`finally` that removes the tmp board and restores `PATH`. The new `await` lets the `finally` run first. Make both test bodies `async` and `await` the reconcile call **inside** the `try`.
   - `serve.mjs` `reconcilePreview`: `return withReadStorage({ dataRoot: root, projectsDir }, (readStorage, mode) => reconcile({ fetch: false, commit: false, dryRun: true, root, projectsDir, projects, readStorage, mode }));`. Route `:722`: `try { return json(200, await reconcilePreview({ root, projectsDir })); } catch (e) { if (e?.blazeResolve) return json(503, { errors: [String(e.message)] }); throw e; }`.
   - Seam ledger: update the `reconcile.mjs`, `supervisor.mjs` and `serve.mjs` entries to the exact names they now take (for example, `stageFor`, `resolvePorts`, `withReadStorage` where it is classed a write), each with a `// BLZ-670:` comment.
 - [ ] **Step 4: Run the tests.**
@@ -966,7 +981,12 @@ Expected: all pass.
 - Modify: `tests/model/seam-closure.test.mjs` if `schedule-runner.mjs`'s entry (`fsStorage`) is affected
 - Test: `tests/db-mode-reads.test.mjs` (remove the `todo` from tests 2, 3 and 4)
 
-- [ ] **Step 1: Confirm the failures.** With tests 2–4's markers removed locally, all three fail on the read side (Task 6 fixed the commit side). Record the messages.
+- [ ] **Step 1: Confirm the failures.** With tests 2–4's markers removed locally:
+  - test 2 fails with `index.json` saying `defined`;
+  - test 3 fails at audit (no `ENG-2`);
+  - test 4 exits 0 instead of refusing.
+
+  Task 6 fixed the commit side, and Task 4's `typeof` filter keeps `new` from crashing. Record the messages.
 - [ ] **Step 2: Implement.** Add `import { resolveReadStorage } from "./model/write-port-resolve.mjs";` at each file's **top level**, never inside a function.
   - **`reindex.mjs`:** inside the existing `try`, **after** `assertWritable(...)` and `mkdirSync(dbDir, …)`, so walk refusals keep going to its `blaze reindex failed:` handler:
 
@@ -1224,6 +1244,13 @@ Expected: 0 fail. Record the exact totals (tests / pass / fail / skipped). The P
 - [ ] **Step 5: Commit.** Subject: `BLZ-670: ADR-0038, ADR-0010/0012 addenda, and db-mode read docs`.
 
 ---
+
+## Follow-up tickets (file at Task 0, via the same board operator)
+
+Found by plan review. These are pre-existing `db`-mode **write** defects outside this read-path ticket, and both block BLZ-254's real cutover. Parent: BLZ-667.
+
+1. **`blaze import` in `db` mode allocates ids from the filesystem allocator** (`import-apply.mjs:431` `allocateId`, `:452` `writeClaim`), not the database's `project_counter`. It also writes and commits `projects/<KEY>/.ids/<n>`. A `db`-mode import and a `db`-mode `blaze new` can hand out the same id. Estimate 240.
+2. **`blaze import` in `db` mode fails on a row with a blank `created`**: `Provided value cannot be bound to SQLite parameter 19`, because `created_on` binds `undefined` (`write-port.mjs:291-295`). Estimate 60.
 
 ## Finish
 
