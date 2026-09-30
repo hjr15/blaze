@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-30-db-mode-write-seed-fixes-design.md` — read it first; this plan argues from it.
 
-**Prototype provenance.** Every code and test block below was run in a scratch worktree of `30978e5` against `postgres:17-alpine`. After adversarial review rounds 1, 2 and 3, every code and test block was re-extracted mechanically from this document and applied to a fresh worktree of the plan commit; with all eight tasks applied, `npm run test:coverage` (the full suite, serial, `BLAZE_TEST_PG_URL` set) → `tests 5326, pass 5325, fail 0, skipped 1`, and the c8 thresholds pass (statements 97.96 %, branches 87.92 %, functions 97.37 %, lines 97.96 % against 91/77/93/91). This covers review rounds 1–3. The fs import was checked byte-identical against the unmodified engine (tickets, `.ids/` claims, `.cutover`, receipt entries) behind an unreachable git remote.
+**Prototype provenance.** Every code and test block below was run in a scratch worktree of `30978e5` against `postgres:17-alpine`. After adversarial review round 4, the plan was applied to a fresh worktree **one task at a time using its own literal `git add`/`git commit` blocks**; after each task `git status --short` printed nothing and that task's test command passed against the committed tree. On the final committed, clean tree, `npm run test:coverage` (the full suite, serial, `BLAZE_TEST_PG_URL` set) → `tests 5332, pass 5331, fail 0, skipped 1`, and the c8 thresholds pass (statements 97.95 %, branches 87.91 %, functions 97.46 %, lines 97.95 % against 91/77/93/91). The fs import was checked byte-identical against the unmodified engine (tickets, `.ids/` claims, `.cutover`, receipt entries) behind an unreachable git remote.
 
 ## Global Constraints
 
@@ -46,8 +46,10 @@
 13. **No `write-port.mjs` seam pin is added for `reserve` (spec §3.2 said "the new port methods join write-port.mjs's pins").** `SEAM_WRITE_PROVIDERS` classifies a module's **exports**; `reserve` is a member of the object literals `fsWritePort`/`dbWritePort`/`dualWritePort` return, which the export classifier does not enumerate. Those three factories are already pinned (`inert`), and seam-closure passes 21/21 with no change to that entry — adding `"reserve"` would fail the "every export classified exactly once" assertion, since no export of that name exists. What *is* pinned is the fs allocator that `reserve` calls: `fsAllocators` joins write-port-resolve's `writes` (Task 5 Step 8).
 14. **db `reserve` refuses an id that already has a row.** Import calls `reserve` only for an explicit-id **create**, which the planner classifies against the same database — so a row there means a concurrent writer took the id after planning, and the following upsert would overwrite it. The refusal surfaces as import exit 4 (board changed, receipt names the unwritten rows), and its message says what the operator meets next rather than "re-run": a plain re-run *finds* the id (skipped if identical, refused naming `--update` if it differs), and a mapped import with a source-id column refuses at exit 5 until `blaze import repair`. `update` rows never call `reserve`. Pinned at import level (Task 5: a concurrent row injected between plan and apply → exit 4, the concurrent ticket survives).
 15. **Cutover cost, stated in the runbook text (Task 8):** after the flip every ticket in the groomer's columns re-grooms once — `.blaze/state.json` holds hashes of *file* text, and the db serialisation differs (it writes empty keys the file omitted). The state file is shared by both modes, so **flipping back to fs re-grooms everything once more** (the db-era hashes don't match the files). No code change; both costs are in the runbook text.
-16. **db-groomer containment is ONE rule with three parts (round-3 review replaced the round-2 patchwork).** Round 2 surveyed the board but excluded the SQLite store files and judged the store only by re-reading the groomed row; round 3 broke that three ways — the agent ran db-mode `new-runner` and planted `ENG-2` (groom success), swapped `.blaze/blaze.db` for a copy (the groom's write landed in the unlinked file and was lost), and a concurrent `import --apply` got an `out-of-bounds` refusal whose restore deleted the receipt and rewound the git ref while the `ENG-2` row stayed (a silent half-revert). The rule now: **(a)** the agent is spawned with `BLAZE_READONLY: "1"`, closing every `blaze` CLI/API write route (`scripts/readonly.mjs`); **(b)** the **store fingerprint** — `MAX(ticket_event.id)` read through `dbWritePort.storeFingerprint()` (the db write port already holds the exec for both drivers and the readers expose none, so no resolver signature changes and fs/dual are untouched) plus, on SQLite, lstat dev/ino/type of `.blaze/blaze.db` and `.blaze/config.db` — is compared after the agent and again before the write; if it moved, the pass is refused `store-changed`, **nothing is written and nothing is restored** (`restoreSkipped: true`, with the reason: store and files cannot be rewound together). `-wal`/`-shm`/`-journal` identity is deliberately **not** fingerprinted: measured while prototyping, another process's connection closing checkpoints and deletes them, so their existence/inode churns legitimately and fingerprinting them refused honest passes. This works on Postgres (event id only). **(c)** everything else on the data root is surveyed exactly as `groomOnce` surveys it — any change refused `out-of-bounds`, restored, verified, `revertFailed`/`residual`/`newDirt`/`revertErrors` and survey-gap flags reported, on **every** refusal path including scratch-only ones; `newDirt` is filtered by the same anchored store exclusion (a checkpoint on a board that tracks `.blaze/` otherwise reads as un-reverted dirt). The exclusion is anchored (`^\.blaze/(blaze|config)\.db(-wal|-shm|-journal)?$`), pinned by a test that `projects/ENG/.blaze/blaze.db-wal`, a root `blaze.db` and `.blaze/blaze.db-evil` are all refused. `cfg` is loaded by the caller before the agent runs, so a corrupted `blaze.config.json` is a restored board change, never an uncaught throw. **Named residual (in the code comment, `commands.md`, `design.md`, and the ADR-0038 and ADR-0019 addenda):** a raw SQL write that appends no `ticket_event` row — an agent holding the database credentials running `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` swapped in — moves neither the event id nor a main file's identity; only a change to the groomed row itself is caught (by the re-read).
+16. **db-groomer containment: one rule, three parts, and what it honestly does not do (rounds 3–4).** Round 3 replaced a patchwork (the round-2 survey excluded the SQLite store and judged it only by re-reading the groomed row — broken three ways: an agent-run `new-runner` planted `ENG-2`; a swapped `.blaze/blaze.db` swallowed the groom's write; a concurrent `import --apply` was half-reverted, its receipt deleted and ref rewound while its row stayed). **(a)** The agent is spawned with `BLAZE_READONLY: "1"`, so a `blaze` write it attempts **while following the rules** is refused. This is a guard, not a sandbox: the agent owns its environment and can unset it (round 4 reproduced `BLAZE_READONLY= new-runner …`), or reach a running board server that is not read-only. **(b)** What catches that is the **store fingerprint** — `MAX(ticket_event.id)` via the read-only `dbWritePort.storeFingerprint()` (the db port already holds the exec for both drivers; the readers expose none; no resolver signature changes; fs/dual untouched) plus, on SQLite, lstat dev/ino/type of `.blaze/blaze.db` and `.blaze/config.db` (not `-wal`/`-shm`/`-journal`: measured, another process's connection closing deletes and recreates them). Compared after the agent and again just before the write (that second check is **untested defence in depth** — no test injects a write between the two). If it moved — by anyone, **the agent included** — the pass is refused `store-changed` and the groom is not written; **the store's own writes stand** (a store cannot be rewound). Board files are left as found (`restoreSkipped`, `restoreSkippedWhy`: "the store changed during the agent run (by the agent or another writer)…") because rewinding another session's receipt or ref is a half-revert — **except** `ALWAYS_RESTORE`: `.blaze/database.json` (the DSN, read by `database-config.mjs`), `blaze.config.json` (holds `agentCommand`), `.blaze/identity.db` (`identity-db.mjs`'s `identityDbPath`), `.git/config`, `.git/hooks/**` — restored on every refusal (round-4 probe D: DSN poison + an agent store write → store-changed, DSN restored, the planted row named as standing). Restoring `identity.db` would also undo a concurrent `blaze user add`; accepted, since a credential store changing during an agent run is treated as hostile. **Back-off:** a store-changed pass records the ticket's current hash in `.blaze/state.json` (the existing shape; no new field), so an unchanged ticket is not offered to the agent again — otherwise a self-triggering agent reruns forever; cost: after an innocent concurrent write the ticket waits until it next changes. Works on Postgres (event id only). **(c)** Everything else on the data root is surveyed as `groomOnce` surveys it — refused `out-of-bounds`, restored, verified, `revertFailed`/`residual`/`newDirt`/`revertErrors` and survey-gap flags, on every non-store-changed refusal path including scratch-only ones; `newDirt` filtered by the same anchored store exclusion. The exclusion is anchored (`^\.blaze/(blaze|config)\.db(-wal|-shm|-journal)?$`) and pinned by a test. `cfg` is loaded before the agent runs. **Named residuals** (code comment, `commands.md`, `design.md`, ADR-0038 and ADR-0019 addenda): store writes by an agent that unset `BLAZE_READONLY` (detected, refused, but standing); a raw SQL write that appends no `ticket_event` row (an agent running `psql` with the credentials, a direct `sqlite3 … UPDATE`, a crafted `-wal`) — caught only on the groomed row, by the re-read; the check-then-write window, which on Postgres also includes identity values committing out of order (a transaction holding an id below the observed MAX that commits during the run).
 17. **Named residual — no undo for a db groom.** The feed's revert button (`supervisor.mjs:139`) needs a `sha`; a db groom commits nothing, so there is none. Recorded in the ADR-0038 addendum; a revert through the port is BLZ-254's.
+18. **`blaze db init`/`seed-counter` carry the per-runner readonly guard** that AGENTS.md says every mutating runner carries ("Every mutating runner also carries its own `BLAZE_READONLY` guard, hoisted before it writes anything"), via `assertWritable` exactly as `link-runner.mjs`/`sprint-runner.mjs` do; `status` stays unguarded (read-only). **Named residual:** `user-runner.mjs`, `init-runner.mjs` and `migrate-runner.mjs` have no per-runner guard (grep count 0 for `assertWritable`/`isReadonly`); a direct `node scripts/<x>-runner.mjs` bypasses `cli.mjs`'s dispatch gate. Not fixed here — each needs its own refusal placement and tests, outside BLZ-668's scope; recorded in the ADR-0019 addendum.
+19. **Every task's commit block was audited against its Files list and Steps (round-4 B1).** Task 6 Step 3 edits `scripts/model/write-port.mjs` (`storeFingerprint`) and Step 1 now edits `tests/model/write-port.test.mjs`; the round-3 pathspec omitted both, so the committed branch failed 15/17 groomer tests with `writePort.storeFingerprint is not a function`. Every commit block is now `git add <paths>` + `git commit … -- <same paths>` + `git status --short` (must print nothing), and the prototype was built by running those literal blocks task by task, running each task's tests against the committed tree.
 
 ## Review Focus
 
@@ -55,7 +57,7 @@
 2. **An operator re-runs `blaze db init` on a live Postgres, or passes `--force`** → refused, nothing dropped, the message names `blaze db seed-counter`; `--force` refused before any connection. Pinned: Task 2.
 3. **An explicit-id import row whose `project` differs from its id prefix** (fs) → claim still written under the row's project, exactly as before. Pinned: Task 5 (`the fs port reserves an explicit id: the claim is written under the given project`) plus the byte-identical check in Task 5 Step 10.
 4. **Another session writes to the store while the groomer's agent is running** (a move, an import) → the pass is refused `store-changed`, nothing is written or rewound, and the other session's work — row, receipt, git ref — survives. Pinned: Task 6 (`a move made by ANOTHER session…`, `a concurrent db-mode import…`, the Postgres case). The agent editing the file into something unparseable returns `reason: "unparseable"` (same path as `invalid`; not separately pinned — reviewers should read it).
-5. **The groomer's agent tries to write** — through `blaze` (refused by `BLAZE_READONLY`), by swapping the store file (`store-changed`), or anywhere else on the board (`.blaze/database.json`, a new ticket file, `blaze.config.json`, a look-alike store path → `out-of-bounds`, restored, nothing thrown). Pinned: Task 6 (probe 1, probe 2, `a write ANYWHERE…`, `a corrupted blaze.config.json…`, `…ANCHORED…`).
+5. **The groomer's agent tries to write** — through `blaze` following the rules (refused by `BLAZE_READONLY`), through `blaze` after unsetting it (`store-changed`: its row stands, its DSN/config/hook poison is restored, the ticket backs off), by swapping the store file (`store-changed`), or anywhere else on the board (`.blaze/database.json`, a new ticket file, `blaze.config.json`, a look-alike store path → `out-of-bounds`, restored, nothing thrown). Pinned: Task 6 (probes 1, 2 and D, the back-off test, `a write ANYWHERE…`, `a corrupted blaze.config.json…`, `…ANCHORED…`).
 6. **`blaze db init` on Postgres fails part-way (seed error after the schema exists, or a foreign/unstamped schema)** → a named error that says what state the database is in; only a genuinely initialised database is sent to `seed-counter`. Pinned: Task 2 (seed failure, foreign tables) and Task 3 (recovery via `seed-counter`).
 7. **A db-mode groomer pass whose resolver refuses** (no shadow/no schema) → one `{type:"error", loop:"groomer"}` event, loop not left `busy`, ports closed. Pinned: Task 7.
 
@@ -406,6 +408,7 @@ Expected: PASS — seed-counter `pass 9` with `BLAZE_TEST_PG_URL` set (8 + 1 ski
 ```bash
 git add scripts/model/seed-counter.mjs scripts/migrate/load-corpus.mjs tests/helpers/pg-scratch.mjs tests/model/seed-counter.test.mjs
 git commit -m "BLZ-668: seed-counter module — never-lower counter upsert over tickets, claims and table" -- scripts/model/seed-counter.mjs scripts/migrate/load-corpus.mjs tests/helpers/pg-scratch.mjs tests/model/seed-counter.test.mjs
+git status --short   # must print nothing
 ```
 
 ---
@@ -798,17 +801,17 @@ Expected: PASS, 0 failures (db-runner-pg: 5 tests with `BLAZE_TEST_PG_URL` set).
 - [ ] **Step 7: Commit**
 
 ```bash
+git add scripts/db-runner.mjs scripts/model/write-port-resolve.mjs tests/db-runner-pg.test.mjs tests/model/seam-closure.test.mjs
 git commit -m "BLZ-668: blaze db init on Postgres — schema and counter seed, --force refused, refusal names host/database" -- scripts/db-runner.mjs scripts/model/write-port-resolve.mjs tests/db-runner-pg.test.mjs tests/model/seam-closure.test.mjs
+git status --short   # must print nothing
 ```
-
-(`git add tests/db-runner-pg.test.mjs` first — it is new.)
 
 ---
 
 ### Task 3: `blaze db seed-counter`, and SQLite init seeds the claims (BLZ-669)
 
 **Files:**
-- Modify: `scripts/db-runner.mjs` (add `seedCounterCmd`; dispatch; SQLite init calls `seedCounter`)
+- Modify: `scripts/db-runner.mjs` (add `seedCounterCmd`; dispatch; SQLite init calls `seedCounter`; per-runner `BLAZE_READONLY` guard on `init`/`seed-counter`)
 - Modify: `tests/db-runner.test.mjs` (append), `tests/db-runner-pg.test.mjs` (append)
 
 **Interfaces:**
@@ -861,7 +864,13 @@ test("after init could not seed, fixing the cause and running seed-counter finis
 });
 ```
 
-In `tests/db-runner.test.mjs` add after `import { runDb } from "../scripts/db-runner.mjs";`:
+In `tests/db-runner.test.mjs` change `import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";` to
+
+```js
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+```
+
+add after `import { runDb } from "../scripts/db-runner.mjs";`:
 
 ```js
 import { writeClaim } from "../scripts/model/claims.mjs";
@@ -907,12 +916,31 @@ describe("blaze db seed-counter (sqlite)", () => {
     assert.match(c.text(), /blaze db init/);
   });
 });
+
+// BLZ-668: `init` and `seed-counter` carry the per-runner BLAZE_READONLY guard (AGENTS.md), so a
+// direct `node db-runner.mjs` refuses under it just as `blaze db` does at dispatch.
+describe("blaze db under BLAZE_READONLY", () => {
+  test("init refuses and creates no shadow; seed-counter refuses", async () => {
+    const roots = board();
+    const c = capture();
+    assert.equal(await runDb(["init"], { ...c.io, roots, env: { BLAZE_READONLY: "1" } }), 1);
+    assert.match(c.text(), /read-only mode \(BLAZE_READONLY=1\) — refusing to run blaze db init/);
+    assert.equal(existsSync(join(roots.dataRoot, ".blaze", "blaze.db")), false);
+    const c2 = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c2.io, roots, env: { BLAZE_READONLY: "1" } }), 1);
+    assert.match(c2.text(), /refusing to run blaze db seed-counter/);
+  });
+
+  test("status still runs — it only reads", async () => {
+    assert.equal(await runDb(["status"], { ...capture().io, roots: board(), env: { BLAZE_READONLY: "1" } }), 0);
+  });
+});
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `node --test --test-concurrency=1 tests/db-runner.test.mjs tests/db-runner-pg.test.mjs`
-Expected: FAIL — `seed-counter` cases: `unknown command "seed-counter"` (exit 1 where 0 expected); `after init could not seed…`: the `seed-counter` step exits 1 (unknown command); `init seeds the counter from a claim above every ticket`: `1 !== 7` (loadCorpus counts tickets only).
+Expected: FAIL — `seed-counter` cases: `unknown command "seed-counter"` (exit 1 where 0 expected); `after init could not seed…`: the `seed-counter` step exits 1 (unknown command); `init seeds the counter from a claim above every ticket`: `1 !== 7` (loadCorpus counts tickets only); `blaze db under BLAZE_READONLY` → `init refuses…`: `0 !== 1` (no per-runner guard yet).
 
 - [ ] **Step 3: Implement.** In `scripts/db-runner.mjs`:
 
@@ -971,7 +999,26 @@ with
                       { dialect: "sqlite" });
 ```
 
-(c) in `runDb` add after `if (cmd === "init") return init(ctx);`:
+(c) add the per-runner readonly guard AGENTS.md promises every mutating runner carries ("Every mutating runner also carries its own `BLAZE_READONLY` guard, hoisted before it writes anything"; `link-runner.mjs`/`sprint-runner.mjs` call `assertWritable` the same way). Change the import `import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";` to be followed by
+
+```js
+import { assertWritable } from "./readonly.mjs";
+```
+
+and in `runDb` insert immediately before `  if (cmd === "init") return init(ctx);`:
+
+```js
+  // BLZ-668: the per-runner BLAZE_READONLY guard every mutating runner carries (AGENTS.md), for
+  // a direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. `status` only reads.
+  if (cmd === "init" || cmd === "seed-counter") {
+    try { assertWritable(`run blaze db ${cmd}`, io.env ?? process.env); }
+    catch (e) { err(e.message); return 1; }
+  }
+```
+
+(`io.env` is injectable for the test; `status` stays unguarded — it only reads.)
+
+(d) in `runDb` add after `if (cmd === "init") return init(ctx);`:
 
 ```js
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
@@ -980,12 +1027,14 @@ with
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test --test-concurrency=1 tests/db-runner.test.mjs tests/db-runner-pg.test.mjs tests/db-mode-reads.test.mjs tests/read-storage-resolve.test.mjs tests/model/config-install.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — db-runner `pass 9`; db-runner-pg `pass 8` with Postgres; seam-closure 21/21 (db-runner's new calls reach no unpinned write member).
+Expected: PASS — db-runner `pass 11`; db-runner-pg `pass 8` with Postgres; seam-closure 21/21 (db-runner's new calls reach no unpinned write member).
 
 - [ ] **Step 5: Commit**
 
 ```bash
+git add scripts/db-runner.mjs tests/db-runner.test.mjs tests/db-runner-pg.test.mjs
 git commit -m "BLZ-669: blaze db seed-counter for both drivers; SQLite init also seeds from .ids/ claims" -- scripts/db-runner.mjs tests/db-runner.test.mjs tests/db-runner-pg.test.mjs
+git status --short   # must print nothing
 ```
 
 ---
@@ -1152,8 +1201,9 @@ Expected: PASS, 0 failures.
 - [ ] **Step 6: Commit**
 
 ```bash
-git add tests/import-db-mode.test.mjs
+git add scripts/model/write-port.mjs tests/model/write-port.test.mjs tests/import-db-mode.test.mjs
 git commit -m "BLZ-672: db write port stamps a missing created/updated with the write's date" -- scripts/model/write-port.mjs tests/model/write-port.test.mjs tests/import-db-mode.test.mjs
+git status --short   # must print nothing
 ```
 
 ---
@@ -1763,7 +1813,9 @@ Expected: `IDENTICAL` and `RECEIPTS IDENTICAL`; `projects/BLZ/.ids/900` = `BLZ-9
 - [ ] **Step 11: Commit**
 
 ```bash
+git add scripts/model/write-port.mjs scripts/model/write-port-resolve.mjs scripts/model/import-apply.mjs scripts/import-runner.mjs tests/model/seam-closure.test.mjs tests/model/import-apply.test.mjs tests/model/write-port.test.mjs tests/write-port-resolve.test.mjs tests/import-runner.test.mjs tests/import-db-mode.test.mjs
 git commit -m "BLZ-671: import allocates and reserves ids through the write port; reserve on fs/db/dual ports" -- scripts/model/write-port.mjs scripts/model/write-port-resolve.mjs scripts/model/import-apply.mjs scripts/import-runner.mjs tests/model/seam-closure.test.mjs tests/model/import-apply.test.mjs tests/model/write-port.test.mjs tests/write-port-resolve.test.mjs tests/import-runner.test.mjs tests/import-db-mode.test.mjs
+git status --short   # must print nothing
 ```
 
 ---
@@ -1774,13 +1826,14 @@ git commit -m "BLZ-671: import allocates and reserves ids through the write port
 - Modify: `scripts/loops/groomer.mjs` (imports; new exports `selectNextTicketDb`, `groomOnceDb` above the CLI block). `groomOnce` and every fs helper are **not** edited.
 - Modify: `scripts/model/write-port.mjs` (`dbWritePort` gains the read-only `storeFingerprint()` method)
 - Modify: `tests/groomer-db-mode.test.mjs` (imports + append; the BLZ-670 refusal test stays until Task 7)
+- Modify: `tests/model/write-port.test.mjs` (import + append: `storeFingerprint` unit tests, SQLite and gated Postgres)
 - Modify: `tests/model/seam-closure.test.mjs` (groomer pin, additive)
 
 **Interfaces:**
 - Consumes: `resolvePorts`' `readStorage` (`listTickets`, `getTicket`) and `writePort.write(t, ctx)`; `serializeTicket`/`parseTicket` (`model/ticket.mjs`); `EDITABLE_FIELDS` (`model/fields.mjs`); `validateTicket` (`model/rules.mjs`); `loadProjectSchema` (`model/schema-config.mjs`); `validateTaxonomy` (`model/taxonomy.mjs`); `loadSprints`, `validateSprintFields` (`model/sprints.mjs`); `loadProject` (`config.mjs`); the file's own `loadState`, `saveState`, `hashContent`, `buildPrompt`, `extractGroomingRules`, `snapshotTree`, `diffSnapshots`, `outOfBoundsPaths`, `redactSecrets`, `DEFAULT_TIMEOUT_SEC`, `DEFAULT_MAX_BUFFER_MB`.
 - Produces:
   - `selectNextTicketDb({ projectsDir, cfg, state, readStorage }) → Promise<{ id, project, status, file, raw } | null>` — columns order, then `cfg.projects` order, then numeric-aware id order; ungroomed = `state.groomed[id] !== hashContent(serializeTicket(t))`.
-  - `groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) → Promise<event|null>` — `writePort` must be a **db** port (it calls `writePort.storeFingerprint()`), and `cfg` must be loaded by the caller before the call. Events: `null`; `{ type:"groom", id, noop:true, ts }`; `{ type:"groom", id, refused:true, reason: "store-changed"|"out-of-bounds"|"unparseable"|"identity-field"|"invalid"|"changed-concurrently", outOfBounds, ts, fields?|errors?, restoreSkipped?, restoreSkippedWhy? }` (`errors` redacted with `redactSecrets` and cut to 200 chars, like the `error` path; `store-changed` carries `restoreSkipped: true` and no revert fields; every other refusal restores the board and reports `revertFailed`/`residual`/`newDirt`/`revertErrors` as `groomOnce` does); `{ type:"groom", id, error, ts, timedOut? }`; success `{ type:"groom", id, files:["<id>.md"], ts }` (no `sha`). Survey-gap flags are stamped on every event. Writes with ctx `{ actor: "groomer", source: "loop" }`. Containment: the agent's env carries `BLAZE_READONLY: "1"`; the store fingerprint (`MAX(ticket_event.id)` + on SQLite the dev/ino/type of `.blaze/blaze.db` and `.blaze/config.db`) is compared after the agent and again just before the write; the whole data root except `DB_STORE_FILE` (anchored `^\.blaze/(blaze|config)\.db(-wal|-shm|-journal)?$`) is surveyed and restored.
+  - `groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) → Promise<event|null>` — `writePort` must be a **db** port (it calls `writePort.storeFingerprint()`), and `cfg` must be loaded by the caller before the call. Events: `null`; `{ type:"groom", id, noop:true, ts }`; `{ type:"groom", id, refused:true, reason: "store-changed"|"out-of-bounds"|"unparseable"|"identity-field"|"invalid"|"changed-concurrently", outOfBounds, ts, fields?|errors?, restoreSkipped?, restoreSkippedWhy?, restored? }` (`errors` redacted with `redactSecrets` and cut to 200 chars, like the `error` path). `store-changed`: the groom is not written, the store's writes stand, `restoreSkipped: true`, only `ALWAYS_RESTORE` paths (`.blaze/database.json`, `blaze.config.json`, `.blaze/identity.db`, `.git/config`, `.git/hooks/**`) among the touched board paths are restored (`restored`, with `revertFailed`/`residual`/`revertErrors` if that restore did not verify), and the ticket's current hash is recorded in `.blaze/state.json` (back-off). Every other refusal restores the whole touched board and reports `revertFailed`/`residual`/`newDirt`/`revertErrors` as `groomOnce` does. `{ type:"groom", id, error, ts, timedOut? }`; success `{ type:"groom", id, files:["<id>.md"], ts }` (no `sha`). Survey-gap flags are stamped on every event. Writes with ctx `{ actor: "groomer", source: "loop" }`. Containment: the agent's env carries `BLAZE_READONLY: "1"` (advisory); the store fingerprint (`MAX(ticket_event.id)` + on SQLite the dev/ino/type of `.blaze/blaze.db` and `.blaze/config.db`) is compared after the agent and again just before the write; the whole data root except `DB_STORE_FILE` (anchored `^\.blaze/(blaze|config)\.db(-wal|-shm|-journal)?$`) is surveyed.
   - `dbWritePort(...).storeFingerprint() → Promise<{ dialect, lastEventId }>` — read-only.
 
 - [ ] **Step 1: Write the failing tests.** In `tests/groomer-db-mode.test.mjs` change the `node:fs` import to include `readFileSync` and `readdirSync`:
@@ -1997,6 +2050,40 @@ test("groomOnceDb: a concurrent db-mode import during the agent → store-change
   assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
 });
 
+test("groomOnceDb: an agent that UNSETS BLAZE_READONLY and writes the store still loses its config poison (probe D)",
+     async () => {
+  // BLAZE_READONLY is advisory — the agent owns its env. Its store write stands (store-changed
+  // cannot rewind a store), but the DSN it planted is restored regardless (ALWAYS_RESTORE).
+  const newRunner = new URL("../scripts/new-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r) =>
+    `printf '{"host":"attacker.example"}' > "${r.dataRoot}/.blaze/database.json"\n`
+    + `BLAZE_READONLY= BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db "${process.execPath}" "${newRunner}" `
+    + `--project ENG --type task --estimate 15 "planted" >/dev/null\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.reason, "store-changed", JSON.stringify(groom));
+  assert.equal(groom.restoreSkipped, true);
+  assert.deepEqual(groom.restored, [".blaze/database.json"]);
+  assert.equal(groom.revertFailed, undefined, JSON.stringify(groom));
+  assert.equal(existsSync(join(roots.dataRoot, ".blaze", "database.json")), false, "the DSN poison is restored");
+  assert.equal((await readBack(roots, "ENG-2")).frontmatter.title, "planted", "the store write stands — named, not hidden");
+  assert.match(groom.restoreSkippedWhy, /by the agent or another writer/);
+});
+
+test("groomOnceDb: a store-changed pass backs off — the same unchanged ticket is not handed to the agent again",
+     async () => {
+  const newRunner = new URL("../scripts/new-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r, mark) =>
+    `echo "$BLAZE_GROOM_TARGET" >> "${mark}/runs"\n`
+    + `BLAZE_READONLY= BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db "${process.execPath}" "${newRunner}" `
+    + `--project ENG --type task --estimate 15 "self-trigger" >/dev/null\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  assert.equal((await groomDirect(roots)).reason, "store-changed");
+  await groomDirect(roots);   // offers the NEXT ungroomed ticket (the one the agent planted), not ENG-1
+  const runs = readFileSync(join(roots.mark, "runs"), "utf8").trim().split("\n");
+  assert.equal(runs.filter((r) => r === "ENG-1.md").length, 1, runs.join(","));
+});
+
 test("groomOnceDb: the store exclusion is ANCHORED — look-alike paths are surveyed, refused and restored", async () => {
   const roots = await dbGroomBoard((r) =>
     `mkdir -p "${r.projectsDir}/ENG/.blaze"\n`
@@ -2085,10 +2172,50 @@ test("groomOnceDb on POSTGRES: grooms through the port, and a concurrent port wr
 });
 ```
 
+In `tests/model/write-port.test.mjs` add after `import { scratchRegistry } from "../helpers/scratch.mjs";`:
+
+```js
+import { PG_SKIP, scratchPgDb, pgClient } from "../helpers/pg-scratch.mjs";
+```
+
+and append the fingerprint's own unit tests:
+
+```js
+// BLZ-673: the store fingerprint the db groomer compares across an agent run. Every port write
+// appends a ticket_event row, so its last id moves; nothing else here is allowed to move it.
+async function assertFingerprint(exec, dialect) {
+  const port = dbWritePort(exec, { dialect });
+  assert.deepEqual(await port.storeFingerprint(), { dialect, lastEventId: 0 });
+  await port.write(TICKET());
+  const a = await port.storeFingerprint();
+  assert.ok(a.lastEventId > 0, JSON.stringify(a));
+  await port.read("BLZ-1");
+  await port.exists({ frontmatter: { id: "BLZ-1" } });
+  assert.deepEqual(await port.storeFingerprint(), a, "reads do not move it");
+  await port.write({ ...TICKET(), body: "edited" });
+  assert.ok((await port.storeFingerprint()).lastEventId > a.lastEventId, "a second write moves it");
+}
+
+test("dbWritePort.storeFingerprint moves on writes and only on writes (sqlite)", async () => {
+  await assertFingerprint(sqliteExec(), "sqlite");
+});
+
+test("dbWritePort.storeFingerprint moves on writes and only on writes (postgres)", PG_SKIP, async () => {
+  const db = await scratchPgDb("fingerprint");
+  const client = await pgClient(db.url);
+  try {
+    const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+    const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    await assertFingerprint(pgExec(client), "postgres");
+  } finally { await client.end(); await db.drop(); }
+});
+```
+
 - [ ] **Step 2: Run them to verify they fail**
 
-Run: `node --test tests/groomer-db-mode.test.mjs`
-Expected: FAIL — `SyntaxError: The requested module '../scripts/loops/groomer.mjs' does not provide an export named 'groomOnceDb'`.
+Run: `node --test tests/groomer-db-mode.test.mjs tests/model/write-port.test.mjs`
+Expected: FAIL — `SyntaxError: The requested module '../scripts/loops/groomer.mjs' does not provide an export named 'groomOnceDb'`; write-port: `TypeError: port.storeFingerprint is not a function`.
 
 - [ ] **Step 3: Implement.** In `scripts/loops/groomer.mjs` replace the import block
 
@@ -2161,6 +2288,18 @@ const DB_STORE_FILE = /^\.blaze\/(blaze|config)\.db(-wal|-shm|-journal)?$/;
  * appends no event: the named residual.
  */
 const STORE_FILES = [".blaze/blaze.db", ".blaze/config.db"];
+
+/**
+ * Board paths restored EVEN on a `store-changed` refusal: configuration and credentials that
+ * no ticket verb writes, and whose poisoning outlives the pass — the Postgres DSN
+ * (`.blaze/database.json`, read by database-config.mjs), the board config (`blaze.config.json`,
+ * which holds `agentCommand`), the identity store (`.blaze/identity.db`, identity-db.mjs), and
+ * git's execution sinks (`.git/config`, `.git/hooks/**`). A concurrent `blaze user add` does
+ * write identity.db; restoring it would undo that user — accepted: a credential store that
+ * changes while an agent runs is treated as hostile. Every other board path keeps
+ * `restoreSkipped` semantics (a receipt or ref written by another session's verb must stand).
+ */
+const ALWAYS_RESTORE = /^(\.blaze\/database\.json|blaze\.config\.json|\.blaze\/identity\.db|\.git\/config|\.git\/hooks(\/.*)?)$/;
 
 /**
  * The store fingerprint: `ticket_event`'s last id (moves on every port write, any process,
@@ -2243,12 +2382,14 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
     const before = snapshotTree(dir);
     // BLZ-673, containment — ONE rule with three parts (ADR-0019: defence in depth, not a
     // boundary; its addendum lists what stays uncovered):
-    //  1. The agent runs with BLAZE_READONLY=1, so every blaze CLI/API write route refuses
-    //     (scripts/readonly.mjs) — it cannot `blaze new`/`move`/`import` its way into the store.
+    //  1. The agent runs with BLAZE_READONLY=1, so a blaze CLI/API write it attempts is refused
+    //     (scripts/readonly.mjs). ADVISORY: the agent controls its own env and can unset it, or
+    //     reach a running non-readonly board server — part 2 is what catches that.
     //  2. The STORE is fingerprinted before and after (storeFingerprintOf). If it moved — a
-    //     port write by anyone, or a store file swapped — the pass is refused `store-changed`,
-    //     NOTHING is written and the board is NOT restored: the store cannot be rewound with the
-    //     files, and rewinding only the files (a receipt, a git ref) would leave a half-revert.
+    //     port write by anyone, the agent included, or a store file swapped — the pass is refused
+    //     `store-changed` and the groom is NOT written. The store's own writes STAND (it cannot be
+    //     rewound); board files are left as found except config/credentials/git sinks
+    //     (ALWAYS_RESTORE), because rewinding a concurrent verb's receipt or ref is a half-revert.
     //  3. The rest of the BOARD is surveyed as the fs groomer surveys it: any change is refused
     //     `out-of-bounds` and restored. `cfg` was loaded by the caller BEFORE the agent ran, so
     //     a corrupted blaze.config.json is a restored board change, never an uncaught throw.
@@ -2300,8 +2441,21 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
       const evt = { type: "groom", id: ticket.id, refused: true, reason, outOfBounds: stray, ts: today, ...extra };
       if (reason === "store-changed") {
         evt.restoreSkipped = true;
-        evt.restoreSkippedWhy = "the store changed during the pass and cannot be rewound together "
-          + "with the files; restoring only the files would leave a half-revert";
+        evt.restoreSkippedWhy = "the store changed during the agent run (by the agent or another "
+          + "writer) and cannot be rewound; its writes stand, and board files other than config, "
+          + "credentials and git hooks are left as found so a concurrent verb is not half-reverted";
+        // Config, credentials and git sinks are restored regardless — see ALWAYS_RESTORE.
+        const guarded = boardTouched.filter((f) => ALWAYS_RESTORE.test(f));
+        if (guarded.length) {
+          const { failures } = restoreSnapshot(root, boardBefore, guarded);
+          const residual = diffSnapshots(boardBefore, snapshotTree(root)).filter((f) => guarded.includes(f));
+          evt.restored = guarded;
+          if (residual.length || failures.length) {
+            evt.revertFailed = true;
+            evt.residual = residual;
+            if (failures.length) evt.revertErrors = failures.map((f) => redactSecrets(f).slice(0, 200));
+          }
+        }
       } else {
         // Restore (board paths only — the scratch dir is deleted anyway) and VERIFY by
         // re-observing, exactly as groomOnce's refuse does, on EVERY refusal path.
@@ -2321,7 +2475,18 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
       console.error(`groomer: refused (${reason}) on ${ticket.id}`);
       return stampSurvey(evt);
     };
-    if (await storeFingerprintOf(root, writePort) !== storeBefore) return refuse("store-changed");
+    // Back-off. A store-changed pass records the groomed ticket's CURRENT hash (the existing
+    // state shape — no new field), so the same unchanged ticket is not handed to the agent again
+    // on the next tick. Without it an agent that writes to the store on every run — the
+    // self-triggering case — is re-run on the same ticket forever. Cost, accepted: after a
+    // store-changed caused by an innocent concurrent writer, this ticket waits until it next
+    // changes (or its state entry is cleared) before it is groomed.
+    const storeChanged = async () => {
+      const cur = (await readStorage.getTicket(projectsDir, ticket.id)).found;
+      if (cur) record(serializeTicket({ frontmatter: cur.frontmatter, body: cur.body ?? "" }));
+      return refuse("store-changed");
+    };
+    if (await storeFingerprintOf(root, writePort) !== storeBefore) return storeChanged();
     if (stray.length) return refuse("out-of-bounds");
 
     if (r.error || r.status !== 0) {
@@ -2360,11 +2525,15 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
     if (errors.length) return refuse("invalid", { errors: errors.map((e) => redactSecrets(e).slice(0, 200)) });
 
     // Last look before the write. The fingerprint again — validation read the whole board,
-    // and a port write in that time is the same lost update — then the groomed ROW itself:
+    // and a port write in that time is the same lost update. (UNTESTED defence in depth: no
+    // test injects a write between the post-agent check and this one.) Then the groomed ROW:
     // strictly redundant for port writes (they move the event id), it is kept as defence in
     // depth because it also catches a raw SQL change to this row that appended no event.
-    // RESIDUAL: check-then-write, no row lock; the window is milliseconds. BLZ-254 owns it.
-    if (await storeFingerprintOf(root, writePort) !== storeBefore) return refuse("store-changed");
+    // RESIDUAL: check-then-write, no row lock; the window is milliseconds. On Postgres it also
+    // includes identity values committing out of order: a transaction that drew a LOWER id than
+    // the MAX read before the agent, and commits during the run, leaves MAX unchanged. BLZ-254
+    // owns both.
+    if (await storeFingerprintOf(root, writePort) !== storeBefore) return storeChanged();
     const current = (await readStorage.getTicket(projectsDir, ticket.id)).found;
     if (!current || current.status !== ticket.status
         || hashContent(serializeTicket({ frontmatter: current.frontmatter, body: current.body ?? "" }))
@@ -2434,12 +2603,14 @@ with
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `node --test --test-concurrency=1 tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/groomer-propose.test.mjs tests/model/write-port.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — groomer-db-mode `pass 15` with `BLAZE_TEST_PG_URL` set (fs control, the still-present BLZ-670 refusal, and the thirteen `groomOnceDb` cases; the Postgres one skips without it); the fs groomer suites unchanged; seam-closure 21/21.
+Expected: PASS — groomer-db-mode `pass 17` with `BLAZE_TEST_PG_URL` set (fs control, the still-present BLZ-670 refusal, and the fifteen `groomOnceDb` cases; the Postgres one skips without it); write-port includes the two `storeFingerprint` tests; the fs groomer suites unchanged; seam-closure 21/21.
 
 - [ ] **Step 6: Commit**
 
 ```bash
-git commit -m "BLZ-673: groomOnceDb — groom through the port via a materialised scratch file" -- scripts/loops/groomer.mjs tests/groomer-db-mode.test.mjs tests/model/seam-closure.test.mjs
+git add scripts/loops/groomer.mjs scripts/model/write-port.mjs tests/groomer-db-mode.test.mjs tests/model/write-port.test.mjs tests/model/seam-closure.test.mjs
+git commit -m "BLZ-673: groomOnceDb — groom through the port via a materialised scratch file" -- scripts/loops/groomer.mjs scripts/model/write-port.mjs tests/groomer-db-mode.test.mjs tests/model/write-port.test.mjs tests/model/seam-closure.test.mjs
+git status --short   # must print nothing
 ```
 
 ---
@@ -2736,6 +2907,40 @@ test("groomOnceDb: a concurrent db-mode import during the agent → store-change
   assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
 });
 
+test("groomOnceDb: an agent that UNSETS BLAZE_READONLY and writes the store still loses its config poison (probe D)",
+     async () => {
+  // BLAZE_READONLY is advisory — the agent owns its env. Its store write stands (store-changed
+  // cannot rewind a store), but the DSN it planted is restored regardless (ALWAYS_RESTORE).
+  const newRunner = new URL("../scripts/new-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r) =>
+    `printf '{"host":"attacker.example"}' > "${r.dataRoot}/.blaze/database.json"\n`
+    + `BLAZE_READONLY= BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db "${process.execPath}" "${newRunner}" `
+    + `--project ENG --type task --estimate 15 "planted" >/dev/null\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.reason, "store-changed", JSON.stringify(groom));
+  assert.equal(groom.restoreSkipped, true);
+  assert.deepEqual(groom.restored, [".blaze/database.json"]);
+  assert.equal(groom.revertFailed, undefined, JSON.stringify(groom));
+  assert.equal(existsSync(join(roots.dataRoot, ".blaze", "database.json")), false, "the DSN poison is restored");
+  assert.equal((await readBack(roots, "ENG-2")).frontmatter.title, "planted", "the store write stands — named, not hidden");
+  assert.match(groom.restoreSkippedWhy, /by the agent or another writer/);
+});
+
+test("groomOnceDb: a store-changed pass backs off — the same unchanged ticket is not handed to the agent again",
+     async () => {
+  const newRunner = new URL("../scripts/new-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r, mark) =>
+    `echo "$BLAZE_GROOM_TARGET" >> "${mark}/runs"\n`
+    + `BLAZE_READONLY= BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db "${process.execPath}" "${newRunner}" `
+    + `--project ENG --type task --estimate 15 "self-trigger" >/dev/null\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  assert.equal((await groomDirect(roots)).reason, "store-changed");
+  await groomDirect(roots);   // offers the NEXT ungroomed ticket (the one the agent planted), not ENG-1
+  const runs = readFileSync(join(roots.mark, "runs"), "utf8").trim().split("\n");
+  assert.equal(runs.filter((r) => r === "ENG-1.md").length, 1, runs.join(","));
+});
+
 test("groomOnceDb: the store exclusion is ANCHORED — look-alike paths are surveyed, refused and restored", async () => {
   const roots = await dbGroomBoard((r) =>
     `mkdir -p "${r.projectsDir}/ENG/.blaze"\n`
@@ -2978,12 +3183,14 @@ with
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `node --test --test-concurrency=1 tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/supervisor-surface.test.mjs tests/cli-key-refusal.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — groomer-db-mode `pass 17` with `BLAZE_TEST_PG_URL` set; the rest unchanged; seam-closure 21/21.
+Expected: PASS — groomer-db-mode `pass 19` with `BLAZE_TEST_PG_URL` set; the rest unchanged; seam-closure 21/21.
 
 - [ ] **Step 7: Commit**
 
 ```bash
+git add scripts/supervisor.mjs scripts/loops/groomer.mjs tests/groomer-db-mode.test.mjs tests/model/seam-closure.test.mjs
 git commit -m "BLZ-673: supervisor and blaze groom groom through the port under db; BLZ-670 refusal replaced" -- scripts/supervisor.mjs scripts/loops/groomer.mjs tests/groomer-db-mode.test.mjs tests/model/seam-closure.test.mjs
+git status --short   # must print nothing
 ```
 
 ---
@@ -3057,14 +3264,19 @@ and append to the `## groom` section, after `No CLI args.`:
 
 Under `BLAZE_WRITE_PORT=db` (BLZ-673) the ticket is read from the database and written to a
 fresh scratch directory as `<id>.md`; the agent edits that file, and the result is written
-back through the write port — nothing is committed. The agent runs with `BLAZE_READONLY=1`, so
-every `blaze` write it attempts is refused. The pass is refused, and nothing written, if:
+back through the write port — nothing is committed. The agent runs with `BLAZE_READONLY=1`,
+so a `blaze` write it attempts **while following the rules** is refused — it is a guard, not a
+sandbox: the agent controls its own environment and can unset it, or reach a running board
+server that is not read-only. What catches that is the store check. The pass is refused, and
+the groom not written, if:
 
 - **the store changed while the agent ran** (`store-changed`) — any write through the write
-  port by any session moves the last `ticket_event` id, and on SQLite a swapped
-  `.blaze/blaze.db`/`config.db` changes its inode. Board files are **not** restored in this
-  case (`restoreSkipped`): the store cannot be rewound with them, and rewinding only the files
-  would half-revert whatever the other session did;
+  port by anyone, the agent included, moves the last `ticket_event` id, and on SQLite a swapped
+  `.blaze/blaze.db`/`config.db` changes its inode. The store's own writes **stand** (a store
+  cannot be rewound). Board files are left as found (`restoreSkipped`) — rewinding another
+  session's receipt or git ref would half-revert it — **except** `.blaze/database.json`,
+  `blaze.config.json`, `.blaze/identity.db`, `.git/config` and `.git/hooks/`, which are always
+  restored (`restored`). The ticket is then not offered to the agent again until it changes;
 - **the agent wrote any other file** (`out-of-bounds`) — in the scratch directory or anywhere on
   the board (the whole data root is surveyed as on the fs path, except `.blaze/blaze.db`,
   `.blaze/config.db` and their `-wal`/`-shm`/`-journal` files, which the store check covers);
@@ -3073,7 +3285,8 @@ every `blaze` write it attempts is refused. The pass is refused, and nothing wri
   `labels`, `components`, `estimate`, `parent`, `likelihood`, `impact`, `sprint`,
   `not_before`, `deadline`) plus `updated`, or left a ticket `blaze edit` would reject.
 
-Not covered: a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in. That moves neither the event id nor a file identity (a re-read of the
+Not covered: store writes the agent makes after unsetting `BLAZE_READONLY` (refused as a pass,
+but they stand); a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in. That moves neither the event id nor a file identity (a re-read of the
 groomed row still catches it on that one row). A db groom has no commit, so the feed offers
 no revert for it.
 ```
@@ -3092,9 +3305,10 @@ with
 **Under `BLAZE_WRITE_PORT=db`** (BLZ-673) the groomer reads the ticket through the port,
 materialises it as `<id>.md` in a scratch directory for the agent, and writes the result back
 through the write port — no file on the board is edited and nothing is committed. The agent runs
-with `BLAZE_READONLY=1`. The store is fingerprinted across the run (last `ticket_event` id; on
-SQLite, the main store files' inodes): if it moved, the pass is refused and nothing — store or
-files — is written or rewound. The rest of the board is surveyed as on the fs path: anything the
+with `BLAZE_READONLY=1` — advisory: the agent owns its environment. The store is fingerprinted
+across the run (last `ticket_event` id; on SQLite, the main store files' inodes): if it moved —
+by anyone, the agent included — the pass is refused and the groom not written; the store's own
+writes stand, and of the board files only config, credentials and git hooks are restored. The rest of the board is surveyed as on the fs path: anything the
 agent writes outside that one file is refused and restored. A field outside the editable set
 plus `updated`, or a result `blaze edit` would reject, is refused too. Not covered: a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in.
 ```
@@ -3175,15 +3389,20 @@ The supervisor's BLZ-670 refusal is removed; `blaze groom` takes the same db bra
 Containment is one rule with three parts ([ADR-0019](0019-the-groomers-guard-is-advisory.md)'s
 defence in depth, not a boundary; its addendum lists what stays uncovered):
 
-1. The agent runs with `BLAZE_READONLY=1`, closing every `blaze` CLI/API write route.
+1. The agent runs with `BLAZE_READONLY=1`, so a `blaze` CLI/API write it attempts while
+   following the rules is refused. This is advisory — the agent controls its own environment
+   and can unset it, or reach a running board server that is not read-only; part 2 catches that.
 2. The **store** is fingerprinted before and after the agent — the last `ticket_event` id (every
-   port write, by any session, on either driver, appends one) and, on SQLite, the dev/ino of
-   `.blaze/blaze.db` and `.blaze/config.db`. If it moved, the pass is refused `store-changed`,
-   nothing is written, and the board is **not** restored (`restoreSkipped`): the store and the
-   files cannot be rewound together, and rewinding only the files — a receipt, a git ref — is a
-   half-revert. The fingerprint is re-checked, and the groomed row re-read, just before the
-   write; that last look is check-then-write without a row lock (a millisecond window,
-   BLZ-254's to close).
+   port write, by anyone — the agent included — on either driver, appends one) and, on SQLite,
+   the dev/ino of `.blaze/blaze.db` and `.blaze/config.db`. If it moved, the pass is refused
+   `store-changed` and the groom is not written. The store's own writes **stand**. Board files
+   are left as found (`restoreSkipped`) — rewinding another session's receipt or git ref is a
+   half-revert — except `.blaze/database.json`, `blaze.config.json`, `.blaze/identity.db`,
+   `.git/config` and `.git/hooks/**`, which are always restored. The ticket's current hash is
+   recorded so it is not offered again until it changes. The fingerprint is re-checked, and the
+   groomed row re-read, just before the write; that last look is check-then-write without a row
+   lock (a millisecond window — on Postgres it also includes identity values committing out of
+   order — BLZ-254's to close).
 3. The rest of the **board** is surveyed as the fs groomer surveys it: any change is refused
    `out-of-bounds`, restored with `restoreSnapshot` and verified by re-observing. Only the store
    files are excluded from that byte comparison, anchored at the data root's `.blaze/`.
@@ -3203,11 +3422,21 @@ revert through the port is BLZ-254's to design.
 
 Under `BLAZE_WRITE_PORT=db` the groomer (`groomOnceDb`) hands the agent a materialised copy of
 the ticket in a scratch directory and writes the result through the write port. Its guard is
-this ADR's, extended: the agent runs with `BLAZE_READONLY=1`; the store is fingerprinted across
-the run (last `ticket_event` id, and on SQLite the dev/ino of `.blaze/blaze.db` and
-`.blaze/config.db`) and a moved fingerprint refuses the pass without restoring anything; the
-rest of the data root is surveyed and restored exactly as above. Added to the exhaustive list of
-what it does **not** cover:
+this ADR's, extended: the agent runs with `BLAZE_READONLY=1` (advisory — it owns its env); the
+store is fingerprinted across the run (last `ticket_event` id, and on SQLite the dev/ino of
+`.blaze/blaze.db` and `.blaze/config.db`) and a moved fingerprint refuses the pass, restores only
+config, credentials and git sinks (`.blaze/database.json`, `blaze.config.json`,
+`.blaze/identity.db`, `.git/config`, `.git/hooks/**`) and backs the ticket off; the rest of the
+data root is surveyed and restored exactly as above. Added to the exhaustive list of what it
+does **not** cover:
+
+- **Store writes by an agent that unsets `BLAZE_READONLY`** (or reaches a running board server
+  that is not read-only). They are detected — the pass is refused `store-changed` — but they
+  **stand**: a store cannot be rewound, and other board files it wrote in the same pass stay too,
+  except the always-restored paths above.
+- **Runners with no per-runner readonly guard**: `user-runner.mjs`, `init-runner.mjs` and
+  `migrate-runner.mjs` are refused only by `cli.mjs`'s dispatch gate, so a direct
+  `node scripts/<x>-runner.mjs` is not. (`db-runner.mjs` gained its guard in BLZ-668.)
 
 - **A raw SQL write that appends no `ticket_event` row** — an agent that holds the database
   credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in
@@ -3215,9 +3444,9 @@ what it does **not** cover:
   and recreate them legitimately). Only a change to the groomed row itself is caught, by the
   re-read before the write.
 - **The check-then-write window** between that last re-read and the write — no row lock;
-  milliseconds wide; BLZ-254 owns the concurrency proofs.
-- **A `store-changed` refusal restores nothing**, by design: board files the agent wrote in the
-  same pass stay, and are named in the event's `outOfBounds`.
+  milliseconds wide; on Postgres it also includes identity values committing out of order (a
+  transaction holding a lower id than the MAX read before the agent, committing during the run).
+  BLZ-254 owns the concurrency proofs.
 ````
 
 - [ ] **Step 6: Run the doc pins**
@@ -3228,13 +3457,16 @@ Expected: PASS, 0 failures.
 - [ ] **Step 7: Commit**
 
 ```bash
+git add docs/guide/commands.md docs/design.md docs/schema-versioning.md docs/decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/decisions/0019-the-groomers-guard-is-advisory.md
 git commit -m "BLZ-668: docs — blaze db init/seed-counter, cutover line, reserve (ADR-0037), groomer under db (ADR-0038, ADR-0019)" -- docs/guide/commands.md docs/design.md docs/schema-versioning.md docs/decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/decisions/0019-the-groomers-guard-is-advisory.md
+git status --short   # must print nothing
 ```
 
 ---
 
 ### Final verification (before the PR)
 
+- [ ] The tree is clean — every task's changes are committed: `git status --short` → prints nothing. The runs below are against that committed tree.
 - [ ] Full suite with Postgres, serially:
 
 ```bash
@@ -3242,8 +3474,8 @@ BLAZE_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:55433/blaze_test \
   node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs
 ```
 
-Expected (prototype): `tests 5326 … pass 5325, fail 0, skipped 1`.
+Expected (prototype): `tests 5332 … pass 5331, fail 0, skipped 1`.
 
-- [ ] `npm run test:coverage` (with `BLAZE_TEST_PG_URL` set) — the c8 gate passes (prototype: 97.96 / 87.92 / 97.37 / 97.96 % against thresholds 91/77/93/91). Note `.c8rc.json` excludes `scripts/*-runner.mjs`, so `db-runner.mjs`'s new branches are covered by the tests above but not counted by the gate; the counted new logic is in `scripts/model/` and `scripts/loops/`.
+- [ ] `npm run test:coverage` (with `BLAZE_TEST_PG_URL` set) — the c8 gate passes (prototype: 97.95 / 87.91 / 97.46 / 97.95 % against thresholds 91/77/93/91). Note `.c8rc.json` excludes `scripts/*-runner.mjs`, so `db-runner.mjs`'s new branches are covered by the tests above but not counted by the gate; the counted new logic is in `scripts/model/` and `scripts/loops/`.
 - [ ] `git log --format=%B origin/main..HEAD | grep -ci co-authored-by` → `0`.
 - [ ] Stop the Postgres container: `docker stop blz-pg`.
