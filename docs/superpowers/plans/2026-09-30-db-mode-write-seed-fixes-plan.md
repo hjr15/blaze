@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-30-db-mode-write-seed-fixes-design.md` — read it first; this plan argues from it.
 
-**Prototype provenance.** Every code and test block below was run in a scratch worktree of `30978e5` against `postgres:17-alpine`. After adversarial review rounds 1 and 2, every code and test block was re-extracted mechanically from this document and applied to a fresh worktree of the plan commit; with all eight tasks applied, `npm run test:coverage` (the full suite, serial, `BLAZE_TEST_PG_URL` set) → `tests 5320, pass 5319, fail 0, skipped 1`, and the c8 thresholds pass (statements 97.96 %, branches 87.96 %, functions 97.36 %, lines 97.96 % against 91/77/93/91). The fs import was checked byte-identical against the unmodified engine (tickets, `.ids/` claims, `.cutover`, receipt entries) behind an unreachable git remote.
+**Prototype provenance.** Every code and test block below was run in a scratch worktree of `30978e5` against `postgres:17-alpine`. After adversarial review rounds 1, 2 and 3, every code and test block was re-extracted mechanically from this document and applied to a fresh worktree of the plan commit; with all eight tasks applied, `npm run test:coverage` (the full suite, serial, `BLAZE_TEST_PG_URL` set) → `tests 5326, pass 5325, fail 0, skipped 1`, and the c8 thresholds pass (statements 97.96 %, branches 87.92 %, functions 97.37 %, lines 97.96 % against 91/77/93/91). This covers review rounds 1–3. The fs import was checked byte-identical against the unmodified engine (tickets, `.ids/` claims, `.cutover`, receipt entries) behind an unreachable git remote.
 
 ## Global Constraints
 
@@ -42,11 +42,11 @@
 9. **`blaze groom` (the CLI, `scripts/loops/groomer.mjs`'s main block) had no db refusal at all** — under db it silently groomed stale files. Task 7 routes it through `groomOnceDb` too.
 10. **"Local date" in spec §4 is actually UTC:** `new-runner.mjs:79` is `new Date().toISOString().slice(0, 10)`. The db port's default clock uses that same expression.
 11. **`docs/guide/commands.md` has no `db` section**; Task 8 adds one and its table row. The page's "There are 16 subcommands" was already false (`cli.mjs` `SUBCOMMANDS` has 23), so Task 8 drops the count rather than claiming another wrong number. ADR-0037 is Accepted and ADR-0010/0012 already carry dated addenda, so BLZ-671's `reserve` is an **ADR-0037 addendum**; the groomer residual closure is an **ADR-0038 addendum**.
-12. **The db groomer re-reads before it writes (lost-update guard).** `writePort.write` is an upsert of the whole row at the status captured at selection, so a move/worklog/link made during the agent run (≤ `timeoutSec`, 900 s by default) would be silently reverted — reproduced: a stub agent that runs a db-mode `move-runner ENG-1 in-progress` left ENG-1 `defined` and the groom reported success. `groomOnceDb` now re-reads the ticket immediately before the write and refuses with `reason: "changed-concurrently"` if its status or `hashContent(serializeTicket(…))` differs from what the agent was given. **Named residual:** this is check-then-write with no row lock; the window shrinks from minutes to milliseconds but is not closed. Closing it (a version column / `SELECT … FOR UPDATE`) belongs to BLZ-254, which owns the concurrency proofs. **The same residual applies to db `reserve` (Finding 14):** its "row exists?" SELECT and the ticket upsert that follows are check-then-write too; a writer landing between them is not caught.
+12. **Lost updates in the db groomer.** `writePort.write` is an upsert of the whole row at the status captured at selection, so a move/worklog/link made during the agent run (≤ `timeoutSec`, 900 s by default) would be silently reverted — reproduced in round 1 (a stub agent running a db-mode `move-runner ENG-1 in-progress` left ENG-1 `defined` and the groom reported success). Since round 3 this is caught by the **store fingerprint** (Finding 16): any port write moves `MAX(ticket_event.id)`, and the pass is refused `store-changed`. The fingerprint is re-checked immediately before the write, and the groomed row is re-read (`changed-concurrently`) — strictly redundant for port writes, kept as defence in depth because it also catches a raw SQL change to that row that appends no event. **Named residual:** check-then-write with no row lock; the window is milliseconds. Closing it (a version column / `SELECT … FOR UPDATE`) belongs to BLZ-254, which owns the concurrency proofs. **The same residual applies to db `reserve` (Finding 14):** its "row exists?" SELECT and the ticket upsert that follows are check-then-write too; a writer landing between them is not caught.
 13. **No `write-port.mjs` seam pin is added for `reserve` (spec §3.2 said "the new port methods join write-port.mjs's pins").** `SEAM_WRITE_PROVIDERS` classifies a module's **exports**; `reserve` is a member of the object literals `fsWritePort`/`dbWritePort`/`dualWritePort` return, which the export classifier does not enumerate. Those three factories are already pinned (`inert`), and seam-closure passes 21/21 with no change to that entry — adding `"reserve"` would fail the "every export classified exactly once" assertion, since no export of that name exists. What *is* pinned is the fs allocator that `reserve` calls: `fsAllocators` joins write-port-resolve's `writes` (Task 5 Step 8).
 14. **db `reserve` refuses an id that already has a row.** Import calls `reserve` only for an explicit-id **create**, which the planner classifies against the same database — so a row there means a concurrent writer took the id after planning, and the following upsert would overwrite it. The refusal surfaces as import exit 4 (board changed, receipt names the unwritten rows), and its message says what the operator meets next rather than "re-run": a plain re-run *finds* the id (skipped if identical, refused naming `--update` if it differs), and a mapped import with a source-id column refuses at exit 5 until `blaze import repair`. `update` rows never call `reserve`. Pinned at import level (Task 5: a concurrent row injected between plan and apply → exit 4, the concurrent ticket survives).
 15. **Cutover cost, stated in the runbook text (Task 8):** after the flip every ticket in the groomer's columns re-grooms once — `.blaze/state.json` holds hashes of *file* text, and the db serialisation differs (it writes empty keys the file omitted). The state file is shared by both modes, so **flipping back to fs re-grooms everything once more** (the db-era hashes don't match the files). No code change; both costs are in the runbook text.
-16. **The db groomer surveys the whole board, as the fs groomer does (round-2 review).** Snapshotting only the scratch dir dropped the fs path's board survey — reproduced: a stub agent that wrote `{"host":"attacker.example"}` to `.blaze/database.json` and a new `projects/ENG/defined/ENG-99-evil.md` got a groom *success*. `groomOnceDb` now snapshots `root` before and after the agent, refuses `out-of-bounds` on any board change (unioned with the scratch strays), restores with `restoreSnapshot`, verifies by re-observing, and reports `revertFailed`/`residual`/`newDirt`/`revertErrors` and the survey-gap flags exactly as `groomOnce` does. **One exclusion, decided and commented in code:** the SQLite store files (`.blaze/blaze.db`, `.blaze/config.db`, and their `-wal`/`-shm`/`-journal`). Under `db` they are the board; concurrent db-mode writers change them legitimately (the `changed-concurrently` test's `blaze move` does — with the exclusion removed that test is refused `out-of-bounds` instead), and restoring their bytes under open connections would corrupt the database; store changes are judged by the re-read instead. `.blaze/state.json` is **not** excluded (fs parity), and the groomer's own db write and state save happen after the after-snapshot. `cfg` is loaded by the caller before the agent runs, so a corrupted `blaze.config.json` is a refused-and-restored board change, never an uncaught `ConfigParseError` (which is what the round-1 code threw).
+16. **db-groomer containment is ONE rule with three parts (round-3 review replaced the round-2 patchwork).** Round 2 surveyed the board but excluded the SQLite store files and judged the store only by re-reading the groomed row; round 3 broke that three ways — the agent ran db-mode `new-runner` and planted `ENG-2` (groom success), swapped `.blaze/blaze.db` for a copy (the groom's write landed in the unlinked file and was lost), and a concurrent `import --apply` got an `out-of-bounds` refusal whose restore deleted the receipt and rewound the git ref while the `ENG-2` row stayed (a silent half-revert). The rule now: **(a)** the agent is spawned with `BLAZE_READONLY: "1"`, closing every `blaze` CLI/API write route (`scripts/readonly.mjs`); **(b)** the **store fingerprint** — `MAX(ticket_event.id)` read through `dbWritePort.storeFingerprint()` (the db write port already holds the exec for both drivers and the readers expose none, so no resolver signature changes and fs/dual are untouched) plus, on SQLite, lstat dev/ino/type of `.blaze/blaze.db` and `.blaze/config.db` — is compared after the agent and again before the write; if it moved, the pass is refused `store-changed`, **nothing is written and nothing is restored** (`restoreSkipped: true`, with the reason: store and files cannot be rewound together). `-wal`/`-shm`/`-journal` identity is deliberately **not** fingerprinted: measured while prototyping, another process's connection closing checkpoints and deletes them, so their existence/inode churns legitimately and fingerprinting them refused honest passes. This works on Postgres (event id only). **(c)** everything else on the data root is surveyed exactly as `groomOnce` surveys it — any change refused `out-of-bounds`, restored, verified, `revertFailed`/`residual`/`newDirt`/`revertErrors` and survey-gap flags reported, on **every** refusal path including scratch-only ones; `newDirt` is filtered by the same anchored store exclusion (a checkpoint on a board that tracks `.blaze/` otherwise reads as un-reverted dirt). The exclusion is anchored (`^\.blaze/(blaze|config)\.db(-wal|-shm|-journal)?$`), pinned by a test that `projects/ENG/.blaze/blaze.db-wal`, a root `blaze.db` and `.blaze/blaze.db-evil` are all refused. `cfg` is loaded by the caller before the agent runs, so a corrupted `blaze.config.json` is a restored board change, never an uncaught throw. **Named residual (in the code comment, `commands.md`, `design.md`, and the ADR-0038 and ADR-0019 addenda):** a raw SQL write that appends no `ticket_event` row — an agent holding the database credentials running `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` swapped in — moves neither the event id nor a main file's identity; only a change to the groomed row itself is caught (by the re-read).
 17. **Named residual — no undo for a db groom.** The feed's revert button (`supervisor.mjs:139`) needs a `sha`; a db groom commits nothing, so there is none. Recorded in the ADR-0038 addendum; a revert through the port is BLZ-254's.
 
 ## Review Focus
@@ -54,8 +54,8 @@
 1. **A Postgres that is initialised but whose counter is stale** (ids handed out on the file path after `init`) → `seed-counter` raises it, never lowers it, and reports `before → after`. Pinned: Task 3 (`seed-counter on Postgres raises the counter to a new claim and is idempotent`).
 2. **An operator re-runs `blaze db init` on a live Postgres, or passes `--force`** → refused, nothing dropped, the message names `blaze db seed-counter`; `--force` refused before any connection. Pinned: Task 2.
 3. **An explicit-id import row whose `project` differs from its id prefix** (fs) → claim still written under the row's project, exactly as before. Pinned: Task 5 (`the fs port reserves an explicit id: the claim is written under the given project`) plus the byte-identical check in Task 5 Step 10.
-4. **The ticket changes (a move, a worklog) while the groomer's agent is running** → the pass is refused `changed-concurrently` and the concurrent change survives. Pinned: Task 6 (`a move made while the agent runs is not reverted`). The agent editing the file into something unparseable returns `reason: "unparseable"` (same path as `invalid`; not separately pinned — reviewers should read it).
-5. **The groomer's agent writes somewhere on the board other than its ticket** (`.blaze/database.json`, a new ticket file, `blaze.config.json`) → refused `out-of-bounds`, the board restored, nothing thrown. Pinned: Task 6 (`a write ANYWHERE on the board…`, `a corrupted blaze.config.json…`).
+4. **Another session writes to the store while the groomer's agent is running** (a move, an import) → the pass is refused `store-changed`, nothing is written or rewound, and the other session's work — row, receipt, git ref — survives. Pinned: Task 6 (`a move made by ANOTHER session…`, `a concurrent db-mode import…`, the Postgres case). The agent editing the file into something unparseable returns `reason: "unparseable"` (same path as `invalid`; not separately pinned — reviewers should read it).
+5. **The groomer's agent tries to write** — through `blaze` (refused by `BLAZE_READONLY`), by swapping the store file (`store-changed`), or anywhere else on the board (`.blaze/database.json`, a new ticket file, `blaze.config.json`, a look-alike store path → `out-of-bounds`, restored, nothing thrown). Pinned: Task 6 (probe 1, probe 2, `a write ANYWHERE…`, `a corrupted blaze.config.json…`, `…ANCHORED…`).
 6. **`blaze db init` on Postgres fails part-way (seed error after the schema exists, or a foreign/unstamped schema)** → a named error that says what state the database is in; only a genuinely initialised database is sent to `seed-counter`. Pinned: Task 2 (seed failure, foreign tables) and Task 3 (recovery via `seed-counter`).
 7. **A db-mode groomer pass whose resolver refuses** (no shadow/no schema) → one `{type:"error", loop:"groomer"}` event, loop not left `busy`, ports closed. Pinned: Task 7.
 
@@ -1772,6 +1772,7 @@ git commit -m "BLZ-671: import allocates and reserves ids through the write port
 
 **Files:**
 - Modify: `scripts/loops/groomer.mjs` (imports; new exports `selectNextTicketDb`, `groomOnceDb` above the CLI block). `groomOnce` and every fs helper are **not** edited.
+- Modify: `scripts/model/write-port.mjs` (`dbWritePort` gains the read-only `storeFingerprint()` method)
 - Modify: `tests/groomer-db-mode.test.mjs` (imports + append; the BLZ-670 refusal test stays until Task 7)
 - Modify: `tests/model/seam-closure.test.mjs` (groomer pin, additive)
 
@@ -1779,12 +1780,13 @@ git commit -m "BLZ-671: import allocates and reserves ids through the write port
 - Consumes: `resolvePorts`' `readStorage` (`listTickets`, `getTicket`) and `writePort.write(t, ctx)`; `serializeTicket`/`parseTicket` (`model/ticket.mjs`); `EDITABLE_FIELDS` (`model/fields.mjs`); `validateTicket` (`model/rules.mjs`); `loadProjectSchema` (`model/schema-config.mjs`); `validateTaxonomy` (`model/taxonomy.mjs`); `loadSprints`, `validateSprintFields` (`model/sprints.mjs`); `loadProject` (`config.mjs`); the file's own `loadState`, `saveState`, `hashContent`, `buildPrompt`, `extractGroomingRules`, `snapshotTree`, `diffSnapshots`, `outOfBoundsPaths`, `redactSecrets`, `DEFAULT_TIMEOUT_SEC`, `DEFAULT_MAX_BUFFER_MB`.
 - Produces:
   - `selectNextTicketDb({ projectsDir, cfg, state, readStorage }) → Promise<{ id, project, status, file, raw } | null>` — columns order, then `cfg.projects` order, then numeric-aware id order; ungroomed = `state.groomed[id] !== hashContent(serializeTicket(t))`.
-  - `groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) → Promise<event|null>`. Events: `null`; `{ type:"groom", id, noop:true, ts }`; `{ type:"groom", id, refused:true, reason: "out-of-bounds"|"unparseable"|"identity-field"|"invalid"|"changed-concurrently", outOfBounds, ts, fields?|errors? }` (`errors` redacted with `redactSecrets` and cut to 200 chars, like the `error` path). Containment covers BOTH trees: the scratch dir (only `<id>.md` may change) and the whole data root (`snapshotTree(root)` before/after; any change except the SQLite store files `DB_STORE_FILE` → `out-of-bounds`, restored via `restoreSnapshot`, `revertFailed`/`residual`/`newDirt`/`revertErrors` and survey-gap flags as in `groomOnce`). `cfg` must be loaded by the caller before the call`; `{ type:"groom", id, error, ts, timedOut? }`; success `{ type:"groom", id, files:["<id>.md"], ts }` (no `sha`). Writes with ctx `{ actor: "groomer", source: "loop" }`.
+  - `groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) → Promise<event|null>` — `writePort` must be a **db** port (it calls `writePort.storeFingerprint()`), and `cfg` must be loaded by the caller before the call. Events: `null`; `{ type:"groom", id, noop:true, ts }`; `{ type:"groom", id, refused:true, reason: "store-changed"|"out-of-bounds"|"unparseable"|"identity-field"|"invalid"|"changed-concurrently", outOfBounds, ts, fields?|errors?, restoreSkipped?, restoreSkippedWhy? }` (`errors` redacted with `redactSecrets` and cut to 200 chars, like the `error` path; `store-changed` carries `restoreSkipped: true` and no revert fields; every other refusal restores the board and reports `revertFailed`/`residual`/`newDirt`/`revertErrors` as `groomOnce` does); `{ type:"groom", id, error, ts, timedOut? }`; success `{ type:"groom", id, files:["<id>.md"], ts }` (no `sha`). Survey-gap flags are stamped on every event. Writes with ctx `{ actor: "groomer", source: "loop" }`. Containment: the agent's env carries `BLAZE_READONLY: "1"`; the store fingerprint (`MAX(ticket_event.id)` + on SQLite the dev/ino/type of `.blaze/blaze.db` and `.blaze/config.db`) is compared after the agent and again just before the write; the whole data root except `DB_STORE_FILE` (anchored `^\.blaze/(blaze|config)\.db(-wal|-shm|-journal)?$`) is surveyed and restored.
+  - `dbWritePort(...).storeFingerprint() → Promise<{ dialect, lastEventId }>` — read-only.
 
-- [ ] **Step 1: Write the failing tests.** In `tests/groomer-db-mode.test.mjs` change the `node:fs` import to include `readFileSync`:
+- [ ] **Step 1: Write the failing tests.** In `tests/groomer-db-mode.test.mjs` change the `node:fs` import to include `readFileSync` and `readdirSync`:
 
 ```js
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, existsSync } from "node:fs";
 ```
 
 add after `import { scratchRegistry } from "./helpers/scratch.mjs";`:
@@ -1794,6 +1796,9 @@ import { runDb } from "../scripts/db-runner.mjs";
 import { resolvePorts } from "../scripts/model/write-port-resolve.mjs";
 import { groomOnceDb } from "../scripts/loops/groomer.mjs";
 import { dbBoard, QUIET } from "./helpers/db-board.mjs";
+import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
+import { writeCsv } from "../scripts/model/csv.mjs";
 ```
 
 and append at the end of the file:
@@ -1806,11 +1811,12 @@ const today = () => new Date().toISOString().slice(0, 10);
 /** A SQLite db-mode board (ENG-1 loaded by `blaze db init`) whose agent runs `script` in the
  *  scratch dir. `$BLAZE_GROOM_TARGET` names the materialised file; `mark` is a directory
  *  OUTSIDE the scratch dir the stub may write evidence into. */
-async function dbGroomBoard(script) {
+async function dbGroomBoard(script, { portOpts = {}, git = null, init = true } = {}) {
   const roots = dbBoard();
-  // A function receives the roots, for a stub that must name the board (the concurrent move).
-  if (typeof script === "function") script = script(roots);
   const mark = scratch(mkdtempSync(join(tmpdir(), "blz673-groom-mark-")));
+  // A function receives the roots and the mark dir (OUTSIDE the board), for a stub that must
+  // name the board or leave evidence (the concurrent writers, the planted-ticket probe).
+  if (typeof script === "function") script = script(roots, mark);
   const stub = join(roots.dataRoot, "stub-agent.sh");
   writeFileSync(stub, `#!/usr/bin/env bash\nset -e\npwd > "${mark}/cwd"\n${script}\n`);
   chmodSync(stub, 0o755);
@@ -1818,23 +1824,31 @@ async function dbGroomBoard(script) {
     projects: ["ENG"], schemaVersion: 2, agentCommand: `bash ${stub}`,
     loops: { groomer: { columns: ["defined"] } },
   }));
-  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
-  return { ...roots, mark };
+  if (init) assert.equal(await runDb(["init"], { ...QUIET, roots, ...portOpts }), 0);
+  if (git) {
+    // `git: "ignore-store"` ignores `.blaze/`, as `blaze init` does.
+    if (git === "ignore-store") writeFileSync(join(roots.dataRoot, ".gitignore"), ".blaze/\n");
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+      execFileSync("git", ["-C", roots.dataRoot, ...a]);
+    }
+  }
+  return { ...roots, mark, portOpts };
 }
 
 /** One db-mode pass called DIRECTLY (no supervisor): resolve, groom, always close. */
 async function groomDirect(roots) {
   const cfg = loadConfig({ root: roots.dataRoot, env: {} });
-  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...(roots.portOpts ?? {}) });
   try {
     return await groomOnceDb({ root: roots.dataRoot, projectsDir: roots.projectsDir, cfg,
       agentsMd: "", today: today(), readStorage: ports.readStorage, writePort: ports.writePort });
   } finally { await ports.close(); }
 }
 
-async function readBack(roots) {
-  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
-  try { return (await ports.readStorage.getTicket(roots.projectsDir, "ENG-1")).found; }
+async function readBack(roots, id = "ENG-1") {
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...(roots.portOpts ?? {}) });
+  try { return (await ports.readStorage.getTicket(roots.projectsDir, id)).found; }
   finally { await ports.close(); }
 }
 
@@ -1914,7 +1928,8 @@ test("groomOnceDb: a result that fails validation is refused with the validator'
   assert.equal((await readBack(roots)).frontmatter.type, "task");
 });
 
-test("groomOnceDb: a move made while the agent runs is not reverted — the pass is refused", async () => {
+test("groomOnceDb: a move made by ANOTHER session while the agent runs is not reverted — store-changed", async () => {
+  // `BLAZE_READONLY=` (empty) stands for a different session: the agent's own env says 1.
   const moveRunner = new URL("../scripts/move-runner.mjs", import.meta.url).pathname;
   const roots = await dbGroomBoard((r) =>
     `BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db BLAZE_READONLY= `
@@ -1922,10 +1937,151 @@ test("groomOnceDb: a move made while the agent runs is not reverted — the pass
     + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
   const groom = await groomDirect(roots);
   assert.equal(groom.refused, true, JSON.stringify(groom));
-  assert.equal(groom.reason, "changed-concurrently");
+  assert.equal(groom.reason, "store-changed");
+  assert.equal(groom.restoreSkipped, true);
   const back = await readBack(roots);
   assert.equal(back.status, "in-progress", "the concurrent move survives");
   assert.doesNotMatch(back.body, /Groomed\./);
+});
+
+test("groomOnceDb: the AGENT's own blaze write is refused by BLAZE_READONLY — the store is unchanged (probe 1)",
+     async () => {
+  const newRunner = new URL("../scripts/new-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r, mark) =>
+    `BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db "${process.execPath}" "${newRunner}" `
+    + `--project ENG --type task --estimate 15 "planted by the agent" 2> "${mark}/planted.err" || true\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.ok(groom && !groom.refused && !groom.error, JSON.stringify(groom));
+  assert.match(readFileSync(join(roots.mark, "planted.err"), "utf8"), /BLAZE_READONLY/);
+  assert.equal(await readBack(roots, "ENG-2"), null, "no ticket was planted in the store");
+});
+
+test("groomOnceDb: a store file swapped for a copy is refused store-changed, and the groom is NOT written (probe 2)",
+     async () => {
+  const roots = await dbGroomBoard((r) =>
+    `cp "${r.dataRoot}/.blaze/blaze.db" "${r.dataRoot}/.blaze/swap"\n`
+    + `mv "${r.dataRoot}/.blaze/swap" "${r.dataRoot}/.blaze/blaze.db"\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "store-changed");
+  assert.equal(groom.restoreSkipped, true);
+  assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
+});
+
+test("groomOnceDb: a concurrent db-mode import during the agent → store-changed; receipt, ref and row are left alone",
+     async () => {
+  const importRunner = new URL("../scripts/import-runner.mjs", import.meta.url).pathname;
+  let csv;
+  const roots = await dbGroomBoard((r, mark) => {
+    csv = join(mark, "concurrent.csv");   // outside the board: the input is not a board file
+    writeFileSync(csv, writeCsv([COLUMN_NAMES.slice(), COLUMN_NAMES.map((n) => ({
+      schema_version: "1", id: "ENG-2", project: "ENG", type: "task", status: "defined",
+      title: "imported concurrently", description: "body", estimate: "30" })[n] ?? "")]));
+    return `(cd "${r.dataRoot}" && BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db BLAZE_READONLY= `
+      + `"${process.execPath}" "${importRunner}" --apply "${csv}" >/dev/null)\n`
+      + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`;
+  }, { git: "ignore-store" });
+  const headBefore = execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "store-changed");
+  assert.equal(groom.restoreSkipped, true);
+  assert.ok(groom.outOfBounds.some((p) => p.startsWith("import-receipts/")), JSON.stringify(groom.outOfBounds));
+  assert.equal(readdirSync(join(roots.dataRoot, "import-receipts")).filter((f) => f.endsWith(".jsonl")).length, 1,
+    "the receipt is not deleted");
+  assert.notEqual(execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    headBefore, "the import's commit is not rewound");
+  assert.equal((await readBack(roots, "ENG-2")).frontmatter.title, "imported concurrently");
+  assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
+});
+
+test("groomOnceDb: the store exclusion is ANCHORED — look-alike paths are surveyed, refused and restored", async () => {
+  const roots = await dbGroomBoard((r) =>
+    `mkdir -p "${r.projectsDir}/ENG/.blaze"\n`
+    + `printf x > "${r.projectsDir}/ENG/.blaze/blaze.db-wal"\n`
+    + `printf x > "${r.dataRoot}/blaze.db"\n`
+    + `printf x > "${r.dataRoot}/.blaze/blaze.db-evil"\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "out-of-bounds");
+  for (const p of [".blaze/blaze.db-evil", "blaze.db", "projects/ENG/.blaze/blaze.db-wal"]) {
+    assert.ok(groom.outOfBounds.includes(p), `${p} was not surveyed: ${JSON.stringify(groom.outOfBounds)}`);
+  }
+  assert.equal(existsSync(join(roots.dataRoot, "blaze.db")), false);
+  assert.equal(existsSync(join(roots.dataRoot, ".blaze", "blaze.db-evil")), false);
+  assert.equal(existsSync(join(roots.projectsDir, "ENG", ".blaze", "blaze.db-wal")), false);
+});
+
+test("groomOnceDb: on a board that TRACKS its shadow, a WAL checkpoint during the pass is not reported as dirt",
+     async () => {
+  // A checkpoint rewrites blaze.db's bytes with no ticket_event and no new inode — legitimate
+  // SQLite housekeeping that the fingerprint rightly ignores. On a board whose git tracks
+  // `.blaze/`, that surfaces in `git status` as ` M .blaze/blaze.db`, which must not read as
+  // dirt the groomer failed to revert.
+  const roots = await dbGroomBoard((r) =>
+    `"${process.execPath}" -e 'const { DatabaseSync } = require("node:sqlite"); `
+    + `new DatabaseSync(${JSON.stringify(join(r.dataRoot, ".blaze", "blaze.db"))}).exec("PRAGMA wal_checkpoint(PASSIVE)")'\n`
+    + `printf 'x\\n' >> "$BLAZE_GROOM_TARGET"\ntouch stray.txt`);
+  // Put frames in the WAL and commit the board while they are still un-checkpointed, so the
+  // committed blaze.db is clean at the pass's baseline and the stub's checkpoint dirties it.
+  const holder = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  try {
+    const t = await holder.readStorage.getTicket(roots.projectsDir, "ENG-1");
+    await holder.writePort.write({ project: "ENG", status: "defined", frontmatter: t.found.frontmatter, body: t.found.body });
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+      execFileSync("git", ["-C", roots.dataRoot, ...a]);
+    }
+    const groom = await groomDirect(roots);
+    assert.equal(groom.refused, true, JSON.stringify(groom));
+    assert.equal(groom.reason, "out-of-bounds");
+    assert.equal(groom.revertFailed, undefined, JSON.stringify(groom));
+  } finally { await holder.close(); }
+});
+
+test("groomOnceDb on POSTGRES: grooms through the port, and a concurrent port write is refused store-changed",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("groom");
+  try {
+    const portOpts = { resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
+                       openPostgresClient: pgClient };
+    // Postgres init loads no tickets, so ENG-1 is written through the port first.
+    const seed = async (roots) => {
+      const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...portOpts });
+      try {
+        await ports.writePort.write({ project: "ENG", status: "defined", body: "## Acceptance Criteria\n\n- [ ] one\n",
+          frontmatter: { id: "ENG-1", title: "A task", type: "task", project: "ENG", priority: "medium",
+                         assignee: "unassigned", estimate: 30, created: "2026-01-01", updated: "2026-01-01" } });
+      } finally { await ports.close(); }
+    };
+    const ok = await dbGroomBoard(`printf '\\nGroomed on Postgres.\\n' >> "$BLAZE_GROOM_TARGET"`, { portOpts });
+    await seed(ok);
+    const g1 = await groomDirect(ok);
+    assert.ok(g1 && !g1.refused && !g1.error, JSON.stringify(g1));
+    assert.match((await readBack(ok)).body, /Groomed on Postgres\./);
+
+    // A second board on the same database: the agent's run coincides with another session's
+    // port write (ENG-2), which moves MAX(ticket_event.id).
+    const writer = join(ok.mark, "concurrent-pg.mjs");
+    writeFileSync(writer, [
+      `import pg from ${JSON.stringify(new URL("../node_modules/pg/lib/index.js", import.meta.url).pathname)};`,
+      `import { dbWritePort } from ${JSON.stringify(new URL("../scripts/model/write-port.mjs", import.meta.url).pathname)};`,
+      `import { pgExec } from ${JSON.stringify(new URL("../scripts/model/write-port-resolve.mjs", import.meta.url).pathname)};`,
+      `const c = new pg.Client(${JSON.stringify(db.url)}); await c.connect();`,
+      `await dbWritePort(pgExec(c), { dialect: "postgres" }).write({ project: "ENG", status: "defined", body: "b",`,
+      `  frontmatter: { id: "ENG-2", title: "concurrent", type: "task", project: "ENG", estimate: 30 } });`,
+      "await c.end();",
+    ].join("\n"));
+    const race = await dbGroomBoard(`"${process.execPath}" "${writer}"\nprintf '\\nSecond.\\n' >> "$BLAZE_GROOM_TARGET"`,
+      { portOpts, init: false });
+    const g2 = await groomDirect(race);
+    assert.equal(g2.refused, true, JSON.stringify(g2));
+    assert.equal(g2.reason, "store-changed");
+    assert.doesNotMatch((await readBack(race)).body, /Second\./);
+  } finally { await db.drop(); }
 });
 ```
 
@@ -1985,18 +2141,44 @@ const GROOMER_MAY_CHANGE = new Set([...EDITABLE_FIELDS, "updated"]);
 const sameValue = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
 
 /**
- * Board paths the db-mode survey deliberately does NOT judge: the SQLite store itself
- * (`.blaze/blaze.db`, `.blaze/config.db` and their `-wal`/`-shm`/`-journal` companions).
- * Under BLAZE_WRITE_PORT=db they ARE the board, and every concurrent db-mode writer — a
- * `blaze move` from another terminal, the board server — legitimately changes them while the
- * agent runs. Refusing on them would refuse every pass on a busy board, and restoring their
- * bytes under open connections would corrupt the database. Store changes are judged instead
- * by the `changed-concurrently` re-read below. Everything else on the board — `.blaze/
- * database.json`, `.blaze/state.json`, `.git/`, `blaze.config.json`, any `projects/` file — is
- * surveyed exactly as the fs groomer surveys it. (The groomer's own db write and state save
- * happen AFTER the after-snapshot, so they never reach the survey.)
+ * The SQLite store files (`.blaze/blaze.db`, `.blaze/config.db` and their `-wal`/`-shm`/
+ * `-journal` companions), anchored at the data root's `.blaze/`. Under BLAZE_WRITE_PORT=db
+ * they ARE the store: the board survey does not byte-compare them (concurrent db writers
+ * legitimately change them, and restoring their bytes under open connections would corrupt
+ * the database). They are judged instead by the STORE FINGERPRINT (`storeFingerprintOf`):
+ * the last `ticket_event` id plus the identity (dev/ino/type) of the two main files. Everything else on the board —
+ * `.blaze/database.json`, `.blaze/state.json`, `.git/`, `blaze.config.json`, any `projects/`
+ * file, and any look-alike (`projects/ENG/.blaze/blaze.db-wal`, `blaze.db`, `.blaze/blaze.db-
+ * evil`) — is surveyed exactly as the fs groomer surveys it.
  */
 const DB_STORE_FILE = /^\.blaze\/(blaze|config)\.db(-wal|-shm|-journal)?$/;
+/**
+ * The two MAIN store files whose identity is fingerprinted. Their `-wal`/`-shm`/`-journal`
+ * companions are NOT: measured while prototyping, ANY other process's connection closing (a
+ * `blaze move` finishing, a checkpoint) may checkpoint and DELETE `-wal`/`-shm` and a later
+ * open recreates them with new inodes — their existence and identity churn legitimately, so
+ * fingerprinting them refuses honest passes. A crafted `-wal` swapped in is a raw write that
+ * appends no event: the named residual.
+ */
+const STORE_FILES = [".blaze/blaze.db", ".blaze/config.db"];
+
+/**
+ * The store fingerprint: `ticket_event`'s last id (moves on every port write, any process,
+ * both drivers) plus, on SQLite, the IDENTITY of the two main store files — dev/ino/type,
+ * never size or mtime, which checkpoints change legitimately. A file swapped for a copy
+ * changes its inode while the port's open connection still sees the old one, so the event id
+ * alone would miss it.
+ */
+async function storeFingerprintOf(root, writePort) {
+  const { dialect, lastEventId } = await writePort.storeFingerprint();
+  const files = dialect !== "sqlite" ? [] : STORE_FILES.map((rel) => {
+    try {
+      const st = lstatSync(join(root, rel));
+      return `${rel}:${st.dev}:${st.ino}:${st.isSymbolicLink() ? "l" : st.isFile() ? "f" : "o"}`;
+    } catch { return `${rel}:absent`; }
+  });
+  return JSON.stringify({ lastEventId, files });
+}
 
 /** The first ungroomed ticket, from the READER: the configured columns in order, then the
  *  configured projects in order, then id order. "Ungroomed" is the fs path's test applied to
@@ -2059,19 +2241,29 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
     const prompt = buildPrompt({ ...ticket, rel }, extractGroomingRules(agentsMd), cfg);
     const [cmd, ...args] = cfg.agentCommand.split(" ");
     const before = snapshotTree(dir);
-    // BLZ-673 review: the WHOLE BOARD is surveyed too, as the fs groomer surveys it. The agent
-    // runs with the operator's privileges and may write anywhere — `.blaze/database.json` (a
-    // DSN pointed at an attacker's host), `.git/hooks`, a new ticket file — and the scratch dir
-    // alone would call that a clean groom. ADR-0019: defence in depth, not a boundary.
-    // `cfg` was loaded by the caller BEFORE the agent ran, so a corrupted blaze.config.json
-    // cannot throw here — it is a board change, refused and restored below.
+    // BLZ-673, containment — ONE rule with three parts (ADR-0019: defence in depth, not a
+    // boundary; its addendum lists what stays uncovered):
+    //  1. The agent runs with BLAZE_READONLY=1, so every blaze CLI/API write route refuses
+    //     (scripts/readonly.mjs) — it cannot `blaze new`/`move`/`import` its way into the store.
+    //  2. The STORE is fingerprinted before and after (storeFingerprintOf). If it moved — a
+    //     port write by anyone, or a store file swapped — the pass is refused `store-changed`,
+    //     NOTHING is written and the board is NOT restored: the store cannot be rewound with the
+    //     files, and rewinding only the files (a receipt, a git ref) would leave a half-revert.
+    //  3. The rest of the BOARD is surveyed as the fs groomer surveys it: any change is refused
+    //     `out-of-bounds` and restored. `cfg` was loaded by the caller BEFORE the agent ran, so
+    //     a corrupted blaze.config.json is a restored board change, never an uncaught throw.
+    // RESIDUAL (named, not covered; ADR-0019 addendum): a raw SQL write that appends no
+    // ticket_event row — an agent holding the DSN running `psql`, a direct `sqlite3 … UPDATE`,
+    // a crafted `-wal` swapped in — moves neither the event id nor a main file's identity. The
+    // row re-read before the write still catches it on THE GROOMED ROW only.
+    const storeBefore = await storeFingerprintOf(root, writePort);
     const boardBefore = snapshotTree(root);
     const porcelainBaseline = new Set(porcelainLines(root));
     const r = spawnSync(cmd, [...args, prompt], {
       cwd: dir, encoding: "utf8",
       timeout: Math.max(1, timeoutSec) * 1000, killSignal: "SIGKILL",
       maxBuffer: Math.max(1, maxBufferMb) * 1024 * 1024,
-      env: { ...process.env, BLAZE_GROOM_TARGET: rel },
+      env: { ...process.env, BLAZE_GROOM_TARGET: rel, BLAZE_READONLY: "1" },
     });
 
     // Contain: the scratch directory holds ONE file, and that file is the only thing the
@@ -2081,8 +2273,8 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
     const boardAfter = snapshotTree(root);
     // If the scratch dir happens to sit inside the board (a data root that contains the OS
     // temp dir), its own paths are the scratch survey's business, not the board's.
-    const inScratch = ((s) => (!s.startsWith("..") && !isAbsolute(s)
-      ? (f) => f === s || f.startsWith(`${s}/`) : () => false))(relative(root, dir));
+    const inScratch = ((sd) => (!sd.startsWith("..") && !isAbsolute(sd)
+      ? (f) => f === sd || f.startsWith(`${sd}/`) : () => false))(relative(root, dir));
     const judged = (paths) => paths.filter((f) => !DB_STORE_FILE.test(f) && !inScratch(f));
     const boardTouched = judged(diffSnapshots(boardBefore, boardAfter));
     const stray = [...new Set(outOfBoundsPaths(touched, [rel])
@@ -2100,13 +2292,23 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
       if (incomplete || surveyGaps.degraded) evt.surveyGaps = surveyGaps;
       return evt;
     };
+    // Dirt this pass introduced, as the fs refuse computes it — minus the store files, whose
+    // churn is the fingerprint's business (a TRACKED blaze.db would otherwise read as dirt).
+    const newDirtNow = () => porcelainLines(root)
+      .filter((l) => !porcelainBaseline.has(l) && !DB_STORE_FILE.test(l.slice(3)));
     const refuse = (reason, extra = {}) => {
       const evt = { type: "groom", id: ticket.id, refused: true, reason, outOfBounds: stray, ts: today, ...extra };
-      if (boardTouched.length) {
-        // Restore and VERIFY by re-observing, exactly as the fs path does (groomOnce's refuse).
-        const { failures } = restoreSnapshot(root, boardBefore, boardTouched);
+      if (reason === "store-changed") {
+        evt.restoreSkipped = true;
+        evt.restoreSkippedWhy = "the store changed during the pass and cannot be rewound together "
+          + "with the files; restoring only the files would leave a half-revert";
+      } else {
+        // Restore (board paths only — the scratch dir is deleted anyway) and VERIFY by
+        // re-observing, exactly as groomOnce's refuse does, on EVERY refusal path.
+        const { failures } = boardTouched.length ? restoreSnapshot(root, boardBefore, boardTouched)
+          : { failures: [] };
         const residual = judged(diffSnapshots(boardBefore, snapshotTree(root)));
-        const newDirt = porcelainLines(root).filter((l) => !porcelainBaseline.has(l));
+        const newDirt = newDirtNow();
         if (residual.length || newDirt.length || failures.length) {
           evt.revertFailed = true;
           evt.residual = residual;
@@ -2119,6 +2321,7 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
       console.error(`groomer: refused (${reason}) on ${ticket.id}`);
       return stampSurvey(evt);
     };
+    if (await storeFingerprintOf(root, writePort) !== storeBefore) return refuse("store-changed");
     if (stray.length) return refuse("out-of-bounds");
 
     if (r.error || r.status !== 0) {
@@ -2156,11 +2359,12 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
       id: ticket.id, frontmatter, body: now.body });
     if (errors.length) return refuse("invalid", { errors: errors.map((e) => redactSecrets(e).slice(0, 200)) });
 
-    // Lost-update guard. The agent may run for up to `timeoutSec`, and the write below is an
-    // upsert of the WHOLE row at the status read at selection — so a move, worklog or link
-    // made meanwhile would be silently reverted. Re-read and refuse if anything changed.
-    // RESIDUAL: this is check-then-write with no row lock; the window is now milliseconds,
-    // not minutes. Closing it is BLZ-254's (it owns the concurrency proofs).
+    // Last look before the write. The fingerprint again — validation read the whole board,
+    // and a port write in that time is the same lost update — then the groomed ROW itself:
+    // strictly redundant for port writes (they move the event id), it is kept as defence in
+    // depth because it also catches a raw SQL change to this row that appended no event.
+    // RESIDUAL: check-then-write, no row lock; the window is milliseconds. BLZ-254 owns it.
+    if (await storeFingerprintOf(root, writePort) !== storeBefore) return refuse("store-changed");
     const current = (await readStorage.getTicket(projectsDir, ticket.id)).found;
     if (!current || current.status !== ticket.status
         || hashContent(serializeTicket({ frontmatter: current.frontmatter, body: current.body ?? "" }))
@@ -2183,6 +2387,33 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
 }
 ```
 
+Then give the db write port the fingerprint the groomer reads — in `scripts/model/write-port.mjs`, inside `dbWritePort`'s returned object, replace
+
+```js
+    reserve,
+```
+
+(the line Task 5 added after `allocate,`) with
+
+```js
+    reserve,
+    /**
+     * BLZ-673: the store fingerprint the db groomer compares across its agent run. Every write
+     * through ANY db port, from any process, appends a `ticket_event` row (persist →
+     * recordEvent), and `ticket_event.id` is identity (Postgres) / INTEGER PRIMARY KEY
+     * AUTOINCREMENT (SQLite), so MAX(id) moves on every port write. Read-only. It lives on the
+     * db write port because that port already holds the exec for BOTH drivers — the readers
+     * expose none — so no resolver signature changes and the fs/dual ports are untouched.
+     * A raw SQL write that appends no event is invisible to it (ADR-0019 residual).
+     */
+    async storeFingerprint() {
+      const rows = await exec.all("SELECT COALESCE(MAX(id), 0) AS n FROM ticket_event", []);
+      return { dialect, lastEventId: Number(rows[0].n) };
+    },
+```
+
+(A method on the returned object, not an export: no seam pin changes — Finding 13's reasoning.)
+
 - [ ] **Step 4: Pin the new exports** — in `tests/model/seam-closure.test.mjs` replace
 
 ```js
@@ -2202,8 +2433,8 @@ with
 
 - [ ] **Step 5: Run the tests to verify they pass**
 
-Run: `node --test tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/groomer-propose.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — groomer-db-mode `pass 9` (fs control, the still-present BLZ-670 refusal, and the seven `groomOnceDb` cases); the fs groomer suites unchanged; seam-closure 21/21.
+Run: `node --test --test-concurrency=1 tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/groomer-propose.test.mjs tests/model/write-port.test.mjs tests/model/seam-closure.test.mjs`
+Expected: PASS — groomer-db-mode `pass 15` with `BLAZE_TEST_PG_URL` set (fs control, the still-present BLZ-670 refusal, and the thirteen `groomOnceDb` cases; the Postgres one skips without it); the fs groomer suites unchanged; seam-closure 21/21.
 
 - [ ] **Step 6: Commit**
 
@@ -2237,7 +2468,7 @@ git commit -m "BLZ-673: groomOnceDb — groom through the port via a materialise
 // agent, and the result is written back through the port. The fs-mode control stays.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, chmodSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, existsSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
@@ -2248,6 +2479,9 @@ import { runDb } from "../scripts/db-runner.mjs";
 import { resolvePorts } from "../scripts/model/write-port-resolve.mjs";
 import { groomOnceDb } from "../scripts/loops/groomer.mjs";
 import { dbBoard, QUIET } from "./helpers/db-board.mjs";
+import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
+import { writeCsv } from "../scripts/model/csv.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
 
 const scratch = scratchRegistry();
@@ -2301,11 +2535,12 @@ test("control: under BLAZE_WRITE_PORT=fs the groomer runs the agent", () => {
 /** A SQLite db-mode board (ENG-1 loaded by `blaze db init`) whose agent runs `script` in the
  *  scratch dir. `$BLAZE_GROOM_TARGET` names the materialised file; `mark` is a directory
  *  OUTSIDE the scratch dir the stub may write evidence into. */
-async function dbGroomBoard(script) {
+async function dbGroomBoard(script, { portOpts = {}, git = null, init = true } = {}) {
   const roots = dbBoard();
-  // A function receives the roots, for a stub that must name the board (the concurrent move).
-  if (typeof script === "function") script = script(roots);
   const mark = scratch(mkdtempSync(join(tmpdir(), "blz673-groom-mark-")));
+  // A function receives the roots and the mark dir (OUTSIDE the board), for a stub that must
+  // name the board or leave evidence (the concurrent writers, the planted-ticket probe).
+  if (typeof script === "function") script = script(roots, mark);
   const stub = join(roots.dataRoot, "stub-agent.sh");
   writeFileSync(stub, `#!/usr/bin/env bash\nset -e\npwd > "${mark}/cwd"\n${script}\n`);
   chmodSync(stub, 0o755);
@@ -2313,8 +2548,16 @@ async function dbGroomBoard(script) {
     projects: ["ENG"], schemaVersion: 2, agentCommand: `bash ${stub}`,
     loops: { groomer: { columns: ["defined"] } },
   }));
-  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
-  return { ...roots, mark };
+  if (init) assert.equal(await runDb(["init"], { ...QUIET, roots, ...portOpts }), 0);
+  if (git) {
+    // `git: "ignore-store"` ignores `.blaze/`, as `blaze init` does.
+    if (git === "ignore-store") writeFileSync(join(roots.dataRoot, ".gitignore"), ".blaze/\n");
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+      execFileSync("git", ["-C", roots.dataRoot, ...a]);
+    }
+  }
+  return { ...roots, mark, portOpts };
 }
 
 async function groomDb(roots) {
@@ -2335,16 +2578,16 @@ async function groomDb(roots) {
 /** One db-mode pass called DIRECTLY (no supervisor): resolve, groom, always close. */
 async function groomDirect(roots) {
   const cfg = loadConfig({ root: roots.dataRoot, env: {} });
-  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...(roots.portOpts ?? {}) });
   try {
     return await groomOnceDb({ root: roots.dataRoot, projectsDir: roots.projectsDir, cfg,
       agentsMd: "", today: today(), readStorage: ports.readStorage, writePort: ports.writePort });
   } finally { await ports.close(); }
 }
 
-async function readBack(roots) {
-  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
-  try { return (await ports.readStorage.getTicket(roots.projectsDir, "ENG-1")).found; }
+async function readBack(roots, id = "ENG-1") {
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...(roots.portOpts ?? {}) });
+  try { return (await ports.readStorage.getTicket(roots.projectsDir, id)).found; }
   finally { await ports.close(); }
 }
 
@@ -2424,7 +2667,8 @@ test("groomOnceDb: a result that fails validation is refused with the validator'
   assert.equal((await readBack(roots)).frontmatter.type, "task");
 });
 
-test("groomOnceDb: a move made while the agent runs is not reverted — the pass is refused", async () => {
+test("groomOnceDb: a move made by ANOTHER session while the agent runs is not reverted — store-changed", async () => {
+  // `BLAZE_READONLY=` (empty) stands for a different session: the agent's own env says 1.
   const moveRunner = new URL("../scripts/move-runner.mjs", import.meta.url).pathname;
   const roots = await dbGroomBoard((r) =>
     `BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db BLAZE_READONLY= `
@@ -2432,10 +2676,151 @@ test("groomOnceDb: a move made while the agent runs is not reverted — the pass
     + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
   const groom = await groomDirect(roots);
   assert.equal(groom.refused, true, JSON.stringify(groom));
-  assert.equal(groom.reason, "changed-concurrently");
+  assert.equal(groom.reason, "store-changed");
+  assert.equal(groom.restoreSkipped, true);
   const back = await readBack(roots);
   assert.equal(back.status, "in-progress", "the concurrent move survives");
   assert.doesNotMatch(back.body, /Groomed\./);
+});
+
+test("groomOnceDb: the AGENT's own blaze write is refused by BLAZE_READONLY — the store is unchanged (probe 1)",
+     async () => {
+  const newRunner = new URL("../scripts/new-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r, mark) =>
+    `BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db "${process.execPath}" "${newRunner}" `
+    + `--project ENG --type task --estimate 15 "planted by the agent" 2> "${mark}/planted.err" || true\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.ok(groom && !groom.refused && !groom.error, JSON.stringify(groom));
+  assert.match(readFileSync(join(roots.mark, "planted.err"), "utf8"), /BLAZE_READONLY/);
+  assert.equal(await readBack(roots, "ENG-2"), null, "no ticket was planted in the store");
+});
+
+test("groomOnceDb: a store file swapped for a copy is refused store-changed, and the groom is NOT written (probe 2)",
+     async () => {
+  const roots = await dbGroomBoard((r) =>
+    `cp "${r.dataRoot}/.blaze/blaze.db" "${r.dataRoot}/.blaze/swap"\n`
+    + `mv "${r.dataRoot}/.blaze/swap" "${r.dataRoot}/.blaze/blaze.db"\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "store-changed");
+  assert.equal(groom.restoreSkipped, true);
+  assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
+});
+
+test("groomOnceDb: a concurrent db-mode import during the agent → store-changed; receipt, ref and row are left alone",
+     async () => {
+  const importRunner = new URL("../scripts/import-runner.mjs", import.meta.url).pathname;
+  let csv;
+  const roots = await dbGroomBoard((r, mark) => {
+    csv = join(mark, "concurrent.csv");   // outside the board: the input is not a board file
+    writeFileSync(csv, writeCsv([COLUMN_NAMES.slice(), COLUMN_NAMES.map((n) => ({
+      schema_version: "1", id: "ENG-2", project: "ENG", type: "task", status: "defined",
+      title: "imported concurrently", description: "body", estimate: "30" })[n] ?? "")]));
+    return `(cd "${r.dataRoot}" && BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db BLAZE_READONLY= `
+      + `"${process.execPath}" "${importRunner}" --apply "${csv}" >/dev/null)\n`
+      + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`;
+  }, { git: "ignore-store" });
+  const headBefore = execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "store-changed");
+  assert.equal(groom.restoreSkipped, true);
+  assert.ok(groom.outOfBounds.some((p) => p.startsWith("import-receipts/")), JSON.stringify(groom.outOfBounds));
+  assert.equal(readdirSync(join(roots.dataRoot, "import-receipts")).filter((f) => f.endsWith(".jsonl")).length, 1,
+    "the receipt is not deleted");
+  assert.notEqual(execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    headBefore, "the import's commit is not rewound");
+  assert.equal((await readBack(roots, "ENG-2")).frontmatter.title, "imported concurrently");
+  assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
+});
+
+test("groomOnceDb: the store exclusion is ANCHORED — look-alike paths are surveyed, refused and restored", async () => {
+  const roots = await dbGroomBoard((r) =>
+    `mkdir -p "${r.projectsDir}/ENG/.blaze"\n`
+    + `printf x > "${r.projectsDir}/ENG/.blaze/blaze.db-wal"\n`
+    + `printf x > "${r.dataRoot}/blaze.db"\n`
+    + `printf x > "${r.dataRoot}/.blaze/blaze.db-evil"\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "out-of-bounds");
+  for (const p of [".blaze/blaze.db-evil", "blaze.db", "projects/ENG/.blaze/blaze.db-wal"]) {
+    assert.ok(groom.outOfBounds.includes(p), `${p} was not surveyed: ${JSON.stringify(groom.outOfBounds)}`);
+  }
+  assert.equal(existsSync(join(roots.dataRoot, "blaze.db")), false);
+  assert.equal(existsSync(join(roots.dataRoot, ".blaze", "blaze.db-evil")), false);
+  assert.equal(existsSync(join(roots.projectsDir, "ENG", ".blaze", "blaze.db-wal")), false);
+});
+
+test("groomOnceDb: on a board that TRACKS its shadow, a WAL checkpoint during the pass is not reported as dirt",
+     async () => {
+  // A checkpoint rewrites blaze.db's bytes with no ticket_event and no new inode — legitimate
+  // SQLite housekeeping that the fingerprint rightly ignores. On a board whose git tracks
+  // `.blaze/`, that surfaces in `git status` as ` M .blaze/blaze.db`, which must not read as
+  // dirt the groomer failed to revert.
+  const roots = await dbGroomBoard((r) =>
+    `"${process.execPath}" -e 'const { DatabaseSync } = require("node:sqlite"); `
+    + `new DatabaseSync(${JSON.stringify(join(r.dataRoot, ".blaze", "blaze.db"))}).exec("PRAGMA wal_checkpoint(PASSIVE)")'\n`
+    + `printf 'x\\n' >> "$BLAZE_GROOM_TARGET"\ntouch stray.txt`);
+  // Put frames in the WAL and commit the board while they are still un-checkpointed, so the
+  // committed blaze.db is clean at the pass's baseline and the stub's checkpoint dirties it.
+  const holder = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  try {
+    const t = await holder.readStorage.getTicket(roots.projectsDir, "ENG-1");
+    await holder.writePort.write({ project: "ENG", status: "defined", frontmatter: t.found.frontmatter, body: t.found.body });
+    for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                     ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+      execFileSync("git", ["-C", roots.dataRoot, ...a]);
+    }
+    const groom = await groomDirect(roots);
+    assert.equal(groom.refused, true, JSON.stringify(groom));
+    assert.equal(groom.reason, "out-of-bounds");
+    assert.equal(groom.revertFailed, undefined, JSON.stringify(groom));
+  } finally { await holder.close(); }
+});
+
+test("groomOnceDb on POSTGRES: grooms through the port, and a concurrent port write is refused store-changed",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("groom");
+  try {
+    const portOpts = { resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
+                       openPostgresClient: pgClient };
+    // Postgres init loads no tickets, so ENG-1 is written through the port first.
+    const seed = async (roots) => {
+      const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...portOpts });
+      try {
+        await ports.writePort.write({ project: "ENG", status: "defined", body: "## Acceptance Criteria\n\n- [ ] one\n",
+          frontmatter: { id: "ENG-1", title: "A task", type: "task", project: "ENG", priority: "medium",
+                         assignee: "unassigned", estimate: 30, created: "2026-01-01", updated: "2026-01-01" } });
+      } finally { await ports.close(); }
+    };
+    const ok = await dbGroomBoard(`printf '\\nGroomed on Postgres.\\n' >> "$BLAZE_GROOM_TARGET"`, { portOpts });
+    await seed(ok);
+    const g1 = await groomDirect(ok);
+    assert.ok(g1 && !g1.refused && !g1.error, JSON.stringify(g1));
+    assert.match((await readBack(ok)).body, /Groomed on Postgres\./);
+
+    // A second board on the same database: the agent's run coincides with another session's
+    // port write (ENG-2), which moves MAX(ticket_event.id).
+    const writer = join(ok.mark, "concurrent-pg.mjs");
+    writeFileSync(writer, [
+      `import pg from ${JSON.stringify(new URL("../node_modules/pg/lib/index.js", import.meta.url).pathname)};`,
+      `import { dbWritePort } from ${JSON.stringify(new URL("../scripts/model/write-port.mjs", import.meta.url).pathname)};`,
+      `import { pgExec } from ${JSON.stringify(new URL("../scripts/model/write-port-resolve.mjs", import.meta.url).pathname)};`,
+      `const c = new pg.Client(${JSON.stringify(db.url)}); await c.connect();`,
+      `await dbWritePort(pgExec(c), { dialect: "postgres" }).write({ project: "ENG", status: "defined", body: "b",`,
+      `  frontmatter: { id: "ENG-2", title: "concurrent", type: "task", project: "ENG", estimate: 30 } });`,
+      "await c.end();",
+    ].join("\n"));
+    const race = await dbGroomBoard(`"${process.execPath}" "${writer}"\nprintf '\\nSecond.\\n' >> "$BLAZE_GROOM_TARGET"`,
+      { portOpts, init: false });
+    const g2 = await groomDirect(race);
+    assert.equal(g2.refused, true, JSON.stringify(g2));
+    assert.equal(g2.reason, "store-changed");
+    assert.doesNotMatch((await readBack(race)).body, /Second\./);
+  } finally { await db.drop(); }
 });
 
 test("supervisor under db: runGroomer grooms through the port and publishes the event — no refusal",
@@ -2513,8 +2898,10 @@ with
 and insert immediately above `  function startLoop(name) {`:
 
 ```js
-  /** BLZ-673: one db-mode pass. Ports are resolved once per run and ALWAYS closed; a
-   *  resolver refusal is published in the shape every groomer error takes. */
+  /** BLZ-673: one db-mode pass. Ports are resolved once per run and closed in the `finally`;
+   *  a resolver refusal is published in the shape every groomer error takes. Every await is
+   *  inside a try — including `close()`, whose failure is published too — so the promise the
+   *  un-awaited timer / control-route call receives cannot reject. */
   async function runGroomerDb() {
     loops.groomer.busy = true;
     let ports = null;
@@ -2531,13 +2918,16 @@ and insert immediately above `  function startLoop(name) {`:
       bus.publish({ type: "error", loop: "groomer", message: e.message, ts: today() });
     } finally {
       loops.groomer.busy = false;
-      if (ports) await ports.close();
+      if (ports) {
+        try { await ports.close(); }
+        catch (e) { bus.publish({ type: "error", loop: "groomer", message: `closing the ports: ${e.message}`, ts: today() }); }
+      }
     }
   }
 
 ```
 
-(`startLoop`, the timer and `/control/groomer/run` call `runGroomer()` without awaiting; `runGroomerDb` catches everything, so no unhandled rejection is possible.)
+(`startLoop`, the timer and `/control/groomer/run` call `runGroomer()` without awaiting. Every await in `runGroomerDb` — `resolvePorts`, the pass, and `ports.close()` in the `finally` — sits inside a `try`, so the returned promise cannot reject; a `close()` failure is published as a groomer error rather than escaping.)
 
 - [ ] **Step 4: Implement the CLI branch** — in `scripts/loops/groomer.mjs`'s CLI block replace
 
@@ -2587,8 +2977,8 @@ with
 
 - [ ] **Step 6: Run the tests to verify they pass**
 
-Run: `node --test tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/supervisor-surface.test.mjs tests/cli-key-refusal.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — groomer-db-mode `pass 11`; the rest unchanged; seam-closure 21/21.
+Run: `node --test --test-concurrency=1 tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/supervisor-surface.test.mjs tests/cli-key-refusal.test.mjs tests/model/seam-closure.test.mjs`
+Expected: PASS — groomer-db-mode `pass 17` with `BLAZE_TEST_PG_URL` set; the rest unchanged; seam-closure 21/21.
 
 - [ ] **Step 7: Commit**
 
@@ -2603,7 +2993,7 @@ git commit -m "BLZ-673: supervisor and blaze groom groom through the port under 
 **Files:**
 - Modify: `docs/guide/commands.md` (count line, table row, new `## db` section before `## schedule`, `## groom` paragraph)
 - Modify: `docs/design.md:129-131`, `docs/schema-versioning.md:121-123`
-- Modify: `docs/decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md` (append), `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md` (append)
+- Modify: `docs/decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md` (append), `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md` (Consequences amended in place + append), `docs/decisions/0019-the-groomers-guard-is-advisory.md` (append)
 
 - [ ] **Step 1: `docs/guide/commands.md`.** The page claims "There are 16 subcommands"; `cli.mjs`'s `SUBCOMMANDS` has 23 and the table omits several, so stop claiming a count — replace
 
@@ -2667,15 +3057,25 @@ and append to the `## groom` section, after `No CLI args.`:
 
 Under `BLAZE_WRITE_PORT=db` (BLZ-673) the ticket is read from the database and written to a
 fresh scratch directory as `<id>.md`; the agent edits that file, and the result is written
-back through the write port — nothing is committed. The pass is refused, and nothing written,
-if the agent writes any other file — in the scratch directory or anywhere on the board (the
-whole data root is surveyed as on the fs path, except the SQLite store files
-`.blaze/blaze.db`/`config.db` and their `-wal`/`-shm`/`-journal` companions); board files it
-touched are restored. It is also refused if the agent changes a field outside the editable set
-(`title`, `type`, `assignee`, `priority`, `labels`, `components`, `estimate`, `parent`,
-`likelihood`, `impact`, `sprint`, `not_before`, `deadline`) plus `updated`, if the result is a
-ticket `blaze edit` would reject, or if the ticket itself changed in the database while the agent
-ran (`changed-concurrently`). A db groom has no commit, so the feed offers no revert for it.
+back through the write port — nothing is committed. The agent runs with `BLAZE_READONLY=1`, so
+every `blaze` write it attempts is refused. The pass is refused, and nothing written, if:
+
+- **the store changed while the agent ran** (`store-changed`) — any write through the write
+  port by any session moves the last `ticket_event` id, and on SQLite a swapped
+  `.blaze/blaze.db`/`config.db` changes its inode. Board files are **not** restored in this
+  case (`restoreSkipped`): the store cannot be rewound with them, and rewinding only the files
+  would half-revert whatever the other session did;
+- **the agent wrote any other file** (`out-of-bounds`) — in the scratch directory or anywhere on
+  the board (the whole data root is surveyed as on the fs path, except `.blaze/blaze.db`,
+  `.blaze/config.db` and their `-wal`/`-shm`/`-journal` files, which the store check covers);
+  the board files it touched are restored;
+- it changed a field outside the editable set (`title`, `type`, `assignee`, `priority`,
+  `labels`, `components`, `estimate`, `parent`, `likelihood`, `impact`, `sprint`,
+  `not_before`, `deadline`) plus `updated`, or left a ticket `blaze edit` would reject.
+
+Not covered: a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in. That moves neither the event id nor a file identity (a re-read of the
+groomed row still catches it on that one row). A db groom has no commit, so the feed offers
+no revert for it.
 ```
 
 - [ ] **Step 2: `docs/design.md`** — replace
@@ -2691,12 +3091,12 @@ with
 ```markdown
 **Under `BLAZE_WRITE_PORT=db`** (BLZ-673) the groomer reads the ticket through the port,
 materialises it as `<id>.md` in a scratch directory for the agent, and writes the result back
-through the write port — no file on the board is edited and nothing is committed. The board is
-still surveyed as on the fs path (the SQLite store files excepted — they are the store, and
-concurrent writers change them): anything the agent writes outside that one file is refused and
-restored. A change to a field outside the editable set plus `updated`, a result `blaze edit`
-would reject, and a ticket that changed in the database while the agent ran are refused too, and
-nothing is written.
+through the write port — no file on the board is edited and nothing is committed. The agent runs
+with `BLAZE_READONLY=1`. The store is fingerprinted across the run (last `ticket_event` id; on
+SQLite, the main store files' inodes): if it moved, the pass is refused and nothing — store or
+files — is written or rewound. The rest of the board is surveyed as on the fs path: anything the
+agent writes outside that one file is refused and restored. A field outside the editable set
+plus `updated`, or a result `blaze edit` would reject, is refused too. Not covered: a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in.
 ```
 
 - [ ] **Step 3: `docs/schema-versioning.md`** — replace
@@ -2743,7 +3143,25 @@ to place a ticket" now holds for the claim as well: `import-apply.mjs` no longer
 `allocateId` or `writeClaim`.
 ````
 
-- [ ] **Step 5: ADR-0038 addendum** — append to `docs/decisions/0038-…-entry-point.md`:
+- [ ] **Step 5: ADR-0038 — amend the Consequences sentence in place, then append the addendum.** In `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md` replace
+
+```markdown
+  from the same store its writes go to, in every mode — with one named exception: the groomer
+  loop still reads and edits ticket files, so in `db` mode it is refused rather than run (see
+  Named residuals; BLZ-673). `fs` and `dual` behaviour is unchanged
+  byte-for-byte.
+```
+
+with
+
+```markdown
+  from the same store its writes go to, in every mode — with one named exception at the time of
+  writing: the groomer loop still read and edited ticket files, so in `db` mode it was refused
+  rather than run (see Named residuals). *BLZ-673 has since closed it — see the Addendum below.*
+  `fs` and `dual` behaviour is unchanged byte-for-byte.
+```
+
+and append:
 
 ````markdown
 ## Addendum (2026-09-30, BLZ-673) — the groomer residual is closed
@@ -2752,21 +3170,54 @@ The third named residual above no longer holds. Under `BLAZE_WRITE_PORT=db` the 
 both ports once per run (`resolvePorts`, closed in a `finally`), selects from the reader,
 materialises the ticket as `<id>.md` in a scratch directory for the agent, and writes the result
 through the write port with `{ actor: "groomer", source: "loop" }`. The fs groomer is unchanged.
-Containment is the fs groomer's, applied to both trees: the scratch directory may change in
-exactly that one file, and the whole data root is snapshotted before and after the agent — any
-board change is refused `out-of-bounds`, restored with `restoreSnapshot` and verified by
-re-observing, as ADR-0019's defence in depth. The SQLite store files (`.blaze/blaze.db`,
-`.blaze/config.db` and their `-wal`/`-shm`/`-journal` files) are the one exclusion: they are the
-board under `db`, concurrent writers legitimately change them, and restoring their bytes under
-open connections would corrupt them; store changes are judged by the re-read below instead.
 The supervisor's BLZ-670 refusal is removed; `blaze groom` takes the same db branch.
-Immediately before the write the ticket is re-read, and the pass is refused
-(`changed-concurrently`) if its status or text changed while the agent ran — the write is an
-upsert of the whole row, so a move made meanwhile would otherwise be reverted. That check is
-check-then-write without a row lock; the remaining millisecond window is BLZ-254's to close.
-**Named residual — no undo.** A db groom is not a commit, so its feed event carries no `sha` and
-the feed's revert button (`supervisor.mjs`, shown only for an event with a `sha`) never appears;
-there is no one-click undo of a db-mode groom. A revert-through-the-port is BLZ-254's to design.
+
+Containment is one rule with three parts ([ADR-0019](0019-the-groomers-guard-is-advisory.md)'s
+defence in depth, not a boundary; its addendum lists what stays uncovered):
+
+1. The agent runs with `BLAZE_READONLY=1`, closing every `blaze` CLI/API write route.
+2. The **store** is fingerprinted before and after the agent — the last `ticket_event` id (every
+   port write, by any session, on either driver, appends one) and, on SQLite, the dev/ino of
+   `.blaze/blaze.db` and `.blaze/config.db`. If it moved, the pass is refused `store-changed`,
+   nothing is written, and the board is **not** restored (`restoreSkipped`): the store and the
+   files cannot be rewound together, and rewinding only the files — a receipt, a git ref — is a
+   half-revert. The fingerprint is re-checked, and the groomed row re-read, just before the
+   write; that last look is check-then-write without a row lock (a millisecond window,
+   BLZ-254's to close).
+3. The rest of the **board** is surveyed as the fs groomer surveys it: any change is refused
+   `out-of-bounds`, restored with `restoreSnapshot` and verified by re-observing. Only the store
+   files are excluded from that byte comparison, anchored at the data root's `.blaze/`.
+
+**Named residuals.** (a) A raw SQL write that appends no `ticket_event` row — an agent holding
+the database credentials running `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` swapped
+in — moves neither the event id nor a store file's identity; the re-read catches it only on the
+groomed row. (b) No undo: a db groom is not a commit, so its feed event carries no `sha` and the
+feed's revert button (`supervisor.mjs`, shown only for an event with a `sha`) never appears. A
+revert through the port is BLZ-254's to design.
+````
+
+- [ ] **Step 5b: ADR-0019 addendum** — `scripts/loops/groomer.mjs` requires ADR-0019 to list every uncovered class exhaustively, so append to `docs/decisions/0019-the-groomers-guard-is-advisory.md`:
+
+````markdown
+## Addendum (2026-09-30, BLZ-673) — the db-mode groomer, and what it leaves uncovered
+
+Under `BLAZE_WRITE_PORT=db` the groomer (`groomOnceDb`) hands the agent a materialised copy of
+the ticket in a scratch directory and writes the result through the write port. Its guard is
+this ADR's, extended: the agent runs with `BLAZE_READONLY=1`; the store is fingerprinted across
+the run (last `ticket_event` id, and on SQLite the dev/ino of `.blaze/blaze.db` and
+`.blaze/config.db`) and a moved fingerprint refuses the pass without restoring anything; the
+rest of the data root is surveyed and restored exactly as above. Added to the exhaustive list of
+what it does **not** cover:
+
+- **A raw SQL write that appends no `ticket_event` row** — an agent that holds the database
+  credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in
+  (`-wal`/`-shm`/`-journal` identity is not fingerprinted: other sessions' connections delete
+  and recreate them legitimately). Only a change to the groomed row itself is caught, by the
+  re-read before the write.
+- **The check-then-write window** between that last re-read and the write — no row lock;
+  milliseconds wide; BLZ-254 owns the concurrency proofs.
+- **A `store-changed` refusal restores nothing**, by design: board files the agent wrote in the
+  same pass stay, and are named in the event's `outOfBounds`.
 ````
 
 - [ ] **Step 6: Run the doc pins**
@@ -2777,7 +3228,7 @@ Expected: PASS, 0 failures.
 - [ ] **Step 7: Commit**
 
 ```bash
-git commit -m "BLZ-668: docs — blaze db init/seed-counter, cutover line, reserve (ADR-0037), groomer under db (ADR-0038)" -- docs/guide/commands.md docs/design.md docs/schema-versioning.md docs/decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md
+git commit -m "BLZ-668: docs — blaze db init/seed-counter, cutover line, reserve (ADR-0037), groomer under db (ADR-0038, ADR-0019)" -- docs/guide/commands.md docs/design.md docs/schema-versioning.md docs/decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/decisions/0019-the-groomers-guard-is-advisory.md
 ```
 
 ---
@@ -2791,8 +3242,8 @@ BLAZE_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:55433/blaze_test \
   node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs
 ```
 
-Expected (prototype): `tests 5320 … pass 5319, fail 0, skipped 1`.
+Expected (prototype): `tests 5326 … pass 5325, fail 0, skipped 1`.
 
-- [ ] `npm run test:coverage` (with `BLAZE_TEST_PG_URL` set) — the c8 gate passes (prototype: 97.96 / 87.96 / 97.36 / 97.96 % against thresholds 91/77/93/91). Note `.c8rc.json` excludes `scripts/*-runner.mjs`, so `db-runner.mjs`'s new branches are covered by the tests above but not counted by the gate; the counted new logic is in `scripts/model/` and `scripts/loops/`.
+- [ ] `npm run test:coverage` (with `BLAZE_TEST_PG_URL` set) — the c8 gate passes (prototype: 97.96 / 87.92 / 97.37 / 97.96 % against thresholds 91/77/93/91). Note `.c8rc.json` excludes `scripts/*-runner.mjs`, so `db-runner.mjs`'s new branches are covered by the tests above but not counted by the gate; the counted new logic is in `scripts/model/` and `scripts/loops/`.
 - [ ] `git log --format=%B origin/main..HEAD | grep -ci co-authored-by` → `0`.
 - [ ] Stop the Postgres container: `docker stop blz-pg`.
