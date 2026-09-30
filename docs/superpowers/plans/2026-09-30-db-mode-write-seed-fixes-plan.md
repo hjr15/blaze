@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-09-30-db-mode-write-seed-fixes-design.md` — read it first; this plan argues from it.
 
-**Prototype provenance.** Every code and test block below was run in a scratch worktree of `30978e5` against `postgres:17-alpine`. With all eight tasks applied, the full suite ran green: `node --test --test-concurrency=1` with `BLAZE_TEST_PG_URL` set → `tests 5310, pass 5309, fail 0, skipped 1`. The fs import was checked byte-identical against the unmodified engine (tickets, `.ids/` claims, `.cutover`, receipt entries) behind an unreachable git remote.
+**Prototype provenance.** Every code and test block below was run in a scratch worktree of `30978e5` against `postgres:17-alpine`. After adversarial review round 1, every code and test block was re-extracted mechanically from this document and applied to a fresh worktree of `d2692ce`; with all eight tasks applied the full suite ran green: `node --test --test-concurrency=1` with `BLAZE_TEST_PG_URL` set → `tests 5317, pass 5316, fail 0, skipped 1`. The fs import was checked byte-identical against the unmodified engine (tickets, `.ids/` claims, `.cutover`, receipt entries) behind an unreachable git remote.
 
 ## Global Constraints
 
@@ -42,14 +42,19 @@
 9. **`blaze groom` (the CLI, `scripts/loops/groomer.mjs`'s main block) had no db refusal at all** — under db it silently groomed stale files. Task 7 routes it through `groomOnceDb` too.
 10. **"Local date" in spec §4 is actually UTC:** `new-runner.mjs:79` is `new Date().toISOString().slice(0, 10)`. The db port's default clock uses that same expression.
 11. **`docs/guide/commands.md` has no `db` section**; Task 8 adds one (and the table row, count 16 → 17). ADR-0037 is Accepted and ADR-0010/0012 already carry dated addenda, so BLZ-671's `reserve` is an **ADR-0037 addendum**; the groomer residual closure is an **ADR-0038 addendum**.
+12. **The db groomer re-reads before it writes (lost-update guard).** `writePort.write` is an upsert of the whole row at the status captured at selection, so a move/worklog/link made during the agent run (≤ `timeoutSec`, 900 s by default) would be silently reverted — reproduced: a stub agent that runs a db-mode `move-runner ENG-1 in-progress` left ENG-1 `defined` and the groom reported success. `groomOnceDb` now re-reads the ticket immediately before the write and refuses with `reason: "changed-concurrently"` if its status or `hashContent(serializeTicket(…))` differs from what the agent was given. **Named residual:** this is check-then-write with no row lock; the window shrinks from minutes to milliseconds but is not closed. Closing it (a version column / `SELECT … FOR UPDATE`) belongs to BLZ-254, which owns the concurrency proofs.
+13. **No `write-port.mjs` seam pin is added for `reserve` (spec §3.2 said "the new port methods join write-port.mjs's pins").** `SEAM_WRITE_PROVIDERS` classifies a module's **exports**; `reserve` is a member of the object literals `fsWritePort`/`dbWritePort`/`dualWritePort` return, which the export classifier does not enumerate. Those three factories are already pinned (`inert`), and seam-closure passes 21/21 with no change to that entry — adding `"reserve"` would fail the "every export classified exactly once" assertion, since no export of that name exists. What *is* pinned is the fs allocator that `reserve` calls: `fsAllocators` joins write-port-resolve's `writes` (Task 5 Step 8).
+14. **db `reserve` refuses an id that already has a row.** Import calls `reserve` only for an explicit-id **create**, which the planner classifies against the same database — so a row there means a concurrent writer took the id after planning, and the following upsert would overwrite it. The refusal surfaces as import exit 4 (board changed, receipt names the unwritten rows); `update` rows never call `reserve`, so re-imports are unaffected.
+15. **Cutover cost, stated in the runbook text (Task 8):** after the flip every ticket in the groomer's columns re-grooms once — `.blaze/state.json` holds hashes of *file* text, and the db serialisation differs (it writes empty keys the file omitted). No code change.
 
 ## Review Focus
 
 1. **A Postgres that is initialised but whose counter is stale** (ids handed out on the file path after `init`) → `seed-counter` raises it, never lowers it, and reports `before → after`. Pinned: Task 3 (`seed-counter on Postgres raises the counter to a new claim and is idempotent`).
 2. **An operator re-runs `blaze db init` on a live Postgres, or passes `--force`** → refused, nothing dropped, the message names `blaze db seed-counter`; `--force` refused before any connection. Pinned: Task 2.
-3. **An explicit-id import row whose `project` differs from its id prefix** (fs) → claim still written under the row's project, exactly as before. Pinned: Task 5 (`the fs port reserves an explicit id: the claim is written under the given project`) plus the byte-identical check in Task 5 Step 7.
-4. **The groomer agent edits the materialised file into something unparseable, or rewrites `created`, or writes a second file** → refused by name, nothing written, scratch removed. Pinned: Task 6 (out-of-bounds, identity-field, invalid); unparseable returns `reason: "unparseable"` (same code path as invalid; not separately pinned — reviewers should read it).
-5. **A db-mode groomer pass whose resolver refuses** (no shadow/no schema) → one `{type:"error", loop:"groomer"}` event, loop not left `busy`, ports closed. Pinned: Task 7.
+3. **An explicit-id import row whose `project` differs from its id prefix** (fs) → claim still written under the row's project, exactly as before. Pinned: Task 5 (`the fs port reserves an explicit id: the claim is written under the given project`) plus the byte-identical check in Task 5 Step 10.
+4. **The ticket changes (a move, a worklog) while the groomer's agent is running** → the pass is refused `changed-concurrently` and the concurrent change survives. Pinned: Task 6 (`a move made while the agent runs is not reverted`). The agent editing the file into something unparseable returns `reason: "unparseable"` (same path as `invalid`; not separately pinned — reviewers should read it).
+5. **`blaze db init` on Postgres fails part-way (seed error after the schema exists, or a foreign/unstamped schema)** → a named error that says what state the database is in; only a genuinely initialised database is sent to `seed-counter`. Pinned: Task 2 (seed failure, foreign tables) and Task 3 (recovery via `seed-counter`).
+6. **A db-mode groomer pass whose resolver refuses** (no shadow/no schema) → one `{type:"error", loop:"groomer"}` event, loop not left `busy`, ports closed. Pinned: Task 7.
 
 ---
 
@@ -433,6 +438,8 @@ import { runDb } from "../scripts/db-runner.mjs";
 import { resolvePorts, resolveWritePort } from "../scripts/model/write-port-resolve.mjs";
 import { writeClaim } from "../scripts/model/claims.mjs";
 import { applyNew } from "../scripts/new.mjs";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { dbBoard } from "./helpers/db-board.mjs";
 import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
 
@@ -442,11 +449,18 @@ const capture = () => {
   return { io, text: () => out.join("\n") };
 };
 
-/** runDb's injectables, pointed at one scratch database. `opened` counts connections. */
-function pgIo(url, opened = { n: 0 }) {
+/** runDb's injectables, pointed at one scratch database. `opened` counts connections
+ *  opened (`n`) and closed (`ended`). */
+function pgIo(url, opened = { n: 0, ended: 0 }) {
   return {
     resolveDbConfig: () => ({ driver: "postgres", connection: url }),
-    openPostgresClient: async (c) => { opened.n++; return pgClient(c); },
+    openPostgresClient: async (c) => {
+      opened.n++;
+      const client = await pgClient(c);
+      const end = client.end.bind(client);
+      client.end = async () => { opened.ended++; return end(); };
+      return client;
+    },
   };
 }
 
@@ -480,6 +494,37 @@ test("acceptance: Postgres init on an empty database → db-mode applyNew gets m
     assert.equal(await runDb(["init"], { ...c2.io, roots, ...pgIo(db.url) }), 1);
     assert.match(c2.text(), /already holds a Blaze schema/);
     assert.match(c2.text(), /blaze db seed-counter/);
+  } finally { await db.drop(); }
+});
+
+test("init that cannot SEED says the schema now exists and names seed-counter; the client is closed",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("seedfail");
+  try {
+    const roots = dbBoard();
+    const bad = join(roots.projectsDir, "ENG", "defined", "ENG-7-bad.md");
+    writeFileSync(bad, "no frontmatter at all\n");       // the walk refuses it (ADR-0031)
+    const opened = { n: 0, ended: 0 };
+    const c = capture();
+    assert.equal(await runDb(["init"], { ...c.io, roots, ...pgIo(db.url, opened) }), 1);
+    assert.match(c.text(), new RegExp(`the schema was created at 127\\.0\\.0\\.1/${db.name}`));
+    assert.match(c.text(), /missing frontmatter/);
+    assert.match(c.text(), /blaze db seed-counter/);
+    assert.doesNotMatch(c.text(), /already initialised/);
+    assert.deepEqual(opened, { n: 1, ended: 1 });
+  } finally { await db.drop(); }
+});
+
+test("init on a database holding FOREIGN tables surfaces that refusal verbatim — not 'already initialised'",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("foreign");
+  try {
+    const client = await pgClient(db.url);
+    try { await client.query("CREATE TABLE ticket (x integer)"); } finally { await client.end(); }
+    const c = capture();
+    assert.equal(await runDb(["init"], { ...c.io, roots: dbBoard(), ...pgIo(db.url) }), 1);
+    assert.match(c.text(), /no Blaze schema stamp/);
+    assert.doesNotMatch(c.text(), /already initialised|seed-counter/);
   } finally { await db.drop(); }
 });
 
@@ -523,7 +568,7 @@ test("cleanup: resolveWritePort on a REAL empty database refuses, names host/dat
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `node --test --test-concurrency=1 tests/db-runner-pg.test.mjs`
-Expected: FAIL (with `BLAZE_TEST_PG_URL` set) — acceptance: `/Postgres schema ready at …/` does not match (today's `init` builds a SQLite shadow instead); `--force`: exit 0 ≠ 1; cleanup: message `blaze: this Postgres database has no Blaze schema` does not match `the Postgres database 127.0.0.1/blz668_refuse_…`.
+Expected: FAIL (with `BLAZE_TEST_PG_URL` set) — acceptance: `/Postgres schema ready at …/` does not match (today's `init` builds a SQLite shadow instead); `--force`: exit 0 ≠ 1; seed failure and foreign tables: no Postgres branch, so `/the schema was created at …/` and `/no Blaze schema stamp/` do not match; cleanup: message `blaze: this Postgres database has no Blaze schema` does not match `the Postgres database 127.0.0.1/blz668_refuse_…`.
 
 - [ ] **Step 3: Export the checked open and name the target** — in `scripts/model/write-port-resolve.mjs` replace
 
@@ -597,11 +642,16 @@ import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
          readSoakState, pgExec, openCheckedPg, describePgTarget } from "./model/write-port-resolve.mjs";
 import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
-import { createDbSchema } from "./model/db-schema-version.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
 ```
 
-(`openCheckedPg` is used from Task 3; importing it now is harmless.)
+and extend the existing `import { DB_SCHEMA_VERSION } from "./model/db-schema-version.mjs";` to
+
+```js
+import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
+```
+
+(one import per module; `openCheckedPg` is used from Task 3 — importing it now is harmless.)
 
 (b) replace `USAGE`'s body lines
 
@@ -657,15 +707,31 @@ async function initPostgres({ dataRoot, projectsDir, force, log, err, openPgClie
   catch (e) { err(`blaze db init: cannot connect to ${describePgTarget(connection)} — ${e.message}`); return 1; }
   try {
     const exec = pgExec(client);
+    const where = describePgTarget(connection);
     try { await createDbSchema(exec, { dialect: "postgres" }); }
     catch (e) {
-      err(`blaze db init: ${describePgTarget(connection)} — ${e.message}.`);
-      err("It is already initialised. To bring its id counter up to date, run:\n");
+      err(`blaze db init: ${where} — ${e.message}.`);
+      // Only an ALREADY-INITIALISED database is sent to seed-counter. Anything else (an
+      // unstamped or foreign schema, a permission error) is surfaced as it is.
+      if (/already holds a Blaze schema/.test(e.message)) {
+        err("It is already initialised. To bring its id counter up to date, run:\n");
+        err("    blaze db seed-counter\n");
+      }
+      return 1;
+    }
+    let rows;
+    try {
+      rows = await seedCounter(exec,
+        await corpusMaxima({ projectsDir, readStorage: fsReadStorage }), { dialect: "postgres" });
+    } catch (e) {
+      // The schema now EXISTS, so re-running init would refuse. Say so, and name the step
+      // that finishes the job once the cause is fixed.
+      err(`blaze db init: the schema was created at ${where}, but seeding the id counter failed:`);
+      err(`  ${e.message}\n`);
+      err("Fix that, then finish with:\n");
       err("    blaze db seed-counter\n");
       return 1;
     }
-    const rows = await seedCounter(exec,
-      await corpusMaxima({ projectsDir, readStorage: fsReadStorage }), { dialect: "postgres" });
     log(`Postgres schema ready at ${describePgTarget(connection)}  (schema v${DB_SCHEMA_VERSION})`);
     log("id counter seeded:");
     printSeed(rows, log);
@@ -724,7 +790,7 @@ with
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `node --test --test-concurrency=1 tests/db-runner-pg.test.mjs tests/db-runner.test.mjs tests/write-port-resolve.test.mjs tests/read-storage-resolve.test.mjs tests/cli-key-refusal.test.mjs tests/model/config-install.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS, 0 failures (db-runner-pg: 3 tests with `BLAZE_TEST_PG_URL` set).
+Expected: PASS, 0 failures (db-runner-pg: 5 tests with `BLAZE_TEST_PG_URL` set).
 
 - [ ] **Step 7: Commit**
 
@@ -775,6 +841,21 @@ test("seed-counter on an uninitialised Postgres refuses, naming the database and
   } finally { await db.drop(); }
 });
 
+test("after init could not seed, fixing the cause and running seed-counter finishes the job", PG_SKIP, async () => {
+  const db = await scratchPgDb("seedfix");
+  try {
+    const roots = dbBoard();
+    const bad = join(roots.projectsDir, "ENG", "defined", "ENG-7-bad.md");
+    writeFileSync(bad, "no frontmatter at all\n");
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 1);
+    // The operator fixes the file, then finishes with the command the message named.
+    writeFileSync(bad, ["---", "id: ENG-7", "title: fixed", "type: task", "project: ENG",
+      "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
+    const c = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c.io, roots, ...pgIo(db.url) }), 0, c.text());
+    assert.match(c.text(), /ENG\s+0 → 7/);
+  } finally { await db.drop(); }
+});
 ```
 
 In `tests/db-runner.test.mjs` add after `import { runDb } from "../scripts/db-runner.mjs";`:
@@ -799,26 +880,26 @@ describe("blaze db seed-counter (sqlite)", () => {
   test("init seeds the counter from a claim above every ticket", async () => {
     const roots = board();
     writeClaim(roots.projectsDir, "ENG", 7, "claimed-no-ticket");
-    assert.equal(0, await runDb(["init"], { ...capture().io, roots }));
+    assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
     assert.equal(await counterOf(roots.dataRoot, "ENG"), 7);
   });
 
   test("seed-counter raises the counter to a claim made after init, then is idempotent", async () => {
     const roots = board();
-    assert.equal(0, await runDb(["init"], { ...capture().io, roots }));
+    assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
     writeClaim(roots.projectsDir, "ENG", 9, "handed-out-on-the-file-path");
     const c1 = capture();
-    assert.equal(0, await runDb(["seed-counter"], { ...c1.io, roots }));
+    assert.equal(await runDb(["seed-counter"], { ...c1.io, roots }), 0);
     assert.match(c1.text(), /ENG\s+1 → 9/);
     const c2 = capture();
-    assert.equal(0, await runDb(["seed-counter"], { ...c2.io, roots }));
+    assert.equal(await runDb(["seed-counter"], { ...c2.io, roots }), 0);
     assert.match(c2.text(), /ENG\s+9 → 9/);
     assert.equal(await counterOf(roots.dataRoot, "ENG"), 9);
   });
 
   test("seed-counter before init refuses, naming blaze db init", async () => {
     const c = capture();
-    assert.equal(1, await runDb(["seed-counter"], { ...c.io, roots: board() }));
+    assert.equal(await runDb(["seed-counter"], { ...c.io, roots: board() }), 1);
     assert.match(c.text(), /no shadow database/);
     assert.match(c.text(), /blaze db init/);
   });
@@ -828,7 +909,7 @@ describe("blaze db seed-counter (sqlite)", () => {
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `node --test --test-concurrency=1 tests/db-runner.test.mjs tests/db-runner-pg.test.mjs`
-Expected: FAIL — `seed-counter` cases: `unknown command "seed-counter"` (exit 1 where 0 expected); `init seeds the counter from a claim above every ticket`: `1 !== 7` (loadCorpus counts tickets only).
+Expected: FAIL — `seed-counter` cases: `unknown command "seed-counter"` (exit 1 where 0 expected); `after init could not seed…`: the `seed-counter` step exits 1 (unknown command); `init seeds the counter from a claim above every ticket`: `1 !== 7` (loadCorpus counts tickets only).
 
 - [ ] **Step 3: Implement.** In `scripts/db-runner.mjs`:
 
@@ -896,7 +977,7 @@ with
 - [ ] **Step 4: Run the tests to verify they pass**
 
 Run: `node --test --test-concurrency=1 tests/db-runner.test.mjs tests/db-runner-pg.test.mjs tests/db-mode-reads.test.mjs tests/read-storage-resolve.test.mjs tests/model/config-install.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — db-runner `pass 9`; db-runner-pg `pass 5` with Postgres; seam-closure 21/21 (db-runner's new calls reach no unpinned write member).
+Expected: PASS — db-runner `pass 9`; db-runner-pg `pass 8` with Postgres; seam-closure 21/21 (db-runner's new calls reach no unpinned write member).
 
 - [ ] **Step 5: Commit**
 
@@ -1020,9 +1101,14 @@ test("sqlite db mode: an imported row with no `created` lands with today's date;
 Run: `node --test tests/model/write-port.test.mjs tests/import-db-mode.test.mjs`
 Expected: FAIL — `NOT NULL constraint failed: ticket.created_on` (write-port "no created/updated" case, and the import exits 4 with that error for `ENG-7`).
 
-- [ ] **Step 4: Implement** — in `scripts/model/write-port.mjs` replace
+- [ ] **Step 4: Implement** — in `scripts/model/write-port.mjs` replace (the clock goes ABOVE the JSDoc, so the comment stays attached to `dbWritePort`)
 
 ```js
+/**
+ * Database adapter. `exec` is the same {run, all} shape the projection uses, so it
+ * works against SQLite synchronously and Postgres asynchronously without a second
+ * implementation — ADR-0010's async port doing the job it was chosen for.
+ */
 export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
 ```
 
@@ -1032,6 +1118,11 @@ with
 /** `YYYY-MM-DD`, the same expression `new-runner.mjs` stamps `created`/`updated` with. */
 const isoToday = () => new Date().toISOString().slice(0, 10);
 
+/**
+ * Database adapter. `exec` is the same {run, all} shape the projection uses, so it
+ * works against SQLite synchronously and Postgres asynchronously without a second
+ * implementation — ADR-0010's async port doing the job it was chosen for.
+ */
 export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {}) {
 ```
 
@@ -1078,7 +1169,7 @@ git commit -m "BLZ-672: db write port stamps a missing created/updated with the 
 - Consumes: Task 1's `counterUpsertSql`; Task 4's clock (the interleave writes undated rows).
 - Produces:
   - `fsWritePort(projectsDir, storage, readStorage, { allocate, reserve })` — `reserve(id, opts)` throws `fsWritePort: no reserve function was injected` when absent.
-  - `dbWritePort(...).reserve(id) → Promise<{}>` — never-lower upsert keyed on the id's prefix.
+  - `dbWritePort(...).reserve(id) → Promise<{}>` — throws `reserve: <id> already exists in the database — refusing to overwrite it …` when a `ticket` row has that id; otherwise the never-lower upsert keyed on the id's prefix.
   - `dualWritePort(...).reserve(id, opts)` → `primary.reserve(id, opts)`.
   - `fsAllocators(projectsDir, { dataRoot = dirname(projectsDir), remoteClaims = true }) → { allocate(project, { title }) → { id, n, claimFile }, reserve(id, { project, title }) → { claimFile } }` (exported from `write-port-resolve.mjs`).
   - `resolveWritePort({ …, remoteClaims = true })`; `resolvePorts` forwards it (it spreads `opts` into `resolveWritePort`).
@@ -1102,6 +1193,12 @@ describe("reserve (BLZ-671)", () => {
     for (let i = 0; i < 5; i++) await port.allocate("BLZ");  // counter at 5
     await port.reserve("BLZ-2");
     assert.equal((await port.allocate("BLZ")).id, "BLZ-6");
+  });
+
+  test("dbWritePort.reserve refuses an id that already has a row — the write after it would overwrite", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    await port.write(TICKET());                              // BLZ-1, e.g. a concurrent db-mode `new`
+    await assert.rejects(port.reserve("BLZ-1", { title: "x" }), /BLZ-1 already exists in the database/);
   });
 
   test("fsWritePort.reserve calls the injected function with id and options", async () => {
@@ -1189,9 +1286,27 @@ test("BLZ-671: an fs --allocate-ids import never fetches — no provisional clai
 });
 ```
 
-Append to `tests/import-db-mode.test.mjs`:
+In `tests/import-db-mode.test.mjs` add after `import { existsSync, writeFileSync } from "node:fs";`:
 
 ```js
+import { execFileSync } from "node:child_process";
+```
+
+and append:
+
+```js
+/** A db board that is also a GIT repo. The file allocator (ids.mjs) reserves under the git
+ *  common dir and refuses outside a worktree; with a repo, the pre-BLZ-671 importer runs to
+ *  completion and the red run shows the real defect — the collision — not a missing repo. */
+function gitDbBoard() {
+  const roots = dbBoard();
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", roots.dataRoot, ...a]);
+  }
+  return roots;
+}
+
 /** new, import --allocate-ids, new, explicit-id import of a HIGH id, new — all through one
  *  resolved db-mode port pair, exactly as the runners resolve it. */
 async function interleave(roots, ports) {
@@ -1221,7 +1336,7 @@ async function interleave(roots, ports) {
 
 test("sqlite db mode: new / import / new / explicit high id / new — all distinct, last is high + 1, no .ids/",
      async () => {
-  const roots = dbBoard();
+  const roots = gitDbBoard();
   assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
   const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
   try {
@@ -1235,7 +1350,7 @@ test("sqlite db mode: new / import / new / explicit high id / new — all distin
 test("postgres db mode: the same interleave — all distinct, last is high + 1, no .ids/", PG_SKIP, async () => {
   const db = await scratchPgDb("interleave");
   try {
-    const roots = dbBoard();
+    const roots = gitDbBoard();
     const pgOpts = { resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
                      openPostgresClient: pgClient };
     assert.equal(await runDb(["init"], { ...QUIET, roots, ...pgOpts }), 0);
@@ -1255,7 +1370,7 @@ test("postgres db mode: the same interleave — all distinct, last is high + 1, 
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `node --test --test-concurrency=1 tests/model/write-port.test.mjs tests/write-port-resolve.test.mjs tests/import-db-mode.test.mjs`
-Expected: FAIL — `port.reserve is not a function`; `remoteClaims: false …`: `'BLZ-1 t provisional\n' !== 'BLZ-1 t\n'`; interleave: the import's allocated id collides (`ENG-2` twice, the second write overwriting the first) so `deepEqual` fails. (`tests/import-runner.test.mjs`'s new case passes today — the runner does not allocate through the port yet — and is the guard that goes red if Step 6 forgets `remoteClaims: false`; see Step 8.)
+Expected: FAIL — `port.reserve is not a function`; `remoteClaims: false …`: `'BLZ-1 t provisional\n' !== 'BLZ-1 t\n'`; `dbWritePort.reserve refuses…`: `port.reserve is not a function`; interleave (sqlite and postgres — the boards are git repos so the file allocator runs): `deepEqual` fails with actual `['ENG-2', 'ENG-2', 'ENG-3', 'ENG-50', 'ENG-4']` vs expected `['ENG-2', 'ENG-3', 'ENG-4', 'ENG-50', 'ENG-51']` — the import allocated `ENG-2` from the file ledger and upserted over db-mode `new`'s `ENG-2`, and the explicit `ENG-50` never raised the counter. (`tests/import-runner.test.mjs`'s new case passes today — the runner does not allocate through the port yet — and is the guard that goes red if Step 6 forgets `remoteClaims: false`; see Step 9.)
 
 - [ ] **Step 3: Add `reserve` to the ports** — in `scripts/model/write-port.mjs`:
 
@@ -1307,9 +1422,19 @@ export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsRe
    * leaves it where it is. The key is the id's own prefix — `ticket`'s CHECK ties
    * `id = project_key || '-' || num`, so a row whose project disagrees could not be written.
    * Returns `{}`: db mode has no claim file.
+   *
+   * REFUSES an id that already has a row. Import calls this only for an explicit-id CREATE —
+   * the planner read the same database and found no such ticket — so a row here means a
+   * concurrent writer (a db-mode `new`, another import) took the id in between, and the
+   * write that follows would upsert over it. The counter is raised only when the id is free.
    */
   async function reserve(id) {
     const s = String(id);
+    const hit = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [s]);
+    if (hit?.length) {
+      throw new Error(`reserve: ${s} already exists in the database — refusing to overwrite it `
+        + "(it was created after this import was planned). Re-run the import to re-plan.");
+    }
     await exec.run(counterUpsertSql(dialect), [s.slice(0, s.lastIndexOf("-")), num(s)]);
     return {};
   }
@@ -1618,7 +1743,7 @@ git commit -m "BLZ-671: import allocates and reserves ids through the write port
 - Consumes: `resolvePorts`' `readStorage` (`listTickets`, `getTicket`) and `writePort.write(t, ctx)`; `serializeTicket`/`parseTicket` (`model/ticket.mjs`); `EDITABLE_FIELDS` (`model/fields.mjs`); `validateTicket` (`model/rules.mjs`); `loadProjectSchema` (`model/schema-config.mjs`); `validateTaxonomy` (`model/taxonomy.mjs`); `loadSprints`, `validateSprintFields` (`model/sprints.mjs`); `loadProject` (`config.mjs`); the file's own `loadState`, `saveState`, `hashContent`, `buildPrompt`, `extractGroomingRules`, `snapshotTree`, `diffSnapshots`, `outOfBoundsPaths`, `redactSecrets`, `DEFAULT_TIMEOUT_SEC`, `DEFAULT_MAX_BUFFER_MB`.
 - Produces:
   - `selectNextTicketDb({ projectsDir, cfg, state, readStorage }) → Promise<{ id, project, status, file, raw } | null>` — columns order, then `cfg.projects` order, then numeric-aware id order; ungroomed = `state.groomed[id] !== hashContent(serializeTicket(t))`.
-  - `groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) → Promise<event|null>`. Events: `null`; `{ type:"groom", id, noop:true, ts }`; `{ type:"groom", id, refused:true, reason: "out-of-bounds"|"unparseable"|"identity-field"|"invalid", outOfBounds, ts, fields?|errors? }`; `{ type:"groom", id, error, ts, timedOut? }`; success `{ type:"groom", id, files:["<id>.md"], ts }` (no `sha`). Writes with ctx `{ actor: "groomer", source: "loop" }`.
+  - `groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) → Promise<event|null>`. Events: `null`; `{ type:"groom", id, noop:true, ts }`; `{ type:"groom", id, refused:true, reason: "out-of-bounds"|"unparseable"|"identity-field"|"invalid"|"changed-concurrently", outOfBounds, ts, fields?|errors? }` (`errors` redacted with `redactSecrets` and cut to 200 chars, like the `error` path)`; `{ type:"groom", id, error, ts, timedOut? }`; success `{ type:"groom", id, files:["<id>.md"], ts }` (no `sha`). Writes with ctx `{ actor: "groomer", source: "loop" }`.
 
 - [ ] **Step 1: Write the failing tests.** In `tests/groomer-db-mode.test.mjs` change the `node:fs` import to include `readFileSync`:
 
@@ -1647,6 +1772,8 @@ const today = () => new Date().toISOString().slice(0, 10);
  *  OUTSIDE the scratch dir the stub may write evidence into. */
 async function dbGroomBoard(script) {
   const roots = dbBoard();
+  // A function receives the roots, for a stub that must name the board (the concurrent move).
+  if (typeof script === "function") script = script(roots);
   const mark = scratch(mkdtempSync(join(tmpdir(), "blz673-groom-mark-")));
   const stub = join(roots.dataRoot, "stub-agent.sh");
   writeFileSync(stub, `#!/usr/bin/env bash\nset -e\npwd > "${mark}/cwd"\n${script}\n`);
@@ -1724,6 +1851,19 @@ test("groomOnceDb: a result that fails validation is refused with the validator'
   assert.equal((await readBack(roots)).frontmatter.type, "task");
 });
 
+test("groomOnceDb: a move made while the agent runs is not reverted — the pass is refused", async () => {
+  const moveRunner = new URL("../scripts/move-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r) =>
+    `BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db BLAZE_READONLY= `
+    + `"${process.execPath}" "${moveRunner}" ENG-1 in-progress >/dev/null\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "changed-concurrently");
+  const back = await readBack(roots);
+  assert.equal(back.status, "in-progress", "the concurrent move survives");
+  assert.doesNotMatch(back.body, /Groomed\./);
+});
 ```
 
 - [ ] **Step 2: Run them to verify they fail**
@@ -1885,7 +2025,7 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
     try {
       was = parseTicket(ticket.raw);
       now = parseTicket(readRegularFileSync(join(dir, rel), "utf8"));
-    } catch (e) { return refuse("unparseable", { errors: [String(e.message).slice(0, 200)] }); }
+    } catch (e) { return refuse("unparseable", { errors: [redactSecrets(e.message).slice(0, 200)] }); }
     const keys = new Set([...Object.keys(was.frontmatter), ...Object.keys(now.frontmatter)]);
     const identity = [...keys].filter((k) => !GROOMER_MAY_CHANGE.has(k)
       && !sameValue(was.frontmatter[k], now.frontmatter[k])).sort();
@@ -1894,7 +2034,19 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
     const frontmatter = { ...now.frontmatter, updated: today };
     const errors = await validateGroomed({ root, projectsDir, cfg, readStorage,
       id: ticket.id, frontmatter, body: now.body });
-    if (errors.length) return refuse("invalid", { errors });
+    if (errors.length) return refuse("invalid", { errors: errors.map((e) => redactSecrets(e).slice(0, 200)) });
+
+    // Lost-update guard. The agent may run for up to `timeoutSec`, and the write below is an
+    // upsert of the WHOLE row at the status read at selection — so a move, worklog or link
+    // made meanwhile would be silently reverted. Re-read and refuse if anything changed.
+    // RESIDUAL: this is check-then-write with no row lock; the window is now milliseconds,
+    // not minutes. Closing it is BLZ-254's (it owns the concurrency proofs).
+    const current = (await readStorage.getTicket(projectsDir, ticket.id)).found;
+    if (!current || current.status !== ticket.status
+        || hashContent(serializeTicket({ frontmatter: current.frontmatter, body: current.body ?? "" }))
+           !== hashContent(ticket.raw)) {
+      return refuse("changed-concurrently");
+    }
 
     // `source` is the event's CHECKed vocabulary (cli|api|loop|migration|git-backfill); the
     // groomer is a loop, and the actor says which one.
@@ -1931,7 +2083,7 @@ with
 - [ ] **Step 5: Run the tests to verify they pass**
 
 Run: `node --test tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/groomer-propose.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — groomer-db-mode `pass 6` (fs control, the still-present BLZ-670 refusal, and the four `groomOnceDb` cases); the fs groomer suites unchanged; seam-closure 21/21.
+Expected: PASS — groomer-db-mode `pass 7` (fs control, the still-present BLZ-670 refusal, and the five `groomOnceDb` cases); the fs groomer suites unchanged; seam-closure 21/21.
 
 - [ ] **Step 6: Commit**
 
@@ -2031,6 +2183,8 @@ test("control: under BLAZE_WRITE_PORT=fs the groomer runs the agent", () => {
  *  OUTSIDE the scratch dir the stub may write evidence into. */
 async function dbGroomBoard(script) {
   const roots = dbBoard();
+  // A function receives the roots, for a stub that must name the board (the concurrent move).
+  if (typeof script === "function") script = script(roots);
   const mark = scratch(mkdtempSync(join(tmpdir(), "blz673-groom-mark-")));
   const stub = join(roots.dataRoot, "stub-agent.sh");
   writeFileSync(stub, `#!/usr/bin/env bash\nset -e\npwd > "${mark}/cwd"\n${script}\n`);
@@ -2123,6 +2277,20 @@ test("groomOnceDb: a result that fails validation is refused with the validator'
   assert.equal((await readBack(roots)).frontmatter.type, "task");
 });
 
+test("groomOnceDb: a move made while the agent runs is not reverted — the pass is refused", async () => {
+  const moveRunner = new URL("../scripts/move-runner.mjs", import.meta.url).pathname;
+  const roots = await dbGroomBoard((r) =>
+    `BLAZE_PROJECTS_DIR="${r.projectsDir}" BLAZE_WRITE_PORT=db BLAZE_READONLY= `
+    + `"${process.execPath}" "${moveRunner}" ENG-1 in-progress >/dev/null\n`
+    + `printf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const groom = await groomDirect(roots);
+  assert.equal(groom.refused, true, JSON.stringify(groom));
+  assert.equal(groom.reason, "changed-concurrently");
+  const back = await readBack(roots);
+  assert.equal(back.status, "in-progress", "the concurrent move survives");
+  assert.doesNotMatch(back.body, /Groomed\./);
+});
+
 test("supervisor under db: runGroomer grooms through the port and publishes the event — no refusal",
      async () => {
   const roots = await dbGroomBoard(`printf '\\nGroomed by the loop.\\n' >> "$BLAZE_GROOM_TARGET"`);
@@ -2161,7 +2329,7 @@ test("supervisor under db: a resolver refusal is published as a groomer error, a
 - [ ] **Step 2: Run them to verify they fail**
 
 Run: `node --test tests/groomer-db-mode.test.mjs`
-Expected: FAIL — `supervisor under db: runGroomer grooms…`: 1 error event (`groomer not run: … (BLZ-254)`) where 0 expected; `blaze groom (the CLI)…`: the CLI grooms the *file* path — no ENG-1 body change reads back from the database; `a resolver refusal…`: message `groomer not run…` does not match `/blaze db init/`.
+Expected: FAIL — `supervisor under db: runGroomer grooms…`: 1 error event (`groomer not run: … (BLZ-254)`) where 0 expected; `blaze groom (the CLI)…`: exit 1 ≠ 0 — the CLI takes the fs path and dies on `git add` with `fatal: not a git repository (or any of the parent directories): .git` (the db board is not a repo); `a resolver refusal…`: message `groomer not run…` does not match `/blaze db init/`.
 
 - [ ] **Step 3: Implement the supervisor** — in `scripts/supervisor.mjs` replace `import { groomOnce } from "./loops/groomer.mjs";` with `import { groomOnce, groomOnceDb } from "./loops/groomer.mjs";`, then replace
 
@@ -2273,7 +2441,7 @@ with
 - [ ] **Step 6: Run the tests to verify they pass**
 
 Run: `node --test tests/groomer-db-mode.test.mjs tests/groomer.test.mjs tests/groomer-containment.test.mjs tests/supervisor-surface.test.mjs tests/cli-key-refusal.test.mjs tests/model/seam-closure.test.mjs`
-Expected: PASS — groomer-db-mode `pass 8`; the rest unchanged; seam-closure 21/21.
+Expected: PASS — groomer-db-mode `pass 9`; the rest unchanged; seam-closure 21/21.
 
 - [ ] **Step 7: Commit**
 
@@ -2321,6 +2489,11 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 Every id handed out on the filesystem path since `init` — by `blaze new`, `blaze import`, or
 another machine's claim you have pulled — is invisible to the database's counter until it is
 re-seeded, and a db-mode `blaze new` would hand the same number out again.
+
+**Expect the groomer to re-groom every ticket in its columns once after the flip.** Its
+"already groomed" record (`.blaze/state.json`) hashes each ticket's text, and the database
+serialises a ticket differently from the file it came from (it writes empty keys the file
+omitted), so no hash matches. Each ticket costs one agent pass, then the records agree again.
 
 ---
 ````
@@ -2410,6 +2583,10 @@ both ports once per run (`resolvePorts`, closed in a `finally`), selects from th
 materialises the ticket as `<id>.md` in a scratch directory for the agent, and writes the result
 through the write port with `{ actor: "groomer", source: "loop" }`. The fs groomer is unchanged.
 The supervisor's BLZ-670 refusal is removed; `blaze groom` takes the same db branch.
+Immediately before the write the ticket is re-read, and the pass is refused
+(`changed-concurrently`) if its status or text changed while the agent ran — the write is an
+upsert of the whole row, so a move made meanwhile would otherwise be reverted. That check is
+check-then-write without a row lock; the remaining millisecond window is BLZ-254's to close.
 ````
 
 - [ ] **Step 6: Run the doc pins**
@@ -2434,7 +2611,7 @@ BLAZE_TEST_PG_URL=postgres://postgres:postgres@127.0.0.1:55433/blaze_test \
   node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs
 ```
 
-Expected (prototype): `tests 5310 … pass 5309, fail 0, skipped 1`.
+Expected (prototype): `tests 5317 … pass 5316, fail 0, skipped 1`.
 
 - [ ] `npm run test:coverage` — the c8 gate still passes (the new logic lives in `scripts/model/`, `scripts/loops/` and `scripts/db-runner.mjs`, all exercised above).
 - [ ] `git log --format=%B origin/main..HEAD | grep -ci co-authored-by` → `0`.
