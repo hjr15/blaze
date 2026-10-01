@@ -3,12 +3,19 @@
 import { createHash, randomBytes } from "node:crypto";
 import {
   readdirSync, writeFileSync, existsSync, mkdirSync, rmSync,
-  lstatSync, readlinkSync, symlinkSync,
+  lstatSync, readlinkSync, symlinkSync, mkdtempSync,
 } from "node:fs";
-import { join, dirname } from "node:path";
+import { join, dirname, relative, isAbsolute } from "node:path";
+import { tmpdir } from "node:os";
 import { spawnSync, execFileSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { parseTicket } from "../model/ticket.mjs";
+import { parseTicket, serializeTicket } from "../model/ticket.mjs";
+import { EDITABLE_FIELDS } from "../model/fields.mjs";
+import { validateTicket } from "../model/rules.mjs";
+import { loadProjectSchema } from "../model/schema-config.mjs";
+import { validateTaxonomy } from "../model/taxonomy.mjs";
+import { loadSprints, validateSprintFields } from "../model/sprints.mjs";
+import { loadProject } from "../config.mjs";
 // BLZ-512 / ADR-0031. Seven `readFileSync` sites lived here, every one of them off the
 // shared read path BLZ-493 guarded and every one of them reproduced as a hang at `44b797f`
 // (`EXIT=137` under a 6s cap). The loop runs unattended, inside `supervisor.mjs`, so a hang
@@ -706,6 +713,314 @@ export function groomOnce({ root, cfg, agentsMd, today }) {
   const sha = git(root, ["rev-parse", "HEAD"]).trim();
   record();
   return stampSurvey({ type: "groom", id: ticket.id, sha, files: changed, ts: today });
+}
+
+// --- BLZ-673: the groomer under BLAZE_WRITE_PORT=db --------------------------------------
+//
+// Under db the database is the store: there is no ticket FILE to hand the agent, and a git
+// commit would record nothing anything reads. So the ticket is MATERIALISED — serialised into
+// a fresh scratch directory — the agent edits that file exactly as it edits one on the fs path,
+// and the result goes back through the WRITE PORT. `groomOnce` (the fs path) is not touched.
+
+/** Keys the groomer may change: the fields a person may edit (`EDITABLE_FIELDS`, the same
+ *  allowlist `blaze edit` and the board use) plus the `updated` stamp. `id`, `project`,
+ *  `status`, `resolution`, `created`, `branch`, `pr` and every derived field are not its. */
+const GROOMER_MAY_CHANGE = new Set([...EDITABLE_FIELDS, "updated"]);
+
+const sameValue = (a, b) => JSON.stringify(a ?? null) === JSON.stringify(b ?? null);
+
+/**
+ * The SQLite store files (`.blaze/blaze.db`, `.blaze/config.db` and their `-wal`/`-shm`/
+ * `-journal` companions), anchored at the data root's `.blaze/`. Under BLAZE_WRITE_PORT=db
+ * they ARE the store: the board survey does not byte-compare them (concurrent db writers
+ * legitimately change them, and restoring their bytes under open connections would corrupt
+ * the database). They are judged instead by the STORE FINGERPRINT (`storeFingerprintOf`):
+ * the last `ticket_event` id plus the identity (dev/ino/type) of the two main files. Everything else on the board —
+ * `.blaze/database.json`, `.blaze/state.json`, `.git/`, `blaze.config.json`, any `projects/`
+ * file, and any look-alike (`projects/ENG/.blaze/blaze.db-wal`, `blaze.db`, `.blaze/blaze.db-
+ * evil`) — is surveyed exactly as the fs groomer surveys it.
+ */
+const DB_STORE_FILE = /^\.blaze\/(blaze|config)\.db(-wal|-shm|-journal)?$/;
+/**
+ * The two MAIN store files whose identity is fingerprinted. Their `-wal`/`-shm`/`-journal`
+ * companions are NOT: measured while prototyping, ANY other process's connection closing (a
+ * `blaze move` finishing, a checkpoint) may checkpoint and DELETE `-wal`/`-shm` and a later
+ * open recreates them with new inodes — their existence and identity churn legitimately, so
+ * fingerprinting them refuses honest passes. A crafted `-wal` swapped in is a raw write that
+ * appends no event: the named residual.
+ */
+const STORE_FILES = [".blaze/blaze.db", ".blaze/config.db"];
+
+/**
+ * Board paths restored EVEN on a `store-changed` refusal: configuration and credentials that
+ * no ticket verb writes, and whose poisoning outlives the pass — the Postgres DSN
+ * (`.blaze/database.json`, read by database-config.mjs), the board config (`blaze.config.json`,
+ * which holds `agentCommand`), the groomer's own instruction source (`AGENTS.md`, whose
+ * "Grooming rules" become the next prompt), the identity store (`.blaze/identity.db` and its
+ * `-journal`/`-wal`/`-shm`, identity-db.mjs), and git's execution sinks (`.git/config`,
+ * `.git/hooks/**`). Three tradeoffs, accepted: a concurrent `blaze user add` writes identity.db,
+ * and restoring it undoes that user; a concurrent session's own `.git/config` change (branch
+ * tracking, `git remote add`, `push -u`) is undone the same way; so is a person's own edit to
+ * AGENTS.md made during the run (or pulled in by git). All are judged smaller than
+ * what they protect against — a credential store or an agent-written `core.hooksPath` that
+ * changes while an agent runs is treated as hostile. Every other board path keeps
+ * `restoreSkipped` semantics (a receipt or ref written by another session's verb must stand).
+ */
+const ALWAYS_RESTORE = /^(\.blaze\/database\.json|blaze\.config\.json|AGENTS\.md|\.blaze\/identity\.db(-journal|-wal|-shm)?|\.git\/config|\.git\/hooks(\/.*)?)$/;
+
+/**
+ * The store fingerprint: `ticket_event`'s last id (moves on every port write, any process,
+ * both drivers) plus, on SQLite, the IDENTITY of the two main store files — dev/ino/type,
+ * never size or mtime, which checkpoints change legitimately. A file swapped for a copy
+ * changes its inode while the port's open connection still sees the old one, so the event id
+ * alone would miss it.
+ */
+async function storeFingerprintOf(root, writePort) {
+  const { dialect, lastEventId } = await writePort.storeFingerprint();
+  const files = dialect !== "sqlite" ? [] : STORE_FILES.map((rel) => {
+    try {
+      const st = lstatSync(join(root, rel));
+      return `${rel}:${st.dev}:${st.ino}:${st.isSymbolicLink() ? "l" : st.isFile() ? "f" : "o"}`;
+    } catch { return `${rel}:absent`; }
+  });
+  return JSON.stringify({ lastEventId, files });
+}
+
+/** The first ungroomed ticket, from the READER: the configured columns in order, then the
+ *  configured projects in order, then id order. "Ungroomed" is the fs path's test applied to
+ *  the materialised text: `state.groomed[id] !== hashContent(serializeTicket(ticket))`. */
+export async function selectNextTicketDb({ projectsDir, cfg, state, readStorage }) {
+  const cols = cfg.loops.groomer.columns;
+  const projects = cfg.projects ?? [];
+  const byId = (a, b) => String(a.frontmatter.id).localeCompare(String(b.frontmatter.id), "en", { numeric: true });
+  const candidates = [...await readStorage.listTickets(projectsDir)]
+    .filter((t) => cols.includes(t.status) && projects.includes(t.project))
+    .sort((a, b) => cols.indexOf(a.status) - cols.indexOf(b.status)
+      || projects.indexOf(a.project) - projects.indexOf(b.project) || byId(a, b));
+  for (const t of candidates) {
+    const raw = serializeTicket({ frontmatter: t.frontmatter, body: t.body ?? "" });
+    if (state.groomed[t.frontmatter.id] !== hashContent(raw)) {
+      return { id: t.frontmatter.id, project: t.project, status: t.status, file: t.file, raw };
+    }
+  }
+  return null;
+}
+
+/** The edit.mjs checks (validateTicket against the ticket's own project registry, taxonomy,
+ *  sprint fields), run on the groomed result. Returns the error list. */
+async function validateGroomed({ root, projectsDir, cfg, readStorage, id, frontmatter, body }) {
+  const all = new Map();
+  for (const t of await readStorage.listTickets(projectsDir)) {
+    all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  }
+  all.set(id, { frontmatter, body });
+  const project = frontmatter.project ?? id.split("-")[0];
+  const { types } = loadProjectSchema(projectsDir, project, { config: cfg });
+  const errors = validateTicket({ frontmatter, body }, (pid) => all.get(pid) || null, { types });
+  errors.push(...validateTaxonomy(frontmatter, loadProject(project, {
+    root, projectsDir, source: `ticket ${id}'s 'project' field`,
+  })));
+  const { sprints } = loadSprints({ root });
+  errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
+  return errors;
+}
+
+/**
+ * One db-mode grooming pass. `readStorage`/`writePort` come from `resolvePorts`, which the
+ * caller (supervisor.runGroomer) opens and closes. Returns the same event shapes as
+ * `groomOnce`: null (nothing to groom), `{ noop }`, `{ refused, reason }`, `{ error }`, or a
+ * success — which carries no `sha`, because nothing is committed.
+ */
+export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, readStorage, writePort }) {
+  const state = loadState(root);
+  const ticket = await selectNextTicketDb({ projectsDir, cfg, state, readStorage });
+  if (!ticket) return null;
+
+  const gcfg = (cfg.loops && cfg.loops.groomer) || {};
+  const timeoutSec = Number(gcfg.timeoutSec ?? DEFAULT_TIMEOUT_SEC);
+  const maxBufferMb = Number(gcfg.maxBufferMb ?? DEFAULT_MAX_BUFFER_MB);
+  const rel = `${ticket.id}.md`;
+  const dir = mkdtempSync(join(tmpdir(), "blaze-groom-db-"));
+  const record = (raw) => { state.groomed[ticket.id] = hashContent(raw); saveState(root, state); };
+  try {
+    writeFileSync(join(dir, rel), ticket.raw);
+    const prompt = buildPrompt({ ...ticket, rel }, extractGroomingRules(agentsMd), cfg);
+    const [cmd, ...args] = cfg.agentCommand.split(" ");
+    const before = snapshotTree(dir);
+    // BLZ-673, containment — ONE rule with three parts (ADR-0019: defence in depth, not a
+    // boundary; its addendum lists what stays uncovered):
+    //  1. The agent runs with BLAZE_READONLY=1, so a blaze CLI/API write it attempts is refused
+    //     (scripts/readonly.mjs). ADVISORY: the agent controls its own env and can unset it, or
+    //     reach a running non-readonly board server — part 2 is what catches that.
+    //  2. The STORE is fingerprinted before and after (storeFingerprintOf). If it moved — a
+    //     port write by anyone, the agent included, or a store file swapped — the pass is refused
+    //     `store-changed` and the groom is NOT written. The store's own writes STAND (it cannot be
+    //     rewound); board files are left as found except config/credentials/git sinks
+    //     (ALWAYS_RESTORE), because rewinding a concurrent verb's receipt or ref is a half-revert.
+    //  3. The rest of the BOARD is surveyed as the fs groomer surveys it: any change is refused
+    //     `out-of-bounds` and restored. `cfg` was loaded by the caller BEFORE the agent ran, so
+    //     a corrupted blaze.config.json is a restored board change, never an uncaught throw.
+    // RESIDUAL (named, not covered; ADR-0019 addendum): a raw SQL write that appends no
+    // ticket_event row — an agent holding the DSN running `psql`, a direct `sqlite3 … UPDATE`,
+    // a crafted `-wal` swapped in — moves neither the event id nor a main file's identity. The
+    // row re-read before the write still catches it on THE GROOMED ROW only.
+    const storeBefore = await storeFingerprintOf(root, writePort);
+    const boardBefore = snapshotTree(root);
+    const porcelainBaseline = new Set(porcelainLines(root));
+    const r = spawnSync(cmd, [...args, prompt], {
+      cwd: dir, encoding: "utf8",
+      timeout: Math.max(1, timeoutSec) * 1000, killSignal: "SIGKILL",
+      maxBuffer: Math.max(1, maxBufferMb) * 1024 * 1024,
+      env: { ...process.env, BLAZE_GROOM_TARGET: rel, BLAZE_READONLY: "1" },
+    });
+
+    // Contain: the scratch directory holds ONE file, and that file is the only thing the
+    // agent may change. Anything else — a new file, a symlink, a deletion — is refused.
+    const after = snapshotTree(dir);
+    const touched = diffSnapshots(before, after);
+    const boardAfter = snapshotTree(root);
+    // If the scratch dir happens to sit inside the board (a data root that contains the OS
+    // temp dir), its own paths are the scratch survey's business, not the board's.
+    const inScratch = ((sd) => (!sd.startsWith("..") && !isAbsolute(sd)
+      ? (f) => f === sd || f.startsWith(`${sd}/`) : () => false))(relative(root, dir));
+    const judged = (paths) => paths.filter((f) => !DB_STORE_FILE.test(f) && !inScratch(f));
+    const boardTouched = judged(diffSnapshots(boardBefore, boardAfter));
+    const stray = [...new Set(outOfBoundsPaths(touched, [rel])
+      .concat(touched.filter((f) => (after.entries.get(f) || {}).t === "l"))
+      .concat(boardTouched))].sort();
+    const surveyGaps = {
+      truncated: boardBefore.truncated || boardAfter.truncated,
+      degraded: boardBefore.degraded || boardAfter.degraded,
+      unreadable: [...new Set([...boardBefore.unreadable, ...boardAfter.unreadable])].slice(0, 20),
+    };
+    const stampSurvey = (evt) => {
+      const incomplete = surveyGaps.truncated || surveyGaps.unreadable.length > 0;
+      if (incomplete) evt.surveyIncomplete = true;
+      if (surveyGaps.degraded) evt.restoreDegraded = true;
+      if (incomplete || surveyGaps.degraded) evt.surveyGaps = surveyGaps;
+      return evt;
+    };
+    // Dirt this pass introduced, as the fs refuse computes it — minus the store files, whose
+    // churn is the fingerprint's business (a TRACKED blaze.db would otherwise read as dirt).
+    const newDirtNow = () => porcelainLines(root)
+      .filter((l) => !porcelainBaseline.has(l) && !DB_STORE_FILE.test(l.slice(3)));
+    const refuse = (reason, extra = {}) => {
+      const evt = { type: "groom", id: ticket.id, refused: true, reason, outOfBounds: stray, ts: today, ...extra };
+      if (reason === "store-changed") {
+        evt.restoreSkipped = true;
+        evt.restoreSkippedWhy = "the store changed during the agent run (by the agent or another "
+          + "writer) and cannot be rewound; its writes stand, and board files other than config, "
+          + "credentials and git hooks are left as found so a concurrent verb is not half-reverted";
+        // Config, credentials and git sinks are restored regardless — see ALWAYS_RESTORE.
+        const guarded = boardTouched.filter((f) => ALWAYS_RESTORE.test(f));
+        if (guarded.length) {
+          const { failures } = restoreSnapshot(root, boardBefore, guarded);
+          const residual = diffSnapshots(boardBefore, snapshotTree(root)).filter((f) => guarded.includes(f));
+          evt.restored = guarded;
+          if (residual.length || failures.length) {
+            evt.revertFailed = true;
+            evt.residual = residual;
+            if (failures.length) evt.revertErrors = failures.map((f) => redactSecrets(f).slice(0, 200));
+          }
+        }
+      } else {
+        // Restore (board paths only — the scratch dir is deleted anyway) and VERIFY by
+        // re-observing, exactly as groomOnce's refuse does, on EVERY refusal path.
+        const { failures } = boardTouched.length ? restoreSnapshot(root, boardBefore, boardTouched)
+          : { failures: [] };
+        const residual = judged(diffSnapshots(boardBefore, snapshotTree(root)));
+        const newDirt = newDirtNow();
+        if (residual.length || newDirt.length || failures.length) {
+          evt.revertFailed = true;
+          evt.residual = residual;
+          if (newDirt.length) evt.newDirt = newDirt;
+          if (failures.length) evt.revertErrors = failures.map((f) => redactSecrets(f).slice(0, 200));
+          console.error(`groomer: REVERT INCOMPLETE on ${ticket.id}; still dirty: `
+            + `${[...residual, ...newDirt].join(", ")}`);
+        }
+      }
+      console.error(`groomer: refused (${reason}) on ${ticket.id}`);
+      return stampSurvey(evt);
+    };
+    // Back-off. A store-changed pass records the groomed ticket's CURRENT hash (the existing
+    // state shape — no new field) and says so (`backedOff: true`), so the SAME UNCHANGED ticket
+    // is not handed to the agent again on the next tick. What it bounds is reruns of that one
+    // ticket; it does NOT stop a self-triggering agent grooming the ticket it planted — it can
+    // plant rows because BLAZE_READONLY is advisory (a named residual). Cost, accepted: after a
+    // store-changed caused by an innocent concurrent writer, this ticket waits until it next
+    // changes; re-queue it by deleting its entry under `groomed` in `.blaze/state.json`.
+    const storeChanged = async () => {
+      const cur = (await readStorage.getTicket(projectsDir, ticket.id)).found;
+      if (cur) record(serializeTicket({ frontmatter: cur.frontmatter, body: cur.body ?? "" }));
+      return refuse("store-changed", { backedOff: Boolean(cur) });
+    };
+    if (await storeFingerprintOf(root, writePort) !== storeBefore) return storeChanged();
+    if (stray.length) return refuse("out-of-bounds");
+
+    if (r.error || r.status !== 0) {
+      const code = r.error && r.error.code;
+      const timedOut = code === "ETIMEDOUT";
+      const raw = timedOut
+        ? `agent command timed out after ${timeoutSec}s and was killed`
+        : code === "ENOBUFS"
+          ? `agent output exceeded maxBuffer (${maxBufferMb}MB)`
+          : (r.stderr || (r.error && r.error.message) || "agent command failed") + "";
+      const evt = { type: "groom", id: ticket.id, error: redactSecrets(raw).slice(0, 200), ts: today };
+      if (timedOut) evt.timedOut = true;
+      return stampSurvey(evt);
+    }
+
+    if (!touched.length) {
+      record(ticket.raw);
+      return stampSurvey({ type: "groom", id: ticket.id, noop: true, ts: today });
+    }
+
+    // Parse and guard. The comparison is parsed-against-parsed, so formatting the agent did
+    // not intend (key order, quoting) is not mistaken for a changed value.
+    let was, now;
+    try {
+      was = parseTicket(ticket.raw);
+      now = parseTicket(readRegularFileSync(join(dir, rel), "utf8"));
+    } catch (e) { return refuse("unparseable", { errors: [redactSecrets(e.message).slice(0, 200)] }); }
+    const keys = new Set([...Object.keys(was.frontmatter), ...Object.keys(now.frontmatter)]);
+    const identity = [...keys].filter((k) => !GROOMER_MAY_CHANGE.has(k)
+      && !sameValue(was.frontmatter[k], now.frontmatter[k])).sort();
+    if (identity.length) return refuse("identity-field", { fields: identity });
+
+    const frontmatter = { ...now.frontmatter, updated: today };
+    const errors = await validateGroomed({ root, projectsDir, cfg, readStorage,
+      id: ticket.id, frontmatter, body: now.body });
+    if (errors.length) return refuse("invalid", { errors: errors.map((e) => redactSecrets(e).slice(0, 200)) });
+
+    // Last look before the write. The fingerprint again — validation read the whole board,
+    // and a port write in that time is the same lost update. (UNTESTED defence in depth: no
+    // test injects a write between the post-agent check and this one.) Then the groomed ROW:
+    // strictly redundant for port writes (they move the event id), it is kept as defence in
+    // depth because it also catches a raw SQL change to this row that appended no event.
+    // RESIDUAL: check-then-write, no row lock; the window is milliseconds. On Postgres it also
+    // includes identity values committing out of order: a transaction that drew a LOWER id than
+    // the MAX read before the agent, and commits during the run, leaves MAX unchanged. BLZ-254
+    // owns both.
+    if (await storeFingerprintOf(root, writePort) !== storeBefore) return storeChanged();
+    const current = (await readStorage.getTicket(projectsDir, ticket.id)).found;
+    if (!current || current.status !== ticket.status
+        || hashContent(serializeTicket({ frontmatter: current.frontmatter, body: current.body ?? "" }))
+           !== hashContent(ticket.raw)) {
+      return refuse("changed-concurrently");
+    }
+
+    // `source` is the event's CHECKed vocabulary (cli|api|loop|migration|git-backfill); the
+    // groomer is a loop, and the actor says which one.
+    await writePort.write({ project: ticket.project, status: ticket.status, frontmatter,
+                            body: now.body, currentFile: ticket.file },
+                          { actor: "groomer", source: "loop" });
+    // Hash what the STORE now holds, re-read, so the next pass compares like with like.
+    const back = (await readStorage.getTicket(projectsDir, ticket.id)).found;
+    record(serializeTicket({ frontmatter: back.frontmatter, body: back.body ?? "" }));
+    return stampSurvey({ type: "groom", id: ticket.id, files: [rel], ts: today });
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 // CLI: `node scripts/loops/groomer.mjs` runs one grooming pass.

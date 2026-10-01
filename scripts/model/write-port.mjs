@@ -399,6 +399,19 @@ export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {})
     name: "db",
     allocate,
     reserve,
+    /**
+     * BLZ-673: the store fingerprint the db groomer compares across its agent run. Every write
+     * through ANY db port, from any process, appends a `ticket_event` row (persist →
+     * recordEvent), and `ticket_event.id` is identity (Postgres) / INTEGER PRIMARY KEY
+     * AUTOINCREMENT (SQLite), so MAX(id) moves on every port write. Read-only. It lives on the
+     * db write port because that port already holds the exec for BOTH drivers — the readers
+     * expose none — so no resolver signature changes and the fs/dual ports are untouched.
+     * A raw SQL write that appends no event is invisible to it (ADR-0019 residual).
+     */
+    async storeFingerprint() {
+      const rows = await exec.all("SELECT COALESCE(MAX(id), 0) AS n FROM ticket_event", []);
+      return { dialect, lastEventId: Number(rows[0].n) };
+    },
     async exists({ frontmatter }) {
       const rows = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [frontmatter.id]);
       return Boolean(rows?.length);

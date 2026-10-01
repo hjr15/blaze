@@ -19,6 +19,7 @@ import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mj
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
 import { memStorage, fsStorage } from "../../scripts/model/storage.mjs";
 import { scratchRegistry } from "../helpers/scratch.mjs";
+import { PG_SKIP, scratchPgDb, pgClient } from "../helpers/pg-scratch.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, selectWritePort, valueDiff,
          ticketValue, WRITE_PORT_ENV, COLUMN_FIELDS,
          extraFields } from "../../scripts/model/write-port.mjs";
@@ -577,4 +578,34 @@ describe("reserve (BLZ-671)", () => {
     assert.deepEqual(await dualWritePort(primary, shadow).reserve("BLZ-9", { title: "t" }), { claimFile: "/c/BLZ-9/t" });
     assert.equal(shadowCalled, false);
   });
+});
+
+// BLZ-673: the store fingerprint the db groomer compares across an agent run. Every port write
+// appends a ticket_event row, so its last id moves; nothing else here is allowed to move it.
+async function assertFingerprint(exec, dialect) {
+  const port = dbWritePort(exec, { dialect });
+  assert.deepEqual(await port.storeFingerprint(), { dialect, lastEventId: 0 });
+  await port.write(TICKET());
+  const a = await port.storeFingerprint();
+  assert.ok(a.lastEventId > 0, JSON.stringify(a));
+  await port.read("BLZ-1");
+  await port.exists({ frontmatter: { id: "BLZ-1" } });
+  assert.deepEqual(await port.storeFingerprint(), a, "reads do not move it");
+  await port.write({ ...TICKET(), body: "edited" });
+  assert.ok((await port.storeFingerprint()).lastEventId > a.lastEventId, "a second write moves it");
+}
+
+test("dbWritePort.storeFingerprint moves on writes and only on writes (sqlite)", async () => {
+  await assertFingerprint(sqliteExec(), "sqlite");
+});
+
+test("dbWritePort.storeFingerprint moves on writes and only on writes (postgres)", PG_SKIP, async () => {
+  const db = await scratchPgDb("fingerprint");
+  const client = await pgClient(db.url);
+  try {
+    const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+    const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    await assertFingerprint(pgExec(client), "postgres");
+  } finally { await client.end(); await db.drop(); }
 });

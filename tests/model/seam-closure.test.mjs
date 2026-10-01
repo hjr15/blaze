@@ -891,8 +891,11 @@ const SEAM_WRITE_PROVIDERS = new Map([
     inert: ["cacheFile", "readRawCache"] }],
   // `saveState` and `restoreSnapshot` are the two the reviewer landed a file with: root and
   // contents both come from the caller. `groomOnce` is the groomer's verb.
-  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot", "groomOnce"], sanctioned: [],
-    inert: ["hashContent", "loadState", "statusDirs", "matchersFor", "selectNextTicket",
+  // BLZ-673: `groomOnceDb` is the db-mode verb — it writes the scratch file the agent edits and
+  // the groomer state, and writes the ticket through the injected port. `selectNextTicketDb`
+  // reads through the injected reader and hashes; it reaches no write.
+  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot", "groomOnce", "groomOnceDb"], sanctioned: [],
+    inert: ["hashContent", "loadState", "statusDirs", "matchersFor", "selectNextTicket", "selectNextTicketDb",
       "extractGroomingRules", "buildPrompt", "parseChangedFiles", "isStructuralChange",
       "redactSecrets", "outOfBoundsPaths", "CONFIG_FILE", "DEFAULT_TIMEOUT_SEC",
       "DEFAULT_MAX_BUFFER_MB", "git", "SNAPSHOT_SKIP_DIRS", "SNAPSHOT_SKIP_FILES",
