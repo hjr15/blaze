@@ -159,12 +159,15 @@ export function extraFields(fm) {
   return out;
 }
 
+/** `YYYY-MM-DD`, the same expression `new-runner.mjs` stamps `created`/`updated` with. */
+const isoToday = () => new Date().toISOString().slice(0, 10);
+
 /**
  * Database adapter. `exec` is the same {run, all} shape the projection uses, so it
  * works against SQLite synchronously and Postgres asynchronously without a second
  * implementation — ADR-0010's async port doing the job it was chosen for.
  */
-export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
+export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {}) {
   if (dialect !== "sqlite" && dialect !== "postgres") {
     throw new Error(`unknown dialect ${JSON.stringify(dialect)} — expected 'sqlite' or 'postgres'`);
   }
@@ -292,7 +295,10 @@ export function dbWritePort(exec, { dialect = "sqlite" } = {}) {
                   nz(fm.resolution), parentId, parentType, fm.assignee || "unassigned",
                   est(fm.estimate), nz(fm.sprint), nz(fm.start), nz(fm.due),
                   nz(fm.not_before), nz(fm.deadline), body ?? "",
-                  fm.created, fm.updated,
+                  // BLZ-672: `created_on`/`updated_on` are NOT NULL, and an imported row may carry
+                  // neither (import design §2.6: an absent value is an absent key). Only a MISSING
+                  // value is filled — with the write's date — and a present one is written verbatim.
+                  nz(fm.created) ?? today(), nz(fm.updated) ?? nz(fm.created) ?? today(),
                   nz(fm.branch), nz(fm.pr) == null ? null : String(fm.pr), nz(fm.ref),
                   nz(fm.category), nz(fm.verification), nz(fm.derived),
                   nz(fm.likelihood), nz(fm.impact),

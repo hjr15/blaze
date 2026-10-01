@@ -497,3 +497,39 @@ test("dbWritePort.allocate is sequential on postgres", { skip: PG ? false : "set
     await cleanup.end();
   }
 });
+
+// BLZ-672: `created_on`/`updated_on` are NOT NULL; an imported row may carry neither.
+describe("dbWritePort stamps a MISSING date (BLZ-672)", () => {
+  const undated = () => {
+    const t = TICKET();
+    const { created, updated, ...fm } = t.frontmatter;
+    void created; void updated;
+    return { ...t, frontmatter: fm };
+  };
+
+  test("no created/updated → both are the injected today", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite", today: () => "2026-09-30" });
+    await port.write(undated());
+    const r = await port.read("BLZ-1");
+    assert.equal(r.frontmatter.created, "2026-09-30");
+    assert.equal(r.frontmatter.updated, "2026-09-30");
+  });
+
+  test("created only → updated follows created, not today", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite", today: () => "2026-09-30" });
+    const t = undated();
+    await port.write({ ...t, frontmatter: { ...t.frontmatter, created: "2026-02-02" } });
+    const r = await port.read("BLZ-1");
+    assert.equal(r.frontmatter.created, "2026-02-02");
+    assert.equal(r.frontmatter.updated, "2026-02-02");
+  });
+
+  test("present dates are written verbatim — the clock is never consulted", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite",
+      today: () => { throw new Error("the clock must not be read when both dates are present"); } });
+    await port.write(TICKET());
+    const r = await port.read("BLZ-1");
+    assert.equal(r.frontmatter.created, "2026-01-01");
+    assert.equal(r.frontmatter.updated, "2026-01-01");
+  });
+});
