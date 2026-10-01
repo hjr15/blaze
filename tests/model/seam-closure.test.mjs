@@ -930,7 +930,10 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // so it is a write; `resolveReadStorage` / `withReadStorage` only open readers — inert.
   ["model/write-port-resolve.mjs",
     { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort",
-      "resolvePorts"], sanctioned: [],
+      "resolvePorts",
+      // BLZ-671: the fs allocate/reserve pair every fs port is handed — `allocateId` +
+      // `writeClaim` behind a closure, under a caller-chosen projects dir. A write.
+      "fsAllocators"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
         "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode",
         "resolveReadStorage", "withReadStorage",
@@ -2080,7 +2083,10 @@ const WRITE_ALLOWED = new Map([
   // `mkdirSync` creates `import-receipts/`, and `unlinkSync` is the 90-day
   // prune. Named to those members: a ticket write, or a fourth primitive,
   // appearing here still reddens.
-  ["model/import-apply.mjs", ["allocateId", "writeClaim", "commitOrQueue",
+  // BLZ-671: `allocateId` + `writeClaim` → `fsAllocators`. Import now takes its ids from the
+  // PORT (allocate / reserve), and its fs default is handed write-port-resolve's allocators
+  // rather than calling the allocator itself — so a db-mode import allocates from the counter.
+  ["model/import-apply.mjs", ["fsAllocators", "commitOrQueue",
     "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
   // BLZ-634 / design §4.2, §5.3, §5.4. The same footing, for the same two
   // records: `appendRegularFileSync` writes the map's pairs, the parked

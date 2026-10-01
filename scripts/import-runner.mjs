@@ -221,7 +221,9 @@ async function main() {
   // BLZ-670: both ports at once, so the board the plan is built against is read from
   // the same store the rows are written to; staging goes by mode.
   let wp;
-  try { wp = await resolvePorts({ dataRoot, projectsDir }); }
+  // BLZ-671: `remoteClaims: false` — ADR-0037 §3's no-network import. The fs/dual port's
+  // allocate now IS import's allocator, so it must seed with the known-empty 0, never fetch.
+  try { wp = await resolvePorts({ dataRoot, projectsDir, remoteClaims: false }); }
   catch (e) { console.error(e.message); process.exit(1); }
 
   let r;

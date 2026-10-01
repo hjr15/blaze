@@ -44,10 +44,10 @@
 import { join, relative, dirname } from "node:path";
 import { readdirSync, statSync, unlinkSync, mkdirSync } from "node:fs";
 import { appendRegularFileSync, readRegularFileSync } from "./regular-file.mjs";
-import { allocateId } from "./ids.mjs";
-import { writeClaim } from "./claims.mjs";
-import { slugify } from "./storage.mjs";
 import { fsWritePort } from "./write-port.mjs";
+// BLZ-671: ids come from the PORT (allocate / reserve). The fs default is handed the same
+// allocators every fs port gets, with the remote seed off — see fsAllocators.
+import { fsAllocators } from "./write-port-resolve.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 import { loadConfig, loadProject } from "../config.mjs";
 import { loadProjectSchema } from "./schema-config.mjs";
@@ -352,9 +352,6 @@ export async function loadBoard(projectsDir, { dataRoot, readStorage = fsReadSto
 
 // --- the apply ---------------------------------------------------------------
 
-/** The numeric half of `<KEY>-<N>`. The planner has already proved the shape. */
-function idNumber(id) { return Number(String(id).split("-").pop()); }
-
 /**
  * Walk a plan through the injected write port, running §5.3's seven-step
  * sequence for every created row and steps 1/5/7 for every updated one.
@@ -374,7 +371,8 @@ function idNumber(id) { return Number(String(id).split("-").pop()); }
 export async function applyImport(plan, ctx) {
   const {
     projectsDir, dataRoot, receiptPath,
-    writePort = fsWritePort(projectsDir),
+    writePort = fsWritePort(projectsDir, undefined, undefined,
+                            fsAllocators(projectsDir, { dataRoot, remoteClaims: false })),
     onPair = null,
     stage = commitOrQueue,
     appendReceipt = appendRegularFileSync,
@@ -420,37 +418,38 @@ export async function applyImport(plan, ctx) {
       boardChanged = true;
 
       let id = entry.id;
-      let n;
+      let claimFile;
       if (entry.allocate) {
-        // --- step 2: allocate → reservation. `remoteMax: 0` is the
-        // KNOWN-EMPTY value, not the could-not-read `null`: ADR-0037 §3
-        // promises the import runs with no network, so `remoteMaxClaim`'s
-        // `git fetch` is never called. The cost is stated rather than hidden
-        // — BLZ-136's cross-machine collision AVOIDANCE is not consulted here,
-        // and an operator who wants it runs `git fetch` before `--apply`.
-        const allocated = allocateId(projectsDir, project, { dataRoot, remoteMax: 0 });
-        id = allocated.id;
-        n = allocated.n;
+        // --- step 2: allocate → reservation, THROUGH THE PORT (BLZ-671). Before, this
+        // called ids.mjs directly, so a db-mode import allocated from the file ledger and
+        // collided with db-mode `new`. The fs port's allocate is the same `allocateId` with
+        // `remoteMax: 0` — the KNOWN-EMPTY value, not the could-not-read `null`: ADR-0037 §3
+        // promises the import runs with no network (`remoteClaims: false`), so `git fetch`
+        // is never called. The cost is stated rather than hidden — BLZ-136's cross-machine
+        // collision AVOIDANCE is not consulted here, and an operator who wants it runs
+        // `git fetch` before `--apply`.
+        //
+        // --- step 4 rides with it: the fs port writes the claim INSIDE allocate, so the
+        // claim now lands before the `allocated` receipt entry rather than after it. Still
+        // BEFORE the ticket — the only ordering §5.3 and the crash-residue argument need.
+        ({ id, claimFile } = await writePort.allocate(project, { title: ticket.frontmatter.title }));
         // --- step 3: allocated → receipt, immediately, so the window in
         // which a number is reserved but unrecorded is one append wide.
         append({ seq, phase: "allocated", id });
       } else {
-        n = idNumber(id);
+        // --- step 4: claim → `.ids/` (fs) / counter (db), BEFORE the ticket. The
+        // explicit-id path has no O_EXCL reservation, so on fs the claim is the only
+        // ledger entry that number will ever get, and in db mode the counter must pass it
+        // or a later db-mode `new` hands the number out again (BLZ-671). The crash residue
+        // is then the harmless one (a claim with no ticket, which only advances the
+        // allocation floor) rather than the damaging one (a ticket with no claim, a
+        // `missingClaimErrors` ERROR on the operator's board after every partial apply).
+        ({ claimFile } = await writePort.reserve(id, { project, title: ticket.frontmatter.title }));
       }
 
       const frontmatter = { ...ticket.frontmatter, id };
-
-      // --- step 4: claim → `.ids/`. ON BOTH PATHS, and BEFORE the ticket —
-      // a deliberate departure from `new.mjs`, which writes the ticket and
-      // then the claim. `applyNew` holds an O_EXCL reservation so its number
-      // is protected either way; the explicit-id path has no reservation, so
-      // the claim is the only ledger entry that number will ever get. The
-      // crash residue is then the harmless one (a claim with no ticket, which
-      // only advances the allocation floor) rather than the damaging one (a
-      // ticket with no claim, which is a `missingClaimErrors` ERROR on the
-      // operator's board after every partial apply).
-      const claimFile = writeClaim(projectsDir, project, n, slugify(frontmatter.title));
-      files.push(claimFile);
+      // db mode has no claim file; the fs port always returns one.
+      if (claimFile) files.push(claimFile);
 
       // --- step 5: write → board, at the DECLARED status, directly through
       // the port. Not `applyNew` + `applyMove`: those force `initialStatus`
@@ -467,7 +466,7 @@ export async function applyImport(plan, ctx) {
       if (onPair && entry.source) onPair({ source: entry.source, id, seq });
 
       // --- step 7: done → receipt.
-      append({ seq, phase: "done", id, file: relative(dataRoot, file), claim: true });
+      append({ seq, phase: "done", id, file: relative(dataRoot, file), claim: Boolean(claimFile) });
 
       void i;
     }

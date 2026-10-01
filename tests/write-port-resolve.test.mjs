@@ -11,6 +11,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, existsSync, readFileSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { execFileSync } from "node:child_process";
 import { resolveWritePort, resolveWriteMode, openShadow, logDivergence, shadowDbPath,
          divergenceLogPath, sqliteExec, pgExec } from "../scripts/model/write-port-resolve.mjs";
 import { createDbSchemaSync } from "../scripts/model/db-schema-version.mjs";
@@ -305,5 +306,42 @@ describe("pgExec mirrors sqliteExec's shape, over a caller-supplied client", () 
     const fakeClient = { async query() { return { rows: [] }; } };
     const exec = pgExec(fakeClient);
     await assert.doesNotReject(() => exec.run("SELECT 1", []));
+  });
+});
+
+// BLZ-671: every fs port the resolver builds can RESERVE an explicit id, and import's
+// `remoteClaims: false` never reaches the network — the allocate claim is never provisional.
+describe("fsAllocators via resolveWritePort (BLZ-671)", () => {
+  // A git worktree (allocateId reserves under its common dir) whose remote cannot be reached:
+  // a FETCHING allocator reads `null` there and marks its claim provisional.
+  const gitRoot = () => {
+    const dataRoot = root();
+    execFileSync("git", ["-C", dataRoot, "init", "-q"]);
+    execFileSync("git", ["-C", dataRoot, "remote", "add", "origin", "/nonexistent/blz671.git"]);
+    return dataRoot;
+  };
+
+  test("the fs port reserves an explicit id: the claim is written under the given project", async () => {
+    const dataRoot = root();
+    const { port } = await resolveWritePort({ dataRoot, projectsDir: join(dataRoot, "projects"), env: {} });
+    const { claimFile } = await port.reserve("BLZ-900", { project: "BLZ", title: "Explicit high" });
+    assert.equal(claimFile, join(dataRoot, "projects", "BLZ", ".ids", "900"));
+    assert.equal(readFileSync(claimFile, "utf8"), "BLZ-900 explicit-high\n");
+  });
+
+  test("remoteClaims: false allocates with the known-empty remote — never provisional", async () => {
+    const dataRoot = gitRoot();
+    const { port } = await resolveWritePort({ dataRoot, projectsDir: join(dataRoot, "projects"),
+                                              env: {}, remoteClaims: false });
+    const { id, claimFile } = await port.allocate("BLZ", { title: "t" });
+    assert.equal(id, "BLZ-1");
+    assert.equal(readFileSync(claimFile, "utf8"), "BLZ-1 t\n");
+  });
+
+  test("control: the default (remoteClaims: true) on the same board IS provisional", async () => {
+    const dataRoot = gitRoot();
+    const { port } = await resolveWritePort({ dataRoot, projectsDir: join(dataRoot, "projects"), env: {} });
+    const { claimFile } = await port.allocate("BLZ", { title: "t" });
+    assert.equal(readFileSync(claimFile, "utf8"), "BLZ-1 t provisional\n");
   });
 });

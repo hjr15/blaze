@@ -533,3 +533,48 @@ describe("dbWritePort stamps a MISSING date (BLZ-672)", () => {
     assert.equal(r.frontmatter.updated, "2026-01-01");
   });
 });
+
+// BLZ-671: `reserve(id)` — "this explicit id is now taken". Import's `BLZ-900` row never goes
+// through `allocate`, so without it a later db-mode `new` hands 900 out again.
+describe("reserve (BLZ-671)", () => {
+  test("dbWritePort.reserve raises the counter to the id's number, so the next allocate follows it", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    await port.allocate("BLZ");                              // BLZ-1
+    assert.deepEqual(await port.reserve("BLZ-900", { title: "x" }), {});
+    assert.equal((await port.allocate("BLZ")).id, "BLZ-901");
+  });
+
+  test("dbWritePort.reserve never lowers the counter", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    for (let i = 0; i < 5; i++) await port.allocate("BLZ");  // counter at 5
+    await port.reserve("BLZ-2");
+    assert.equal((await port.allocate("BLZ")).id, "BLZ-6");
+  });
+
+  test("dbWritePort.reserve refuses an id that already has a row — the write after it would overwrite", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    await port.write(TICKET());                              // BLZ-1, e.g. a concurrent db-mode `new`
+    await assert.rejects(port.reserve("BLZ-1", { title: "x" }), /BLZ-1 already exists in the database/);
+  });
+
+  test("fsWritePort.reserve calls the injected function with id and options", async () => {
+    const calls = [];
+    const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage,
+      { reserve: async (id, opts) => { calls.push([id, opts]); return { claimFile: "/tmp/fake" }; } });
+    assert.deepEqual(await port.reserve("BLZ-9", { project: "BLZ", title: "t" }), { claimFile: "/tmp/fake" });
+    assert.deepEqual(calls, [["BLZ-9", { project: "BLZ", title: "t" }]]);
+  });
+
+  test("fsWritePort.reserve with no injected function refuses clearly, not silently", async () => {
+    const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage);
+    await assert.rejects(() => port.reserve("BLZ-9", { title: "x" }), /no reserve function was injected/);
+  });
+
+  test("dualWritePort.reserve delegates to the primary only", async () => {
+    let shadowCalled = false;
+    const primary = { name: "fs", reserve: async (id, o) => ({ claimFile: `/c/${id}/${o.title}` }) };
+    const shadow = { name: "db", reserve: async () => { shadowCalled = true; return {}; } };
+    assert.deepEqual(await dualWritePort(primary, shadow).reserve("BLZ-9", { title: "t" }), { claimFile: "/c/BLZ-9/t" });
+    assert.equal(shadowCalled, false);
+  });
+});

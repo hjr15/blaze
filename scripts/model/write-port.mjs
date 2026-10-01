@@ -22,6 +22,7 @@ import { ticketPath, fsStorage } from "./storage.mjs";
 import { storableEstimate } from "./time.mjs";
 import { serializeTicket } from "./ticket.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
+import { counterUpsertSql } from "./seed-counter.mjs";
 
 /** A corrupt extra_json must not take the whole read down — report empty, never throw. */
 function safeJson(text) {
@@ -83,12 +84,18 @@ export function ticketValue(rec) {
  * title is known (BLZ-667: a construction-time closure broke `blaze new` outright).
  */
 export function fsWritePort(projectsDir, storage = fsStorage, readStorage = fsReadStorage,
-                            { allocate } = {}) {
+                            { allocate, reserve } = {}) {
   return {
     name: "fs",
     async allocate(project, opts = {}) {
       if (!allocate) throw new Error("fsWritePort: no allocate function was injected");
       return allocate(project, opts);
+    },
+    // BLZ-671: "this explicit id is now taken" — import's `BLZ-900` row. Injected exactly like
+    // `allocate`; the fs one writes the id's `.ids/` claim and returns `{ claimFile }`.
+    async reserve(id, opts = {}) {
+      if (!reserve) throw new Error("fsWritePort: no reserve function was injected");
+      return reserve(id, opts);
     },
     write({ project, status, frontmatter, body, currentFile }) {
       const text = serializeTicket({ frontmatter, body });
@@ -240,6 +247,38 @@ export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {})
   }
 
   /**
+   * BLZ-671: an explicit id is TAKEN. Import's explicit-id row (`BLZ-900`) never goes through
+   * `allocate`, so without this a later db-mode `new` hands out 900 again. The counter is
+   * raised to the id's number with the one never-lower upsert (seed-counter.mjs); a lower id
+   * leaves it where it is. The key is the id's own prefix — `ticket`'s CHECK ties
+   * `id = project_key || '-' || num`, so a row whose project disagrees could not be written.
+   * Returns `{}`: db mode has no claim file.
+   *
+   * REFUSES an id that already has a row. Import calls this only for an explicit-id CREATE —
+   * the planner read the same database and found no such ticket — so a row here means a
+   * concurrent writer (a db-mode `new`, another import) took the id in between, and the
+   * write that follows would upsert over it. The counter is raised only when the id is free.
+   * RESIDUAL: check-then-upsert, no row lock — a writer landing between the SELECT and the
+   * ticket write is not caught. The window is milliseconds; BLZ-254 owns closing it.
+   */
+  async function reserve(id) {
+    const s = String(id);
+    const hit = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [s]);
+    if (hit?.length) {
+      // What the operator meets next, stated rather than a generic "re-run": the import stops
+      // at exit 4 and its receipt names the row. A plain re-run now FINDS the id on the board
+      // (skipped if identical, refused naming --update if not); a mapped import with a source
+      // column refuses at exit 5 until `blaze import repair` resolves the receipt.
+      throw new Error(`reserve: ${s} already exists in the database — another writer created it `
+        + "after this import was planned, so this row was NOT written (nothing is overwritten). "
+        + `A re-run finds ${s} on the board: skipped if identical, refused naming --update if it `
+        + "differs; a mapped import (source-id column) needs `blaze import repair` first.");
+    }
+    await exec.run(counterUpsertSql(dialect), [s.slice(0, s.lastIndexOf("-")), num(s)]);
+    return {};
+  }
+
+  /**
    * BLZ-667: persist() is one transaction. Its sequence — ticket upsert, link/label/
    * component/worklog replace, event insert — is several statements, and a failure partway
    * (a duplicate label, say) used to leave the ticket row committed with the rest missing.
@@ -359,6 +398,7 @@ export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {})
   return {
     name: "db",
     allocate,
+    reserve,
     async exists({ frontmatter }) {
       const rows = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [frontmatter.id]);
       return Boolean(rows?.length);
@@ -490,6 +530,8 @@ export function dualWritePort(primary, shadow, { onDivergence, strict = false } 
     // Allocation, like existence, is decided entirely by the primary — the shadow never
     // sees it, per this function's own principle above ("the primary decides every outcome").
     allocate(project, opts) { return primary.allocate(project, opts); },
+    // BLZ-671: same principle — the primary decides what is taken.
+    reserve(id, opts) { return primary.reserve(id, opts); },
     close() { primary.close?.(); shadow.close?.(); },
   };
 }

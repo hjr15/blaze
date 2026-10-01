@@ -169,21 +169,33 @@ export function readSoakState(dataRoot) {
 }
 
 /**
- * The fs allocator `fsWritePort` is handed (BLZ-667): seed from the remote's published
- * claims, reserve the next id, write the claim. `title` is a CALL-time argument — this
- * port is built before `applyNew` knows the ticket's title. The same closure lives in
- * `applyNew`'s default `writePort` (new.mjs); duplicated deliberately rather than shared,
- * since a shared export would add a cross-module edge the seam guard must pin either way.
+ * The fs allocators `fsWritePort` is handed (BLZ-667, BLZ-671): `allocate` seeds from the
+ * remote's published claims, reserves the next id and writes its claim; `reserve` writes the
+ * claim for an id the caller already has (import's explicit-id row). `title` is a CALL-time
+ * argument — this port is built before the verb knows the ticket's title. The allocate closure
+ * also lives in `applyNew`'s default `writePort` (new.mjs), duplicated deliberately.
+ *
+ * `remoteClaims: false` is import's contract (ADR-0037 §3: the import runs with no network):
+ * `remoteMax` is the KNOWN-EMPTY 0, never the could-not-read null, so `git fetch` is never
+ * called and no claim is marked provisional — byte for byte what import wrote before BLZ-671.
  */
-function fsAllocator(projectsDir) {
-  return async (proj, { title: t } = {}) => {
-    const dataRoot = dirname(projectsDir);
-    // null = the remote could not be read (stale view): the claim is provisional.
-    const remoteMax = remoteMaxClaim(dataRoot, proj);
-    const { id, n } = allocateId(projectsDir, proj, { dataRoot, remoteMax: remoteMax ?? 0 });
-    const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
-                                 { provisional: remoteMax === null });
-    return { id, n, claimFile };
+export function fsAllocators(projectsDir, { dataRoot = dirname(projectsDir), remoteClaims = true } = {}) {
+  return {
+    async allocate(proj, { title: t } = {}) {
+      // null = the remote could not be read (stale view): the claim is provisional.
+      const remoteMax = remoteClaims ? remoteMaxClaim(dataRoot, proj) : 0;
+      const { id, n } = allocateId(projectsDir, proj, { dataRoot, remoteMax: remoteMax ?? 0 });
+      const claimFile = writeClaim(projectsDir, proj, n, slugify(t ?? ""),
+                                   { provisional: remoteMax === null });
+      return { id, n, claimFile };
+    },
+    // `project` defaults to the id's prefix; import passes the row's own project, which is
+    // the directory its claim has always been written under.
+    async reserve(id, { project, title } = {}) {
+      const s = String(id);
+      const proj = project ?? s.slice(0, s.lastIndexOf("-"));
+      return { claimFile: writeClaim(projectsDir, proj, Number(s.split("-").pop()), slugify(title ?? "")) };
+    },
   };
 }
 
@@ -204,12 +216,14 @@ export function resolveWriteMode(env = process.env) {
  */
 export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStorage,
                                          env = process.env, onDivergence,
+                                         // BLZ-671: import passes false — see fsAllocators.
+                                         remoteClaims = true,
                                          resolveDbConfig = resolveDatabaseConfig,
                                          openPostgresClient: openPgClient = openPostgresClient } = {}) {
   const mode = resolveWriteMode(env);
   if (mode === "fs") {
     return { port: fsWritePort(projectsDir, storage, undefined,
-                               { allocate: fsAllocator(projectsDir) }), mode, close() {} };
+                               fsAllocators(projectsDir, { remoteClaims })), mode, close() {} };
   }
   if (mode !== "dual" && mode !== "db") {
     throw unknownMode(mode);
@@ -237,7 +251,7 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
   // safety net the outage.
   const report = onDivergence ?? ((d) => logDivergence(dataRoot, d));
   const port = dualWritePort(
-    fsWritePort(projectsDir, storage, undefined, { allocate: fsAllocator(projectsDir) }),
+    fsWritePort(projectsDir, storage, undefined, fsAllocators(projectsDir, { remoteClaims })),
     db, { onDivergence: report });
   // Count every operation, so a week of "no divergences" can be told apart from a week
   // of the soak not running at all.

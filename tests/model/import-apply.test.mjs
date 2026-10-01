@@ -23,6 +23,7 @@ import { planImport, parseCanonicalCsv } from "../../scripts/model/import-plan.m
 import { COLUMN_NAMES } from "../../scripts/model/csv-schema.mjs";
 import { writeCsv } from "../../scripts/model/csv.mjs";
 import { fsWritePort } from "../../scripts/model/write-port.mjs";
+import { fsAllocators } from "../../scripts/model/write-port-resolve.mjs";
 import { claimPath, claimDir } from "../../scripts/model/claims.mjs";
 import { OP_LABEL } from "../../scripts/commit-summary.mjs";
 
@@ -68,6 +69,11 @@ async function planFor(root, ...maps) {
   return planImport(parsed.rows, await loadBoard(projectsDir, { dataRoot: root }));
 }
 
+// BLZ-671: import takes its ids from the port, so a hand-built fs port carries the same
+// allocators `applyImport`'s own default does — `remoteClaims: false`, import's no-network seed.
+const fsPort = (projectsDir, root) =>
+  fsWritePort(projectsDir, undefined, undefined, fsAllocators(projectsDir, { dataRoot: root, remoteClaims: false }));
+
 // `applyImport` does NOT decide exit 5: establishing the receipt is the
 // caller's pre-write phase (that is what `runImport` does, and what the exit-5
 // tests below drive). So these direct-apply tests establish it themselves.
@@ -77,7 +83,7 @@ function ctxFor(root, extra = {}) {
   return {
     projectsDir,
     dataRoot: root,
-    writePort: fsWritePort(projectsDir),
+    writePort: fsPort(projectsDir, root),
     receiptPath: receiptPathFor(root, { now: new Date("2026-09-21T00:00:00Z") }),
     stage: () => ({ ok: true, committed: false, queued: true }),
     ...extra,
@@ -102,7 +108,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
   test("the claim lands BEFORE the ticket — a kill between them leaves the HARMLESS residue", async (t) => {
     const root = boardRoot(t);
     const projectsDir = join(root, "projects");
-    const real = fsWritePort(projectsDir);
+    const real = fsPort(projectsDir, root);
     const claimSeenAtWrite = [];
     const port = {
       ...real,
@@ -314,7 +320,7 @@ describe("BLZ-629: the exit codes", () => {
   test("exit 4 — a ticket write that fails part way stops, lists written AND unwritten ids, and does not roll back", async (t) => {
     const root = boardRoot(t);
     const projectsDir = join(root, "projects");
-    const real = fsWritePort(projectsDir);
+    const real = fsPort(projectsDir, root);
     let n = 0;
     const port = {
       ...real,
