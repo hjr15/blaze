@@ -175,7 +175,6 @@ what it does **not** cover:
   only by `cli.mjs`'s dispatch gate (where they pass through it at all), so a direct
   `node scripts/<x>.mjs` is not. (`db-runner.mjs` gained its guard in BLZ-668, and
   `loops/groomer.mjs`'s db path in BLZ-673.)
-
 - **A raw SQL write that appends no `ticket_event` row** — an agent that holds the database
   credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in
   (`-wal`/`-shm`/`-journal` identity is not fingerprinted: other sessions' connections delete
