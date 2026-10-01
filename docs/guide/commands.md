@@ -1,7 +1,7 @@
 # Command reference
 
-Every `blaze` invocation is `blaze <subcommand> [args] [flags]`. There are 16
-subcommands. Most that write commit immediately (`commitMode: per-op`,
+Every `blaze` invocation is `blaze <subcommand> [args] [flags]`. The table below covers the
+subcommands documented on this page; `blaze --help` lists every one. Most that write commit immediately (`commitMode: per-op`,
 the default) or queue into a session ledger (`commitMode: batch`) — see
 [Commit modes](#commit-modes) below.
 
@@ -22,6 +22,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
+| [`db`](#db) | Create the database schema, seed its id counter, report the dual-write soak | yes (`init`, `seed-counter`); no (`status`) |
 | [`user`](#user) | Add a board user and issue its API token | yes |
 
 ## start
@@ -208,6 +209,45 @@ configured columns, spawns the configured agent command against it, and
 auto-commits the result. If the agent renames the ticket file or edits its
 `status` or `resolution` fields, groom refuses the change and rolls it back.
 No CLI args.
+
+Under `BLAZE_WRITE_PORT=db` (BLZ-673) the ticket is read from the database and written to a
+fresh scratch directory as `<id>.md`; the agent edits that file, and the result is written
+back through the write port — nothing is committed. The agent runs with `BLAZE_READONLY=1`,
+so a `blaze` write it attempts **while following the rules** is refused — it is a guard, not a
+sandbox: the agent controls its own environment and can unset it, or reach a running board
+server that is not read-only. What catches that is the store check. The pass is refused, and
+the groom not written, if:
+
+- **the store changed while the agent ran** (`store-changed`) — any write through the write
+  port by anyone, the agent included, moves the last `ticket_event` id, and on SQLite a swapped
+  `.blaze/blaze.db`/`config.db` changes its inode. The store's own writes **stand** (a store
+  cannot be rewound). Board files are left as found (`restoreSkipped`) — rewinding another
+  session's receipt or git ref would half-revert it — **except** `.blaze/database.json`,
+  `blaze.config.json`, `AGENTS.md`, `.blaze/identity.db` (and its `-journal`/`-wal`/`-shm`),
+  `.git/config` and `.git/hooks/`, which are always restored (`restored`). Three tradeoffs come
+  with that: a `blaze user add` from another session during the pass is undone, so is
+  another session's own `.git/config` change (branch tracking, `git remote add`, `push -u`), and
+  so is a person's own edit to `AGENTS.md` made during the pass (or pulled in by git) —
+  judged smaller than an agent-written credential or `core.hooksPath`. The event carries
+  `backedOff: true`: the ticket's current hash is recorded, so that same unchanged ticket is
+  not offered to the agent again. This bounds reruns of **that one ticket**; it does not stop an
+  agent that unset `BLAZE_READONLY` from grooming a ticket it planted itself. To re-queue a
+  backed-off ticket, delete its entry under `groomed` in `.blaze/state.json`;
+- **the agent wrote any other file** (`out-of-bounds`) — in the scratch directory or anywhere on
+  the board (the whole data root is surveyed as on the fs path, except `.blaze/blaze.db`,
+  `.blaze/config.db` and their `-wal`/`-shm`/`-journal` files, which the store check covers);
+  the board files it touched are restored;
+- it changed a field outside the editable set (`title`, `type`, `assignee`, `priority`,
+  `labels`, `components`, `estimate`, `parent`, `likelihood`, `impact`, `sprint`,
+  `not_before`, `deadline`) plus `updated`, or left a ticket `blaze edit` would reject.
+
+`blaze groom` (and the `blaze start` loop) itself refuses under `BLAZE_READONLY` in db mode —
+a db groom writes the store. In fs mode `blaze groom` is refused under `BLAZE_READONLY` by the CLI's dispatch gate; only a direct `node scripts/loops/groomer.mjs` in fs mode has no guard of its own (a named residual).
+
+Not covered: store writes the agent makes after unsetting `BLAZE_READONLY` (refused as a pass,
+but they stand); a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in. That moves neither the event id nor a file identity (a re-read of the
+groomed row still catches it on that one row). A db groom has no commit, so the feed offers
+no revert for it.
 
 ## new
 
@@ -646,6 +686,38 @@ the reviewed ledger.
 > only the files it wrote. Review the disposition ledger and your working
 > tree before running it, especially if you have unrelated uncommitted
 > changes sitting in the same repo.
+
+---
+
+## db
+
+```
+blaze db init [--force]
+blaze db seed-counter
+blaze db status
+```
+
+The database behind `BLAZE_WRITE_PORT=dual|db`. `database.driver` in `blaze.config.json`
+picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
+([ADR-0012](../decisions/0012-how-an-installation-selects-and-stores-its-database.md)).
+
+| Subcommand | SQLite | Postgres |
+|---|---|---|
+| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded** (that is the BLZ-254 migration). Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
+| `status` | What the shadow holds, and what the dual-write soak has found. | — |
+
+**Before setting `BLAZE_WRITE_PORT=db`, run `blaze db seed-counter` immediately beforehand.**
+Every id handed out on the filesystem path since `init` — by `blaze new`, `blaze import`, or
+another machine's claim you have pulled — is invisible to the database's counter until it is
+re-seeded, and a db-mode `blaze new` would hand the same number out again.
+
+**Expect the groomer to re-groom every ticket in its columns once after the flip.** Its
+"already groomed" record (`.blaze/state.json`) hashes each ticket's text, and the database
+serialises a ticket differently from the file it came from (it writes empty keys the file
+omitted), so no hash matches. Each ticket costs one agent pass, then the records agree again.
+The record is shared by both modes, so **flipping back to `BLAZE_WRITE_PORT=fs` costs the same
+again**: the db-era hashes no longer match the files, and every ticket re-grooms once more.
 
 ---
 

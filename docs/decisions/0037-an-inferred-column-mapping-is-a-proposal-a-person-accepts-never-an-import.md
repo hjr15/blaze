@@ -279,3 +279,25 @@ for an unrelated reason gets waived, and then it is not watching when something 
   is precisely when the migration oracle starts reading that log.
 - **Ship an untyped, dynamic column set that accepts whatever the CSV has.** Rejected: it makes
   the round trip unfalsifiable. A schema you cannot fail is not a schema.
+
+## Addendum (2026-09-30, BLZ-671) — ids come from the port too
+
+§1 made the port the only thing that places a ticket. It left the **id** outside it:
+`applyImport` called `ids.mjs`'s `allocateId` and wrote the `.ids/` claim itself, so under
+`BLAZE_WRITE_PORT=db` an import took numbers from the file ledger while db-mode `blaze new`
+took them from `project_counter` — two allocators for one id space, and they collide.
+
+The write port now answers both id questions, and `applyImport` asks it both:
+
+| Question | Port method | fs | db | dual |
+|---|---|---|---|---|
+| "give me the next id" (`--allocate-ids`) | `allocate(project, { title })` | `allocateId` + claim, injected | `project_counter + 1` | primary |
+| "this explicit id is now taken" (`BLZ-900` in the file) | `reserve(id, { project, title })` | the claim, injected | counter raised to the id's number, never lowered | primary |
+
+`reserve` exists because `allocate` cannot express the second question: an explicit id never
+passes through the allocator, so without it a later db-mode `new` hands the same number out
+again. The fs allocators are built in one place (`fsAllocators`, `write-port-resolve.mjs`)
+and import is handed them with `remoteClaims: false` — §3's no-network import, so the fs
+output is byte for byte what it was. §1's sentence "nothing in the import path calls `node:fs`
+to place a ticket" now holds for the claim as well: `import-apply.mjs` no longer names
+`allocateId` or `writeClaim`.

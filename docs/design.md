@@ -126,9 +126,15 @@ public repo.
 **Trigger:** a filesystem watch on the groomed columns (default: `backlog/`) plus a
 timer (default 300s) plus a manual "run groomer now" button in the web app.
 
-**Not under `BLAZE_WRITE_PORT=db`:** the groomer reads and edits ticket *files*, so when the
-database is the store each pass is refused with a `{ type: "error", loop: "groomer" }` feed event
-and grooms nothing (ADR-0038's named residuals; porting it is BLZ-673).
+**Under `BLAZE_WRITE_PORT=db`** (BLZ-673) the groomer reads the ticket through the port,
+materialises it as `<id>.md` in a scratch directory for the agent, and writes the result back
+through the write port — no file on the board is edited and nothing is committed. The agent runs
+with `BLAZE_READONLY=1` — advisory: the agent owns its environment. The store is fingerprinted
+across the run (last `ticket_event` id; on SQLite, the main store files' inodes): if it moved —
+by anyone, the agent included — the pass is refused and the groom not written; the store's own
+writes stand, and of the board files only config, credentials and git hooks are restored. The rest of the board is surveyed as on the fs path: anything the
+agent writes outside that one file is refused and restored. A field outside the editable set
+plus `updated`, or a result `blaze edit` would reject, is refused too. Not covered: a raw SQL write that appends no `ticket_event` row — an agent that holds the database credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in.
 
 **What it does** (one ticket at a time, defined once in `AGENTS.md` so the human rules
 and the agent prompt share a source):

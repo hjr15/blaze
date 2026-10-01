@@ -119,8 +119,10 @@ file at `.blaze/config.db`, ATTACHed by the opener, or a Postgres schema — tog
 with `view` and `view_type` inside it. Before it, `blaze_config` was a namespace
 **nothing created**: `configDdl` was exported and called only from its own test.
 Version 5 (BLZ-667) adds `project_counter`, the per-project counter db-mode id
-allocation advances; `blaze db init` seeds it from the corpus's highest ticket number
-per project.
+allocation advances; `blaze db init` seeds it from the highest number already taken per
+project — ticket files and `.ids/` claims, plus the database's own rows — on both drivers,
+and `blaze db seed-counter` re-seeds it the same way (BLZ-668, BLZ-669). A seed never lowers
+a counter.
 
 The floor rises with each of these, which is why **a version-1, -2, -3 or -4 shadow is all
 refused**. A version-3 shadow has no `blaze_config` at all, so a version-4 engine that

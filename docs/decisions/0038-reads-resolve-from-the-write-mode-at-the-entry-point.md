@@ -124,10 +124,10 @@ Four things this design deliberately does not touch, so they are not mistaken fo
 ## Consequences
 
 - **The split-brain defect is closed.** Every read a verb, CLI runner, or server makes now comes
-  from the same store its writes go to, in every mode — with one named exception: the groomer
-  loop still reads and edits ticket files, so in `db` mode it is refused rather than run (see
-  Named residuals; BLZ-673). `fs` and `dual` behaviour is unchanged
-  byte-for-byte.
+  from the same store its writes go to, in every mode — with one named exception at the time of
+  writing: the groomer loop still read and edited ticket files, so in `db` mode it was refused
+  rather than run (see Named residuals). *BLZ-673 has since closed it — see the Addendum below.*
+  `fs` and `dual` behaviour is unchanged byte-for-byte.
 - **ADR-0010's rule stands**, and is now stated as an addendum there: the port is async, the
   filesystem seam is unchanged, and consumers await every seam call.
 - **A malformed `BLAZE_WRITE_PORT` now surfaces**, uniformly, wherever it previously would not
@@ -158,3 +158,43 @@ Four things this design deliberately does not touch, so they are not mistaken fo
 - **A read-seam guard** (beside `tests/model/seam-closure.test.mjs`) now fails CI if a production
   module outside a named allowlist imports `fsReadStorage` or calls `walkTickets` directly, so a
   future bypass of `resolveReadStorage`/`resolvePorts` is caught before it reaches production.
+
+## Addendum (2026-09-30, BLZ-673) — the groomer residual is closed
+
+The third named residual above no longer holds. Under `BLAZE_WRITE_PORT=db` the groomer resolves
+both ports once per run (`resolvePorts`, closed in a `finally`), selects from the reader,
+materialises the ticket as `<id>.md` in a scratch directory for the agent, and writes the result
+through the write port with `{ actor: "groomer", source: "loop" }`. The fs groomer is unchanged.
+The supervisor's BLZ-670 refusal is removed; `blaze groom` takes the same db branch.
+
+Containment is one rule with three parts ([ADR-0019](0019-the-groomers-guard-is-advisory.md)'s
+defence in depth, not a boundary; its addendum lists what stays uncovered):
+
+1. The agent runs with `BLAZE_READONLY=1`, so a `blaze` CLI/API write it attempts while
+   following the rules is refused (and a db groom itself refuses to start under
+   `BLAZE_READONLY`, from `blaze groom` or the supervisor loop). This is advisory — the agent controls its own environment
+   and can unset it, or reach a running board server that is not read-only; part 2 catches that.
+2. The **store** is fingerprinted before and after the agent — the last `ticket_event` id (every
+   port write, by anyone — the agent included — on either driver, appends one) and, on SQLite,
+   the dev/ino of `.blaze/blaze.db` and `.blaze/config.db`. If it moved, the pass is refused
+   `store-changed` and the groom is not written. The store's own writes **stand**. Board files
+   are left as found (`restoreSkipped`) — rewinding another session's receipt or git ref is a
+   half-revert — except `.blaze/database.json`, `blaze.config.json`, `AGENTS.md`,
+   `.blaze/identity.db` (and its `-journal`/`-wal`/`-shm`), `.git/config` and `.git/hooks/**`,
+   which are always restored (undoing, as accepted tradeoffs, a concurrent `blaze user add`,
+   another session's own `.git/config` change, or a person's concurrent `AGENTS.md` edit). The ticket's current hash is recorded
+   (`backedOff`), so that same unchanged ticket is not offered again — which bounds reruns of
+   that ticket, not an agent grooming a ticket it planted itself. The fingerprint is re-checked, and the
+   groomed row re-read, just before the write; that last look is check-then-write without a row
+   lock (a millisecond window — on Postgres it also includes identity values committing out of
+   order — BLZ-254's to close).
+3. The rest of the **board** is surveyed as the fs groomer surveys it: any change is refused
+   `out-of-bounds`, restored with `restoreSnapshot` and verified by re-observing. Only the store
+   files are excluded from that byte comparison, anchored at the data root's `.blaze/`.
+
+**Named residuals.** (a) A raw SQL write that appends no `ticket_event` row — an agent holding
+the database credentials running `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` swapped
+in — moves neither the event id nor a store file's identity; the re-read catches it only on the
+groomed row. (b) No undo: a db groom is not a commit, so its feed event carries no `sha` and the
+feed's revert button (`supervisor.mjs`, shown only for an event with a `sha`) never appears. A
+revert through the port is BLZ-254's to design.
