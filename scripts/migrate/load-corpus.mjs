@@ -12,6 +12,7 @@ import { parseAcBlocks } from "../model/ac-blocks.mjs";
 import { storableEstimate } from "../model/time.mjs";
 import { extraFields } from "../model/write-port.mjs";
 import { fsReadStorage } from "../model/read-storage.mjs";
+import { counterUpsertSql } from "../model/seed-counter.mjs";
 
 const ISO_DATE = /^\d{4}-\d{2}-\d{2}$/;
 
@@ -183,9 +184,8 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
   // BLZ-667: seed the db-mode allocator, so its first number follows the corpus's last
   // rather than colliding with it. The MAX, not the count — numbering has gaps. And never
   // lower an existing counter: a number already issued must not be issued twice.
-  const seedCounter = db.prepare(
-    `INSERT INTO project_counter (project_key, n) VALUES (?, ?)
-     ON CONFLICT (project_key) DO UPDATE SET n = max(project_counter.n, excluded.n)`);
+  // BLZ-668: the upsert is spelled once, in seed-counter.mjs, for both dialects.
+  const seedCounter = db.prepare(counterUpsertSql("sqlite"));
   for (const [key, n] of maxNum) seedCounter.run(key, n);
   db.exec("COMMIT");
   return report;
