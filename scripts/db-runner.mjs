@@ -16,6 +16,7 @@ import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
 
@@ -34,6 +35,17 @@ export const USAGE = `usage: blaze db <command>
 function dbConfigOr(ctx) {
   try { return ctx.resolveDbConfig({ dataRoot: ctx.dataRoot, config: loadConfig({ root: ctx.dataRoot }) }); }
   catch (e) { ctx.err(e.message); return null; }
+}
+
+/**
+ * BLZ-668: the per-runner BLAZE_READONLY guard every mutating runner carries (AGENTS.md), for a
+ * direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. Called by `init` and
+ * `seed-counter` AFTER the config is resolved (a bad project key is still named first, as in
+ * the other runners) and BEFORE anything is opened or written. `status` only reads.
+ */
+function writableOr(ctx, what) {
+  try { assertWritable(`run blaze db ${what}`, ctx.env); return true; }
+  catch (e) { ctx.err(e.message); return false; }
 }
 
 /** One line per project, `before → after`, plus a note when nothing moved. */
@@ -95,9 +107,44 @@ async function initPostgres({ dataRoot, projectsDir, force, log, err, openPgClie
 
 async function init(ctx) {
   const dbConfig = dbConfigOr(ctx);
-  if (!dbConfig) return 1;
+  if (!dbConfig || !writableOr(ctx, "init")) return 1;
   if (dbConfig.driver === "postgres") return initPostgres(ctx, dbConfig.connection);
   return initSqlite(ctx);
+}
+
+/**
+ * BLZ-669: `blaze db seed-counter`, both drivers. Opens the database the write port would
+ * (refusing one with no schema), raises every counter to max(corpus, claims, table), prints
+ * `project  before → after`. Never lowers; a second run reports before === after.
+ */
+async function seedCounterCmd(ctx) {
+  const { dataRoot, projectsDir, log, err, openPgClient } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig || !writableOr(ctx, "seed-counter")) return 1;
+  let exec, close, dialect, where;
+  try {
+    if (dbConfig.driver === "postgres") {
+      const client = await openCheckedPg(dbConfig.connection, openPgClient);
+      exec = pgExec(client); dialect = "postgres"; where = describePgTarget(dbConfig.connection);
+      close = async () => { try { await client.end(); } catch { /* already closed */ } };
+    } else {
+      const shadow = await openShadow(dataRoot);
+      exec = shadow.exec; dialect = "sqlite"; where = shadow.path;
+      close = () => { try { shadow.db.close(); } catch { /* already closed */ } };
+    }
+  } catch (e) { err(e.message); return 1; }
+  try {
+    const rows = await seedCounter(exec,
+      await corpusMaxima({ projectsDir, readStorage: fsReadStorage }), { dialect });
+    log(`id counter at ${where}:`);
+    printSeed(rows, log);
+    return 0;
+  } catch (e) {
+    err(`blaze db seed-counter: ${e.message}`);
+    return 1;
+  } finally {
+    await close();
+  }
 }
 
 async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
@@ -182,6 +229,10 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
       source: fsReadStorage, today: new Date().toISOString().slice(0, 10),
     });
     db.exec(setMigrationModeSql("sqlite", false));
+    // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
+    // handed out that may not have a ticket yet). It can only RAISE a counter.
+    await seedCounter(exec, await corpusMaxima({ projectsDir, readStorage: fsReadStorage }),
+                      { dialect: "sqlite" });
 
     log(`shadow database ready at ${path}  (schema v${DB_SCHEMA_VERSION})`);
     log(`  tickets      ${tally.tickets}`);
@@ -291,8 +342,10 @@ export async function runDb(argv, io = {}) {
   // so a test drives the Postgres branch against a scratch database.
   const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, log, err,
                 resolveDbConfig: io.resolveDbConfig ?? resolveDatabaseConfig,
-                openPgClient: io.openPostgresClient ?? openPostgresClient };
+                openPgClient: io.openPostgresClient ?? openPostgresClient,
+                env: io.env ?? process.env };
   if (cmd === "init") return init(ctx);
+  if (cmd === "seed-counter") return seedCounterCmd(ctx);
   if (cmd === "status") return status(ctx);
   err(`blaze db: unknown command ${JSON.stringify(cmd)}\n`);
   err(USAGE);

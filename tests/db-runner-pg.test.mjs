@@ -136,3 +136,45 @@ test("cleanup: resolveWritePort on a REAL empty database refuses, names host/dat
     assert.equal(ended, 1, "the refused client must be closed");
   } finally { await db.drop(); }
 });
+
+test("seed-counter on Postgres raises the counter to a new claim and is idempotent", PG_SKIP, async () => {
+  const db = await scratchPgDb("seed");
+  try {
+    const roots = dbBoard();
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    writeClaim(roots.projectsDir, "ENG", 20, "handed-out-on-the-file-path");
+    const c1 = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c1.io, roots, ...pgIo(db.url) }), 0, c1.text());
+    assert.match(c1.text(), /ENG\s+1 → 20/);
+    const c2 = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c2.io, roots, ...pgIo(db.url) }), 0);
+    assert.match(c2.text(), /ENG\s+20 → 20/);
+  } finally { await db.drop(); }
+});
+
+test("seed-counter on an uninitialised Postgres refuses, naming the database and blaze db init",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("noschema");
+  try {
+    const c = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c.io, roots: dbBoard(), ...pgIo(db.url) }), 1);
+    assert.match(c.text(), new RegExp(`the Postgres database 127\\.0\\.0\\.1/${db.name} has no Blaze schema`));
+    assert.match(c.text(), /blaze db init/);
+  } finally { await db.drop(); }
+});
+
+test("after init could not seed, fixing the cause and running seed-counter finishes the job", PG_SKIP, async () => {
+  const db = await scratchPgDb("seedfix");
+  try {
+    const roots = dbBoard();
+    const bad = join(roots.projectsDir, "ENG", "defined", "ENG-7-bad.md");
+    writeFileSync(bad, "no frontmatter at all\n");
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 1);
+    // The operator fixes the file, then finishes with the command the message named.
+    writeFileSync(bad, ["---", "id: ENG-7", "title: fixed", "type: task", "project: ENG",
+      "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
+    const c = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c.io, roots, ...pgIo(db.url) }), 0, c.text());
+    assert.match(c.text(), /ENG\s+0 → 7/);
+  } finally { await db.drop(); }
+});

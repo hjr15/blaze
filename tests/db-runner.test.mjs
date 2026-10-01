@@ -7,10 +7,12 @@
 // a soak must never raise. It briefly convinced me the database was corrupting data.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDb } from "../scripts/db-runner.mjs";
+import { writeClaim } from "../scripts/model/claims.mjs";
+import { openShadow } from "../scripts/model/write-port-resolve.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
 
 // BLZ-503: every scratch directory this file mints, removed when the file is done with
@@ -38,7 +40,8 @@ function board() {
 
 const capture = () => {
   const out = [];
-  const io = { log: (s) => out.push(String(s)), err: (s) => out.push(String(s)) };
+  // `env: {}` — runDb's readonly guard must not read an ambient BLAZE_READONLY (BLZ-668).
+  const io = { log: (s) => out.push(String(s)), err: (s) => out.push(String(s)), env: {} };
   return { io, out, text: () => out.join("\n") };
 };
 
@@ -92,5 +95,61 @@ describe("blaze db", () => {
     assert.equal(1, await runDb(["frobnicate"], { ...c.io, roots: board() }));
     assert.match(c.text(), /unknown command "frobnicate"/);
     assert.match(c.text(), /usage: blaze db/);
+  });
+});
+
+// BLZ-668 / BLZ-669. The SQLite half of the counter seed: init now also counts `.ids/` claims,
+// and `blaze db seed-counter` re-seeds an existing shadow.
+describe("blaze db seed-counter (sqlite)", () => {
+  const counterOf = async (dataRoot, key) => {
+    const { db, exec } = await openShadow(dataRoot);
+    try { return exec.all("SELECT n FROM project_counter WHERE project_key = ?", [key])[0]?.n ?? 0; }
+    finally { db.close(); }
+  };
+
+  test("init seeds the counter from a claim above every ticket", async () => {
+    const roots = board();
+    writeClaim(roots.projectsDir, "ENG", 7, "claimed-no-ticket");
+    assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+    assert.equal(await counterOf(roots.dataRoot, "ENG"), 7);
+  });
+
+  test("seed-counter raises the counter to a claim made after init, then is idempotent", async () => {
+    const roots = board();
+    assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+    writeClaim(roots.projectsDir, "ENG", 9, "handed-out-on-the-file-path");
+    const c1 = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c1.io, roots }), 0);
+    assert.match(c1.text(), /ENG\s+1 → 9/);
+    const c2 = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c2.io, roots }), 0);
+    assert.match(c2.text(), /ENG\s+9 → 9/);
+    assert.equal(await counterOf(roots.dataRoot, "ENG"), 9);
+  });
+
+  test("seed-counter before init refuses, naming blaze db init", async () => {
+    const c = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c.io, roots: board() }), 1);
+    assert.match(c.text(), /no shadow database/);
+    assert.match(c.text(), /blaze db init/);
+  });
+});
+
+// BLZ-668: `init` and `seed-counter` carry the per-runner BLAZE_READONLY guard (AGENTS.md), so a
+// direct `node db-runner.mjs` refuses under it just as `blaze db` does at dispatch.
+describe("blaze db under BLAZE_READONLY", () => {
+  test("init refuses and creates no shadow; seed-counter refuses", async () => {
+    const roots = board();
+    const c = capture();
+    assert.equal(await runDb(["init"], { ...c.io, roots, env: { BLAZE_READONLY: "1" } }), 1);
+    assert.match(c.text(), /read-only mode \(BLAZE_READONLY=1\) — refusing to run blaze db init/);
+    assert.equal(existsSync(join(roots.dataRoot, ".blaze", "blaze.db")), false);
+    const c2 = capture();
+    assert.equal(await runDb(["seed-counter"], { ...c2.io, roots, env: { BLAZE_READONLY: "1" } }), 1);
+    assert.match(c2.text(), /refusing to run blaze db seed-counter/);
+  });
+
+  test("status still runs — it only reads", async () => {
+    assert.equal(await runDb(["status"], { ...capture().io, roots: board(), env: { BLAZE_READONLY: "1" } }), 0);
   });
 });
