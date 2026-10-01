@@ -425,6 +425,37 @@ describe("dbWritePort.allocate (BLZ-667)", () => {
   });
 });
 
+// BLZ-671 I-1: a stale counter must not hand out a number that already has a ticket row —
+// import --allocate-ids would upsert over it. Rows at n+1 and n+2 with the counter at n:
+// allocate skips both and returns n+3.
+async function assertAllocateSkipsTaken(exec, dialect) {
+  const port = dbWritePort(exec, { dialect });
+  await port.allocate("BLZ"); // counter at n = 1
+  for (const id of ["BLZ-2", "BLZ-3"]) {
+    const t = TICKET();
+    await port.write({ ...t, frontmatter: { ...t.frontmatter, id, title: `taken ${id}` } });
+  }
+  const got = await port.allocate("BLZ");
+  assert.deepEqual(got, { id: "BLZ-4", n: 4 });
+  assert.equal((await port.read("BLZ-2")).frontmatter.title, "taken BLZ-2");
+  assert.equal((await port.read("BLZ-3")).frontmatter.title, "taken BLZ-3");
+}
+
+test("dbWritePort.allocate skips numbers that already have a ticket row (sqlite)", async () => {
+  await assertAllocateSkipsTaken(sqliteExec(), "sqlite");
+});
+
+test("dbWritePort.allocate skips numbers that already have a ticket row (postgres)", PG_SKIP, async () => {
+  const db = await scratchPgDb("allocskip");
+  const client = await pgClient(db.url);
+  try {
+    const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+    const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    await assertAllocateSkipsTaken(pgExec(client), "postgres");
+  } finally { await client.end(); await db.drop(); }
+});
+
 // BLZ-667 Task 5: fsWritePort.allocate is an injected seam, `title` passed at CALL time —
 // resolveWritePort builds the port before the ticket's title is known.
 test("fsWritePort.allocate calls the injected function with project and title", async () => {

@@ -148,3 +148,47 @@ test("sqlite db mode: an explicit id created by another writer between plan and 
     assert.equal(back.frontmatter.title, "written concurrently", "the concurrent ticket survives");
   } finally { await ports.close(); }
 });
+
+/** BLZ-671 I-1: a stale counter (after a dual soak, or a missed seed-counter) sits BELOW rows
+ *  already in `ticket`. Rows ENG-2 and ENG-3 are written straight through the port, which does
+ *  not touch project_counter, so the counter still stands at 1. An --allocate-ids import must
+ *  land at ENG-4 and leave both existing rows exactly as they were — not upsert over ENG-2. */
+async function staleCounterImport(roots, ports) {
+  for (const n of [2, 3]) {
+    await ports.writePort.write({ project: "ENG", status: "defined", body: "existing",
+      frontmatter: { id: `ENG-${n}`, title: `existing ${n}`, type: "task", project: "ENG",
+                     estimate: 30, created: "2026-09-30", updated: "2026-09-30" } });
+  }
+  const r = await runImport({ projectsDir: roots.projectsDir, dataRoot: roots.dataRoot, apply: true,
+    writePort: ports.writePort, readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }),
+    allocateIds: true, file: csvAt(roots.dataRoot, "stale", { id: "", title: "allocated over a stale counter" }) });
+  assert.equal(r.exitCode, 0, r.report);
+  assert.deepEqual(r.result.written, ["ENG-4"]);
+  for (const n of [2, 3]) {
+    const back = (await ports.readStorage.getTicket(roots.projectsDir, `ENG-${n}`)).found;
+    assert.equal(back.frontmatter.title, `existing ${n}`, `ENG-${n} must survive the import unchanged`);
+  }
+  const fresh = (await ports.readStorage.getTicket(roots.projectsDir, "ENG-4")).found;
+  assert.equal(fresh.frontmatter.title, "allocated over a stale counter");
+}
+
+test("sqlite db mode: --allocate-ids over a stale counter skips existing rows — nothing overwritten",
+     async () => {
+  const roots = gitDbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  try { await staleCounterImport(roots, ports); } finally { await ports.close(); }
+});
+
+test("postgres db mode: --allocate-ids over a stale counter skips existing rows — nothing overwritten",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("stalecounter");
+  try {
+    const roots = gitDbBoard();
+    const pgOpts = { resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
+                     openPostgresClient: pgClient };
+    assert.equal(await runDb(["init"], { ...QUIET, roots, ...pgOpts }), 0);
+    const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" }, ...pgOpts });
+    try { await staleCounterImport(roots, ports); } finally { await ports.close(); }
+  } finally { await db.drop(); }
+});

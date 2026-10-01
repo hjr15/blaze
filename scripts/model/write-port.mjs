@@ -237,13 +237,22 @@ export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {})
    * — db mode has no claim file, so there is nothing to slug it into.
    */
   async function allocate(project, { title } = {}) {
-    const rows = await exec.all(
-      `INSERT INTO project_counter (project_key, n) VALUES (${ph(0)}, 1)
-       ON CONFLICT (project_key) DO UPDATE SET n = project_counter.n + 1
-       RETURNING n`,
-      [project]);
-    const n = Number(rows[0].n);
-    return { id: `${project}-${n}`, n };
+    // BLZ-671 I-1: the counter can be STALE — below rows already in `ticket` — after a dual
+    // soak (fs allocated, the counter never moved) or a missed `blaze db seed-counter`. A
+    // number with a row is skipped, not handed out: import --allocate-ids would otherwise
+    // upsert over that ticket. Each pass is the same atomic upsert, so concurrent allocators
+    // still never share a number; the cost is a gap. seed-counter stays the documented cure.
+    for (;;) {
+      const rows = await exec.all(
+        `INSERT INTO project_counter (project_key, n) VALUES (${ph(0)}, 1)
+         ON CONFLICT (project_key) DO UPDATE SET n = project_counter.n + 1
+         RETURNING n`,
+        [project]);
+      const n = Number(rows[0].n);
+      const id = `${project}-${n}`;
+      const taken = await exec.all(`SELECT 1 AS hit FROM ticket WHERE id = ${ph(0)}`, [id]);
+      if (!taken?.length) return { id, n };
+    }
   }
 
   /**
