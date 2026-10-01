@@ -179,7 +179,9 @@ what it does **not** cover:
 - **A raw SQL write that appends no `ticket_event` row** — an agent that holds the database
   credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in
   (`-wal`/`-shm`/`-journal` identity is not fingerprinted: other sessions' connections delete
-  and recreate them legitimately). Only a change to the groomed row itself is caught, by the
+  and recreate them legitimately). The agent no longer inherits the Postgres password variable
+  (the one `passwordEnv` names is stripped from its env, BLZ-673), but the parent process's
+  `/proc/<pid>/environ` remains readable by the same user. Only a change to the groomed row itself is caught, by the
   re-read before the write.
 - **The check-then-write window** between that last re-read and the write — no row lock;
   milliseconds wide; on Postgres it also includes identity values committing out of order (a

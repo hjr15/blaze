@@ -16,6 +16,7 @@ import { loadProjectSchema } from "../model/schema-config.mjs";
 import { validateTaxonomy } from "../model/taxonomy.mjs";
 import { loadSprints, validateSprintFields } from "../model/sprints.mjs";
 import { loadProject } from "../config.mjs";
+import { passwordEnvName } from "../model/database-config.mjs";
 // BLZ-512 / ADR-0031. Seven `readFileSync` sites lived here, every one of them off the
 // shared read path BLZ-493 guarded and every one of them reproduced as a hang at `44b797f`
 // (`EXIT=137` under a 6s cap). The loop runs unattended, inside `supervisor.mjs`, so a hang
@@ -826,6 +827,20 @@ async function validateGroomed({ root, projectsDir, cfg, readStorage, id, frontm
 }
 
 /**
+ * BLZ-673 M-4: the db-mode agent's env — the supervisor's own, minus the Postgres password.
+ * The variable `passwordEnv` names holds the password itself; inheriting it handed the agent
+ * a working credential. `root` is the data root both callers resolve the ports from, so the
+ * name comes from the same env / `.blaze/database.json` the connection did. RESIDUAL
+ * (ADR-0019 addendum): the parent's /proc/<pid>/environ stays readable by the same user.
+ */
+function agentEnv(root, extra) {
+  const env = { ...process.env, ...extra };
+  const name = passwordEnvName({ dataRoot: root, env: process.env });
+  if (name) delete env[name];
+  return env;
+}
+
+/**
  * One db-mode grooming pass. `readStorage`/`writePort` come from `resolvePorts`, which the
  * caller (supervisor.runGroomer) opens and closes. Returns the same event shapes as
  * `groomOnce`: null (nothing to groom), `{ noop }`, `{ refused, reason }`, `{ error }`, or a
@@ -871,7 +886,7 @@ export async function groomOnceDb({ root, projectsDir, cfg, agentsMd, today, rea
       cwd: dir, encoding: "utf8",
       timeout: Math.max(1, timeoutSec) * 1000, killSignal: "SIGKILL",
       maxBuffer: Math.max(1, maxBufferMb) * 1024 * 1024,
-      env: { ...process.env, BLAZE_GROOM_TARGET: rel, BLAZE_READONLY: "1" },
+      env: agentEnv(root, { BLAZE_GROOM_TARGET: rel, BLAZE_READONLY: "1" }),
     });
 
     // Contain: the scratch directory holds ONE file, and that file is the only thing the

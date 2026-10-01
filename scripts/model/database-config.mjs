@@ -45,3 +45,20 @@ export function resolveDatabaseConfig({ dataRoot, config = {}, env = process.env
   return { driver, connection: { host: merged.host, port: Number(merged.port),
                                   database: merged.database, user: merged.user, password } };
 }
+
+/**
+ * BLZ-673 M-4: the NAME of the variable holding the Postgres password, by the same precedence
+ * resolveDatabaseConfig uses (BLAZE_DB_PASSWORD_ENV, then `.blaze/database.json`'s
+ * `passwordEnv`), or null. For callers that spawn an untrusted child (the groomer's agent) and
+ * must strip the password from its env. Never throws: a missing or unreadable file means no
+ * name from it — the caller is removing a secret, not connecting.
+ */
+export function passwordEnvName({ dataRoot, env = process.env }) {
+  if (env[ENV_KEYS.passwordEnv]) return env[ENV_KEYS.passwordEnv];
+  try {
+    const path = join(dataRoot, ".blaze", "database.json");
+    if (!existsSync(path)) return null;
+    const v = JSON.parse(readRegularFileSync(path, "utf8"))?.passwordEnv;
+    return typeof v === "string" && v ? v : null;
+  } catch { return null; }
+}

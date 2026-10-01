@@ -4,7 +4,7 @@ import { mkdtempSync, writeFileSync, chmodSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scratchRegistry } from "../helpers/scratch.mjs";
-import { resolveDatabaseConfig } from "../../scripts/model/database-config.mjs";
+import { resolveDatabaseConfig, passwordEnvName } from "../../scripts/model/database-config.mjs";
 
 const scratch = scratchRegistry();
 
@@ -73,4 +73,17 @@ test("with no .blaze/database.json, BLAZE_DB_* env vars alone are sufficient", (
     env: { BLAZE_DB_HOST: "h", BLAZE_DB_PORT: "5432", BLAZE_DB_NAME: "d",
            BLAZE_DB_USER: "u", ENV_PW: "p", BLAZE_DB_PASSWORD_ENV: "ENV_PW" } });
   assert.deepEqual(result.connection, { host: "h", port: 5432, database: "d", user: "u", password: "p" });
+});
+
+// BLZ-673 M-4: the groomer strips this name from its agent's env.
+test("passwordEnvName: env pointer first, then .blaze/database.json, else null — never throws", () => {
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-dbcfg-")));
+  assert.equal(passwordEnvName({ dataRoot, env: {} }), null, "no file, no pointer");
+  withDatabaseJson(dataRoot, { passwordEnv: "FROM_FILE" });
+  assert.equal(passwordEnvName({ dataRoot, env: {} }), "FROM_FILE");
+  assert.equal(passwordEnvName({ dataRoot, env: { BLAZE_DB_PASSWORD_ENV: "FROM_ENV" } }), "FROM_ENV");
+  writeFileSync(join(dataRoot, ".blaze", "database.json"), "{not json");
+  assert.equal(passwordEnvName({ dataRoot, env: {} }), null, "an unreadable file yields no name");
+  writeFileSync(join(dataRoot, ".blaze", "database.json"), JSON.stringify({ passwordEnv: 7 }));
+  assert.equal(passwordEnvName({ dataRoot, env: {} }), null, "a non-string name is ignored");
 });

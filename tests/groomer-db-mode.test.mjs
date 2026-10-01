@@ -465,3 +465,34 @@ test("supervisor under db: a resolver refusal is published as a groomer error, a
   assert.equal((await groomDb(roots)).filter((e) => e.type === "error").length, 1,
     "a second run reaches the resolver again — `busy` was cleared in the finally");
 });
+
+// BLZ-673 M-4: the agent's env was `{ ...process.env, … }`, so the variable `passwordEnv` names —
+// the Postgres password itself — was inherited by the agent. It is now stripped, whether the
+// name arrives by BLAZE_DB_PASSWORD_ENV or by `.blaze/database.json`'s `passwordEnv`.
+async function groomWithPassword({ viaFile }) {
+  const name = `BLZ673_TEST_PW_${viaFile ? "FILE" : "ENV"}`;
+  const roots = await dbGroomBoard((r, mark) =>
+    `printf '%s' "\${${name}-unset}" > "${mark}/pw"\nprintf '\\nGroomed.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  if (viaFile) {
+    writeFileSync(join(roots.dataRoot, ".blaze", "database.json"), JSON.stringify({ passwordEnv: name }));
+  }
+  const saved = { name: process.env[name], ptr: process.env.BLAZE_DB_PASSWORD_ENV };
+  process.env[name] = "s3cret-should-not-leak";
+  if (viaFile) delete process.env.BLAZE_DB_PASSWORD_ENV; else process.env.BLAZE_DB_PASSWORD_ENV = name;
+  try {
+    const groom = await groomDirect(roots);
+    assert.ok(groom && !groom.refused && !groom.error, JSON.stringify(groom));
+  } finally {
+    for (const [k, v] of [[name, saved.name], ["BLAZE_DB_PASSWORD_ENV", saved.ptr]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+  assert.equal(readFileSync(join(roots.mark, "pw"), "utf8"), "unset",
+    "the agent must not inherit the database password variable");
+}
+
+test("groomOnceDb: the password variable named by BLAZE_DB_PASSWORD_ENV is not in the agent's env",
+     () => groomWithPassword({ viaFile: false }));
+
+test("groomOnceDb: the password variable named by .blaze/database.json's passwordEnv is not in the agent's env",
+     () => groomWithPassword({ viaFile: true }));
