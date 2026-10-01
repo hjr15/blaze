@@ -12,7 +12,8 @@ import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
 import { resolvePorts, resolveReadStorage, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
 import { stageFor } from "./commit-or-queue.mjs";
-import { groomOnce } from "./loops/groomer.mjs";
+import { groomOnce, groomOnceDb } from "./loops/groomer.mjs";
+import { assertWritable } from "./readonly.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
 import { AttemptLimiter } from "./model/rate-limit.mjs";
@@ -394,17 +395,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
 
   function runGroomer() {
     if (loops.groomer.busy) return;
+    // BLZ-673: under BLAZE_WRITE_PORT=db the groomer reads and writes through the port
+    // (groomOnceDb). That path is async; the fs path below stays synchronous and unchanged.
+    if (resolveWriteMode() === "db") return runGroomerDb();
     loops.groomer.busy = true;
     try {
-      // BLZ-670 (final review). The groomer picks a ticket by reading `.md` files, has an
-      // agent edit that FILE, and commits it. Under BLAZE_WRITE_PORT=db the database is the
-      // store, so it would groom stale files that nothing reads. Refused — and said on the
-      // bus, in the shape every groomer error takes — until it goes through the port (BLZ-673).
-      if (resolveWriteMode() === "db") {
-        bus.publish({ type: "error", loop: "groomer", ts: today(),
-          message: "groomer not run: it edits ticket files, and under BLAZE_WRITE_PORT=db the database is the store (BLZ-254)" });
-        return;
-      }
       let agentsMd = "";
       // BLZ-512 / ADR-0031. This is the LONG-LIVED process, so the site REPORTS rather
       // than refusing: the rethrown refusal lands in the `catch` below, which publishes an
@@ -422,6 +417,36 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       bus.publish({ type: "error", loop: "groomer", message: e.message, ts: today() });
     } finally {
       loops.groomer.busy = false;
+    }
+  }
+
+  /** BLZ-673: one db-mode pass. Ports are resolved once per run and closed in the `finally`;
+   *  a resolver refusal is published in the shape every groomer error takes. Every await is
+   *  inside a try — including `close()`, whose failure is published too — so the promise the
+   *  un-awaited timer / control-route call receives cannot reject. */
+  async function runGroomerDb() {
+    loops.groomer.busy = true;
+    let ports = null;
+    try {
+      // Matches reconcile under BLAZE_READONLY here: the verb's own `assertWritable` refusal
+      // lands in the catch below as a groomer error event, and nothing is opened or run.
+      assertWritable("run the groomer", process.env);
+      ports = await resolvePorts({ dataRoot: root, projectsDir });
+      let agentsMd = "";
+      // Same rule as the fs path above: ENOENT is "no rules declared"; a refusal is reported.
+      try { agentsMd = readRegularFileSync(join(root, "AGENTS.md"), "utf8"); }
+      catch (e) { if (e instanceof NotARegularFileError) throw e; }
+      const evt = await groomOnceDb({ root, projectsDir, cfg, agentsMd, today: today(),
+                                      readStorage: ports.readStorage, writePort: ports.writePort });
+      if (evt) bus.publish(evt);
+    } catch (e) {
+      bus.publish({ type: "error", loop: "groomer", message: e.message, ts: today() });
+    } finally {
+      loops.groomer.busy = false;
+      if (ports) {
+        try { await ports.close(); }
+        catch (e) { bus.publish({ type: "error", loop: "groomer", message: `closing the ports: ${e.message}`, ts: today() }); }
+      }
     }
   }
 

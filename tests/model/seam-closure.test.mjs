@@ -2130,7 +2130,8 @@ const WRITE_ALLOWED = new Map([
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
   // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts) and stages by mode (stageFor).
-  ["supervisor.mjs", ["groomOnce", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
+  // BLZ-673: runGroomer grooms through the port under db (groomOnceDb), resolving ports per run.
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.

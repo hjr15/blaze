@@ -1043,6 +1043,26 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   try { agentsMd = readRegularFileSync(join(root, "AGENTS.md"), "utf8"); }
   catch (e) { if (e instanceof NotARegularFileError) throw e; }
   const today = new Date().toISOString().slice(0, 10);
-  const evt = groomOnce({ root, cfg, agentsMd, today });
+  // BLZ-673: `blaze groom` under BLAZE_WRITE_PORT=db grooms through the port, as the
+  // supervisor's loop does. The fs call is unchanged.
+  const { resolveWriteMode, resolvePorts } = await import("../model/write-port-resolve.mjs");
+  let evt;
+  if (resolveWriteMode() === "db") {
+    // A db groom WRITES the store, so it honours BLAZE_READONLY like every mutating runner
+    // (AGENTS.md). The fs path below is unchanged — its missing guard is a named residual.
+    const { assertWritable } = await import("../readonly.mjs");
+    try { assertWritable("run blaze groom", process.env); }
+    catch (e) { console.error(e.message); process.exit(1); }
+    const { projectsDir } = resolveRoots();
+    let ports;
+    try { ports = await resolvePorts({ dataRoot: root, projectsDir }); }
+    catch (e) { console.error(e.message); process.exit(1); }
+    try {
+      evt = await groomOnceDb({ root, projectsDir, cfg, agentsMd, today,
+                                readStorage: ports.readStorage, writePort: ports.writePort });
+    } finally { await ports.close(); }
+  } else {
+    evt = groomOnce({ root, cfg, agentsMd, today });
+  }
   console.log(evt ? JSON.stringify(evt) : "groomer: nothing to groom.");
 }

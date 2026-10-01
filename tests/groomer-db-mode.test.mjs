@@ -1,19 +1,19 @@
-// tests/groomer-db-mode.test.mjs — BLZ-670 (final review).
+// tests/groomer-db-mode.test.mjs — BLZ-670 (final review), then BLZ-673.
 //
-// The groomer picks a ticket by reading `projects/<KEY>/<col>/*.md`, drives an agent to edit
-// that FILE, and commits it. Under BLAZE_WRITE_PORT=db the database is the store: the file is
-// stale, the agent's edit is read by nothing, and the commit is noise. Until the groomer reads
-// and writes through the port (BLZ-673), the supervisor refuses to run it in db mode, and SAYS
-// so on the bus rather than going quiet.
+// BLZ-670 made the supervisor REFUSE the groomer under BLAZE_WRITE_PORT=db: it read `.md`
+// files, had an agent edit the file, and committed it, while the database was the store.
+// BLZ-673 removes that refusal on purpose — the behaviour it pinned is gone — and replaces it
+// with a db branch: the ticket is read through the port, materialised to a scratch file for the
+// agent, and the result is written back through the port. The fs-mode control stays.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, chmodSync, existsSync } from "node:fs";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, dirname } from "node:path";
 import { createApp } from "../scripts/supervisor.mjs";
 import { loadConfig } from "../scripts/config.mjs";
-import { scratchRegistry } from "./helpers/scratch.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { resolvePorts } from "../scripts/model/write-port-resolve.mjs";
 import { groomOnceDb } from "../scripts/loops/groomer.mjs";
@@ -21,8 +21,11 @@ import { dbBoard, QUIET } from "./helpers/db-board.mjs";
 import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
 import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
 import { writeCsv } from "../scripts/model/csv.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
 const scratch = scratchRegistry();
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
+const today = () => new Date().toISOString().slice(0, 10);
 const TICKET = "---\nid: TASK-001\ntitle: x\ntype: feature\npriority: medium\nlabels: []\n---\nbody\n";
 
 /** A board whose stub agent leaves a marker OUTSIDE the board when it runs, so "a groom ran"
@@ -63,24 +66,10 @@ function groomUnder(mode) {
 }
 
 test("control: under BLAZE_WRITE_PORT=fs the groomer runs the agent", () => {
-  // Without this the db-mode assertion below could pass on a fixture that never grooms.
   assert.equal(groomUnder("fs").ran, true);
 });
 
-test("under BLAZE_WRITE_PORT=db the groomer is refused, by name, and no groom runs", () => {
-  const { events, ran } = groomUnder("db");
-  assert.equal(ran, false, "the agent ran against a ticket file the database does not read");
-  const errs = events.filter((e) => e.type === "error" && e.loop === "groomer");
-  assert.equal(errs.length, 1, JSON.stringify(events));
-  assert.match(errs[0].message, /BLAZE_WRITE_PORT=db/);
-  assert.match(errs[0].message, /database/);
-  assert.match(errs[0].message, /BLZ-254/);
-  assert.ok(errs[0].ts, "the event carries a timestamp like every other groomer error");
-});
-
 // --- BLZ-673: db mode --------------------------------------------------------------------
-
-const today = () => new Date().toISOString().slice(0, 10);
 
 /** A SQLite db-mode board (ENG-1 loaded by `blaze db init`) whose agent runs `script` in the
  *  scratch dir. `$BLAZE_GROOM_TARGET` names the materialised file; `mark` is a directory
@@ -108,6 +97,25 @@ async function dbGroomBoard(script, { portOpts = {}, git = null, init = true } =
     }
   }
   return { ...roots, mark, portOpts };
+}
+
+async function groomDb(roots, { readonly = "" } = {}) {
+  // The supervisor reads its own process env, so both variables are set for the call and put
+  // back after — `readonly` defaults to "" so an ambient BLAZE_READONLY=1 cannot refuse the test.
+  const saved = { port: process.env.BLAZE_WRITE_PORT, ro: process.env.BLAZE_READONLY };
+  process.env.BLAZE_WRITE_PORT = "db";
+  process.env.BLAZE_READONLY = readonly;
+  const events = [];
+  try {
+    const app = createApp(loadConfig({ root: roots.dataRoot, env: {} }), { root: roots.dataRoot });
+    app.bus.subscribe((e) => events.push(e));
+    await app.runGroomer();
+  } finally {
+    for (const [k, v] of [["BLAZE_WRITE_PORT", saved.port], ["BLAZE_READONLY", saved.ro]]) {
+      if (v === undefined) delete process.env[k]; else process.env[k] = v;
+    }
+  }
+  return events;
 }
 
 /** One db-mode pass called DIRECTLY (no supervisor): resolve, groom, always close. */
@@ -397,4 +405,63 @@ test("groomOnceDb on POSTGRES: grooms through the port, and a concurrent port wr
     assert.equal(g2.reason, "store-changed");
     assert.doesNotMatch((await readBack(race)).body, /Second\./);
   } finally { await db.drop(); }
+});
+
+test("supervisor under db: runGroomer grooms through the port and publishes the event — no refusal",
+     async () => {
+  const roots = await dbGroomBoard(`printf '\\nGroomed by the loop.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const events = await groomDb(roots);
+  assert.equal(events.filter((e) => e.type === "error").length, 0, JSON.stringify(events));
+  const groom = events.find((e) => e.type === "groom");
+  assert.ok(groom && !groom.refused, JSON.stringify(events));
+  assert.match((await readBack(roots)).body, /Groomed by the loop\./);
+});
+
+test("blaze groom (the CLI) under db grooms through the port too", async () => {
+  const roots = await dbGroomBoard(`printf '\\nGroomed by the CLI.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const r = spawnSync(process.execPath, [join(SCRIPTS, "loops", "groomer.mjs")], {
+    encoding: "utf8",
+    env: { ...process.env, BLAZE_PROJECTS_DIR: roots.projectsDir, BLAZE_WRITE_PORT: "db", BLAZE_READONLY: "" },
+  });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).id, "ENG-1");
+  assert.match((await readBack(roots)).body, /Groomed by the CLI\./);
+});
+
+test("blaze groom (the CLI) under db REFUSES under BLAZE_READONLY — the agent never runs, nothing is written",
+     async () => {
+  const roots = await dbGroomBoard(`printf '\\nGroomed by the CLI.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const r = spawnSync(process.execPath, [join(SCRIPTS, "loops", "groomer.mjs")], {
+    encoding: "utf8",
+    env: { ...process.env, BLAZE_PROJECTS_DIR: roots.projectsDir, BLAZE_WRITE_PORT: "db", BLAZE_READONLY: "1" },
+  });
+  assert.equal(r.status, 1, r.stdout);
+  assert.match(r.stderr, /read-only mode \(BLAZE_READONLY=1\) — refusing to run blaze groom/);
+  assert.equal(existsSync(join(roots.mark, "cwd")), false, "the agent did not run");
+  assert.doesNotMatch((await readBack(roots)).body, /Groomed by the CLI\./);
+});
+
+test("supervisor under db REFUSES under BLAZE_READONLY, as reconcile does — one groomer error, nothing written",
+     async () => {
+  const roots = await dbGroomBoard(`printf '\\nGroomed by the loop.\\n' >> "$BLAZE_GROOM_TARGET"`);
+  const events = await groomDb(roots, { readonly: "1" });
+  const errs = events.filter((e) => e.type === "error" && e.loop === "groomer");
+  assert.equal(errs.length, 1, JSON.stringify(events));
+  assert.match(errs[0].message, /refusing to run the groomer/);
+  assert.equal(existsSync(join(roots.mark, "cwd")), false, "the agent did not run");
+  assert.doesNotMatch((await readBack(roots)).body, /Groomed by the loop\./);
+});
+
+test("supervisor under db: a resolver refusal is published as a groomer error, and the loop is not left busy", async () => {
+  const roots = dbBoard();   // no `blaze db init`: resolvePorts refuses — no shadow database
+  writeFileSync(join(roots.dataRoot, "blaze.config.json"), JSON.stringify({
+    projects: ["ENG"], schemaVersion: 2, agentCommand: "true", loops: { groomer: { columns: ["defined"] } },
+  }));
+  const events = await groomDb(roots);
+  const errs = events.filter((e) => e.type === "error" && e.loop === "groomer");
+  assert.equal(errs.length, 1, JSON.stringify(events));
+  assert.match(errs[0].message, /blaze db init/);
+  assert.ok(errs[0].ts);
+  assert.equal((await groomDb(roots)).filter((e) => e.type === "error").length, 1,
+    "a second run reaches the resolver again — `busy` was cleared in the finally");
 });
