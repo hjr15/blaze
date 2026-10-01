@@ -259,15 +259,31 @@ const unknownMode = (mode) => new Error(
   + "expected 'fs', 'dual' or 'db'. Leaving it unset uses 'fs', which is the "
   + "filesystem behaviour Blaze has always had.");
 
+/**
+ * BLZ-668: which Postgres a message is about — `host/database`, never the password. Takes
+ * either shape a connection arrives in: resolveDatabaseConfig's parsed parts, or a URL string
+ * (tests). An unparseable string names nothing rather than echoing it back.
+ */
+export function describePgTarget(connection) {
+  if (connection && typeof connection === "object") {
+    return `${connection.host ?? "?"}/${connection.database ?? "?"}`;
+  }
+  try {
+    const u = new URL(String(connection));
+    return `${u.hostname}/${decodeURIComponent(u.pathname.replace(/^\//, "")) || "?"}`;
+  } catch { return "an unparseable connection"; }
+}
+
 /** Connect, and refuse a missing or out-of-range schema, closing the socket on refusal. */
-async function openCheckedPg(connection, openPgClient) {
+export async function openCheckedPg(connection, openPgClient) {
   const client = await openPgClient(connection);
   await closeOnSetupFailure(client, async () => {
     const state = await checkDbSchema(pgExec(client), { dialect: "postgres" });
     if (!state.ok) throw new Error(`blaze: ${state.error}`);
     if (state.state === "empty") {
       throw new Error(
-        "blaze: this Postgres database has no Blaze schema. Create it first:\n\n"
+        `blaze: the Postgres database ${describePgTarget(connection)} has no Blaze schema. `
+        + "Create it first:\n\n"
         + "    blaze db init\n");
     }
   });

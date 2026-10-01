@@ -933,7 +933,10 @@ const SEAM_WRITE_PROVIDERS = new Map([
       "resolvePorts"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
         "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode",
-        "resolveReadStorage", "withReadStorage"] }],
+        "resolveReadStorage", "withReadStorage",
+        // BLZ-668: `blaze db init`/`seed-counter` open Postgres through the resolver's own
+        // checked open, and name the target in refusals. A client connect and a string — no fs.
+        "openCheckedPg", "describePgTarget"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
