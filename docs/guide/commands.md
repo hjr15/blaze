@@ -707,10 +707,26 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 
-**Before setting `BLAZE_WRITE_PORT=db`, run `blaze db seed-counter` immediately beforehand.**
-Every id handed out on the filesystem path since `init` — by `blaze new`, `blaze import`, or
-another machine's claim you have pulled — is invisible to the database's counter until it is
-re-seeded, and a db-mode `blaze new` would hand the same number out again.
+**Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
+
+1. Stop the supervisor and every other writer (`blaze new`, `blaze import`, the groomer, any
+   agent session) on **every** machine.
+2. `git pull`, so this checkout holds every claim and ticket the other machines pushed.
+3. `blaze db seed-counter`.
+4. Set `BLAZE_WRITE_PORT=db` everywhere, then restart the long-lived processes (the
+   supervisor and anything else that read the environment at start-up).
+
+Why the order matters:
+
+- Every id handed out on the filesystem path since `init` — by `blaze new`, `blaze import`, or
+  another machine's claim — is invisible to the database's counter until it is re-seeded.
+- `seed-counter` reads only **local** `.ids/` claims and ticket files. A claim another machine
+  made but you have not pulled is invisible to it — hence step 2, after every writer stopped.
+- A machine left in `fs` or `dual` mode after the flip still allocates from the file ledger,
+  which the database's counter never sees, and the two can hand out the same number.
+- db-mode allocation skips any number that already has a ticket row, so a stale counter can no
+  longer overwrite a ticket — but it can leave gaps, and it cannot see a number that exists only
+  as a file on a machine still writing in `fs` mode. `seed-counter` remains the cure.
 
 **Expect the groomer to re-groom every ticket in its columns once after the flip.** Its
 "already groomed" record (`.blaze/state.json`) hashes each ticket's text, and the database
