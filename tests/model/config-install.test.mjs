@@ -341,7 +341,8 @@ describe("BLZ-377: init rebuilds both files, and never wedges trying", () => {
   };
   const init = (root, ...args) => spawnSync(process.execPath,
     [fileURLToPath(new URL("../../scripts/db-runner.mjs", import.meta.url)), "init", ...args],
-    { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
+    // BLZ-668: db init is readonly-guarded now; an ambient BLAZE_READONLY must not refuse it here.
+    { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects"), BLAZE_READONLY: "" }, encoding: "utf8" });
 
   test("a stale config.db is REBUILT, not reused, even without --force", () => {
     // A config.db from an older engine would otherwise be silently reused: its tables are all

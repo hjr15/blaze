@@ -286,3 +286,14 @@ test("BLAZE_READONLY refuses `blaze import repair --apply` at the CLI gate", (t)
   assert.notEqual(r.status, 0);
   assert.equal(readFileSync(receipt, "utf8").includes("resolved"), false);
 });
+
+// BLZ-671: the runner's port now ALLOCATES for import, so it must be built with import's
+// no-network seed (`remoteClaims: false`, ADR-0037 §3). Behind an unreachable remote a
+// fetching allocator reads `null` and marks the claim " provisional" — the byte this pins.
+test("BLZ-671: an fs --allocate-ids import never fetches — no provisional claim behind an unreachable remote", (t) => {
+  const root = board(t);
+  spawnSync("git", ["-C", root, "remote", "add", "origin", "/nonexistent/blz671.git"]);
+  const r = run(root, ["--apply", "--allocate-ids", csvAt(root, row({ id: "" }))], { BLAZE_READONLY: "" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(claimPath(join(root, "projects"), "BLZ", 1), "utf8"), "BLZ-1 t\n");
+});

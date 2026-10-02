@@ -891,8 +891,11 @@ const SEAM_WRITE_PROVIDERS = new Map([
     inert: ["cacheFile", "readRawCache"] }],
   // `saveState` and `restoreSnapshot` are the two the reviewer landed a file with: root and
   // contents both come from the caller. `groomOnce` is the groomer's verb.
-  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot", "groomOnce"], sanctioned: [],
-    inert: ["hashContent", "loadState", "statusDirs", "matchersFor", "selectNextTicket",
+  // BLZ-673: `groomOnceDb` is the db-mode verb — it writes the scratch file the agent edits and
+  // the groomer state, and writes the ticket through the injected port. `selectNextTicketDb`
+  // reads through the injected reader and hashes; it reaches no write.
+  ["loops/groomer.mjs", { writes: ["saveState", "restoreSnapshot", "groomOnce", "groomOnceDb"], sanctioned: [],
+    inert: ["hashContent", "loadState", "statusDirs", "matchersFor", "selectNextTicket", "selectNextTicketDb",
       "extractGroomingRules", "buildPrompt", "parseChangedFiles", "isStructuralChange",
       "redactSecrets", "outOfBoundsPaths", "CONFIG_FILE", "DEFAULT_TIMEOUT_SEC",
       "DEFAULT_MAX_BUFFER_MB", "git", "SNAPSHOT_SKIP_DIRS", "SNAPSHOT_SKIP_FILES",
@@ -930,10 +933,16 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // so it is a write; `resolveReadStorage` / `withReadStorage` only open readers — inert.
   ["model/write-port-resolve.mjs",
     { writes: ["openShadow", "logDivergence", "recordSoakOp", "resolveWritePort",
-      "resolvePorts"], sanctioned: [],
+      "resolvePorts",
+      // BLZ-671: the fs allocate/reserve pair every fs port is handed — `allocateId` +
+      // `writeClaim` behind a closure, under a caller-chosen projects dir. A write.
+      "fsAllocators"], sanctioned: [],
       inert: ["shadowDbPath", "configDbPath", "divergenceLogPath", "soakStatePath",
         "sqliteExec", "pgExec", "readSoakState", "assertConfigNamespace", "resolveWriteMode",
-        "resolveReadStorage", "withReadStorage"] }],
+        "resolveReadStorage", "withReadStorage",
+        // BLZ-668: `blaze db init`/`seed-counter` open Postgres through the resolver's own
+        // checked open, and name the target in refusals. A client connect and a string — no fs.
+        "openCheckedPg", "describePgTarget"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
@@ -2077,7 +2086,10 @@ const WRITE_ALLOWED = new Map([
   // `mkdirSync` creates `import-receipts/`, and `unlinkSync` is the 90-day
   // prune. Named to those members: a ticket write, or a fourth primitive,
   // appearing here still reddens.
-  ["model/import-apply.mjs", ["allocateId", "writeClaim", "commitOrQueue",
+  // BLZ-671: `allocateId` + `writeClaim` → `fsAllocators`. Import now takes its ids from the
+  // PORT (allocate / reserve), and its fs default is handed write-port-resolve's allocators
+  // rather than calling the allocator itself — so a db-mode import allocates from the counter.
+  ["model/import-apply.mjs", ["fsAllocators", "commitOrQueue",
     "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
   // BLZ-634 / design §4.2, §5.3, §5.4. The same footing, for the same two
   // records: `appendRegularFileSync` writes the map's pairs, the parked
@@ -2118,7 +2130,8 @@ const WRITE_ALLOWED = new Map([
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
   // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts) and stages by mode (stageFor).
-  ["supervisor.mjs", ["groomOnce", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
+  // BLZ-673: runGroomer grooms through the port under db (groomOnceDb), resolving ports per run.
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.

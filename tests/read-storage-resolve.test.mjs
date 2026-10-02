@@ -50,7 +50,7 @@ describe("resolveReadStorage", () => {
 
   test("db on sqlite reads the shadow", async () => {
     const roots = board();
-    assert.equal(0, await runDb(["init"], { log() {}, err() {}, roots }));
+    assert.equal(0, await runDb(["init"], { log() {}, err() {}, env: {}, roots }));
     const r = await resolveReadStorage({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
     assert.equal(r.readStorage.name, "sqlite");
     await r.close();
@@ -98,7 +98,7 @@ describe("resolvePorts: one resolution, one source", () => {
 
   test("db on sqlite: both ports over the shadow, closed together", async () => {
     const roots = board();
-    assert.equal(0, await runDb(["init"], { log() {}, err() {}, roots }));
+    assert.equal(0, await runDb(["init"], { log() {}, err() {}, env: {}, roots }));
     const r = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
     assert.equal(r.readStorage.name, "sqlite");
     assert.equal(r.writePort.name, "db");

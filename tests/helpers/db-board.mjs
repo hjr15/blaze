@@ -9,7 +9,9 @@ import { scratchRegistry } from "./scratch.mjs";
 
 const scratch = scratchRegistry();
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "..", "scripts");
-export const QUIET = { log() {}, err() {} };
+// `env: {}` — runDb's readonly guard reads `io.env ?? process.env`; tests pass an explicit,
+// empty env so an ambient BLAZE_READONLY=1 in the shell running the suite cannot refuse them.
+export const QUIET = { log() {}, err() {}, env: {} };
 
 export function dbBoard() {
   const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blz670-board-")));

@@ -252,6 +252,14 @@ test("BLZ-432: the reconcile help line makes no unqualified whole-board `sync` c
   assert.match(r.stdout, /branch|PR/i, "it must still say what evidence it reads");
 });
 
+// BLZ-668 M-1: `db` gained `seed-counter`; its help line read "create/inspect the database
+// and the dual-write soak", which left the counter seed out of the verb's own summary.
+test("BLZ-668: the db help line names seeding alongside create and inspect", () => {
+  const r = spawnSync(process.execPath, [cli, "db", "--help"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.match(r.stdout, /usage: blaze db — create\/seed\/inspect the database and the dual-write soak/);
+});
+
 // BLZ-639: cli.mjs's final `process.exit(r.status ?? 0)` read a signal-killed
 // child (r.status === null, r.signal === "SIGKILL") as exit 0 — a clean-looking
 // exit for a process an OOM-killer (or anything else) sent a signal to, for

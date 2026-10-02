@@ -144,3 +144,45 @@ report is held to the same standard as the mechanism. Three rules fell out of re
   unasked.
 - **Untrusted ticket content is no longer last in the prompt**: a per-call 72-bit nonce
   delimits it and a guard restatement follows it.
+
+## Addendum (2026-09-30, BLZ-673) — the db-mode groomer, and what it leaves uncovered
+
+Under `BLAZE_WRITE_PORT=db` the groomer (`groomOnceDb`) hands the agent a materialised copy of
+the ticket in a scratch directory and writes the result through the write port. Its guard is
+this ADR's, extended: the agent runs with `BLAZE_READONLY=1` (advisory — it owns its env); the
+store is fingerprinted across the run (last `ticket_event` id, and on SQLite the dev/ino of
+`.blaze/blaze.db` and `.blaze/config.db`) and a moved fingerprint refuses the pass, restores only
+config, credentials, instructions and git sinks (`.blaze/database.json`, `blaze.config.json`,
+`AGENTS.md`, `.blaze/identity.db` and its `-journal`/`-wal`/`-shm`, `.git/config`,
+`.git/hooks/**`) and backs the same unchanged ticket off; the rest of the data root is surveyed
+and restored exactly as above. `blaze groom` and the supervisor loop refuse a db groom under
+`BLAZE_READONLY`. Three accepted tradeoffs of the always-restore list: a concurrent
+`blaze user add` is undone with `identity.db`, a concurrent session's own `.git/config`
+change (branch tracking, `git remote add`, `push -u`) is undone with `.git/config`, and a
+person's concurrent edit to `AGENTS.md` is undone with it — all judged smaller than an
+agent-written credential, `core.hooksPath` or grooming instruction. `CLAUDE.md`,
+`.claude/settings.json` and `.envrc` at the data root are not on the list. Added to the exhaustive list of
+what it does **not** cover:
+
+- **Store writes by an agent that unsets `BLAZE_READONLY`** (or reaches a running board server
+  that is not read-only). They are detected — the pass is refused `store-changed` — but they
+  **stand**: a store cannot be rewound, and other board files it wrote in the same pass stay too,
+  except the always-restored paths above.
+- **The back-off bounds reruns of the same unchanged ticket only.** It does not stop an agent
+  that unset `BLAZE_READONLY` from planting a ticket and being handed that ticket next pass.
+- **Runners with no per-runner readonly guard**: `user-runner.mjs`, `init-runner.mjs`,
+  `migrate-runner.mjs`, `schedule-runner.mjs`, and the fs path of `loops/groomer.mjs` are refused
+  only by `cli.mjs`'s dispatch gate (where they pass through it at all), so a direct
+  `node scripts/<x>.mjs` is not. (`db-runner.mjs` gained its guard in BLZ-668, and
+  `loops/groomer.mjs`'s db path in BLZ-673.)
+- **A raw SQL write that appends no `ticket_event` row** — an agent that holds the database
+  credentials and runs `psql`, a direct `sqlite3 … UPDATE`, or a crafted `-wal` file swapped in
+  (`-wal`/`-shm`/`-journal` identity is not fingerprinted: other sessions' connections delete
+  and recreate them legitimately). The agent no longer inherits the Postgres password variable
+  (the one `passwordEnv` names is stripped from its env, BLZ-673), but the parent process's
+  `/proc/<pid>/environ` remains readable by the same user. Only a change to the groomed row itself is caught, by the
+  re-read before the write.
+- **The check-then-write window** between that last re-read and the write — no row lock;
+  milliseconds wide; on Postgres it also includes identity values committing out of order (a
+  transaction holding a lower id than the MAX read before the agent, committing during the run).
+  BLZ-254 owns the concurrency proofs.

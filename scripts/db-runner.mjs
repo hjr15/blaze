@@ -9,20 +9,145 @@ import { existsSync, rmSync } from "node:fs";
 import { readRegularFileSync } from "./model/regular-file.mjs";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
-         readSoakState } from "./model/write-port-resolve.mjs";
+         readSoakState, pgExec, openCheckedPg, describePgTarget } from "./model/write-port-resolve.mjs";
+import { resolveDatabaseConfig } from "./model/database-config.mjs";
+import { openPostgresClient } from "./init-pg.mjs";
+import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { DB_SCHEMA_VERSION } from "./model/db-schema-version.mjs";
+import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
 
-  init      create the shadow database and load this board into it
-  status    what the database holds, and what the dual-write soak has found
+  init          create the database schema. SQLite: create the shadow database and load
+                this board into it. Postgres: create the schema and seed the id counter
+                (the board's tickets are NOT loaded — that is the BLZ-254 migration)
+  seed-counter  raise the db-mode id counter to every number already taken (ticket files,
+                .ids/ claims, database rows). Run it immediately before BLAZE_WRITE_PORT=db
+  status        what the database holds, and what the dual-write soak has found
 
-  --force   with init: replace an existing shadow database
+  --force       with init, SQLite only: replace an existing shadow database
 `;
 
-async function init({ dataRoot, projectsDir, force, log, err }) {
+/** The resolved `database` block, or a printed refusal (null). Resolved BEFORE anything is
+ *  touched, so a bad key or an incomplete Postgres connection changes nothing on disk. */
+function dbConfigOr(ctx) {
+  try { return ctx.resolveDbConfig({ dataRoot: ctx.dataRoot, config: loadConfig({ root: ctx.dataRoot }) }); }
+  catch (e) { ctx.err(e.message); return null; }
+}
+
+/**
+ * BLZ-668: the per-runner BLAZE_READONLY guard every mutating runner carries (AGENTS.md), for a
+ * direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. Called by `init` and
+ * `seed-counter` AFTER the config is resolved (a bad project key is still named first, as in
+ * the other runners) and BEFORE anything is opened or written. `status` only reads.
+ */
+function writableOr(ctx, what) {
+  try { assertWritable(`run blaze db ${what}`, ctx.env); return true; }
+  catch (e) { ctx.err(e.message); return false; }
+}
+
+/** One line per project, `before → after`, plus a note when nothing moved. */
+function printSeed(rows, log) {
+  if (!rows.length) { log("  (no projects — nothing to seed)"); return; }
+  for (const r of rows) log(`  ${r.project.padEnd(10)} ${r.before} → ${r.after}`);
+}
+
+/**
+ * BLZ-668: `blaze db init` on Postgres — schema + counter seed ONLY. Loading the corpus into
+ * Postgres is BLZ-254's migration (it carries the zero-diff oracle), not this command.
+ * `--force` is refused: a CLI flag never drops a real database's tables.
+ */
+async function initPostgres({ dataRoot, projectsDir, force, log, err, openPgClient }, connection) {
+  if (force) {
+    err("blaze db init: --force is refused on Postgres. It would drop a real database's tables;");
+    err("Blaze never does that from a CLI flag. Drop the schema by hand if you mean it.");
+    return 1;
+  }
+  let client;
+  try { client = await openPgClient(connection); }
+  catch (e) { err(`blaze db init: cannot connect to ${describePgTarget(connection)} — ${e.message}`); return 1; }
+  try {
+    const exec = pgExec(client);
+    const where = describePgTarget(connection);
+    try { await createDbSchema(exec, { dialect: "postgres" }); }
+    catch (e) {
+      err(`blaze db init: ${where} — ${e.message}.`);
+      // Only an ALREADY-INITIALISED database is sent to seed-counter. Anything else (an
+      // unstamped or foreign schema, a permission error) is surfaced as it is.
+      if (/already holds a Blaze schema/.test(e.message)) {
+        err("It is already initialised. To bring its id counter up to date, run:\n");
+        err("    blaze db seed-counter\n");
+      }
+      return 1;
+    }
+    let rows;
+    try {
+      rows = await seedCounter(exec,
+        await corpusMaxima({ projectsDir, readStorage: fsReadStorage }), { dialect: "postgres" });
+    } catch (e) {
+      // The schema now EXISTS, so re-running init would refuse. Say so, and name the step
+      // that finishes the job once the cause is fixed.
+      err(`blaze db init: the schema was created at ${where}, but seeding the id counter failed:`);
+      err(`  ${e.message}\n`);
+      err("Fix that, then finish with:\n");
+      err("    blaze db seed-counter\n");
+      return 1;
+    }
+    log(`Postgres schema ready at ${describePgTarget(connection)}  (schema v${DB_SCHEMA_VERSION})`);
+    log("id counter seeded:");
+    printSeed(rows, log);
+    log("\nThe board's tickets were NOT loaded — Postgres holds the schema and the counter only.");
+    return 0;
+  } finally {
+    try { await client.end(); } catch { /* already closed */ }
+  }
+}
+
+async function init(ctx) {
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig || !writableOr(ctx, "init")) return 1;
+  if (dbConfig.driver === "postgres") return initPostgres(ctx, dbConfig.connection);
+  return initSqlite(ctx);
+}
+
+/**
+ * BLZ-669: `blaze db seed-counter`, both drivers. Opens the database the write port would
+ * (refusing one with no schema), raises every counter to max(corpus, claims, table), prints
+ * `project  before → after`. Never lowers; a second run reports before === after.
+ */
+async function seedCounterCmd(ctx) {
+  const { dataRoot, projectsDir, log, err, openPgClient } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig || !writableOr(ctx, "seed-counter")) return 1;
+  let exec, close, dialect, where;
+  try {
+    if (dbConfig.driver === "postgres") {
+      const client = await openCheckedPg(dbConfig.connection, openPgClient);
+      exec = pgExec(client); dialect = "postgres"; where = describePgTarget(dbConfig.connection);
+      close = async () => { try { await client.end(); } catch { /* already closed */ } };
+    } else {
+      const shadow = await openShadow(dataRoot);
+      exec = shadow.exec; dialect = "sqlite"; where = shadow.path;
+      close = () => { try { shadow.db.close(); } catch { /* already closed */ } };
+    }
+  } catch (e) { err(e.message); return 1; }
+  try {
+    const rows = await seedCounter(exec,
+      await corpusMaxima({ projectsDir, readStorage: fsReadStorage }), { dialect });
+    log(`id counter at ${where}:`);
+    printSeed(rows, log);
+    return 0;
+  } catch (e) {
+    err(`blaze db seed-counter: ${e.message}`);
+    return 1;
+  } finally {
+    await close();
+  }
+}
+
+async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
   const path = shadowDbPath(dataRoot);
   if (existsSync(path) && !force) {
     err(`blaze db init: ${path} already exists.\n`);
@@ -104,6 +229,10 @@ async function init({ dataRoot, projectsDir, force, log, err }) {
       source: fsReadStorage, today: new Date().toISOString().slice(0, 10),
     });
     db.exec(setMigrationModeSql("sqlite", false));
+    // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
+    // handed out that may not have a ticket yet). It can only RAISE a counter.
+    await seedCounter(exec, await corpusMaxima({ projectsDir, readStorage: fsReadStorage }),
+                      { dialect: "sqlite" });
 
     log(`shadow database ready at ${path}  (schema v${DB_SCHEMA_VERSION})`);
     log(`  tickets      ${tally.tickets}`);
@@ -209,8 +338,14 @@ export async function runDb(argv, io = {}) {
   if (!cmd || argv.includes("--help") || argv.includes("-h")) { log(USAGE); return cmd ? 0 : 1; }
 
   const roots = io.roots ?? resolveRoots();
-  const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, log, err };
+  // `resolveDbConfig` / `openPostgresClient` are injectable exactly as resolveWritePort's are,
+  // so a test drives the Postgres branch against a scratch database.
+  const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, log, err,
+                resolveDbConfig: io.resolveDbConfig ?? resolveDatabaseConfig,
+                openPgClient: io.openPostgresClient ?? openPostgresClient,
+                env: io.env ?? process.env };
   if (cmd === "init") return init(ctx);
+  if (cmd === "seed-counter") return seedCounterCmd(ctx);
   if (cmd === "status") return status(ctx);
   err(`blaze db: unknown command ${JSON.stringify(cmd)}\n`);
   err(USAGE);

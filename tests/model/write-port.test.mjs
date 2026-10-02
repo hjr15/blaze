@@ -19,6 +19,7 @@ import { SQLITE_DDL, SQLITE_PRAGMAS } from "../../scripts/model/sqlite-schema.mj
 import { fsReadStorage } from "../../scripts/model/read-storage.mjs";
 import { memStorage, fsStorage } from "../../scripts/model/storage.mjs";
 import { scratchRegistry } from "../helpers/scratch.mjs";
+import { PG_SKIP, scratchPgDb, pgClient } from "../helpers/pg-scratch.mjs";
 import { fsWritePort, dbWritePort, dualWritePort, selectWritePort, valueDiff,
          ticketValue, WRITE_PORT_ENV, COLUMN_FIELDS,
          extraFields } from "../../scripts/model/write-port.mjs";
@@ -424,6 +425,37 @@ describe("dbWritePort.allocate (BLZ-667)", () => {
   });
 });
 
+// BLZ-671 I-1: a stale counter must not hand out a number that already has a ticket row —
+// import --allocate-ids would upsert over it. Rows at n+1 and n+2 with the counter at n:
+// allocate skips both and returns n+3.
+async function assertAllocateSkipsTaken(exec, dialect) {
+  const port = dbWritePort(exec, { dialect });
+  await port.allocate("BLZ"); // counter at n = 1
+  for (const id of ["BLZ-2", "BLZ-3"]) {
+    const t = TICKET();
+    await port.write({ ...t, frontmatter: { ...t.frontmatter, id, title: `taken ${id}` } });
+  }
+  const got = await port.allocate("BLZ");
+  assert.deepEqual(got, { id: "BLZ-4", n: 4 });
+  assert.equal((await port.read("BLZ-2")).frontmatter.title, "taken BLZ-2");
+  assert.equal((await port.read("BLZ-3")).frontmatter.title, "taken BLZ-3");
+}
+
+test("dbWritePort.allocate skips numbers that already have a ticket row (sqlite)", async () => {
+  await assertAllocateSkipsTaken(sqliteExec(), "sqlite");
+});
+
+test("dbWritePort.allocate skips numbers that already have a ticket row (postgres)", PG_SKIP, async () => {
+  const db = await scratchPgDb("allocskip");
+  const client = await pgClient(db.url);
+  try {
+    const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+    const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    await assertAllocateSkipsTaken(pgExec(client), "postgres");
+  } finally { await client.end(); await db.drop(); }
+});
+
 // BLZ-667 Task 5: fsWritePort.allocate is an injected seam, `title` passed at CALL time —
 // resolveWritePort builds the port before the ticket's title is known.
 test("fsWritePort.allocate calls the injected function with project and title", async () => {
@@ -496,4 +528,115 @@ test("dbWritePort.allocate is sequential on postgres", { skip: PG ? false : "set
     await cleanup.query(`DROP DATABASE IF EXISTS ${dbName}`);
     await cleanup.end();
   }
+});
+
+// BLZ-672: `created_on`/`updated_on` are NOT NULL; an imported row may carry neither.
+describe("dbWritePort stamps a MISSING date (BLZ-672)", () => {
+  const undated = () => {
+    const t = TICKET();
+    const { created, updated, ...fm } = t.frontmatter;
+    void created; void updated;
+    return { ...t, frontmatter: fm };
+  };
+
+  test("no created/updated → both are the injected today", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite", today: () => "2026-09-30" });
+    await port.write(undated());
+    const r = await port.read("BLZ-1");
+    assert.equal(r.frontmatter.created, "2026-09-30");
+    assert.equal(r.frontmatter.updated, "2026-09-30");
+  });
+
+  test("created only → updated follows created, not today", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite", today: () => "2026-09-30" });
+    const t = undated();
+    await port.write({ ...t, frontmatter: { ...t.frontmatter, created: "2026-02-02" } });
+    const r = await port.read("BLZ-1");
+    assert.equal(r.frontmatter.created, "2026-02-02");
+    assert.equal(r.frontmatter.updated, "2026-02-02");
+  });
+
+  test("present dates are written verbatim — the clock is never consulted", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite",
+      today: () => { throw new Error("the clock must not be read when both dates are present"); } });
+    await port.write(TICKET());
+    const r = await port.read("BLZ-1");
+    assert.equal(r.frontmatter.created, "2026-01-01");
+    assert.equal(r.frontmatter.updated, "2026-01-01");
+  });
+});
+
+// BLZ-671: `reserve(id)` — "this explicit id is now taken". Import's `BLZ-900` row never goes
+// through `allocate`, so without it a later db-mode `new` hands 900 out again.
+describe("reserve (BLZ-671)", () => {
+  test("dbWritePort.reserve raises the counter to the id's number, so the next allocate follows it", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    await port.allocate("BLZ");                              // BLZ-1
+    assert.deepEqual(await port.reserve("BLZ-900", { title: "x" }), {});
+    assert.equal((await port.allocate("BLZ")).id, "BLZ-901");
+  });
+
+  test("dbWritePort.reserve never lowers the counter", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    for (let i = 0; i < 5; i++) await port.allocate("BLZ");  // counter at 5
+    await port.reserve("BLZ-2");
+    assert.equal((await port.allocate("BLZ")).id, "BLZ-6");
+  });
+
+  test("dbWritePort.reserve refuses an id that already has a row — the write after it would overwrite", async () => {
+    const port = dbWritePort(sqliteExec(), { dialect: "sqlite" });
+    await port.write(TICKET());                              // BLZ-1, e.g. a concurrent db-mode `new`
+    await assert.rejects(port.reserve("BLZ-1", { title: "x" }), /BLZ-1 already exists in the database/);
+  });
+
+  test("fsWritePort.reserve calls the injected function with id and options", async () => {
+    const calls = [];
+    const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage,
+      { reserve: async (id, opts) => { calls.push([id, opts]); return { claimFile: "/tmp/fake" }; } });
+    assert.deepEqual(await port.reserve("BLZ-9", { project: "BLZ", title: "t" }), { claimFile: "/tmp/fake" });
+    assert.deepEqual(calls, [["BLZ-9", { project: "BLZ", title: "t" }]]);
+  });
+
+  test("fsWritePort.reserve with no injected function refuses clearly, not silently", async () => {
+    const port = fsWritePort("/tmp/does-not-matter/projects", fsStorage, fsReadStorage);
+    await assert.rejects(() => port.reserve("BLZ-9", { title: "x" }), /no reserve function was injected/);
+  });
+
+  test("dualWritePort.reserve delegates to the primary only", async () => {
+    let shadowCalled = false;
+    const primary = { name: "fs", reserve: async (id, o) => ({ claimFile: `/c/${id}/${o.title}` }) };
+    const shadow = { name: "db", reserve: async () => { shadowCalled = true; return {}; } };
+    assert.deepEqual(await dualWritePort(primary, shadow).reserve("BLZ-9", { title: "t" }), { claimFile: "/c/BLZ-9/t" });
+    assert.equal(shadowCalled, false);
+  });
+});
+
+// BLZ-673: the store fingerprint the db groomer compares across an agent run. Every port write
+// appends a ticket_event row, so its last id moves; nothing else here is allowed to move it.
+async function assertFingerprint(exec, dialect) {
+  const port = dbWritePort(exec, { dialect });
+  assert.deepEqual(await port.storeFingerprint(), { dialect, lastEventId: 0 });
+  await port.write(TICKET());
+  const a = await port.storeFingerprint();
+  assert.ok(a.lastEventId > 0, JSON.stringify(a));
+  await port.read("BLZ-1");
+  await port.exists({ frontmatter: { id: "BLZ-1" } });
+  assert.deepEqual(await port.storeFingerprint(), a, "reads do not move it");
+  await port.write({ ...TICKET(), body: "edited" });
+  assert.ok((await port.storeFingerprint()).lastEventId > a.lastEventId, "a second write moves it");
+}
+
+test("dbWritePort.storeFingerprint moves on writes and only on writes (sqlite)", async () => {
+  await assertFingerprint(sqliteExec(), "sqlite");
+});
+
+test("dbWritePort.storeFingerprint moves on writes and only on writes (postgres)", PG_SKIP, async () => {
+  const db = await scratchPgDb("fingerprint");
+  const client = await pgClient(db.url);
+  try {
+    const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+    const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+    await createDbSchema(pgExec(client), { dialect: "postgres" });
+    await assertFingerprint(pgExec(client), "postgres");
+  } finally { await client.end(); await db.drop(); }
 });
