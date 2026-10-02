@@ -13,7 +13,13 @@ import { applyNew } from "../scripts/new.mjs";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { dbBoard } from "./helpers/db-board.mjs";
-import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+import { PG, PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+
+// CI's BLAZE_TEST_PG_URL uses host `localhost`; local runs often use `127.0.0.1`. The product
+// correctly echoes back whatever host is in the connection URL, so assertions must derive the
+// expected host from PG rather than hard-coding either spelling (BLZ-668).
+const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
+const pgHost = () => escapeRegExp(new URL(PG).hostname);
 
 const capture = () => {
   const out = [];
@@ -45,7 +51,7 @@ test("acceptance: Postgres init on an empty database → db-mode applyNew gets m
     writeClaim(roots.projectsDir, "ENG", 5, "claimed-no-ticket");  // a number taken on the file path
     const c1 = capture();
     assert.equal(await runDb(["init"], { ...c1.io, roots, ...pgIo(db.url) }), 0, c1.text());
-    assert.match(c1.text(), /Postgres schema ready at 127\.0\.0\.1\/blz668_init_/);
+    assert.match(c1.text(), new RegExp(`Postgres schema ready at ${pgHost()}/blz668_init_`));
     assert.match(c1.text(), /ENG\s+0 → 5/);
     assert.match(c1.text(), /tickets were NOT loaded/);
 
@@ -80,7 +86,7 @@ test("init that cannot SEED says the schema now exists and names seed-counter; t
     const opened = { n: 0, ended: 0 };
     const c = capture();
     assert.equal(await runDb(["init"], { ...c.io, roots, ...pgIo(db.url, opened) }), 1);
-    assert.match(c.text(), new RegExp(`the schema was created at 127\\.0\\.0\\.1/${db.name}`));
+    assert.match(c.text(), new RegExp(`the schema was created at ${pgHost()}/${db.name}`));
     assert.match(c.text(), /missing frontmatter/);
     assert.match(c.text(), /blaze db seed-counter/);
     assert.doesNotMatch(c.text(), /already initialised/);
@@ -128,7 +134,7 @@ test("cleanup: resolveWritePort on a REAL empty database refuses, names host/dat
       resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
       openPostgresClient: open,
     }), (e) => {
-      assert.match(e.message, new RegExp(`the Postgres database 127\\.0\\.0\\.1/${db.name} has no Blaze schema`));
+      assert.match(e.message, new RegExp(`the Postgres database ${pgHost()}/${db.name} has no Blaze schema`));
       assert.match(e.message, /blaze db init/);
       assert.doesNotMatch(e.message, /postgres:postgres@/, "the password must never appear");
       return true;
@@ -158,7 +164,7 @@ test("seed-counter on an uninitialised Postgres refuses, naming the database and
   try {
     const c = capture();
     assert.equal(await runDb(["seed-counter"], { ...c.io, roots: dbBoard(), ...pgIo(db.url) }), 1);
-    assert.match(c.text(), new RegExp(`the Postgres database 127\\.0\\.0\\.1/${db.name} has no Blaze schema`));
+    assert.match(c.text(), new RegExp(`the Postgres database ${pgHost()}/${db.name} has no Blaze schema`));
     assert.match(c.text(), /blaze db init/);
   } finally { await db.drop(); }
 });
