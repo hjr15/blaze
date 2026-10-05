@@ -2038,4 +2038,2851 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 
 ---
 
-> **WIP:** Tasks 5–8 and the verification task follow in the next commit.
+### Task 5: under db, metrics history from `ticket_transition`; the load imports git's (BLZ-680)
+
+**Files:**
+- Create: `tests/db-transitions.test.mjs`
+- Create: `scripts/model/transitions-db.mjs`
+- Modify: `scripts/db-runner.mjs`
+- Modify: `scripts/migrate/load-corpus.mjs`
+- Modify: `scripts/model/pg-storage.mjs`
+- Modify: `scripts/model/sqlite-storage.mjs`
+- Modify: `scripts/serve.mjs`
+- Modify: `scripts/supervisor.mjs`
+- Modify: `AGENTS.md`
+- Modify: `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md`
+- Modify: `docs/guide/commands.md`
+
+**Interfaces:**
+- Consumes: `buildTransitions({ root })` (git rename history, pure), Task 3's `loadCorpusAsync` (its `typeById`).
+- Produces:
+  - `postgresReader(client).listTransitions(root) → Promise<{id, from, to, ts}[]>` and `openSqliteRead(path).listTransitions(root) → {id, from, to, ts}[]`, ordered `ts, id`.
+  - `dbTransitions(readStorage, mode, view, root) → Promise<list | undefined>` (`scripts/model/transitions-db.mjs`) — `undefined` unless `mode === "db" && view === "metrics"`.
+  - `GIT_TRANSITION_ACTOR = "git-history"`, `transitionEvents(transitions, loadedIds: Set) → { rows, unknown, undated }`, `importTransitions(exec, transitions, loadedIds, { dialect }) → Promise<{ imported, unknown, undated }>` (`load-corpus.mjs`).
+
+- [ ] **Step 1: Write the failing tests.**
+
+Create `tests/db-transitions.test.mjs`:
+
+```js
+// tests/db-transitions.test.mjs — BLZ-680 (spec §5.7): under BLAZE_WRITE_PORT=db the metrics
+// view's status history comes from `ticket_transition`, and `blaze db load` (and the SQLite
+// `blaze db init`) import the git-era history into it once. fs mode is unchanged: it still
+// reads git, and `dbTransitions` answers `undefined` there so the page derives it as before.
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { execFileSync } from "node:child_process";
+import { mkdirSync, renameSync } from "node:fs";
+import { join } from "node:path";
+import { transitionEvents, GIT_TRANSITION_ACTOR } from "../scripts/migrate/load-corpus.mjs";
+import { dbTransitions } from "../scripts/model/transitions-db.mjs";
+import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
+import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
+import { postgresReader } from "../scripts/model/pg-storage.mjs";
+import { runDb } from "../scripts/db-runner.mjs";
+import { startServer, CSRF } from "../scripts/serve.mjs";
+import { createApp } from "../scripts/supervisor.mjs";
+import { loadConfig } from "../scripts/config.mjs";
+import { dbBoard, QUIET } from "./helpers/db-board.mjs";
+import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+
+const git = (root, ...args) => execFileSync("git", ["-C", root, ...args], { encoding: "utf8" });
+
+/** dbBoard() as a git repo whose history moved ENG-1 defined → in-progress: one transition. */
+function gitBoard() {
+  const roots = dbBoard();
+  git(roots.dataRoot, "init", "-q");
+  git(roots.dataRoot, "config", "user.email", "t@t.t");
+  git(roots.dataRoot, "config", "user.name", "t");
+  git(roots.dataRoot, "add", "-A");
+  git(roots.dataRoot, "commit", "-qm", "seed");
+  mkdirSync(join(roots.projectsDir, "ENG", "in-progress"), { recursive: true });
+  renameSync(join(roots.projectsDir, "ENG", "defined", "ENG-1-a.md"),
+             join(roots.projectsDir, "ENG", "in-progress", "ENG-1-a.md"));
+  git(roots.dataRoot, "add", "-A");
+  git(roots.dataRoot, "commit", "-qm", "move");
+  return roots;
+}
+
+describe("the pure parts", () => {
+  test("transitionEvents: one row per git transition of a LOADED ticket; the rest are counted", () => {
+    const r = transitionEvents([
+      { id: "ENG-1", from: "defined", to: "in-progress", ts: "2026-10-01T10:00:00+10:00" },
+      { id: "ENG-9", from: "defined", to: "done", ts: "2026-10-01T11:00:00+10:00" },
+      { id: "ENG-1", from: "in-progress", to: "done", ts: null },
+    ], new Set(["ENG-1"]));
+    assert.deepEqual(r.rows, [["ENG-1", "transition", "2026-10-01T10:00:00+10:00", GIT_TRANSITION_ACTOR,
+                               "git-backfill", "defined", "in-progress"]]);
+    assert.equal(r.unknown, 1);
+    assert.equal(r.undated, 1);
+  });
+
+  test("dbTransitions answers only for db mode's metrics view", async () => {
+    const rs = { listTransitions: async () => [{ id: "ENG-1" }] };
+    assert.deepEqual(await dbTransitions(rs, "db", "metrics", "/p"), [{ id: "ENG-1" }]);
+    assert.equal(await dbTransitions(rs, "db", "board", "/p"), undefined, "no other view pays for the query");
+    assert.equal(await dbTransitions(rs, "fs", "metrics", "/p"), undefined, "fs keeps git");
+    assert.equal(await dbTransitions(rs, "dual", "metrics", "/p"), undefined, "dual keeps git");
+  });
+});
+
+test("SQLite `blaze db init` imports the git history, and the shadow reader returns it", async () => {
+  const roots = gitBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const r = openSqliteRead(shadowDbPath(roots.dataRoot));
+  try {
+    const got = r.listTransitions(null);
+    assert.equal(got.length, 1);
+    assert.deepEqual({ ...got[0], ts: "*" }, { id: "ENG-1", from: "defined", to: "in-progress", ts: "*" });
+    assert.match(got[0].ts, /^\d{4}-\d{2}-\d{2}T/);
+  } finally { r.close(); }
+});
+
+/** The metrics view's cumulative-flow series, as the server rendered it. */
+async function cfdSeries(base) {
+  const r = await fetch(`${base}/view/metrics`);
+  assert.equal(r.status, 200);
+  const m = /id="cfd-series">([\s\S]*?)<\/script>/.exec((await r.json()).html);
+  assert.ok(m, "the metrics view carries its series");
+  return JSON.parse(m[1]);
+}
+
+async function withDbBoard(fn) {
+  const roots = dbBoard();               // NOT a git repo: git has no history to offer here
+  assert.equal(0, await runDb(["init"], { ...QUIET, roots }));
+  const before = process.env.BLAZE_WRITE_PORT;
+  process.env.BLAZE_WRITE_PORT = "db";
+  try { await fn(roots); }
+  finally {
+    if (before === undefined) delete process.env.BLAZE_WRITE_PORT;
+    else process.env.BLAZE_WRITE_PORT = before;
+  }
+}
+
+for (const [name, boot] of [
+  ["blaze board", (roots) => startServer({ port: 0, root: roots.dataRoot, projectsDir: roots.projectsDir })],
+  ["blaze start", (roots) => {
+    const app = createApp(loadConfig({ root: roots.dataRoot }), { root: roots.dataRoot });
+    app.server.listen(0, "127.0.0.1");
+    return app.server;
+  }],
+]) {
+  test(`${name} under db: a move made through the port shows in the metrics history`, async () => {
+    await withDbBoard(async (roots) => {
+      const server = boot(roots);
+      if (!server.listening) await new Promise((res) => server.once("listening", res));
+      const base = `http://127.0.0.1:${server.address().port}`;
+      try {
+        assert.deepEqual(await cfdSeries(base), [], "no history yet: nothing has moved");
+        if (name === "blaze board") {
+          const m = await fetch(`${base}/api/move`, { method: "POST",
+            headers: { "content-type": "application/json", "x-blaze-csrf": CSRF },
+            body: JSON.stringify({ id: "ENG-1", to: "in-progress" }) });
+          assert.equal(m.status, 200, await m.text());
+        } else {
+          // The supervisor serves no /api/move; write the event the port would have written.
+          const r = openSqliteRead(shadowDbPath(roots.dataRoot));
+          try {
+            r.appendEvent(null, { ticket_id: "ENG-1", kind: "transition", from_status: "defined",
+                                  to_status: "in-progress", source: "cli" });
+          } finally { r.close(); }
+        }
+        // Before BLZ-680 this stayed [] — the page asked git, and this board has no git history.
+        assert.ok((await cfdSeries(base)).length > 0, "the database's transition reached the view");
+      } finally {
+        server.closeAllConnections();
+        await new Promise((r) => server.close(r));
+      }
+    });
+  });
+}
+
+test("Postgres `blaze db load` imports the git history as transition events", PG_SKIP, async () => {
+  const db = await scratchPgDb("transitions");
+  try {
+    const roots = gitBoard();
+    const pgIo = { resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
+                   openPostgresClient: (c) => pgClient(c) };
+    assert.equal(await runDb(["init"], { ...QUIET, roots, ...pgIo }), 0);
+    const out = [];
+    const io = { log: (s) => out.push(String(s)), err: (s) => out.push(String(s)), env: {} };
+    assert.equal(await runDb(["load"], { ...io, roots, ...pgIo }), 0, out.join("\n"));
+    assert.match(out.join("\n"), /transitions\s+1\s+\(from git history\)/);
+    const c = await pgClient(db.url);
+    try {
+      const got = await postgresReader(c).listTransitions(null);
+      assert.equal(got.length, 1);
+      assert.deepEqual([got[0].id, got[0].from, got[0].to], ["ENG-1", "defined", "in-progress"]);
+      const ev = (await c.query("SELECT actor, source FROM ticket_event")).rows;
+      assert.deepEqual(ev, [{ actor: GIT_TRANSITION_ACTOR, source: "git-backfill" }]);
+    } finally { await c.end(); }
+  } finally { await db.drop(); }
+});
+```
+
+
+- [ ] **Step 2: Run them to verify they fail.**
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-transitions.test.mjs
+```
+
+Expected: the file fails to load — `does not provide an export named 'GIT_TRANSITION_ACTOR'` (and `transitions-db.mjs` does not exist yet).
+
+- [ ] **Step 3: Implement.**
+
+In `scripts/db-runner.mjs`, replace (1/7):
+
+```js
+import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
+import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
+```
+
+with:
+
+```js
+import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
+import { loadCorpusAsync, importTransitions } from "./migrate/load-corpus.mjs";
+import { buildTransitions } from "./model/transitions.mjs";
+import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
+```
+
+In `scripts/db-runner.mjs`, replace (2/7):
+
+```js
+async function loadCmd(ctx) {
+  const { projectsDir, log, err, openPgClient, replace } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+```
+
+with:
+
+```js
+async function loadCmd(ctx) {
+  const { dataRoot, projectsDir, log, err, openPgClient, replace } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+```
+
+In `scripts/db-runner.mjs`, replace (3/7):
+
+```js
+    await exec.run("BEGIN", []);
+    let tally, seeded;
+    try {
+```
+
+with:
+
+```js
+    await exec.run("BEGIN", []);
+    let tally, seeded, history;
+    try {
+```
+
+In `scripts/db-runner.mjs`, replace (4/7):
+
+```js
+      }
+      // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
+```
+
+with:
+
+```js
+      }
+      // BLZ-680 (spec §5.7): the git-era status history, once, as `transition` events — under
+      // db the metrics view reads `ticket_transition`, and git's log stops growing at cutover.
+      history = await importTransitions(exec, buildTransitions({ root: dataRoot }).transitions,
+                                        new Set(tally.typeById.keys()), { dialect: "postgres" });
+      // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
+```
+
+In `scripts/db-runner.mjs`, replace (5/7):
+
+```js
+    if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+    if (tally.skipped.noId || tally.skipped.badId) {
+```
+
+with:
+
+```js
+    if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+    log(`  transitions  ${history.imported}  (from git history)`);
+    if (history.unknown) log(`  ⚠ transitions for tickets not in this board: ${history.unknown}`);
+    if (history.undated) log(`  ⚠ transitions with no timestamp: ${history.undated}`);
+    if (tally.skipped.noId || tally.skipped.badId) {
+```
+
+In `scripts/db-runner.mjs`, replace (6/7):
+
+```js
+    db.exec(setMigrationModeSql("sqlite", false));
+    // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
+```
+
+with:
+
+```js
+    db.exec(setMigrationModeSql("sqlite", false));
+    // BLZ-680: the same git-era history `blaze db load` imports on Postgres, so a SQLite board
+    // switched to BLAZE_WRITE_PORT=db keeps its metrics history too. One transaction: a file
+    // database commits each autocommitted INSERT to disk on its own.
+    db.exec("BEGIN");
+    const history = await importTransitions(exec, buildTransitions({ root: dataRoot }).transitions,
+      new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), { dialect: "sqlite" });
+    db.exec("COMMIT");
+    // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
+```
+
+In `scripts/db-runner.mjs`, replace (7/7):
+
+```js
+    log(`  labels       ${tally.labels}   components ${tally.components}`);
+    // Every substitution is named. A tally that reports only successes is a tally that
+```
+
+with:
+
+```js
+    log(`  labels       ${tally.labels}   components ${tally.components}`);
+    log(`  transitions  ${history.imported}  (from git history)`);
+    // Every substitution is named. A tally that reports only successes is a tally that
+```
+
+In `scripts/migrate/load-corpus.mjs`, replace:
+
+```js
+  return { ...report, typeById };
+}
+```
+
+with:
+
+```js
+  return { ...report, typeById };
+}
+
+/** BLZ-680: who a git-era transition is recorded as. Git's rename log names a commit, not an
+ *  operator, and `ticket_event.actor` must not invent one. */
+export const GIT_TRANSITION_ACTOR = "git-history";
+
+/**
+ * BLZ-680 (spec §5.7), pure: the git-derived transitions (`buildTransitions`) as `transition`
+ * ticket_events, for the tickets that loaded. Under db the metrics view reads history from
+ * `ticket_transition`, and the git rename log stops growing once moves stop touching files —
+ * so the history up to the load is imported, once, here.
+ *
+ * A transition for an id that did not load, or with no timestamp, is COUNTED and skipped: the
+ * event table's foreign key and NOT NULL `at` would refuse it, and refusing it silently would
+ * be the drop this file promises never to make.
+ */
+export function transitionEvents(transitions, loadedIds) {
+  const rows = [];
+  let unknown = 0, undated = 0;
+  for (const tr of transitions ?? []) {
+    if (!loadedIds.has(tr.id)) { unknown++; continue; }
+    if (!tr.ts) { undated++; continue; }
+    rows.push([tr.id, "transition", tr.ts, GIT_TRANSITION_ACTOR, "git-backfill", tr.from, tr.to]);
+  }
+  return { rows, unknown, undated };
+}
+
+/** Insert `transitionEvents`' rows through an `exec`, either dialect, sync or async. */
+export async function importTransitions(exec, transitions, loadedIds, { dialect = "postgres" } = {}) {
+  const ph = (i) => (dialect === "postgres" ? `$${i + 1}` : "?");
+  const { rows, unknown, undated } = transitionEvents(transitions, loadedIds);
+  for (const r of rows) {
+    await exec.run(
+      `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
+       VALUES (${r.map((_, i) => ph(i)).join(", ")})`, r);
+  }
+  return { imported: rows.length, unknown, undated };
+}
+```
+
+In `scripts/model/pg-storage.mjs`, replace:
+
+```js
+
+    async appendEvent(_root, e) {
+```
+
+with:
+
+```js
+
+    // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db, from the `ticket_transition`
+    // view over `ticket_event` — the `{ id, from, to, ts }` shape metrics.mjs reads from git in
+    // fs mode. `blaze db load` imports the git-era history into it, once.
+    async listTransitions(_root) {
+      const { rows } = await client.query(`SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
+      return rows;
+    },
+
+    async appendEvent(_root, e) {
+```
+
+In `scripts/model/sqlite-storage.mjs`, replace (1/2):
+
+```js
+       FROM ticket_event WHERE ticket_id = ? ORDER BY at, id`);
+  const appendEv = db.prepare(
+```
+
+with:
+
+```js
+       FROM ticket_event WHERE ticket_id = ? ORDER BY at, id`);
+  // BLZ-680: see listTransitions below.
+  const transitionsAll = db.prepare(
+    `SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
+  const appendEv = db.prepare(
+```
+
+In `scripts/model/sqlite-storage.mjs`, replace (2/2):
+
+```js
+
+    appendEvent(_root, e) {
+```
+
+with:
+
+```js
+
+    // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db — pg-storage.mjs says why.
+    listTransitions(_root) {
+      return transitionsAll.all().map((r) => ({ id: r.id, from: r.from, to: r.to, ts: r.ts }));
+    },
+
+    appendEvent(_root, e) {
+```
+
+Create `scripts/model/transitions-db.mjs`:
+
+```js
+// scripts/model/transitions-db.mjs — where the metrics view's status-move history comes from
+// under BLAZE_WRITE_PORT=db (BLZ-680, spec §5.7).
+//
+// In fs and dual mode the history is git's rename log (transitions.mjs), and once moves stop
+// touching files — db mode — that log stops growing. The database records every move as a
+// `transition` ticket_event, exposed by the `ticket_transition` view, and `blaze db load`
+// imports the git-era history into it once. So under db the history is read from there.
+//
+// `undefined` means "not mine to answer": the page then derives it from git, lazily, exactly as
+// before — fs and dual are untouched, and no view but metrics pays for the query.
+
+/** @returns the `{ id, from, to, ts }` list under db for the metrics view, else `undefined`. */
+export async function dbTransitions(readStorage, mode, view, root) {
+  if (mode !== "db" || view !== "metrics") return undefined;
+  return readStorage.listTransitions(root);
+}
+```
+
+In `scripts/serve.mjs`, replace (1/3):
+
+```js
+import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
+import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
+```
+
+with:
+
+```js
+import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
+import { dbTransitions } from "./model/transitions-db.mjs";
+import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
+```
+
+In `scripts/serve.mjs`, replace (2/3):
+
+```js
+    if (vm) {
+      return reading(async (rs) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          project: u.searchParams.get("project") || "all",
+```
+
+with:
+
+```js
+    if (vm) {
+      return reading(async (rs, mode) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          // BLZ-680: under db the metrics history is the database's (ticket_transition); left
+          // undefined otherwise, so fs and dual still take it from git, lazily, as before.
+          transitions: await dbTransitions(rs, mode, vm[1], projectsDir),
+          project: u.searchParams.get("project") || "all",
+```
+
+In `scripts/serve.mjs`, replace (3/3):
+
+```js
+      try {
+        html = await reading(async (rs) => pageHtml({ project, focus, flat, sprint, view, views,
+          projectsDir, nonce, tickets: await allTickets(rs) }));
+      } catch (e) {
+```
+
+with:
+
+```js
+      try {
+        html = await reading(async (rs, mode) => pageHtml({ project, focus, flat, sprint, view, views,
+          projectsDir, nonce, tickets: await allTickets(rs),
+          transitions: await dbTransitions(rs, mode, view, projectsDir) }));
+      } catch (e) {
+```
+
+In `scripts/supervisor.mjs`, replace (1/3):
+
+```js
+import { viewEnvelope, CSRF } from "./views/page.mjs";
+import { createBus } from "./event-bus.mjs";
+```
+
+with:
+
+```js
+import { viewEnvelope, CSRF } from "./views/page.mjs";
+import { dbTransitions } from "./model/transitions-db.mjs";
+import { createBus } from "./event-bus.mjs";
+```
+
+In `scripts/supervisor.mjs`, replace (2/3):
+
+```js
+    if (vm) {
+      return reading(async (rs) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          project: u.searchParams.get("project") || "all",
+```
+
+with:
+
+```js
+    if (vm) {
+      return reading(async (rs, mode) => {
+        const envelope = viewEnvelope({
+          view: vm[1],
+          // BLZ-680: serve.mjs's rule — the database's history under db, git's otherwise.
+          transitions: await dbTransitions(rs, mode, vm[1], projectsDir),
+          project: u.searchParams.get("project") || "all",
+```
+
+In `scripts/supervisor.mjs`, replace (3/3):
+
+```js
+      try {
+        html = await reading(async (rs) => pageHtml({
+          project: u.searchParams.get("project") || "all",
+```
+
+with:
+
+```js
+      try {
+        html = await reading(async (rs, mode) => pageHtml({
+          transitions: await dbTransitions(rs, mode, u.searchParams.get("view") || "board", projectsDir),
+          project: u.searchParams.get("project") || "all",
+```
+
+
+- [ ] **Step 4: Run them to verify they pass**, then the neighbours this task touches.
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-transitions.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/db-*.test.mjs tests/views/*.test.mjs tests/db-mode-reads*.test.mjs tests/groomer-db-mode.test.mjs tests/model/driver-conformance.test.mjs tests/model/seam-closure.test.mjs
+```
+
+Expected: 7/7 pass (1 skips without Postgres). Discrimination was proven in the prototype: with Step 3's `serve.mjs`/`supervisor.mjs` edits reverted, both `… shows in the metrics history` tests fail (`[]`).
+
+- [ ] **Step 5: Docs, in the same commit.**
+
+In `AGENTS.md`, replace:
+
+```markdown
+[ADR-0038](https://github.com/hjr15/blaze/blob/main/docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md).
+`.blaze/transitions.json` still comes from git history in every mode, `db` included.
+
+```
+
+with:
+
+```markdown
+[ADR-0038](https://github.com/hjr15/blaze/blob/main/docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md).
+`.blaze/transitions.json` still comes from git history in `fs` and `dual` mode. Under
+`BLAZE_WRITE_PORT=db` the Metrics view reads its status-move history from the database
+instead — every move is a `transition` event, read through the `ticket_transition` view — and
+`blaze db load` (or, for the SQLite shadow, `blaze db init`) imports the git-era history into it
+once, because git's rename log stops growing when moves stop touching files.
+
+```
+
+In `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md`, replace:
+
+```markdown
+revert through the port is BLZ-254's to design.
+```
+
+with:
+
+```markdown
+revert through the port is BLZ-254's to design.
+
+## Addendum (2026-10-05, BLZ-254 PR A) — the remaining named residuals
+
+BLZ-254 decided each residual this ADR left open ([spec](../superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md) §5.7 and §5.8):
+
+- **`.blaze/transitions.json` — closed (BLZ-680).** Under `db` the Metrics view reads its
+  history from the `ticket_transition` view over `ticket_event` (`dbTransitions`, called by both
+  servers for the metrics view only). `blaze db load` imports the git-era history once, as
+  `transition` events with `source = 'git-backfill'` and actor `git-history`; the SQLite
+  `blaze db init` does the same for the shadow. `fs` and `dual` still read git, unchanged.
+- **`sprints.json` — kept as a data-root config file**, like `blaze.config.json`. It is a small
+  operator-edited registry; a ticket's sprint membership is already the `ticket.sprint_id`
+  column. It moves with config in Phase 5.
+- **Connection pooling — measure first.** The cutover rehearsal times 200 sequential `GET /` and
+  100 `POST /api/new` against the cluster database; a `pg.Pool` (max 5) is built only if either
+  p95 exceeds 250 ms, or connecting takes more than 20% of p95. The numbers are recorded on
+  BLZ-254 either way.
+```
+
+In `docs/guide/commands.md`, replace:
+
+```markdown
+| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. |
+| `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
+```
+
+with:
+
+```markdown
+| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. |
+| `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
+```
+
+
+- [ ] **Step 6: Fence check, commit, prove the committed tree.**
+
+```bash
+git add tests/db-transitions.test.mjs scripts/db-runner.mjs scripts/migrate/load-corpus.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/transitions-db.mjs scripts/serve.mjs scripts/supervisor.mjs AGENTS.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/guide/commands.md
+git diff --cached | grep -c '^+```'      # must print 0
+git commit -m "BLZ-680: under db, metrics history from ticket_transition; db load imports git transitions" -m "pg and sqlite readers gain listTransitions; new scripts/model/transitions-db.mjs; serve.mjs and supervisor.mjs pass it to the metrics view under db only; load-corpus.mjs gains transitionEvents/importTransitions, used by db load and the SQLite init. New tests/db-transitions.test.mjs; AGENTS.md, commands.md, ADR-0038 addendum." -- tests/db-transitions.test.mjs scripts/db-runner.mjs scripts/migrate/load-corpus.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/transitions-db.mjs scripts/serve.mjs scripts/supervisor.mjs AGENTS.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/guide/commands.md
+git status --short                        # must print nothing
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-transitions.test.mjs   # green on the COMMITTED tree
+```
+
+
+---
+
+### Task 6: `blaze audit --fail-on`, three governance kinds, and `--projects` that resolves across projects (BLZ-681)
+
+**Files:**
+- Create: `tests/audit-governance.test.mjs`
+- Modify: `tests/audit-terminal-goal-unverified.test.mjs`
+- Modify: `scripts/audit-runner.mjs`
+- Modify: `scripts/model/audit.mjs`
+- Modify: `docs/guide/commands.md`
+
+**Interfaces:**
+- Produces (`scripts/model/audit.mjs`): `SOFT_KINDS` += `empty-body`, `config-project-drift`; `HARD_KINDS` += `terminal-parent-open-child`; `TERMINAL_PARENT_STATUSES`, `EMPTY_BODY_TERMINAL` (Sets); `isScaffoldLine(line) → boolean`; `bodyIsEmpty(body) → boolean`; `governanceFindings({ tickets, configProjects: string[]|null, storeProjects: string[] }) → finding[]`; `auditCorpus({ tickets, projects, config, universe })` — `universe` (default `tickets`) is what ids and parent types resolve against.
+- Produces (`blaze audit`): `--fail-on k1,k2` — exit 1 iff a finding of a named kind, else 0; unknown or empty → exit 2; JSON gains `failOn`, `failing` when given.
+
+- [ ] **Step 1: Write the failing tests.**
+
+Create `tests/audit-governance.test.mjs`:
+
+```js
+// tests/audit-governance.test.mjs — BLZ-681 (spec §5.6). blaze-pm's governance scripts,
+// re-homed as `blaze audit` kinds: terminal-parent-open-child (hard), empty-body (soft),
+// config-project-drift (soft), plus `--fail-on <kinds>` so one kind can gate on its own. The
+// rules are the scripts' own, pinned here; the runner tests prove they read through the
+// resolved store — the db-mode test deletes a ticket FILE after loading the shadow, and the
+// finding is still reported, because it came from the database.
+import { test, describe } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { governanceFindings, isScaffoldLine, bodyIsEmpty, TERMINAL_PARENT_STATUSES,
+         EMPTY_BODY_TERMINAL, HARD_KINDS, SOFT_KINDS } from "../scripts/model/audit.mjs";
+import { runDb } from "../scripts/db-runner.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+import { QUIET } from "./helpers/db-board.mjs";
+
+const scratch = scratchRegistry();
+const AUDIT = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "audit-runner.mjs");
+
+const t = (id, status, { type = "task", parent = "", body = "Some prose." } = {}) =>
+  ({ frontmatter: { id, type, parent }, status, body });
+
+describe("the rules, as the scripts wrote them", () => {
+  test("the two terminal sets are the scripts' sets, verbatim", () => {
+    assert.deepEqual([...TERMINAL_PARENT_STATUSES].sort(), ["accepted", "achieved", "done", "mitigated", "obsolete"]);
+    assert.deepEqual([...EMPTY_BODY_TERMINAL].sort(),
+      ["accepted", "achieved", "done", "implemented", "mitigated", "obsolete", "rejected"]);
+  });
+
+  test("severities: terminal-parent-open-child is hard; empty-body and config-project-drift are soft", () => {
+    assert.ok(HARD_KINDS.has("terminal-parent-open-child"));
+    for (const k of ["empty-body", "config-project-drift"]) {
+      assert.ok(SOFT_KINDS.includes(k), k);
+      assert.ok(!HARD_KINDS.has(k), k);
+    }
+  });
+
+  test("terminal-parent-open-child: any type pair, cross-project, open children in id order", () => {
+    const f = governanceFindings({ tickets: [
+      t("ENG-1", "done", { type: "feature" }),
+      t("ENG-10", "in-progress", { parent: "ENG-1" }), t("ENG-2", "defined", { parent: "ENG-1" }),
+      t("OPS-3", "done", { parent: "ENG-1" }),
+      t("ENG-5", "achieved", { type: "goal" }), t("OPS-9", "proposed", { type: "requirement", parent: "ENG-5" }),
+      t("ENG-7", "implemented", { type: "requirement" }), t("ENG-8", "defined", { parent: "ENG-7" }),
+      t("ENG-11", "defined", { parent: "ENG-404" }),
+    ] }).filter((x) => x.kind === "terminal-parent-open-child");
+    assert.deepEqual(f, [
+      { ticket: "ENG-1", kind: "terminal-parent-open-child", detail: "feature done with 2/3 children open: ENG-2, ENG-10" },
+      { ticket: "ENG-5", kind: "terminal-parent-open-child", detail: "goal achieved with 1/1 children open: OPS-9" },
+    ], "`implemented` is not in the script's set, and a dangling parent is dangling-parent's job");
+  });
+
+  test("empty-body: scaffold-only bodies, non-terminal tickets only", () => {
+    for (const line of ["", "   ", "## Context", "- [ ]", "* [x]", "-", "*", "<!-- note -->"]) {
+      assert.equal(isScaffoldLine(line), true, JSON.stringify(line));
+    }
+    for (const line of ["prose", "- [ ] a real criterion", "- a bullet", "<!-- open"]) {
+      assert.equal(isScaffoldLine(line), false, JSON.stringify(line));
+    }
+    assert.equal(bodyIsEmpty("## Context\n\n## Acceptance Criteria\n\n- [ ]\n"), true);
+    assert.equal(bodyIsEmpty(""), true);
+    const f = governanceFindings({ tickets: [
+      t("ENG-1", "defined", { body: "## Context\n\n- [ ]\n" }),
+      t("ENG-2", "done", { body: "" }),
+      t("ENG-3", "defined"),
+    ] }).filter((x) => x.kind === "empty-body");
+    assert.deepEqual(f, [{ ticket: "ENG-1", kind: "empty-body", detail: "defined" }]);
+  });
+
+  test("config-project-drift: both directions; skipped when the config did not load", () => {
+    const f = governanceFindings({ configProjects: ["ENG", "OPS"], storeProjects: ["ENG", "NEW"] });
+    assert.deepEqual(f.map((x) => [x.ticket, x.kind]), [["NEW", "config-project-drift"], ["OPS", "config-project-drift"]]);
+    assert.match(f[0].detail, /store holds this project but blaze\.config\.json's projects does not list it/);
+    assert.match(f[1].detail, /lists this project but the store holds none of it/);
+    assert.deepEqual(governanceFindings({ configProjects: null, storeProjects: ["X"] }), []);
+  });
+});
+
+// --- the runner ----------------------------------------------------------------------------------
+const doc = (fm, body = "Some prose.") =>
+  ["---", ...Object.entries(fm).map(([k, v]) => `${k}: ${v}`), "---", "", body, ""].join("\n");
+
+/** A done feature ENG-1 with an open child ENG-2 whose body is scaffold-only; config lists ENG
+ *  and a project OPS that has no directory. */
+function board() {
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blz681-audit-")));
+  const projectsDir = join(dataRoot, "projects");
+  for (const s of ["done", "defined"]) mkdirSync(join(projectsDir, "ENG", s), { recursive: true });
+  writeFileSync(join(dataRoot, "blaze.config.json"), JSON.stringify({ projects: ["ENG", "OPS"] }));
+  writeFileSync(join(projectsDir, "ENG", "done", "ENG-1-f.md"),
+    doc({ id: "ENG-1", title: "F", type: "feature", project: "ENG", components: "[a]", labels: "[b]" }));
+  writeFileSync(join(projectsDir, "ENG", "defined", "ENG-2-t.md"),
+    doc({ id: "ENG-2", title: "T", type: "task", project: "ENG", parent: "ENG-1", estimate: 30,
+          components: "[a]", labels: "[b]" }, "## Context\n\n## Acceptance Criteria\n\n- [ ]"));
+  return { dataRoot, projectsDir };
+}
+/** `blaze audit` against `projectsDir`, with the caller's mode only: an ambient
+ *  BLAZE_WRITE_PORT must not leak in, and an EMPTY one is refused, so it is removed. */
+function audit(projectsDir, args = [], env = {}) {
+  const base = { ...process.env };
+  delete base.BLAZE_WRITE_PORT;
+  return spawnSync(process.execPath, [AUDIT, ...args, projectsDir],
+    { encoding: "utf8", env: { ...base, ...env } });
+}
+
+test("blaze audit reports all three, and the hard one fails the run", () => {
+  const { projectsDir } = board();
+  const r = audit(projectsDir, ["--json"]);
+  assert.equal(r.status, 1, r.stderr);
+  const kinds = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind}`);
+  for (const k of ["ENG-1 terminal-parent-open-child", "ENG-2 empty-body", "OPS config-project-drift"]) {
+    assert.ok(kinds.includes(k), `${k} missing from ${kinds.join("; ")}`);
+  }
+});
+
+test("--fail-on gates on the named kinds only, hard or soft, and says so", () => {
+  const { projectsDir } = board();
+  const other = audit(projectsDir, ["--fail-on", "duplicate-status"]);
+  assert.equal(other.status, 0, "a hard finding of ANOTHER kind does not fail a --fail-on run");
+  assert.match(other.stdout, /fail-on duplicate-status: 0 finding\(s\)/);
+  assert.match(other.stdout, /ok=false/, "the report still says what it found");
+  const soft = audit(projectsDir, ["--fail-on", "duplicate-status,empty-body"]);
+  assert.equal(soft.status, 1, "a soft kind can gate when it is named");
+  assert.match(soft.stdout, /fail-on duplicate-status,empty-body: 1 finding\(s\)/);
+  const json = JSON.parse(audit(projectsDir, ["--json", "--fail-on", "terminal-parent-open-child"]).stdout);
+  assert.deepEqual([json.failOn, json.failing], [["terminal-parent-open-child"], 1]);
+});
+
+test("--fail-on refuses a name that is not a kind (exit 2), so a typo is never a gate that cannot fail", () => {
+  const { projectsDir } = board();
+  const r = audit(projectsDir, ["--fail-on", "duplicate-statsu"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /--fail-on names no such kind: duplicate-statsu/);
+  const none = audit(projectsDir, ["--fail-on", ""]);
+  assert.equal(none.status, 2);
+  assert.match(none.stderr, /--fail-on needs at least one kind/);
+});
+
+test("under BLAZE_WRITE_PORT=db the kinds come from the DATABASE, not the files", async () => {
+  const roots = board();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  // Changed on disk only: the FILE now has prose and no parent; the ROW is as it was loaded.
+  writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-2-t.md"),
+    doc({ id: "ENG-2", title: "T", type: "task", project: "ENG", estimate: 30 }, "Now it has prose."));
+  const r = audit(roots.projectsDir, ["--json"], { BLAZE_WRITE_PORT: "db" });
+  assert.equal(r.status, 1, r.stderr);
+  const kinds = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind}`);
+  assert.ok(kinds.includes("ENG-1 terminal-parent-open-child"), kinds.join("; "));
+  assert.ok(kinds.includes("ENG-2 empty-body"), kinds.join("; "));
+  assert.ok(kinds.includes("OPS config-project-drift"), kinds.join("; "));
+});
+
+test("--projects scopes what is JUDGED, never what RESOLVES: a cross-project link or parent is not dangling", () => {
+  // The defect: audit-runner filtered the corpus to --projects BEFORE auditCorpus built its id
+  // set, so `blaze audit --projects BLZ` called BLZ-134 → INF-750 a hard dangling-target while
+  // the unscoped audit called the same board clean.
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blz681-scope-")));
+  const projectsDir = join(dataRoot, "projects");
+  for (const p of ["ENG", "OPS"]) mkdirSync(join(projectsDir, p, "defined"), { recursive: true });
+  writeFileSync(join(dataRoot, "blaze.config.json"), JSON.stringify({ projects: ["ENG", "OPS"] }));
+  const flow = (target) => `\nlinks:\n  - { type: Relates, target: ${target} }`;
+  const file = (p, id, extra) => writeFileSync(join(projectsDir, p, "defined", `${id}-x.md`),
+    `---\nid: ${id}\ntitle: ${id}\ntype: ${extra.type}\nproject: ${p}\nparent: ${extra.parent ?? ""}`
+    + `\nestimate: 30\ncomponents: [a]\nlabels: [b]${extra.links ?? ""}\n---\n\nProse.\n`);
+  file("OPS", "OPS-1", { type: "feature" });
+  file("ENG", "ENG-1", { type: "task", parent: "OPS-1", links: flow("OPS-1") });
+  file("ENG", "ENG-2", { type: "task", parent: "OPS-1", links: flow("OPS-99") });
+  const r = audit(projectsDir, ["--json", "--projects", "ENG"]);
+  const found = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind} ${f.detail}`);
+  assert.deepEqual(found.filter((f) => /dangling/.test(f)), ["ENG-2 dangling-target OPS-99"],
+    "only the truly missing target is dangling; OPS-1 exists, out of scope");
+  assert.ok(!found.some((f) => f.startsWith("OPS-1 ")), "an out-of-scope ticket is resolved, never judged");
+  assert.equal(r.status, 1, "the one real dangling target is still hard");
+});
+```
+
+In `tests/audit-terminal-goal-unverified.test.mjs`, replace:
+
+```js
+test("R48: a soft finding does not fail the run", () => {
+  const report = audit(board("implemented"));
+  assert.equal(report.ok, true, "a fill-queue finding must never fail the gate");
+```
+
+with:
+
+```js
+test("R48: a soft finding does not fail the run", () => {
+  // BLZ-681: under an `achieved` goal, an `implemented` requirement is ALSO an open child of a
+  // terminal parent — the hard `terminal-parent-open-child` (`implemented` is not in the
+  // re-homed script's terminal set). `canceled` is terminal for R48 and not for that kind, so
+  // this board still holds the soft finding and only the soft finding, which is what this
+  // test is about.
+  const report = audit(board("implemented", { goalStatus: "canceled" }));
+  assert.equal(report.findings.filter((f) => f.kind === KIND).length, 1, "the soft finding is still raised");
+  assert.equal(report.ok, true, "a fill-queue finding must never fail the gate");
+```
+
+
+- [ ] **Step 2: Run them to verify they fail.**
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs
+```
+
+Expected: `tests/audit-governance.test.mjs` fails to load (`does not provide an export named 'governanceFindings'`); the R48 file still passes (its fixture change is behaviour-neutral until Step 3).
+
+- [ ] **Step 3: Implement.**
+
+In `scripts/audit-runner.mjs`, replace (1/11):
+
+```js
+// scripts/audit-runner.mjs — `blaze audit`: corpus hygiene over the whole board.
+// Run: node scripts/audit-runner.mjs [--projects A,B] [--kind k] [--json] [projectsDir]
+//
+```
+
+with:
+
+```js
+// scripts/audit-runner.mjs — `blaze audit`: corpus hygiene over the whole board.
+// Run: node scripts/audit-runner.mjs [--projects A,B] [--kind k] [--fail-on k1,k2] [--json] [projectsDir]
+//
+```
+
+In `scripts/audit-runner.mjs`, replace (2/11):
+
+```js
+import { join, dirname, resolve as resolvePath } from "node:path";
+import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
+import { scheduleModel } from "./model/schedule.mjs";
+```
+
+with:
+
+```js
+import { join, dirname, resolve as resolvePath } from "node:path";
+import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings, governanceFindings } from "./model/audit.mjs";
+import { scheduleModel } from "./model/schedule.mjs";
+```
+
+In `scripts/audit-runner.mjs`, replace (3/11):
+
+```js
+const positional = [];
+const opts = { projects: null, kind: null, json: false };
+for (let i = 2; i < process.argv.length; i++) {
+```
+
+with:
+
+```js
+const positional = [];
+const opts = { projects: null, kind: null, json: false, failOn: null };
+for (let i = 2; i < process.argv.length; i++) {
+```
+
+In `scripts/audit-runner.mjs`, replace (4/11):
+
+```js
+  if (a === "--kind") { opts.kind = process.argv[++i]; continue; }
+  if (a === "--help" || a === "-h") { usage(); process.exit(0); }
+```
+
+with:
+
+```js
+  if (a === "--kind") { opts.kind = process.argv[++i]; continue; }
+  if (a === "--fail-on") { opts.failOn = (process.argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean); continue; }
+  if (a === "--help" || a === "-h") { usage(); process.exit(0); }
+```
+
+In `scripts/audit-runner.mjs`, replace (5/11):
+
+```js
+function usage() {
+  console.error("usage: blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]");
+  console.error("  Reports corpus hygiene. Exits non-zero on a HARD finding only.");
+  console.error(`  hard: ${[...HARD_KINDS].sort().join(", ")}`);
+  // Hardcoded, and it went stale twice — the hard line beside it is derived from HARD_KINDS
+  // and cannot. Kept in one place with the kinds that actually exist.
+  console.error(`  soft: ${SOFT_KINDS.join(", ")}`);
+}
+```
+
+with:
+
+```js
+function usage() {
+  console.error("usage: blaze audit [--projects A,B] [--kind <kind>] [--fail-on <kind,…>] [--json] [projectsDir]");
+  console.error("  Reports corpus hygiene. Exits non-zero on a HARD finding only — or, with --fail-on,");
+  console.error("  on a finding of one of the named kinds only (hard or soft), whatever else it found.");
+  console.error(`  hard: ${[...HARD_KINDS].sort().join(", ")}`);
+  // Hardcoded, and it went stale twice — the hard line beside it is derived from HARD_KINDS
+  // and cannot. Kept in one place with the kinds that actually exist.
+  console.error(`  soft: ${SOFT_KINDS.join(", ")}`);
+}
+
+// BLZ-681: `--fail-on` turns ONE kind (or a few) into the gate, so a board that already carries
+// other hard findings can still gate on, say, `duplicate-status` — which is what blaze-pm's
+// `duplicate_id_check.py` existed for. A name that is not a kind is REFUSED rather than ignored:
+// a typo would otherwise be a gate that can never fail. Exit 2, like an empty corpus — a run
+// that could not measure what it was asked to.
+if (opts.failOn !== null) {
+  const known = new Set([...HARD_KINDS, ...SOFT_KINDS]);
+  const unknown = opts.failOn.filter((k) => !known.has(k));
+  if (!opts.failOn.length || unknown.length) {
+    console.error(opts.failOn.length
+      ? `blaze audit: --fail-on names no such kind: ${unknown.join(", ")}`
+      : "blaze audit: --fail-on needs at least one kind");
+    usage();
+    process.exit(2);
+  }
+}
+```
+
+In `scripts/audit-runner.mjs`, replace (6/11):
+
+```js
+
+const report = auditCorpus({ tickets, projects, config });
+
+```
+
+with:
+
+```js
+
+// BLZ-681: `universe` — links and parents RESOLVE against everything the store holds, while
+// only the in-scope `tickets` are judged. See auditCorpus.
+const report = auditCorpus({ tickets, projects, config, universe: allTickets });
+
+```
+
+In `scripts/audit-runner.mjs`, replace (7/11):
+
+```js
+const unreadable = await rs.readStorage.unreadableTicketDirs(projectsDir);
+await rs.close();
+```
+
+with:
+
+```js
+const unreadable = await rs.readStorage.unreadableTicketDirs(projectsDir);
+// BLZ-681: the projects the READ STORE holds — directories under fs/dual, project keys with
+// tickets under db — for `config-project-drift`. Asked before the reader closes.
+const storeProjects = await rs.readStorage.listProjects(projectsDir);
+await rs.close();
+```
+
+In `scripts/audit-runner.mjs`, replace (8/11):
+
+```js
+
+// auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
+```
+
+with:
+
+```js
+
+// BLZ-681 (spec §5.6): the three governance kinds re-homed from blaze-pm. Raised HERE because
+// two of them need the walk (status) and one needs the store's project list; the rules live in
+// `governanceFindings` in model/audit.mjs, where the coverage gate sees them.
+// An EMPTY or absent `projects` is no list to drift from: the audit itself falls back to the
+// store's own listing for it (`nonEmpty` above), and a directory audited outside any board has
+// no config at all.
+report.findings.push(...governanceFindings({
+  tickets, configProjects: nonEmpty(config?.projects), storeProjects,
+}));
+
+// auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
+```
+
+In `scripts/audit-runner.mjs`, replace (9/11):
+
+```js
+const findings = opts.kind ? report.findings.filter((f) => f.kind === opts.kind) : report.findings;
+
+if (opts.json) {
+  console.log(JSON.stringify({ ...report, findings }, null, 2));
+} else {
+```
+
+with:
+
+```js
+const findings = opts.kind ? report.findings.filter((f) => f.kind === opts.kind) : report.findings;
+// BLZ-681: with --fail-on the exit code answers "is there a finding of THESE kinds", and only that.
+const failOn = opts.failOn ? new Set(opts.failOn) : null;
+const failing = failOn ? report.findings.filter((f) => failOn.has(f.kind)).length : null;
+
+if (opts.json) {
+  console.log(JSON.stringify({ ...report, findings,
+    ...(failOn ? { failOn: [...failOn], failing } : {}) }, null, 2));
+} else {
+```
+
+In `scripts/audit-runner.mjs`, replace (10/11):
+
+```js
+  console.log(`  ok=${report.ok}${report.ok ? "" : "  (hard findings present)"}`);
+}
+```
+
+with:
+
+```js
+  console.log(`  ok=${report.ok}${report.ok ? "" : "  (hard findings present)"}`);
+  if (failOn) console.log(`  fail-on ${[...failOn].join(",")}: ${failing} finding(s)`);
+}
+```
+
+In `scripts/audit-runner.mjs`, replace (11/11):
+
+```js
+// at 64KB the first time it was piped.
+process.exitCode = report.ok ? 0 : 1;
+```
+
+with:
+
+```js
+// at 64KB the first time it was piped.
+process.exitCode = failOn ? (failing ? 1 : 0) : (report.ok ? 0 : 1);
+```
+
+In `scripts/model/audit.mjs`, replace (1/4):
+
+```js
+  "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
+];
+```
+
+with:
+
+```js
+  "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
+  // BLZ-681: re-homed from blaze-pm's `empty_body_scan.py` and `config_drift_check.py` —
+  // `governanceFindings` below says why each is soft.
+  "empty-body", "config-project-drift",
+];
+```
+
+In `scripts/model/audit.mjs`, replace (2/4):
+
+```js
+  "unreadable-ticket-directory",
+]);
+```
+
+with:
+
+```js
+  "unreadable-ticket-directory",
+  // BLZ-681 (spec §5.6): re-homed from blaze-pm's `terminal_parent_scan.py`. A terminal ticket
+  // with a non-terminal child asserts the work is finished while the child says it is not, and
+  // both cannot be true — the corpus is WRONG, so HARD, as the spec decides. MEASURED before
+  // shipping (the BLZ-353 lesson): blaze-pm's BLZ-305-v4-spine at 8bd7fd3d holds 66 such parents
+  // with 279 open children, so `blaze audit` on that board fails on this kind until INF-733's
+  // remedy runs. `blaze audit --fail-on <kinds>` is how a gate checks other kinds meanwhile.
+  "terminal-parent-open-child",
+]);
+```
+
+In `scripts/model/audit.mjs`, replace (3/4):
+
+```js
+/**
+ * @param tickets   [{ frontmatter, body }] — the whole corpus
+ * @param projects  { KEY: projectJson } — taxonomy and optional per-project schema block
+ * @param config    the board config, for the top-level schema override
+ * @returns { findings: [{ ticket, kind, detail }], ok }
+ */
+export function auditCorpus({ tickets = [], projects = {}, config = null } = {}) {
+  const findings = [];
+  const add = (ticket, kind, detail = "") => findings.push({ ticket, kind, detail });
+
+  const ids = new Set();
+  const typeById = new Map();
+  for (const t of tickets) {
+    const fm = t?.frontmatter ?? {};
+```
+
+with:
+
+```js
+/**
+ * @param tickets   [{ frontmatter, body }] — the tickets to JUDGE (the audited scope)
+ * @param projects  { KEY: projectJson } — taxonomy and optional per-project schema block
+ * @param config    the board config, for the top-level schema override
+ * @param universe  every ticket the store holds, to RESOLVE against — a link target or parent
+ *                  in a project outside `--projects` still exists. Defaults to `tickets`.
+ * @returns { findings: [{ ticket, kind, detail }], ok }
+ */
+export function auditCorpus({ tickets = [], projects = {}, config = null, universe = null } = {}) {
+  const findings = [];
+  const add = (ticket, kind, detail = "") => findings.push({ ticket, kind, detail });
+
+  // BLZ-681: ids and parent types come from the WHOLE store, not the audited scope. Built from
+  // `tickets` alone, `blaze audit --projects BLZ` reported a hard `dangling-target` for every
+  // legitimate cross-project link (BLZ-134 → INF-750) and `dangling-parent` for a cross-project
+  // parent — targets that exist, in a project the run was not asked to judge. Unscoped, the same
+  // board reported none. Findings are still raised only on the tickets in scope.
+  const ids = new Set();
+  const typeById = new Map();
+  for (const t of universe ?? tickets) {
+    const fm = t?.frontmatter ?? {};
+```
+
+In `scripts/model/audit.mjs`, replace (4/4):
+
+```js
+/** Counts by kind, for a runner that prints a summary rather than every finding. */
+export function summarise(findings) {
+```
+
+with:
+
+```js
+/** Counts by kind, for a runner that prints a summary rather than every finding. */
+// ---------------------------------------------------------------------------------------
+// governanceFindings — BLZ-681 (spec §5.6). Three of blaze-pm's governance scripts, re-homed as
+// `blaze audit` kinds so they read through `resolveReadStorage` and work under fs, dual and db.
+// Each RULE is ported exactly — the sets and patterns below are the scripts' own — so the
+// finding count on a board is the count the script reported for it.
+
+/** `terminal_parent_scan.py`'s TERMINAL: the terminal statuses of the delivery, goal and risk
+ *  workflows. Deliberately the script's fixed set, not the resolved schema's terminals: an
+ *  `implemented` requirement with an open delivery child is the normal state of a requirement
+ *  being built, and the script never flagged it. */
+export const TERMINAL_PARENT_STATUSES = new Set(["done", "achieved", "mitigated", "accepted", "obsolete"]);
+
+/** `empty_body_scan.py`'s TERMINAL_STATUSES: a terminal ticket with no body is a weaker
+ *  historical record, not an active breach, so it is not reported. */
+export const EMPTY_BODY_TERMINAL = new Set(["done", "achieved", "implemented", "accepted",
+                                            "mitigated", "obsolete", "rejected"]);
+
+/** `is_scaffold_line`: blank, a heading, an empty checkbox, a bare bullet, an HTML comment. */
+export function isScaffoldLine(line) {
+  const stripped = line.trim();
+  return stripped === "" || stripped.startsWith("#")
+    || /^\s*[-*]\s*\[[ xX]\]\s*$/.test(line)
+    || /^\s*[-*]\s*$/.test(line)
+    || /^\s*<!--.*-->\s*$/.test(line);
+}
+
+/** `body_is_empty`: every line is scaffold — the shape `blaze new` leaves for a title-only ticket. */
+export const bodyIsEmpty = (body) => String(body ?? "").split(/\r\n|\r|\n/).every(isScaffoldLine);
+
+const idOrder = (a, b) => {
+  const [ka, na] = [a.slice(0, a.lastIndexOf("-")), Number(a.slice(a.lastIndexOf("-") + 1))];
+  const [kb, nb] = [b.slice(0, b.lastIndexOf("-")), Number(b.slice(b.lastIndexOf("-") + 1))];
+  return ka < kb ? -1 : ka > kb ? 1 : na - nb;
+};
+
+/**
+ * @param tickets         [{ frontmatter, body, status }] — the audited corpus, from the read store
+ * @param configProjects  blaze.config.json's `projects`, or null when the config did not load
+ * @param storeProjects   the project keys the read store holds (`readStorage.listProjects`)
+ * @returns findings, `{ ticket, kind, detail }`
+ */
+export function governanceFindings({ tickets = [], configProjects = null, storeProjects = [] } = {}) {
+  const findings = [];
+
+  // terminal-parent-open-child — HARD. Children are found across the whole audited set, so a
+  // cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
+  const byId = new Map();
+  for (const t of tickets) {
+    const id = t?.frontmatter?.id;
+    if (id) byId.set(String(id), { status: t.status, type: t.frontmatter.type, parent: t.frontmatter.parent || null });
+  }
+  const children = new Map();
+  for (const [id, t] of byId) {
+    if (!t.parent) continue;
+    if (!children.has(t.parent)) children.set(t.parent, []);
+    children.get(t.parent).push(id);
+  }
+  for (const parent of [...children.keys()].filter((p) => byId.has(p)).sort(idOrder)) {
+    const p = byId.get(parent);
+    if (!TERMINAL_PARENT_STATUSES.has(p.status)) continue;
+    const kids = children.get(parent);
+    const open = kids.filter((k) => !TERMINAL_PARENT_STATUSES.has(byId.get(k).status)).sort(idOrder);
+    if (!open.length) continue;
+    findings.push({ ticket: parent, kind: "terminal-parent-open-child",
+      detail: `${p.type} ${p.status} with ${open.length}/${kids.length} children open: ${open.join(", ")}` });
+  }
+
+  // empty-body — SOFT. A fill queue: the ticket is valid, its description is simply not written.
+  for (const t of tickets) {
+    const id = t?.frontmatter?.id;
+    if (!id || EMPTY_BODY_TERMINAL.has(t.status) || !bodyIsEmpty(t.body)) continue;
+    findings.push({ ticket: id, kind: "empty-body", detail: String(t.status) });
+  }
+
+  // config-project-drift — SOFT. The configured `projects` and the projects the read store
+  // holds disagree. Soft because nothing is wrong with any ticket: a project missing from the
+  // config is simply not audited or served, and the fix is a config line. Skipped when the
+  // config did not load — `config-unloadable` already says so.
+  if (Array.isArray(configProjects)) {
+    const configured = new Set(configProjects), held = new Set(storeProjects);
+    for (const k of [...held].filter((x) => !configured.has(x)).sort()) {
+      findings.push({ ticket: k, kind: "config-project-drift",
+        detail: "the store holds this project but blaze.config.json's projects does not list it" });
+    }
+    for (const k of [...configured].filter((x) => !held.has(x)).sort()) {
+      findings.push({ ticket: k, kind: "config-project-drift",
+        detail: "blaze.config.json's projects lists this project but the store holds none of it" });
+    }
+  }
+  return findings;
+}
+
+export function summarise(findings) {
+```
+
+
+- [ ] **Step 4: Run them to verify they pass**, then the neighbours this task touches.
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit*.test.mjs tests/model/link-type-overrides.test.mjs tests/board-gate.test.mjs tests/model/schedule-findings.test.mjs tests/blz-407-audit-load-agreement.test.mjs tests/schema-audit-load-agreement-oracle.test.mjs tests/temp-cleanup-guard.test.mjs tests/quoted-sources.test.mjs
+```
+
+Expected: 11/11 pass in `tests/audit-governance.test.mjs` and every neighbour green (`link-type-overrides`' "every kind the audit emits is registered" scan finds the three new literals). Discrimination: with `universe: allTickets` changed to `universe: null` in the runner, `--projects scopes what is JUDGED…` fails.
+
+- [ ] **Step 5: Docs, in the same commit.**
+
+In `docs/guide/commands.md`, replace (1/3):
+
+````markdown
+```
+blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]
+```
+````
+
+with:
+
+````markdown
+```
+blaze audit [--projects A,B] [--kind <kind>] [--fail-on <kind,…>] [--json] [projectsDir]
+```
+````
+
+In `docs/guide/commands.md`, replace (2/3):
+
+```markdown
+|---|---|
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch` |
+| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
+
+```
+
+with:
+
+```markdown
+|---|---|
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch`, `terminal-parent-open-child` |
+| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty`, `empty-body`, `config-project-drift` |
+
+```
+
+In `docs/guide/commands.md`, replace (3/3):
+
+```markdown
+| `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
+| `--json` | Emit the full report as JSON. |
+| `projectsDir` | Audit a `projects/` tree outside the current board. |
+
+Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
+the corpus is empty — a run that measured nothing is never reported as a pass.
+
+```
+
+with:
+
+```markdown
+| `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. An unknown kind is refused (exit `2`). |
+| `--json` | Emit the full report as JSON. |
+| `projectsDir` | Audit a `projects/` tree outside the current board. |
+
+Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
+the corpus is empty — a run that measured nothing is never reported as a pass. With
+`--fail-on`, `1` means a finding of a named kind and nothing else.
+
+**Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
+resolved store, so it works under `fs`, `dual` and `db`, and each rule is the script's own:
+
+- **`terminal-parent-open-child`** (hard, was `terminal_parent_scan.py`): a ticket in `done`,
+  `achieved`, `mitigated`, `accepted` or `obsolete` with a child that is not — any type pair,
+  across projects. The parent asserts the work is finished while the child says it is not.
+  Measured before shipping: blaze-pm's `BLZ-305-v4-spine` holds 66 such parents (279 open
+  children), so a whole-board `blaze audit` there exits `1` until they are resolved; gate on
+  another kind meanwhile with `--fail-on`.
+- **`empty-body`** (soft, was `empty_body_scan.py`): a non-terminal ticket whose body is only
+  headings, blank lines, empty checkboxes, bare bullets and HTML comments — what `blaze new`
+  leaves for a title-only ticket.
+- **`config-project-drift`** (soft, was `config_drift_check.py`): `blaze.config.json`'s
+  `projects` and the projects the store holds disagree, in either direction. Not raised when the
+  config lists no projects at all.
+
+`blaze audit --fail-on duplicate-status` is the gate `duplicate_id_check.py` was: it fails on a
+duplicated id alone, on a board that already carries other hard findings.
+
+**`--projects` scopes what is judged, never what resolves** (BLZ-681). A link target or parent in
+a project outside the list still exists, so `blaze audit --projects BLZ` does not call
+`BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged.
+
+```
+
+
+- [ ] **Step 6: Fence check, commit, prove the committed tree.**
+
+```bash
+git add tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs scripts/audit-runner.mjs scripts/model/audit.mjs docs/guide/commands.md
+git diff --cached | grep -c '^+```'      # must print 0
+git commit -m "BLZ-681: blaze audit --fail-on, three governance kinds, and --projects resolving across projects" -m "audit.mjs gains terminal-parent-open-child (hard), empty-body and config-project-drift (soft) via governanceFindings, and auditCorpus resolves against the whole store (universe); audit-runner adds --fail-on and wires both. New tests/audit-governance.test.mjs; the R48 fixture moves its goal to canceled; commands.md." -- tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs scripts/audit-runner.mjs scripts/model/audit.mjs docs/guide/commands.md
+git status --short                        # must print nothing
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs   # green on the COMMITTED tree
+```
+
+
+---
+
+### Task 7: `blaze matrices` replaces `build_matrices.py` (BLZ-682)
+
+**Files:**
+- Create: `tests/fixtures/matrices-board/blaze.config.json`
+- Create: `tests/fixtures/matrices-board/docs/matrices/eng-architecture-matrix.md`
+- Create: `tests/fixtures/matrices-board/docs/matrices/eng-requirements-matrix.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/accepted/ENG-6-files-are-the-store.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/accepted/ENG-8-another-without-a-ref.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/achieved/ENG-1-ship-the-board.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/defined/ENG-2-keep-it-honest.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/done/ENG-10-build-the-renderer.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/implemented/ENG-3-render-the-board.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/implemented/ENG-5-no-trace-yet.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/in-progress/ENG-9-renderer-feature.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/proposed/ENG-4-reads-are-fast.md`
+- Create: `tests/fixtures/matrices-board/projects/ENG/proposed/ENG-7-no-ref-yet.md`
+- Create: `tests/matrices.test.mjs`
+- Create: `scripts/matrices-runner.mjs`
+- Create: `scripts/model/matrices.mjs`
+- Modify: `tests/model/seam-closure.test.mjs`
+- Modify: `scripts/cli.mjs`
+- Modify: `scripts/model/schema-version.mjs`
+- Modify: `AGENTS.md`
+- Modify: `docs/guide/commands.md`
+
+**Interfaces:**
+- Produces (`scripts/model/matrices.mjs`): `requirementsMatrix(tickets, project, pathOf) → string`, `architectureMatrix(tickets, project, pathOf) → string`, `matrixFiles(tickets, project, pathOf) → { "<key>-requirements-matrix.md": string, "<key>-architecture-matrix.md": string }` — `tickets` are reader records (`{ frontmatter, body, project, status, file }`), `pathOf(ticket) → "projects/<KEY>/<status>/<file>.md"` relative to the data root.
+- Produces: `blaze matrices [--project KEY] [--check] [--out DIR]` — exit 0 / 1 (drift) / 2 (no projects).
+
+The fixture board's `docs/matrices/*.md` are the output of blaze-pm's `scripts/build_matrices.py --project ENG` run on that board (the prototype ran it; it is reproduced below byte for byte). Create every fixture file with EXACTLY the content shown — each ends with a single newline.
+
+- [ ] **Step 1: Write the failing tests.**
+
+Create `tests/fixtures/matrices-board/blaze.config.json`:
+
+```json
+{ "projects": ["ENG"] }
+```
+
+Create `tests/fixtures/matrices-board/docs/matrices/eng-architecture-matrix.md`:
+
+```markdown
+# ENG architecture decision matrix
+
+> **Derived view — do not edit.** Regenerate with `python3 scripts/build_matrices.py`.
+
+- **3** decisions
+- by status: **2** accepted, **1** proposed
+- **2** answering no stated requirement (parented to a goal — legal, and counted rather than hidden)
+
+| Ref | Decision | Status | Answers | Ticket |
+|---|---|---|---|---|
+| `?` | [Another without a ref](../../projects/ENG/accepted/ENG-8-another-without-a-ref.md) | accepted | — *(untraced; under ENG-1)* | ENG-8 |
+| `?` | [No ref yet](../../projects/ENG/proposed/ENG-7-no-ref-yet.md) | proposed | — *(untraced; under ENG-2)* | ENG-7 |
+| `ADR-0001` | [Files are the store](../../projects/ENG/accepted/ENG-6-files-are-the-store.md) | accepted | `REQ-002` Render the board | ENG-6 |
+
+Reference a decision by its **designator** (`ADR-0011`), never by path — an architecture ticket's path changes with its status (ADR-0017).
+```
+
+Create `tests/fixtures/matrices-board/docs/matrices/eng-requirements-matrix.md`:
+
+```markdown
+# ENG requirements traceability matrix
+
+> **Derived view — do not edit.** Regenerate with `python3 scripts/build_matrices.py`. The tickets are the source of truth (ADR-0015). A hand-edit here will be overwritten and, worse, believed in the meantime.
+
+- **3** requirements — 2 implemented, 1 proposed
+- **3** traced delivery tickets
+- **1** implemented requirements with no delivery ticket recorded
+
+## ENG-1 — Ship the board
+
+| Ref | Requirement | Cat | Verify | Status | Implemented by | Addresses |
+|---|---|---|---|---|---|---|
+| `REQ-001` | [Reads are fast](../../projects/ENG/proposed/ENG-4-reads-are-fast.md) | perf | analy | proposed | ENG-9 | engine ADR-0009, ADR-0012 |
+| `REQ-002` | [Render the board](../../projects/ENG/implemented/ENG-3-render-the-board.md) | func | test | implemented | ENG-9, ENG-10 | ADR-0001 |
+
+## ENG-2 — Keep it honest
+
+| Ref | Requirement | Cat | Verify | Status | Implemented by | Addresses |
+|---|---|---|---|---|---|---|
+| `REQ-003` | [No trace yet](../../projects/ENG/implemented/ENG-5-no-trace-yet.md) | secu | inspe | implemented | — | a decision recorded outside this board |
+
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/accepted/ENG-6-files-are-the-store.md`:
+
+```markdown
+---
+id: ENG-6
+title: Files are the store
+type: architecture
+project: ENG
+parent: ENG-3
+ref: ADR-0001
+links:
+  - { type: Addresses, target: ENG-3 }
+---
+
+Decision.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/accepted/ENG-8-another-without-a-ref.md`:
+
+```markdown
+---
+id: ENG-8
+title: Another without a ref
+type: architecture
+project: ENG
+parent: ENG-1
+---
+
+A tie with ENG-7 on the empty ref.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/achieved/ENG-1-ship-the-board.md`:
+
+```markdown
+---
+id: ENG-1
+title: Ship the board
+type: goal
+project: ENG
+---
+
+The goal.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/defined/ENG-2-keep-it-honest.md`:
+
+```markdown
+---
+id: ENG-2
+title: Keep it honest
+type: goal
+project: ENG
+---
+
+A second goal.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/done/ENG-10-build-the-renderer.md`:
+
+```markdown
+---
+id: ENG-10
+title: Build the renderer
+type: task
+project: ENG
+parent: ENG-9
+estimate: 30
+links:
+  - { type: Implements, target: ENG-3 }
+---
+
+Work.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/implemented/ENG-3-render-the-board.md`:
+
+```markdown
+---
+id: ENG-3
+title: Render the board
+type: requirement
+project: ENG
+parent: ENG-1
+ref: REQ-002
+category: functional
+verification: test
+---
+
+**Addresses:** a prose-only decision
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/implemented/ENG-5-no-trace-yet.md`:
+
+```markdown
+---
+id: ENG-5
+title: No trace yet
+type: requirement
+project: ENG
+parent: ENG-2
+ref: REQ-003
+category: security
+verification: inspection
+---
+
+Nothing implements this.
+
+**Addresses:** a decision recorded outside this board
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/in-progress/ENG-9-renderer-feature.md`:
+
+```markdown
+---
+id: ENG-9
+title: Renderer feature
+type: feature
+project: ENG
+parent: ENG-3
+links:
+  - { type: Implements, target: ENG-3 }
+  - { type: Implements, target: ENG-4 }
+---
+
+Feature.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/proposed/ENG-4-reads-are-fast.md`:
+
+```markdown
+---
+id: ENG-4
+title: Reads are fast
+type: requirement
+project: ENG
+parent: ENG-1
+ref: REQ-001
+category: performance
+verification: analysis
+---
+
+Cites engine ADR-0012 and engine ADR-0009 in prose.
+```
+
+Create `tests/fixtures/matrices-board/projects/ENG/proposed/ENG-7-no-ref-yet.md`:
+
+```markdown
+---
+id: ENG-7
+title: No ref yet
+type: architecture
+project: ENG
+parent: ENG-2
+---
+
+Untraced: parented to a goal, and no designator.
+```
+
+Create `tests/matrices.test.mjs`:
+
+```js
+// tests/matrices.test.mjs — BLZ-682: `blaze matrices`, replacing blaze-pm's build_matrices.py.
+//
+// GENERATOR-ORACLE, IN MINIATURE. tests/fixtures/matrices-board/docs/matrices/ is the output
+// `python3 scripts/build_matrices.py --project ENG` wrote for that fixture board, committed
+// byte for byte, so every assertion below compares against the script's own output rather than
+// a hand-derived expectation. The board exercises each rule: goals sorted as strings, `ref`
+// ordering with a TIE (ENG-7/ENG-8 have no ref — path order, not id order), Implements
+// tracing, Addresses by link, by `engine ADR-n` prose and by the `**Addresses:**` fallback, the
+// `[:4]`/`[:5]` truncations, an untraced decision, and `?` for a missing ref.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname, relative } from "node:path";
+import { fileURLToPath } from "node:url";
+import { fsReadStorage } from "../scripts/model/read-storage.mjs";
+import { matrixFiles } from "../scripts/model/matrices.mjs";
+import { runDb } from "../scripts/db-runner.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+import { QUIET } from "./helpers/db-board.mjs";
+
+const scratch = scratchRegistry();
+const HERE = dirname(fileURLToPath(import.meta.url));
+const FIXTURE = join(HERE, "fixtures", "matrices-board");
+const CLI = join(HERE, "..", "scripts", "cli.mjs");
+const NAMES = ["eng-requirements-matrix.md", "eng-architecture-matrix.md"];
+const expected = (name) => readFileSync(join(FIXTURE, "docs", "matrices", name), "utf8");
+
+/** A private copy of the fixture board, so a run may write into it. */
+function copy() {
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz682-matrices-")));
+  cpSync(FIXTURE, root, { recursive: true });
+  return root;
+}
+function matrices(root, args = [], env = {}) {
+  const base = { ...process.env };
+  delete base.BLAZE_WRITE_PORT;
+  delete base.BLAZE_READONLY;
+  return spawnSync(process.execPath, [CLI, "matrices", ...args],
+    { encoding: "utf8", env: { ...base, BLAZE_PROJECTS_DIR: join(root, "projects"), ...env } });
+}
+
+test("matrixFiles reproduces the script's two files byte for byte", () => {
+  const tickets = [...fsReadStorage.listTickets(join(FIXTURE, "projects"))];
+  const files = matrixFiles(tickets, "ENG", (t) => relative(FIXTURE, t.file));
+  assert.deepEqual(Object.keys(files), NAMES);
+  for (const n of NAMES) assert.equal(files[n], expected(n), n);
+});
+
+test("a tie on ref is broken by PATH, as a sorted glob would — not by id, not by walk order", () => {
+  const tickets = [...fsReadStorage.listTickets(join(FIXTURE, "projects"))].reverse();
+  const arch = matrixFiles(tickets, "ENG", (t) => relative(FIXTURE, t.file))["eng-architecture-matrix.md"];
+  assert.ok(arch.indexOf("ENG-8 |") < arch.indexOf("ENG-7 |"),
+    "accepted/ENG-8 sorts before proposed/ENG-7 whatever order the tickets arrive in");
+  assert.equal(arch, expected("eng-architecture-matrix.md"));
+});
+
+test("only the named project's tickets are rendered", () => {
+  const tickets = [...fsReadStorage.listTickets(join(FIXTURE, "projects"))];
+  const other = matrixFiles(tickets, "OPS", () => "x")["ops-requirements-matrix.md"];
+  assert.match(other, /^# OPS requirements traceability matrix/);
+  assert.match(other, /\*\*0\*\* requirements — 0 implemented, 0 proposed/);
+});
+
+test("blaze matrices --check: in sync exits 0; a drifted file exits 1 and is named", () => {
+  const root = copy();
+  const ok = matrices(root, ["--check"]);
+  assert.equal(ok.status, 0, ok.stderr);
+  assert.match(ok.stdout, /matrices are in sync with the tickets/);
+  writeFileSync(join(root, "docs", "matrices", NAMES[0]), "hand-edited\n");
+  const drift = matrices(root, ["--check"]);
+  assert.equal(drift.status, 1);
+  assert.match(drift.stderr, /MATRIX DRIFT — regenerate: eng-requirements-matrix\.md$/m);
+  assert.equal(readFileSync(join(root, "docs", "matrices", NAMES[0]), "utf8"), "hand-edited\n",
+    "--check writes nothing");
+});
+
+test("blaze matrices --out writes the two files, and they are the script's", () => {
+  const root = copy();
+  const out = join(root, "elsewhere");
+  const r = matrices(root, ["--out", out]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readdirSync(out).sort(), [...NAMES].sort());
+  for (const n of NAMES) assert.equal(readFileSync(join(out, n), "utf8"), expected(n), n);
+  assert.match(r.stdout, /wrote elsewhere\/eng-requirements-matrix\.md/);
+});
+
+test("BLAZE_READONLY refuses a write — even run directly — but allows --check", () => {
+  const root = copy();
+  const out = join(root, "ro");
+  const viaCli = matrices(root, ["--out", out], { BLAZE_READONLY: "1" });
+  assert.notEqual(viaCli.status, 0);
+  assert.match(viaCli.stderr, /read-only mode \(BLAZE_READONLY=1\)/);
+  const direct = spawnSync(process.execPath, [join(HERE, "..", "scripts", "matrices-runner.mjs"), "--out", out],
+    { encoding: "utf8", env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects"), BLAZE_READONLY: "1" } });
+  assert.equal(direct.status, 1);
+  assert.match(direct.stderr, /refusing to run blaze matrices/);
+  assert.equal(existsSync(out), false, "nothing written");
+  assert.equal(matrices(root, ["--check"], { BLAZE_READONLY: "1" }).status, 0);
+});
+
+test("under BLAZE_WRITE_PORT=db the matrices come from the database, and match", async () => {
+  const root = copy();
+  assert.equal(await runDb(["init"], { ...QUIET, roots: { dataRoot: root, projectsDir: join(root, "projects") } }), 0);
+  writeFileSync(join(root, "projects", "ENG", "implemented", "ENG-5-no-trace-yet.md"),
+    "---\nid: ENG-5\ntitle: CHANGED ON DISK ONLY\ntype: requirement\nproject: ENG\n---\n\nx\n");
+  const out = join(root, "from-db");
+  const r = matrices(root, ["--out", out], { BLAZE_WRITE_PORT: "db" });
+  assert.equal(r.status, 0, r.stderr);
+  for (const n of NAMES) assert.equal(readFileSync(join(out, n), "utf8"), expected(n), n);
+});
+
+test("an empty board is refused (exit 2), never reported as in sync", () => {
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz682-empty-")));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: [] }));
+  const r = matrices(root, ["--check"]);
+  assert.equal(r.status, 2);
+  assert.match(r.stderr, /no projects found/);
+});
+
+test("an unknown argument, or --out with no value, is refused with the usage", () => {
+  const root = copy();
+  for (const args of [["--bogus"], ["--out"]]) {
+    const r = matrices(root, args);
+    assert.equal(r.status, 1, args.join(" "));
+    assert.match(r.stderr, /usage: blaze matrices/);
+  }
+});
+```
+
+In `tests/model/seam-closure.test.mjs`, replace (1/2):
+
+```js
+  ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
+```
+
+with:
+
+```js
+  ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["matrices-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // BLZ-682: a CLI verb, no exports
+  // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
+```
+
+In `tests/model/seam-closure.test.mjs`, replace (2/2):
+
+```js
+  ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+  // BLZ-535 round 7, Finding 2. Fifteen more, and they are the cost of deleting a false
+```
+
+with:
+
+```js
+  ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+  // BLZ-682: `blaze matrices` writes the two derived matrix files per project into --out —
+  // generated docs, never a ticket — through the FIFO-safe primitive, after creating the dir.
+  ["matrices-runner.mjs", ["mkdirSync", "writeRegularFileSync"]],
+  // BLZ-535 round 7, Finding 2. Fifteen more, and they are the cost of deleting a false
+```
+
+
+- [ ] **Step 2: Run them to verify they fail.**
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/matrices.test.mjs tests/model/seam-closure.test.mjs tests/schema-version-fixture-census.test.mjs
+```
+
+Expected: `tests/matrices.test.mjs` fails to load (`Cannot find module '…/scripts/model/matrices.mjs'`); `seam-closure` fails "the write-seam scan OBSERVED the corpus, and its allowlist is all load-bearing" (`matrices-runner.mjs` is named but does not exist yet); `schema-version-fixture-census` fails `5 !== 6` (the new fixture board) until Step 3's comment change.
+
+- [ ] **Step 3: Implement.**
+
+In `scripts/cli.mjs`, replace (1/2):
+
+```js
+  rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
+  migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
+```
+
+with:
+
+```js
+  rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
+  // BLZ-682: replaces blaze-pm's build_matrices.py. It writes files, so it mutates; `--check`
+  // writes nothing and is that verb's read-only invocation (BLZ-499's mechanism).
+  matrices: { file: "matrices-runner.mjs", desc: "regenerate the requirements/architecture matrices (--check: report drift only)", mutates: true, readOnlyFlags: ["--check"] },
+  migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
+```
+
+In `scripts/cli.mjs`, replace (2/2):
+
+```js
+//
+// That leaves 20 of the 23 subcommands in `SUBCOMMANDS` running this check.
+//
+```
+
+with:
+
+```js
+//
+// That leaves 21 of the 24 subcommands in `SUBCOMMANDS` running this check.
+//
+```
+
+Create `scripts/matrices-runner.mjs`:
+
+```js
+// scripts/matrices-runner.mjs — `blaze matrices [--project KEY] [--check] [--out DIR]` (BLZ-682).
+//
+// Replaces blaze-pm's `scripts/build_matrices.py` (spec §5.6). The I/O half only: the tickets
+// come through `resolveReadStorage` (fs, dual and db alike) and every byte of every file comes
+// from `model/matrices.mjs`, where the coverage gate sees it (`.c8rc.json` excludes runners).
+//
+//   default   write `<KEY>-requirements-matrix.md` and `<KEY>-architecture-matrix.md` for each
+//             project into --out (default `<data root>/docs/matrices`)
+//   --check   write nothing; exit 1 naming every file that differs from what would be written —
+//             the script's CI gate, `matrices-in-sync`
+import { mkdirSync } from "node:fs";
+import { join, relative, resolve as resolvePath } from "node:path";
+import { readRegularFileSync, writeRegularFileSync } from "./model/regular-file.mjs";
+import { resolveRoots, loadConfig } from "./config.mjs";
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
+import { ticketPath } from "./model/storage.mjs";
+import { matrixFiles } from "./model/matrices.mjs";
+import { assertWritable } from "./readonly.mjs";
+
+const USAGE = `usage: blaze matrices [--project KEY] [--check] [--out DIR]
+
+  Regenerate the requirements and architecture matrices — derived views of the tickets.
+  --project KEY   one project only (default: every configured project)
+  --check         write nothing; exit 1 if a committed matrix differs from the tickets
+  --out DIR       where the files live (default: <data root>/docs/matrices)`;
+
+const opts = { project: null, check: false, out: null };
+const argv = process.argv.slice(2);
+for (let i = 0; i < argv.length; i++) {
+  const a = argv[i];
+  if (a === "--check") { opts.check = true; continue; }
+  if (a === "--project" || a === "--out") {
+    const v = argv[++i];
+    if (v === undefined || v.startsWith("--")) { console.error(`blaze matrices: ${a} needs a value\n\n${USAGE}`); process.exit(1); }
+    opts[a.slice(2)] = v;
+    continue;
+  }
+  if (a === "--help" || a === "-h") { console.log(USAGE); process.exit(0); }
+  console.error(`blaze matrices: unknown argument ${a}\n\n${USAGE}`);
+  process.exit(1);
+}
+
+const { dataRoot, projectsDir } = resolveRoots();
+const out = opts.out ? resolvePath(opts.out) : join(dataRoot, "docs", "matrices");
+
+// The per-runner BLAZE_READONLY guard every mutating runner carries (AGENTS.md), before anything
+// is written. `--check` writes nothing and is allowed, exactly as cli.mjs's readOnlyFlags says.
+if (!opts.check) {
+  try { assertWritable("run blaze matrices"); }
+  catch (e) { console.error(e.message); process.exit(1); }
+}
+
+const rs = await resolveReadStorage({ dataRoot, projectsDir }).catch((e) => {
+  console.error(e.message);
+  process.exit(1);
+});
+let tickets, keys;
+try {
+  tickets = [...(await rs.readStorage.listTickets(projectsDir))];
+  const configured = loadConfig({ root: dataRoot }).projects ?? [];
+  keys = opts.project ? [opts.project]
+    : (configured.length ? configured : await rs.readStorage.listProjects(projectsDir));
+} finally { await rs.close(); }
+if (!keys.length) {
+  // A run that rendered nothing must not report that everything is in sync.
+  console.error(`blaze matrices: no projects found under ${projectsDir}`);
+  process.exit(2);
+}
+
+// The link column. Under fs and dual a ticket's record carries its real path. Under db there
+// is no file, so the link is the canonical path `ticketPath` gives — what the file would be
+// called if it were written today.
+const pathOf = rs.mode === "db"
+  ? (t) => relative(dataRoot, ticketPath(projectsDir, t.project, t.status, t.frontmatter.id, t.frontmatter.title))
+  : (t) => relative(dataRoot, t.file);
+
+const drift = [];
+if (!opts.check) mkdirSync(out, { recursive: true });
+for (const key of keys) {
+  for (const [name, content] of Object.entries(matrixFiles(tickets, key, pathOf))) {
+    const path = join(out, name);
+    if (opts.check) {
+      let existing = null;
+      try { existing = readRegularFileSync(path); } catch (e) { if (e?.code !== "ENOENT") throw e; }
+      if (existing !== content) drift.push(name);
+    } else {
+      writeRegularFileSync(path, content);
+      console.log(`wrote ${relative(dataRoot, path)}`);
+    }
+  }
+}
+if (opts.check) {
+  if (drift.length) {
+    console.error(`MATRIX DRIFT — regenerate: ${drift.join(", ")}`);
+    process.exitCode = 1;
+  } else {
+    console.log("matrices are in sync with the tickets");
+  }
+}
+```
+
+Create `scripts/model/matrices.mjs`:
+
+```js
+// scripts/model/matrices.mjs — the requirements and architecture matrices (BLZ-682).
+//
+// A PORT of blaze-pm's `scripts/build_matrices.py`, kept byte-for-byte compatible with its
+// output: the 22 files it generates are the acceptance oracle (generator-oracle — a zero
+// `diff -r` against what the script writes for the same tree). That is why some choices below
+// look odd for JavaScript — `None` printed for a parent with no `ref`, `cat[:4]` truncation,
+// goals sorted as strings. Each mirrors a line of the script; "fixing" one breaks the oracle.
+//
+// Pure: it takes tickets the CALLER read (through `resolveReadStorage`, so fs, dual and db all
+// work) and a `pathOf(ticket)` for the link column, and returns `{ fileName: text }`.
+
+/** The script's frontmatter values are raw strings; the engine's are parsed. Normalise. */
+const s = (v) => (v === null || v === undefined ? "" : Array.isArray(v) ? v.join(", ") : String(v));
+/** Python's `d.get(k, dflt)`: the default only when the key is ABSENT. A key written with no
+ *  value (`ref:`) is present and empty — the engine's parser reads it as `[]`. The database
+ *  readers return `""` for a NULL column, which is the database's spelling of ABSENT, so `""`
+ *  takes the default too; that keeps a db-mode matrix equal to the fs-mode one. */
+const get = (fm, k, dflt) => (fm && Object.hasOwn(fm, k) && fm[k] !== null && fm[k] !== undefined
+  && fm[k] !== "" ? s(fm[k]) : dflt);
+
+const ID_HEAD = /^([A-Z]+-\d+)/;
+
+/** `_links`: typed links whose type is letters and whose target STARTS with `[A-Z]+-\d+`. */
+function linksOf(t) {
+  const out = [];
+  for (const l of Array.isArray(t.frontmatter?.links) ? t.frontmatter.links : []) {
+    const ty = /^([A-Za-z]+)/.exec(s(l?.type));
+    const tg = ID_HEAD.exec(s(l?.target));
+    if (ty && tg) out.push([ty[1], tg[1]]);
+  }
+  return out;
+}
+
+const idKey = (id) => { const [p, n] = id.split("-"); return [p, Number(n)]; };
+const byIdNumeric = (a, b) => {
+  const [pa, na] = idKey(a), [pb, nb] = idKey(b);
+  return pa < pb ? -1 : pa > pb ? 1 : na - nb;
+};
+// Python's default string ordering is by code point; so is `<` on JS strings for BMP text.
+const byStr = (a, b) => (a < b ? -1 : a > b ? 1 : 0);
+
+function implementers(req, tickets) {
+  const rid = s(req.frontmatter.id);
+  return tickets.filter((t) => linksOf(t).some(([ty, tg]) => ty === "Implements" && tg === rid))
+    .map((t) => s(t.frontmatter.id)).sort(byIdNumeric);
+}
+
+function addresses(req, tickets) {
+  const rid = s(req.frontmatter.id);
+  const refs = tickets.filter((t) => s(t.frontmatter.type) === "architecture"
+      && linksOf(t).some(([ty, tg]) => ty === "Addresses" && tg === rid))
+    .map((t) => get(t.frontmatter, "ref", "")).sort(byStr);
+  const linked = refs.filter(Boolean).join(", ");
+  const external = [...new Set([...s(req.body).matchAll(/\bengine (ADR-\d+)/g)].map((m) => m[1]))].sort(byStr);
+  if (linked || external.length) {
+    const parts = linked ? [linked] : [];
+    if (external.length) parts.push("engine " + external.join(", "));
+    return parts.join("; ");
+  }
+  const m = /\*\*Addresses:\*\*\s*(.+)/.exec(s(req.body));
+  return m ? m[1].trim() : "";
+}
+
+/** `list.sort(key=…)` by `ref`, ties broken by the ticket's PATH. The script's ties fall in
+ *  `glob.glob` order, which is the filesystem's directory order — arbitrary, and different on
+ *  two machines. Path order is what a sorted glob gives, so it is the one deterministic order
+ *  the script's output can be checked against (`sorted(glob.glob(…))`, a no-op on its rules). */
+const sortedBy = (arr, key, pathOf) => arr.map((v) => [key(v), pathOf(v), v])
+  .sort((a, b) => byStr(a[0], b[0]) || byStr(a[1], b[1])).map((x) => x[2]);
+
+export function requirementsMatrix(tickets, project, pathOf) {
+  const reqs = sortedBy(tickets.filter((t) => s(t.frontmatter.type) === "requirement"),
+    (t) => get(t.frontmatter, "ref", ""), pathOf);
+  const goals = new Map(tickets.filter((t) => s(t.frontmatter.type) === "goal")
+    .map((t) => [s(t.frontmatter.id), s(t.frontmatter.title)]));
+  const met = reqs.filter((r) => r.status === "implemented");
+  const future = reqs.filter((r) => r.status !== "implemented");
+  const untraced = met.filter((r) => implementers(r, tickets).length === 0);
+  const L = [];
+  L.push(`# ${project} requirements traceability matrix`, "");
+  L.push("> **Derived view — do not edit.** Regenerate with "
+    + "`python3 scripts/build_matrices.py`. The tickets are the source of "
+    + "truth (ADR-0015). A hand-edit here will be overwritten and, worse, "
+    + "believed in the meantime.", "");
+  L.push(`- **${reqs.length}** requirements — ${met.length} implemented, ${future.length} proposed`);
+  L.push(`- **${reqs.reduce((n, r) => n + implementers(r, tickets).length, 0)}** traced delivery tickets`);
+  L.push(`- **${untraced.length}** implemented requirements with no delivery ticket recorded`, "");
+  for (const [gid, gtitle] of [...goals].sort((a, b) => byStr(a[0], b[0]))) {
+    const rows = reqs.filter((r) => get(r.frontmatter, "parent", null) === gid);
+    if (!rows.length) continue;
+    L.push(`## ${gid} — ${gtitle}`, "");
+    L.push("| Ref | Requirement | Cat | Verify | Status | Implemented by | Addresses |");
+    L.push("|---|---|---|---|---|---|---|");
+    for (const r of rows) {
+      const fm = r.frontmatter;
+      const impl = implementers(r, tickets).join(", ") || "—";
+      L.push(`| \`${get(fm, "ref", "?")}\` | [${get(fm, "title", "")}](../../${pathOf(r)}) | `
+        + `${get(fm, "category", "").slice(0, 4)} | ${get(fm, "verification", "").slice(0, 5)} | `
+        + `${r.status} | ${impl} | ${addresses(r, tickets) || "—"} |`);
+    }
+    L.push("");
+  }
+  return L.join("\n") + "\n";
+}
+
+export function architectureMatrix(tickets, project, pathOf) {
+  const adrs = sortedBy(tickets.filter((t) => s(t.frontmatter.type) === "architecture"),
+    (t) => get(t.frontmatter, "ref", ""), pathOf);
+  const reqs = new Map(tickets.filter((t) => s(t.frontmatter.type) === "requirement")
+    .map((t) => [s(t.frontmatter.id), t]));
+  const L = [];
+  L.push(`# ${project} architecture decision matrix`, "");
+  L.push("> **Derived view — do not edit.** Regenerate with "
+    + "`python3 scripts/build_matrices.py`.", "");
+  L.push(`- **${adrs.length}** decisions`);
+  const byStatus = new Map();
+  for (const a of adrs) byStatus.set(a.status, (byStatus.get(a.status) ?? 0) + 1);
+  L.push("- by status: " + [...byStatus].sort((a, b) => byStr(a[0], b[0]))
+    .map(([k, v]) => `**${v}** ${k}`).join(", "));
+  const parentOf = (a) => get(a.frontmatter, "parent", null);
+  const untraced = adrs.filter((a) => !reqs.has(parentOf(a)));
+  L.push(`- **${untraced.length}** answering no stated requirement `
+    + "(parented to a goal — legal, and counted rather than hidden)", "");
+  L.push("| Ref | Decision | Status | Answers | Ticket |");
+  L.push("|---|---|---|---|---|");
+  for (const a of adrs) {
+    const par = reqs.get(parentOf(a));
+    // Python formats a missing value as `None` — reproduced, not corrected.
+    const answers = par
+      ? `\`${get(par.frontmatter, "ref", "None")}\` ${get(par.frontmatter, "title", "None")}`
+      : `— *(untraced; under ${parentOf(a) ?? "None"})*`;
+    L.push(`| \`${get(a.frontmatter, "ref", "?")}\` | [${get(a.frontmatter, "title", "")}](../../${pathOf(a)}) | `
+      + `${a.status} | ${answers} | ${get(a.frontmatter, "id", "None")} |`);
+  }
+  L.push("");
+  L.push("Reference a decision by its **designator** (`ADR-0011`), never by path — "
+    + "an architecture ticket's path changes with its status (ADR-0017).");
+  return L.join("\n") + "\n";
+}
+
+/** Both files for one project, keyed by the script's own file names. */
+export function matrixFiles(tickets, project, pathOf) {
+  const mine = tickets.filter((t) => t.project === project);
+  return {
+    [`${project.toLowerCase()}-requirements-matrix.md`]: requirementsMatrix(mine, project, pathOf),
+    [`${project.toLowerCase()}-architecture-matrix.md`]: architectureMatrix(mine, project, pathOf),
+  };
+}
+```
+
+In `scripts/model/schema-version.mjs`, replace:
+
+```js
+  //   tests/schema-version-fixture-census.test.mjs, which fails if this sentence and the
+  //   files disagree: 5 fixture boards, of which 1 sets a removed key
+  //   (`board-gate-removed-key`, `provider: "github"` — a string) and 0 set one to null.
+```
+
+with:
+
+```js
+  //   tests/schema-version-fixture-census.test.mjs, which fails if this sentence and the
+  //   files disagree: 6 fixture boards, of which 1 sets a removed key
+  //   (`board-gate-removed-key`, `provider: "github"` — a string) and 0 set one to null.
+```
+
+
+- [ ] **Step 4: Run them to verify they pass**, then the neighbours this task touches.
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/matrices.test.mjs tests/model/seam-closure.test.mjs tests/schema-version-fixture-census.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/cli.test.mjs tests/readonly.test.mjs tests/tmp-scratch-attribution.test.mjs tests/temp-cleanup-guard.test.mjs
+```
+
+Expected: 9/9 pass in `tests/matrices.test.mjs`; `seam-closure` 21/21; census green; `cli.test.mjs` green (the "21 of the 24 subcommands" comment).
+
+- [ ] **Step 5: Docs, in the same commit.**
+
+In `AGENTS.md`, replace:
+
+```markdown
+(`new`/`move`/`edit`/`link`/`resolve`/`log`/`commit`/`reindex`/`sprint`/
+`reconcile`/`groom`/`start`) at dispatch — it exits non-zero naming the
+command and the env var, and never spawns the runner, so nothing is written.
+```
+
+with:
+
+```markdown
+(`new`/`move`/`edit`/`link`/`resolve`/`log`/`commit`/`reindex`/`sprint`/
+`reconcile`/`groom`/`start`, and `matrices` unless `--check`) at dispatch — it exits non-zero naming the
+command and the env var, and never spawns the runner, so nothing is written.
+```
+
+In `docs/guide/commands.md`, replace (1/2):
+
+```markdown
+| [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
+| [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
+```
+
+with:
+
+```markdown
+| [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
+| [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
+| [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
+```
+
+In `docs/guide/commands.md`, replace (2/2):
+
+```markdown
+
+## migrate
+```
+
+with:
+
+````markdown
+
+## matrices
+
+```
+blaze matrices [--project <KEY>] [--check] [--out <dir>]
+```
+
+Regenerates the two **derived** traceability views per project — `<key>-requirements-matrix.md`
+(each requirement, the delivery tickets that `Implements` it, the decisions that `Addresses` it)
+and `<key>-architecture-matrix.md` (each decision and the requirement it answers) — from the
+tickets, through the resolved store, so it works under `fs`, `dual` and `db`. It replaces
+blaze-pm's `scripts/build_matrices.py` (BLZ-682) and writes the same bytes: the acceptance test
+was a zero `diff -r` against that script's output for the live board.
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--project <KEY>` | One project only. | every project in `blaze.config.json` |
+| `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
+| `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
+
+Exit `2` when there are no projects to render — a run that rendered nothing never reports
+"in sync". Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
+what the script produced when its `glob` happened to return paths sorted; on a filesystem that
+returned them in another order the script's ties came out differently, so the first
+`blaze matrices` run on such a board may reorder those rows once. Under `db` a ticket has no
+file, so its link is the path the file would have today (`<KEY>/<status>/<id>-<slug>.md`).
+
+## migrate
+````
+
+
+- [ ] **Step 6: Fence check, commit, prove the committed tree.**
+
+```bash
+git add tests/fixtures/matrices-board/blaze.config.json tests/fixtures/matrices-board/docs/matrices/eng-architecture-matrix.md tests/fixtures/matrices-board/docs/matrices/eng-requirements-matrix.md tests/fixtures/matrices-board/projects/ENG/accepted/ENG-6-files-are-the-store.md tests/fixtures/matrices-board/projects/ENG/accepted/ENG-8-another-without-a-ref.md tests/fixtures/matrices-board/projects/ENG/achieved/ENG-1-ship-the-board.md tests/fixtures/matrices-board/projects/ENG/defined/ENG-2-keep-it-honest.md tests/fixtures/matrices-board/projects/ENG/done/ENG-10-build-the-renderer.md tests/fixtures/matrices-board/projects/ENG/implemented/ENG-3-render-the-board.md tests/fixtures/matrices-board/projects/ENG/implemented/ENG-5-no-trace-yet.md tests/fixtures/matrices-board/projects/ENG/in-progress/ENG-9-renderer-feature.md tests/fixtures/matrices-board/projects/ENG/proposed/ENG-4-reads-are-fast.md tests/fixtures/matrices-board/projects/ENG/proposed/ENG-7-no-ref-yet.md tests/matrices.test.mjs tests/model/seam-closure.test.mjs scripts/cli.mjs scripts/matrices-runner.mjs scripts/model/matrices.mjs scripts/model/schema-version.mjs AGENTS.md docs/guide/commands.md
+git diff --cached | grep -c '^+```'      # must print 2   (the `## matrices` usage block in docs/guide/commands.md — nothing else)
+git commit -m "BLZ-682: blaze matrices replaces build_matrices.py" -m "New scripts/model/matrices.mjs (pure renderer, byte-compatible with the script) and scripts/matrices-runner.mjs (resolveReadStorage, --check/--out/--project, readonly guard); cli.mjs entry (readOnlyFlags --check); seam-closure WRITE_ALLOWED entry and pin; schema-version.mjs census comment 5 -> 6 fixture boards. New tests/matrices.test.mjs and tests/fixtures/matrices-board/; commands.md, AGENTS.md." -- tests/fixtures/matrices-board/blaze.config.json tests/fixtures/matrices-board/docs/matrices/eng-architecture-matrix.md tests/fixtures/matrices-board/docs/matrices/eng-requirements-matrix.md tests/fixtures/matrices-board/projects/ENG/accepted/ENG-6-files-are-the-store.md tests/fixtures/matrices-board/projects/ENG/accepted/ENG-8-another-without-a-ref.md tests/fixtures/matrices-board/projects/ENG/achieved/ENG-1-ship-the-board.md tests/fixtures/matrices-board/projects/ENG/defined/ENG-2-keep-it-honest.md tests/fixtures/matrices-board/projects/ENG/done/ENG-10-build-the-renderer.md tests/fixtures/matrices-board/projects/ENG/implemented/ENG-3-render-the-board.md tests/fixtures/matrices-board/projects/ENG/implemented/ENG-5-no-trace-yet.md tests/fixtures/matrices-board/projects/ENG/in-progress/ENG-9-renderer-feature.md tests/fixtures/matrices-board/projects/ENG/proposed/ENG-4-reads-are-fast.md tests/fixtures/matrices-board/projects/ENG/proposed/ENG-7-no-ref-yet.md tests/matrices.test.mjs tests/model/seam-closure.test.mjs scripts/cli.mjs scripts/matrices-runner.mjs scripts/model/matrices.mjs scripts/model/schema-version.mjs AGENTS.md docs/guide/commands.md
+git status --short                        # must print nothing
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/matrices.test.mjs tests/model/seam-closure.test.mjs tests/schema-version-fixture-census.test.mjs   # green on the COMMITTED tree
+```
+
+
+---
+
+### Task 8: §5.8 residuals — readonly guards on four runners; a create never overwrites (BLZ-683)
+
+**Files:**
+- Create: `tests/readonly-runners.test.mjs`
+- Create: `tests/reserve-window.test.mjs`
+- Modify: `scripts/init-runner.mjs`
+- Modify: `scripts/migrate-runner.mjs`
+- Modify: `scripts/model/import-apply.mjs`
+- Modify: `scripts/model/write-port.mjs`
+- Modify: `scripts/new.mjs`
+- Modify: `scripts/schedule-runner.mjs`
+- Modify: `scripts/user-runner.mjs`
+- Modify: `docs/decisions/0019-the-groomers-guard-is-advisory.md`
+- Modify: `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md`
+
+**Interfaces:**
+- Consumes: `assertWritable(what, env)` (`scripts/readonly.mjs`).
+- Produces: `dbWritePort(...).write(t, { create: true })` — refuses an existing row (`write: <id> already exists in the database … NOT written …`) and inserts without `ON CONFLICT`; `applyNew` and `applyImport`'s create rows pass `{ create: true }`. Runner refusal text: `blaze: read-only mode (BLAZE_READONLY=1) — refusing to run blaze user add|user passwd|init|migrate|schedule migrate-dates --write`.
+
+- [ ] **Step 1: Write the failing tests.**
+
+Create `tests/readonly-runners.test.mjs`:
+
+```js
+// tests/readonly-runners.test.mjs — BLZ-683 (spec §5.8). Four runners had no per-runner
+// BLAZE_READONLY guard (ADR-0019's addendum named them): user, init, migrate and schedule. A
+// direct `node scripts/<x>-runner.mjs` bypassed cli.mjs's dispatch gate and wrote. Each test runs
+// the runner DIRECTLY under BLAZE_READONLY=1 and proves the refusal names the mode and that
+// nothing was written — the positive invariant, not just a non-zero exit.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { runInit } from "../scripts/init-runner.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+const scratch = scratchRegistry();
+const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
+const TICKET = "---\nid: ENG-1\ntitle: One\ntype: task\nproject: ENG\nestimate: 30\ndue: 2026-12-01\n---\n\nbody\n";
+
+function board() {
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blz683-readonly-")));
+  mkdirSync(join(dataRoot, "projects", "ENG", "defined"), { recursive: true });
+  writeFileSync(join(dataRoot, "blaze.config.json"), JSON.stringify({ projects: ["ENG"] }));
+  writeFileSync(join(dataRoot, "projects", "ENG", "defined", "ENG-1-one.md"), TICKET);
+  return dataRoot;
+}
+function direct(dataRoot, script, args, extra = {}) {
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: join(dataRoot, "projects"), BLAZE_READONLY: "1", ...extra };
+  delete env.BLAZE_WRITE_PORT;
+  return spawnSync(process.execPath, [join(SCRIPTS, script), ...args],
+    { cwd: dataRoot, encoding: "utf8", input: "a-password-long-enough\n", env });
+}
+const refused = (r, what) => {
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, new RegExp(`blaze: read-only mode \\(BLAZE_READONLY=1\\) — refusing to ${what}`));
+};
+
+test("user-runner add and passwd refuse, and no identity store is created", () => {
+  const root = board();
+  refused(direct(root, "user-runner.mjs", ["add", "--email", "a@example.com"]), "run blaze user add");
+  refused(direct(root, "user-runner.mjs", ["passwd", "--email", "a@example.com"]), "run blaze user passwd");
+  assert.equal(existsSync(join(root, ".blaze", "identity.db")), false);
+  assert.equal(existsSync(join(root, ".gitignore")), false, "not even the .gitignore line");
+});
+
+test("user-runner still names a usage error first", () => {
+  const r = direct(board(), "user-runner.mjs", ["add"]);
+  assert.equal(r.status, 1);
+  assert.doesNotMatch(r.stderr, /read-only mode/);
+});
+
+test("init-runner refuses before writing a board; --help still answers", async () => {
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blz683-init-")));
+  const out = [];
+  const io = { log: (s) => out.push(String(s)), err: (s) => out.push(String(s)), isTTY: false,
+               env: { BLAZE_READONLY: "1" } };
+  assert.equal(await runInit(["--yes", `--dir=${dir}`, "--project=ENG", "--no-git"], io), 1);
+  assert.match(out.join("\n"), /read-only mode \(BLAZE_READONLY=1\) — refusing to run blaze init/);
+  assert.equal(existsSync(join(dir, "blaze.config.json")), false);
+  assert.equal(existsSync(join(dir, "projects")), false);
+  assert.equal(await runInit(["--help"], io), 0);
+});
+
+test("migrate-runner refuses both modes before writing migration/ or a ticket", () => {
+  const root = board();
+  refused(direct(root, "migrate-runner.mjs", ["--dry-run"]), "run blaze migrate");
+  refused(direct(root, "migrate-runner.mjs", ["--live"]), "run blaze migrate");
+  assert.equal(existsSync(join(root, "migration")), false);
+});
+
+test("schedule-runner refuses --write and leaves the ticket as it was; the dry run still runs", () => {
+  const root = board();
+  const file = join(root, "projects", "ENG", "defined", "ENG-1-one.md");
+  refused(direct(root, "schedule-runner.mjs", ["migrate-dates", "--write"]), "run blaze schedule migrate-dates --write");
+  assert.equal(readFileSync(file, "utf8"), TICKET);
+  const dry = direct(root, "schedule-runner.mjs", ["migrate-dates"]);
+  assert.equal(dry.status, 0, dry.stderr);
+  assert.equal(readFileSync(file, "utf8"), TICKET);
+});
+```
+
+Create `tests/reserve-window.test.mjs`:
+
+```js
+// tests/reserve-window.test.mjs — BLZ-683 (spec §5.8). The db `reserve` check-then-upsert window
+// is ACCEPTED (import is single-operator and refused in remote mode), on one condition the spec
+// states: the losing writer fails LOUDLY and never overwrites. Before this, a ticket created by
+// another writer after `reserve` (or after `new`'s `exists`) was silently upserted over by the
+// create that followed. These tests put a second writer in exactly that window.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { runDb } from "../scripts/db-runner.mjs";
+import { resolvePorts, pgExec } from "../scripts/model/write-port-resolve.mjs";
+import { dbWritePort } from "../scripts/model/write-port.mjs";
+import { createDbSchema } from "../scripts/model/db-schema-version.mjs";
+import { applyNew } from "../scripts/new.mjs";
+import { runImport } from "../scripts/model/import-apply.mjs";
+import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
+import { writeCsv } from "../scripts/model/csv.mjs";
+import { dbBoard, QUIET } from "./helpers/db-board.mjs";
+import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+
+const theirs = (id) => ({ project: "ENG", status: "defined", body: "theirs",
+  frontmatter: { id, title: "written by the other writer", type: "task", project: "ENG",
+                 estimate: 30, created: "2026-10-05", updated: "2026-10-05" } });
+
+test("import: a ticket created AFTER reserve, before the write — exit 4, the other writer's ticket survives",
+     async () => {
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  try {
+    // reserve finds ENG-50 free and raises the counter; THEN the other writer lands.
+    const racing = { ...ports.writePort, async reserve(id, opts) {
+      const r = await ports.writePort.reserve(id, opts);
+      await ports.writePort.write(theirs(id));
+      return r;
+    } };
+    const csv = join(roots.dataRoot, "race.csv");
+    const base = { schema_version: "1", project: "ENG", type: "task", status: "defined",
+                   description: "body", estimate: "30", id: "ENG-50", title: "from the csv" };
+    writeFileSync(csv, writeCsv([COLUMN_NAMES.slice(), COLUMN_NAMES.map((n) => base[n] ?? "")]));
+    const r = await runImport({ projectsDir: roots.projectsDir, dataRoot: roots.dataRoot, apply: true,
+      writePort: racing, readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }), file: csv });
+    assert.equal(r.exitCode, 4, r.report);
+    assert.match(r.report, /ENG-50 already exists in the database/);
+    assert.match(r.report, /NOT written/);
+    const back = (await ports.readStorage.getTicket(roots.projectsDir, "ENG-50")).found;
+    assert.equal(back.frontmatter.title, "written by the other writer", "never overwritten");
+  } finally { await ports.close(); }
+});
+
+test("new: a ticket created after the exists-check, before the write — refused, never overwritten",
+     async () => {
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  try {
+    const racing = { ...ports.writePort, async exists(t) {
+      const there = await ports.writePort.exists(t);
+      await ports.writePort.write(theirs(t.frontmatter.id));
+      return there;
+    } };
+    await assert.rejects(applyNew(roots.projectsDir, {
+      project: "ENG", type: "task", title: "mine", today: "2026-10-05", extra: { estimate: 15 },
+      writePort: racing, readStorage: ports.readStorage,
+    }), /ENG-2 already exists in the database.*NOT written/);
+    const back = (await ports.readStorage.getTicket(roots.projectsDir, "ENG-2")).found;
+    assert.equal(back.frontmatter.title, "written by the other writer");
+  } finally { await ports.close(); }
+});
+
+test("an edit or a move is still an upsert — only a create refuses an existing row", async () => {
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const ports = await resolvePorts({ ...roots, env: { BLAZE_WRITE_PORT: "db" } });
+  try {
+    await ports.writePort.write(theirs("ENG-7"), { create: true });
+    await ports.writePort.write({ ...theirs("ENG-7"), status: "in-progress" });
+    assert.equal((await ports.readStorage.getTicket(roots.projectsDir, "ENG-7")).found.status, "in-progress");
+  } finally { await ports.close(); }
+});
+
+test("Postgres, two connections: the loser's INSERT meets the primary key inside its own transaction",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("window");
+  const a = await pgClient(db.url), b = await pgClient(db.url);
+  try {
+    await createDbSchema(pgExec(a), { dialect: "postgres" });
+    // B pauses right after reading "no such row", exactly where a concurrent create can land.
+    let release, paused;
+    const gate = new Promise((r) => { release = r; });
+    const reached = new Promise((r) => { paused = r; });
+    const base = pgExec(b);
+    const execB = { run: base.run, async all(sql, params) {
+      const rows = await base.all(sql, params);
+      if (/SELECT status FROM ticket WHERE id/.test(sql)) { paused(); await gate; }
+      return rows;
+    } };
+    const loser = dbWritePort(execB, { dialect: "postgres" }).write({ ...theirs("ENG-9"),
+      frontmatter: { ...theirs("ENG-9").frontmatter, title: "the loser" } }, { create: true });
+    await reached;
+    await dbWritePort(pgExec(a), { dialect: "postgres" }).write(theirs("ENG-9"), { create: true });
+    release();
+    await assert.rejects(loser, /duplicate key value violates unique constraint "ticket_pkey"/);
+    const rows = (await a.query("SELECT title FROM ticket WHERE id = 'ENG-9'")).rows;
+    assert.deepEqual(rows, [{ title: "written by the other writer" }]);
+    const events = Number((await a.query("SELECT count(*) AS n FROM ticket_event WHERE ticket_id = 'ENG-9'")).rows[0].n);
+    assert.equal(events, 1, "the loser's transaction — its event included — rolled back");
+  } finally { await a.end(); await b.end(); await db.drop(); }
+});
+```
+
+
+- [ ] **Step 2: Run them to verify they fail.**
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/readonly-runners.test.mjs tests/reserve-window.test.mjs
+```
+
+Expected: 4 failures in `readonly-runners` (user/init/migrate/schedule each wrote or ran) and 3 in `reserve-window` (`import: …` exit 0 with the CSV title over the other writer's, `new: …` no rejection, `Postgres, two connections: …` no rejection — the loser upserted). `an edit or a move is still an upsert` passes before and after (it guards the change from over-reaching).
+
+- [ ] **Step 3: Implement.**
+
+In `scripts/init-runner.mjs`, replace (1/2):
+
+```js
+import { addUser } from "./model/user-admin.mjs";
+
+```
+
+with:
+
+```js
+import { addUser } from "./model/user-admin.mjs";
+import { assertWritable } from "./readonly.mjs";
+
+```
+
+In `scripts/init-runner.mjs`, replace (2/2):
+
+```js
+    return 1;
+  }
+
+  const interactive = Boolean(isTTY) && !args.yes;
+```
+
+with:
+
+```js
+    return 1;
+  }
+  // BLZ-683: the per-runner BLAZE_READONLY guard, before a prompt is shown, a connection is
+  // tested or a file is written — `--help` and an unknown option are still answered first.
+  try { assertWritable("run blaze init", env); }
+  catch (e) { err(e.message); return 1; }
+
+  const interactive = Boolean(isTTY) && !args.yes;
+```
+
+In `scripts/migrate-runner.mjs`, replace (1/2):
+
+```js
+import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
+
+```
+
+with:
+
+```js
+import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
+import { assertWritable } from "./readonly.mjs";
+
+```
+
+In `scripts/migrate-runner.mjs`, replace (2/2):
+
+```js
+
+if (mode === "dry-run") {
+```
+
+with:
+
+```js
+
+// BLZ-683: the per-runner BLAZE_READONLY guard. BOTH modes write — the dry run writes
+// migration/MIGRATION-AUDIT.md and the ledger, `--live` writes tickets and commits — so it sits
+// before either, after the arguments and the project keys are judged.
+try { assertWritable("run blaze migrate"); }
+catch (e) { console.error(e.message); process.exit(1); }
+
+if (mode === "dry-run") {
+```
+
+In `scripts/model/import-apply.mjs`, replace:
+
+```js
+      // `updated` stamps per imported row (ADR-0037 §1).
+      const { file } = await writePort.write({ ...ticket, frontmatter });
+      files.push(file);
+```
+
+with:
+
+```js
+      // `updated` stamps per imported row (ADR-0037 §1).
+      // BLZ-683: `create` — if another writer took this id after `reserve`, this write fails
+      // loudly (exit 4, the row is named) rather than upserting over that writer's ticket.
+      const { file } = await writePort.write({ ...ticket, frontmatter }, { create: true });
+      files.push(file);
+```
+
+In `scripts/model/write-port.mjs`, replace (1/2):
+
+```js
+    const prior = priorRows?.length ? priorRows[0].status : null;
+
+```
+
+with:
+
+```js
+    const prior = priorRows?.length ? priorRows[0].status : null;
+    // BLZ-683 (spec §5.8): a CREATE never writes over a row. `ctx.create` comes from the two
+    // verbs that mint a ticket — `applyNew` and import's create rows — and each checked the id
+    // was free (`exists`, `reserve`) a moment BEFORE this write. That check-then-write window
+    // is accepted, not locked (ADR-0038's addendum); what closes the damage is that the LOSING
+    // writer fails loudly here, or on the ticket's primary key below if the winner's row
+    // commits between this read and that insert, and never upserts over the winner's ticket.
+    if (ctx?.create && prior !== null) {
+      throw new Error(`write: ${id} already exists in the database — another writer created it `
+        + "first, so this create was NOT written (nothing is overwritten).");
+    }
+
+```
+
+In `scripts/model/write-port.mjs`, replace (2/2):
+
+```js
+    const set = cols.slice(1).map((c) => `${c} = excluded.${c}`).join(", ");
+    await exec.run(
+      `INSERT INTO ticket (${cols.join(", ")}) VALUES (${cols.map((_, i) => ph(i)).join(", ")})
+       ON CONFLICT (id) DO UPDATE SET ${set}`, vals);
+
+```
+
+with:
+
+```js
+    const set = cols.slice(1).map((c) => `${c} = excluded.${c}`).join(", ");
+    // A create is a plain INSERT, so a row that appeared after the read above is refused by
+    // the primary key (BLZ-683); an edit or a move stays the upsert it has always been.
+    await exec.run(
+      `INSERT INTO ticket (${cols.join(", ")}) VALUES (${cols.map((_, i) => ph(i)).join(", ")})`
+      + (ctx?.create ? "" : `\n       ON CONFLICT (id) DO UPDATE SET ${set}`), vals);
+
+```
+
+In `scripts/new.mjs`, replace:
+
+```js
+  }
+  const { file } = await writePort.write(target);
+  const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
+```
+
+with:
+
+```js
+  }
+  // BLZ-683: `create` — a row that appears between the check above and this write is refused,
+  // never overwritten (the db port's rule; the fs port ignores the context).
+  const { file } = await writePort.write(target, { create: true });
+  const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
+```
+
+In `scripts/schedule-runner.mjs`, replace (1/2):
+
+```js
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
+
+```
+
+with:
+
+```js
+import { resolveReadStorage } from "./model/write-port-resolve.mjs";
+import { assertWritable } from "./readonly.mjs";
+
+```
+
+In `scripts/schedule-runner.mjs`, replace (2/2):
+
+```js
+    + "The tool reports; you decide.");
+  process.exit(1);
+}
+
+```
+
+with:
+
+```js
+    + "The tool reports; you decide.");
+  process.exit(1);
+}
+
+// BLZ-683: the per-runner BLAZE_READONLY guard. Only `--write` writes; the dry run stays
+// available under BLAZE_READONLY, because a plan is a read.
+if (write) {
+  try { assertWritable("run blaze schedule migrate-dates --write"); }
+  catch (e) { console.error(e.message); process.exit(1); }
+}
+
+```
+
+In `scripts/user-runner.mjs`, replace (1/2):
+
+```js
+import { identityDbPath } from "./model/identity-db.mjs";
+
+```
+
+with:
+
+```js
+import { identityDbPath } from "./model/identity-db.mjs";
+import { assertWritable } from "./readonly.mjs";
+
+```
+
+In `scripts/user-runner.mjs`, replace (2/2):
+
+```js
+const { dataRoot } = resolveRoots();
+
+```
+
+with:
+
+```js
+const { dataRoot } = resolveRoots();
+
+// BLZ-683: the per-runner BLAZE_READONLY guard (AGENTS.md "Read-only mode"), for a direct
+// `node scripts/user-runner.mjs` that bypasses cli.mjs's dispatch gate. After the arguments
+// are judged (a usage error is still named first) and before a password is read or a user,
+// token or .gitignore line is written.
+try { assertWritable(`run blaze user ${parsed.verb}`); }
+catch (e) { console.error(e.message); process.exit(1); }
+
+```
+
+
+- [ ] **Step 4: Run them to verify they pass**, then the neighbours this task touches.
+
+```bash
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/readonly-runners.test.mjs tests/reserve-window.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/readonly.test.mjs tests/init.test.mjs tests/init-first-admin.test.mjs tests/user-add.test.mjs tests/user-passwd.test.mjs tests/schedule-runner.test.mjs tests/import-db-mode.test.mjs tests/import-runner.test.mjs tests/model/write-port.test.mjs tests/model/import-apply.test.mjs tests/new.test.mjs tests/new-runner.test.mjs tests/verbs-dual-write.test.mjs tests/model/seam-closure.test.mjs
+```
+
+Expected: 5/5 and 4/4 pass (1 skips without Postgres); every neighbour green.
+
+- [ ] **Step 5: Docs, in the same commit.**
+
+In `docs/decisions/0019-the-groomers-guard-is-advisory.md`, replace:
+
+```markdown
+  BLZ-254 owns the concurrency proofs.
+```
+
+with:
+
+```markdown
+  BLZ-254 owns the concurrency proofs.
+
+## Addendum (2026-10-05, BLZ-683) — every mutating runner now carries the guard
+
+The residual above — "Runners with no per-runner readonly guard" — is closed for the four it
+named. `user-runner.mjs`, `init-runner.mjs`, `migrate-runner.mjs` and `schedule-runner.mjs` each
+call `assertWritable` before their first write, matching the other runners: after their
+arguments are judged (a usage error is still named first), before a prompt, a connection test or
+any file. `migrate` is refused in both modes, because its dry run writes `migration/` too;
+`schedule` only under `--write`, because its dry run is a read. `tests/readonly-runners.test.mjs`
+runs each one directly under `BLAZE_READONLY=1` and proves nothing was written. This ADR's
+decision is unchanged: the guard is advisory, not a boundary.
+```
+
+In `docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md`, replace:
+
+```markdown
+  BLZ-254 either way.
+```
+
+with:
+
+```markdown
+  BLZ-254 either way.
+- **The groomer's check-then-write window, and Postgres identity values committing out of order
+  — accepted.** The groomer loop is off in the cluster (`loops.*` disabled), and a ticket id comes
+  from `project_counter`'s row lock, never from identity order.
+- **db `reserve`'s check-then-upsert window — accepted, and the loser now fails (BLZ-683).**
+  `reserve` runs only inside `import`, which is single-operator and refused in remote mode. A
+  create (`applyNew`, import's create rows) now writes with `{ create: true }`, so a ticket another
+  writer created after the check is refused — `already exists … NOT written`, or the ticket's
+  primary key if it commits mid-write — and never upserted over. An edit or move is unchanged.
+  `tests/reserve-window.test.mjs` puts a second writer in the window, on SQLite and on Postgres
+  over two connections.
+- **A db groom has no undo — accepted.** Recovery is the `ticket_event` history plus the
+  database's backup and point-in-time restore.
+```
+
+
+- [ ] **Step 6: Fence check, commit, prove the committed tree.**
+
+```bash
+git add tests/readonly-runners.test.mjs tests/reserve-window.test.mjs scripts/init-runner.mjs scripts/migrate-runner.mjs scripts/model/import-apply.mjs scripts/model/write-port.mjs scripts/new.mjs scripts/schedule-runner.mjs scripts/user-runner.mjs docs/decisions/0019-the-groomers-guard-is-advisory.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md
+git diff --cached | grep -c '^+```'      # must print 0
+git commit -m "BLZ-683: BLAZE_READONLY guards on four runners; a db create never overwrites" -m "user-, init-, migrate- and schedule-runner call assertWritable before their first write; dbWritePort honours { create: true } (refuse a visible row, plain INSERT) and applyNew and import create rows pass it. New tests/readonly-runners.test.mjs and tests/reserve-window.test.mjs; ADR-0019 addendum and ADR-0038 addendum bullets." -- tests/readonly-runners.test.mjs tests/reserve-window.test.mjs scripts/init-runner.mjs scripts/migrate-runner.mjs scripts/model/import-apply.mjs scripts/model/write-port.mjs scripts/new.mjs scripts/schedule-runner.mjs scripts/user-runner.mjs docs/decisions/0019-the-groomers-guard-is-advisory.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md
+git status --short                        # must print nothing
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/readonly-runners.test.mjs tests/reserve-window.test.mjs   # green on the COMMITTED tree
+```
+
+
+---
+
+### Task 9: Verification before the PR (no commit)
+
+- [ ] **Step 1: Kickoff §9, on the branch.**
+
+```bash
+cd /home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-254-live-board-cutover
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+git fetch origin
+npm test 2>&1 | tail -12                                   # fail 0
+node scripts/ci/hygiene-check.mjs origin/main              # hygiene: clean
+git log origin/main..HEAD --format=%B | grep -ci 'co-authored-by\|signed-off-by'   # 0
+git log origin/main..HEAD --format=%s | grep -vc '^BLZ-'  # 0
+git status --short                                         # empty
+[ "$(git merge-base HEAD origin/main)" = "$(git rev-parse origin/main)" ] && echo base-ok
+```
+
+- [ ] **Step 2: The local Postgres run, with coverage.**
+
+```bash
+docker run -d --rm --name blz-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=blaze_test -p 127.0.0.1:55432:5432 postgres:17-alpine
+until docker exec blz-pg pg_isready -U postgres -d blaze_test; do sleep 1; done
+BOX=$(mktemp -d /tmp/blz254-box-XXXX)
+TMPDIR=$BOX BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test npm run test:coverage > "$BOX.log" 2>&1; tail -12 "$BOX.log"
+grep -c "already executing" "$BOX.log"                    # 0 — BLZ-675's AC over the whole run
+node scripts/ci/tmp-scratch-attribution.mjs --tmp "$BOX" --max 0
+docker stop blz-pg
+```
+
+Expected: `fail 0`, the c8 thresholds pass (91/77/93/91), no deprecation line, no attributable scratch directory left. (`npm run test:coverage` already passes `--test-concurrency=1`.)
+
+- [ ] **Step 3: `gh pr checks <PR>` after opening the PR** — every row pass; re-read it before merging (`--watch` can exit 0 on a failure). PR title: `BLZ-674 + BLZ-675 + BLZ-678 + BLZ-679 + BLZ-680 + BLZ-681 + BLZ-682 + BLZ-683: db readiness for the live-board cutover`, with one `* BLZ-n: …` bullet per child in the body (BLZ-131's squash-body reconcile reads them).
+
+## Operator acceptance (read-only against blaze-pm; never writes into it)
+
+Both steps work on a COPY. Nothing here writes to `blaze-pm` or its worktrees.
+
+**A. The matrices generator-oracle (spec §5.6, Finding 15).**
+
+```bash
+cd /home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-254-live-board-cutover
+export PATH=/home/rnamwoh/.local/node24/bin:$PATH
+SRC=/home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine
+COPY=$(mktemp -d /tmp/blz682-oracle-XXXX)
+cp -r "$SRC/projects" "$SRC/blaze.config.json" "$COPY/" && mkdir -p "$COPY/scripts" "$COPY/docs"
+cp "$SRC/scripts/build_matrices.py" "$COPY/scripts/" && cp -r "$SRC/docs/matrices" "$COPY/docs/"
+# the script's ties follow glob order, which is filesystem order; sort it (a no-op on its rules)
+sed -i 's|for path in glob.glob(os.path.join(ROOT, "projects", project, "\*", "\*.md")):|for path in sorted(glob.glob(os.path.join(ROOT, "projects", project, "*", "*.md"))):|' "$COPY/scripts/build_matrices.py"
+grep -c 'sorted(glob.glob' "$COPY/scripts/build_matrices.py"          # 1
+for k in $(node -e 'console.log(require(process.argv[1]).projects.join(" "))' "$COPY/blaze.config.json"); do
+  (cd "$COPY" && python3 scripts/build_matrices.py --project "$k" >/dev/null); done
+BLAZE_PROJECTS_DIR="$COPY/projects" node scripts/cli.mjs matrices --out "$COPY/blaze-out"
+diff -r "$COPY/docs/matrices" "$COPY/blaze-out" && echo ZERO-DIFF        # prototype: ZERO-DIFF, 22 files
+diff -rq "$SRC/docs/matrices" "$COPY/blaze-out"   # vs COMMITTED: blz-requirements (BLZ-676), nca (BLZ-555), blz-architecture (tie order)
+```
+
+**B. Load + verify preview on a scratch database** (spec §7 step 3's rehearsal does this for real on CNPG):
+
+```bash
+docker run -d --rm --name blz-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=blaze_test -p 127.0.0.1:55432:5432 postgres:17-alpine
+until docker exec blz-pg pg_isready -U postgres -d blaze_test; do sleep 1; done
+docker exec blz-pg psql -U postgres -d blaze_test -c "CREATE DATABASE preview_v4"
+node -e 'const f=process.argv[1],fs=require("fs"),c=JSON.parse(fs.readFileSync(f));c.database={driver:"postgres"};fs.writeFileSync(f,JSON.stringify(c,null,2))' "$COPY/blaze.config.json"
+export BLAZE_PROJECTS_DIR="$COPY/projects" BLAZE_DB_HOST=127.0.0.1 BLAZE_DB_PORT=55432 BLAZE_DB_NAME=preview_v4 BLAZE_DB_USER=postgres BLAZE_DB_PASSWORD_ENV=PREVIEW_PW PREVIEW_PW=postgres
+node scripts/cli.mjs db init && node scripts/cli.mjs db load && node scripts/cli.mjs db verify; echo "verify exit=$?"   # prototype: PASS, 0
+node scripts/cli.mjs audit --fail-on duplicate-status; echo "exit=$?"       # 0; a plain `blaze audit` exits 1 on the 66 terminal parents (Finding 10)
+docker stop blz-pg
+```
+
+(The copy has no `.git`, so its load imports 0 transitions; the real tree imports git's history — 914 on `BLZ-305-v4-spine` at `8bd7fd3d`.)
+
+## Self-review
+
+- **Spec coverage:** §5.2 → Task 3 (+ Findings 3–6); §5.3 → Task 4 (all four conditions, each pinned alone; exit 0/1/2); §5.6 → Tasks 6 and 7 (`duplicate_id_check.py` by `--fail-on`; `parent_rules.mjs` already deleted, nothing to do); §5.7 → Task 5 (transitions) and the ADR-0038 addendum (sprints, pool); §5.8 → Task 8 and the ADR-0038/0019 addenda; §8 row A's BLZ-674/675 → Tasks 2 and 1. `fs`/`dual` unchanged: the fs port ignores `{ create }`, `dbTransitions` answers only db, the SQLite shadow's rows are unchanged (Finding 6).
+- **Placeholders:** none — every code step is the prototype's literal content.
+- **Type consistency:** `loadCorpusAsync`'s `typeById` (Task 3) is what Task 5's `importTransitions` takes as `new Set(tally.typeById.keys())`; `corpusRows`/`relationRows` (Task 3) are what `expectedCounts` (Task 4) reuses; `governanceFindings`' `configProjects` is `nonEmpty(config?.projects)` (Finding 12).
+- **Review Focus:** each of the five lines is pinned by a named test in its task.
