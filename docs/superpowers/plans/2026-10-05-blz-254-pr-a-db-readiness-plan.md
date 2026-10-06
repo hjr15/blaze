@@ -38,20 +38,21 @@
 1. **BLZ-675 is three sites, not one.** At base every one of the 9 Postgres test files printed pg's "Calling client.query() when the client is already executing a query" deprecation. `applyCreate` was the first in each; with it fixed, `postgresReader` (`childrenFor`/`hydrate`/`hydrateAll`/`listTickets` — `Promise.all` over one client) and `tests/model/allocate-concurrency.test.mjs` (50 `allocate()`s at once on one client) surfaced next. The ticket's AC ("Postgres test runs are free of the warning") needs all three. One client runs one query at a time anyway, so awaiting in turn costs nothing; the allocate test keeps its real property — the race BETWEEN two connections — and its assertions are byte-unchanged.
 2. **BLZ-674 vs ADR-0008's freeze.** ADR-0008 (*Proposed*) says `@hjr15/blaze-board` "freezes at 0.7.0", and `why-blaze.md` says so twice. The kickoff asks for 0.8.0; npm refuses a republish of 0.7.0, which lacks BLZ-131. Task 2 bumps to **0.8.0** (a minor: it also carries the new db commands) and records why in an ADR-0008 addendum and the two `why-blaze.md` lines. If the operator wants the freeze kept as a patch instead, it is 0.7.1 in the same five places.
 3. **`blaze db load` and `verify` are Postgres-only.** The SQLite shadow is still loaded by `blaze db init` (its `loadCorpus` now runs on the shared builder). `load` on SQLite exits 1 naming `blaze db init`; `verify` on SQLite exits 2 ("could not run"). The async executor still takes `dialect` and is tested over SQLite, which is how "the two executors cannot drift" is pinned without a server.
-4. **The load is all or nothing.** Each ticket inserts under a `SAVEPOINT` so EVERY refused row is named, then any refusal rolls the whole transaction back (exit 1, "NOTHING was loaded"). A half-loaded board would only fail `verify` and force `--replace` on the re-run. Measured: 0 calendar-invalid dates on the live corpus, the one class SQLite accepts and Postgres's `date` refuses.
+4. **The load is all or nothing.** Each ticket — and, in pass two, each parent `UPDATE` and link `INSERT` — runs under a `SAVEPOINT` so EVERY refused row is named with its ticket id (a ticket that is its own parent reads `ENG-3: parent: … ticket_not_own_parent`), then any refusal rolls the whole transaction back (exit 1, "NOTHING was loaded"). A half-loaded board would only fail `verify` and force `--replace` on the re-run. Measured: 0 calendar-invalid dates on the live corpus, the one class SQLite accepts and Postgres's `date` refuses.
 5. **`--replace` truncates `ticket_link, ticket_label, ticket_component, worklog_entry, acceptance_criterion, ticket_event, ticket` — never `project_counter`.** `ticket_event`'s FK to `ticket` is `ON DELETE RESTRICT`, so it must go too; `TRUNCATE` does not fire the append-only row triggers. A number already issued is never issued again, so the counter is only raised (`seedCounter`).
 6. **The builder de-duplicates labels, components and links per ticket.** Their primary keys refuse a repeat, so a repeat was never a row; counting it made the tally disagree with the table — and `verify`'s row-count condition compares the two. The SQLite shadow's rows are unchanged; only its `labels`/`links` tally numbers drop by the repeats (and a label after a repeat gets the next `ord` rather than skipping one).
 7. **"The loader's tallies" are recomputed, not remembered.** `verify` runs the same `corpusRows` + `relationRows` over the files and compares each table's `count(*)` with that; nothing stores a tally between the two commands. A row `postgresReader` hides (a soft-deleted ticket) still fails the count.
 8. **`criteriaFor` on Postgres is the engine's own parser over the loaded body.** Postgres keeps no `acceptance_criterion` rows (spec §5.2), and every db-mode reader and writer takes criteria from `body`; the oracle reads the SOURCE body with `ac-oracle-matcher.mjs`, which shares no code with it. `verifyLoad` takes `criteriaOf` as an injectable only so a test can fail condition 4 on its own.
-9. **Transitions under db (BLZ-680):** a new inert module `scripts/model/transitions-db.mjs` (`dbTransitions(readStorage, mode, view, root)`) answers only for `mode === "db"` and the `metrics` view, so `fs`/`dual` and every other view are as before (no new export on the write-allowlisted `transitions.mjs`, so no seam pin changes). Both servers (`serve.mjs`, `supervisor.mjs`) call it on the page and `/view/<name>` routes. The SQLite `blaze db init` imports the git history too, so a SQLite board switched to db mode keeps its metrics. Imported events: `source = 'git-backfill'` (already allowed by the CHECK), actor `git-history`; a transition for an id that did not load, or with no timestamp, is counted, never inserted. `BLZ-305-v4-spine` holds 914 git transitions.
+8a. **Adversarial round 1, M2: `verify` was blind to `extra_json` — and so were the db-mode readers, which LOST it.** `zeroDiff`'s `FIELDS` names only keys with a column, so a database that dropped every unknown frontmatter key (BLZ-295's round-trip promise) still passed. Worse, measured on the base: `postgresReader` and `openSqliteRead` never selected `extra_json`, so a db-mode read showed no unknown keys and the next write through the port persisted `{}` over them — a `custom_key` loaded into the shadow was gone after one `blaze edit … priority high`. Task 4 fixes both: the two readers spread `extra_json` into the frontmatter exactly as `dbWritePort.read` already did (kept identical across drivers, `blockersOf` included), and `verifyLoad` adds `extraDiffs` — each ticket's `extraFields` on both sides, canonically stringified — to condition 1. The `verify` row in `commands.md` now says "every field value (unknown frontmatter keys included)", which is true.
+9. **Transitions under db (BLZ-680):** a new inert module `scripts/model/transitions-db.mjs` (`dbTransitions(readStorage, mode, view, root)`) answers only for `mode === "db"` and the `metrics` view, so `fs`/`dual` and every other view are as before (no new export on the write-allowlisted `transitions.mjs`, so no seam pin changes). Both servers (`serve.mjs`, `supervisor.mjs`) call it on the page and `/view/<name>` routes. The SQLite `blaze db init` imports the git history too, so a SQLite board switched to db mode keeps its metrics. The import reuses BLZ-281's `scripts/migrate/import-transitions.mjs` (round 1, m3): its row rule is extracted into one `transitionRows` and shared by the existing sync `importTransitions` and a new `importTransitionsExec` (async `exec`, either dialect, inside the load's transaction) — timestamps verbatim, `source = 'git-backfill'`, actor `unknown`, unknown and malformed rows counted, coverage reported. Its header gains one paragraph on why the load reads git once (spec §5.7's `buildTransitions`): the load is the one moment the trail is frozen into the database. A data root with no git history prints `⚠ transitions  0 — no git history at <root>` rather than a silent 0 (round 1, m2). Both the `/view/metrics` and the page route `GET /?view=metrics` are tested in both servers (round 1, m8). `BLZ-305-v4-spine` holds 914 git transitions.
 10. **`terminal-parent-open-child` ships SOFT (operator decision, 2026-10-05; the spec's §5.6 is amended in the same commit as this plan).** Ported with the script's own fixed terminal set (`done/achieved/mitigated/accepted/obsolete`), not the schema's terminals, so counts match the script exactly — 66 parents, 279 open children on `BLZ-305-v4-spine@8bd7fd3d`. Shipped hard, it would fail the live board's `blaze audit` on day one and with it spec §7's "0 hard findings" gate. The 66 are groomed under a separate ticket; the kind moves to `HARD_KINDS` once the count is zero. Until then `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
 11. **No existing test changes in Task 6.** Because the kind is soft, `tests/audit-terminal-goal-unverified.test.mjs`'s "a soft finding does not fail the run" (an `achieved` goal over an `implemented` requirement, which this kind also reports) still holds unchanged. Promoting the kind to hard later must move that fixture's goal to `canceled` (terminal for R48, not for this kind).
 12. **`config-project-drift` is skipped when the config lists no projects** (absent or `[]`): the audit already falls back to the store's listing then, and a `blaze audit <dir>` outside any board has no config at all (without this, `tests/audit.test.mjs`'s 1,200-finding pipe test gains a 1,201st). Under db the store's projects are `DISTINCT project_key`, so a configured project with no tickets reads as drift there.
 13. **`--fail-on` refuses an unknown or empty kind list with exit 2** (a typo would otherwise be a gate that can never fail) and accepts soft kinds too.
-14. **Added by the coordinator, verified against the code: `--projects` resolved links against the scoped set.** `audit-runner.mjs` filtered to `--projects` before `auditCorpus` built its id set, so `blaze audit --projects BLZ` on the live copy reported 5 hard `dangling-target`s (BLZ-134→INF-750, BLZ-136→INF-744, BLZ-142→INF-798, BLZ-96→INF-556, BLZ-97→INF-556) that the unscoped run does not. `auditCorpus` gains `universe` (resolve against every ticket the store holds; judge only `tickets`); after the fix the scoped run reports 0. Folded into Task 6 (BLZ-681).
+14. **Added by the coordinator, verified against the code: `--projects` resolved links against the scoped set.** `audit-runner.mjs` filtered to `--projects` before `auditCorpus` built its id set, so `blaze audit --projects BLZ` on the live copy reported 5 hard `dangling-target`s (BLZ-134→INF-750, BLZ-136→INF-744, BLZ-142→INF-798, BLZ-96→INF-556, BLZ-97→INF-556) that the unscoped run does not. `auditCorpus` gains `universe` (resolve against every ticket the store holds; judge only `tickets`); after the fix the scoped run reports 0. Folded into Task 6 (BLZ-681). Round 1 (m5) applied the same rule to the governance kinds: `governanceFindings` takes `universe` (an in-scope terminal parent's open child in another project still counts) and `scopeProjects` (`config-project-drift` names only `--projects` keys).
 15. **Matrices keep the script's header text** ("Regenerate with `python3 scripts/build_matrices.py`") — changing it would break the byte-for-byte oracle; once blaze-pm switches to `blaze matrices`, rewording it is a one-line follow-up there. **Ties on `ref` are ordered by path.** The script's ties follow `glob.glob`, i.e. directory order, which differs per filesystem: blaze-pm's committed `blz-architecture-matrix.md` orders its 6 ref-less decisions differently from a sorted glob. The oracle therefore runs the script with `sorted(glob.glob(…))` (a no-op on its rules) on a scratch copy. Against the COMMITTED files, `blaze matrices --check` on the live copy names `blz-requirements-matrix.md` (BLZ-676's existing drift), `nca-requirements-matrix.md` (BLZ-555's known exception) and `blz-architecture-matrix.md` (that tie order).
 16. **`blaze matrices` is `mutates: true` with `readOnlyFlags: ["--check"]`** (BLZ-499's mechanism), carries its own readonly guard, writes through `writeRegularFileSync` (one new `WRITE_ALLOWED` entry and its pin), defaults to every configured project and `<data root>/docs/matrices`, and exits 2 on an empty project set. Under db a ticket's link is `ticketPath`'s canonical path; on the live copy that gave zero diff against fs mode. The new fixture board moves `scripts/model/schema-version.mjs`'s derived census comment from 5 to 6 fixture boards (`tests/schema-version-fixture-census.test.mjs` pins it).
-17. **§5.8's reserve window: the spec's premise was false at base.** "The losing writer fails loudly on the unique key" — but the create write was `INSERT … ON CONFLICT (id) DO UPDATE`, so a ticket created by another writer after `reserve` (or after `new`'s `exists`) was silently overwritten (each Task 8 race test fails at base). Fix: `applyNew` and import's create rows write with `{ create: true }`; `dbWritePort.persist` then refuses a row it can see (`already exists … NOT written`) and inserts without `ON CONFLICT`, so one committed mid-write hits `ticket_pkey`. Edits and moves are unchanged; the fs port ignores the context; under dual the shadow reports it as a divergence instead of upserting. Both §5.8 items (guards and window) belong to BLZ-683, the only §5.8 child.
+17. **§5.8's reserve window: the spec's premise was false at base.** "The losing writer fails loudly on the unique key" — but the create write was `INSERT … ON CONFLICT (id) DO UPDATE`, so a ticket created by another writer after `reserve` (or after `new`'s `exists`) was silently overwritten (each Task 8 race test fails at base). Fix: `applyNew` and import's create rows write with `{ create: true }`; `dbWritePort.persist` then refuses a row it can see (`already exists … NOT written`) and inserts without `ON CONFLICT`, so one committed mid-write hits `ticket_pkey`. Edits and moves are unchanged; the fs port ignores the context; and `dualWritePort` strips `create` before calling the shadow (round 1, M1), so under dual a stale shadow row is still upserted with no divergence, exactly as before — pinned by a test that fails without the strip. Both §5.8 items (guards and window) belong to BLZ-683, the only §5.8 child.
 18. **Readonly guard placement (BLZ-683):** after argument validation (a usage error is still named first), before the first write. `migrate` is guarded in both modes (its dry run writes `migration/`); `schedule` only under `--write` (its dry run is a read, and stays allowed); `init` uses its injected `io.env`.
 19. **`cli.mjs`'s preflight comment count** becomes "21 of the 24 subcommands" — `tests/cli.test.mjs` derives and pins it.
 
@@ -70,14 +71,15 @@
 | File | Task | Responsibility |
 |---|---|---|
 | `scripts/model/db-schema-version.mjs` | 1 | `applyCreate` runs its DDL one statement at a time |
-| `scripts/model/pg-storage.mjs` | 1, 5 | reader queries one at a time; `listTransitions` |
+| `scripts/model/pg-storage.mjs` | 1, 4, 5 | reader queries one at a time; `extra_json` read back; `listTransitions` |
 | `tests/model/pg-one-query-at-a-time.test.mjs` (new) | 1 | fake-client overlap detectors + real-pg warning check |
 | `tests/model/allocate-concurrency.test.mjs` | 1 | per-connection calls in turn; the cross-connection race kept |
 | `package.json`, `package-lock.json`, `tests/package.test.mjs` | 2 | 0.8.0 |
-| `scripts/migrate/load-corpus.mjs` | 3, 5 | `corpusRows`, `relationRows`, `loadCorpus`, `loadCorpusAsync`; `transitionEvents`, `importTransitions` |
+| `scripts/migrate/load-corpus.mjs` | 3 | `corpusRows`, `relationRows`, `loadCorpus`, `loadCorpusAsync` |
 | `scripts/db-runner.mjs` | 3, 4, 5 | `load`, `verify`; transitions imported by `load` and SQLite `init` |
-| `scripts/migrate/verify-load.mjs` (new) | 4 | `verifyLoad`, `expectedCounts`, `criteriaFromBody` |
-| `scripts/model/sqlite-storage.mjs` | 5 | `listTransitions` |
+| `scripts/migrate/verify-load.mjs` (new) | 4 | `verifyLoad`, `expectedCounts`, `criteriaFromBody`, `extraDiffs` |
+| `scripts/model/sqlite-storage.mjs` | 4, 5 | `extra_json` read back; `listTransitions` |
+| `scripts/migrate/import-transitions.mjs` | 5 | shared `transitionRows`; `importTransitionsExec` |
 | `scripts/model/transitions-db.mjs` (new) | 5 | `dbTransitions` |
 | `scripts/serve.mjs`, `scripts/supervisor.mjs` | 5 | metrics history from the database under db |
 | `scripts/model/audit.mjs` | 6 | three kinds, `governanceFindings`, `auditCorpus({ universe })` |
@@ -875,6 +877,23 @@ test("a row Postgres refuses rolls the WHOLE load back and names every refusal",
   } finally { await db.drop(); }
 });
 
+test("a refused PARENT is named with its ticket too, and the load still rolls back whole", PG_SKIP, async () => {
+  const db = await scratchPgDb("refusedparent");
+  try {
+    const roots = board();
+    // Its own parent: ticket's CHECK (parent_id IS DISTINCT FROM id) refuses pass two's UPDATE.
+    writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-3-self.md"),
+      ["---", "id: ENG-3", "title: self", "type: task", "project: ENG", "estimate: 30",
+       "parent: ENG-3", "---", "", "x", ""].join("\n"));
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    const c = capture();
+    assert.equal(await runDb(["load"], { ...c.io, roots, ...pgIo(db.url) }), 1);
+    assert.match(c.text(), /refused 1 row\(s\), so NOTHING was loaded/);
+    assert.match(c.text(), /ENG-3: parent: .*ticket_not_own_parent/);
+    assert.equal(await count(db.url, "SELECT count(*) n FROM ticket"), 0);
+  } finally { await db.drop(); }
+});
+
 test("load refuses a SQLite board, a database with no schema, and BLAZE_READONLY", PG_SKIP, async () => {
   const db = await scratchPgDb("loadrefuse");
   try {
@@ -1448,16 +1467,35 @@ export async function loadCorpusAsync(exec, projectsDir, { source = fsReadStorag
     typeById.set(t.id, t.type);
   }
 
+  // Pass two, under the same per-statement savepoint: a parent or link the database refuses
+  // (a ticket that names itself as its parent, say) is named with its ticket, like a refused
+  // ticket, rather than aborting the transaction on the first one with no id attached.
+  const attempt = async (id, what, sql, params) => {
+    await exec.run("SAVEPOINT blaze_load_relation", []);
+    try {
+      await exec.run(sql, params);
+      await exec.run("RELEASE SAVEPOINT blaze_load_relation", []);
+      return true;
+    } catch (e) {
+      await exec.run("ROLLBACK TO SAVEPOINT blaze_load_relation", []);
+      await exec.run("RELEASE SAVEPOINT blaze_load_relation", []);
+      report.skipped.insertFailed.push({ id, reason: `${what}: ${String(e.message).slice(0, 110)}` });
+      return false;
+    }
+  };
   const rel = relationRows(tickets, typeById);
   for (const p of rel.parents) {
-    await exec.run(`UPDATE ticket SET parent_id = ${ph(0)}, parent_type = ${ph(1)} WHERE id = ${ph(2)}`,
-                   [p.parent, p.parentType, p.id]);
+    await attempt(p.id, "parent",
+      `UPDATE ticket SET parent_id = ${ph(0)}, parent_type = ${ph(1)} WHERE id = ${ph(2)}`,
+      [p.parent, p.parentType, p.id]);
   }
+  let links = 0;
   for (const l of rel.links) {
-    await exec.run(`INSERT INTO ticket_link (src_id, link_type, target_id) VALUES (${list(3)})`,
-                   [l.src, l.type, l.target]);
+    if (await attempt(l.src, "link",
+      `INSERT INTO ticket_link (src_id, link_type, target_id) VALUES (${list(3)})`,
+      [l.src, l.type, l.target])) links++;
   }
-  report.links = rel.links.length;
+  report.links = links;
   report.danglingParents = rel.danglingParents;
   report.danglingLinks = rel.danglingLinks;
   return { ...report, typeById };
@@ -1474,7 +1512,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/migrate/*.test.mjs tests/db-runner.test.mjs tests/db-runner-pg.test.mjs tests/model/read-seam-projection.test.mjs tests/model/seam-closure.test.mjs
 ```
 
-Expected: 8/8 pass in `tests/db-load.test.mjs` (4 skip without Postgres), and every neighbour green — `tests/migrate/load-corpus.test.mjs`'s assertions are unchanged.
+Expected: `tests 9, pass 9` in `tests/db-load.test.mjs` (5 skip without Postgres), and every neighbour green — `tests/migrate/load-corpus.test.mjs`'s assertions are unchanged.
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -1548,6 +1586,8 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 - Create: `tests/db-verify.test.mjs`
 - Create: `scripts/migrate/verify-load.mjs`
 - Modify: `scripts/db-runner.mjs`
+- Modify: `scripts/model/pg-storage.mjs`
+- Modify: `scripts/model/sqlite-storage.mjs`
 - Modify: `docs/guide/commands.md`
 
 **Interfaces:**
@@ -1556,7 +1596,9 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
   - `VERIFY_TABLES = ["ticket", "ticket_link", "worklog_entry", "ticket_label", "ticket_component"]`.
   - `expectedCounts(source, projectsDir) → { [table]: number }`.
   - `criteriaFromBody(body) → { text, checked }[]`.
+  - `extraDiffs(sourceTickets, loadedTickets) → { id, field: "extra", source, loaded }[]`.
   - `verifyLoad({ source, sourceRoot, loadedTickets, counts, criteriaOf? }) → { ok, failures: string[], report, expected, countDiffs }`.
+  - `postgresReader` / `openSqliteRead` records now carry each ticket's `extra_json` keys in `frontmatter`.
 - Produces (`runDb`): `blaze db verify` — exit 0 pass, 1 differences, 2 could not run. Read-only (no readonly guard).
 
 - [ ] **Step 1: Write the failing tests.**
@@ -1576,7 +1618,8 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
-import { verifyLoad, expectedCounts, criteriaFromBody, VERIFY_TABLES } from "../scripts/migrate/verify-load.mjs";
+import { verifyLoad, expectedCounts, criteriaFromBody, extraDiffs, VERIFY_TABLES } from "../scripts/migrate/verify-load.mjs";
+import { runner } from "./helpers/db-board.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { dbBoard } from "./helpers/db-board.mjs";
 import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
@@ -1586,7 +1629,7 @@ function board() {
   writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-2-b.md"),
     ["---", "id: ENG-2", "title: B task", "type: task", "project: ENG", "priority: high",
      "assignee: unassigned", "estimate: 15", "parent: ENG-1", "labels: [x, y]",
-     "created: 2026-01-02", "updated: 2026-01-03",
+     "created: 2026-01-02", "updated: 2026-01-03", "custom_key: keepme",
      "worklog:", "  - { date: 2026-01-03, minutes: 10, note: first }",
      "links:", "  - { type: Blocks, target: ENG-1 }",
      "---", "", "## Acceptance Criteria", "", "- [x] done", "- [ ] open", ""].join("\n"));
@@ -1616,6 +1659,23 @@ test("condition 1 alone: one changed VALUE fails, and names the field", () => {
   assert.equal(v.ok, false);
   assert.deepEqual(v.failures, ["1 value difference(s)"]);
   assert.deepEqual(v.report.valueDiffs, [{ id: "ENG-2", field: "priority", source: "high", loaded: "low" }]);
+});
+
+test("condition 1 alone, the unknown keys: an extra field the database lost fails, and is named", () => {
+  const { projectsDir } = board();
+  const loaded = asLoaded(projectsDir);
+  delete loaded.find((t) => t.frontmatter.id === "ENG-2").frontmatter.custom_key;
+  const v = verifyLoad({ source: fsReadStorage, sourceRoot: projectsDir, loadedTickets: loaded,
+                         counts: expectedCounts(fsReadStorage, projectsDir) });
+  assert.deepEqual(v.failures, ["1 value difference(s)"]);
+  assert.deepEqual(v.report.valueDiffs, [{ id: "ENG-2", field: "extra", source: '{"custom_key":"keepme"}', loaded: "{}" }]);
+});
+
+test("extraDiffs ignores key order and the keys that have a column", () => {
+  const src = [{ frontmatter: { id: "A-1", title: "t", b: 2, a: { y: 1, x: 2 } } }];
+  const same = [{ frontmatter: { id: "A-1", title: "other", a: { x: 2, y: 1 }, b: 2 } }];
+  assert.deepEqual(extraDiffs(src, same), []);
+  assert.deepEqual(extraDiffs(src, []), [], "a missing ticket is condition 2's");
 });
 
 test("condition 2 alone: a ticket missing from the database fails", () => {
@@ -1694,6 +1754,34 @@ test("one injected value change in the database → exit 1, naming the ticket an
     assert.match(c.text(), /ENG-2 {2}title: "B task" → "tampered"/);
     assert.match(c.text(), /verify: FAIL — 1 value difference\(s\)/);
   } finally { await db.drop(); }
+});
+
+test("the database losing a ticket's unknown keys (extra_json) → exit 1, naming it", PG_SKIP, async () => {
+  const { db, roots } = await loadedBoard("verifyextra");
+  try {
+    await sql(db.url, "UPDATE ticket SET extra_json = '{}' WHERE id = 'ENG-2'");
+    const c = capture();
+    assert.equal(await runDb(["verify"], { ...c.io, roots, ...pgIo(db.url) }), 1);
+    assert.match(c.text(), /ENG-2 {2}extra: "\{\\"custom_key\\":\\"keepme\\"\}" → "\{\}"/);
+  } finally { await db.drop(); }
+});
+
+test("a db-mode edit keeps a ticket's unknown keys — the readers surface extra_json", async () => {
+  const roots = dbBoard();
+  writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-1-a.md"),
+    ["---", "id: ENG-1", "title: A task", "type: task", "project: ENG", "estimate: 30",
+     "custom_key: keepme", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
+  assert.equal(await runDb(["init"], { log() {}, err() {}, env: {}, roots }), 0);
+  const r = runner("edit-runner.mjs", ["ENG-1", "priority", "low"], roots);
+  assert.equal(r.status, 0, r.stderr);
+  const { openSqliteRead } = await import("../scripts/model/sqlite-storage.mjs");
+  const { shadowDbPath } = await import("../scripts/model/write-port-resolve.mjs");
+  const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+  try {
+    const fm = rs.getTicket(null, "ENG-1").found.frontmatter;
+    assert.equal(fm.priority, "low");
+    assert.equal(fm.custom_key, "keepme", "before the readers surfaced it, the edit wrote {} over it");
+  } finally { rs.close(); }
 });
 
 test("a row the reader never shows (a soft-deleted ticket) still fails the row count", PG_SKIP, async () => {
@@ -1888,7 +1976,9 @@ Create `scripts/migrate/verify-load.mjs`:
 // The runner owns the I/O; nothing here opens a connection, so the verdict is unit-tested.
 //
 // It passes only if ALL FOUR hold (spec §5.3):
-//   1. zeroDiff's `valueDiffs` is empty — no field VALUE changed;
+//   1. zeroDiff's `valueDiffs` is empty — no field VALUE changed — and, added here, every
+//      ticket's UNKNOWN frontmatter keys (`extra_json`, BLZ-295's round-trip promise) agree:
+//      zeroDiff's FIELDS list names only keys with a column, so it never looked at them;
 //   2. the id set on each side is identical — nothing missing, nothing extra;
 //   3. each table's row count equals what the loader's own row builder says it inserts;
 //   4. acceptance criteria agree on every ticket, read by `ac-oracle-matcher.mjs` on the source
@@ -1897,6 +1987,32 @@ Create `scripts/migrate/verify-load.mjs`:
 import { zeroDiff } from "./zero-diff.mjs";
 import { corpusRows, relationRows } from "./load-corpus.mjs";
 import { parseAcBlocks } from "../model/ac-blocks.mjs";
+import { extraFields } from "../model/write-port.mjs";
+
+/** Stable JSON: object keys sorted at every depth, so key order is never a difference. */
+const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(",")}]`
+  : v && typeof v === "object"
+    ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}`
+    : JSON.stringify(v));
+
+/**
+ * Condition 1's other half: the frontmatter keys that have no column, ticket by ticket, as the
+ * file holds them and as the database reads them back. `extraFields` is the loader's own rule
+ * for what goes to `extra_json`, applied to both sides.
+ * @returns [{ id, field: "extra", source, loaded }] for each ticket whose extras differ
+ */
+export function extraDiffs(sourceTickets, loadedTickets) {
+  const loaded = new Map(loadedTickets.map((t) => [String(t.frontmatter?.id), t]));
+  const out = [];
+  for (const t of sourceTickets) {
+    const id = String(t.frontmatter?.id ?? "");
+    const b = loaded.get(id);
+    if (!id || !b) continue;   // a missing id is condition 2's finding, not this one's
+    const want = canon(extraFields(t.frontmatter)), got = canon(extraFields(b.frontmatter));
+    if (want !== got) out.push({ id, field: "extra", source: want, loaded: got });
+  }
+  return out;
+}
 
 /** The tables whose row counts gate, in the order they are printed. */
 export const VERIFY_TABLES = ["ticket", "ticket_link", "worklog_entry", "ticket_label", "ticket_component"];
@@ -1946,6 +2062,7 @@ export function verifyLoad({ source, sourceRoot, loadedTickets, counts, criteria
   const bodies = new Map(loadedTickets.map((t) => [String(t.frontmatter?.id), t.body ?? ""]));
   const report = zeroDiff(source, sourceRoot, { listTickets: () => loadedTickets },
                           { criteriaFor: (id) => criteriaOf(bodies.get(id)) });
+  report.valueDiffs.push(...extraDiffs([...source.listTickets(sourceRoot)], loadedTickets));
   const expected = expectedCounts(source, sourceRoot);
   const countDiffs = VERIFY_TABLES
     .filter((t) => expected[t] !== counts[t])
@@ -1962,6 +2079,123 @@ export function verifyLoad({ source, sourceRoot, loadedTickets, counts, criteria
 }
 ```
 
+In `scripts/model/pg-storage.mjs`, replace (1/2):
+
+```js
+// one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
+function toRecord(row, links, labels, components, worklog) {
+  const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
+  return {
+    frontmatter: {
+      id: row.id, project: row.project_key, type: row.type, title: row.title,
+```
+
+with:
+
+```js
+// one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
+/** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
+ *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
+ *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty. */
+function extraOf(text) {
+  if (!text) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+
+function toRecord(row, links, labels, components, worklog) {
+  const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
+  return {
+    frontmatter: {
+      // Unknown keys first: `extraFields` never stores a key that has a column, so nothing
+      // below can be shadowed, and the column values stay authoritative regardless.
+      ...extraOf(row.extra_json),
+      id: row.id, project: row.project_key, type: row.type, title: row.title,
+```
+
+In `scripts/model/pg-storage.mjs`, replace (2/2):
+
+```js
+              deadline::text AS deadline, body,
+              created_on::text AS created_on, updated_on::text AS updated_on, version`;
+const ALIVE = "deleted_at IS NULL";
+```
+
+with:
+
+```js
+              deadline::text AS deadline, body,
+              created_on::text AS created_on, updated_on::text AS updated_on, version, extra_json`;
+const ALIVE = "deleted_at IS NULL";
+```
+
+In `scripts/model/sqlite-storage.mjs`, replace (1/3):
+
+```js
+// already was — the N+1 shape is the existing precedent here, not a new one.
+function toRecord(row, links, labels, components, worklog) {
+  const frontmatter = {
+    id: row.id, project: row.project_key, type: row.type, title: row.title,
+```
+
+with:
+
+```js
+// already was — the N+1 shape is the existing precedent here, not a new one.
+/** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
+ *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
+ *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty. */
+function extraOf(text) {
+  if (!text) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+
+function toRecord(row, links, labels, components, worklog) {
+  const frontmatter = {
+    // Unknown keys first — see pg-storage.mjs's toRecord; the two are kept identical.
+    ...extraOf(row.extra_json),
+    id: row.id, project: row.project_key, type: row.type, title: row.title,
+```
+
+In `scripts/model/sqlite-storage.mjs`, replace (2/3):
+
+```js
+                start_date, due_date, constraint_start_no_earlier_than, deadline,
+                body, created_on, updated_on, version`;
+  const ALIVE = "deleted_at IS NULL";
+```
+
+with:
+
+```js
+                start_date, due_date, constraint_start_no_earlier_than, deadline,
+                body, created_on, updated_on, version, extra_json`;
+  const ALIVE = "deleted_at IS NULL";
+```
+
+In `scripts/model/sqlite-storage.mjs`, replace (3/3):
+
+```js
+            t.parent_id, t.parent_type, t.assignee, t.estimate_minutes, t.sprint_id,
+            t.start_date, t.due_date, t.body, t.created_on, t.updated_on, t.version
+       FROM ticket_link l JOIN ticket t ON t.id = l.src_id
+```
+
+with:
+
+```js
+            t.parent_id, t.parent_type, t.assignee, t.estimate_minutes, t.sprint_id,
+            t.start_date, t.due_date, t.body, t.created_on, t.updated_on, t.version, t.extra_json
+       FROM ticket_link l JOIN ticket t ON t.id = l.src_id
+```
+
 
 - [ ] **Step 4: Run them to verify they pass**, then the neighbours this task touches.
 
@@ -1969,10 +2203,10 @@ export function verifyLoad({ source, sourceRoot, loadedTickets, counts, criteria
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-verify.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-load.test.mjs tests/migrate/*.test.mjs tests/db-runner-pg.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-load.test.mjs tests/migrate/*.test.mjs tests/db-runner-pg.test.mjs tests/model/seam-closure.test.mjs tests/model/driver-conformance.test.mjs tests/model/read-seam*.test.mjs tests/model/pg-list-batched.test.mjs tests/db-mode-reads*.test.mjs tests/verbs-*.test.mjs tests/serve-db-mode.test.mjs tests/groomer-db-mode.test.mjs tests/import-db-mode.test.mjs
 ```
 
-Expected: 10/10 pass (4 skip without Postgres).
+Expected: `tests 14, pass 14` (5 skip without Postgres). Discrimination: with the two readers' `extra_json` changes reverted, 4 fail (`acceptance…`, `one injected value change…`, `a db-mode edit keeps…`, `a row the reader never shows…`).
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -2018,7 +2252,7 @@ with:
 
 ```markdown
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
-| `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value, the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
+| `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value (unknown frontmatter keys included), the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 ```
 
@@ -2026,9 +2260,9 @@ with:
 - [ ] **Step 6: Fence check, commit, prove the committed tree.**
 
 ```bash
-git add tests/db-verify.test.mjs scripts/db-runner.mjs scripts/migrate/verify-load.mjs docs/guide/commands.md
+git add tests/db-verify.test.mjs scripts/db-runner.mjs scripts/migrate/verify-load.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs docs/guide/commands.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-679: blaze db verify — the zero-diff oracle as the migration gate" -m "New scripts/migrate/verify-load.mjs (verifyLoad: value diffs, id sets, row counts recomputed by the loader's own builder, criteria by the independent matcher; byte diffs informational); db-runner verify with exit 0/1/2. New tests/db-verify.test.mjs; commands.md." -- tests/db-verify.test.mjs scripts/db-runner.mjs scripts/migrate/verify-load.mjs docs/guide/commands.md
+git commit -m "BLZ-679: blaze db verify — the zero-diff oracle as the migration gate" -m "New scripts/migrate/verify-load.mjs (verifyLoad: value diffs incl. extra_json via extraDiffs, id sets, row counts recomputed by the loader's own builder, criteria by the independent matcher; byte diffs informational); db-runner verify with exit 0/1/2; pg-storage and sqlite-storage readers surface extra_json (a db-mode edit no longer erases unknown keys). New tests/db-verify.test.mjs; commands.md." -- tests/db-verify.test.mjs scripts/db-runner.mjs scripts/migrate/verify-load.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs docs/guide/commands.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
@@ -2044,7 +2278,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 - Create: `tests/db-transitions.test.mjs`
 - Create: `scripts/model/transitions-db.mjs`
 - Modify: `scripts/db-runner.mjs`
-- Modify: `scripts/migrate/load-corpus.mjs`
+- Modify: `scripts/migrate/import-transitions.mjs`
 - Modify: `scripts/model/pg-storage.mjs`
 - Modify: `scripts/model/sqlite-storage.mjs`
 - Modify: `scripts/serve.mjs`
@@ -2054,11 +2288,11 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 - Modify: `docs/guide/commands.md`
 
 **Interfaces:**
-- Consumes: `buildTransitions({ root })` (git rename history, pure), Task 3's `loadCorpusAsync` (its `typeById`).
+- Consumes: `buildTransitions({ root }) → { head, transitions }` (git rename history, pure; `head === null` when there is no git), Task 3's `loadCorpusAsync` (its `typeById`).
 - Produces:
   - `postgresReader(client).listTransitions(root) → Promise<{id, from, to, ts}[]>` and `openSqliteRead(path).listTransitions(root) → {id, from, to, ts}[]`, ordered `ts, id`.
   - `dbTransitions(readStorage, mode, view, root) → Promise<list | undefined>` (`scripts/model/transitions-db.mjs`) — `undefined` unless `mode === "db" && view === "metrics"`.
-  - `GIT_TRANSITION_ACTOR = "git-history"`, `transitionEvents(transitions, loadedIds: Set) → { rows, unknown, undated }`, `importTransitions(exec, transitions, loadedIds, { dialect }) → Promise<{ imported, unknown, undated }>` (`load-corpus.mjs`).
+  - `importTransitionsExec(exec, cache: { transitions }, { knownIds: Set, dialect }) → Promise<report>` (`scripts/migrate/import-transitions.mjs`, beside the unchanged sync `importTransitions`; both share `transitionRows`). `report = { read, imported, skipped: { unknownTicket, malformed }, ticketsCovered, totalTickets, coveragePct }`.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -2074,7 +2308,10 @@ import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { mkdirSync, renameSync } from "node:fs";
 import { join } from "node:path";
-import { transitionEvents, GIT_TRANSITION_ACTOR } from "../scripts/migrate/load-corpus.mjs";
+import { importTransitionsExec } from "../scripts/migrate/import-transitions.mjs";
+import { DatabaseSync } from "node:sqlite";
+import { SQLITE_DDL, SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
+import { sqliteExec } from "../scripts/model/write-port-resolve.mjs";
 import { dbTransitions } from "../scripts/model/transitions-db.mjs";
 import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
 import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
@@ -2105,16 +2342,23 @@ function gitBoard() {
 }
 
 describe("the pure parts", () => {
-  test("transitionEvents: one row per git transition of a LOADED ticket; the rest are counted", () => {
-    const r = transitionEvents([
+  test("importTransitionsExec: BLZ-281's rules through an exec — verbatim, backfill, the rest counted", async () => {
+    const db = new DatabaseSync(":memory:");
+    db.exec(SQLITE_PRAGMAS); db.exec(SQLITE_DDL);
+    db.prepare(`INSERT INTO ticket (id, project_key, num, type, status, title, created_on, updated_on)
+                VALUES ('ENG-1','ENG',1,'task','done','t','2026-01-01','2026-01-01')`).run();
+    const r = await importTransitionsExec(sqliteExec(db), { transitions: [
       { id: "ENG-1", from: "defined", to: "in-progress", ts: "2026-10-01T10:00:00+10:00" },
       { id: "ENG-9", from: "defined", to: "done", ts: "2026-10-01T11:00:00+10:00" },
       { id: "ENG-1", from: "in-progress", to: "done", ts: null },
-    ], new Set(["ENG-1"]));
-    assert.deepEqual(r.rows, [["ENG-1", "transition", "2026-10-01T10:00:00+10:00", GIT_TRANSITION_ACTOR,
-                               "git-backfill", "defined", "in-progress"]]);
-    assert.equal(r.unknown, 1);
-    assert.equal(r.undated, 1);
+    ] }, { knownIds: new Set(["ENG-1"]), dialect: "sqlite" });
+    assert.deepEqual({ imported: r.imported, ...r.skipped, coveragePct: r.coveragePct },
+                     { imported: 1, unknownTicket: 1, malformed: 1, coveragePct: 100 });
+    assert.deepEqual({ ...db.prepare("SELECT at, actor, source, from_status, to_status FROM ticket_event").get() },
+      { at: "2026-10-01T10:00:00+10:00", actor: "unknown", source: "git-backfill",
+        from_status: "defined", to_status: "in-progress" });
+    await assert.rejects(importTransitionsExec(sqliteExec(db), {}, { knownIds: new Set(), dialect: "mysql" }),
+                         /unknown dialect "mysql"/);
   });
 
   test("dbTransitions answers only for db mode's metrics view", async () => {
@@ -2147,6 +2391,15 @@ async function cfdSeries(base) {
   return JSON.parse(m[1]);
 }
 
+/** The same series from the PAGE route's first render (`GET /?view=metrics`). */
+async function pageSeries(base) {
+  const r = await fetch(`${base}/?view=metrics`);
+  assert.equal(r.status, 200);
+  const m = /id="cfd-series">([\s\S]*?)<\/script>/.exec(await r.text());
+  assert.ok(m, "the page's metrics view carries its series");
+  return JSON.parse(m[1]);
+}
+
 async function withDbBoard(fn) {
   const roots = dbBoard();               // NOT a git repo: git has no history to offer here
   assert.equal(0, await runDb(["init"], { ...QUIET, roots }));
@@ -2174,6 +2427,7 @@ for (const [name, boot] of [
       const base = `http://127.0.0.1:${server.address().port}`;
       try {
         assert.deepEqual(await cfdSeries(base), [], "no history yet: nothing has moved");
+        assert.deepEqual(await pageSeries(base), []);
         if (name === "blaze board") {
           const m = await fetch(`${base}/api/move`, { method: "POST",
             headers: { "content-type": "application/json", "x-blaze-csrf": CSRF },
@@ -2189,6 +2443,7 @@ for (const [name, boot] of [
         }
         // Before BLZ-680 this stayed [] — the page asked git, and this board has no git history.
         assert.ok((await cfdSeries(base)).length > 0, "the database's transition reached the view");
+        assert.ok((await pageSeries(base)).length > 0, "…and the page route's first render");
       } finally {
         server.closeAllConnections();
         await new Promise((r) => server.close(r));
@@ -2207,15 +2462,29 @@ test("Postgres `blaze db load` imports the git history as transition events", PG
     const out = [];
     const io = { log: (s) => out.push(String(s)), err: (s) => out.push(String(s)), env: {} };
     assert.equal(await runDb(["load"], { ...io, roots, ...pgIo }), 0, out.join("\n"));
-    assert.match(out.join("\n"), /transitions\s+1\s+\(from git history\)/);
+    assert.match(out.join("\n"), /transitions\s+1\s+\(from git history; 1 tickets, 100% covered\)/);
     const c = await pgClient(db.url);
     try {
       const got = await postgresReader(c).listTransitions(null);
       assert.equal(got.length, 1);
       assert.deepEqual([got[0].id, got[0].from, got[0].to], ["ENG-1", "defined", "in-progress"]);
       const ev = (await c.query("SELECT actor, source FROM ticket_event")).rows;
-      assert.deepEqual(ev, [{ actor: GIT_TRANSITION_ACTOR, source: "git-backfill" }]);
+      assert.deepEqual(ev, [{ actor: "unknown", source: "git-backfill" }]);
     } finally { await c.end(); }
+  } finally { await db.drop(); }
+});
+
+test("a load from a tree with no git history SAYS so — 0 is not reported as 'no moves'", PG_SKIP, async () => {
+  const db = await scratchPgDb("nogit");
+  try {
+    const roots = dbBoard();
+    const pgIo = { resolveDbConfig: () => ({ driver: "postgres", connection: db.url }),
+                   openPostgresClient: (c) => pgClient(c) };
+    assert.equal(await runDb(["init"], { ...QUIET, roots, ...pgIo }), 0);
+    const out = [];
+    const io = { log: (s) => out.push(String(s)), err: (s) => out.push(String(s)), env: {} };
+    assert.equal(await runDb(["load"], { ...io, roots, ...pgIo }), 0, out.join("\n"));
+    assert.match(out.join("\n"), /⚠ transitions {2}0 — no git history at .*, so none was imported/);
   } finally { await db.drop(); }
 });
 ```
@@ -2229,14 +2498,13 @@ export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/db-transitions.test.mjs
 ```
 
-Expected: the file fails to load — `does not provide an export named 'GIT_TRANSITION_ACTOR'` (and `transitions-db.mjs` does not exist yet).
+Expected: the file fails to load — `Cannot find module '…/scripts/model/transitions-db.mjs'` (`tests 1, fail 1`).
 
 - [ ] **Step 3: Implement.**
 
-In `scripts/db-runner.mjs`, replace (1/7):
+In `scripts/db-runner.mjs`, replace (1/8):
 
 ```js
-import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
 import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
 import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
 ```
@@ -2244,13 +2512,36 @@ import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
 with:
 
 ```js
-import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
-import { loadCorpusAsync, importTransitions } from "./migrate/load-corpus.mjs";
+import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { importTransitionsExec } from "./migrate/import-transitions.mjs";
 import { buildTransitions } from "./model/transitions.mjs";
 import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
 ```
 
-In `scripts/db-runner.mjs`, replace (2/7):
+In `scripts/db-runner.mjs`, replace (2/8):
+
+```js
+
+/** BLZ-678: the tables `blaze db load --replace` empties — the ticket corpus and its history.
+```
+
+with:
+
+```js
+
+/** BLZ-680: what the transition import did, in one line — and, loudly, when there was no git
+ *  history to import from at all (a copy with no `.git`), which must not read as "no moves". */
+function transitionsLine(h, dataRoot) {
+  if (h.head === null) return `  ⚠ transitions  0 — no git history at ${dataRoot}, so none was imported`;
+  const skipped = h.skipped.unknownTicket + h.skipped.malformed;
+  return `  transitions  ${h.imported}  (from git history; ${h.ticketsCovered} tickets, ${h.coveragePct}% covered`
+    + `${skipped ? `; ${h.skipped.unknownTicket} for unknown tickets and ${h.skipped.malformed} malformed skipped` : ""})`;
+}
+
+/** BLZ-678: the tables `blaze db load --replace` empties — the ticket corpus and its history.
+```
+
+In `scripts/db-runner.mjs`, replace (3/8):
 
 ```js
 async function loadCmd(ctx) {
@@ -2266,7 +2557,7 @@ async function loadCmd(ctx) {
   const dbConfig = dbConfigOr(ctx);
 ```
 
-In `scripts/db-runner.mjs`, replace (3/7):
+In `scripts/db-runner.mjs`, replace (4/8):
 
 ```js
     await exec.run("BEGIN", []);
@@ -2282,7 +2573,7 @@ with:
     try {
 ```
 
-In `scripts/db-runner.mjs`, replace (4/7):
+In `scripts/db-runner.mjs`, replace (5/8):
 
 ```js
       }
@@ -2295,12 +2586,15 @@ with:
       }
       // BLZ-680 (spec §5.7): the git-era status history, once, as `transition` events — under
       // db the metrics view reads `ticket_transition`, and git's log stops growing at cutover.
-      history = await importTransitions(exec, buildTransitions({ root: dataRoot }).transitions,
-                                        new Set(tally.typeById.keys()), { dialect: "postgres" });
+      // Through BLZ-281's import rules (import-transitions.mjs). `head === null` means no git
+      // history could be read at the data root — said below, never passed off as "none".
+      const built = buildTransitions({ root: dataRoot });
+      history = { ...(await importTransitionsExec(exec, built,
+                    { knownIds: new Set(tally.typeById.keys()), dialect: "postgres" })), head: built.head };
       // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
 ```
 
-In `scripts/db-runner.mjs`, replace (5/7):
+In `scripts/db-runner.mjs`, replace (6/8):
 
 ```js
     if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
@@ -2311,13 +2605,11 @@ with:
 
 ```js
     if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
-    log(`  transitions  ${history.imported}  (from git history)`);
-    if (history.unknown) log(`  ⚠ transitions for tickets not in this board: ${history.unknown}`);
-    if (history.undated) log(`  ⚠ transitions with no timestamp: ${history.undated}`);
+    log(transitionsLine(history, dataRoot));
     if (tally.skipped.noId || tally.skipped.badId) {
 ```
 
-In `scripts/db-runner.mjs`, replace (6/7):
+In `scripts/db-runner.mjs`, replace (7/8):
 
 ```js
     db.exec(setMigrationModeSql("sqlite", false));
@@ -2332,13 +2624,15 @@ with:
     // switched to BLAZE_WRITE_PORT=db keeps its metrics history too. One transaction: a file
     // database commits each autocommitted INSERT to disk on its own.
     db.exec("BEGIN");
-    const history = await importTransitions(exec, buildTransitions({ root: dataRoot }).transitions,
-      new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), { dialect: "sqlite" });
+    const built = buildTransitions({ root: dataRoot });
+    const history = { ...(await importTransitionsExec(exec, built,
+      { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
+      head: built.head };
     db.exec("COMMIT");
     // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
 ```
 
-In `scripts/db-runner.mjs`, replace (7/7):
+In `scripts/db-runner.mjs`, replace (8/8):
 
 ```js
     log(`  labels       ${tally.labels}   components ${tally.components}`);
@@ -2349,58 +2643,110 @@ with:
 
 ```js
     log(`  labels       ${tally.labels}   components ${tally.components}`);
-    log(`  transitions  ${history.imported}  (from git history)`);
+    log(transitionsLine(history, dataRoot));
     // Every substitution is named. A tally that reports only successes is a tally that
 ```
 
-In `scripts/migrate/load-corpus.mjs`, replace:
+Replace the whole of `scripts/migrate/import-transitions.mjs` with:
 
 ```js
-  return { ...report, typeById };
+// scripts/migrate/import-transitions.mjs — the historical audit trail (BLZ-281).
+//
+// The brief is unusually emphatic here, and it is right to be:
+//
+//   "Import verbatim. Never re-run `git log`. Never synthesise unobserved
+//    transitions. Surface the coverage figure on the metrics view."
+//
+// The reason is that .blaze/transitions.json is NOT a complete history and cannot be
+// made into one. It is rebuilt by `blaze reindex` from `git log --diff-filter=R`
+// rename detection, and the board's history is squash-merged — so it covers 385 of
+// 2,547 tickets, about 15%. Every ticket move that happened inside a squashed commit
+// is simply not observable any more.
+//
+// That makes two things forbidden rather than merely inadvisable:
+//
+//   - Re-deriving from git at import time. It would produce a DIFFERENT partial set
+//     depending on when it ran and how the clone was fetched, so the trail would stop
+//     being reproducible.
+//   - Filling gaps. A ticket sitting in done/ with no recorded transition did move
+//     there, and inventing a plausible timestamp would put fiction into a table whose
+//     entire value is that it is evidence.
+//
+// So: import what was observed, mark it as backfill, and report the coverage honestly.
+//
+// BLZ-680: `blaze db load` imports through these SAME rules (`importTransitionsExec` below, over
+// an async `exec` on Postgres or the SQLite shadow's). It reads git's rename log once, at the
+// load (`buildTransitions`, spec §5.7) — the one moment the trail is frozen into the database,
+// after which git's log stops growing — so the "never re-run git log" rule above governs every
+// LATER import, and the trail is reproducible as of the commit the load ran at.
+const ISO = /^\d{4}-\d{2}-\d{2}T/;
+
+/** The rule, once: which recorded transitions become events, and the report about the rest.
+ *  @returns { rows: [ticket_id, at, from, to][], report } */
+function transitionRows(cache, ids) {
+  const rows = Array.isArray(cache?.transitions) ? cache.transitions : [];
+  const report = {
+    read: rows.length, imported: 0,
+    skipped: { unknownTicket: 0, malformed: 0 },
+    ticketsCovered: 0, totalTickets: ids.size, coveragePct: 0,
+  };
+  const out = [];
+  const covered = new Set();
+  for (const t of rows) {
+    // `from` may legitimately be absent — a ticket's first appearance has no prior
+    // status — but the event shape CHECK requires both, so those cannot be imported
+    // as transitions. Counted, not silently dropped.
+    if (!t?.id || !t?.to || !t?.from || !ISO.test(String(t.ts ?? ""))) {
+      report.skipped.malformed++; continue;
+    }
+    if (!ids.has(t.id)) { report.skipped.unknownTicket++; continue; }
+    // Timestamps are carried through EXACTLY as recorded — not normalised, not
+    // re-zoned. They are evidence, and evidence that has been tidied is weaker.
+    out.push([t.id, String(t.ts), String(t.from), String(t.to)]);
+    covered.add(t.id);
+  }
+  report.imported = out.length;
+  report.ticketsCovered = covered.size;
+  report.coveragePct = report.totalTickets
+    ? Number(((covered.size / report.totalTickets) * 100).toFixed(1)) : 0;
+  return { rows: out, report };
 }
-```
-
-with:
-
-```js
-  return { ...report, typeById };
-}
-
-/** BLZ-680: who a git-era transition is recorded as. Git's rename log names a commit, not an
- *  operator, and `ticket_event.actor` must not invent one. */
-export const GIT_TRANSITION_ACTOR = "git-history";
 
 /**
- * BLZ-680 (spec §5.7), pure: the git-derived transitions (`buildTransitions`) as `transition`
- * ticket_events, for the tickets that loaded. Under db the metrics view reads history from
- * `ticket_transition`, and the git rename log stops growing once moves stop touching files —
- * so the history up to the load is imported, once, here.
- *
- * A transition for an id that did not load, or with no timestamp, is COUNTED and skipped: the
- * event table's foreign key and NOT NULL `at` would refuse it, and refusing it silently would
- * be the drop this file promises never to make.
+ * @param db       an open SQLite handle with the schema applied
+ * @param cache    the parsed .blaze/transitions.json
+ * @returns a report including the coverage figure the metrics view must surface
  */
-export function transitionEvents(transitions, loadedIds) {
-  const rows = [];
-  let unknown = 0, undated = 0;
-  for (const tr of transitions ?? []) {
-    if (!loadedIds.has(tr.id)) { unknown++; continue; }
-    if (!tr.ts) { undated++; continue; }
-    rows.push([tr.id, "transition", tr.ts, GIT_TRANSITION_ACTOR, "git-backfill", tr.from, tr.to]);
-  }
-  return { rows, unknown, undated };
+export function importTransitions(db, cache, { knownIds = null } = {}) {
+  const ins = db.prepare(
+    `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
+     VALUES (?, 'transition', ?, 'unknown', 'git-backfill', ?, ?)`);
+  const ids = knownIds ??
+    new Set(db.prepare("SELECT id FROM ticket").all().map((r) => r.id));
+  const { rows, report } = transitionRows(cache, ids);
+  db.exec("BEGIN");
+  for (const r of rows) ins.run(...r);
+  db.exec("COMMIT");
+  return report;
 }
 
-/** Insert `transitionEvents`' rows through an `exec`, either dialect, sync or async. */
-export async function importTransitions(exec, transitions, loadedIds, { dialect = "postgres" } = {}) {
+/**
+ * BLZ-680: the same import through an `exec` ({run, all}, awaited) in either dialect, INSIDE
+ * the caller's transaction — `blaze db load` commits it with the tickets, or not at all.
+ * @param knownIds  the ids that loaded (the event's foreign key needs the ticket)
+ */
+export async function importTransitionsExec(exec, cache, { knownIds, dialect = "postgres" }) {
+  if (dialect !== "sqlite" && dialect !== "postgres") {
+    throw new Error(`unknown dialect ${JSON.stringify(dialect)} — expected 'sqlite' or 'postgres'`);
+  }
   const ph = (i) => (dialect === "postgres" ? `$${i + 1}` : "?");
-  const { rows, unknown, undated } = transitionEvents(transitions, loadedIds);
+  const { rows, report } = transitionRows(cache, knownIds);
   for (const r of rows) {
     await exec.run(
       `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
-       VALUES (${r.map((_, i) => ph(i)).join(", ")})`, r);
+       VALUES (${ph(0)}, 'transition', ${ph(1)}, 'unknown', 'git-backfill', ${ph(2)}, ${ph(3)})`, r);
   }
-  return { imported: rows.length, unknown, undated };
+  return report;
 }
 ```
 
@@ -2604,7 +2950,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/db-*.test.mjs tests/views/*.test.mjs tests/db-mode-reads*.test.mjs tests/groomer-db-mode.test.mjs tests/model/driver-conformance.test.mjs tests/model/seam-closure.test.mjs
 ```
 
-Expected: 7/7 pass (1 skips without Postgres). Discrimination was proven in the prototype: with Step 3's `serve.mjs`/`supervisor.mjs` edits reverted, both `… shows in the metrics history` tests fail (`[]`).
+Expected: `tests 7, suites 1, pass 7` (2 skip without Postgres). Discrimination was proven in the prototype: with Step 3's `serve.mjs`/`supervisor.mjs` edits reverted, both `… shows in the metrics history` tests fail; with only the page route's `transitions:` removed from `serve.mjs`, `blaze board under db…` fails on `…and the page route's first render`.
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -2645,9 +2991,11 @@ BLZ-254 decided each residual this ADR left open ([spec](../superpowers/specs/20
 
 - **`.blaze/transitions.json` — closed (BLZ-680).** Under `db` the Metrics view reads its
   history from the `ticket_transition` view over `ticket_event` (`dbTransitions`, called by both
-  servers for the metrics view only). `blaze db load` imports the git-era history once, as
-  `transition` events with `source = 'git-backfill'` and actor `git-history`; the SQLite
-  `blaze db init` does the same for the shadow. `fs` and `dual` still read git, unchanged.
+  servers for the metrics view only). `blaze db load` imports the git-era history once, through
+  BLZ-281's import rules (`import-transitions.mjs`: timestamps verbatim, `source =
+  'git-backfill'`, actor `unknown`, unknown and malformed rows counted, coverage reported) and
+  says so loudly when the data root has no git history to import; the SQLite `blaze db init`
+  does the same for the shadow. `fs` and `dual` still read git, unchanged.
 - **`sprints.json` — kept as a data-root config file**, like `blaze.config.json`. It is a small
   operator-edited registry; a ticket's sprint membership is already the `ticket.sprint_id`
   column. It moves with config in Phase 5.
@@ -2677,9 +3025,9 @@ with:
 - [ ] **Step 6: Fence check, commit, prove the committed tree.**
 
 ```bash
-git add tests/db-transitions.test.mjs scripts/db-runner.mjs scripts/migrate/load-corpus.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/transitions-db.mjs scripts/serve.mjs scripts/supervisor.mjs AGENTS.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/guide/commands.md
+git add tests/db-transitions.test.mjs scripts/db-runner.mjs scripts/migrate/import-transitions.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/transitions-db.mjs scripts/serve.mjs scripts/supervisor.mjs AGENTS.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/guide/commands.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-680: under db, metrics history from ticket_transition; db load imports git transitions" -m "pg and sqlite readers gain listTransitions; new scripts/model/transitions-db.mjs; serve.mjs and supervisor.mjs pass it to the metrics view under db only; load-corpus.mjs gains transitionEvents/importTransitions, used by db load and the SQLite init. New tests/db-transitions.test.mjs; AGENTS.md, commands.md, ADR-0038 addendum." -- tests/db-transitions.test.mjs scripts/db-runner.mjs scripts/migrate/load-corpus.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/transitions-db.mjs scripts/serve.mjs scripts/supervisor.mjs AGENTS.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/guide/commands.md
+git commit -m "BLZ-680: under db, metrics history from ticket_transition; db load imports git transitions" -m "pg and sqlite readers gain listTransitions; new scripts/model/transitions-db.mjs; serve.mjs and supervisor.mjs pass it to the metrics view (page and fragment routes) under db only; import-transitions.mjs shares its rule with a new importTransitionsExec, used by db load and the SQLite init, which warn when there is no git history. New tests/db-transitions.test.mjs; AGENTS.md, commands.md, ADR-0038 addendum." -- tests/db-transitions.test.mjs scripts/db-runner.mjs scripts/migrate/import-transitions.mjs scripts/model/pg-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/transitions-db.mjs scripts/serve.mjs scripts/supervisor.mjs AGENTS.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md docs/guide/commands.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
@@ -2698,7 +3046,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 - Modify: `docs/guide/commands.md`
 
 **Interfaces:**
-- Produces (`scripts/model/audit.mjs`): `SOFT_KINDS` += `empty-body`, `config-project-drift`, `terminal-parent-open-child` (soft until the board is groomed; `HARD_KINDS` unchanged); `TERMINAL_PARENT_STATUSES`, `EMPTY_BODY_TERMINAL` (Sets); `isScaffoldLine(line) → boolean`; `bodyIsEmpty(body) → boolean`; `governanceFindings({ tickets, configProjects: string[]|null, storeProjects: string[] }) → finding[]`; `auditCorpus({ tickets, projects, config, universe })` — `universe` (default `tickets`) is what ids and parent types resolve against.
+- Produces (`scripts/model/audit.mjs`): `SOFT_KINDS` += `empty-body`, `config-project-drift`, `terminal-parent-open-child` (soft until the board is groomed; `HARD_KINDS` unchanged); `TERMINAL_PARENT_STATUSES`, `EMPTY_BODY_TERMINAL` (Sets); `isScaffoldLine(line) → boolean`; `bodyIsEmpty(body) → boolean`; `governanceFindings({ tickets, universe?, configProjects: string[]|null, storeProjects: string[], scopeProjects?: string[]|null }) → finding[]`; `auditCorpus({ tickets, projects, config, universe })` — `universe` (default `tickets`) is what ids and parent types resolve against.
 - Produces (`blaze audit`): `--fail-on k1,k2` — exit 1 iff a finding of a named kind, else 0; unknown or empty → exit 2; JSON gains `failOn`, `failing` when given.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2882,6 +3230,36 @@ test("--projects scopes what is JUDGED, never what RESOLVES: a cross-project lin
   assert.ok(!found.some((f) => f.startsWith("OPS-1 ")), "an out-of-scope ticket is resolved, never judged");
   assert.equal(r.status, 1, "the one real dangling target is still hard");
 });
+
+test("governanceFindings scopes like auditCorpus: children resolve across the store, findings stay in scope", () => {
+  const universe = [
+    t("ENG-1", "done", { type: "feature" }), t("OPS-2", "defined", { parent: "ENG-1" }),
+    t("OPS-3", "done", { type: "feature" }), t("ENG-4", "defined", { parent: "OPS-3" }),
+  ];
+  const tickets = universe.filter((x) => x.frontmatter.id.startsWith("ENG-"));
+  const f = governanceFindings({ tickets, universe, configProjects: ["ENG", "OPS", "GONE"],
+                                 storeProjects: ["ENG", "OPS", "NEW"], scopeProjects: ["ENG"] });
+  assert.deepEqual(f.map((x) => `${x.ticket} ${x.kind}`), ["ENG-1 terminal-parent-open-child"],
+    "OPS-2 (out of scope) is still ENG-1's open child; OPS-3 is not judged; GONE/NEW are not ENG's");
+  assert.match(f[0].detail, /1\/1 children open: OPS-2/);
+});
+
+test("blaze audit --projects: an in-scope terminal parent with an out-of-scope open child is reported", () => {
+  const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blz681-scope2-")));
+  const projectsDir = join(dataRoot, "projects");
+  mkdirSync(join(projectsDir, "ENG", "done"), { recursive: true });
+  mkdirSync(join(projectsDir, "OPS", "defined"), { recursive: true });
+  writeFileSync(join(dataRoot, "blaze.config.json"), JSON.stringify({ projects: ["ENG", "OPS", "GONE"] }));
+  writeFileSync(join(projectsDir, "ENG", "done", "ENG-1-f.md"),
+    doc({ id: "ENG-1", title: "F", type: "feature", project: "ENG", components: "[a]", labels: "[b]" }));
+  writeFileSync(join(projectsDir, "OPS", "defined", "OPS-2-t.md"),
+    doc({ id: "OPS-2", title: "T", type: "task", project: "OPS", parent: "ENG-1", estimate: 30,
+          components: "[a]", labels: "[b]" }));
+  const r = audit(projectsDir, ["--json", "--projects", "ENG"]);
+  const found = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind}`);
+  assert.ok(found.includes("ENG-1 terminal-parent-open-child"), found.join("; "));
+  assert.ok(!found.some((f) => f.endsWith("config-project-drift")), "GONE is outside --projects ENG");
+});
 ```
 
 
@@ -2893,7 +3271,7 @@ export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs
 ```
 
-Expected: the file fails to load (`does not provide an export named 'governanceFindings'`).
+Expected: the file fails to load — `does not provide an export named 'EMPTY_BODY_TERMINAL'` (the first missing import; `tests 1, fail 1`).
 
 - [ ] **Step 3: Implement.**
 
@@ -3056,8 +3434,11 @@ with:
 // An EMPTY or absent `projects` is no list to drift from: the audit itself falls back to the
 // store's own listing for it (`nonEmpty` above), and a directory audited outside any board has
 // no config at all.
+// Scoped like auditCorpus: a parent's children are found in the whole store (`allTickets`), and
+// only in-scope tickets and projects are reported.
 report.findings.push(...governanceFindings({
-  tickets, configProjects: nonEmpty(config?.projects), storeProjects,
+  tickets, universe: allTickets, configProjects: nonEmpty(config?.projects), storeProjects,
+  scopeProjects: nonEmpty(opts.projects),
 }));
 
 // auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
@@ -3186,14 +3567,16 @@ export function auditCorpus({ tickets = [], projects = {}, config = null, univer
 In `scripts/model/audit.mjs`, replace (3/3):
 
 ```js
-/** Counts by kind, for a runner that prints a summary rather than every finding. */
-export function summarise(findings) {
+  return { findings, ok: !findings.some((f) => HARD_KINDS.has(f.kind)) };
+}
 ```
 
 with:
 
 ```js
-/** Counts by kind, for a runner that prints a summary rather than every finding. */
+  return { findings, ok: !findings.some((f) => HARD_KINDS.has(f.kind)) };
+}
+
 // ---------------------------------------------------------------------------------------
 // governanceFindings — BLZ-681 (spec §5.6). Three of blaze-pm's governance scripts, re-homed as
 // `blaze audit` kinds so they read through `resolveReadStorage` and work under fs, dual and db.
@@ -3230,29 +3613,38 @@ const idOrder = (a, b) => {
 };
 
 /**
- * @param tickets         [{ frontmatter, body, status }] — the audited corpus, from the read store
+ * Scoping matches `auditCorpus`'s (BLZ-681): relations RESOLVE against everything the store
+ * holds, and findings are raised only on what is in scope.
+ *
+ * @param tickets         [{ frontmatter, body, status }] — the tickets in scope (`--projects`)
+ * @param universe        every ticket the store holds; a parent's children are found here, so a
+ *                        child in a project outside `--projects` still counts. Default `tickets`.
  * @param configProjects  blaze.config.json's `projects`, or null when the config did not load
  * @param storeProjects   the project keys the read store holds (`readStorage.listProjects`)
+ * @param scopeProjects   the `--projects` keys, or null for an unscoped run; drift is reported
+ *                        only for these
  * @returns findings, `{ ticket, kind, detail }`
  */
-export function governanceFindings({ tickets = [], configProjects = null, storeProjects = [] } = {}) {
+export function governanceFindings({ tickets = [], universe = null, configProjects = null,
+                                     storeProjects = [], scopeProjects = null } = {}) {
   const findings = [];
 
   // terminal-parent-open-child — SOFT until the live board is groomed (see SOFT_KINDS), then
   // hard. Children are found across the whole audited set, so a
   // cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
   const byId = new Map();
-  for (const t of tickets) {
+  for (const t of universe ?? tickets) {
     const id = t?.frontmatter?.id;
     if (id) byId.set(String(id), { status: t.status, type: t.frontmatter.type, parent: t.frontmatter.parent || null });
   }
+  const inScope = new Set(tickets.map((t) => String(t?.frontmatter?.id ?? "")));
   const children = new Map();
   for (const [id, t] of byId) {
     if (!t.parent) continue;
     if (!children.has(t.parent)) children.set(t.parent, []);
     children.get(t.parent).push(id);
   }
-  for (const parent of [...children.keys()].filter((p) => byId.has(p)).sort(idOrder)) {
+  for (const parent of [...children.keys()].filter((p) => byId.has(p) && inScope.has(p)).sort(idOrder)) {
     const p = byId.get(parent);
     if (!TERMINAL_PARENT_STATUSES.has(p.status)) continue;
     const kids = children.get(parent);
@@ -3275,19 +3667,18 @@ export function governanceFindings({ tickets = [], configProjects = null, storeP
   // config did not load — `config-unloadable` already says so.
   if (Array.isArray(configProjects)) {
     const configured = new Set(configProjects), held = new Set(storeProjects);
-    for (const k of [...held].filter((x) => !configured.has(x)).sort()) {
+    const scoped = (k) => !scopeProjects || scopeProjects.includes(k);
+    for (const k of [...held].filter((x) => !configured.has(x) && scoped(x)).sort()) {
       findings.push({ ticket: k, kind: "config-project-drift",
         detail: "the store holds this project but blaze.config.json's projects does not list it" });
     }
-    for (const k of [...configured].filter((x) => !held.has(x)).sort()) {
+    for (const k of [...configured].filter((x) => !held.has(x) && scoped(x)).sort()) {
       findings.push({ ticket: k, kind: "config-project-drift",
         detail: "blaze.config.json's projects lists this project but the store holds none of it" });
     }
   }
   return findings;
 }
-
-export function summarise(findings) {
 ```
 
 
@@ -3300,7 +3691,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit*.test.mjs tests/model/link-type-overrides.test.mjs tests/board-gate.test.mjs tests/model/schedule-findings.test.mjs tests/blz-407-audit-load-agreement.test.mjs tests/schema-audit-load-agreement-oracle.test.mjs tests/temp-cleanup-guard.test.mjs tests/quoted-sources.test.mjs
 ```
 
-Expected: 11/11 pass in `tests/audit-governance.test.mjs` and every neighbour green (`link-type-overrides`' "every kind the audit emits is registered" scan finds the three new literals). Discrimination: with `universe: allTickets` changed to `universe: null` in the runner, `--projects scopes what is JUDGED…` fails.
+Expected: `tests 12, suites 1, pass 12` in `tests/audit-governance.test.mjs` and every neighbour green (`link-type-overrides`' "every kind the audit emits is registered" scan finds the three new literals). Discrimination: with `universe: allTickets` → `universe: null` in the `auditCorpus` call, `--projects scopes what is JUDGED…` fails; with it in the `governanceFindings` call, `…out-of-scope open child is reported` fails.
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -3381,7 +3772,9 @@ duplicated id alone, on a board that already carries other hard findings.
 
 **`--projects` scopes what is judged, never what resolves** (BLZ-681). A link target or parent in
 a project outside the list still exists, so `blaze audit --projects BLZ` does not call
-`BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged.
+`BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged. The
+governance kinds follow the same rule: an in-scope parent's open child in another project still
+counts for `terminal-parent-open-child`, and `config-project-drift` names only listed projects.
 
 ```
 
@@ -3430,7 +3823,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 - Produces (`scripts/model/matrices.mjs`): `requirementsMatrix(tickets, project, pathOf) → string`, `architectureMatrix(tickets, project, pathOf) → string`, `matrixFiles(tickets, project, pathOf) → { "<key>-requirements-matrix.md": string, "<key>-architecture-matrix.md": string }` — `tickets` are reader records (`{ frontmatter, body, project, status, file }`), `pathOf(ticket) → "projects/<KEY>/<status>/<file>.md"` relative to the data root.
 - Produces: `blaze matrices [--project KEY] [--check] [--out DIR]` — exit 0 / 1 (drift) / 2 (no projects).
 
-The fixture board's `docs/matrices/*.md` are the output of blaze-pm's `scripts/build_matrices.py --project ENG` run on that board (the prototype ran it; it is reproduced below byte for byte). Create every fixture file with EXACTLY the content shown — each ends with a single newline.
+The fixture board's `docs/matrices/*.md` are the output of blaze-pm's `scripts/build_matrices.py --project ENG` run on that board (the prototype ran it; it is reproduced below byte for byte). Create every fixture file with EXACTLY the content shown, byte for byte — including `eng-requirements-matrix.md`'s trailing blank line (the script's output ends `|` then two newlines); do not strip or add newlines.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -3819,7 +4212,7 @@ export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/matrices.test.mjs tests/model/seam-closure.test.mjs tests/schema-version-fixture-census.test.mjs
 ```
 
-Expected: `tests/matrices.test.mjs` fails to load (`Cannot find module '…/scripts/model/matrices.mjs'`); `seam-closure` fails "the write-seam scan OBSERVED the corpus, and its allowlist is all load-bearing" (`matrices-runner.mjs` is named but does not exist yet); `schema-version-fixture-census` fails `5 !== 6` (the new fixture board) until Step 3's comment change.
+Expected: `tests/matrices.test.mjs` fails to load (`Cannot find module '…/scripts/model/matrices.mjs'`); `seam-closure` fails two tests — "the write-seam scan OBSERVED the corpus, and its allowlist is all load-bearing" and "every module the write allowlist names is pinned, export by export" (`matrices-runner.mjs` is named but does not exist yet); `schema-version-fixture-census` fails "the census comment states the numbers derived here…" (`5 !== 6`, the new fixture board) until Step 3's comment change.
 
 - [ ] **Step 3: Implement.**
 
@@ -4139,7 +4532,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/cli.test.mjs tests/readonly.test.mjs tests/tmp-scratch-attribution.test.mjs tests/temp-cleanup-guard.test.mjs
 ```
 
-Expected: 9/9 pass in `tests/matrices.test.mjs`; `seam-closure` 21/21; census green; `cli.test.mjs` green (the "21 of the 24 subcommands" comment).
+Expected: across the three files `tests 34, suites 1, pass 34` (matrices 9, seam-closure 21, census 4); `cli.test.mjs` green (the "21 of the 24 subcommands" comment).
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -4348,7 +4741,8 @@ import assert from "node:assert/strict";
 import { writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { runDb } from "../scripts/db-runner.mjs";
-import { resolvePorts, pgExec } from "../scripts/model/write-port-resolve.mjs";
+import { resolvePorts, resolveWritePort, pgExec } from "../scripts/model/write-port-resolve.mjs";
+import { execFileSync } from "node:child_process";
 import { dbWritePort } from "../scripts/model/write-port.mjs";
 import { createDbSchema } from "../scripts/model/db-schema-version.mjs";
 import { applyNew } from "../scripts/new.mjs";
@@ -4419,6 +4813,34 @@ test("an edit or a move is still an upsert — only a create refuses an existing
   } finally { await ports.close(); }
 });
 
+test("dual: a stale SHADOW row is still upserted by a create — no divergence, as before", async () => {
+  const roots = dbBoard();
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", roots.dataRoot, ...a]);
+  }
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const { DatabaseSync } = await import("node:sqlite");
+  const raw = new DatabaseSync(join(roots.dataRoot, ".blaze", "blaze.db"));
+  raw.prepare(`INSERT INTO ticket (id, project_key, num, type, status, title, body, estimate_minutes, created_on, updated_on)
+               VALUES ('ENG-2','ENG',2,'task','defined','stale shadow row','old body',30,'2026-01-01','2026-01-01')`).run();
+  raw.close();
+  const divergences = [];
+  const w = await resolveWritePort({ ...roots, env: { BLAZE_WRITE_PORT: "dual" },
+                                     onDivergence: (d) => divergences.push(d) });
+  try {
+    const n = await applyNew(roots.projectsDir, { project: "ENG", type: "task", title: "fresh",
+      today: "2026-10-05", extra: { estimate: 15 }, writePort: w.port });
+    assert.equal(n.ok, true, JSON.stringify(n.errors));
+    assert.equal(n.id, "ENG-2");
+  } finally { w.close(); }
+  assert.deepEqual(divergences, [], "the shadow converged, exactly as before BLZ-683");
+  const check = new DatabaseSync(join(roots.dataRoot, ".blaze", "blaze.db"));
+  try {
+    assert.equal(check.prepare("SELECT title FROM ticket WHERE id = 'ENG-2'").get().title, "fresh");
+  } finally { check.close(); }
+});
+
 test("Postgres, two connections: the loser's INSERT meets the primary key inside its own transaction",
      PG_SKIP, async () => {
   const db = await scratchPgDb("window");
@@ -4458,7 +4880,7 @@ export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/readonly-runners.test.mjs tests/reserve-window.test.mjs
 ```
 
-Expected: 4 failures in `readonly-runners` (user/init/migrate/schedule each wrote or ran) and 3 in `reserve-window` (`import: …` exit 0 with the CSV title over the other writer's, `new: …` no rejection, `Postgres, two connections: …` no rejection — the loser upserted). `an edit or a move is still an upsert` passes before and after (it guards the change from over-reaching).
+Expected: `tests 10, pass 3, fail 7` — 4 in `readonly-runners` (user/init/migrate/schedule each wrote or ran) and 3 in `reserve-window` (`import: …` exit 0 with the CSV title over the other writer's, `new: …` no rejection, `Postgres, two connections: …` no rejection — the loser upserted). `an edit or a move is still an upsert` and `dual: a stale SHADOW row is still upserted…` pass before and after: they pin what must NOT change (the dual one fails if Step 3's `dualWritePort` strip is left out).
 
 - [ ] **Step 3: Implement.**
 
@@ -4552,7 +4974,7 @@ with:
       files.push(file);
 ```
 
-In `scripts/model/write-port.mjs`, replace (1/2):
+In `scripts/model/write-port.mjs`, replace (1/3):
 
 ```js
     const prior = priorRows?.length ? priorRows[0].status : null;
@@ -4576,7 +4998,7 @@ with:
 
 ```
 
-In `scripts/model/write-port.mjs`, replace (2/2):
+In `scripts/model/write-port.mjs`, replace (2/3):
 
 ```js
     const set = cols.slice(1).map((c) => `${c} = excluded.${c}`).join(", ");
@@ -4596,6 +5018,25 @@ with:
       `INSERT INTO ticket (${cols.join(", ")}) VALUES (${cols.map((_, i) => ph(i)).join(", ")})`
       + (ctx?.create ? "" : `\n       ON CONFLICT (id) DO UPDATE SET ${set}`), vals);
 
+```
+
+In `scripts/model/write-port.mjs`, replace (3/3):
+
+```js
+    try {
+      await shadow[op](t, ctx);
+    } catch (e) {
+```
+
+with:
+
+```js
+    try {
+      // BLZ-683: `create` is the PRIMARY's question ("is this id free?"), decided above. The
+      // shadow keeps its pre-BLZ-683 upsert, so a stale shadow row still converges to what the
+      // primary wrote rather than becoming a divergence — dual behaviour is unchanged.
+      await shadow[op](t, ctx?.create ? { ...ctx, create: false } : ctx);
+    } catch (e) {
 ```
 
 In `scripts/new.mjs`, replace:
@@ -4702,7 +5143,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/readonly.test.mjs tests/init.test.mjs tests/init-first-admin.test.mjs tests/user-add.test.mjs tests/user-passwd.test.mjs tests/schedule-runner.test.mjs tests/import-db-mode.test.mjs tests/import-runner.test.mjs tests/model/write-port.test.mjs tests/model/import-apply.test.mjs tests/new.test.mjs tests/new-runner.test.mjs tests/verbs-dual-write.test.mjs tests/model/seam-closure.test.mjs
 ```
 
-Expected: 5/5 and 4/4 pass (1 skips without Postgres); every neighbour green.
+Expected: `tests 10, pass 10` (1 skips without Postgres); every neighbour green.
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -4746,7 +5187,8 @@ with:
   `reserve` runs only inside `import`, which is single-operator and refused in remote mode. A
   create (`applyNew`, import's create rows) now writes with `{ create: true }`, so a ticket another
   writer created after the check is refused — `already exists … NOT written`, or the ticket's
-  primary key if it commits mid-write — and never upserted over. An edit or move is unchanged.
+  primary key if it commits mid-write — and never upserted over. An edit or move is unchanged,
+  and so is dual: the flag is the primary's, and the shadow keeps its upsert.
   `tests/reserve-window.test.mjs` puts a second writer in the window, on SQLite and on Postgres
   over two connections.
 - **A db groom has no undo — accepted.** Recovery is the `ticket_event` history plus the
@@ -4759,7 +5201,7 @@ with:
 ```bash
 git add tests/readonly-runners.test.mjs tests/reserve-window.test.mjs scripts/init-runner.mjs scripts/migrate-runner.mjs scripts/model/import-apply.mjs scripts/model/write-port.mjs scripts/new.mjs scripts/schedule-runner.mjs scripts/user-runner.mjs docs/decisions/0019-the-groomers-guard-is-advisory.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-683: BLAZE_READONLY guards on four runners; a db create never overwrites" -m "user-, init-, migrate- and schedule-runner call assertWritable before their first write; dbWritePort honours { create: true } (refuse a visible row, plain INSERT) and applyNew and import create rows pass it. New tests/readonly-runners.test.mjs and tests/reserve-window.test.mjs; ADR-0019 addendum and ADR-0038 addendum bullets." -- tests/readonly-runners.test.mjs tests/reserve-window.test.mjs scripts/init-runner.mjs scripts/migrate-runner.mjs scripts/model/import-apply.mjs scripts/model/write-port.mjs scripts/new.mjs scripts/schedule-runner.mjs scripts/user-runner.mjs docs/decisions/0019-the-groomers-guard-is-advisory.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md
+git commit -m "BLZ-683: BLAZE_READONLY guards on four runners; a db create never overwrites" -m "user-, init-, migrate- and schedule-runner call assertWritable before their first write; dbWritePort honours { create: true } (refuse a visible row, plain INSERT), applyNew and import create rows pass it, and dualWritePort strips it before the shadow so dual is unchanged. New tests/readonly-runners.test.mjs and tests/reserve-window.test.mjs; ADR-0019 addendum and ADR-0038 addendum bullets." -- tests/readonly-runners.test.mjs tests/reserve-window.test.mjs scripts/init-runner.mjs scripts/migrate-runner.mjs scripts/model/import-apply.mjs scripts/model/write-port.mjs scripts/new.mjs scripts/schedule-runner.mjs scripts/user-runner.mjs docs/decisions/0019-the-groomers-guard-is-advisory.md docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
@@ -4841,7 +5283,7 @@ docker stop blz-pg
 
 ## Self-review
 
-- **Spec coverage:** §5.2 → Task 3 (+ Findings 3–6); §5.3 → Task 4 (all four conditions, each pinned alone; exit 0/1/2); §5.6 → Tasks 6 and 7 (`duplicate_id_check.py` by `--fail-on`; `parent_rules.mjs` already deleted, nothing to do); §5.7 → Task 5 (transitions) and the ADR-0038 addendum (sprints, pool); §5.8 → Task 8 and the ADR-0038/0019 addenda; §8 row A's BLZ-674/675 → Tasks 2 and 1. `fs`/`dual` unchanged: the fs port ignores `{ create }`, `dbTransitions` answers only db, the SQLite shadow's rows are unchanged (Finding 6).
+- **Spec coverage:** §5.2 → Task 3 (+ Findings 3–6); §5.3 → Task 4 (all four conditions, each pinned alone; exit 0/1/2); §5.6 → Tasks 6 and 7 (`duplicate_id_check.py` by `--fail-on`; `parent_rules.mjs` already deleted, nothing to do); §5.7 → Task 5 (transitions) and the ADR-0038 addendum (sprints, pool); §5.8 → Task 8 and the ADR-0038/0019 addenda; §8 row A's BLZ-674/675 → Tasks 2 and 1. `fs`/`dual` unchanged: the fs port ignores `{ create }` and `dualWritePort` strips it before the shadow (pinned by `dual: a stale SHADOW row…`), `dbTransitions` answers only db, the reader `extra_json` fix touches only the db readers, and the SQLite shadow's rows are unchanged (Finding 6). Round 1's findings (M1, M2, m1–m8) are each folded into the task that owns the code, with a test.
 - **Placeholders:** none — every code step is the prototype's literal content.
 - **Type consistency:** `loadCorpusAsync`'s `typeById` (Task 3) is what Task 5's `importTransitions` takes as `new Set(tally.typeById.keys())`; `corpusRows`/`relationRows` (Task 3) are what `expectedCounts` (Task 4) reuses; `governanceFindings`' `configProjects` is `nonEmpty(config?.projects)` (Finding 12). The spec's §5.6 "hard" was amended to soft with the operator's decision (Finding 10).
 - **Review Focus:** each of the five lines is pinned by a named test in its task.
