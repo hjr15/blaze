@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md` — §5.2, §5.3, §5.6, §5.7, §5.8 and §8 row A. Read it first; this plan argues from it. Recon (git-ignored, file:line evidence) is under `.superpowers/sdd/blz-254/recon/` in the main checkout.
 
-**Prototype provenance.** Every code and test block below was run, task by task, in a scratch worktree of `ca07c6f` against `postgres:17-alpine`. This Markdown was then GENERATED from that prototype's per-task trees: each "replace" block was checked to occur exactly once in its file at that point, and applying all of them in order reproduces the prototype byte for byte. Each task's tests were shown to FAIL on the pre-task tree and pass after it — including BLZ-675's AC (`grep -c "already executing"` over every Postgres test file: 9 files at base, 0 after Task 1). On the final tree, `npm run test:coverage` with `BLAZE_TEST_PG_URL` set and a private `TMPDIR` → `tests 5398, pass 5397, fail 0, skipped 1`; c8 statements 97.99 %, branches 88.15 %, functions 97.46 %, lines 97.99 % (thresholds 91/77/93/91); 0 deprecation lines in the whole run; `hygiene-check` clean; no attributable scratch directory left. Live-corpus rehearsal of Tasks 3–7 against a read-only COPY of blaze-pm's `BLZ-305-v4-spine` (`8bd7fd3d`, 2,930 tickets) in a scratch database: `blaze db load` → 2,930 tickets, 1,884 links, 1,905 worklog, 2,505 labels, 2,861 components in 17.9 s; `blaze db verify` → PASS in 1.3 s (0 value diffs, 0 missing, 0 extra, every row count equal, 6,885 criteria checked, 0 criteria diffs, 0 byte diffs); one changed title made it exit 1 naming the ticket and field. `blaze matrices` wrote all 22 files with zero `diff -r` against `build_matrices.py`'s own output, in both `fs` and `db` mode. `blaze audit` reproduced `terminal_parent_scan.py` (66 parents, 279 open children) and `empty_body_scan.py` (27) exactly.
+**Prototype provenance.** Every code and test block below was run, task by task, in a scratch worktree of `ca07c6f` against `postgres:17-alpine`. This Markdown was then GENERATED from that prototype's per-task trees: each "replace" block was checked to occur exactly once in its file at that point, and applying all of them in order reproduces the prototype byte for byte. Each task's tests were shown to FAIL on the pre-task tree and pass after it — including BLZ-675's AC (`grep -c "already executing"` over every Postgres test file: 9 files at base, 0 after Task 1). On the final tree, `npm run test:coverage` with `BLAZE_TEST_PG_URL` set and a private `TMPDIR` → `tests 5398, pass 5397, fail 0, skipped 1`; c8 statements 98.00 %, branches 88.16 % (thresholds 91/77/93/91, all met); 0 deprecation lines in the whole run; `hygiene-check` clean; no attributable scratch directory left. Live-corpus rehearsal of Tasks 3–7 against a read-only COPY of blaze-pm's `BLZ-305-v4-spine` (`8bd7fd3d`, 2,930 tickets) in a scratch database: `blaze db load` → 2,930 tickets, 1,884 links, 1,905 worklog, 2,505 labels, 2,861 components in 17.9 s; `blaze db verify` → PASS in 1.3 s (0 value diffs, 0 missing, 0 extra, every row count equal, 6,885 criteria checked, 0 criteria diffs, 0 byte diffs); one changed title made it exit 1 naming the ticket and field. `blaze matrices` wrote all 22 files with zero `diff -r` against `build_matrices.py`'s own output, in both `fs` and `db` mode. `blaze audit` reproduced `terminal_parent_scan.py` (66 parents, 279 open children) and `empty_body_scan.py` (27) exactly.
 
 ## Global Constraints
 
@@ -44,8 +44,8 @@
 7. **"The loader's tallies" are recomputed, not remembered.** `verify` runs the same `corpusRows` + `relationRows` over the files and compares each table's `count(*)` with that; nothing stores a tally between the two commands. A row `postgresReader` hides (a soft-deleted ticket) still fails the count.
 8. **`criteriaFor` on Postgres is the engine's own parser over the loaded body.** Postgres keeps no `acceptance_criterion` rows (spec §5.2), and every db-mode reader and writer takes criteria from `body`; the oracle reads the SOURCE body with `ac-oracle-matcher.mjs`, which shares no code with it. `verifyLoad` takes `criteriaOf` as an injectable only so a test can fail condition 4 on its own.
 9. **Transitions under db (BLZ-680):** a new inert module `scripts/model/transitions-db.mjs` (`dbTransitions(readStorage, mode, view, root)`) answers only for `mode === "db"` and the `metrics` view, so `fs`/`dual` and every other view are as before (no new export on the write-allowlisted `transitions.mjs`, so no seam pin changes). Both servers (`serve.mjs`, `supervisor.mjs`) call it on the page and `/view/<name>` routes. The SQLite `blaze db init` imports the git history too, so a SQLite board switched to db mode keeps its metrics. Imported events: `source = 'git-backfill'` (already allowed by the CHECK), actor `git-history`; a transition for an id that did not load, or with no timestamp, is counted, never inserted. `BLZ-305-v4-spine` holds 914 git transitions.
-10. **`terminal-parent-open-child` is HARD as the spec says — and the live board has 66.** Ported with the script's own fixed terminal set (`done/achieved/mitigated/accepted/obsolete`), not the schema's terminals, so counts match the script exactly (66 parents, 279 open children on `BLZ-305-v4-spine@8bd7fd3d`). Consequence for spec §7 steps 3–4 ("audit has 0 hard findings"): that gate fails until INF-733's remedy runs on the board, or the runbook gates with `blaze audit --fail-on <kinds>`. This plan does not change the runbook; the operator decides.
-11. **One existing test fixture changes, no assertion.** `tests/audit-terminal-goal-unverified.test.mjs`'s "R48: a soft finding does not fail the run" built an `achieved` goal over an `implemented` requirement — now ALSO a hard `terminal-parent-open-child` (`implemented` is not in the script's set). Its goal moves to `canceled` (terminal for R48, not for the new kind), and the test gains an assertion that the R48 finding is still raised.
+10. **`terminal-parent-open-child` ships SOFT (operator decision, 2026-10-05; the spec's §5.6 is amended in the same commit as this plan).** Ported with the script's own fixed terminal set (`done/achieved/mitigated/accepted/obsolete`), not the schema's terminals, so counts match the script exactly — 66 parents, 279 open children on `BLZ-305-v4-spine@8bd7fd3d`. Shipped hard, it would fail the live board's `blaze audit` on day one and with it spec §7's "0 hard findings" gate. The 66 are groomed under a separate ticket; the kind moves to `HARD_KINDS` once the count is zero. Until then `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
+11. **No existing test changes in Task 6.** Because the kind is soft, `tests/audit-terminal-goal-unverified.test.mjs`'s "a soft finding does not fail the run" (an `achieved` goal over an `implemented` requirement, which this kind also reports) still holds unchanged. Promoting the kind to hard later must move that fixture's goal to `canceled` (terminal for R48, not for this kind).
 12. **`config-project-drift` is skipped when the config lists no projects** (absent or `[]`): the audit already falls back to the store's listing then, and a `blaze audit <dir>` outside any board has no config at all (without this, `tests/audit.test.mjs`'s 1,200-finding pipe test gains a 1,201st). Under db the store's projects are `DISTINCT project_key`, so a configured project with no tickets reads as drift there.
 13. **`--fail-on` refuses an unknown or empty kind list with exit 2** (a typo would otherwise be a gate that can never fail) and accepts soft kinds too.
 14. **Added by the coordinator, verified against the code: `--projects` resolved links against the scoped set.** `audit-runner.mjs` filtered to `--projects` before `auditCorpus` built its id set, so `blaze audit --projects BLZ` on the live copy reported 5 hard `dangling-target`s (BLZ-134→INF-750, BLZ-136→INF-744, BLZ-142→INF-798, BLZ-96→INF-556, BLZ-97→INF-556) that the unscoped run does not. `auditCorpus` gains `universe` (resolve against every ticket the store holds; judge only `tickets`); after the fix the scoped run reports 0. Folded into Task 6 (BLZ-681).
@@ -2689,17 +2689,16 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 
 ---
 
-### Task 6: `blaze audit --fail-on`, three governance kinds, and `--projects` that resolves across projects (BLZ-681)
+### Task 6: `blaze audit --fail-on`, three soft governance kinds, and `--projects` that resolves across projects (BLZ-681)
 
 **Files:**
 - Create: `tests/audit-governance.test.mjs`
-- Modify: `tests/audit-terminal-goal-unverified.test.mjs`
 - Modify: `scripts/audit-runner.mjs`
 - Modify: `scripts/model/audit.mjs`
 - Modify: `docs/guide/commands.md`
 
 **Interfaces:**
-- Produces (`scripts/model/audit.mjs`): `SOFT_KINDS` += `empty-body`, `config-project-drift`; `HARD_KINDS` += `terminal-parent-open-child`; `TERMINAL_PARENT_STATUSES`, `EMPTY_BODY_TERMINAL` (Sets); `isScaffoldLine(line) → boolean`; `bodyIsEmpty(body) → boolean`; `governanceFindings({ tickets, configProjects: string[]|null, storeProjects: string[] }) → finding[]`; `auditCorpus({ tickets, projects, config, universe })` — `universe` (default `tickets`) is what ids and parent types resolve against.
+- Produces (`scripts/model/audit.mjs`): `SOFT_KINDS` += `empty-body`, `config-project-drift`, `terminal-parent-open-child` (soft until the board is groomed; `HARD_KINDS` unchanged); `TERMINAL_PARENT_STATUSES`, `EMPTY_BODY_TERMINAL` (Sets); `isScaffoldLine(line) → boolean`; `bodyIsEmpty(body) → boolean`; `governanceFindings({ tickets, configProjects: string[]|null, storeProjects: string[] }) → finding[]`; `auditCorpus({ tickets, projects, config, universe })` — `universe` (default `tickets`) is what ids and parent types resolve against.
 - Produces (`blaze audit`): `--fail-on k1,k2` — exit 1 iff a finding of a named kind, else 0; unknown or empty → exit 2; JSON gains `failOn`, `failing` when given.
 
 - [ ] **Step 1: Write the failing tests.**
@@ -2708,7 +2707,7 @@ Create `tests/audit-governance.test.mjs`:
 
 ```js
 // tests/audit-governance.test.mjs — BLZ-681 (spec §5.6). blaze-pm's governance scripts,
-// re-homed as `blaze audit` kinds: terminal-parent-open-child (hard), empty-body (soft),
+// re-homed as `blaze audit` kinds: terminal-parent-open-child, empty-body and
 // config-project-drift (soft), plus `--fail-on <kinds>` so one kind can gate on its own. The
 // rules are the scripts' own, pinned here; the runner tests prove they read through the
 // resolved store — the db-mode test deletes a ticket FILE after loading the shadow, and the
@@ -2739,9 +2738,8 @@ describe("the rules, as the scripts wrote them", () => {
       ["accepted", "achieved", "done", "implemented", "mitigated", "obsolete", "rejected"]);
   });
 
-  test("severities: terminal-parent-open-child is hard; empty-body and config-project-drift are soft", () => {
-    assert.ok(HARD_KINDS.has("terminal-parent-open-child"));
-    for (const k of ["empty-body", "config-project-drift"]) {
+  test("severities: all three are soft — terminal-parent-open-child until the board is groomed", () => {
+    for (const k of ["terminal-parent-open-child", "empty-body", "config-project-drift"]) {
       assert.ok(SOFT_KINDS.includes(k), k);
       assert.ok(!HARD_KINDS.has(k), k);
     }
@@ -2815,10 +2813,11 @@ function audit(projectsDir, args = [], env = {}) {
     { encoding: "utf8", env: { ...base, ...env } });
 }
 
-test("blaze audit reports all three, and the hard one fails the run", () => {
+test("blaze audit reports all three, and — all soft — none fails the run", () => {
   const { projectsDir } = board();
   const r = audit(projectsDir, ["--json"]);
-  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(JSON.parse(r.stdout).ok, true);
   const kinds = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind}`);
   for (const k of ["ENG-1 terminal-parent-open-child", "ENG-2 empty-body", "OPS config-project-drift"]) {
     assert.ok(kinds.includes(k), `${k} missing from ${kinds.join("; ")}`);
@@ -2828,9 +2827,8 @@ test("blaze audit reports all three, and the hard one fails the run", () => {
 test("--fail-on gates on the named kinds only, hard or soft, and says so", () => {
   const { projectsDir } = board();
   const other = audit(projectsDir, ["--fail-on", "duplicate-status"]);
-  assert.equal(other.status, 0, "a hard finding of ANOTHER kind does not fail a --fail-on run");
+  assert.equal(other.status, 0, "findings of OTHER kinds do not fail a --fail-on run");
   assert.match(other.stdout, /fail-on duplicate-status: 0 finding\(s\)/);
-  assert.match(other.stdout, /ok=false/, "the report still says what it found");
   const soft = audit(projectsDir, ["--fail-on", "duplicate-status,empty-body"]);
   assert.equal(soft.status, 1, "a soft kind can gate when it is named");
   assert.match(soft.stdout, /fail-on duplicate-status,empty-body: 1 finding\(s\)/);
@@ -2855,7 +2853,7 @@ test("under BLAZE_WRITE_PORT=db the kinds come from the DATABASE, not the files"
   writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-2-t.md"),
     doc({ id: "ENG-2", title: "T", type: "task", project: "ENG", estimate: 30 }, "Now it has prose."));
   const r = audit(roots.projectsDir, ["--json"], { BLAZE_WRITE_PORT: "db" });
-  assert.equal(r.status, 1, r.stderr);
+  assert.equal(r.status, 0, r.stderr);
   const kinds = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind}`);
   assert.ok(kinds.includes("ENG-1 terminal-parent-open-child"), kinds.join("; "));
   assert.ok(kinds.includes("ENG-2 empty-body"), kinds.join("; "));
@@ -2886,38 +2884,16 @@ test("--projects scopes what is JUDGED, never what RESOLVES: a cross-project lin
 });
 ```
 
-In `tests/audit-terminal-goal-unverified.test.mjs`, replace:
-
-```js
-test("R48: a soft finding does not fail the run", () => {
-  const report = audit(board("implemented"));
-  assert.equal(report.ok, true, "a fill-queue finding must never fail the gate");
-```
-
-with:
-
-```js
-test("R48: a soft finding does not fail the run", () => {
-  // BLZ-681: under an `achieved` goal, an `implemented` requirement is ALSO an open child of a
-  // terminal parent — the hard `terminal-parent-open-child` (`implemented` is not in the
-  // re-homed script's terminal set). `canceled` is terminal for R48 and not for that kind, so
-  // this board still holds the soft finding and only the soft finding, which is what this
-  // test is about.
-  const report = audit(board("implemented", { goalStatus: "canceled" }));
-  assert.equal(report.findings.filter((f) => f.kind === KIND).length, 1, "the soft finding is still raised");
-  assert.equal(report.ok, true, "a fill-queue finding must never fail the gate");
-```
-
 
 - [ ] **Step 2: Run them to verify they fail.**
 
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs
 ```
 
-Expected: `tests/audit-governance.test.mjs` fails to load (`does not provide an export named 'governanceFindings'`); the R48 file still passes (its fixture change is behaviour-neutral until Step 3).
+Expected: the file fails to load (`does not provide an export named 'governanceFindings'`).
 
 - [ ] **Step 3: Implement.**
 
@@ -3140,7 +3116,7 @@ with:
 process.exitCode = failOn ? (failing ? 1 : 0) : (report.ok ? 0 : 1);
 ```
 
-In `scripts/model/audit.mjs`, replace (1/4):
+In `scripts/model/audit.mjs`, replace (1/3):
 
 ```js
   "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
@@ -3151,34 +3127,18 @@ with:
 
 ```js
   "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
-  // BLZ-681: re-homed from blaze-pm's `empty_body_scan.py` and `config_drift_check.py` —
-  // `governanceFindings` below says why each is soft.
-  "empty-body", "config-project-drift",
+  // BLZ-681: re-homed from blaze-pm's governance scripts — `governanceFindings` below says why
+  // each is soft. `terminal-parent-open-child` is soft AT FIRST only: a terminal ticket with a
+  // non-terminal child asserts the work is finished while the child says it is not, which is the
+  // corpus being WRONG — but MEASURED before shipping (the BLZ-353 lesson), blaze-pm's
+  // BLZ-305-v4-spine at 8bd7fd3d holds 66 such parents with 279 open children. Shipped hard it
+  // would fail `blaze audit` on the live board on day one. They are groomed under a separate
+  // ticket, and the kind moves to HARD_KINDS once the count is zero.
+  "empty-body", "config-project-drift", "terminal-parent-open-child",
 ];
 ```
 
-In `scripts/model/audit.mjs`, replace (2/4):
-
-```js
-  "unreadable-ticket-directory",
-]);
-```
-
-with:
-
-```js
-  "unreadable-ticket-directory",
-  // BLZ-681 (spec §5.6): re-homed from blaze-pm's `terminal_parent_scan.py`. A terminal ticket
-  // with a non-terminal child asserts the work is finished while the child says it is not, and
-  // both cannot be true — the corpus is WRONG, so HARD, as the spec decides. MEASURED before
-  // shipping (the BLZ-353 lesson): blaze-pm's BLZ-305-v4-spine at 8bd7fd3d holds 66 such parents
-  // with 279 open children, so `blaze audit` on that board fails on this kind until INF-733's
-  // remedy runs. `blaze audit --fail-on <kinds>` is how a gate checks other kinds meanwhile.
-  "terminal-parent-open-child",
-]);
-```
-
-In `scripts/model/audit.mjs`, replace (3/4):
+In `scripts/model/audit.mjs`, replace (2/3):
 
 ```js
 /**
@@ -3223,7 +3183,7 @@ export function auditCorpus({ tickets = [], projects = {}, config = null, univer
     const fm = t?.frontmatter ?? {};
 ```
 
-In `scripts/model/audit.mjs`, replace (4/4):
+In `scripts/model/audit.mjs`, replace (3/3):
 
 ```js
 /** Counts by kind, for a runner that prints a summary rather than every finding. */
@@ -3278,7 +3238,8 @@ const idOrder = (a, b) => {
 export function governanceFindings({ tickets = [], configProjects = null, storeProjects = [] } = {}) {
   const findings = [];
 
-  // terminal-parent-open-child — HARD. Children are found across the whole audited set, so a
+  // terminal-parent-open-child — SOFT until the live board is groomed (see SOFT_KINDS), then
+  // hard. Children are found across the whole audited set, so a
   // cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
   const byId = new Map();
   for (const t of tickets) {
@@ -3335,7 +3296,7 @@ export function summarise(findings) {
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit*.test.mjs tests/model/link-type-overrides.test.mjs tests/board-gate.test.mjs tests/model/schedule-findings.test.mjs tests/blz-407-audit-load-agreement.test.mjs tests/schema-audit-load-agreement-oracle.test.mjs tests/temp-cleanup-guard.test.mjs tests/quoted-sources.test.mjs
 ```
 
@@ -3362,7 +3323,6 @@ blaze audit [--projects A,B] [--kind <kind>] [--fail-on <kind,…>] [--json] [pr
 In `docs/guide/commands.md`, replace (2/3):
 
 ```markdown
-|---|---|
 | hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch` |
 | soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
 
@@ -3371,9 +3331,8 @@ In `docs/guide/commands.md`, replace (2/3):
 with:
 
 ```markdown
-|---|---|
-| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch`, `terminal-parent-open-child` |
-| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty`, `empty-body`, `config-project-drift` |
+| hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch` |
+| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty`, `empty-body`, `config-project-drift`, `terminal-parent-open-child` |
 
 ```
 
@@ -3404,12 +3363,12 @@ the corpus is empty — a run that measured nothing is never reported as a pass.
 **Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
 resolved store, so it works under `fs`, `dual` and `db`, and each rule is the script's own:
 
-- **`terminal-parent-open-child`** (hard, was `terminal_parent_scan.py`): a ticket in `done`,
-  `achieved`, `mitigated`, `accepted` or `obsolete` with a child that is not — any type pair,
-  across projects. The parent asserts the work is finished while the child says it is not.
-  Measured before shipping: blaze-pm's `BLZ-305-v4-spine` holds 66 such parents (279 open
-  children), so a whole-board `blaze audit` there exits `1` until they are resolved; gate on
-  another kind meanwhile with `--fail-on`.
+- **`terminal-parent-open-child`** (soft for now, was `terminal_parent_scan.py`): a ticket in
+  `done`, `achieved`, `mitigated`, `accepted` or `obsolete` with a child that is not — any type
+  pair, across projects. The parent asserts the work is finished while the child says it is not.
+  Soft at first: blaze-pm's `BLZ-305-v4-spine` held 66 such parents (279 open children) on
+  2026-10-05. They are groomed under a separate ticket, and the kind becomes hard once the count
+  is zero; until then `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
 - **`empty-body`** (soft, was `empty_body_scan.py`): a non-terminal ticket whose body is only
   headings, blank lines, empty checkboxes, bare bullets and HTML comments — what `blaze new`
   leaves for a title-only ticket.
@@ -3430,13 +3389,13 @@ a project outside the list still exists, so `blaze audit --projects BLZ` does no
 - [ ] **Step 6: Fence check, commit, prove the committed tree.**
 
 ```bash
-git add tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs scripts/audit-runner.mjs scripts/model/audit.mjs docs/guide/commands.md
+git add tests/audit-governance.test.mjs scripts/audit-runner.mjs scripts/model/audit.mjs docs/guide/commands.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-681: blaze audit --fail-on, three governance kinds, and --projects resolving across projects" -m "audit.mjs gains terminal-parent-open-child (hard), empty-body and config-project-drift (soft) via governanceFindings, and auditCorpus resolves against the whole store (universe); audit-runner adds --fail-on and wires both. New tests/audit-governance.test.mjs; the R48 fixture moves its goal to canceled; commands.md." -- tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs scripts/audit-runner.mjs scripts/model/audit.mjs docs/guide/commands.md
+git commit -m "BLZ-681: blaze audit --fail-on, three governance kinds, and --projects resolving across projects" -m "audit.mjs gains terminal-parent-open-child, empty-body and config-project-drift (all soft; the first is promoted to hard once the live board is groomed) via governanceFindings, and auditCorpus resolves against the whole store (universe); audit-runner adds --fail-on and wires both. New tests/audit-governance.test.mjs; commands.md." -- tests/audit-governance.test.mjs scripts/audit-runner.mjs scripts/model/audit.mjs docs/guide/commands.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs tests/audit-terminal-goal-unverified.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/audit-governance.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -4874,7 +4833,7 @@ docker exec blz-pg psql -U postgres -d blaze_test -c "CREATE DATABASE preview_v4
 node -e 'const f=process.argv[1],fs=require("fs"),c=JSON.parse(fs.readFileSync(f));c.database={driver:"postgres"};fs.writeFileSync(f,JSON.stringify(c,null,2))' "$COPY/blaze.config.json"
 export BLAZE_PROJECTS_DIR="$COPY/projects" BLAZE_DB_HOST=127.0.0.1 BLAZE_DB_PORT=55432 BLAZE_DB_NAME=preview_v4 BLAZE_DB_USER=postgres BLAZE_DB_PASSWORD_ENV=PREVIEW_PW PREVIEW_PW=postgres
 node scripts/cli.mjs db init && node scripts/cli.mjs db load && node scripts/cli.mjs db verify; echo "verify exit=$?"   # prototype: PASS, 0
-node scripts/cli.mjs audit --fail-on duplicate-status; echo "exit=$?"       # 0; a plain `blaze audit` exits 1 on the 66 terminal parents (Finding 10)
+node scripts/cli.mjs audit; echo "exit=$?"                                   # 0: the 66 terminal parents are SOFT findings (Finding 10)
 docker stop blz-pg
 ```
 
@@ -4884,5 +4843,5 @@ docker stop blz-pg
 
 - **Spec coverage:** §5.2 → Task 3 (+ Findings 3–6); §5.3 → Task 4 (all four conditions, each pinned alone; exit 0/1/2); §5.6 → Tasks 6 and 7 (`duplicate_id_check.py` by `--fail-on`; `parent_rules.mjs` already deleted, nothing to do); §5.7 → Task 5 (transitions) and the ADR-0038 addendum (sprints, pool); §5.8 → Task 8 and the ADR-0038/0019 addenda; §8 row A's BLZ-674/675 → Tasks 2 and 1. `fs`/`dual` unchanged: the fs port ignores `{ create }`, `dbTransitions` answers only db, the SQLite shadow's rows are unchanged (Finding 6).
 - **Placeholders:** none — every code step is the prototype's literal content.
-- **Type consistency:** `loadCorpusAsync`'s `typeById` (Task 3) is what Task 5's `importTransitions` takes as `new Set(tally.typeById.keys())`; `corpusRows`/`relationRows` (Task 3) are what `expectedCounts` (Task 4) reuses; `governanceFindings`' `configProjects` is `nonEmpty(config?.projects)` (Finding 12).
+- **Type consistency:** `loadCorpusAsync`'s `typeById` (Task 3) is what Task 5's `importTransitions` takes as `new Set(tally.typeById.keys())`; `corpusRows`/`relationRows` (Task 3) are what `expectedCounts` (Task 4) reuses; `governanceFindings`' `configProjects` is `nonEmpty(config?.projects)` (Finding 12). The spec's §5.6 "hard" was amended to soft with the operator's decision (Finding 10).
 - **Review Focus:** each of the five lines is pinned by a named test in its task.

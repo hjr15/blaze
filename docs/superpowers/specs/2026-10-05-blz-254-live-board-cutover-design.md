@@ -141,7 +141,7 @@ each line (recon A §5).
 | Script | Re-home |
 |---|---|
 | `duplicate_id_check.py` | Covered by `blaze audit`'s `duplicate-status`, which works under db, plus the `ticket` primary key. Add `blaze audit --fail-on <kind,…>` so one kind can gate on its own. |
-| `terminal_parent_scan.py` | New hard `blaze audit` kind, `terminal-parent-open-child`: a terminal ticket with a non-terminal child, any type pair. |
+| `terminal_parent_scan.py` | New soft `blaze audit` kind, `terminal-parent-open-child`: a terminal ticket with a non-terminal child, any type pair. Soft at first: the live board had 66 terminal parents with 279 open children on 2026-10-05. They are groomed under a separate ticket, and the kind is promoted to hard once the count is zero. |
 | `empty_body_scan.py` | New soft kind, `empty-body`, using the script's scaffold-only rule. |
 | `config_drift_check.py` | New soft kind, `config-project-drift`: the configured `projects` versus the projects the read store holds. |
 | `build_matrices.py` | New `blaze matrices [--check] [--out docs/matrices]`, built on `resolveReadStorage`, reproducing the script's files. Acceptance is a zero `git diff` against the 22 files the script generates (generator-oracle). |
