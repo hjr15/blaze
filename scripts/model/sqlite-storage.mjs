@@ -215,6 +215,7 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
     },
 
     // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db — pg-storage.mjs says why.
+    // Order is not guaranteed chronological (text ts, mixed offsets): consumers sort, as metrics.mjs does.
     listTransitions(_root) {
       return transitionsAll.all().map((r) => ({ id: r.id, from: r.from, to: r.to, ts: r.ts }));
     },

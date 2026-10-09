@@ -262,6 +262,8 @@ export function postgresReader(client) {
     // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db, from the `ticket_transition`
     // view over `ticket_event` — the `{ id, from, to, ts }` shape metrics.mjs reads from git in
     // fs mode. `blaze db load` imports the git-era history into it, once.
+    // Rows are ordered by the ts TEXT, which is not guaranteed chronological across mixed
+    // offsets (`+10:00` vs `Z`): consumers sort by Date.parse(ts), as metrics.mjs does.
     async listTransitions(_root) {
       const { rows } = await client.query(`SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
       return rows;

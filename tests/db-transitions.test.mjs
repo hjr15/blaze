@@ -30,6 +30,7 @@ function gitBoard() {
   git(roots.dataRoot, "init", "-q");
   git(roots.dataRoot, "config", "user.email", "t@t.t");
   git(roots.dataRoot, "config", "user.name", "t");
+  git(roots.dataRoot, "config", "commit.gpgsign", "false"); // a signing machine must not prompt
   git(roots.dataRoot, "add", "-A");
   git(roots.dataRoot, "commit", "-qm", "seed");
   mkdirSync(join(roots.projectsDir, "ENG", "in-progress"), { recursive: true });
