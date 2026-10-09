@@ -163,6 +163,9 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
     `SELECT id, ticket_id, kind, at, actor, source, request_id,
             from_status, to_status, field, old_value, new_value, detail
        FROM ticket_event WHERE ticket_id = ? ORDER BY at, id`);
+  // BLZ-680: see listTransitions below.
+  const transitionsAll = db.prepare(
+    `SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
   const appendEv = db.prepare(
     `INSERT INTO ticket_event
        (ticket_id, kind, at, actor, source, request_id, from_status, to_status,
@@ -209,6 +212,11 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
     // history a reader wants is chronological, not insertion order.
     listEvents(_root, id) {
       return eventsFor.all(id);
+    },
+
+    // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db — pg-storage.mjs says why.
+    listTransitions(_root) {
+      return transitionsAll.all().map((r) => ({ id: r.id, from: r.from, to: r.to, ts: r.ts }));
     },
 
     appendEvent(_root, e) {

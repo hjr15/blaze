@@ -14,6 +14,8 @@ import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
 import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { importTransitionsExec } from "./migrate/import-transitions.mjs";
+import { buildTransitions } from "./model/transitions.mjs";
 import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
 import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
@@ -157,6 +159,15 @@ async function seedCounterCmd(ctx) {
   }
 }
 
+/** BLZ-680: what the transition import did, in one line — and, loudly, when there was no git
+ *  history to import from at all (a copy with no `.git`), which must not read as "no moves". */
+function transitionsLine(h, dataRoot) {
+  if (h.head === null) return `  ⚠ transitions  0 — no git history at ${dataRoot}, so none was imported`;
+  const skipped = h.skipped.unknownTicket + h.skipped.malformed;
+  return `  transitions  ${h.imported}  (from git history; ${h.ticketsCovered} tickets, ${h.coveragePct}% covered`
+    + `${skipped ? `; ${h.skipped.unknownTicket} for unknown tickets and ${h.skipped.malformed} malformed skipped` : ""})`;
+}
+
 /** BLZ-678: the tables `blaze db load --replace` empties — the ticket corpus and its history.
  *  NOT `project_counter`: a number already issued must never be issued again, so the counter
  *  is only ever raised (seedCounter), never reset. */
@@ -177,7 +188,7 @@ const LOAD_TABLES = ["ticket_link", "ticket_label", "ticket_component", "worklog
  * why it is never the default.
  */
 async function loadCmd(ctx) {
-  const { projectsDir, log, err, openPgClient, replace } = ctx;
+  const { dataRoot, projectsDir, log, err, openPgClient, replace } = ctx;
   const dbConfig = dbConfigOr(ctx);
   if (!dbConfig || !writableOr(ctx, "load")) return 1;
   if (dbConfig.driver !== "postgres") {
@@ -192,7 +203,7 @@ async function loadCmd(ctx) {
   const where = describePgTarget(dbConfig.connection);
   try {
     await exec.run("BEGIN", []);
-    let tally, seeded;
+    let tally, seeded, history;
     try {
       const held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
       if (held > 0 && !replace) {
@@ -211,6 +222,13 @@ async function loadCmd(ctx) {
         for (const f of tally.skipped.insertFailed) err(`  ${f.id}: ${f.reason}`);
         return 1;
       }
+      // BLZ-680 (spec §5.7): the git-era status history, once, as `transition` events — under
+      // db the metrics view reads `ticket_transition`, and git's log stops growing at cutover.
+      // Through BLZ-281's import rules (import-transitions.mjs). `head === null` means no git
+      // history could be read at the data root — said below, never passed off as "none".
+      const built = buildTransitions({ root: dataRoot });
+      history = { ...(await importTransitionsExec(exec, built,
+                    { knownIds: new Set(tally.typeById.keys()), dialect: "postgres" })), head: built.head };
       // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
       // ticket table's MAX inside this transaction) and from the files and `.ids/` claims, so
       // the load and the counter cannot disagree.
@@ -233,6 +251,7 @@ async function loadCmd(ctx) {
     if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
     if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
     if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+    log(transitionsLine(history, dataRoot));
     if (tally.skipped.noId || tally.skipped.badId) {
       log(`  ⚠ files skipped: ${tally.skipped.noId} with no id, ${tally.skipped.badId} with a malformed id`);
     }
@@ -386,6 +405,15 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
       source: fsReadStorage, today: new Date().toISOString().slice(0, 10),
     });
     db.exec(setMigrationModeSql("sqlite", false));
+    // BLZ-680: the same git-era history `blaze db load` imports on Postgres, so a SQLite board
+    // switched to BLAZE_WRITE_PORT=db keeps its metrics history too. One transaction: a file
+    // database commits each autocommitted INSERT to disk on its own.
+    db.exec("BEGIN");
+    const built = buildTransitions({ root: dataRoot });
+    const history = { ...(await importTransitionsExec(exec, built,
+      { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
+      head: built.head };
+    db.exec("COMMIT");
     // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
     // handed out that may not have a ticket yet). It can only RAISE a counter.
     await seedCounter(exec, await corpusMaxima({ projectsDir, readStorage: fsReadStorage }),
@@ -397,6 +425,7 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
     log(`  criteria     ${tally.criteria}`);
     log(`  worklog      ${tally.worklog}`);
     log(`  labels       ${tally.labels}   components ${tally.components}`);
+    log(transitionsLine(history, dataRoot));
     // Every substitution is named. A tally that reports only successes is a tally that
     // cannot be trusted (BLZ-280).
     if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);

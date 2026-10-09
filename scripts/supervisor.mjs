@@ -8,6 +8,7 @@ import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
 import { pageHtml } from "./serve.mjs";
 import { viewEnvelope, CSRF } from "./views/page.mjs";
+import { dbTransitions } from "./model/transitions-db.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
 import { resolvePorts, resolveReadStorage, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
@@ -608,9 +609,11 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {
-      return reading(async (rs) => {
+      return reading(async (rs, mode) => {
         const envelope = viewEnvelope({
           view: vm[1],
+          // BLZ-680: serve.mjs's rule — the database's history under db, git's otherwise.
+          transitions: await dbTransitions(rs, mode, vm[1], projectsDir),
           project: u.searchParams.get("project") || "all",
           focus: u.searchParams.get("focus") || null,
           flat: u.searchParams.get("flat") === "1",
@@ -645,7 +648,8 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // module-private — and the cause goes to stderr, not to the browser.
       let html;
       try {
-        html = await reading(async (rs) => pageHtml({
+        html = await reading(async (rs, mode) => pageHtml({
+          transitions: await dbTransitions(rs, mode, u.searchParams.get("view") || "board", projectsDir),
           project: u.searchParams.get("project") || "all",
           focus: u.searchParams.get("focus") || null,
           flat: u.searchParams.get("flat") === "1",

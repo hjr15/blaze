@@ -273,7 +273,11 @@ reindex` rebuilds both from `projects/` and git history respectively.
 Under `BLAZE_WRITE_PORT=db`, `blaze reindex` rebuilds `.blaze/index.json` from the
 database instead — every read resolves from the write mode, not from `projects/`, see
 [ADR-0038](https://github.com/hjr15/blaze/blob/main/docs/decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md).
-`.blaze/transitions.json` still comes from git history in every mode, `db` included.
+`.blaze/transitions.json` still comes from git history in `fs` and `dual` mode. Under
+`BLAZE_WRITE_PORT=db` the Metrics view reads its status-move history from the database
+instead — every move is a `transition` event, read through the `ticket_transition` view — and
+`blaze db load` (or, for the SQLite shadow, `blaze db init`) imports the git-era history into it
+once, because git's rename log stops growing when moves stop touching files.
 
 While building the index, `blaze reindex` also lints every ticket's `links`
 (`scripts/model/links.mjs` → `lintLinks`) and prints one warning per issue —

@@ -259,6 +259,14 @@ export function postgresReader(client) {
       return rows.map((r) => ({ ...r, id: Number(r.id) }));
     },
 
+    // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db, from the `ticket_transition`
+    // view over `ticket_event` — the `{ id, from, to, ts }` shape metrics.mjs reads from git in
+    // fs mode. `blaze db load` imports the git-era history into it, once.
+    async listTransitions(_root) {
+      const { rows } = await client.query(`SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
+      return rows;
+    },
+
     async appendEvent(_root, e) {
       await client.query(
         `INSERT INTO ticket_event

@@ -21,31 +21,25 @@
 //     entire value is that it is evidence.
 //
 // So: import what was observed, mark it as backfill, and report the coverage honestly.
+//
+// BLZ-680: `blaze db load` imports through these SAME rules (`importTransitionsExec` below, over
+// an async `exec` on Postgres or the SQLite shadow's). It reads git's rename log once, at the
+// load (`buildTransitions`, spec §5.7) — the one moment the trail is frozen into the database,
+// after which git's log stops growing — so the "never re-run git log" rule above governs every
+// LATER import, and the trail is reproducible as of the commit the load ran at.
 const ISO = /^\d{4}-\d{2}-\d{2}T/;
 
-/**
- * @param db       an open SQLite handle with the schema applied
- * @param cache    the parsed .blaze/transitions.json
- * @returns a report including the coverage figure the metrics view must surface
- */
-export function importTransitions(db, cache, { knownIds = null } = {}) {
+/** The rule, once: which recorded transitions become events, and the report about the rest.
+ *  @returns { rows: [ticket_id, at, from, to][], report } */
+function transitionRows(cache, ids) {
   const rows = Array.isArray(cache?.transitions) ? cache.transitions : [];
   const report = {
     read: rows.length, imported: 0,
     skipped: { unknownTicket: 0, malformed: 0 },
-    ticketsCovered: 0, totalTickets: 0, coveragePct: 0,
+    ticketsCovered: 0, totalTickets: ids.size, coveragePct: 0,
   };
-
-  const ins = db.prepare(
-    `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
-     VALUES (?, 'transition', ?, 'unknown', 'git-backfill', ?, ?)`);
-
-  const ids = knownIds ??
-    new Set(db.prepare("SELECT id FROM ticket").all().map((r) => r.id));
-  report.totalTickets = ids.size;
-
+  const out = [];
   const covered = new Set();
-  db.exec("BEGIN");
   for (const t of rows) {
     // `from` may legitimately be absent — a ticket's first appearance has no prior
     // status — but the event shape CHECK requires both, so those cannot be imported
@@ -56,14 +50,49 @@ export function importTransitions(db, cache, { knownIds = null } = {}) {
     if (!ids.has(t.id)) { report.skipped.unknownTicket++; continue; }
     // Timestamps are carried through EXACTLY as recorded — not normalised, not
     // re-zoned. They are evidence, and evidence that has been tidied is weaker.
-    ins.run(t.id, String(t.ts), String(t.from), String(t.to));
-    report.imported++;
+    out.push([t.id, String(t.ts), String(t.from), String(t.to)]);
     covered.add(t.id);
   }
-  db.exec("COMMIT");
-
+  report.imported = out.length;
   report.ticketsCovered = covered.size;
   report.coveragePct = report.totalTickets
     ? Number(((covered.size / report.totalTickets) * 100).toFixed(1)) : 0;
+  return { rows: out, report };
+}
+
+/**
+ * @param db       an open SQLite handle with the schema applied
+ * @param cache    the parsed .blaze/transitions.json
+ * @returns a report including the coverage figure the metrics view must surface
+ */
+export function importTransitions(db, cache, { knownIds = null } = {}) {
+  const ins = db.prepare(
+    `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
+     VALUES (?, 'transition', ?, 'unknown', 'git-backfill', ?, ?)`);
+  const ids = knownIds ??
+    new Set(db.prepare("SELECT id FROM ticket").all().map((r) => r.id));
+  const { rows, report } = transitionRows(cache, ids);
+  db.exec("BEGIN");
+  for (const r of rows) ins.run(...r);
+  db.exec("COMMIT");
+  return report;
+}
+
+/**
+ * BLZ-680: the same import through an `exec` ({run, all}, awaited) in either dialect, INSIDE
+ * the caller's transaction — `blaze db load` commits it with the tickets, or not at all.
+ * @param knownIds  the ids that loaded (the event's foreign key needs the ticket)
+ */
+export async function importTransitionsExec(exec, cache, { knownIds, dialect = "postgres" }) {
+  if (dialect !== "sqlite" && dialect !== "postgres") {
+    throw new Error(`unknown dialect ${JSON.stringify(dialect)} — expected 'sqlite' or 'postgres'`);
+  }
+  const ph = (i) => (dialect === "postgres" ? `$${i + 1}` : "?");
+  const { rows, report } = transitionRows(cache, knownIds);
+  for (const r of rows) {
+    await exec.run(
+      `INSERT INTO ticket_event (ticket_id, kind, at, actor, source, from_status, to_status)
+       VALUES (${ph(0)}, 'transition', ${ph(1)}, 'unknown', 'git-backfill', ${ph(2)}, ${ph(3)})`, r);
+  }
   return report;
 }
