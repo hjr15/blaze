@@ -302,7 +302,7 @@ makes no commit. Optional positional `projectsDir` overrides which
 ## audit
 
 ```
-blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]
+blaze audit [--projects A,B] [--kind <kind>] [--fail-on <kind,…>] [--json] [projectsDir]
 ```
 
 Read-only corpus hygiene over the whole board. Findings split two ways, and the
@@ -314,7 +314,7 @@ findings too.
 | Severity | Kinds |
 |---|---|
 | hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch` |
-| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
+| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty`, `empty-body`, `config-project-drift`, `terminal-parent-open-child` |
 
 `schema-malformed` and `schema-invalid` (BLZ-392, split by severity in BLZ-407) both come from
 `auditCorpus` reading the tagged `collectSchemaProblems`. `schema-malformed` is HARD: the
@@ -358,11 +358,38 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. An unknown kind is refused (exit `2`). |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
 Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
-the corpus is empty — a run that measured nothing is never reported as a pass.
+the corpus is empty — a run that measured nothing is never reported as a pass. With
+`--fail-on`, `1` means a finding of a named kind and nothing else.
+
+**Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
+resolved store, so it works under `fs`, `dual` and `db`, and each rule is the script's own:
+
+- **`terminal-parent-open-child`** (soft for now, was `terminal_parent_scan.py`): a ticket in
+  `done`, `achieved`, `mitigated`, `accepted` or `obsolete` with a child that is not — any type
+  pair, across projects. The parent asserts the work is finished while the child says it is not.
+  Soft at first: blaze-pm's `BLZ-305-v4-spine` held 66 such parents (279 open children) on
+  2026-10-05. They are groomed under a separate ticket, and the kind becomes hard once the count
+  is zero; until then `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
+- **`empty-body`** (soft, was `empty_body_scan.py`): a non-terminal ticket whose body is only
+  headings, blank lines, empty checkboxes, bare bullets and HTML comments — what `blaze new`
+  leaves for a title-only ticket.
+- **`config-project-drift`** (soft, was `config_drift_check.py`): `blaze.config.json`'s
+  `projects` and the projects the store holds disagree, in either direction. Not raised when the
+  config lists no projects at all.
+
+`blaze audit --fail-on duplicate-status` is the gate `duplicate_id_check.py` was: it fails on a
+duplicated id alone, on a board that already carries other hard findings.
+
+**`--projects` scopes what is judged, never what resolves** (BLZ-681). A link target or parent in
+a project outside the list still exists, so `blaze audit --projects BLZ` does not call
+`BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged. The
+governance kinds follow the same rule: an in-scope parent's open child in another project still
+counts for `terminal-parent-open-child`, and `config-project-drift` names only listed projects.
 
 **`duplicate-status`** is the one finding that comes from the *walk* rather than
 from frontmatter. Status is the directory, so an id resolving to files under two

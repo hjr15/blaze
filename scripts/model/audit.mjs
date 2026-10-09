@@ -22,6 +22,14 @@ export const SOFT_KINDS = [
   "empty-components", "empty-labels", "missing-parent",
   "terminal-goal-unverified-requirement", "schema-invalid",
   "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
+  // BLZ-681: re-homed from blaze-pm's governance scripts — `governanceFindings` below says why
+  // each is soft. `terminal-parent-open-child` is soft AT FIRST only: a terminal ticket with a
+  // non-terminal child asserts the work is finished while the child says it is not, which is the
+  // corpus being WRONG — but MEASURED before shipping (the BLZ-353 lesson), blaze-pm's
+  // BLZ-305-v4-spine at 8bd7fd3d holds 66 such parents with 279 open children. Shipped hard it
+  // would fail `blaze audit` on the live board on day one. They are groomed under a separate
+  // ticket, and the kind moves to HARD_KINDS once the count is zero.
+  "empty-body", "config-project-drift", "terminal-parent-open-child",
 ];
 
 export const HARD_KINDS = new Set([
@@ -144,18 +152,25 @@ function attributeToProject(key, message) {
 }
 
 /**
- * @param tickets   [{ frontmatter, body }] — the whole corpus
+ * @param tickets   [{ frontmatter, body }] — the tickets to JUDGE (the audited scope)
  * @param projects  { KEY: projectJson } — taxonomy and optional per-project schema block
  * @param config    the board config, for the top-level schema override
+ * @param universe  every ticket the store holds, to RESOLVE against — a link target or parent
+ *                  in a project outside `--projects` still exists. Defaults to `tickets`.
  * @returns { findings: [{ ticket, kind, detail }], ok }
  */
-export function auditCorpus({ tickets = [], projects = {}, config = null } = {}) {
+export function auditCorpus({ tickets = [], projects = {}, config = null, universe = null } = {}) {
   const findings = [];
   const add = (ticket, kind, detail = "") => findings.push({ ticket, kind, detail });
 
+  // BLZ-681: ids and parent types come from the WHOLE store, not the audited scope. Built from
+  // `tickets` alone, `blaze audit --projects BLZ` reported a hard `dangling-target` for every
+  // legitimate cross-project link (BLZ-134 → INF-750) and `dangling-parent` for a cross-project
+  // parent — targets that exist, in a project the run was not asked to judge. Unscoped, the same
+  // board reported none. Findings are still raised only on the tickets in scope.
   const ids = new Set();
   const typeById = new Map();
-  for (const t of tickets) {
+  for (const t of universe ?? tickets) {
     const fm = t?.frontmatter ?? {};
     if (fm.id) { ids.add(fm.id); typeById.set(fm.id, fm.type); }
   }
@@ -304,6 +319,109 @@ export function auditCorpus({ tickets = [], projects = {}, config = null } = {})
   }
 
   return { findings, ok: !findings.some((f) => HARD_KINDS.has(f.kind)) };
+}
+
+// ---------------------------------------------------------------------------------------
+// governanceFindings — BLZ-681 (spec §5.6). Three of blaze-pm's governance scripts, re-homed as
+// `blaze audit` kinds so they read through `resolveReadStorage` and work under fs, dual and db.
+// Each RULE is ported exactly — the sets and patterns below are the scripts' own — so the
+// finding count on a board is the count the script reported for it.
+
+/** `terminal_parent_scan.py`'s TERMINAL: the terminal statuses of the delivery, goal and risk
+ *  workflows. Deliberately the script's fixed set, not the resolved schema's terminals: an
+ *  `implemented` requirement with an open delivery child is the normal state of a requirement
+ *  being built, and the script never flagged it. */
+export const TERMINAL_PARENT_STATUSES = new Set(["done", "achieved", "mitigated", "accepted", "obsolete"]);
+
+/** `empty_body_scan.py`'s TERMINAL_STATUSES: a terminal ticket with no body is a weaker
+ *  historical record, not an active breach, so it is not reported. */
+export const EMPTY_BODY_TERMINAL = new Set(["done", "achieved", "implemented", "accepted",
+                                            "mitigated", "obsolete", "rejected"]);
+
+/** `is_scaffold_line`: blank, a heading, an empty checkbox, a bare bullet, an HTML comment. */
+export function isScaffoldLine(line) {
+  const stripped = line.trim();
+  return stripped === "" || stripped.startsWith("#")
+    || /^\s*[-*]\s*\[[ xX]\]\s*$/.test(line)
+    || /^\s*[-*]\s*$/.test(line)
+    || /^\s*<!--.*-->\s*$/.test(line);
+}
+
+/** `body_is_empty`: every line is scaffold — the shape `blaze new` leaves for a title-only ticket. */
+export const bodyIsEmpty = (body) => String(body ?? "").split(/\r\n|\r|\n/).every(isScaffoldLine);
+
+const idOrder = (a, b) => {
+  const [ka, na] = [a.slice(0, a.lastIndexOf("-")), Number(a.slice(a.lastIndexOf("-") + 1))];
+  const [kb, nb] = [b.slice(0, b.lastIndexOf("-")), Number(b.slice(b.lastIndexOf("-") + 1))];
+  return ka < kb ? -1 : ka > kb ? 1 : na - nb;
+};
+
+/**
+ * Scoping matches `auditCorpus`'s (BLZ-681): relations RESOLVE against everything the store
+ * holds, and findings are raised only on what is in scope.
+ *
+ * @param tickets         [{ frontmatter, body, status }] — the tickets in scope (`--projects`)
+ * @param universe        every ticket the store holds; a parent's children are found here, so a
+ *                        child in a project outside `--projects` still counts. Default `tickets`.
+ * @param configProjects  blaze.config.json's `projects`, or null when the config did not load
+ * @param storeProjects   the project keys the read store holds (`readStorage.listProjects`)
+ * @param scopeProjects   the `--projects` keys, or null for an unscoped run; drift is reported
+ *                        only for these
+ * @returns findings, `{ ticket, kind, detail }`
+ */
+export function governanceFindings({ tickets = [], universe = null, configProjects = null,
+                                     storeProjects = [], scopeProjects = null } = {}) {
+  const findings = [];
+
+  // terminal-parent-open-child — SOFT until the live board is groomed (see SOFT_KINDS), then
+  // hard. Children are found across the whole audited set, so a
+  // cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
+  const byId = new Map();
+  for (const t of universe ?? tickets) {
+    const id = t?.frontmatter?.id;
+    if (id) byId.set(String(id), { status: t.status, type: t.frontmatter.type, parent: t.frontmatter.parent || null });
+  }
+  const inScope = new Set(tickets.map((t) => String(t?.frontmatter?.id ?? "")));
+  const children = new Map();
+  for (const [id, t] of byId) {
+    if (!t.parent) continue;
+    if (!children.has(t.parent)) children.set(t.parent, []);
+    children.get(t.parent).push(id);
+  }
+  for (const parent of [...children.keys()].filter((p) => byId.has(p) && inScope.has(p)).sort(idOrder)) {
+    const p = byId.get(parent);
+    if (!TERMINAL_PARENT_STATUSES.has(p.status)) continue;
+    const kids = children.get(parent);
+    const open = kids.filter((k) => !TERMINAL_PARENT_STATUSES.has(byId.get(k).status)).sort(idOrder);
+    if (!open.length) continue;
+    findings.push({ ticket: parent, kind: "terminal-parent-open-child",
+      detail: `${p.type} ${p.status} with ${open.length}/${kids.length} children open: ${open.join(", ")}` });
+  }
+
+  // empty-body — SOFT. A fill queue: the ticket is valid, its description is simply not written.
+  for (const t of tickets) {
+    const id = t?.frontmatter?.id;
+    if (!id || EMPTY_BODY_TERMINAL.has(t.status) || !bodyIsEmpty(t.body)) continue;
+    findings.push({ ticket: id, kind: "empty-body", detail: String(t.status) });
+  }
+
+  // config-project-drift — SOFT. The configured `projects` and the projects the read store
+  // holds disagree. Soft because nothing is wrong with any ticket: a project missing from the
+  // config is simply not audited or served, and the fix is a config line. Skipped when the
+  // config did not load — `config-unloadable` already says so.
+  if (Array.isArray(configProjects)) {
+    const configured = new Set(configProjects), held = new Set(storeProjects);
+    const scoped = (k) => !scopeProjects || scopeProjects.includes(k);
+    for (const k of [...held].filter((x) => !configured.has(x) && scoped(x)).sort()) {
+      findings.push({ ticket: k, kind: "config-project-drift",
+        detail: "the store holds this project but blaze.config.json's projects does not list it" });
+    }
+    for (const k of [...configured].filter((x) => !held.has(x) && scoped(x)).sort()) {
+      findings.push({ ticket: k, kind: "config-project-drift",
+        detail: "blaze.config.json's projects lists this project but the store holds none of it" });
+    }
+  }
+  return findings;
 }
 
 /** Counts by kind, for a runner that prints a summary rather than every finding. */
