@@ -197,3 +197,7 @@ any file. `migrate` is refused in both modes, because its dry run writes `migrat
 `schedule` only under `--write`, because its dry run is a read. `tests/readonly-runners.test.mjs`
 runs each one directly under `BLAZE_READONLY=1` and proves nothing was written. This ADR's
 decision is unchanged: the guard is advisory, not a boundary.
+
+Ordering, for `init` specifically: only `--help` and an unknown option are answered before the
+guard, so a bad key (or any other answer error) under `BLAZE_READONLY=1` gets the read-only
+refusal first. Nothing is written either way.
