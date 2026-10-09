@@ -22,7 +22,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
-| [`db`](#db) | Create the database schema, seed its id counter, report the dual-write soak | yes (`init`, `seed-counter`); no (`status`) |
+| [`db`](#db) | Create the database schema, load the board into Postgres, seed its id counter, report the dual-write soak | yes (`init`, `seed-counter`, `load`); no (`status`) |
 | [`user`](#user) | Add a board user and issue its API token | yes |
 
 ## start
@@ -694,6 +694,7 @@ the reviewed ledger.
 ```
 blaze db init [--force]
 blaze db seed-counter
+blaze db load [--replace]
 blaze db status
 ```
 
@@ -703,7 +704,8 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 
 | Subcommand | SQLite | Postgres |
 |---|---|---|
-| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded** (that is the BLZ-254 migration). Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. |
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 
