@@ -51,6 +51,15 @@ async function isolatedDbTwoConnections(name) {
   return { clientA, clientB, dbName };
 }
 
+/** BLZ-675: `n` calls on ONE connection, each awaited before the next. A `Promise.all` here
+ *  issued them all at once on one pg.Client — which pg queues anyway (the header above), and
+ *  deprecates. The race this file proves is BETWEEN the two connections, and that stays. */
+async function inTurn(n, fn) {
+  const out = [];
+  for (let i = 0; i < n; i++) out.push(await fn());
+  return out;
+}
+
 /** Drops the database this helper created — call in the test's own `finally`. */
 async function dropDb(dbName) {
   const admin = new pg.Client(process.env.BLAZE_TEST_PG_URL);
@@ -67,8 +76,8 @@ test("50x50 concurrent allocations on one project, across two real connections: 
     const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
     const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
     const [a, b] = await Promise.all([
-      Promise.all(Array.from({ length: 50 }, () => portA.allocate(key))),
-      Promise.all(Array.from({ length: 50 }, () => portB.allocate(key))),
+      inTurn(50, () => portA.allocate(key)),
+      inTurn(50, () => portB.allocate(key)),
     ]);
     const all = [...a, ...b].map((r) => r.n).sort((x, y) => x - y);
     assert.deepEqual(all, Array.from({ length: 100 }, (_, i) => i + 1));
@@ -87,8 +96,8 @@ test("concurrent allocations on two DIFFERENT projects, across two connections, 
     const portA = dbWritePort(pgExec(clientA), { dialect: "postgres" });
     const portB = dbWritePort(pgExec(clientB), { dialect: "postgres" });
     const [resA, resB] = await Promise.all([
-      Promise.all(Array.from({ length: 20 }, () => portA.allocate(keyA))),
-      Promise.all(Array.from({ length: 20 }, () => portB.allocate(keyB))),
+      inTurn(20, () => portA.allocate(keyA)),
+      inTurn(20, () => portB.allocate(keyB)),
     ]);
     assert.deepEqual(resA.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));
     assert.deepEqual(resB.map((r) => r.n).sort((x, y) => x - y), Array.from({ length: 20 }, (_, i) => i + 1));

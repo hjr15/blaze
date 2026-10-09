@@ -151,12 +151,14 @@ export function postgresReader(client) {
 
   // Same child-table fetches as sqlite-storage.mjs, in the same order, for the same reason:
   // `ord` preserves what the operator wrote, and `worklog_entry` has no ord so it uses on_date.
+  // BLZ-675: one query at a time. These were `Promise.all`s over ONE pg.Client — concurrent
+  // `client.query()` calls on a single connection, which pg 8 queues but deprecates and pg 9 is
+  // set to refuse. One connection runs one query at a time anyway, so awaiting each in turn
+  // costs nothing; it only stops asking the client to queue.
   const childrenFor = async (id) => {
-    const [labels, components, worklog] = await Promise.all([
-      client.query("SELECT label FROM ticket_label WHERE ticket_id = $1 ORDER BY ord", [id]),
-      client.query("SELECT component FROM ticket_component WHERE ticket_id = $1 ORDER BY ord", [id]),
-      client.query("SELECT on_date::text AS on_date, minutes, note FROM worklog_entry WHERE ticket_id = $1 ORDER BY on_date, id", [id]),
-    ]);
+    const labels = await client.query("SELECT label FROM ticket_label WHERE ticket_id = $1 ORDER BY ord", [id]);
+    const components = await client.query("SELECT component FROM ticket_component WHERE ticket_id = $1 ORDER BY ord", [id]);
+    const worklog = await client.query("SELECT on_date::text AS on_date, minutes, note FROM worklog_entry WHERE ticket_id = $1 ORDER BY on_date, id", [id]);
     return [
       labels.rows.map((r) => r.label),
       components.rows.map((r) => r.component),
@@ -170,10 +172,15 @@ export function postgresReader(client) {
 
   const hydrate = async (row) => {
     if (!row) return null;
-    const [links, [labels, components, worklog]] = await Promise.all([linksFor(row.id), childrenFor(row.id)]);
+    const links = await linksFor(row.id);
+    const [labels, components, worklog] = await childrenFor(row.id);
     return toRecord(row, links, labels, components, worklog);
   };
-  const hydrateAll = async (rows) => Promise.all(rows.map(hydrate));
+  const hydrateAll = async (rows) => {
+    const out = [];
+    for (const row of rows) out.push(await hydrate(row));
+    return out;
+  };
 
   return {
     name: "postgres",
@@ -205,13 +212,11 @@ export function postgresReader(client) {
       // Five queries for the whole corpus, not 1 + 4N. Ordered exactly as the per-id fetches
       // order them (links by type,target; labels/components by ord; worklog by on_date,id) —
       // driver-conformance.test.mjs pins the two paths against each other.
-      const [t, l, lb, cp, wl] = await Promise.all([
-        client.query(`SELECT ${COLS} FROM ticket WHERE ${ALIVE} ORDER BY id`),
-        client.query("SELECT src_id, link_type, target_id FROM ticket_link ORDER BY src_id, link_type, target_id"),
-        client.query("SELECT ticket_id, label, ord FROM ticket_label ORDER BY ticket_id, ord"),
-        client.query("SELECT ticket_id, component, ord FROM ticket_component ORDER BY ticket_id, ord"),
-        client.query("SELECT ticket_id, on_date::text AS on_date, minutes, note FROM worklog_entry ORDER BY ticket_id, on_date, id"),
-      ]);
+      const t = await client.query(`SELECT ${COLS} FROM ticket WHERE ${ALIVE} ORDER BY id`);
+      const l = await client.query("SELECT src_id, link_type, target_id FROM ticket_link ORDER BY src_id, link_type, target_id");
+      const lb = await client.query("SELECT ticket_id, label, ord FROM ticket_label ORDER BY ticket_id, ord");
+      const cp = await client.query("SELECT ticket_id, component, ord FROM ticket_component ORDER BY ticket_id, ord");
+      const wl = await client.query("SELECT ticket_id, on_date::text AS on_date, minutes, note FROM worklog_entry ORDER BY ticket_id, on_date, id");
       // Array.prototype.sort is stable, so rows without `ord` (links, worklog) keep SQL order.
       const group = (rows, key, map) => {
         const m = new Map();
