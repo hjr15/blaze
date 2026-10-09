@@ -154,6 +154,9 @@ test("a second load is REFUSED and changes nothing; --replace reloads and never 
     assert.match(again.text(), /already holds 2 ticket\(s\)\. Nothing was loaded/);
     assert.match(again.text(), /blaze db verify/);
     assert.match(again.text(), /--replace/);
+    assert.equal(await count(db.url, "SELECT count(*) n FROM ticket"), 2, "the refused load changed no ticket");
+    assert.equal(await count(db.url, "SELECT n FROM project_counter WHERE project_key = 'ENG'"), 40,
+      "the refused load left the counter alone");
 
     const rep = capture();
     assert.equal(await runDb(["load", "--replace"], { ...rep.io, roots, ...pgIo(db.url) }), 0, rep.text());
@@ -162,6 +165,26 @@ test("a second load is REFUSED and changes nothing; --replace reloads and never 
     assert.equal(await count(db.url, "SELECT count(*) n FROM ticket_link"), 1);
     assert.equal(await count(db.url, "SELECT n FROM project_counter WHERE project_key = 'ENG'"), 40,
       "a number already issued is never issued again — --replace does not reset the counter");
+  } finally { await db.drop(); }
+});
+
+test("a failing load --replace leaves the previous tickets, events and counter intact", PG_SKIP, async () => {
+  const db = await scratchPgDb("replacefail");
+  try {
+    const roots = board();
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    assert.equal(await runDb(["load"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    const snap = async () => [
+      await count(db.url, "SELECT count(*) n FROM ticket"),
+      await count(db.url, "SELECT count(*) n FROM ticket_event"),
+      await count(db.url, "SELECT n FROM project_counter WHERE project_key = 'ENG'")];
+    const before = await snap();
+    mkdirSync(join(roots.projectsDir, "ENG", "done"), { recursive: true });
+    writeFileSync(join(roots.projectsDir, "ENG", "done", "eng-7-bad.md"),
+      ["---", "id: eng-7", "title: bad", "type: task", "project: ENG", "---", "", "x", ""].join("\n"));
+    const c = capture();
+    assert.equal(await runDb(["load", "--replace"], { ...c.io, roots, ...pgIo(db.url) }), 1, c.text());
+    assert.deepEqual(await snap(), before, "the TRUNCATE rolled back with the refused load");
   } finally { await db.drop(); }
 });
 
