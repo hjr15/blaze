@@ -2,12 +2,12 @@
 // re-homed as `blaze audit` kinds: terminal-parent-open-child, empty-body and
 // config-project-drift (soft), plus `--fail-on <kinds>` so one kind can gate on its own. The
 // rules are the scripts' own, pinned here; the runner tests prove they read through the
-// resolved store — the db-mode test deletes a ticket FILE after loading the shadow, and the
+// resolved store — the db-mode test rewrites a ticket FILE after loading the shadow, and the
 // finding is still reported, because it came from the database.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -203,4 +203,17 @@ test("blaze audit --projects: an in-scope terminal parent with an out-of-scope o
   const found = JSON.parse(r.stdout).findings.map((f) => `${f.ticket} ${f.kind}`);
   assert.ok(found.includes("ENG-1 terminal-parent-open-child"), found.join("; "));
   assert.ok(!found.some((f) => f.endsWith("config-project-drift")), "GONE is outside --projects ENG");
+});
+
+test("--fail-on exits 2 when the walk could not observe the whole board, never a clean 0",
+  { skip: process.getuid && process.getuid() === 0 ? "root ignores mode bits" : false }, () => {
+  const { projectsDir } = board();
+  const dir = join(projectsDir, "ENG", "defined");
+  mkdirSync(dir, { recursive: true });
+  chmodSync(dir, 0o000);
+  try {
+    const r = audit(projectsDir, ["--fail-on", "duplicate-status"]);
+    assert.equal(r.status, 2, r.stdout + r.stderr);
+    assert.match(r.stderr, /unreadable-ticket-directory/);
+  } finally { chmodSync(dir, 0o755); }
 });

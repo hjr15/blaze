@@ -359,13 +359,14 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
-| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. An unknown kind is refused (exit `2`). |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
 Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
 the corpus is empty — a run that measured nothing is never reported as a pass. With
-`--fail-on`, `1` means a finding of a named kind and nothing else.
+`--fail-on`, `1` means a finding of a named kind and nothing else, and `2` also covers a run
+that could not read the whole board.
 
 **Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
 resolved store, so it works under `fs`, `dual` and `db`, and each rule is the script's own:

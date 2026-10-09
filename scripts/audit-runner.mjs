@@ -440,4 +440,12 @@ if (opts.json) {
 // exiting immediately after a large console.log truncates it mid-write. The --json payload
 // on a real board is well past the pipe buffer, so this is not theoretical — it truncated
 // at 64KB the first time it was piped.
-process.exitCode = failOn ? (failing ? 1 : 0) : (report.ok ? 0 : 1);
+// BLZ-681: a --fail-on run that could not observe the whole board (an unread status directory,
+// a config that did not load) cannot vouch for the absence of the named kinds: exit 2, "could
+// not run", never a clean 0.
+const BLIND_KINDS = ["unreadable-ticket-directory", "config-unloadable"];
+const blind = failOn ? BLIND_KINDS.filter((k) => report.findings.some((f) => f.kind === k)) : [];
+if (blind.length) {
+  console.error(`blaze audit: --fail-on cannot pass — the run could not observe the whole board (${blind.join(", ")}); fix that first`);
+}
+process.exitCode = blind.length ? 2 : failOn ? (failing ? 1 : 0) : (report.ok ? 0 : 1);

@@ -374,8 +374,8 @@ export function governanceFindings({ tickets = [], universe = null, configProjec
   const findings = [];
 
   // terminal-parent-open-child — SOFT until the live board is groomed (see SOFT_KINDS), then
-  // hard. Children are found across the whole audited set, so a
-  // cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
+  // hard. Children are found across the whole universe (not just the
+  // scoped tickets), so a cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
   const byId = new Map();
   for (const t of universe ?? tickets) {
     const id = t?.frontmatter?.id;
