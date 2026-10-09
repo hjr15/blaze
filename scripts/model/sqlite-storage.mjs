@@ -19,6 +19,7 @@ import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-sch
 import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
 import { assertConfigNamespace } from "./write-port-resolve.mjs";
 import { readActivityFeed } from "./read-storage.mjs";
+import { safeJson } from "./safe-json.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
 // BLZ-391. This projected 15 of a ticket's 28 frontmatter keys: `loadCorpus` WROTE the other
@@ -31,19 +32,12 @@ import { readActivityFeed } from "./read-storage.mjs";
 /** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
  *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
  *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
- *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty. */
-function extraOf(text) {
-  if (!text) return {};
-  try {
-    const v = JSON.parse(text);
-    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
-  } catch { return {}; }
-}
-
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty —
+ *  `safeJson`, the write port's own parser, shared so the three cannot drift. */
 function toRecord(row, links, labels, components, worklog) {
   const frontmatter = {
     // Unknown keys first — see pg-storage.mjs's toRecord; the two are kept identical.
-    ...extraOf(row.extra_json),
+    ...safeJson(row.extra_json),
     id: row.id, project: row.project_key, type: row.type, title: row.title,
     priority: row.priority, resolution: row.resolution ?? "",
     parent: row.parent_id ?? "", assignee: row.assignee,

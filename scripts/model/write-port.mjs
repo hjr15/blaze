@@ -23,15 +23,7 @@ import { storableEstimate } from "./time.mjs";
 import { serializeTicket } from "./ticket.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 import { counterUpsertSql } from "./seed-counter.mjs";
-
-/** A corrupt extra_json must not take the whole read down — report empty, never throw. */
-function safeJson(text) {
-  if (!text) return {};
-  try {
-    const v = JSON.parse(text);
-    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
-  } catch { return {}; }
-}
+import { safeJson } from "./safe-json.mjs";
 
 /** Stable stringify: object keys sorted, array order preserved. */
 function canonical(v) {

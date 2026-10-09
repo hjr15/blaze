@@ -14,28 +14,22 @@
 // npx + SQLite path installs nothing.
 import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
 import { readActivityFeed } from "./read-storage.mjs";
+import { safeJson } from "./safe-json.mjs";
 
 // BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
 // one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
 /** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
  *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
  *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
- *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty. */
-function extraOf(text) {
-  if (!text) return {};
-  try {
-    const v = JSON.parse(text);
-    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
-  } catch { return {}; }
-}
-
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty —
+ *  `safeJson`, the write port's own parser, shared so the three cannot drift. */
 function toRecord(row, links, labels, components, worklog) {
   const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
   return {
     frontmatter: {
       // Unknown keys first: `extraFields` never stores a key that has a column, so nothing
       // below can be shadowed, and the column values stay authoritative regardless.
-      ...extraOf(row.extra_json),
+      ...safeJson(row.extra_json),
       id: row.id, project: row.project_key, type: row.type, title: row.title,
       priority: row.priority, resolution: row.resolution ?? "",
       parent: row.parent_id ?? "", assignee: row.assignee,
