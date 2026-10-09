@@ -93,6 +93,10 @@ export function verifyLoad({ source, sourceRoot, loadedTickets, counts, criteria
   const report = zeroDiff(source, sourceRoot, { listTickets: () => loadedTickets },
                           { criteriaFor: (id) => criteriaOf(bodies.get(id)) });
   report.valueDiffs.push(...extraDiffs([...source.listTickets(sourceRoot)], loadedTickets));
+  // zeroDiff computed `ok` before the extras diffs were appended, so recompute it: `ok` must not
+  // say true on an extras-only diff.
+  report.ok = !report.valueDiffs.length && !report.missing.length && !report.extra.length
+    && !report.criteriaDiffs.length && !report.frozenViolations.length;
   const expected = expectedCounts(source, sourceRoot);
   const countDiffs = VERIFY_TABLES
     .filter((t) => expected[t] !== counts[t])
