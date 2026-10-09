@@ -1,4 +1,4 @@
-// scripts/db-runner.mjs — `blaze db init|seed-counter|load|status` (BLZ-299).
+// scripts/db-runner.mjs — `blaze db init|seed-counter|load|verify|status` (BLZ-299).
 //
 // ADR-0012 makes schema creation an EXPLICIT, named operation: runtime `open()` reads
 // and refuses rather than writing DDL behind your back (BLZ-297). This is that named
@@ -14,6 +14,8 @@ import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
 import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
+import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
@@ -29,6 +31,8 @@ export const USAGE = `usage: blaze db <command>
   load          Postgres only: load this board's tickets into the database, in one
                 transaction, then raise the id counter. Refuses a database that already
                 holds tickets unless --replace
+  verify        Postgres only: compare the database with this board's files — the
+                migration gate. Exit 0 pass, 1 differences found, 2 could not run
   status        what the database holds, and what the dual-write soak has found
 
   --force       with init, SQLite only: replace an existing shadow database
@@ -241,6 +245,65 @@ async function loadCmd(ctx) {
   }
 }
 
+/**
+ * BLZ-679: `blaze db verify` — the migration gate (spec §5.3). The filesystem reader over this
+ * board is the SOURCE; the Postgres reader, every ticket fetched up front (zeroDiff is
+ * synchronous), is the LOADED side. `verifyLoad` decides; this prints and picks the exit code:
+ *   0  every condition holds
+ *   1  it ran, and found a difference
+ *   2  it could not run — no config, not Postgres, no connection or schema, or a source file
+ *      it could not read. A verify that could not look must never print a pass.
+ * Read-only: no BLAZE_READONLY guard, and nothing is written.
+ */
+async function verifyCmd(ctx) {
+  const { projectsDir, log, err, openPgClient } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig) return 2;
+  if (dbConfig.driver !== "postgres") {
+    err("blaze db verify: verifies a Postgres database loaded by 'blaze db load'. It could not run.");
+    return 2;
+  }
+  let client;
+  try { client = await openCheckedPg(dbConfig.connection, openPgClient); }
+  catch (e) { err(e.message); err("blaze db verify could not run."); return 2; }
+  const where = describePgTarget(dbConfig.connection);
+  let verdict;
+  try {
+    const loadedTickets = await postgresReader(client).listTickets(null);
+    const counts = {};
+    for (const t of VERIFY_TABLES) counts[t] = Number((await client.query(`SELECT count(*) AS n FROM ${t}`)).rows[0].n);
+    verdict = verifyLoad({ source: fsReadStorage, sourceRoot: projectsDir, loadedTickets, counts });
+  } catch (e) {
+    err(`blaze db verify: ${where} — ${e.message}`);
+    err("blaze db verify could not run.");
+    return 2;
+  } finally {
+    try { await client.end(); } catch { /* already closed */ }
+  }
+  const { report, expected, countDiffs } = verdict;
+  const SHOW = 20;
+  log(`blaze db verify — ${projectsDir} against ${where}`);
+  log(`  compared       ${report.compared} tickets, ${report.fieldsChecked} fields`);
+  log(`  value diffs    ${report.valueDiffs.length}`);
+  for (const d of report.valueDiffs.slice(0, SHOW)) {
+    log(`      ${d.id}  ${d.field}${d.source === undefined ? "" : `: ${JSON.stringify(d.source)} → ${JSON.stringify(d.loaded)}`}`);
+  }
+  log(`  missing        ${report.missing.length}${report.missing.length ? `  (${report.missing.slice(0, SHOW).join(", ")})` : ""}`);
+  log(`  extra          ${report.extra.length}${report.extra.length ? `  (${report.extra.slice(0, SHOW).join(", ")})` : ""}`);
+  for (const t of VERIFY_TABLES) {
+    const d = countDiffs.find((x) => x.table === t);
+    log(`  rows ${t.padEnd(17)} ${d ? `${d.loaded} loaded, ${d.expected} expected  ✗` : expected[t]}`);
+  }
+  log(`  criteria       ${report.criteriaChecked} checked, ${report.criteriaDiffs.length} diffs`);
+  for (const d of report.criteriaDiffs.slice(0, SHOW)) log(`      ${d.id}  ${d.kind}`);
+  // Informational, never gating — spec §5.3 and zero-diff.mjs's own header say why.
+  log(`  byte diffs     ${report.byteDiffs}  (field order only — informational)`);
+  log(`  defaulted      ${report.defaulted.length}  (no value in the file; the schema default applied)`);
+  if (verdict.ok) { log("verify: PASS"); return 0; }
+  log(`verify: FAIL — ${verdict.failures.join("; ")}`);
+  return 1;
+}
+
 async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
   const path = shadowDbPath(dataRoot);
   if (existsSync(path) && !force) {
@@ -442,6 +505,7 @@ export async function runDb(argv, io = {}) {
   if (cmd === "init") return init(ctx);
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
   if (cmd === "load") return loadCmd(ctx);
+  if (cmd === "verify") return verifyCmd(ctx);
   if (cmd === "status") return status(ctx);
   err(`blaze db: unknown command ${JSON.stringify(cmd)}\n`);
   err(USAGE);

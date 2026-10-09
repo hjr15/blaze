@@ -17,10 +17,25 @@ import { readActivityFeed } from "./read-storage.mjs";
 
 // BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
 // one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
+/** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
+ *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
+ *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty. */
+function extraOf(text) {
+  if (!text) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+
 function toRecord(row, links, labels, components, worklog) {
   const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
   return {
     frontmatter: {
+      // Unknown keys first: `extraFields` never stores a key that has a column, so nothing
+      // below can be shadowed, and the column values stay authoritative regardless.
+      ...extraOf(row.extra_json),
       id: row.id, project: row.project_key, type: row.type, title: row.title,
       priority: row.priority, resolution: row.resolution ?? "",
       parent: row.parent_id ?? "", assignee: row.assignee,
@@ -56,7 +71,7 @@ const COLS = `id, project_key, num, type, status, title, priority, resolution,
               start_date::text AS start_date, due_date::text AS due_date,
               constraint_start_no_earlier_than::text AS constraint_start_no_earlier_than,
               deadline::text AS deadline, body,
-              created_on::text AS created_on, updated_on::text AS updated_on, version`;
+              created_on::text AS created_on, updated_on::text AS updated_on, version, extra_json`;
 const ALIVE = "deleted_at IS NULL";
 
 // `pg` is an OPTIONAL peer dependency: it is deliberately not installed for the

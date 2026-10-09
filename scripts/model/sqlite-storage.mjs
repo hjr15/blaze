@@ -28,8 +28,22 @@ import { readActivityFeed } from "./read-storage.mjs";
 //
 // `labels`, `components` and `worklog` come from child tables, fetched per row exactly as `links`
 // already was — the N+1 shape is the existing precedent here, not a new one.
+/** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
+ *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
+ *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty. */
+function extraOf(text) {
+  if (!text) return {};
+  try {
+    const v = JSON.parse(text);
+    return v && typeof v === "object" && !Array.isArray(v) ? v : {};
+  } catch { return {}; }
+}
+
 function toRecord(row, links, labels, components, worklog) {
   const frontmatter = {
+    // Unknown keys first — see pg-storage.mjs's toRecord; the two are kept identical.
+    ...extraOf(row.extra_json),
     id: row.id, project: row.project_key, type: row.type, title: row.title,
     priority: row.priority, resolution: row.resolution ?? "",
     parent: row.parent_id ?? "", assignee: row.assignee,
@@ -137,7 +151,7 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
                 parent_id, parent_type, assignee, estimate_minutes, sprint_id,
                 likelihood, impact, branch, pr, ref, category, verification, derived,
                 start_date, due_date, constraint_start_no_earlier_than, deadline,
-                body, created_on, updated_on, version`;
+                body, created_on, updated_on, version, extra_json`;
   const ALIVE = "deleted_at IS NULL";
 
   const byId       = db.prepare(`SELECT ${COLS} FROM ticket WHERE id = ? AND ${ALIVE}`);
@@ -147,7 +161,7 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   const blockers   = db.prepare(
     `SELECT t.id, t.project_key, t.num, t.type, t.status, t.title, t.priority, t.resolution,
             t.parent_id, t.parent_type, t.assignee, t.estimate_minutes, t.sprint_id,
-            t.start_date, t.due_date, t.body, t.created_on, t.updated_on, t.version
+            t.start_date, t.due_date, t.body, t.created_on, t.updated_on, t.version, t.extra_json
        FROM ticket_link l JOIN ticket t ON t.id = l.src_id
       WHERE l.target_id = ? AND l.link_type = 'Blocks' AND t.id <> ? AND t.${ALIVE}
       ORDER BY t.id`);
