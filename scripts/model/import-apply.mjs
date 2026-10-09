@@ -455,7 +455,9 @@ export async function applyImport(plan, ctx) {
       // the port. Not `applyNew` + `applyMove`: those force `initialStatus`
       // and walk transitions, fabricating up to three transitions and three
       // `updated` stamps per imported row (ADR-0037 §1).
-      const { file } = await writePort.write({ ...ticket, frontmatter });
+      // BLZ-683: `create` — if another writer took this id after `reserve`, this write fails
+      // loudly (exit 4, the row is named) rather than upserting over that writer's ticket.
+      const { file } = await writePort.write({ ...ticket, frontmatter }, { create: true });
       files.push(file);
       written.push(id);
       ids.push(id);

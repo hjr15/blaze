@@ -186,3 +186,14 @@ what it does **not** cover:
   milliseconds wide; on Postgres it also includes identity values committing out of order (a
   transaction holding a lower id than the MAX read before the agent, committing during the run).
   BLZ-254 owns the concurrency proofs.
+
+## Addendum (2026-10-05, BLZ-683) — every mutating runner now carries the guard
+
+The residual above — "Runners with no per-runner readonly guard" — is closed for the four it
+named. `user-runner.mjs`, `init-runner.mjs`, `migrate-runner.mjs` and `schedule-runner.mjs` each
+call `assertWritable` before their first write, matching the other runners: after their
+arguments are judged (a usage error is still named first), before a prompt, a connection test or
+any file. `migrate` is refused in both modes, because its dry run writes `migration/` too;
+`schedule` only under `--write`, because its dry run is a read. `tests/readonly-runners.test.mjs`
+runs each one directly under `BLAZE_READONLY=1` and proves nothing was written. This ADR's
+decision is unchanged: the guard is advisory, not a boundary.

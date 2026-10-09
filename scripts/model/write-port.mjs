@@ -306,6 +306,16 @@ export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {})
     // and no way to recover the status a transition came from.
     const priorRows = await exec.all(`SELECT status FROM ticket WHERE id = ${ph(0)}`, [id]);
     const prior = priorRows?.length ? priorRows[0].status : null;
+    // BLZ-683 (spec §5.8): a CREATE never writes over a row. `ctx.create` comes from the two
+    // verbs that mint a ticket — `applyNew` and import's create rows — and each checked the id
+    // was free (`exists`, `reserve`) a moment BEFORE this write. That check-then-write window
+    // is accepted, not locked (ADR-0038's addendum); what closes the damage is that the LOSING
+    // writer fails loudly here, or on the ticket's primary key below if the winner's row
+    // commits between this read and that insert, and never upserts over the winner's ticket.
+    if (ctx?.create && prior !== null) {
+      throw new Error(`write: ${id} already exists in the database — another writer created it `
+        + "first, so this create was NOT written (nothing is overwritten).");
+    }
 
     // parent_type is DERIVED, never taken from frontmatter — frontmatter has no such
     // field. The soak surfaced this on the live board: writing parent_id with a NULL
@@ -349,9 +359,11 @@ export function dbWritePort(exec, { dialect = "sqlite", today = isoToday } = {})
     // surfaced as "NOT NULL constraint failed: ticket.project_key" rather than as
     // anything resembling the actual mistake.
     const set = cols.slice(1).map((c) => `${c} = excluded.${c}`).join(", ");
+    // A create is a plain INSERT, so a row that appeared after the read above is refused by
+    // the primary key (BLZ-683); an edit or a move stays the upsert it has always been.
     await exec.run(
-      `INSERT INTO ticket (${cols.join(", ")}) VALUES (${cols.map((_, i) => ph(i)).join(", ")})
-       ON CONFLICT (id) DO UPDATE SET ${set}`, vals);
+      `INSERT INTO ticket (${cols.join(", ")}) VALUES (${cols.map((_, i) => ph(i)).join(", ")})`
+      + (ctx?.create ? "" : `\n       ON CONFLICT (id) DO UPDATE SET ${set}`), vals);
 
     await exec.run(`DELETE FROM ticket_link WHERE src_id = ${ph(0)}`, [id]);
     for (const l of fm.links ?? []) {
@@ -516,7 +528,10 @@ export function dualWritePort(primary, shadow, { onDivergence, strict = false } 
     const result = await primary[op](t, ctx);
     let shadowFailed = null;
     try {
-      await shadow[op](t, ctx);
+      // BLZ-683: `create` is the PRIMARY's question ("is this id free?"), decided above. The
+      // shadow keeps its pre-BLZ-683 upsert, so a stale shadow row still converges to what the
+      // primary wrote rather than becoming a divergence — dual behaviour is unchanged.
+      await shadow[op](t, ctx?.create ? { ...ctx, create: false } : ctx);
     } catch (e) {
       // A shadow that throws must never take the primary down with it.
       shadowFailed = e;

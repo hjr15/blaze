@@ -130,7 +130,9 @@ export async function applyNew(projectsDir, opts = {}) {
   if (await writePort.exists(target)) {
     return { ok: false, errors: [`refusing to overwrite ${ticketPath(projectsDir, project, status, id, title)}`] };
   }
-  const { file } = await writePort.write(target);
+  // BLZ-683: `create` — a row that appears between the check above and this write is refused,
+  // never overwritten (the db port's rule; the fs port ignores the context).
+  const { file } = await writePort.write(target, { create: true });
   const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
   return { ok: true, id, type, project, status, file, claimFile, warnings };
 }

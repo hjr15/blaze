@@ -11,6 +11,7 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { runDryRun, runLive } from "./migrate/jira-import.mjs";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 const CACHE = join(dataRoot, ".migration-cache");
@@ -51,6 +52,12 @@ if (keys.length === 0) {
   console.error("usage: blaze migrate [--dry-run|--live] --project KEY [--merge] (no projects configured in blaze.config.json)");
   process.exit(1);
 }
+
+// BLZ-683: the per-runner BLAZE_READONLY guard. BOTH modes write — the dry run writes
+// migration/MIGRATION-AUDIT.md and the ledger, `--live` writes tickets and commits — so it sits
+// before either, after the arguments and the project keys are judged.
+try { assertWritable("run blaze migrate"); }
+catch (e) { console.error(e.message); process.exit(1); }
 
 if (mode === "dry-run") {
   const { auditMd, ledger, stats } = runDryRun({ cacheDir: CACHE, keys, detectMerges: enableMerges });

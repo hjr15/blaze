@@ -22,6 +22,7 @@ import { planInit, questions, testConnection, OFFERED_DRIVERS } from "./init.mjs
 // nothing for the installed operator this usage text is written for.
 import { KEY_RULE_DOC } from "./config.mjs";
 import { addUser } from "./model/user-admin.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const FLAGS = {
   "--dir": "dir", "--project": "project", "--project-name": "projectName",
@@ -127,6 +128,10 @@ export async function runInit(argv, io = {}) {
     err(USAGE);
     return 1;
   }
+  // BLZ-683: the per-runner BLAZE_READONLY guard, before a prompt is shown, a connection is
+  // tested or a file is written — `--help` and an unknown option are still answered first.
+  try { assertWritable("run blaze init", env); }
+  catch (e) { err(e.message); return 1; }
 
   const interactive = Boolean(isTTY) && !args.yes;
   const answers = { ...args };

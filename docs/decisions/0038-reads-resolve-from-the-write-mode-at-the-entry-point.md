@@ -217,3 +217,16 @@ BLZ-254 decided each residual this ADR left open ([spec](../superpowers/specs/20
   100 `POST /api/new` against the cluster database; a `pg.Pool` (max 5) is built only if either
   p95 exceeds 250 ms, or connecting takes more than 20% of p95. The numbers are recorded on
   BLZ-254 either way.
+- **The groomer's check-then-write window, and Postgres identity values committing out of order
+  — accepted.** The groomer loop is off in the cluster (`loops.*` disabled), and a ticket id comes
+  from `project_counter`'s row lock, never from identity order.
+- **db `reserve`'s check-then-upsert window — accepted, and the loser now fails (BLZ-683).**
+  `reserve` runs only inside `import`, which is single-operator and refused in remote mode. A
+  create (`applyNew`, import's create rows) now writes with `{ create: true }`, so a ticket another
+  writer created after the check is refused — `already exists … NOT written`, or the ticket's
+  primary key if it commits mid-write — and never upserted over. An edit or move is unchanged,
+  and so is dual: the flag is the primary's, and the shadow keeps its upsert.
+  `tests/reserve-window.test.mjs` puts a second writer in the window, on SQLite and on Postgres
+  over two connections.
+- **A db groom has no undo — accepted.** Recovery is the `ticket_event` history plus the
+  database's backup and point-in-time restore.
