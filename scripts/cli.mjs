@@ -83,6 +83,9 @@ const SUBCOMMANDS = {
   // flush itself very much mutates.
   commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true, readOnlyFlags: ["--status"] },
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
+  // BLZ-682: replaces blaze-pm's build_matrices.py. It writes files, so it mutates; `--check`
+  // writes nothing and is that verb's read-only invocation (BLZ-499's mechanism).
+  matrices: { file: "matrices-runner.mjs", desc: "regenerate the requirements/architecture matrices (--check: report drift only)", mutates: true, readOnlyFlags: ["--check"] },
   migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
   publish: { file: "publish-runner.mjs", desc: "sweep local queues and trigger the flush", mutates: true },
   // BLZ-348: the command serve-auth.mjs's bind refusal has named since BLZ-304, and
@@ -160,7 +163,7 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
 //            ALREADY relocated but not committed — the same hazard the read-only gate
 //            above cites for gating too late.
 //
-// That leaves 20 of the 23 subcommands in `SUBCOMMANDS` running this check.
+// That leaves 21 of the 24 subcommands in `SUBCOMMANDS` running this check.
 //
 // The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw

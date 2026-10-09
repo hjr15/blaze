@@ -83,7 +83,7 @@ export function checkSchemaVersion(cfg, { current = SCHEMA_VERSION, min = MIN_SC
   //
   //   PER CHECKOUT — reproducible, DERIVED, and pinned by
   //   tests/schema-version-fixture-census.test.mjs, which fails if this sentence and the
-  //   files disagree: 5 fixture boards, of which 1 sets a removed key
+  //   files disagree: 6 fixture boards, of which 1 sets a removed key
   //   (`board-gate-removed-key`, `provider: "github"` — a string) and 0 set one to null.
   //   That is this repository's entire contribution, and it repeats once per checkout,
   //   which is the whole of why the number below moves.

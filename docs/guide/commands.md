@@ -21,6 +21,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`log`](#log) | Append a worklog entry | yes |
 | [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
+| [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
 | [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
 | [`db`](#db) | Create the database schema, load the board into Postgres, check the load, seed its id counter, report the dual-write soak | yes (`init`, `seed-counter`, `load`); no (`verify`, `status`) |
 | [`user`](#user) | Add a board user and issue its API token | yes |
@@ -689,6 +690,32 @@ blaze rollup [<id>]
 Read-only time roll-up. With an id, prints that node's own and rolled-up
 estimate and worklog time plus a child breakdown. Without an id, prints a
 summary across every goal and epic. Makes no writes.
+
+## matrices
+
+```
+blaze matrices [--project <KEY>] [--check] [--out <dir>]
+```
+
+Regenerates the two **derived** traceability views per project — `<key>-requirements-matrix.md`
+(each requirement, the delivery tickets that `Implements` it, the decisions that `Addresses` it)
+and `<key>-architecture-matrix.md` (each decision and the requirement it answers) — from the
+tickets, through the resolved store, so it works under `fs`, `dual` and `db`. It replaces
+blaze-pm's `scripts/build_matrices.py` (BLZ-682) and writes the same bytes: the acceptance test
+was a zero `diff -r` against that script's output for the live board.
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--project <KEY>` | One project only. | every project in `blaze.config.json` |
+| `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
+| `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
+
+Exit `2` when there are no projects to render — a run that rendered nothing never reports
+"in sync". Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
+what the script produced when its `glob` happened to return paths sorted; on a filesystem that
+returned them in another order the script's ties came out differently, so the first
+`blaze matrices` run on such a board may reorder those rows once. Under `db` a ticket has no
+file, so its link is the path the file would have today (`<KEY>/<status>/<id>-<slug>.md`).
 
 ## migrate
 

@@ -951,6 +951,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
+  ["matrices-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // BLZ-682: a CLI verb, no exports
   // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
   ["commit-or-queue.mjs", { writes: ["commitOrQueue", "stageFor"], sanctioned: [],
     inert: ["commitSuffix"] }],
@@ -2048,6 +2049,9 @@ const WRITE_ALLOWED = new Map([
   ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
   ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+  // BLZ-682: `blaze matrices` writes the two derived matrix files per project into --out —
+  // generated docs, never a ticket — through the FIFO-safe primitive, after creating the dir.
+  ["matrices-runner.mjs", ["mkdirSync", "writeRegularFileSync"]],
   // BLZ-535 round 7, Finding 2. Fifteen more, and they are the cost of deleting a false
   // criterion rather than rewording it: `fsStorage`, `resolveWritePort`, `commitOrQueue`,
   // `groomOnce`, `loadIdentity` and `loadTransitions` all write to a destination their caller

@@ -396,7 +396,7 @@ flushes. Use a git worktree per session when you need hard isolation.
 
 `BLAZE_READONLY=1` makes `blaze` refuse every mutating subcommand
 (`new`/`move`/`edit`/`link`/`resolve`/`log`/`commit`/`reindex`/`sprint`/
-`reconcile`/`groom`/`start`) at dispatch — it exits non-zero naming the
+`reconcile`/`groom`/`start`, and `matrices` unless `--check`) at dispatch — it exits non-zero naming the
 command and the env var, and never spawns the runner, so nothing is written.
 `board` and `rollup` are unaffected, and any `--help` still works — the point
 is to keep the CLI usable for the inspection itself, not to lock it out.
