@@ -90,8 +90,9 @@ export function readRegularFileSync(path, encoding = "utf8") {
  *  caller's existing best-effort catch sees an error rather than never returning.
  *
  *  This writes NO TICKET and is not a second write seam (ADR-0006): it is the primitive its
- *  one caller — the transitions cache, already inside the write-seam allowlist — uses to
- *  stop its own best-effort write from hanging the process. */
+ *  callers — the transitions cache (already inside the write-seam allowlist) and
+ *  matrices-runner.mjs, which writes the generated matrix files — use to stop a write from
+ *  hanging the process. */
 export function writeRegularFileSync(path, data) {
   const fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_TRUNC | NONBLOCK, 0o666);
   try {

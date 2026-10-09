@@ -25,6 +25,7 @@ import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
+import { dbTransitions } from "./model/transitions-db.mjs";
 import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admin.mjs";
@@ -745,9 +746,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     const vm = req.method === "GET" && u.pathname.match(/^\/view\/([a-z]+)$/);
     if (vm) {
-      return reading(async (rs) => {
+      return reading(async (rs, mode) => {
         const envelope = viewEnvelope({
           view: vm[1],
+          // BLZ-680: under db the metrics history is the database's (ticket_transition); left
+          // undefined otherwise, so fs and dual still take it from git, lazily, as before.
+          transitions: await dbTransitions(rs, mode, vm[1], projectsDir),
           project: u.searchParams.get("project") || "all",
           focus: u.searchParams.get("focus") || null,
           flat: u.searchParams.get("flat") === "1",
@@ -783,8 +787,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // statement that the board is empty — made by a run that never read it.
       let html;
       try {
-        html = await reading(async (rs) => pageHtml({ project, focus, flat, sprint, view, views,
-          projectsDir, nonce, tickets: await allTickets(rs) }));
+        html = await reading(async (rs, mode) => pageHtml({ project, focus, flat, sprint, view, views,
+          projectsDir, nonce, tickets: await allTickets(rs),
+          transitions: await dbTransitions(rs, mode, view, projectsDir) }));
       } catch (e) {
         console.error("blaze: the board page could not be rendered:", boardFailureReason(e));
         return send(req, res, 500, "text/html; charset=utf-8",

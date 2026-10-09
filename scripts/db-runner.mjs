@@ -1,4 +1,4 @@
-// scripts/db-runner.mjs — `blaze db init|status` (BLZ-299).
+// scripts/db-runner.mjs — `blaze db init|seed-counter|load|verify|status` (BLZ-299).
 //
 // ADR-0012 makes schema creation an EXPLICIT, named operation: runtime `open()` reads
 // and refuses rather than writing DDL behind your back (BLZ-297). This is that named
@@ -13,6 +13,11 @@ import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
 import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
+import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { importTransitionsExec } from "./migrate/import-transitions.mjs";
+import { buildTransitions } from "./model/transitions.mjs";
+import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
+import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
@@ -22,12 +27,18 @@ export const USAGE = `usage: blaze db <command>
 
   init          create the database schema. SQLite: create the shadow database and load
                 this board into it. Postgres: create the schema and seed the id counter
-                (the board's tickets are NOT loaded — that is the BLZ-254 migration)
+                (the board's tickets are NOT loaded — run 'blaze db load' next)
   seed-counter  raise the db-mode id counter to every number already taken (ticket files,
                 .ids/ claims, database rows). Run it immediately before BLAZE_WRITE_PORT=db
+  load          Postgres only: load this board's tickets into the database, in one
+                transaction, then raise the id counter. Refuses a database that already
+                holds tickets unless --replace
+  verify        Postgres only: compare the database with this board's files — the
+                migration gate. Exit 0 pass, 1 differences found, 2 could not run
   status        what the database holds, and what the dual-write soak has found
 
   --force       with init, SQLite only: replace an existing shadow database
+  --replace     with load: empty the ticket tables first, in the same transaction
 `;
 
 /** The resolved `database` block, or a printed refusal (null). Resolved BEFORE anything is
@@ -99,6 +110,7 @@ async function initPostgres({ dataRoot, projectsDir, force, log, err, openPgClie
     log("id counter seeded:");
     printSeed(rows, log);
     log("\nThe board's tickets were NOT loaded — Postgres holds the schema and the counter only.");
+    log("Load them with 'blaze db load', then check the load with 'blaze db verify'.");
     return 0;
   } finally {
     try { await client.end(); } catch { /* already closed */ }
@@ -145,6 +157,170 @@ async function seedCounterCmd(ctx) {
   } finally {
     await close();
   }
+}
+
+/** BLZ-680: what the transition import did, in one line — and, loudly, when there was no git
+ *  history to import from at all (a copy with no `.git`), which must not read as "no moves". */
+function transitionsLine(h, dataRoot) {
+  if (h.head === null) return `  ⚠ transitions  0 — no git history at ${dataRoot}, so none was imported`;
+  const skipped = h.skipped.unknownTicket + h.skipped.malformed;
+  return `  transitions  ${h.imported}  (from git history; ${h.ticketsCovered} tickets, ${h.coveragePct}% covered`
+    + `${skipped ? `; ${h.skipped.unknownTicket} for unknown tickets and ${h.skipped.malformed} malformed skipped` : ""})`;
+}
+
+/** BLZ-678: the tables `blaze db load --replace` empties — the ticket corpus and its history.
+ *  NOT `project_counter`: a number already issued must never be issued again, so the counter
+ *  is only ever raised (seedCounter), never reset. */
+const LOAD_TABLES = ["ticket_link", "ticket_label", "ticket_component", "worklog_entry",
+                     "acceptance_criterion", "ticket_event", "ticket"];
+
+/**
+ * BLZ-678: `blaze db load [--replace]` — the board's tickets into Postgres (spec §5.2).
+ *
+ * ONE TRANSACTION, ALL OR NOTHING. The emptiness check, a `--replace` truncate, the load and
+ * the counter seed commit together. A row the database refuses is counted (each ticket runs
+ * under a savepoint, so every refusal is named, not just the first) and then the WHOLE load is
+ * rolled back: a half-loaded board is one `blaze db verify` would only fail, and a re-run would
+ * then need `--replace` to get past the rows the failed run left behind.
+ *
+ * Refuses a database that already holds tickets unless `--replace`. After the cutover that
+ * database IS the board, and `--replace` erases its tickets and their event history — which is
+ * why it is never the default.
+ */
+async function loadCmd(ctx) {
+  const { dataRoot, projectsDir, log, err, openPgClient, replace } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig || !writableOr(ctx, "load")) return 1;
+  if (dbConfig.driver !== "postgres") {
+    err("blaze db load: loads a Postgres database. The SQLite shadow is loaded by 'blaze db init'");
+    err("(pass --force there to rebuild it).");
+    return 1;
+  }
+  let client;
+  try { client = await openCheckedPg(dbConfig.connection, openPgClient); }
+  catch (e) { err(e.message); return 1; }
+  const exec = pgExec(client);
+  const where = describePgTarget(dbConfig.connection);
+  try {
+    await exec.run("BEGIN", []);
+    let tally, seeded, history;
+    try {
+      const held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
+      if (held > 0 && !replace) {
+        await exec.run("ROLLBACK", []);
+        err(`blaze db load: ${where} already holds ${held} ticket(s). Nothing was loaded.`);
+        err("To check them against this board instead, run 'blaze db verify'. To erase them —");
+        err("their event history included — and load this board in their place, pass --replace.");
+        return 1;
+      }
+      if (replace) await exec.run(`TRUNCATE ${LOAD_TABLES.join(", ")}`, []);
+      tally = await loadCorpusAsync(exec, projectsDir, {
+        source: fsReadStorage, today: new Date().toISOString().slice(0, 10), dialect: "postgres" });
+      if (tally.skipped.insertFailed.length) {
+        await exec.run("ROLLBACK", []);
+        err(`blaze db load: ${where} refused ${tally.skipped.insertFailed.length} row(s), so NOTHING was loaded:`);
+        for (const f of tally.skipped.insertFailed) err(`  ${f.id}: ${f.reason}`);
+        return 1;
+      }
+      // BLZ-680 (spec §5.7): the git-era status history, once, as `transition` events — under
+      // db the metrics view reads `ticket_transition`, and git's log stops growing at cutover.
+      // Through BLZ-281's import rules (import-transitions.mjs). `head === null` means no git
+      // history could be read at the data root — said below, never passed off as "none".
+      const built = buildTransitions({ root: dataRoot });
+      history = { ...(await importTransitionsExec(exec, built,
+                    { knownIds: new Set(tally.typeById.keys()), dialect: "postgres" })), head: built.head };
+      // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
+      // ticket table's MAX inside this transaction) and from the files and `.ids/` claims, so
+      // the load and the counter cannot disagree.
+      seeded = await seedCounter(exec,
+        await corpusMaxima({ projectsDir, readStorage: fsReadStorage }), { dialect: "postgres" });
+      await exec.run("COMMIT", []);
+    } catch (e) {
+      try { await exec.run("ROLLBACK", []); } catch { /* the original error is what matters */ }
+      err(`blaze db load: ${where} — ${e.message}`);
+      err("Nothing was loaded: the load runs in one transaction.");
+      return 1;
+    }
+    log(`loaded ${where}${replace ? "  (--replace: the previous tickets were erased first)" : ""}`);
+    log(`  tickets      ${tally.tickets}`);
+    log(`  links        ${tally.links}`);
+    log(`  worklog      ${tally.worklog}`);
+    log(`  labels       ${tally.labels}   components ${tally.components}`);
+    // Every substitution is named (BLZ-280). A tally that reports only successes cannot be trusted.
+    if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
+    if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
+    if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
+    if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+    log(transitionsLine(history, dataRoot));
+    if (tally.skipped.noId || tally.skipped.badId) {
+      log(`  ⚠ files skipped: ${tally.skipped.noId} with no id, ${tally.skipped.badId} with a malformed id`);
+    }
+    log("id counter seeded:");
+    printSeed(seeded, log);
+    log("\nNow check it: blaze db verify");
+    return 0;
+  } finally {
+    try { await client.end(); } catch { /* already closed */ }
+  }
+}
+
+/**
+ * BLZ-679: `blaze db verify` — the migration gate (spec §5.3). The filesystem reader over this
+ * board is the SOURCE; the Postgres reader, every ticket fetched up front (zeroDiff is
+ * synchronous), is the LOADED side. `verifyLoad` decides; this prints and picks the exit code:
+ *   0  every condition holds
+ *   1  it ran, and found a difference
+ *   2  it could not run — no config, not Postgres, no connection or schema, or a source file
+ *      it could not read. A verify that could not look must never print a pass.
+ * Read-only: no BLAZE_READONLY guard, and nothing is written.
+ */
+async function verifyCmd(ctx) {
+  const { projectsDir, log, err, openPgClient } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig) return 2;
+  if (dbConfig.driver !== "postgres") {
+    err("blaze db verify: verifies a Postgres database loaded by 'blaze db load'. It could not run.");
+    return 2;
+  }
+  let client;
+  try { client = await openCheckedPg(dbConfig.connection, openPgClient); }
+  catch (e) { err(e.message); err("blaze db verify could not run."); return 2; }
+  const where = describePgTarget(dbConfig.connection);
+  let verdict;
+  try {
+    const loadedTickets = await postgresReader(client).listTickets(null);
+    const counts = {};
+    for (const t of VERIFY_TABLES) counts[t] = Number((await client.query(`SELECT count(*) AS n FROM ${t}`)).rows[0].n);
+    verdict = verifyLoad({ source: fsReadStorage, sourceRoot: projectsDir, loadedTickets, counts });
+  } catch (e) {
+    err(`blaze db verify: ${where} — ${e.message}`);
+    err("blaze db verify could not run.");
+    return 2;
+  } finally {
+    try { await client.end(); } catch { /* already closed */ }
+  }
+  const { report, expected, countDiffs } = verdict;
+  const SHOW = 20;
+  log(`blaze db verify — ${projectsDir} against ${where}`);
+  log(`  compared       ${report.compared} tickets, ${report.fieldsChecked} fields`);
+  log(`  value diffs    ${report.valueDiffs.length}`);
+  for (const d of report.valueDiffs.slice(0, SHOW)) {
+    log(`      ${d.id}  ${d.field}${d.source === undefined ? "" : `: ${JSON.stringify(d.source)} → ${JSON.stringify(d.loaded)}`}`);
+  }
+  log(`  missing        ${report.missing.length}${report.missing.length ? `  (${report.missing.slice(0, SHOW).join(", ")})` : ""}`);
+  log(`  extra          ${report.extra.length}${report.extra.length ? `  (${report.extra.slice(0, SHOW).join(", ")})` : ""}`);
+  for (const t of VERIFY_TABLES) {
+    const d = countDiffs.find((x) => x.table === t);
+    log(`  rows ${t.padEnd(17)} ${d ? `${d.loaded} loaded, ${d.expected} expected  ✗` : expected[t]}`);
+  }
+  log(`  criteria       ${report.criteriaChecked} checked, ${report.criteriaDiffs.length} diffs`);
+  for (const d of report.criteriaDiffs.slice(0, SHOW)) log(`      ${d.id}  ${d.kind}`);
+  // Informational, never gating — spec §5.3 and zero-diff.mjs's own header say why.
+  log(`  byte diffs     ${report.byteDiffs}  (field order only — informational)`);
+  log(`  defaulted      ${report.defaulted.length}  (no value in the file; the schema default applied)`);
+  if (verdict.ok) { log("verify: PASS"); return 0; }
+  log(`verify: FAIL — ${verdict.failures.join("; ")}`);
+  return 1;
 }
 
 async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
@@ -229,6 +405,15 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
       source: fsReadStorage, today: new Date().toISOString().slice(0, 10),
     });
     db.exec(setMigrationModeSql("sqlite", false));
+    // BLZ-680: the same git-era history `blaze db load` imports on Postgres, so a SQLite board
+    // switched to BLAZE_WRITE_PORT=db keeps its metrics history too. One transaction: a file
+    // database commits each autocommitted INSERT to disk on its own.
+    db.exec("BEGIN");
+    const built = buildTransitions({ root: dataRoot });
+    const history = { ...(await importTransitionsExec(exec, built,
+      { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
+      head: built.head };
+    db.exec("COMMIT");
     // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
     // handed out that may not have a ticket yet). It can only RAISE a counter.
     await seedCounter(exec, await corpusMaxima({ projectsDir, readStorage: fsReadStorage }),
@@ -240,6 +425,7 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
     log(`  criteria     ${tally.criteria}`);
     log(`  worklog      ${tally.worklog}`);
     log(`  labels       ${tally.labels}   components ${tally.components}`);
+    log(transitionsLine(history, dataRoot));
     // Every substitution is named. A tally that reports only successes is a tally that
     // cannot be trusted (BLZ-280).
     if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
@@ -335,17 +521,20 @@ export async function runDb(argv, io = {}) {
   const { log = console.log, err = console.error } = io;
   const cmd = argv.find((a) => !a.startsWith("-"));
   const force = argv.includes("--force");
+  const replace = argv.includes("--replace");
   if (!cmd || argv.includes("--help") || argv.includes("-h")) { log(USAGE); return cmd ? 0 : 1; }
 
   const roots = io.roots ?? resolveRoots();
   // `resolveDbConfig` / `openPostgresClient` are injectable exactly as resolveWritePort's are,
   // so a test drives the Postgres branch against a scratch database.
-  const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, log, err,
+  const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, replace, log, err,
                 resolveDbConfig: io.resolveDbConfig ?? resolveDatabaseConfig,
                 openPgClient: io.openPostgresClient ?? openPostgresClient,
                 env: io.env ?? process.env };
   if (cmd === "init") return init(ctx);
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
+  if (cmd === "load") return loadCmd(ctx);
+  if (cmd === "verify") return verifyCmd(ctx);
   if (cmd === "status") return status(ctx);
   err(`blaze db: unknown command ${JSON.stringify(cmd)}\n`);
   err(USAGE);

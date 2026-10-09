@@ -236,34 +236,46 @@ function applyCreate(exec, dialect, state) {
         + `configDbPathFor(). Attached databases: ${attached.join(", ")}`);
     }
   }
-  const runs = [
-    exec.run(ddl, []),
-    exec.run(linkDdl(dialect), []),
-    exec.run(hierarchyDdl(dialect), []),
-    exec.run(metaDdl(dialect), []),
+  // BLZ-675: each statement is a THUNK, run one at a time. This used to be an array of
+  // `exec.run(...)` CALLS, so every statement was issued before the first was awaited — against
+  // a real pg.Client that is N concurrent `client.query()` calls on one connection, which pg 8
+  // queues but deprecates ("Calling client.query() when the client is already executing a
+  // query") and pg 9 is set to refuse.
+  const steps = [
+    () => exec.run(ddl, []),
+    () => exec.run(linkDdl(dialect), []),
+    () => exec.run(hierarchyDdl(dialect), []),
+    () => exec.run(metaDdl(dialect), []),
     // `configDdl` emits `CREATE SCHEMA IF NOT EXISTS blaze_config` on Postgres and nothing on
     // SQLite, where the ATTACH above IS the namespace. `viewDdl` must follow it: `view`'s FKs
     // point at `project` (config's) and `view_type` (its own), and BLZ-371 established that in
     // SQLite an FK cannot cross a database file — which is why `view` lives here at all.
-    exec.run(configDdl(dialect), []),
-    exec.run(viewDdl(dialect), []),
-    ...viewTypeSeedSql(dialect).map(({ sql, params }) => exec.run(sql, params)),
-    exec.run(
+    () => exec.run(configDdl(dialect), []),
+    () => exec.run(viewDdl(dialect), []),
+    ...viewTypeSeedSql(dialect).map(({ sql, params }) => () => exec.run(sql, params)),
+    () => exec.run(
       `INSERT INTO blaze_meta (key, value) VALUES (${ph(dialect, 0)}, ${ph(dialect, 1)})`,
       ["schema_version", String(DB_SCHEMA_VERSION)]),
   ];
-  // Await only if the driver actually returned promises — one body, both drivers.
   const done = { created: true, version: DB_SCHEMA_VERSION };
-  // The config seed is NOT in `runs`: it needs its own transaction, because
+  // The config seed is NOT a step: it needs its own transaction, because
   // `workflow.reopen_to` is a deferred circular FK and the seed is only consistent at COMMIT.
   // The sync driver needs the SYNCHRONOUS twin — `seedConfigInTransaction` is async, so with
   // node:sqlite every await in it defers to a microtask and this function would return with
   // the config tables still empty.
-  if (runs.some((r) => r instanceof Promise)) {
-    return Promise.all(runs)
-      .then(() => seedConfigInTransaction((sql, params) => exec.run(sql, params), dialect))
-      .then(() => done);
+  //
+  // One body, both drivers: the FIRST step's result says which kind this exec is. An async
+  // driver returns a promise, and then every later step waits for the one before it.
+  const first = steps[0]();
+  if (first instanceof Promise) {
+    return (async () => {
+      await first;
+      for (const step of steps.slice(1)) await step();
+      await seedConfigInTransaction((sql, params) => exec.run(sql, params), dialect);
+      return done;
+    })();
   }
+  for (const step of steps.slice(1)) step();
   seedConfigSync((sql, params) => exec.run(sql, params), dialect);
   return done;
 }

@@ -198,3 +198,35 @@ in — moves neither the event id nor a store file's identity; the re-read catch
 groomed row. (b) No undo: a db groom is not a commit, so its feed event carries no `sha` and the
 feed's revert button (`supervisor.mjs`, shown only for an event with a `sha`) never appears. A
 revert through the port is BLZ-254's to design.
+
+## Addendum (2026-10-05, BLZ-254 PR A) — the remaining named residuals
+
+BLZ-254 decided each residual this ADR left open ([spec](../superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md) §5.7 and §5.8):
+
+- **`.blaze/transitions.json` — closed (BLZ-680).** Under `db` the Metrics view reads its
+  history from the `ticket_transition` view over `ticket_event` (`dbTransitions`, called by both
+  servers for the metrics view only). `blaze db load` imports the git-era history once, through
+  BLZ-281's import rules (`import-transitions.mjs`: timestamps verbatim, `source =
+  'git-backfill'`, actor `unknown`, unknown and malformed rows counted, coverage reported) and
+  says so loudly when the data root has no git history to import; the SQLite `blaze db init`
+  does the same for the shadow. `fs` and `dual` still read git, unchanged.
+- **`sprints.json` — kept as a data-root config file**, like `blaze.config.json`. It is a small
+  operator-edited registry; a ticket's sprint membership is already the `ticket.sprint_id`
+  column. It moves with config in Phase 5.
+- **Connection pooling — measure first.** The cutover rehearsal times 200 sequential `GET /` and
+  100 `POST /api/new` against the cluster database; a `pg.Pool` (max 5) is built only if either
+  p95 exceeds 250 ms, or connecting takes more than 20% of p95. The numbers are recorded on
+  BLZ-254 either way.
+- **The groomer's check-then-write window, and Postgres identity values committing out of order
+  — accepted.** The groomer loop is off in the cluster (`loops.*` disabled), and a ticket id comes
+  from `project_counter`'s row lock, never from identity order.
+- **db `reserve`'s check-then-upsert window — accepted, and the loser now fails (BLZ-683).**
+  `reserve` runs only inside `import`, which is single-operator and refused in remote mode. A
+  create (`applyNew`, import's create rows) now writes with `{ create: true }`, so a ticket another
+  writer created after the check is refused — `already exists … NOT written`, or the ticket's
+  primary key if it commits mid-write — and never upserted over. An edit or move is unchanged,
+  and so is dual: the flag is the primary's, and the shadow keeps its upsert.
+  `tests/reserve-window.test.mjs` puts a second writer in the window, on SQLite and on Postgres
+  over two connections.
+- **A db groom has no undo — accepted.** Recovery is the `ticket_event` history plus the
+  database's backup and point-in-time restore.

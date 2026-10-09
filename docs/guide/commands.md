@@ -21,8 +21,9 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`log`](#log) | Append a worklog entry | yes |
 | [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
+| [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
 | [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
-| [`db`](#db) | Create the database schema, seed its id counter, report the dual-write soak | yes (`init`, `seed-counter`); no (`status`) |
+| [`db`](#db) | Create the database schema, load the board into Postgres, check the load, seed its id counter, report the dual-write soak | yes (`init`, `seed-counter`, `load`); no (`verify`, `status`) |
 | [`user`](#user) | Add a board user and issue its API token | yes |
 
 ## start
@@ -302,7 +303,7 @@ makes no commit. Optional positional `projectsDir` overrides which
 ## audit
 
 ```
-blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]
+blaze audit [--projects A,B] [--kind <kind>] [--fail-on <kind,…>] [--json] [projectsDir]
 ```
 
 Read-only corpus hygiene over the whole board. Findings split two ways, and the
@@ -314,7 +315,7 @@ findings too.
 | Severity | Kinds |
 |---|---|
 | hard | `duplicate-status`, `off-taxonomy-component`, `off-taxonomy-label`, `bad-link-key`, `unknown-link-type`, `dangling-target`, `dangling-parent`, `invalid-parent-type`, `parse-error`, `config-unloadable`, `schema-malformed`, `project-mismatch` |
-| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty` |
+| soft | `empty-components`, `empty-labels`, `missing-parent`, `terminal-goal-unverified-requirement`, `schema-invalid`, `deadline-unreachable`, `dependency-cycle`, `schedule-stale`, `schedule-empty`, `empty-body`, `config-project-drift`, `terminal-parent-open-child` |
 
 `schema-malformed` and `schema-invalid` (BLZ-392, split by severity in BLZ-407) both come from
 `auditCorpus` reading the tagged `collectSchemaProblems`. `schema-malformed` is HARD: the
@@ -358,11 +359,39 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
 Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
-the corpus is empty — a run that measured nothing is never reported as a pass.
+the corpus is empty — a run that measured nothing is never reported as a pass. With
+`--fail-on`, `1` means a finding of a named kind and nothing else, and `2` also covers a run
+that could not read the whole board.
+
+**Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
+resolved store, so it works under `fs`, `dual` and `db`, and each rule is the script's own:
+
+- **`terminal-parent-open-child`** (soft for now, was `terminal_parent_scan.py`): a ticket in
+  `done`, `achieved`, `mitigated`, `accepted` or `obsolete` with a child that is not — any type
+  pair, across projects. The parent asserts the work is finished while the child says it is not.
+  Soft at first: blaze-pm's `BLZ-305-v4-spine` held 66 such parents (279 open children) on
+  2026-10-05. They are groomed under a separate ticket, and the kind becomes hard once the count
+  is zero; until then `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
+- **`empty-body`** (soft, was `empty_body_scan.py`): a non-terminal ticket whose body is only
+  headings, blank lines, empty checkboxes, bare bullets and HTML comments — what `blaze new`
+  leaves for a title-only ticket.
+- **`config-project-drift`** (soft, was `config_drift_check.py`): `blaze.config.json`'s
+  `projects` and the projects the store holds disagree, in either direction. Not raised when the
+  config lists no projects at all.
+
+`blaze audit --fail-on duplicate-status` is the gate `duplicate_id_check.py` was: it fails on a
+duplicated id alone, on a board that already carries other hard findings.
+
+**`--projects` scopes what is judged, never what resolves** (BLZ-681). A link target or parent in
+a project outside the list still exists, so `blaze audit --projects BLZ` does not call
+`BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged. The
+governance kinds follow the same rule: an in-scope parent's open child in another project still
+counts for `terminal-parent-open-child`, and `config-project-drift` names only listed projects.
 
 **`duplicate-status`** is the one finding that comes from the *walk* rather than
 from frontmatter. Status is the directory, so an id resolving to files under two
@@ -663,6 +692,32 @@ Read-only time roll-up. With an id, prints that node's own and rolled-up
 estimate and worklog time plus a child breakdown. Without an id, prints a
 summary across every goal and epic. Makes no writes.
 
+## matrices
+
+```
+blaze matrices [--project <KEY>] [--check] [--out <dir>]
+```
+
+Regenerates the two **derived** traceability views per project — `<key>-requirements-matrix.md`
+(each requirement, the delivery tickets that `Implements` it, the decisions that `Addresses` it)
+and `<key>-architecture-matrix.md` (each decision and the requirement it answers) — from the
+tickets, through the resolved store, so it works under `fs`, `dual` and `db`. It replaces
+blaze-pm's `scripts/build_matrices.py` (BLZ-682) and writes the same bytes: the acceptance test
+was a zero `diff -r` against that script's output for the live board.
+
+| Flag | Meaning | Default |
+|---|---|---|
+| `--project <KEY>` | One project only. | every project in `blaze.config.json` |
+| `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
+| `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
+
+Exit `2` when there are no projects to render — a run that rendered nothing never reports
+"in sync". Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
+what the script produced when its `glob` happened to return paths sorted; on a filesystem that
+returned them in another order the script's ties came out differently, so the first
+`blaze matrices` run on such a board may reorder those rows once. Under `db` a ticket has no
+file, so its link is the path the file would have today (`<KEY>/<status>/<id>-<slug>.md`).
+
 ## migrate
 
 ```
@@ -694,6 +749,8 @@ the reviewed ledger.
 ```
 blaze db init [--force]
 blaze db seed-counter
+blaze db load [--replace]
+blaze db verify
 blaze db status
 ```
 
@@ -703,8 +760,10 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 
 | Subcommand | SQLite | Postgres |
 |---|---|---|
-| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded** (that is the BLZ-254 migration). Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. |
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
+| `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value (unknown frontmatter keys included), the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**

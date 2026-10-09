@@ -69,3 +69,14 @@ inconsistency rather than adding one. It also leaves `@hjr15/blaze-core`,
   would downgrade past BLZ-251 before any rename lands.
 - Two published names must be kept straight in docs and in support answers. The
   deprecation note is what keeps that cost bounded.
+
+## Addendum (2026-10-05, BLZ-674) — one more release of the file-based line: 0.8.0
+
+This ADR is still *Proposed*, and `@hjr15/blaze` has not shipped: the engine in this repository
+still publishes as `@hjr15/blaze-board`, and the live board (blaze-pm) still installs it. The
+published 0.7.0 predates BLZ-131's squash-body reconcile, so a bundled feature PR's children are
+not moved to `done` on that board; and npm never accepts a version twice. The line therefore
+gets **one more release, 0.8.0** — a minor, because it also carries the database-mode work
+(`blaze db load`/`verify`, `blaze matrices`, `blaze audit --fail-on`). The freeze moves to
+0.8.0 on the same terms: the rename decision above is unchanged, and so is the promise that an
+existing user is not upgraded by accident.

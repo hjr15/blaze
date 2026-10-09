@@ -15,6 +15,7 @@ import { planDependencyImport, DISPOSITION } from "./model/import-deps.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
 import { resolveReadStorage } from "./model/write-port-resolve.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -36,6 +37,13 @@ if (sub === "import-deps" && write) {
     + "operator-driven because 124 of the 392 Blocks pairs are mutual and carry no direction. "
     + "The tool reports; you decide.");
   process.exit(1);
+}
+
+// BLZ-683: the per-runner BLAZE_READONLY guard. Only `--write` writes; the dry run stays
+// available under BLAZE_READONLY, because a plan is a read.
+if (write) {
+  try { assertWritable("run blaze schedule migrate-dates --write"); }
+  catch (e) { console.error(e.message); process.exit(1); }
 }
 
 /** The frontmatter block's non-empty lines, for the round-trip guard below. */

@@ -301,3 +301,17 @@ test("BLZ-639: cli.mjs's final process.exit routes the spawn result through exit
   assert.match(src, /process\.exit\(exitCodeForSpawn\(r\)\)/,
     "cli.mjs's final process.exit must use exitCodeForSpawn(r), not a bare r.status ?? 0");
 });
+
+// BLZ-679: `blaze db verify` only reads, so BLAZE_READONLY must not refuse it at dispatch —
+// but it is the ONLY db verb that passes; every other spelling is still refused.
+test("BLAZE_READONLY=1: `db verify` is not refused at dispatch, `db load` still is", () => {
+  const env = { ...process.env, BLAZE_READONLY: "1" };
+  const refusal = /refusing to run a mutating command/;
+  const verify = spawnSync(process.execPath, [cli, "db", "verify"], { encoding: "utf8", env });
+  assert.doesNotMatch(verify.stderr, refusal, verify.stderr);
+  for (const sub of ["load", "init", "seed-counter", "status"]) {
+    const r = spawnSync(process.execPath, [cli, "db", sub], { encoding: "utf8", env });
+    assert.equal(r.status, 1, `${sub}: ${r.stderr}`);
+    assert.match(r.stderr, refusal, sub);
+  }
+});

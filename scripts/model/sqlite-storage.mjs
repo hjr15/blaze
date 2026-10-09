@@ -19,6 +19,7 @@ import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-sch
 import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
 import { assertConfigNamespace } from "./write-port-resolve.mjs";
 import { readActivityFeed } from "./read-storage.mjs";
+import { safeJson } from "./safe-json.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
 // BLZ-391. This projected 15 of a ticket's 28 frontmatter keys: `loadCorpus` WROTE the other
@@ -28,8 +29,15 @@ import { readActivityFeed } from "./read-storage.mjs";
 //
 // `labels`, `components` and `worklog` come from child tables, fetched per row exactly as `links`
 // already was — the N+1 shape is the existing precedent here, not a new one.
+/** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
+ *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
+ *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty —
+ *  `safeJson`, the write port's own parser, shared so the three cannot drift. */
 function toRecord(row, links, labels, components, worklog) {
   const frontmatter = {
+    // Unknown keys first — see pg-storage.mjs's toRecord; the two are kept identical.
+    ...safeJson(row.extra_json),
     id: row.id, project: row.project_key, type: row.type, title: row.title,
     priority: row.priority, resolution: row.resolution ?? "",
     parent: row.parent_id ?? "", assignee: row.assignee,
@@ -137,7 +145,7 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
                 parent_id, parent_type, assignee, estimate_minutes, sprint_id,
                 likelihood, impact, branch, pr, ref, category, verification, derived,
                 start_date, due_date, constraint_start_no_earlier_than, deadline,
-                body, created_on, updated_on, version`;
+                body, created_on, updated_on, version, extra_json`;
   const ALIVE = "deleted_at IS NULL";
 
   const byId       = db.prepare(`SELECT ${COLS} FROM ticket WHERE id = ? AND ${ALIVE}`);
@@ -147,7 +155,7 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
   const blockers   = db.prepare(
     `SELECT t.id, t.project_key, t.num, t.type, t.status, t.title, t.priority, t.resolution,
             t.parent_id, t.parent_type, t.assignee, t.estimate_minutes, t.sprint_id,
-            t.start_date, t.due_date, t.body, t.created_on, t.updated_on, t.version
+            t.start_date, t.due_date, t.body, t.created_on, t.updated_on, t.version, t.extra_json
        FROM ticket_link l JOIN ticket t ON t.id = l.src_id
       WHERE l.target_id = ? AND l.link_type = 'Blocks' AND t.id <> ? AND t.${ALIVE}
       ORDER BY t.id`);
@@ -155,6 +163,9 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
     `SELECT id, ticket_id, kind, at, actor, source, request_id,
             from_status, to_status, field, old_value, new_value, detail
        FROM ticket_event WHERE ticket_id = ? ORDER BY at, id`);
+  // BLZ-680: see listTransitions below.
+  const transitionsAll = db.prepare(
+    `SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
   const appendEv = db.prepare(
     `INSERT INTO ticket_event
        (ticket_id, kind, at, actor, source, request_id, from_status, to_status,
@@ -201,6 +212,12 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
     // history a reader wants is chronological, not insertion order.
     listEvents(_root, id) {
       return eventsFor.all(id);
+    },
+
+    // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db — pg-storage.mjs says why.
+    // Order is not guaranteed chronological (text ts, mixed offsets): consumers sort, as metrics.mjs does.
+    listTransitions(_root) {
+      return transitionsAll.all().map((r) => ({ id: r.id, from: r.from, to: r.to, ts: r.ts }));
     },
 
     appendEvent(_root, e) {

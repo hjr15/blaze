@@ -18,6 +18,19 @@ test("package identity", () => {
   assert.equal(pkg.engines?.node, ">=24", "engine floor matches the tested Node line — node:sqlite needs 24 (BLZ-264)");
 });
 
+// BLZ-674. npm already holds a 0.7.0 cut BEFORE BLZ-131's squash-body reconcile landed, and a
+// registry never accepts the same version twice — so the fix reaches blaze-pm only under a NEW
+// version. The publish itself is an operator step after merge; this pins what it will publish.
+test("BLZ-674: the next publish is 0.8.0, and it carries BLZ-131's squash-body reconcile", async () => {
+  assert.equal(pkg.version, "0.8.0");
+  const lock = JSON.parse(readFileSync(join(REPO, "package-lock.json"), "utf8"));
+  assert.equal(lock.version, "0.8.0", "package-lock.json's top-level version must move with it");
+  assert.equal(lock.packages[""].version, "0.8.0", "…and its root package entry");
+  const { idsFromCommitMessage } = await import("../scripts/reconcile.mjs");
+  assert.deepEqual(idsFromCommitMessage("BLZ-675: x (#9)\n\n* BLZ-674: y\n* BLZ-678: z", "BLZ"),
+    ["BLZ-675", "BLZ-674", "BLZ-678"], "a bundled squash recovers every child");
+});
+
 // BLZ-474 / ADR-0028: the `docs/` assertion below is LOAD-BEARING, not incidental tidiness.
 // It is one half of a decision, and the other half is that `AGENTS.md` and `README.md` — the
 // two documents that DO ship — link outward by absolute URL rather than by relative path.

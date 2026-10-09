@@ -1,35 +1,54 @@
 // scripts/audit-runner.mjs — `blaze audit`: corpus hygiene over the whole board.
-// Run: node scripts/audit-runner.mjs [--projects A,B] [--kind k] [--json] [projectsDir]
+// Run: node scripts/audit-runner.mjs [--projects A,B] [--kind k] [--fail-on k1,k2] [--json] [projectsDir]
 //
 // Read-only. Exits non-zero only on a HARD finding — a soft finding is a fill queue and
 // must never fail a run (blaze-pm ADR-0011). BLZ-137.
 import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
 import { join, dirname, resolve as resolvePath } from "node:path";
-import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings } from "./model/audit.mjs";
+import { auditCorpus, summarise, HARD_KINDS, SOFT_KINDS, scheduleFindings, governanceFindings } from "./model/audit.mjs";
 import { scheduleModel } from "./model/schedule.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
 import { resolveRoots, loadConfig, ConfigParseError, IncompatibleSchemaVersionError } from "./config.mjs";
 import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 
 const positional = [];
-const opts = { projects: null, kind: null, json: false };
+const opts = { projects: null, kind: null, json: false, failOn: null };
 for (let i = 2; i < process.argv.length; i++) {
   const a = process.argv[i];
   if (a === "--json") { opts.json = true; continue; }
   if (a === "--projects") { opts.projects = process.argv[++i]?.split(",").map((s) => s.trim()).filter(Boolean); continue; }
   if (a === "--kind") { opts.kind = process.argv[++i]; continue; }
+  if (a === "--fail-on") { opts.failOn = (process.argv[++i] ?? "").split(",").map((s) => s.trim()).filter(Boolean); continue; }
   if (a === "--help" || a === "-h") { usage(); process.exit(0); }
   if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); usage(); process.exit(1); }
   positional.push(a);
 }
 
 function usage() {
-  console.error("usage: blaze audit [--projects A,B] [--kind <kind>] [--json] [projectsDir]");
-  console.error("  Reports corpus hygiene. Exits non-zero on a HARD finding only.");
+  console.error("usage: blaze audit [--projects A,B] [--kind <kind>] [--fail-on <kind,…>] [--json] [projectsDir]");
+  console.error("  Reports corpus hygiene. Exits non-zero on a HARD finding only — or, with --fail-on,");
+  console.error("  on a finding of one of the named kinds only (hard or soft), whatever else it found.");
   console.error(`  hard: ${[...HARD_KINDS].sort().join(", ")}`);
   // Hardcoded, and it went stale twice — the hard line beside it is derived from HARD_KINDS
   // and cannot. Kept in one place with the kinds that actually exist.
   console.error(`  soft: ${SOFT_KINDS.join(", ")}`);
+}
+
+// BLZ-681: `--fail-on` turns ONE kind (or a few) into the gate, so a board that already carries
+// other hard findings can still gate on, say, `duplicate-status` — which is what blaze-pm's
+// `duplicate_id_check.py` existed for. A name that is not a kind is REFUSED rather than ignored:
+// a typo would otherwise be a gate that can never fail. Exit 2, like an empty corpus — a run
+// that could not measure what it was asked to.
+if (opts.failOn !== null) {
+  const known = new Set([...HARD_KINDS, ...SOFT_KINDS]);
+  const unknown = opts.failOn.filter((k) => !known.has(k));
+  if (!opts.failOn.length || unknown.length) {
+    console.error(opts.failOn.length
+      ? `blaze audit: --fail-on names no such kind: ${unknown.join(", ")}`
+      : "blaze audit: --fail-on needs at least one kind");
+    usage();
+    process.exit(2);
+  }
 }
 
 // BLZ-133's pattern: an explicit projectsDir is self-sufficient, so resolve it BEFORE
@@ -199,7 +218,9 @@ for (const t of allTickets) {
   filesById.get(id).push(t.file);
 }
 
-const report = auditCorpus({ tickets, projects, config });
+// BLZ-681: `universe` — links and parents RESOLVE against everything the store holds, while
+// only the in-scope `tickets` are judged. See auditCorpus.
+const report = auditCorpus({ tickets, projects, config, universe: allTickets });
 
 // BLZ-470: WHAT THIS RUN COULD NOT READ, before anything it did read. BLZ-430 stopped a
 // submodule under `projects/` from crashing the whole walk by skipping any directory that
@@ -210,6 +231,9 @@ const report = auditCorpus({ tickets, projects, config });
 // Raised HERE rather than in `auditCorpus` for the same reason `duplicate-status` is: which
 // directories exist and which of them could be read is a property of the WALK.
 const unreadable = await rs.readStorage.unreadableTicketDirs(projectsDir);
+// BLZ-681: the projects the READ STORE holds — directories under fs/dual, project keys with
+// tickets under db — for `config-project-drift`. Asked before the reader closes.
+const storeProjects = await rs.readStorage.listProjects(projectsDir);
 await rs.close();
 for (const u of unreadable) {
   report.findings.push({ ticket: null, kind: "unreadable-ticket-directory", detail: u.message });
@@ -361,14 +385,31 @@ const schedule = config === null ? null : scheduleModel({
 });
 if (schedule) report.findings.push(...scheduleFindings(schedule));
 
+// BLZ-681 (spec §5.6): the three governance kinds re-homed from blaze-pm. Raised HERE because
+// two of them need the walk (status) and one needs the store's project list; the rules live in
+// `governanceFindings` in model/audit.mjs, where the coverage gate sees them.
+// An EMPTY or absent `projects` is no list to drift from: the audit itself falls back to the
+// store's own listing for it (`nonEmpty` above), and a directory audited outside any board has
+// no config at all.
+// Scoped like auditCorpus: a parent's children are found in the whole store (`allTickets`), and
+// only in-scope tickets and projects are reported.
+report.findings.push(...governanceFindings({
+  tickets, universe: allTickets, configProjects: nonEmpty(config?.projects), storeProjects,
+  scopeProjects: nonEmpty(opts.projects),
+}));
+
 // auditCorpus computed `ok` before the walk-level findings existed, so recompute it — a gate
 // that reports a hard finding and still exits 0 is not a gate.
 report.ok = !report.findings.some((f) => HARD_KINDS.has(f.kind));
 
 const findings = opts.kind ? report.findings.filter((f) => f.kind === opts.kind) : report.findings;
+// BLZ-681: with --fail-on the exit code answers "is there a finding of THESE kinds", and only that.
+const failOn = opts.failOn ? new Set(opts.failOn) : null;
+const failing = failOn ? report.findings.filter((f) => failOn.has(f.kind)).length : null;
 
 if (opts.json) {
-  console.log(JSON.stringify({ ...report, findings }, null, 2));
+  console.log(JSON.stringify({ ...report, findings,
+    ...(failOn ? { failOn: [...failOn], failing } : {}) }, null, 2));
 } else {
   console.log("=== blaze audit ===");
   // Named UNCONDITIONALLY, ahead of any --kind filtering: the plain report's summary line
@@ -392,10 +433,19 @@ if (opts.json) {
     if (!report.findings.length) console.log("  clean");
   }
   console.log(`  ok=${report.ok}${report.ok ? "" : "  (hard findings present)"}`);
+  if (failOn) console.log(`  fail-on ${[...failOn].join(",")}: ${failing} finding(s)`);
 }
 
 // Set the code rather than calling process.exit(): stdout to a PIPE is asynchronous, and
 // exiting immediately after a large console.log truncates it mid-write. The --json payload
 // on a real board is well past the pipe buffer, so this is not theoretical — it truncated
 // at 64KB the first time it was piped.
-process.exitCode = report.ok ? 0 : 1;
+// BLZ-681: a --fail-on run that could not observe the whole board (an unread status directory,
+// a config that did not load) cannot vouch for the absence of the named kinds: exit 2, "could
+// not run", never a clean 0.
+const BLIND_KINDS = ["unreadable-ticket-directory", "config-unloadable"];
+const blind = failOn ? BLIND_KINDS.filter((k) => report.findings.some((f) => f.kind === k)) : [];
+if (blind.length) {
+  console.error(`blaze audit: --fail-on cannot pass — the run could not observe the whole board (${blind.join(", ")}); fix that first`);
+}
+process.exitCode = blind.length ? 2 : failOn ? (failing ? 1 : 0) : (report.ok ? 0 : 1);

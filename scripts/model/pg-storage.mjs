@@ -14,13 +14,22 @@
 // npx + SQLite path installs nothing.
 import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
 import { readActivityFeed } from "./read-storage.mjs";
+import { safeJson } from "./safe-json.mjs";
 
 // BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
 // one driver and not the other IS the divergence driver-conformance.test.mjs exists to catch.
+/** BLZ-679: `extra_json` — the frontmatter keys with no column — read back, as dbWritePort's own
+ *  `read` already did. Without it every db-mode read DROPPED them, and the next write through
+ *  the port (any `blaze edit`) persisted `{}` over them: measured, a `custom_key` loaded into the
+ *  shadow was gone after one `blaze edit … priority high`. A corrupt value reads as empty —
+ *  `safeJson`, the write port's own parser, shared so the three cannot drift. */
 function toRecord(row, links, labels, components, worklog) {
   const iso = (d) => (d instanceof Date ? d.toISOString().slice(0, 10) : (d ?? ""));
   return {
     frontmatter: {
+      // Unknown keys first: `extraFields` never stores a key that has a column, so nothing
+      // below can be shadowed, and the column values stay authoritative regardless.
+      ...safeJson(row.extra_json),
       id: row.id, project: row.project_key, type: row.type, title: row.title,
       priority: row.priority, resolution: row.resolution ?? "",
       parent: row.parent_id ?? "", assignee: row.assignee,
@@ -56,7 +65,7 @@ const COLS = `id, project_key, num, type, status, title, priority, resolution,
               start_date::text AS start_date, due_date::text AS due_date,
               constraint_start_no_earlier_than::text AS constraint_start_no_earlier_than,
               deadline::text AS deadline, body,
-              created_on::text AS created_on, updated_on::text AS updated_on, version`;
+              created_on::text AS created_on, updated_on::text AS updated_on, version, extra_json`;
 const ALIVE = "deleted_at IS NULL";
 
 // `pg` is an OPTIONAL peer dependency: it is deliberately not installed for the
@@ -151,12 +160,14 @@ export function postgresReader(client) {
 
   // Same child-table fetches as sqlite-storage.mjs, in the same order, for the same reason:
   // `ord` preserves what the operator wrote, and `worklog_entry` has no ord so it uses on_date.
+  // BLZ-675: one query at a time. These were `Promise.all`s over ONE pg.Client — concurrent
+  // `client.query()` calls on a single connection, which pg 8 queues but deprecates and pg 9 is
+  // set to refuse. One connection runs one query at a time anyway, so awaiting each in turn
+  // costs nothing; it only stops asking the client to queue.
   const childrenFor = async (id) => {
-    const [labels, components, worklog] = await Promise.all([
-      client.query("SELECT label FROM ticket_label WHERE ticket_id = $1 ORDER BY ord", [id]),
-      client.query("SELECT component FROM ticket_component WHERE ticket_id = $1 ORDER BY ord", [id]),
-      client.query("SELECT on_date::text AS on_date, minutes, note FROM worklog_entry WHERE ticket_id = $1 ORDER BY on_date, id", [id]),
-    ]);
+    const labels = await client.query("SELECT label FROM ticket_label WHERE ticket_id = $1 ORDER BY ord", [id]);
+    const components = await client.query("SELECT component FROM ticket_component WHERE ticket_id = $1 ORDER BY ord", [id]);
+    const worklog = await client.query("SELECT on_date::text AS on_date, minutes, note FROM worklog_entry WHERE ticket_id = $1 ORDER BY on_date, id", [id]);
     return [
       labels.rows.map((r) => r.label),
       components.rows.map((r) => r.component),
@@ -170,10 +181,15 @@ export function postgresReader(client) {
 
   const hydrate = async (row) => {
     if (!row) return null;
-    const [links, [labels, components, worklog]] = await Promise.all([linksFor(row.id), childrenFor(row.id)]);
+    const links = await linksFor(row.id);
+    const [labels, components, worklog] = await childrenFor(row.id);
     return toRecord(row, links, labels, components, worklog);
   };
-  const hydrateAll = async (rows) => Promise.all(rows.map(hydrate));
+  const hydrateAll = async (rows) => {
+    const out = [];
+    for (const row of rows) out.push(await hydrate(row));
+    return out;
+  };
 
   return {
     name: "postgres",
@@ -205,13 +221,11 @@ export function postgresReader(client) {
       // Five queries for the whole corpus, not 1 + 4N. Ordered exactly as the per-id fetches
       // order them (links by type,target; labels/components by ord; worklog by on_date,id) —
       // driver-conformance.test.mjs pins the two paths against each other.
-      const [t, l, lb, cp, wl] = await Promise.all([
-        client.query(`SELECT ${COLS} FROM ticket WHERE ${ALIVE} ORDER BY id`),
-        client.query("SELECT src_id, link_type, target_id FROM ticket_link ORDER BY src_id, link_type, target_id"),
-        client.query("SELECT ticket_id, label, ord FROM ticket_label ORDER BY ticket_id, ord"),
-        client.query("SELECT ticket_id, component, ord FROM ticket_component ORDER BY ticket_id, ord"),
-        client.query("SELECT ticket_id, on_date::text AS on_date, minutes, note FROM worklog_entry ORDER BY ticket_id, on_date, id"),
-      ]);
+      const t = await client.query(`SELECT ${COLS} FROM ticket WHERE ${ALIVE} ORDER BY id`);
+      const l = await client.query("SELECT src_id, link_type, target_id FROM ticket_link ORDER BY src_id, link_type, target_id");
+      const lb = await client.query("SELECT ticket_id, label, ord FROM ticket_label ORDER BY ticket_id, ord");
+      const cp = await client.query("SELECT ticket_id, component, ord FROM ticket_component ORDER BY ticket_id, ord");
+      const wl = await client.query("SELECT ticket_id, on_date::text AS on_date, minutes, note FROM worklog_entry ORDER BY ticket_id, on_date, id");
       // Array.prototype.sort is stable, so rows without `ord` (links, worklog) keep SQL order.
       const group = (rows, key, map) => {
         const m = new Map();
@@ -243,6 +257,16 @@ export function postgresReader(client) {
            FROM ticket_event WHERE ticket_id = $1 ORDER BY at, id`, [id]);
       // bigint arrives as a string from pg; the fold compares ids with >, so coerce.
       return rows.map((r) => ({ ...r, id: Number(r.id) }));
+    },
+
+    // BLZ-680: the status-move history under BLAZE_WRITE_PORT=db, from the `ticket_transition`
+    // view over `ticket_event` — the `{ id, from, to, ts }` shape metrics.mjs reads from git in
+    // fs mode. `blaze db load` imports the git-era history into it, once.
+    // Rows are ordered by the ts TEXT, which is not guaranteed chronological across mixed
+    // offsets (`+10:00` vs `Z`): consumers sort by Date.parse(ts), as metrics.mjs does.
+    async listTransitions(_root) {
+      const { rows } = await client.query(`SELECT id, "from", "to", ts FROM ticket_transition ORDER BY ts, id`);
+      return rows;
     },
 
     async appendEvent(_root, e) {

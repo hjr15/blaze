@@ -9,6 +9,7 @@ import { parseUserArgv, addUser, setUserPassword, ensureIdentityIgnored } from "
 import { MIN_PASSWORD_LENGTH } from "./model/passwords.mjs";
 import { ROLES } from "./model/identity-schema.mjs";
 import { identityDbPath } from "./model/identity-db.mjs";
+import { assertWritable } from "./readonly.mjs";
 
 const USAGE = [
   "usage: blaze user add    --email <address> [--role <role>] [--name <display name>]",
@@ -41,6 +42,13 @@ if (!parsed.ok) {
 }
 
 const { dataRoot } = resolveRoots();
+
+// BLZ-683: the per-runner BLAZE_READONLY guard (AGENTS.md "Read-only mode"), for a direct
+// `node scripts/user-runner.mjs` that bypasses cli.mjs's dispatch gate. After the arguments
+// are judged (a usage error is still named first) and before a password is read or a user,
+// token or .gitignore line is written.
+try { assertWritable(`run blaze user ${parsed.verb}`); }
+catch (e) { console.error(e.message); process.exit(1); }
 
 /**
  * Read the password from stdin, and from nowhere else.
