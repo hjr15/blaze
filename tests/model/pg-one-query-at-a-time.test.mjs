@@ -10,7 +10,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
-import { createDbSchema } from "../../scripts/model/db-schema-version.mjs";
+import { createDbSchema, DB_SCHEMA_VERSION } from "../../scripts/model/db-schema-version.mjs";
 import { postgresReader } from "../../scripts/model/pg-storage.mjs";
 import { PG_SKIP, scratchPgDb } from "../helpers/pg-scratch.mjs";
 
@@ -33,7 +33,7 @@ test("createDbSchema on an async driver runs ONE statement at a time", async () 
   const { seen, query } = oneAtATime(() => ({ rows: [] }));   // every lookup: empty database
   const exec = { run: (sql) => query(sql), all: async (sql) => (await query(sql)).rows };
   const r = await createDbSchema(exec, { dialect: "postgres" });
-  assert.deepEqual(r, { created: true, version: 5 });
+  assert.deepEqual(r, { created: true, version: DB_SCHEMA_VERSION });
   assert.ok(seen.calls > 10, `only ${seen.calls} statements seen — the fake is not observing the create`);
   assert.deepEqual(seen.overlaps, [], "a statement started while another was still running");
 });
@@ -66,7 +66,7 @@ test("real Postgres: init, a write and every reader path print no pg deprecation
     const mod = (p) => JSON.stringify(new URL(`../../scripts/${p}`, import.meta.url).href);
     const src = `
       import pg from "pg";
-      import { createDbSchema } from ${mod("model/db-schema-version.mjs")};
+      import { createDbSchema, DB_SCHEMA_VERSION } from ${mod("model/db-schema-version.mjs")};
       import { dbWritePort } from ${mod("model/write-port.mjs")};
       import { pgExec } from ${mod("model/write-port-resolve.mjs")};
       import { postgresReader } from ${mod("model/pg-storage.mjs")};
