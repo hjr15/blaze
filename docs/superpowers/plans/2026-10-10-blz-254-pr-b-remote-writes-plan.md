@@ -10,7 +10,7 @@
 
 **Spec:** `docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md` — §5.4, §6 ("Remote writes"), §7 step 3, and §8 row B. Read it first; this plan argues from it. ADR-0013 §7 is the decision Task 1 amends.
 
-**Prototype provenance.** Every code and test block below was run, task by task, in a scratch worktree of `385d2aa` (PR A's squash on `main`) against `postgres:17-alpine`. This Markdown was then GENERATED from that prototype's per-task trees: each "replace" block was checked to occur exactly once in its file at that point, and applying all of them in order reproduces the prototype byte for byte (35 edits, 23 files). This is the round-1-revised plan (adversarial review `pr-b-r1.md`: B1, M1, M2 and eight minors applied, Findings 13–20). Each task's tests were run on the tree with only that task's tests applied — the failures named in each Step 2 are that run's — and then on the finished task. On the final tree, `npm run test:coverage` with `BLAZE_TEST_PG_URL` set and a private `TMPDIR` → `tests 5453, pass 5452, fail 0, skipped 1`; c8 statements 98.04 %, branches 88.39 %, functions 97.68 %, lines 98.04 % (thresholds 91/77/93/91); 0 pg deprecation lines; `hygiene-check` clean; no attributable scratch directory left.
+**Prototype provenance.** Every code and test block below was run, task by task, in a scratch worktree of `385d2aa` (PR A's squash on `main`) against `postgres:17-alpine`. This Markdown was then GENERATED from that prototype's per-task trees: each "replace" block was checked to occur exactly once in its file at that point, and applying all of them in order reproduces the prototype byte for byte (35 edits, 23 files). This is the round-2-revised plan (adversarial review `pr-b-r1.md`: B1, M1, M2 and eight minors applied, Findings 15–19; `pr-b-r2.md`: upheld, four minors applied, Finding 20). Each task's tests were run on the tree with only that task's tests applied — the failures named in each Step 2 are that run's — and then on the finished task. On the final tree, `npm run test:coverage` with `BLAZE_TEST_PG_URL` set and a private `TMPDIR` → `tests 5454, pass 5453, fail 0, skipped 1`; c8 statements 98.04 %, branches 88.39 %, functions 97.69 %, lines 98.04 % (thresholds 91/77/93/91); 0 pg deprecation lines; `hygiene-check` clean; no attributable scratch directory left.
 
 ## Global Constraints
 
@@ -46,7 +46,7 @@
 7. **The event log records the remote caller.** `applyNew` and `applyLink` passed no `actor`/`source` to the port (`move`/`log` already did), so a ticket created over HTTP would be logged `unknown`/`cli`. Both now take `actor` and `source` (defaults unchanged for the CLI), and the db-mode test pins `create`/`edit` events as `m@example.com (m@example.com initial token)` / `api`.
 8. **Where the token may go, decided here:** `BLAZE_REMOTE_URL` must be the board's origin — `https://`, or `http://` for a loopback host only (a token in clear over the network is refused); no path, query, fragment or `user:pass@`. Every request is built as `new URL("/api/…", origin)` and re-checked against the origin; `fetch` runs with `redirect: "error"`. One function, `requestRemote`, sends the token, shared by the CLI and the proof harness.
 9. **Half-set is an error for EVERY command**, including ones that would not use the network, and is decided before the schema preflight (there is no local board to judge in remote mode). `BLAZE_READONLY` is checked first and still refuses a write in remote mode.
-10. **`/api/new` validates at the boundary, BEFORE an id is allocated, and everything else in `applyNew`** (round 1, m1/m2/m5). `model/new-request.mjs`'s `newRequestOrErrors` refuses, by name and all at once: a non-object body; a missing or non-string `project`/`type`/`title`; a title over 300 characters (the fs slug would be `ENAMETOOLONG` after allocation); a wrong-typed optional field (never coerced, never silently dropped); an `estimate` that is not a whole number in `1…2147483647` (`true` used to become 5, `1e12` a Postgres `500` and a burned id); and a `project` this board does not configure (a member must not mint a project key over the network; a board that configures none keeps `blaze new`'s behaviour). A malformed key that reaches `applyNew` is still a `422`. `start`/`due` are not accepted (the CLI refuses them as derived; the server ignores them). The test pins that after twelve refused bodies the next create is `OBA-2`: no id burned.
+10. **`/api/new` validates at the boundary, BEFORE an id is allocated, and everything else in `applyNew`** (round 1, m1/m2/m5). `model/new-request.mjs`'s `newRequestOrErrors` refuses, by name and all at once: a non-object body; a missing or non-string `project`/`type`/`title`; a title over 300 characters (a sanity bound) or one whose ticket FILE NAME `<KEY>-<10 digits>-<slug>.md` would exceed 255 bytes (`ticketFileNameFits`, with the engine's own `slugify` — the 300 cap alone did not stop an fs `ENAMETOOLONG` after allocation, round 2 n1); a wrong-typed optional field (never coerced, never silently dropped); an `estimate` that is not a finite number in `(0, 2147483645]` (`true` used to become 5, `1e12` a Postgres `500` and a burned id) — a fraction is accepted and `applyNew` rounds it with `roundEstimate`, exactly as `blaze new --estimate 7.5` does locally (round 2 n3); and a `project` this board does not configure (a member must not mint a project key over the network; a board that configures none keeps `blaze new`'s behaviour). A malformed key that reaches `applyNew` is still a `422`. `start`/`due` are not accepted (the CLI refuses them as derived; the server ignores them). The tests pin that after fourteen refused bodies the next create is `OBA-2` (fs) and that a refused 300-character title leaves the db counter untouched (the next create is `ENG-3`): no id burned.
 11. **Refusals carry no server path** (round 1, m6): `withoutServerPaths` turns `refusing to overwrite /srv/…/projects/ENG/…` into `projects/ENG/…` on `/api/new` and `/api/link`.
 12. **`/api/link` and `/api/log` check their bodies too** (round 1, m3/m4): `id`/`type`/`target` must be non-empty strings (a `null` body or a numeric type was a `500`); a worklog `date` must be a real `YYYY-MM-DD` — enforced in `applyLog`, so `blaze log --date` is fixed for the local CLI as well (`not-a-date` and `2026-02-30` used to land in the file, and a Postgres `500`).
 13. **The proof harness creates real tickets** and never deletes; its doc says to run it against the rehearsal database. `verify` treats an empty set as a FAIL (a proof that created nothing proves nothing) and asks the server about every distinct id through `GET /api/panel?id=` (`read` scope).
@@ -55,6 +55,7 @@
 16. **Round 1, M1 → operator decision D4 (2026-10-10): drop Traefik basic-auth in PR C.** The deployed ingress puts a `basicAuth` middleware on every path (service-platform `values-dev.yaml` `auth.enabled: true`), which occupies the `Authorization` header a remote bearer request needs. Blaze's own auth becomes the single layer: the spec now records D4 (§2), `auth.enabled: false` with the precondition that the live board already has a user (§5.1, §7 steps 1 and 5, §8 row C). No PR B code; the operator step below says remote mode reaches the LIVE board only after PR C's change, and the rehearsal (a local `blaze board` on machine 1) is unaffected.
 17. **Round 1, M2 — the suite deletes the remote pair before any test runs.** With both exported, review recorded five authenticated writes from three unrelated existing test files. `tests/setup/no-remote.mjs`, imported first by `hang-watchdog.mjs` (which every test process preloads), deletes both; `tests/remote-env-guard.test.mjs` proves an exported pair reaches neither a test process nor the `blaze` it spawns, against a recording server. The docs tell operators to scope the pair per command, never to `export` it globally. The guard's preload is test infrastructure, so it lands in Step 1 and its own test already passes at Step 2.
 18. **Round 1, m7 — the spec is amended in the plan's commit:** §5.4's CSRF bullet now states the full exemption (and why), and its remote-verb list drops `ac` (Finding 5).
+20. **Round 2 (upheld; four minors):** n1 and n3 are in Finding 10; n2 — Task 3 Step 4's neighbour command carries `--test-timeout=120000` and the preload, so `tests/hang-watchdog.test.mjs` sees the bound `package.json` declares; n4 — the operator note and `commands.md` say the rehearsal is reached from machine 2 through `ssh -L <local>:127.0.0.1:<port> machine1` (remote mode then targets `http://127.0.0.1:<local>`) or over https, never plain http across the LAN.
 19. **Round 1, m8:** the Postgres container is `blz684-pg`, removed first if left over, reused by Task 5 and stopped at its end.
 
 ## Review Focus
@@ -376,7 +377,7 @@ with:
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs
 ```
 
 Expected: `tests 20, pass 18, fail 2` — `tests/serve-csrf-bearer.test.mjs` fails to load (`does not provide an export named 'csrfRequired'`), and `serve-identity`'s reversed test (`a valid bearer token without the CSRF header — and no cookie — is accepted (BLZ-684)`) fails with `403`.
@@ -480,8 +481,8 @@ with:
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/signin*.test.mjs tests/setup*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/signin*.test.mjs tests/setup*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/seam-closure.test.mjs
 ```
 
 Expected: `tests 35, suites 7, pass 35`, and every neighbour green — `tests/supervisor-identity.test.mjs` still requires the header on `/control/*` from a bearer caller (Finding 2). Discrimination: with Step 3's `serve.mjs` change reverted, `bearer alone, no CSRF header → 200…` and the reversed `serve-identity` test fail.
@@ -563,7 +564,7 @@ git commit -m "BLZ-684: a bearer-authenticated request skips the CSRF header; a 
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -596,7 +597,7 @@ Create `tests/model/new-request.test.mjs`:
 // tests/model/new-request.test.mjs — BLZ-684: `POST /api/new`'s network boundary, as a function.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { newRequestOrErrors, withoutServerPaths, NEW_TITLE_MAX } from "../../scripts/model/new-request.mjs";
+import { newRequestOrErrors, withoutServerPaths, ticketFileNameFits, NEW_TITLE_MAX } from "../../scripts/model/new-request.mjs";
 
 test("a well-formed body becomes applyNew's options, untouched", () => {
   assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 30,
@@ -612,10 +613,25 @@ test("every refusal is named, and they are all reported at once", () => {
     priority: 2, sprint: [], labels: [1], estimate: 2147483648 }, ["ENG"]);
   assert.deepEqual(r.errors, ["project must be a non-empty string", "type must be a non-empty string",
     "title is too long (300 characters max)", "priority must be a string", "sprint must be a string",
-    "labels must be a list of strings", "estimate must be a whole number of minutes above 0"]);
+    "labels must be a list of strings", "estimate must be a number of minutes above 0"]);
   for (const body of [null, [], "x", 3]) assert.deepEqual(newRequestOrErrors(body).errors, ["the body must be a JSON object"]);
-  assert.equal(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 2147483647 }, ["ENG"]).request.extra.estimate, 2147483647);
-  assert.match(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 7.5 }, ["ENG"]).errors[0], /whole number/);
+  assert.equal(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 2147483645 }, ["ENG"]).request.extra.estimate, 2147483645);
+  assert.equal(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 7.5 }, ["ENG"]).request.extra.estimate, 7.5,
+    "a fraction is passed through for applyNew to round, exactly as the local CLI's is");
+  for (const e of [Infinity, NaN, -5, 0, 2147483646, "30"]) {
+    assert.match(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: e }, ["ENG"]).errors?.[0] ?? "", /estimate must be a number/, String(e));
+  }
+});
+
+test("a title is refused when its FILE NAME would not fit, before any id — 255 bytes, as a slug", () => {
+  const fits = "a".repeat(255 - "ENG-9999999999-.md".length);
+  assert.equal(ticketFileNameFits("ENG", fits), true);
+  assert.equal(ticketFileNameFits("ENG", fits + "a"), false);
+  assert.equal(ticketFileNameFits("ENG", "é".repeat(200)), true, "the slug drops what is not [a-z0-9], so bytes are judged after slugging");
+  assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "x".repeat(300) }, ["ENG"]).errors,
+                   ["title is too long to name the ticket's file (255 bytes max, as a slug)"]);
+  assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "x".repeat(301) }, ["ENG"]).errors,
+                   ["title is too long (300 characters max)"], "the 300-character cap is still its own bound");
 });
 
 test("withoutServerPaths keeps the ticket's place on the board and drops the server's filesystem", () => {
@@ -658,6 +674,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { startServer } from "../scripts/serve.mjs";
+import { roundEstimate } from "../scripts/model/time.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
@@ -728,10 +745,12 @@ describe("fs mode", () => {
         [{ project: "OBA", type: "task", estimate: 30 }, /title must be a non-empty string/],
         [{ ...ok, project: "o(" }, /"o\(" is not one this board configures/],
         [{ ...ok, project: "ZZZ" }, /"ZZZ" is not one this board configures \(OBA\)/],
-        [{ ...ok, estimate: true }, /estimate must be a whole number/],
-        [{ ...ok, estimate: 1e12 }, /estimate must be a whole number/],
-        [{ ...ok, estimate: 0 }, /estimate must be a whole number/],
+        [{ ...ok, estimate: true }, /estimate must be a number of minutes/],
+        [{ ...ok, estimate: 1e12 }, /estimate must be a number of minutes/],
+        [{ ...ok, estimate: 0 }, /estimate must be a number of minutes/],
         [{ ...ok, title: "x".repeat(301) }, /title is too long \(300 characters max\)/],
+        [{ ...ok, title: "x".repeat(250) }, /title is too long to name the ticket's file/],
+        [{ ...ok, title: "x".repeat(300) }, /title is too long to name the ticket's file/],
         [{ ...ok, labels: "a,b" }, /labels must be a list of strings/],
         [{ ...ok, parent: 7 }, /parent must be a string/],
         [null, /the body must be a JSON object/],
@@ -740,8 +759,10 @@ describe("fs mode", () => {
         assert.equal(r.status, 422, JSON.stringify(body)?.slice(0, 80));
         assert.match((await r.json()).errors.join(" "), why);
       }
-      const made = await post(base, "/api/new", ok, token.token);
+      const made = await post(base, "/api/new", { ...ok, estimate: 7.5 }, token.token);
       assert.equal((await made.json()).id, "OBA-2", "no refused create consumed a number");
+      assert.match(readFileSync(join(roots.projectsDir, "OBA", "defined", "OBA-2-t.md"), "utf8"),
+                   new RegExp(`estimate: ${roundEstimate(7.5)}\\n`), "7.5 is rounded exactly as `blaze new --estimate 7.5` rounds it");
     } finally { server.close(); }
   });
 
@@ -817,6 +838,12 @@ test("db mode: /api/new takes its id from the counter and /api/link writes the r
       const body = await r.json();
       assert.equal(r.status, 200, JSON.stringify(body));
       assert.deepEqual([body.id, body.db, body.committed], ["ENG-2", true, false]);
+      // A title whose file name would not fit is refused here too, and burns no number.
+      const long = await post(base, "/api/new", { project: "ENG", type: "task", title: "x".repeat(300), estimate: 15 }, token.token);
+      assert.equal(long.status, 422);
+      assert.match((await long.json()).errors[0], /too long to name the ticket's file/);
+      const next = await post(base, "/api/new", { project: "ENG", type: "task", title: "next", estimate: 15 }, token.token);
+      assert.equal((await next.json()).id, "ENG-3", "the refused create consumed no number from the counter");
       assert.equal(existsSync(join(roots.projectsDir, "ENG", "defined", "ENG-2-from-afar.md")), false,
                    "under db a ticket is a row, never a file");
       const l = await post(base, "/api/link", { id: "ENG-2", type: "Blocks", target: "ENG-1" }, token.token);
@@ -841,7 +868,7 @@ test("db mode: /api/new takes its id from the counter and /api/link writes the r
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs
 ```
 
 Expected: `tests 28, pass 20, fail 8` — all six `serve-api-new` tests (`/api/new` is an unknown endpoint → `404`; `/api/link` answers `404 not found`; the log ignores `date`), `tests/model/new-request.test.mjs` fails to load (`Cannot find module '…/scripts/model/new-request.mjs'`), and `seam-closure`'s "the write-seam scan OBSERVED the corpus, and its allowlist is all load-bearing" (`serve.mjs :: applyNew` is named but not yet reached).
@@ -905,10 +932,27 @@ Create `scripts/model/new-request.mjs`:
 // scripts/model/new-request.mjs — the network boundary of `POST /api/new` and the remote
 // refusals (BLZ-684). Pure, so it is unit-tested apart from a server, and run by `serve.mjs`
 // BEFORE any id is allocated.
+import { slugify } from "./storage.mjs";
 
-/** The longest title `POST /api/new` accepts. A title becomes the file name's slug in fs mode,
- *  and an unbounded one is an ENAMETOOLONG after the id was already allocated. */
+/** The longest title `POST /api/new` accepts — a sanity bound on what one request may carry.
+ *  It is NOT what keeps the file name legal; `ticketFileNameFits` is. */
 export const NEW_TITLE_MAX = 300;
+
+/** The longest file name (in bytes) the filesystems Blaze runs on accept. */
+export const FILE_NAME_MAX_BYTES = 255;
+
+/**
+ * Would the ticket's FILE NAME fit, whatever number it is given? An fs-mode ticket is
+ * `<KEY>-<n>-<slug>.md` (`ticketPath`, with the engine's own `slugify`), and slugify does not
+ * truncate, so a long title is an ENAMETOOLONG — AFTER the id was allocated, which burns it.
+ * Judged against a 10-digit number, the widest an id will realistically reach, so the answer
+ * cannot change between this check and the allocation. Applied in every mode: a title the
+ * board cannot store as a file must not exist only because the board happens to be on a
+ * database today.
+ */
+export function ticketFileNameFits(project, title) {
+  return Buffer.byteLength(`${project}-9999999999-${slugify(title)}.md`) <= FILE_NAME_MAX_BYTES;
+}
 const NEW_STRING_FIELDS = ["parent", "assignee", "likelihood", "impact", "reason", "sprint",
                            "not_before", "deadline"];
 
@@ -929,6 +973,9 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
   }
   if (typeof p.title === "string" && p.title.length > NEW_TITLE_MAX) {
     errors.push(`title is too long (${NEW_TITLE_MAX} characters max)`);
+  } else if (typeof p.title === "string" && typeof p.project === "string"
+             && !ticketFileNameFits(p.project, p.title)) {
+    errors.push(`title is too long to name the ticket's file (${FILE_NAME_MAX_BYTES} bytes max, as a slug)`);
   }
   if (typeof p.project === "string" && Array.isArray(configuredProjects) && configuredProjects.length
       && !configuredProjects.includes(p.project)) {
@@ -943,9 +990,11 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
       errors.push(`${k} must be a list of strings`);
     }
   }
+  // A finite positive number, as `blaze new --estimate` takes: `applyNew` rounds it to the
+  // nearest 5 (`roundEstimate`) on both paths, so 7.5 is 10 locally and remotely alike.
   if (p.estimate !== undefined
-      && !(typeof p.estimate === "number" && Number.isInteger(p.estimate) && p.estimate > 0 && p.estimate <= 2147483647)) {
-    errors.push("estimate must be a whole number of minutes above 0");
+      && !(typeof p.estimate === "number" && Number.isFinite(p.estimate) && p.estimate > 0 && p.estimate <= 2147483645)) {
+    errors.push("estimate must be a number of minutes above 0");
   }
   if (errors.length) return { errors };
   const extra = {};
@@ -1093,11 +1142,11 @@ with:
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/artifact-api.test.mjs tests/new*.test.mjs tests/link*.test.mjs tests/log*.test.mjs tests/verbs-*.test.mjs tests/reserve-window.test.mjs tests/runner-*.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/artifact-api.test.mjs tests/new*.test.mjs tests/link*.test.mjs tests/log*.test.mjs tests/verbs-*.test.mjs tests/reserve-window.test.mjs tests/runner-*.test.mjs
 ```
 
-Expected: `tests 30, suites 1, pass 30`, and every neighbour green (`tests/log.test.mjs` included — no existing caller logs an invalid date) (`serve-auth.test.mjs`'s "no mutating route is free" sees `POST /api/new` at `write`).
+Expected: `tests 31, suites 1, pass 31`, and every neighbour green (`tests/log.test.mjs` included — no existing caller logs an invalid date) (`serve-auth.test.mjs`'s "no mutating route is free" sees `POST /api/new` at `write`).
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -1115,7 +1164,7 @@ with:
 ```markdown
 | GET | `/api/matrix` · `/api/coverage` | `read` | v4 traceability matrix and coverage (BLZ-323) |
 | POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations (`/api/log` takes an optional `date`, a real `YYYY-MM-DD` or `422` — as `blaze log --date` now is too, BLZ-684) — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push). The response carries `committed` and `queued` alongside `ok`: an idempotent re-write (editing a field to the value it already holds, re-checking a checked box) is a benign no-op that creates no commit, and `ok: true` alone never meant one existed (BLZ-422). It also carries `db`: `true` under `BLAZE_WRITE_PORT=db`, where the database is the store, no commit is made, and the page therefore does not read `committed: false` as "already matched HEAD" (BLZ-670) |
-| POST | `/api/new` | `write` | Create a ticket (BLZ-684): `{ project, type, title, estimate?, priority?, labels?, components?, parent?, assignee?, likelihood?, impact?, sprint?, not_before?, deadline?, reason? }` → `{ ok, id, warnings, committed, queued, db }`. The same `applyNew` `blaze new` runs, through the resolved port — under `db` the id comes from `project_counter`'s transactional allocate. The body is checked BEFORE an id is allocated (`model/new-request.mjs`): every field's type, a title of at most 300 characters, a whole-number estimate that fits the column, and a `project` this board configures — so a refusal is a `422` naming why and never burns an id. Refusals carry no server path |
+| POST | `/api/new` | `write` | Create a ticket (BLZ-684): `{ project, type, title, estimate?, priority?, labels?, components?, parent?, assignee?, likelihood?, impact?, sprint?, not_before?, deadline?, reason? }` → `{ ok, id, warnings, committed, queued, db }`. The same `applyNew` `blaze new` runs, through the resolved port — under `db` the id comes from `project_counter`'s transactional allocate. The body is checked BEFORE an id is allocated (`model/new-request.mjs`): every field's type, a title of at most 300 characters whose ticket file name (`<KEY>-<n>-<slug>.md`) fits 255 bytes, a positive estimate (rounded to 5 by `applyNew`, as `blaze new --estimate` is) that fits the column, and a `project` this board configures — so a refusal is a `422` naming why and never burns an id. Refusals carry no server path |
 | POST | `/api/link` | `write` | Add or (`remove: true`) remove a typed link between two tickets — `{ id, type, target, remove? }` (strings, else `422`), the ticket-link verb `blaze link` runs (BLZ-684; classified since BLZ-323, answered by no handler until then) |
 | POST | `/api/artifact` · `/api/baseline` | `write` | v4 artifact model mutations (BLZ-323) |
 | POST | `/api/field` | `admin` | Defining a filterable field emits `ALTER TABLE` and spends the install-wide field budget ADR-0018 shares across every project — an administrative act, not an ordinary write |
@@ -1148,7 +1197,7 @@ git commit -m "BLZ-684: POST /api/new and POST /api/link on blaze board" -m "ser
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -1251,6 +1300,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { execFileSync } from "node:child_process";
 import { startServer } from "../scripts/serve.mjs";
+import { roundEstimate } from "../scripts/model/time.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { remoteFrom, requestFor, runRemote, REMOTE_VERBS } from "../scripts/remote-client.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
@@ -1374,7 +1424,8 @@ test("runRemote drives all six verbs against the server, and the board changes",
       const code = await runRemote(verb, argv, { env, ...c.io });
       return { code, out: c.out.join("\n"), err: c.err.join("\n") };
     };
-    const made = await run("new", ["--project", "OBA", "--type", "task", "--estimate", "30", "Remote", "two"]);
+    // 7.5, as round-2 review's parity check: the server rounds it exactly as `blaze new` does locally.
+    const made = await run("new", ["--project", "OBA", "--type", "task", "--estimate", "7.5", "Remote", "two"]);
     assert.equal(made.code, 0, made.err);
     assert.equal(made.out, `created OBA-2 (remote: ${url})`);
     assert.equal((await run("move", ["OBA-2", "in-progress"])).code, 0);
@@ -1383,7 +1434,8 @@ test("runRemote drives all six verbs against the server, and the board changes",
     assert.equal((await run("link", ["OBA-2", "Relates", "OBA-1"])).code, 0);
     assert.equal((await run("resolve", ["OBA-2", "wont-do"])).code, 0);
     const text = readFileSync(join(root, "projects", "OBA", "in-progress", "OBA-2-remote-two.md"), "utf8");
-    for (const want of [/priority: high/, /minutes: 15, note: n/, /type: Relates, target: OBA-1/, /resolution: wont-do/]) {
+    for (const want of [new RegExp(`estimate: ${roundEstimate(7.5)}\\n`), /priority: high/, /minutes: 15, note: n/,
+                        /type: Relates, target: OBA-1/, /resolution: wont-do/]) {
       assert.match(text, want);
     }
     const refused = await run("move", ["OBA-2", "nowhere"]);
@@ -1503,7 +1555,7 @@ delete process.env.BLAZE_TOKEN;
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs
 ```
 
 Expected: `tests 3, pass 2, fail 1` — `tests/remote-mode.test.mjs` fails to load (`Cannot find module '…/scripts/remote-client.mjs'`); `tests/remote-env-guard.test.mjs`'s two tests already pass, because their preload (`tests/setup/no-remote.mjs` and its import in `hang-watchdog.mjs`) is test infrastructure written in Step 1. Its discrimination: with that import line removed, both fail.
@@ -1759,8 +1811,8 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/cli*.test.mjs tests/readonly*.test.mjs tests/runner-*.test.mjs tests/model/seam-closure.test.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs tests/hang-watchdog.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/cli*.test.mjs tests/readonly*.test.mjs tests/runner-*.test.mjs tests/model/seam-closure.test.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs tests/hang-watchdog.test.mjs
 ```
 
 Expected: `tests 12, suites 2, pass 12`, and every neighbour green.
@@ -1845,7 +1897,11 @@ exported pair can never turn `npm test` into writes to a real board.
 
 The token is sent to `BLAZE_REMOTE_URL`'s origin and nowhere else: every request is built
 against that origin, a redirect is refused rather than followed, plain `http://` is accepted
-only for a loopback host, and no message prints the token. Use a `member` token (`blaze user
+only for a loopback host, and no message prints the token. To reach a board on another machine
+that has no TLS — the cutover rehearsal's `blaze board` on machine 1, say — tunnel it rather
+than send the token over the LAN in clear: `ssh -L 4321:127.0.0.1:<port> machine1`, then
+`BLAZE_REMOTE_URL=http://127.0.0.1:4321`. (Machine 1's board must have users; it can stay on
+loopback, since the tunnel arrives there.) Use a `member` token (`blaze user
 add --role member`): a `viewer` token is refused `403` on every write. The server skips the
 CSRF header for such a bearer request (ADR-0013's addendum), so remote mode needs a board with
 users — a loopback board with none still requires the header, and remote mode cannot supply it.
@@ -1879,7 +1935,7 @@ git commit -m "BLZ-684: blaze remote mode — the six ticket verbs over HTTP to 
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -2106,7 +2162,7 @@ test("spec §6: 2 processes × 50 parallel POST /api/new on Postgres → 100 dis
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/concurrency-proof.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/concurrency-proof.test.mjs
 ```
 
 Expected: the file fails to load — `Cannot find module '…/scripts/ops/concurrency-proof.mjs'` (`tests 1, fail 1`).
@@ -2328,8 +2384,8 @@ with:
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/concurrency-proof.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/model/seam-closure.test.mjs tests/tmp-scratch-attribution.test.mjs tests/temp-cleanup-guard.test.mjs tests/package.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/concurrency-proof.test.mjs
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/model/seam-closure.test.mjs tests/tmp-scratch-attribution.test.mjs tests/temp-cleanup-guard.test.mjs tests/package.test.mjs
 ```
 
 Expected: `tests 6, suites 1, pass 6` (1 skips without Postgres), and every neighbour green.
@@ -2370,7 +2426,7 @@ git commit -m "BLZ-684: the two-machine concurrency proof and its Postgres test"
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/concurrency-proof.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/concurrency-proof.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -2410,7 +2466,7 @@ Expected: `fail 0`, the c8 thresholds pass (91/77/93/91), no deprecation line, n
 
 ## Operator acceptance (spec §7 step 3, after PR C's Postgres exists)
 
-**Which board this reaches.** The REHEARSAL (spec §7 step 3: a local `blaze board` on machine 1 with `BLAZE_WRITE_PORT=db`, reached from machine 2 over the LAN or a tunnel) is unaffected by the ingress. The LIVE board is reachable in remote mode only after PR C sets the chart's `auth.enabled: false` (D4, spec §5.1) — until then Traefik's basic-auth takes the `Authorization` header and answers `401` before blaze sees the request. Do not try to work around it with both credentials; one header cannot carry both.
+**Which board this reaches.** The REHEARSAL (spec §7 step 3: a local `blaze board` on machine 1 with `BLAZE_WRITE_PORT=db` and at least one user) is unaffected by the ingress. Machine 2 reaches it through a tunnel — `ssh -L 4321:127.0.0.1:<port> machine1`, then `BLAZE_REMOTE_URL=http://127.0.0.1:4321` — or over https; remote mode refuses plain `http://` to a LAN address, so the token never crosses the network in clear. Machine 1 uses `http://127.0.0.1:<port>` directly. The LIVE board is reachable in remote mode only after PR C sets the chart's `auth.enabled: false` (D4, spec §5.1) — until then Traefik's basic-auth takes the `Authorization` header and answers `401` before blaze sees the request. Do not try to work around it with both credentials; one header cannot carry both.
 
 On the rehearsal board, with `BLAZE_WRITE_PORT=db` and a `member` token issued by `blaze user add` on the server:
 
