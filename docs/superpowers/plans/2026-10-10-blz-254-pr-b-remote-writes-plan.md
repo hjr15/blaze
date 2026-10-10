@@ -4,57 +4,66 @@
 
 **Goal:** Let a second machine write to the live board over HTTP once it is on Postgres: `POST /api/new` and `POST /api/link` on `blaze board`, a bearer-only request exempt from the CSRF header, `blaze` remote mode (`BLAZE_REMOTE_URL` + `BLAZE_TOKEN`), and the two-machine concurrency proof.
 
-**Architecture:** One predicate, `csrfRequired({ headers, store })` in `serve-auth.mjs`, decides the CSRF exemption: exempt only for a bearer token the gate judged, with no session cookie beside it. `serve.mjs`'s POST handler gains `/api/new` (`applyNew` through the resolved port, so under db the id comes from `project_counter`) and `/api/link` (`applyLink`), both recording the caller as the event's actor. `scripts/remote-client.mjs` (built-in `fetch`) turns the six verbs' argv into requests to one origin; `cli.mjs` routes to it when both variables are set and refuses everything else. `scripts/ops/concurrency-proof.mjs` is the operator's create/verify harness on the same client.
+**Architecture:** One predicate, `csrfRequired({ headers, store })` in `serve-auth.mjs`, decides the CSRF exemption: exempt only for a bearer token the gate judged, with no session cookie beside it, a JSON body, and no cross-site `sec-fetch-site` — so a browser relayed by a bearer-injecting proxy is never exempt. `serve.mjs`'s POST handler gains `/api/new` (the body checked by `model/new-request.mjs` before any id is allocated, then `applyNew` through the resolved port, so under db the id comes from `project_counter`) and `/api/link` (`applyLink`), both recording the caller as the event's actor. `scripts/remote-client.mjs` (built-in `fetch`) turns the six verbs' argv into requests to one origin; `cli.mjs` routes to it when both variables are set and refuses everything else; a test preload deletes both variables so the suite can never write to a real board. `scripts/ops/concurrency-proof.mjs` is the operator's create/verify harness on the same client.
 
 **Tech Stack:** Node 24 ESM, `node:test`, built-in `fetch`, `node:sqlite`, `pg` 8 against Postgres 17.
 
 **Spec:** `docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md` — §5.4, §6 ("Remote writes"), §7 step 3, and §8 row B. Read it first; this plan argues from it. ADR-0013 §7 is the decision Task 1 amends.
 
-**Prototype provenance.** Every code and test block below was run, task by task, in a scratch worktree of `385d2aa` (PR A's squash on `main`) against `postgres:17-alpine`. This Markdown was then GENERATED from that prototype's per-task trees: each "replace" block was checked to occur exactly once in its file at that point, and applying all of them in order reproduces the prototype byte for byte (29 edits, 17 files). Each task's tests were run on the tree with only that task's tests applied — the failures named in each Step 2 are that run's — and then on the finished task. On the final tree, `npm run test:coverage` with `BLAZE_TEST_PG_URL` set and a private `TMPDIR` → `tests 5442, pass 5441, fail 0, skipped 1`; c8 statements 98.04 %, branches 88.28 %, functions 97.68 %, lines 98.04 % (thresholds 91/77/93/91); 0 pg deprecation lines; `hygiene-check` clean; no attributable scratch directory left.
+**Prototype provenance.** Every code and test block below was run, task by task, in a scratch worktree of `385d2aa` (PR A's squash on `main`) against `postgres:17-alpine`. This Markdown was then GENERATED from that prototype's per-task trees: each "replace" block was checked to occur exactly once in its file at that point, and applying all of them in order reproduces the prototype byte for byte (35 edits, 23 files). This is the round-1-revised plan (adversarial review `pr-b-r1.md`: B1, M1, M2 and eight minors applied, Findings 13–20). Each task's tests were run on the tree with only that task's tests applied — the failures named in each Step 2 are that run's — and then on the finished task. On the final tree, `npm run test:coverage` with `BLAZE_TEST_PG_URL` set and a private `TMPDIR` → `tests 5453, pass 5452, fail 0, skipped 1`; c8 statements 98.04 %, branches 88.39 %, functions 97.68 %, lines 98.04 % (thresholds 91/77/93/91); 0 pg deprecation lines; `hygiene-check` clean; no attributable scratch directory left.
 
 ## Global Constraints
 
 - **`fs` and `dual` behaviour stay unchanged** except where this PR exists to change it: the CSRF rule (Task 1, the spec's decision) and the two new endpoints. Mode comes only from `resolveWriteMode(env)` (or the `mode` the resolvers return); nothing sniffs `writePort.name` or `database.driver`.
-- **SECURITY-SENSITIVE (auth). Tests must pin, on a real server:** a cookie-only POST without the CSRF header is `403`; an unauthenticated POST is `401` (the CSRF header is never a credential); a `read`-scope token gets `403` on every write; cookie + bearer without the header is `403`; a loopback board with no users still requires the header; and remote mode never sends the token to any host but `BLAZE_REMOTE_URL`'s origin (no redirect followed, no plain `http` off loopback, no path, no `user:pass@`, and no message prints it).
+- **SECURITY-SENSITIVE (auth). Tests must pin, on a real server:** a cookie-only POST without the CSRF header is `403`; an unauthenticated POST is `401` (the CSRF header is never a credential); a `read`-scope token gets `403` on every write; cookie + bearer without the header is `403`; a bearer request with a `text/plain` or form body, or with `sec-fetch-site: cross-site`, is `403` — including through a reverse proxy that injects the bearer for a browser (ADR-0034's shape); a loopback board with no users still requires the header; and remote mode never sends the token to any host but `BLAZE_REMOTE_URL`'s origin (no redirect followed, no plain `http` off loopback, no path, no `user:pass@`, and no message prints it).
 - **`tests/model/seam-closure.test.mjs`: changes are additive or exact name swaps, each with a `// BLZ-684:` comment; never weaken an assertion.** Any module that names `fsReadStorage` must be on `FS_READER_ALLOWED` (this plan adds none).
+- **The suite can never write to a remote board:** `tests/setup/no-remote.mjs` (preloaded via `hang-watchdog.mjs`) deletes `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` from every test process; a test that wants remote mode sets the pair itself, on its own spawned process.
 - **One existing assertion is reversed, on purpose, and only one:** `tests/serve-identity.test.mjs`'s "a valid token without [the CSRF header] is still refused" becomes "…is accepted" — spec §5.4's decision, recorded in ADR-0013's addendum (Task 1). Every other existing test is untouched.
 - **Postgres tests use `tests/helpers/pg-scratch.mjs`** (`PG`, `PG_SKIP`, `scratchPgDb`, `pgClient`), one scratch database per test, gated `PG_SKIP`; a host is derived with `new URL(PG).hostname`, never hard-coded.
 - **Hand-rolled `applyNew` calls pass `today`, and a `task` passes `extra: { estimate }`.**
 - **Reuse, don't re-derive:** `gate`, `bearerFrom`, `cookieFrom`, `SESSION_COOKIE`, `isLoopback` (`serve-auth.mjs`); `applyNew`, `applyLink`; `resolvePorts` (already resolved per request in the POST handler); `stageFor`; `actorFor`; `addUser`; `runDb` (`init`/`load`).
 - **Test hygiene the suite enforces:** scratch dirs via `scratch(mkdtempSync(join(tmpdir(), "<literal-prefix>-")))` and `scratchRegistry()`; no `rmSync` in a test body; a spawned process gets an env with `BLAZE_WRITE_PORT`/`BLAZE_READONLY` (and, for remote tests, `BLAZE_REMOTE_URL`/`BLAZE_TOKEN`) DELETED, never set to `""`; a test that runs a server in-process spawns its client with `spawn` (async) — `spawnSync` would block the event loop the server answers on.
 - **Commits:** one per task, subject `BLZ-684: …`; staged and committed with an explicit pathspec; **no `Co-Authored-By` or `Signed-off-by` trailer**; no `/home/` path or `*.howman.link` hostname in an added non-Markdown line (and none in shipped `AGENTS.md` either).
-- **Every task ends:** `git diff --cached | grep -c '^+```'` prints 0 before the commit; commit with the explicit pathspec; then `git status --short` prints nothing and the task's tests pass on the committed tree.
+- **Every task ends:** `git diff --cached | grep -c '^+```'` prints 0 before the commit (no task adds a fenced block); commit with the explicit pathspec; then `git status --short` prints nothing and the task's tests pass on the committed tree.
 - **Environment for every command** (`npm ci` once if `node_modules/` is absent):
   ```bash
   cd /home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-684-remote-writes
   export PATH=/home/rnamwoh/.local/node24/bin:$PATH
-  docker run -d --rm --name blz-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=blaze_test -p 127.0.0.1:55432:5432 postgres:17-alpine
-  until docker exec blz-pg pg_isready -U postgres -d blaze_test; do sleep 1; done
+  docker rm -f blz684-pg >/dev/null 2>&1; docker run -d --rm --name blz684-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=blaze_test -p 127.0.0.1:55432:5432 postgres:17-alpine
+  until docker exec blz684-pg pg_isready -U postgres -d blaze_test; do sleep 1; done
   export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test
   ```
-  Run Postgres tests with `--test-concurrency=1`.
+  Run Postgres tests with `--test-concurrency=1`. Task 5 reuses this container (`blz684-pg`) and stops it at the end.
 
 ## Findings that refine the spec (decided here, from the code)
 
 1. **`POST /api/link` did not reach anything.** It has been classified `write` in `ROUTE_SCOPES` since BLZ-323, but `serve.mjs`'s POST handler had no branch for it, so a POST fell through to `404 not found` after the CSRF check. Task 2 adds the branch, calling `applyLink` (the verb `blaze link` runs) through the resolved port, and `docs/architecture.md`'s HTTP table stops listing it as a v4 artifact route.
 2. **Only `blaze board` (`serve.mjs`) gets the endpoints and the exemption.** `blaze start` (`supervisor.mjs`) serves no `POST /api/*` write route at all — its writes are `/control/*` loop controls — so there is no twin to add. Its `/control/*` CSRF rule is deliberately unchanged (bearer callers still need the header there; no remote verb uses them, and `tests/supervisor-identity.test.mjs` keeps pinning it). The deployed board runs `serve.mjs`.
-3. **The exemption needs a board with users.** `csrfRequired` exempts a bearer request only when `store` is set: on a loopback board with no users the gate judges nothing, so the header is the only control left (a browser would preflight a cross-origin `Authorization` header anyway, but the rule does not lean on that alone). Consequence: remote mode needs a board with users; against a no-user loopback board every remote write is `403 bad csrf token`. Documented in `commands.md`.
+3. **The exemption needs a board with users.** `csrfRequired` exempts a bearer request only when `store` is set: on a loopback board with no users the gate judges nothing, so the header is the only control left. Consequence: remote mode needs a board with users; against a no-user loopback board every remote write is `403 bad csrf token`. Documented in `commands.md`.
 4. **"Cookie" means the `blaze_session` cookie.** An unrelated cookie (`theme=dark`) beside a bearer token does not make it a cookie request — only the ambient credential does. A session credential pasted into `Authorization` is not a bearer token (`bearerFrom` already refuses it), so it is never exempt.
 5. **No `blaze ac` exists to forward.** Spec §5.4 lists `ac` among the remote verbs, but the CLI has no `ac` command (the AC toggle is a browser action on `POST /api/ac`). Remote mode forwards the six that exist — `new`, `move`, `edit`, `resolve`, `log`, `link`. Adding a CLI `ac` verb is out of this PR's scope.
 6. **`POST /api/log` gains `date`.** The browser never sent one; `blaze log --date` does, so the remote verb would silently log today's date without it.
 7. **The event log records the remote caller.** `applyNew` and `applyLink` passed no `actor`/`source` to the port (`move`/`log` already did), so a ticket created over HTTP would be logged `unknown`/`cli`. Both now take `actor` and `source` (defaults unchanged for the CLI), and the db-mode test pins `create`/`edit` events as `m@example.com (m@example.com initial token)` / `api`.
 8. **Where the token may go, decided here:** `BLAZE_REMOTE_URL` must be the board's origin — `https://`, or `http://` for a loopback host only (a token in clear over the network is refused); no path, query, fragment or `user:pass@`. Every request is built as `new URL("/api/…", origin)` and re-checked against the origin; `fetch` runs with `redirect: "error"`. One function, `requestRemote`, sends the token, shared by the CLI and the proof harness.
 9. **Half-set is an error for EVERY command**, including ones that would not use the network, and is decided before the schema preflight (there is no local board to judge in remote mode). `BLAZE_READONLY` is checked first and still refuses a write in remote mode.
-10. **`/api/new` validates types at the boundary, everything else in `applyNew`.** Strings and string lists are taken only if they are strings (anything else is dropped, never coerced); `estimate` is `Number(...)`; an `InvalidProjectKeyError` (a malformed `project`) is a `422`, not a `500`. `start`/`due` are not accepted (the CLI refuses them as derived; the server ignores them).
-11. **The proof harness creates real tickets** and never deletes; its doc says to run it against the rehearsal database. `verify` treats an empty set as a FAIL (a proof that created nothing proves nothing) and asks the server about every distinct id through `GET /api/panel?id=` (`read` scope).
-12. **Postgres connection budget.** There is no pool (PR A's ADR-0038 addendum: measure first), and each request opens one connection; the CI proof runs 2 processes × `--parallel 5`, well inside `max_connections` 100. The harness defaults to `--parallel 8`.
+10. **`/api/new` validates at the boundary, BEFORE an id is allocated, and everything else in `applyNew`** (round 1, m1/m2/m5). `model/new-request.mjs`'s `newRequestOrErrors` refuses, by name and all at once: a non-object body; a missing or non-string `project`/`type`/`title`; a title over 300 characters (the fs slug would be `ENAMETOOLONG` after allocation); a wrong-typed optional field (never coerced, never silently dropped); an `estimate` that is not a whole number in `1…2147483647` (`true` used to become 5, `1e12` a Postgres `500` and a burned id); and a `project` this board does not configure (a member must not mint a project key over the network; a board that configures none keeps `blaze new`'s behaviour). A malformed key that reaches `applyNew` is still a `422`. `start`/`due` are not accepted (the CLI refuses them as derived; the server ignores them). The test pins that after twelve refused bodies the next create is `OBA-2`: no id burned.
+11. **Refusals carry no server path** (round 1, m6): `withoutServerPaths` turns `refusing to overwrite /srv/…/projects/ENG/…` into `projects/ENG/…` on `/api/new` and `/api/link`.
+12. **`/api/link` and `/api/log` check their bodies too** (round 1, m3/m4): `id`/`type`/`target` must be non-empty strings (a `null` body or a numeric type was a `500`); a worklog `date` must be a real `YYYY-MM-DD` — enforced in `applyLog`, so `blaze log --date` is fixed for the local CLI as well (`not-a-date` and `2026-02-30` used to land in the file, and a Postgres `500`).
+13. **The proof harness creates real tickets** and never deletes; its doc says to run it against the rehearsal database. `verify` treats an empty set as a FAIL (a proof that created nothing proves nothing) and asks the server about every distinct id through `GET /api/panel?id=` (`read` scope).
+14. **Postgres connection budget.** There is no pool (PR A's ADR-0038 addendum: measure first), and each request opens one connection; the CI proof runs 2 processes × `--parallel 5`, well inside `max_connections` 100. The harness defaults to `--parallel 8`.
+15. **Round 1, B1 — the bearer exemption also requires a JSON body and no cross-site fetch metadata.** ADR-0034 documents a reverse proxy that authenticates a BROWSER by its own means and injects `Authorization: Bearer`; behind it a header-present rule is no protection, and review reproduced a cross-site `text/plain` form post landing a write (200, priority changed). `csrfRequired` now also requires `content-type: application/json` (media type exact, parameters allowed) and `sec-fetch-site` absent, `same-origin` or `none`. The CLI sends JSON and no fetch metadata, so remote mode is unaffected; every browser sends `sec-fetch-site`, and a cross-site page cannot send JSON without a preflight this server never approves. The reviewer's proxy is now a test. ADR-0013's addendum states the proxy shape and why.
+16. **Round 1, M1 → operator decision D4 (2026-10-10): drop Traefik basic-auth in PR C.** The deployed ingress puts a `basicAuth` middleware on every path (service-platform `values-dev.yaml` `auth.enabled: true`), which occupies the `Authorization` header a remote bearer request needs. Blaze's own auth becomes the single layer: the spec now records D4 (§2), `auth.enabled: false` with the precondition that the live board already has a user (§5.1, §7 steps 1 and 5, §8 row C). No PR B code; the operator step below says remote mode reaches the LIVE board only after PR C's change, and the rehearsal (a local `blaze board` on machine 1) is unaffected.
+17. **Round 1, M2 — the suite deletes the remote pair before any test runs.** With both exported, review recorded five authenticated writes from three unrelated existing test files. `tests/setup/no-remote.mjs`, imported first by `hang-watchdog.mjs` (which every test process preloads), deletes both; `tests/remote-env-guard.test.mjs` proves an exported pair reaches neither a test process nor the `blaze` it spawns, against a recording server. The docs tell operators to scope the pair per command, never to `export` it globally. The guard's preload is test infrastructure, so it lands in Step 1 and its own test already passes at Step 2.
+18. **Round 1, m7 — the spec is amended in the plan's commit:** §5.4's CSRF bullet now states the full exemption (and why), and its remote-verb list drops `ac` (Finding 5).
+19. **Round 1, m8:** the Postgres container is `blz684-pg`, removed first if left over, reused by Task 5 and stopped at its end.
 
 ## Review Focus
 
+0. **A browser behind a reverse proxy that injects the bearer token, made to post cross-site** (ADR-0034's deployment) → `403 bad csrf token`, nothing written. Pinned: Task 1 (`ADR-0034's proxy that injects the bearer for a browser…`), plus `text/plain` and `sec-fetch-site: cross-site` cases.
 1. **A browser session that also carries a bearer token** (a developer's own browser with an extension adding `Authorization`) → treated as a cookie request: no CSRF header, `403`, nothing written. Pinned: Task 1 (`cookie + bearer, no CSRF header → 403…`).
 2. **A token for a `viewer`, or a revoked/garbage token, used in remote mode** → `403` / `401` from the server, printed as the server's refusal, exit `1`, nothing created. Pinned: Task 1 (server), Task 3 (`an unauthenticated or read-scope caller is refused…`), Task 4 (`a refused create is counted as a failure…`).
 3. **A misconfigured or hostile `BLAZE_REMOTE_URL`** (plain http to a LAN host, a path, credentials in the URL, a server that redirects) → refused before any request, or after one request to the configured origin only; the token never printed. Pinned: Task 3 (`a URL that could send the token anywhere else…`, `…a redirect elsewhere is refused, not followed`), Task 4 (`requestRemote never builds a URL off the configured origin`).
-4. **An operator with only one variable exported in a shell** → every command refuses with both names, nothing written locally. Pinned: Task 3 (`…half-set refuses everything`).
+4. **An operator with one or both variables exported in a shell** → half-set refuses every command, nothing written locally (Task 3, `…half-set refuses everything`); a full pair never reaches the test suite (Task 3, `tests/remote-env-guard.test.mjs`).
 5. **Two machines creating at the same instant against Postgres** → distinct ids, every row present, no gap the counter did not skip. Pinned: Task 4 (`spec §6: 2 processes × 50…`).
 
 ---
@@ -65,11 +74,13 @@
 |---|---|---|
 | `scripts/model/serve-auth.mjs` | 1, 2 | `csrfRequired`; `POST /api/new` classified `write` |
 | `scripts/serve.mjs` | 1, 2 | the CSRF rule; `/api/new`, `/api/link`; `/api/log` `date` |
-| `scripts/new.mjs`, `scripts/link.mjs` | 2 | `actor`/`source` reach the event |
+| `scripts/model/new-request.mjs` (new) | 2 | `newRequestOrErrors`, `withoutServerPaths` — the boundary, before any id |
+| `scripts/new.mjs`, `scripts/link.mjs`, `scripts/log.mjs` | 2 | `actor`/`source` reach the event; a worklog `date` must be real |
+| `tests/setup/no-remote.mjs` (new), `tests/setup/hang-watchdog.mjs` | 3 | the suite never sees `BLAZE_REMOTE_URL`/`BLAZE_TOKEN` |
 | `scripts/remote-client.mjs` (new) | 3, 4 | `remoteFrom`, `requestFor`, `runRemote`, `requestRemote` |
 | `scripts/cli.mjs` | 3 | remote-mode dispatch and refusals |
 | `scripts/ops/concurrency-proof.mjs` (new) | 4 | the two-machine create/verify harness |
-| `tests/serve-csrf-bearer.test.mjs`, `tests/serve-api-new.test.mjs`, `tests/remote-mode.test.mjs`, `tests/concurrency-proof.test.mjs` (new) | 1–4 | |
+| `tests/serve-csrf-bearer.test.mjs`, `tests/serve-api-new.test.mjs`, `tests/model/new-request.test.mjs`, `tests/remote-mode.test.mjs`, `tests/remote-env-guard.test.mjs`, `tests/concurrency-proof.test.mjs` (new) | 1–4 | |
 | `tests/serve-identity.test.mjs`, `tests/model/seam-closure.test.mjs` | 1, 2 | one reversed expectation (Task 1); one pinned name (Task 2) |
 | `docs/decisions/0013-…md`, `docs/guide/commands.md`, `docs/architecture.md`, `AGENTS.md` | 1–4 | docs, in each task's own commit |
 
@@ -87,7 +98,7 @@
 
 **Interfaces:**
 - Consumes: `bearerFrom(headers)`, `cookieFrom(headers, name)`, `SESSION_COOKIE` (`serve-auth.mjs`).
-- Produces: `csrfRequired({ headers, store }) → boolean` (`serve-auth.mjs`) — `false` only when `store` is set, `bearerFrom(headers)` is non-empty, and there is no `blaze_session` cookie.
+- Produces (`serve-auth.mjs`): `isJsonContentType(headers) → boolean`; `csrfRequired({ headers, store }) → boolean` — `false` only when `store` is set, `bearerFrom(headers)` is non-empty, there is no `blaze_session` cookie, `content-type` is `application/json`, and `sec-fetch-site` is absent, `same-origin` or `none`.
 
 - [ ] **Step 1: Write the failing tests.**
 
@@ -96,21 +107,23 @@ Create `tests/serve-csrf-bearer.test.mjs`:
 ```js
 // tests/serve-csrf-bearer.test.mjs — BLZ-684 (spec §5.4, ADR-0013's addendum).
 //
-// The CSRF header is forgery protection for an AMBIENT credential. A bearer token is not
-// ambient, so a request the gate authenticated by bearer alone skips the header — that is what
-// lets a CLI on another machine write over HTTP. Everything else keeps it, and this file pins
-// every side of that line on a real server: cookie alone, cookie + bearer, no credential, a
-// read-only token, and a loopback board with no users.
+// The CSRF header is forgery protection for a request a BROWSER was made to send. A bearer-only
+// JSON request with no cross-site fetch metadata cannot be one, so it skips the header — that is
+// what lets a CLI on another machine write over HTTP. Everything else keeps it, and this file
+// pins every side of that line on a real server: cookie alone, cookie + bearer, no credential, a
+// read-only token, a loopback board with no users, a text/plain body, a cross-site
+// `sec-fetch-site`, and ADR-0034's reverse proxy that injects the bearer token for a browser.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync } from "node:fs";
+import { createServer, request as httpRequest } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { startServer, CSRF } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { loadIdentity } from "../scripts/model/identity-db.mjs";
-import { csrfRequired, SESSION_COOKIE } from "../scripts/model/serve-auth.mjs";
+import { csrfRequired, isJsonContentType, SESSION_COOKIE } from "../scripts/model/serve-auth.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
 
 const scratch = scratchRegistry();
@@ -166,21 +179,41 @@ const priorityOf = (root) => /priority: (\w+)/.exec(readFileSync(join(root, TICK
 
 describe("csrfRequired — the rule, as a function", () => {
   const store = {};
-  test("a bearer token alone, on a board with users, is exempt", () => {
-    assert.equal(csrfRequired({ headers: { authorization: "Bearer blz_x" }, store }), false);
+  const json = { "content-type": "application/json" };
+  const bearer = { authorization: "Bearer blz_x", ...json };
+  test("a bearer-only JSON request with no cross-site metadata, on a board with users, is exempt", () => {
+    assert.equal(csrfRequired({ headers: bearer, store }), false);
+    assert.equal(csrfRequired({ headers: { ...bearer, "content-type": "application/json; charset=utf-8" }, store }), false);
+    for (const site of ["same-origin", "none", "SAME-ORIGIN"]) {
+      assert.equal(csrfRequired({ headers: { ...bearer, "sec-fetch-site": site }, store }), false, site);
+    }
   });
   test("a session cookie — alone or beside a bearer token — is not", () => {
-    assert.equal(csrfRequired({ headers: { cookie: `${SESSION_COOKIE}=blz_sess.x` }, store }), true);
-    assert.equal(csrfRequired({ headers: { authorization: "Bearer blz_x",
-                                           cookie: `${SESSION_COOKIE}=blz_sess.x` }, store }), true);
+    assert.equal(csrfRequired({ headers: { cookie: `${SESSION_COOKIE}=blz_sess.x`, ...json }, store }), true);
+    assert.equal(csrfRequired({ headers: { ...bearer, cookie: `${SESSION_COOKIE}=blz_sess.x` }, store }), true);
+  });
+  test("a body a cross-site page can send without a preflight is not, bearer or not", () => {
+    for (const ct of ["text/plain", "application/x-www-form-urlencoded", "multipart/form-data; boundary=x",
+                      "", "application/jsonx", "text/json"]) {
+      assert.equal(csrfRequired({ headers: { ...bearer, "content-type": ct }, store }), true, JSON.stringify(ct));
+    }
+  });
+  test("a browser reporting a cross-site or same-site initiator is not, whatever a proxy added", () => {
+    for (const site of ["cross-site", "same-site"]) {
+      assert.equal(csrfRequired({ headers: { ...bearer, "sec-fetch-site": site }, store }), true, site);
+    }
   });
   test("no credential, a session pasted as a bearer, or a board with no users: required", () => {
-    assert.equal(csrfRequired({ headers: {}, store }), true);
-    assert.equal(csrfRequired({ headers: { authorization: "Bearer blz_sess.x" }, store }), true);
-    assert.equal(csrfRequired({ headers: { authorization: "Bearer blz_x" }, store: null }), true);
+    assert.equal(csrfRequired({ headers: json, store }), true);
+    assert.equal(csrfRequired({ headers: { ...json, authorization: "Bearer blz_sess.x" }, store }), true);
+    assert.equal(csrfRequired({ headers: bearer, store: null }), true);
   });
   test("an unrelated cookie does not make a bearer request a cookie request", () => {
-    assert.equal(csrfRequired({ headers: { authorization: "Bearer blz_x", cookie: "theme=dark" }, store }), false);
+    assert.equal(csrfRequired({ headers: { ...bearer, cookie: "theme=dark" }, store }), false);
+  });
+  test("isJsonContentType reads the media type only, case-insensitively", () => {
+    assert.equal(isJsonContentType({ "content-type": "Application/JSON ; charset=utf-8" }), true);
+    assert.equal(isJsonContentType({}), false);
   });
 });
 
@@ -238,6 +271,53 @@ describe("on a real server", () => {
       }
       assert.equal(priorityOf(root), "medium");
     } finally { server.close(); }
+  });
+
+  test("bearer + a text/plain body, no CSRF header → 403: the simple request CSRF uses", async () => {
+    const { root, server, base, bearer } = await configured();
+    try {
+      const r = await edit(base, { authorization: `Bearer ${bearer}`, "content-type": "text/plain" });
+      assert.equal(r.status, 403);
+      assert.match((await r.json()).errors[0], /csrf/i);
+      assert.equal(priorityOf(root), "medium");
+    } finally { server.close(); }
+  });
+
+  test("bearer + JSON + `sec-fetch-site: cross-site` → 403; same JSON with no fetch metadata → 200", async () => {
+    const { root, server, base, bearer } = await configured();
+    try {
+      const r = await edit(base, { authorization: `Bearer ${bearer}`, "sec-fetch-site": "cross-site" });
+      assert.equal(r.status, 403);
+      assert.equal(priorityOf(root), "medium");
+      assert.equal((await edit(base, { authorization: `Bearer ${bearer}` })).status, 200);
+      assert.equal(priorityOf(root), "high");
+    } finally { server.close(); }
+  });
+
+  test("ADR-0034's proxy that injects the bearer for a browser: a cross-site form post is still 403", async () => {
+    // The shape adversarial review round 1 reproduced: a reverse proxy authenticates the
+    // browser by its own means and adds `Authorization: Bearer`, then forwards what a hostile
+    // page made the browser send — a `<form enctype="text/plain">` POST, which needs no
+    // preflight. Without the content-type and fetch-metadata conditions this landed (200).
+    const { root, server, base, bearer } = await configured();
+    const target = new URL(base);
+    const proxy = createServer((req, res) => {
+      const up = httpRequest({ host: target.hostname, port: target.port, path: req.url, method: req.method,
+                               headers: { ...req.headers, authorization: `Bearer ${bearer}` } },
+        (r) => { res.writeHead(r.statusCode, r.headers); r.pipe(res); });
+      req.pipe(up);
+    });
+    await new Promise((res) => proxy.listen(0, "127.0.0.1", res));
+    try {
+      const r = await fetch(`http://127.0.0.1:${proxy.address().port}/api/edit`, {
+        method: "POST",
+        headers: { "content-type": "text/plain", origin: "https://evil.example", "sec-fetch-site": "cross-site" },
+        body: JSON.stringify({ id: "OBA-1", patch: { priority: "lowest" } }),
+      });
+      assert.equal(r.status, 403);
+      assert.match((await r.json()).errors[0], /csrf/i);
+      assert.equal(priorityOf(root), "medium", "nothing was written");
+    } finally { proxy.close(); server.close(); }
   });
 
   test("a loopback board with NO users still requires the header, bearer or not", async () => {
@@ -306,6 +386,8 @@ Expected: `tests 20, pass 18, fail 2` — `tests/serve-csrf-bearer.test.mjs` fai
 In `scripts/model/serve-auth.mjs`, replace:
 
 ```js
+}
+
 /**
  * Decide one request.
 ```
@@ -313,25 +395,42 @@ In `scripts/model/serve-auth.mjs`, replace:
 with:
 
 ```js
+}
+
+/** `content-type` is exactly `application/json` (parameters such as `; charset=utf-8` allowed). */
+export function isJsonContentType(headers) {
+  const raw = String(headers?.["content-type"] ?? headers?.["Content-Type"] ?? "");
+  return raw.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
 /**
  * BLZ-684 (spec §5.4, ADR-0013 §7 and its addendum): does this request have to carry the
  * `x-blaze-csrf` header?
  *
- * CSRF is forgery of an AMBIENT credential — one the browser attaches by itself. A bearer
- * token in `Authorization` is not ambient: a foreign page cannot attach it, and attaching any
- * custom header makes a cross-origin request preflighted, which this server never approves.
- * So a request is exempt only when ALL of these hold:
+ * CSRF is a browser being made to send a request it did not mean to. A bearer token in
+ * `Authorization` is not ambient for a CLI — but ADR-0034 also documents a reverse proxy that
+ * authenticates a BROWSER by its own ambient means and then injects the bearer header. Behind
+ * that proxy a header-present check alone is no protection: a cross-site `<form
+ * enctype="text/plain">` POST is a simple request (no preflight), the proxy adds the token,
+ * and the write lands. So the request must also be one a cross-site page CANNOT make without a
+ * preflight, which this server never approves. Exempt only when ALL of these hold:
  *   - the board has users (`store`), so the gate actually judged the bearer token — on a
  *     loopback board with no users the gate asks for nothing, and the header is all there is;
  *   - a bearer token was presented (`bearerFrom` — a session pasted into it does not count);
- *   - NO session cookie rides along. A request carrying both is treated as a cookie request:
- *     the cookie is the browser's ambient credential, and its presence means a browser may be
- *     the one asking.
+ *   - NO session cookie rides along — a request carrying both is a cookie request;
+ *   - `content-type` is `application/json`: a cross-site page can only send JSON after a
+ *     preflight, and a `text/plain`/form body is exactly the simple request CSRF uses;
+ *   - `sec-fetch-site` is absent, `same-origin` or `none`. Every current browser sends it on
+ *     every request; a CLI (`fetch` in Node) sends none. `cross-site`/`same-site` is a browser
+ *     reporting that another site started the request, whatever header a proxy then added.
  */
 export function csrfRequired({ headers, store }) {
   if (!store) return true;
   if (!bearerFrom(headers)) return true;
-  return cookieFrom(headers, SESSION_COOKIE) !== "";
+  if (cookieFrom(headers, SESSION_COOKIE) !== "") return true;
+  if (!isJsonContentType(headers)) return true;
+  const site = String(headers?.["sec-fetch-site"] ?? "").trim().toLowerCase();
+  return !(site === "" || site === "same-origin" || site === "none");
 }
 
 /**
@@ -385,7 +484,7 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/signin*.test.mjs tests/setup*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/seam-closure.test.mjs
 ```
 
-Expected: `tests 29, suites 7, pass 29`, and every neighbour green — `tests/supervisor-identity.test.mjs` still requires the header on `/control/*` from a bearer caller (Finding 2). Discrimination: with Step 3's `serve.mjs` change reverted, `bearer alone, no CSRF header → 200…` and the reversed `serve-identity` test fail.
+Expected: `tests 35, suites 7, pass 35`, and every neighbour green — `tests/supervisor-identity.test.mjs` still requires the header on `/control/*` from a bearer caller (Finding 2). Discrimination: with Step 3's `serve.mjs` change reverted, `bearer alone, no CSRF header → 200…` and the reversed `serve-identity` test fail.
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -400,28 +499,36 @@ with:
 ```markdown
 and per-project roles. The schema anticipates them; none is built.
 
-## Addendum (2026-10-10, BLZ-684) — a bearer request skips the CSRF header; a cookie request never does
+## Addendum (2026-10-10, BLZ-684) — a CLI's bearer request skips the CSRF header; a browser's never does
 
 §7 says the CSRF check is "retained only while any part of the browser flow uses a cookie".
-That stays true for the cookie, and BLZ-684 (the live-board cutover's remote writes, spec
-§5.4) draws the line per REQUEST instead of per server: `blaze board`'s `POST /api/*` handler
-skips the `x-blaze-csrf` check when, and only when, `csrfRequired` (`serve-auth.mjs`) says so:
+BLZ-684 (the live-board cutover's remote writes, spec §5.4) draws the line per REQUEST:
+`blaze board`'s `POST /api/*` handler skips the `x-blaze-csrf` check when, and only when,
+`csrfRequired` (`serve-auth.mjs`) finds ALL of these:
 
 - the board has users, so the gate actually judged the token — on a loopback board with no
-  users the gate asks for nothing and the header is the only control left, so it stays;
-- an `Authorization: Bearer` token was presented (a session credential pasted there is not one);
-- and **no** `blaze_session` cookie rides along. A request carrying both is a cookie request,
-  CSRF required: the cookie is the ambient credential, and its presence means a browser may be
-  the one asking.
+  users the gate asks for nothing and the header is the only control left;
+- an `Authorization: Bearer` token (a session credential pasted there is not one);
+- **no** `blaze_session` cookie — a request carrying both is a cookie request;
+- `content-type: application/json` (parameters allowed);
+- `sec-fetch-site` absent, `same-origin` or `none`.
 
-Why this is safe: a foreign page cannot attach an `Authorization` header to a cross-site
-request, and any custom header makes the request preflighted, which this server never
-approves. Why it is needed: a CLI on another machine (`BLAZE_REMOTE_URL` + `BLAZE_TOKEN`) has
-no page to read the per-process CSRF value from. `tests/serve-csrf-bearer.test.mjs` pins every
-side of the line: cookie alone without the header → 403, cookie + bearer → 403, no credential →
-401 (the header is never a credential), a read-scope token → 403, a no-user loopback board →
-403. `blaze start`'s `/control/*` routes are unchanged — they still require the header from
-every caller; no remote verb uses them.
+**Why the last two, and not just "a bearer header is present".** §7's argument — "a foreign
+page cannot attach it" — holds for a CLI, and fails for the deployment
+[ADR-0034](0034-a-browser-signs-in-a-token-does-not.md) documents beside it: a reverse proxy
+that authenticates a *browser* by its own ambient means (SSO, basic auth, a cookie of its own)
+and then injects `Authorization: Bearer` toward the board. Behind that proxy the bearer header
+IS ambient. A hostile page can make the browser send a `<form enctype="text/plain">` POST — a
+simple request, never preflighted — and the proxy adds the token; adversarial review reproduced
+exactly that landing a write. So the exemption also requires a request a cross-site page cannot
+make without a preflight (JSON), and that the browser has not reported a cross-site or
+same-site initiator (`sec-fetch-site`, sent by every current browser on every request, and by
+no CLI). This server answers no CORS preflight, so a cross-site page can never send the JSON.
+`tests/serve-csrf-bearer.test.mjs` pins every side, including that proxy, end to end.
+
+Why it is needed at all: a CLI on another machine (`BLAZE_REMOTE_URL` + `BLAZE_TOKEN`) has no
+page to read the per-process CSRF value from. `blaze start`'s `/control/*` routes are unchanged —
+they still require the header from every caller; no remote verb uses them.
 ```
 
 In `docs/guide/commands.md`, replace:
@@ -437,10 +544,12 @@ with:
 ```markdown
 forgery protection for the browser flow, retained as defence-in-depth alongside the token
 check, never as a substitute for it. On `blaze board`'s `POST /api/*` a request authenticated
-by an `Authorization: Bearer` token with **no** session cookie skips it (BLZ-684, ADR-0013's
-addendum) — the token is not ambient, and that is how a CLI on another machine writes; a
-request that carries the `blaze_session` cookie, with or without a bearer token, still needs
-it, and so does every request on a board with no users. `blaze start` also requires it on `/control/*`,
+by an `Authorization: Bearer` token, with **no** session cookie, a `content-type:
+application/json` body and no cross-site `sec-fetch-site`, skips it (BLZ-684, ADR-0013's
+addendum) — that is a CLI on another machine, never a browser; a request that carries the
+`blaze_session` cookie, a form or text body, or a browser's cross-site fetch metadata still
+needs it, even when a reverse proxy injected the bearer token, and so does every request on a
+board with no users. `blaze start` also requires it on `/control/*`,
 where it is the only control that covers a loopback board with no users at all: the gate
 ```
 
@@ -450,7 +559,7 @@ where it is the only control that covers a loopback board with no users at all: 
 ```bash
 git add tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs scripts/model/serve-auth.mjs scripts/serve.mjs docs/decisions/0013-identity-access-and-tokens.md docs/guide/commands.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-684: a bearer-authenticated request skips the CSRF header; a cookie request never does" -m "serve-auth.mjs gains csrfRequired (exempt only for a judged bearer token with no session cookie); serve.mjs's POST handler uses it. New tests/serve-csrf-bearer.test.mjs pins cookie-only 403, cookie+bearer 403, no credential 401, read token 403, no-user board 403; serve-identity's bearer-without-CSRF expectation is reversed per spec 5.4. ADR-0013 addendum; commands.md." -- tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs scripts/model/serve-auth.mjs scripts/serve.mjs docs/decisions/0013-identity-access-and-tokens.md docs/guide/commands.md
+git commit -m "BLZ-684: a bearer-authenticated request skips the CSRF header; a cookie request never does" -m "serve-auth.mjs gains csrfRequired (exempt only for a judged bearer token, no session cookie, a JSON body, no cross-site sec-fetch-site) and isJsonContentType; serve.mjs's POST handler uses it. New tests/serve-csrf-bearer.test.mjs pins cookie-only 403, cookie+bearer 403, text/plain 403, cross-site 403, a bearer-injecting proxy relaying a cross-site form 403, no credential 401, read token 403, no-user board 403; serve-identity's bearer-without-CSRF expectation is reversed per spec 5.4. ADR-0013 addendum; commands.md." -- tests/serve-csrf-bearer.test.mjs tests/serve-identity.test.mjs scripts/model/serve-auth.mjs scripts/serve.mjs docs/decisions/0013-identity-access-and-tokens.md docs/guide/commands.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
@@ -463,9 +572,12 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 ### Task 2: `POST /api/new` and `POST /api/link` on `blaze board`
 
 **Files:**
+- Create: `tests/model/new-request.test.mjs`
 - Create: `tests/serve-api-new.test.mjs`
+- Create: `scripts/model/new-request.mjs`
 - Modify: `tests/model/seam-closure.test.mjs`
 - Modify: `scripts/link.mjs`
+- Modify: `scripts/log.mjs`
 - Modify: `scripts/model/serve-auth.mjs`
 - Modify: `scripts/new.mjs`
 - Modify: `scripts/serve.mjs`
@@ -474,9 +586,45 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 
 **Interfaces:**
 - Consumes: Task 1's CSRF rule (a bearer caller needs no header); `applyNew`, `applyLink`; the POST handler's per-request `resolvePorts`, `stageFor`, `actor`.
-- Produces: `POST /api/new` (`write`) — body `{ project, type, title, estimate?, priority?, labels?: string[], components?: string[], parent?, assignee?, likelihood?, impact?, sprint?, not_before?, deadline?, reason? }` → `200 { ok: true, id, warnings, committed, queued, db }` or `422 { errors }`. `POST /api/link` (`write`) — `{ id, type, target, remove? }` → `200 { ok: true, committed, queued, db }` or `422`. `POST /api/log` also takes `date`. `applyNew(…, { actor, source })` and `applyLink(…, { actor, source })` pass both to the write port (defaults `"unknown"`, `"cli"`).
+- Produces: `newRequestOrErrors(payload, configuredProjects) → { request } | { errors }`, `withoutServerPaths(errors) → string[]`, `NEW_TITLE_MAX = 300` (`scripts/model/new-request.mjs`). `POST /api/new` (`write`) — body `{ project, type, title, estimate?, priority?, labels?: string[], components?: string[], parent?, assignee?, likelihood?, impact?, sprint?, not_before?, deadline?, reason? }` → `200 { ok: true, id, warnings, committed, queued, db }` or `422 { errors }` (checked before an id is allocated). `POST /api/link` (`write`) — `{ id, type, target, remove? }` → `200 { ok: true, committed, queued, db }` or `422`. `POST /api/log` also takes `date`; `applyLog` refuses a `date` that is not a real `YYYY-MM-DD`. `applyNew(…, { actor, source })` and `applyLink(…, { actor, source })` pass both to the write port (defaults `"unknown"`, `"cli"`).
 
 - [ ] **Step 1: Write the failing tests.**
+
+Create `tests/model/new-request.test.mjs`:
+
+```js
+// tests/model/new-request.test.mjs — BLZ-684: `POST /api/new`'s network boundary, as a function.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { newRequestOrErrors, withoutServerPaths, NEW_TITLE_MAX } from "../../scripts/model/new-request.mjs";
+
+test("a well-formed body becomes applyNew's options, untouched", () => {
+  assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 30,
+    labels: ["a"], components: ["c"], parent: "ENG-1", not_before: "2026-11-01" }, ["ENG"]),
+    { request: { project: "ENG", type: "task", title: "t", priority: "medium", labels: ["a"],
+                 extra: { parent: "ENG-1", not_before: "2026-11-01", components: ["c"], estimate: 30 } } });
+  assert.equal(newRequestOrErrors({ project: "NEW", type: "task", title: "t" }, []).request.project, "NEW",
+    "a board that configures no projects keeps blaze new's own behaviour");
+});
+
+test("every refusal is named, and they are all reported at once", () => {
+  const r = newRequestOrErrors({ project: 1, type: "", title: "x".repeat(NEW_TITLE_MAX + 1),
+    priority: 2, sprint: [], labels: [1], estimate: 2147483648 }, ["ENG"]);
+  assert.deepEqual(r.errors, ["project must be a non-empty string", "type must be a non-empty string",
+    "title is too long (300 characters max)", "priority must be a string", "sprint must be a string",
+    "labels must be a list of strings", "estimate must be a whole number of minutes above 0"]);
+  for (const body of [null, [], "x", 3]) assert.deepEqual(newRequestOrErrors(body).errors, ["the body must be a JSON object"]);
+  assert.equal(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 2147483647 }, ["ENG"]).request.extra.estimate, 2147483647);
+  assert.match(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 7.5 }, ["ENG"]).errors[0], /whole number/);
+});
+
+test("withoutServerPaths keeps the ticket's place on the board and drops the server's filesystem", () => {
+  assert.deepEqual(withoutServerPaths([
+    "refusing to overwrite /srv/data/projects/ENG/defined/ENG-2-t.md",
+    'link target does not resolve: "ENG-9"',
+  ]), ["refusing to overwrite projects/ENG/defined/ENG-2-t.md", 'link target does not resolve: "ENG-9"']);
+});
+```
 
 In `tests/model/seam-closure.test.mjs`, replace:
 
@@ -568,22 +716,32 @@ describe("fs mode", () => {
     } finally { server.close(); }
   });
 
-  test("POST /api/new refuses what `blaze new` refuses, as a 422 naming why", async () => {
+  test("POST /api/new refuses bad input as a 422 naming why — and burns no id doing it", async () => {
     const roots = gitBoard();
     const { token } = await addUser(roots.dataRoot, { email: "m@example.com", role: "member" });
     const { server, base } = await serve(roots);
     try {
+      const ok = { project: "OBA", type: "task", title: "t", estimate: 30 };
       for (const [body, why] of [
         [{ project: "OBA", type: "task", title: "no estimate" }, /estimate/],
         [{ project: "OBA", type: "nonsense", title: "t" }, /unknown or missing type/],
-        [{ project: "OBA", type: "task", estimate: 30 }, /missing title/],
-        [{ project: "o(", type: "task", title: "t", estimate: 30 }, /o\(/],
+        [{ project: "OBA", type: "task", estimate: 30 }, /title must be a non-empty string/],
+        [{ ...ok, project: "o(" }, /"o\(" is not one this board configures/],
+        [{ ...ok, project: "ZZZ" }, /"ZZZ" is not one this board configures \(OBA\)/],
+        [{ ...ok, estimate: true }, /estimate must be a whole number/],
+        [{ ...ok, estimate: 1e12 }, /estimate must be a whole number/],
+        [{ ...ok, estimate: 0 }, /estimate must be a whole number/],
+        [{ ...ok, title: "x".repeat(301) }, /title is too long \(300 characters max\)/],
+        [{ ...ok, labels: "a,b" }, /labels must be a list of strings/],
+        [{ ...ok, parent: 7 }, /parent must be a string/],
+        [null, /the body must be a JSON object/],
       ]) {
         const r = await post(base, "/api/new", body, token.token);
-        assert.equal(r.status, 422, JSON.stringify(body));
+        assert.equal(r.status, 422, JSON.stringify(body)?.slice(0, 80));
         assert.match((await r.json()).errors.join(" "), why);
       }
-      assert.equal(existsSync(join(roots.projectsDir, "OBA", "defined", "OBA-2-t.md")), false);
+      const made = await post(base, "/api/new", ok, token.token);
+      assert.equal((await made.json()).id, "OBA-2", "no refused create consumed a number");
     } finally { server.close(); }
   });
 
@@ -615,6 +773,11 @@ describe("fs mode", () => {
       const bad = await post(base, "/api/link", { id: "OBA-1", type: "Nonsense", target: "OBA-2" }, token.token);
       assert.equal(bad.status, 422);
       assert.match((await bad.json()).errors[0], /unknown link type/);
+      for (const body of [null, { id: "OBA-1", type: 7, target: "OBA-2" }, { id: "OBA-1", type: "Relates" }]) {
+        const r = await post(base, "/api/link", body, token.token);
+        assert.equal(r.status, 422, JSON.stringify(body));
+        assert.match((await r.json()).errors[0], /must be non-empty strings/);
+      }
       const rm = await post(base, "/api/link", { id: "OBA-1", type: "Relates", target: "OBA-2", remove: true }, token.token);
       assert.equal(rm.status, 200);
       assert.doesNotMatch(readFileSync(file, "utf8"), /target: OBA-2/);
@@ -630,6 +793,13 @@ describe("fs mode", () => {
       assert.equal(r.status, 200, await r.text());
       assert.match(readFileSync(join(roots.projectsDir, "OBA", "defined", "OBA-1-one.md"), "utf8"),
                    /date: 2026-02-03, minutes: 20, note: n/);
+      for (const date of ["not-a-date", "2026-02-30", "2026-01-01\nresolution: done", 12345]) {
+        const bad = await post(base, "/api/log", { id: "OBA-1", minutes: 5, date }, token.token);
+        assert.equal(bad.status, 422, JSON.stringify(date));
+        assert.match((await bad.json()).errors[0], /a worklog date must be a real YYYY-MM-DD date/);
+      }
+      assert.doesNotMatch(readFileSync(join(roots.projectsDir, "OBA", "defined", "OBA-1-one.md"), "utf8"),
+                          /not-a-date|resolution: done/);
     } finally { server.close(); }
   });
 });
@@ -671,10 +841,10 @@ test("db mode: /api/new takes its id from the counter and /api/link writes the r
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs
 ```
 
-Expected: `tests 27, pass 20, fail 7` — all six `serve-api-new` tests (`/api/new` is an unknown endpoint → `404`; `/api/link` answers `404 not found`; the log ignores `date`), and `seam-closure`'s "the write-seam scan OBSERVED the corpus, and its allowlist is all load-bearing" (`serve.mjs :: applyNew` is named but not yet reached).
+Expected: `tests 28, pass 20, fail 8` — all six `serve-api-new` tests (`/api/new` is an unknown endpoint → `404`; `/api/link` answers `404 not found`; the log ignores `date`), `tests/model/new-request.test.mjs` fails to load (`Cannot find module '…/scripts/model/new-request.mjs'`), and `seam-closure`'s "the write-seam scan OBSERVED the corpus, and its allowlist is all load-bearing" (`serve.mjs :: applyNew` is named but not yet reached).
 
 - [ ] **Step 3: Implement.**
 
@@ -699,6 +869,99 @@ with:
     frontmatter: fm, body: found.body, currentFile: found.file,
   }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   return { ok: true, id, file };
+```
+
+In `scripts/log.mjs`, replace:
+
+```js
+import { roundWorklog } from "./model/time.mjs";
+
+export async function applyLog(projectsDir, id, minutes, opts = {}) {
+  const { date = null, note = null, today = null, storage = fsStorage, readStorage = fsReadStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
+```
+
+with:
+
+```js
+import { roundWorklog } from "./model/time.mjs";
+import { isIsoDate } from "./model/sprints.mjs";
+
+export async function applyLog(projectsDir, id, minutes, opts = {}) {
+  const { date = null, note = null, today = null, storage = fsStorage, readStorage = fsReadStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
+  // BLZ-684: a given date must be a real one. `--date` (and now `POST /api/log`'s `date`) went
+  // into the worklog verbatim — `not-a-date` landed in a file, and Postgres refused it with a 500.
+  if (date !== null && date !== undefined && !isIsoDate(date)) {
+    return { ok: false, errors: [`a worklog date must be a real YYYY-MM-DD date, got ${JSON.stringify(date)}`] };
+  }
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
+```
+
+Create `scripts/model/new-request.mjs`:
+
+```js
+// scripts/model/new-request.mjs — the network boundary of `POST /api/new` and the remote
+// refusals (BLZ-684). Pure, so it is unit-tested apart from a server, and run by `serve.mjs`
+// BEFORE any id is allocated.
+
+/** The longest title `POST /api/new` accepts. A title becomes the file name's slug in fs mode,
+ *  and an unbounded one is an ENAMETOOLONG after the id was already allocated. */
+export const NEW_TITLE_MAX = 300;
+const NEW_STRING_FIELDS = ["parent", "assignee", "likelihood", "impact", "reason", "sprint",
+                           "not_before", "deadline"];
+
+/**
+ * `POST /api/new`'s body → `applyNew`'s options, or the reasons it is refused. Pure, and run
+ * BEFORE anything is allocated. A wrong-typed field is refused by name, never coerced or
+ * silently dropped; `estimate` must be a whole number of minutes that fits the column; a
+ * `project` must be one this board configures (when it configures any) — a member must not be
+ * able to mint a new project key over the network.
+ * @returns { request } | { errors: string[] }
+ */
+export function newRequestOrErrors(payload, configuredProjects = []) {
+  const p = payload && typeof payload === "object" && !Array.isArray(payload) ? payload : null;
+  if (!p) return { errors: ["the body must be a JSON object"] };
+  const errors = [];
+  for (const k of ["project", "type", "title"]) {
+    if (typeof p[k] !== "string" || !p[k].trim()) errors.push(`${k} must be a non-empty string`);
+  }
+  if (typeof p.title === "string" && p.title.length > NEW_TITLE_MAX) {
+    errors.push(`title is too long (${NEW_TITLE_MAX} characters max)`);
+  }
+  if (typeof p.project === "string" && Array.isArray(configuredProjects) && configuredProjects.length
+      && !configuredProjects.includes(p.project)) {
+    errors.push(`project ${JSON.stringify(p.project)} is not one this board configures (${configuredProjects.join(", ")})`);
+  }
+  if (p.priority !== undefined && typeof p.priority !== "string") errors.push("priority must be a string");
+  for (const k of NEW_STRING_FIELDS) {
+    if (p[k] !== undefined && typeof p[k] !== "string") errors.push(`${k} must be a string`);
+  }
+  for (const k of ["labels", "components"]) {
+    if (p[k] !== undefined && !(Array.isArray(p[k]) && p[k].every((x) => typeof x === "string"))) {
+      errors.push(`${k} must be a list of strings`);
+    }
+  }
+  if (p.estimate !== undefined
+      && !(typeof p.estimate === "number" && Number.isInteger(p.estimate) && p.estimate > 0 && p.estimate <= 2147483647)) {
+    errors.push("estimate must be a whole number of minutes above 0");
+  }
+  if (errors.length) return { errors };
+  const extra = {};
+  for (const k of NEW_STRING_FIELDS) if (p[k] !== undefined) extra[k] = p[k];
+  if (p.components !== undefined) extra.components = p.components;
+  if (p.estimate !== undefined) extra.estimate = p.estimate;
+  return { request: { project: p.project, type: p.type, title: p.title, priority: p.priority ?? "medium",
+                      labels: p.labels ?? [], extra } };
+}
+
+/** A refusal sent to a remote caller names a ticket, never where the server keeps its files:
+ *  an absolute path in `refusing to overwrite /srv/…/projects/ENG/…` is reduced to its
+ *  `projects/…` tail. */
+export function withoutServerPaths(errors) {
+  return errors.map((e) => String(e).replace(/(^|[\s"'(])\/\S*?\/(projects\/)/g, "$1$2"));
+}
 ```
 
 In `scripts/model/serve-auth.mjs`, replace:
@@ -749,6 +1012,7 @@ with:
 import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
+import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
 import { stageFor } from "./commit-or-queue.mjs";
 ```
 
@@ -785,29 +1049,24 @@ with:
         // BLZ-684 (spec §5.4): `blaze new` over HTTP. The same `applyNew` the CLI runs, through
         // the RESOLVED port — so under db the id comes from project_counter's transactional
         // allocate, and two machines creating at once can never be handed the same number.
-        // Only the fields `blaze new` takes; strings and string lists are checked here, the
-        // rest (types, taxonomy, required fields, the parent rule) is applyNew's to refuse.
-        const p = payload && typeof payload === "object" ? payload : {};
-        const str = (v) => (typeof v === "string" ? v : undefined);
-        const list = (v) => (Array.isArray(v) ? v.filter((x) => typeof x === "string") : []);
-        const extra = {};
-        for (const k of ["parent", "assignee", "likelihood", "impact", "reason", "sprint", "not_before", "deadline"]) {
-          if (str(p[k]) !== undefined) extra[k] = p[k];
-        }
-        if (p.components !== undefined) extra.components = list(p.components);
-        if (p.estimate !== undefined) extra.estimate = Number(p.estimate);
+        //
+        // THE BOUNDARY IS CHECKED BEFORE ANY ID IS ALLOCATED. This route is reachable from the
+        // network, and a value that fails only after allocation (a 200,000-character title is a
+        // file name the OS refuses; an estimate past 2^31 is a column Postgres refuses) burns an
+        // id and answers 500. So: the shape is checked here, and refused as a 422 naming the
+        // field; the rest (types, taxonomy, required fields, the parent rule) is applyNew's.
+        const v = newRequestOrErrors(payload, cfgFor(root).projects);
+        if (v.errors) return json(422, { errors: v.errors });
         let r;
         try {
-          r = await applyNew(projectsDir, { project: str(p.project), type: str(p.type), title: str(p.title),
-            priority: str(p.priority) ?? "medium", labels: list(p.labels), extra, today,
-            writePort, readStorage, actor, source: "api" });
+          r = await applyNew(projectsDir, { ...v.request, today, writePort, readStorage, actor, source: "api" });
         } catch (e) {
           // A malformed project key throws (InvalidProjectKeyError, BLZ-402): the caller's input
           // was refused, so it is a 422 like any other refusal — never a 500.
           if (e?.name === "InvalidProjectKeyError") return json(422, { errors: [e.message] });
           throw e;
         }
-        if (!r.ok) return json(422, { errors: r.errors });
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors) });
         const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "new", id: r.id,
           message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile].filter(Boolean), lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
@@ -816,10 +1075,15 @@ with:
       if (u.pathname === "/api/link") {
         // BLZ-684: classified `write` in ROUTE_SCOPES since BLZ-323, and answered by NO handler
         // here — a POST reached the 404 below. The ticket-link verb, through the resolved port.
-        const r = await applyLink(projectsDir, payload.id,
-          { type: payload.type, target: payload.target, remove: payload.remove === true },
+        // The body is shape-checked first, as /api/new's is: `null` or a non-string type is the
+        // caller's mistake (422), not the server's (500).
+        const p = payload && typeof payload === "object" ? payload : {};
+        const bad = ["id", "type", "target"].filter((k) => typeof p[k] !== "string" || !p[k]);
+        if (bad.length) return json(422, { errors: [`${bad.join(", ")} must be non-empty strings`] });
+        const r = await applyLink(projectsDir, p.id, { type: p.type, target: p.target, remove: p.remove === true },
           { today, writePort, readStorage, actor, source: "api" });
-        return done(r, `${payload.id}: ${payload.remove === true ? "unlink" : "link"} ${payload.type} ${payload.target}`, "link");
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors) });
+        return done(r, `${p.id}: ${p.remove === true ? "unlink" : "link"} ${p.type} ${p.target}`, "link");
       }
 ```
 
@@ -829,11 +1093,11 @@ with:
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/seam-closure.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/artifact-api.test.mjs tests/new*.test.mjs tests/link*.test.mjs tests/verbs-*.test.mjs tests/reserve-window.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/supervisor*.test.mjs tests/event-actor.test.mjs tests/model/serve-auth*.test.mjs tests/model/artifact-api.test.mjs tests/new*.test.mjs tests/link*.test.mjs tests/log*.test.mjs tests/verbs-*.test.mjs tests/reserve-window.test.mjs tests/runner-*.test.mjs
 ```
 
-Expected: `tests 27, suites 1, pass 27`, and every neighbour green (`serve-auth.test.mjs`'s "no mutating route is free" sees `POST /api/new` at `write`).
+Expected: `tests 30, suites 1, pass 30`, and every neighbour green (`tests/log.test.mjs` included — no existing caller logs an invalid date) (`serve-auth.test.mjs`'s "no mutating route is free" sees `POST /api/new` at `write`).
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -850,9 +1114,9 @@ with:
 
 ```markdown
 | GET | `/api/matrix` · `/api/coverage` | `read` | v4 traceability matrix and coverage (BLZ-323) |
-| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations (`/api/log` takes an optional `date`, BLZ-684) — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push). The response carries `committed` and `queued` alongside `ok`: an idempotent re-write (editing a field to the value it already holds, re-checking a checked box) is a benign no-op that creates no commit, and `ok: true` alone never meant one existed (BLZ-422). It also carries `db`: `true` under `BLAZE_WRITE_PORT=db`, where the database is the store, no commit is made, and the page therefore does not read `committed: false` as "already matched HEAD" (BLZ-670) |
-| POST | `/api/new` | `write` | Create a ticket (BLZ-684): `{ project, type, title, estimate?, priority?, labels?, components?, parent?, assignee?, likelihood?, impact?, sprint?, not_before?, deadline?, reason? }` → `{ ok, id, warnings, committed, queued, db }`. The same `applyNew` `blaze new` runs, through the resolved port — under `db` the id comes from `project_counter`'s transactional allocate. A refusal is a `422` naming why |
-| POST | `/api/link` | `write` | Add or (`remove: true`) remove a typed link between two tickets — `{ id, type, target, remove? }`, the ticket-link verb `blaze link` runs (BLZ-684; classified since BLZ-323, answered by no handler until then) |
+| POST | `/api/move` · `/api/edit` · `/api/resolve` · `/api/log` · `/api/ac` | `write` | Mutations (`/api/log` takes an optional `date`, a real `YYYY-MM-DD` or `422` — as `blaze log --date` now is too, BLZ-684) — each validates through the model core, writes one file, commits it locally (never `git add -A`, never auto-push). The response carries `committed` and `queued` alongside `ok`: an idempotent re-write (editing a field to the value it already holds, re-checking a checked box) is a benign no-op that creates no commit, and `ok: true` alone never meant one existed (BLZ-422). It also carries `db`: `true` under `BLAZE_WRITE_PORT=db`, where the database is the store, no commit is made, and the page therefore does not read `committed: false` as "already matched HEAD" (BLZ-670) |
+| POST | `/api/new` | `write` | Create a ticket (BLZ-684): `{ project, type, title, estimate?, priority?, labels?, components?, parent?, assignee?, likelihood?, impact?, sprint?, not_before?, deadline?, reason? }` → `{ ok, id, warnings, committed, queued, db }`. The same `applyNew` `blaze new` runs, through the resolved port — under `db` the id comes from `project_counter`'s transactional allocate. The body is checked BEFORE an id is allocated (`model/new-request.mjs`): every field's type, a title of at most 300 characters, a whole-number estimate that fits the column, and a `project` this board configures — so a refusal is a `422` naming why and never burns an id. Refusals carry no server path |
+| POST | `/api/link` | `write` | Add or (`remove: true`) remove a typed link between two tickets — `{ id, type, target, remove? }` (strings, else `422`), the ticket-link verb `blaze link` runs (BLZ-684; classified since BLZ-323, answered by no handler until then) |
 | POST | `/api/artifact` · `/api/baseline` | `write` | v4 artifact model mutations (BLZ-323) |
 | POST | `/api/field` | `admin` | Defining a filterable field emits `ALTER TABLE` and spends the install-wide field budget ADR-0018 shares across every project — an administrative act, not an ordinary write |
 ```
@@ -878,13 +1142,13 @@ link). Parses no CLI args.
 - [ ] **Step 6: Fence check, commit, prove the committed tree.**
 
 ```bash
-git add tests/model/seam-closure.test.mjs tests/serve-api-new.test.mjs scripts/link.mjs scripts/model/serve-auth.mjs scripts/new.mjs scripts/serve.mjs docs/architecture.md docs/guide/commands.md
+git add tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs tests/serve-api-new.test.mjs scripts/link.mjs scripts/log.mjs scripts/model/new-request.mjs scripts/model/serve-auth.mjs scripts/new.mjs scripts/serve.mjs docs/architecture.md docs/guide/commands.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-684: POST /api/new and POST /api/link on blaze board" -m "serve.mjs's POST handler gains /api/new (applyNew through the resolved port; under db the id comes from project_counter) and /api/link (applyLink — classified since BLZ-323, never answered), and /api/log takes date; ROUTE_SCOPES classifies /api/new write; applyNew and applyLink pass actor/source to the port; seam-closure pins serve.mjs taking applyNew. New tests/serve-api-new.test.mjs; architecture.md HTTP table, commands.md." -- tests/model/seam-closure.test.mjs tests/serve-api-new.test.mjs scripts/link.mjs scripts/model/serve-auth.mjs scripts/new.mjs scripts/serve.mjs docs/architecture.md docs/guide/commands.md
+git commit -m "BLZ-684: POST /api/new and POST /api/link on blaze board" -m "serve.mjs's POST handler gains /api/new (body checked by the new model/new-request.mjs before any id is allocated, then applyNew through the resolved port; under db the id comes from project_counter) and /api/link (applyLink, body shape-checked — classified since BLZ-323, never answered); refusals carry no server path; /api/log takes date and applyLog refuses an unreal one; ROUTE_SCOPES classifies /api/new write; applyNew and applyLink pass actor/source to the port; seam-closure pins serve.mjs taking applyNew. New tests/serve-api-new.test.mjs and tests/model/new-request.test.mjs; architecture.md HTTP table, commands.md." -- tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs tests/serve-api-new.test.mjs scripts/link.mjs scripts/log.mjs scripts/model/new-request.mjs scripts/model/serve-auth.mjs scripts/new.mjs scripts/serve.mjs docs/architecture.md docs/guide/commands.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/seam-closure.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/serve-api-new.test.mjs tests/model/new-request.test.mjs tests/model/seam-closure.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -893,8 +1157,11 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 ### Task 3: `blaze` remote mode — `BLAZE_REMOTE_URL` + `BLAZE_TOKEN`
 
 **Files:**
+- Create: `tests/remote-env-guard.test.mjs`
 - Create: `tests/remote-mode.test.mjs`
+- Create: `tests/setup/no-remote.mjs`
 - Create: `scripts/remote-client.mjs`
+- Modify: `tests/setup/hang-watchdog.mjs`
 - Modify: `scripts/cli.mjs`
 - Modify: `AGENTS.md`
 - Modify: `docs/guide/commands.md`
@@ -904,6 +1171,65 @@ node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/
 - Produces (`scripts/remote-client.mjs`): `REMOTE_URL_ENV`, `REMOTE_TOKEN_ENV`; `REMOTE_VERBS = { new, move, edit, resolve, log, link }` (verb → path); `remoteFrom(env) → { remote: false } | { remote: true, origin, token } | { error }`; `requestFor(verb, argv) → { path, body } | { error }`; `successLine(verb, body, answer, origin) → string`; `runRemote(verb, argv, { env, fetch, out, err }) → Promise<exit code>`. `cli.mjs` routes the six verbs to `runRemote` when both variables are set, refuses every other command, and refuses everything when only one is set.
 
 - [ ] **Step 1: Write the failing tests.**
+
+Create `tests/remote-env-guard.test.mjs`:
+
+```js
+// tests/remote-env-guard.test.mjs — BLZ-684 (adversarial review round 1, M2).
+//
+// An operator's exported BLAZE_REMOTE_URL + BLAZE_TOKEN must never reach a test, or a process a
+// test spawns: with them, an ordinary CLI test would write to the live board with the
+// operator's token. This file proves the preload strips them — in a process started exactly as
+// `npm test` starts one, and in a `blaze` that process spawns — against a server that records
+// every request it receives.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawn } from "node:child_process";
+import { createServer } from "node:http";
+import { mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+const scratch = scratchRegistry();
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+
+test("this test process itself has neither variable, whatever the shell exported", () => {
+  assert.equal(process.env.BLAZE_REMOTE_URL, undefined);
+  assert.equal(process.env.BLAZE_TOKEN, undefined);
+});
+
+test("an exported pair does not leak: a preloaded process, and the `blaze` it spawns, stay local", async () => {
+  const seen = [];
+  const server = createServer((req, res) => { seen.push(`${req.method} ${req.url}`); res.writeHead(500); res.end(); });
+  await new Promise((res) => server.listen(0, "127.0.0.1", res));
+  const cwd = scratch(mkdtempSync(join(tmpdir(), "blz684-guard-")));
+  try {
+    // A child started the way `npm test` starts every test file (`--import` the preload), with
+    // the pair exported, which then runs `blaze new` the way a CLI test does.
+    const script = `
+      import { spawnSync } from "node:child_process";
+      const r = spawnSync(process.execPath, [${JSON.stringify(join(REPO, "scripts", "cli.mjs"))},
+        "new", "--project", "ENG", "--type", "task", "--estimate", "30", "leak"], { encoding: "utf8" });
+      console.log(JSON.stringify({ url: process.env.BLAZE_REMOTE_URL ?? null,
+                                   token: process.env.BLAZE_TOKEN ?? null, stderr: r.stderr }));`;
+    const out = await new Promise((resolve) => {
+      const p = spawn(process.execPath, [`--import=${join(REPO, "tests", "setup", "hang-watchdog.mjs")}`,
+                                         "--input-type=module", "-e", script],
+        { cwd, env: { ...process.env, BLAZE_REMOTE_URL: `http://127.0.0.1:${server.address().port}`,
+                      BLAZE_TOKEN: "blz_operator_token" } });
+      let stdout = "";
+      p.stdout.on("data", (d) => (stdout += d));
+      p.on("close", () => resolve(stdout));
+    });
+    const r = JSON.parse(out);
+    assert.deepEqual([r.url, r.token], [null, null], "the preload removed both");
+    assert.doesNotMatch(r.stderr, /remote/, "the spawned blaze ran locally (and found no board here)");
+    assert.deepEqual(seen, [], "the recording server received nothing");
+  } finally { server.close(); }
+});
+```
 
 Create `tests/remote-mode.test.mjs`:
 
@@ -1137,16 +1463,50 @@ test("an unauthenticated or read-scope caller is refused by the server, and noth
 });
 ```
 
+In `tests/setup/hang-watchdog.mjs`, replace:
+
+```js
+// changed: an unbounded hang became a bounded, attributable failure.
+import { spawnSync } from "node:child_process";
+```
+
+with:
+
+```js
+// changed: an unbounded hang became a bounded, attributable failure.
+// BLZ-684: first, and for every test process — the suite must never write to a remote board.
+import "./no-remote.mjs";
+import { spawnSync } from "node:child_process";
+```
+
+Create `tests/setup/no-remote.mjs`:
+
+```js
+// tests/setup/no-remote.mjs — BLZ-684. THE SUITE NEVER WRITES TO A REMOTE BOARD.
+//
+// With BLAZE_REMOTE_URL and BLAZE_TOKEN both set, `blaze new|move|edit|resolve|log|link` send
+// the write to that server with that token. An operator who exported the pair in a shell and
+// then ran `npm test` would have had existing CLI tests post real writes to the live board —
+// adversarial review reproduced five authenticated writes from three unrelated test files. So
+// both are deleted from THIS process's environment before any test runs; every process a test
+// spawns inherits that environment, and a test that wants remote mode sets the pair itself.
+//
+// Loaded by `hang-watchdog.mjs` (which every test process preloads with `--import`), so no
+// command line has to remember a second flag. `tests/remote-env-guard.test.mjs` pins it.
+delete process.env.BLAZE_REMOTE_URL;
+delete process.env.BLAZE_TOKEN;
+```
+
 
 - [ ] **Step 2: Run them to verify they fail.**
 
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs
 ```
 
-Expected: the file fails to load — `Cannot find module '…/scripts/remote-client.mjs'` (`tests 1, fail 1`).
+Expected: `tests 3, pass 2, fail 1` — `tests/remote-mode.test.mjs` fails to load (`Cannot find module '…/scripts/remote-client.mjs'`); `tests/remote-env-guard.test.mjs`'s two tests already pass, because their preload (`tests/setup/no-remote.mjs` and its import in `hang-watchdog.mjs`) is test infrastructure written in Step 1. Its discrimination: with that import line removed, both fail.
 
 - [ ] **Step 3: Implement.**
 
@@ -1399,11 +1759,11 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
 ```bash
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/cli*.test.mjs tests/readonly*.test.mjs tests/runner-*.test.mjs tests/model/seam-closure.test.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/cli*.test.mjs tests/readonly*.test.mjs tests/runner-*.test.mjs tests/model/seam-closure.test.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs tests/hang-watchdog.test.mjs
 ```
 
-Expected: `tests 10, suites 2, pass 10`, and every neighbour green.
+Expected: `tests 12, suites 2, pass 12`, and every neighbour green.
 
 - [ ] **Step 5: Docs, in the same commit.**
 
@@ -1431,7 +1791,9 @@ Every other command is refused in remote mode (it needs the board's data on this
 read the board over `GET /api/live` or the page. Setting only ONE of the two variables is an
 error for every command — never a silent local write. The token is only ever sent to
 `BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for a
-loopback host only. See
+loopback host only. Set the two **per command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`)
+or in a shell used only for that — never as a global `export`, which would send every `blaze`
+write on the machine to the server. See
 [the command reference](https://github.com/hjr15/blaze/blob/main/docs/guide/commands.md#remote-mode).
 
 ## Querying the board
@@ -1473,6 +1835,14 @@ Read the board over `GET /api/live` or the page instead. A remote mode set **hal
 one of the two variables) is an error for every command, never a silent fallback to writing
 locally. `BLAZE_READONLY` still refuses a write first.
 
+**Scope the two variables to the command, never to your whole shell.** Exported, they turn every
+`blaze` write anywhere on the machine into a write to that server — an agent working on a
+local board, a script, anything. Prefer
+`BLAZE_REMOTE_URL=https://blaze.example.com BLAZE_TOKEN=$(cat ~/.blaze-token) blaze new …`,
+or a dedicated shell (or a `direnv` directory) that exists only to write to the server. The
+engine's own test suite deletes both before any test runs (`tests/setup/no-remote.mjs`), so an
+exported pair can never turn `npm test` into writes to a real board.
+
 The token is sent to `BLAZE_REMOTE_URL`'s origin and nowhere else: every request is built
 against that origin, a redirect is refused rather than followed, plain `http://` is accepted
 only for a loopback host, and no message prints the token. Use a `member` token (`blaze user
@@ -1503,13 +1873,13 @@ with:
 - [ ] **Step 6: Fence check, commit, prove the committed tree.**
 
 ```bash
-git add tests/remote-mode.test.mjs scripts/cli.mjs scripts/remote-client.mjs AGENTS.md docs/guide/commands.md
+git add tests/remote-env-guard.test.mjs tests/remote-mode.test.mjs tests/setup/hang-watchdog.mjs tests/setup/no-remote.mjs scripts/cli.mjs scripts/remote-client.mjs AGENTS.md docs/guide/commands.md
 git diff --cached | grep -c '^+```'      # must print 0
-git commit -m "BLZ-684: blaze remote mode — the six ticket verbs over HTTP to one origin" -m "New scripts/remote-client.mjs (remoteFrom, requestFor, runRemote on built-in fetch; https or loopback http only, origin only, redirects refused, the token never printed); cli.mjs sends new/move/edit/resolve/log/link to it when BLAZE_REMOTE_URL and BLAZE_TOKEN are both set, refuses every other command, and refuses everything when half-set. New tests/remote-mode.test.mjs (incl. an end-to-end CLI process against a real server); commands.md remote-mode section and env rows, AGENTS.md section." -- tests/remote-mode.test.mjs scripts/cli.mjs scripts/remote-client.mjs AGENTS.md docs/guide/commands.md
+git commit -m "BLZ-684: blaze remote mode — the six ticket verbs over HTTP to one origin" -m "New scripts/remote-client.mjs (remoteFrom, requestFor, runRemote on built-in fetch; https or loopback http only, origin only, redirects refused, the token never printed); cli.mjs sends new/move/edit/resolve/log/link to it when BLAZE_REMOTE_URL and BLAZE_TOKEN are both set, refuses every other command, and refuses everything when half-set. New tests/remote-mode.test.mjs (incl. an end-to-end CLI process against a real server); new tests/setup/no-remote.mjs, imported by hang-watchdog.mjs, so the suite never sees BLAZE_REMOTE_URL/BLAZE_TOKEN, pinned by new tests/remote-env-guard.test.mjs; commands.md remote-mode section (scope the pair per command) and env rows, AGENTS.md section." -- tests/remote-env-guard.test.mjs tests/remote-mode.test.mjs tests/setup/hang-watchdog.mjs tests/setup/no-remote.mjs scripts/cli.mjs scripts/remote-client.mjs AGENTS.md docs/guide/commands.md
 git status --short                        # must print nothing
 export PATH=/home/rnamwoh/.local/node24/bin:$PATH
 export BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test   # the Global Constraints container
-node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs   # green on the COMMITTED tree
+node --test --test-concurrency=1 --import=./tests/setup/hang-watchdog.mjs tests/remote-mode.test.mjs tests/remote-env-guard.test.mjs   # green on the COMMITTED tree
 ```
 
 
@@ -2025,13 +2395,13 @@ git status --short                                         # empty
 - [ ] **Step 2: The local Postgres run, with coverage.**
 
 ```bash
-docker run -d --rm --name blz-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=blaze_test -p 127.0.0.1:55432:5432 postgres:17-alpine
-until docker exec blz-pg pg_isready -U postgres -d blaze_test; do sleep 1; done
+docker ps --filter name=blz684-pg --format '{{.Names}}' | grep -q . || docker run -d --rm --name blz684-pg -e POSTGRES_PASSWORD=postgres -e POSTGRES_DB=blaze_test -p 127.0.0.1:55432:5432 postgres:17-alpine
+until docker exec blz684-pg pg_isready -U postgres -d blaze_test; do sleep 1; done
 BOX=$(mktemp -d /tmp/blz684-box-XXXX)
 TMPDIR=$BOX BLAZE_TEST_PG_URL=postgres://postgres:postgres@localhost:55432/blaze_test npm run test:coverage > "$BOX.log" 2>&1; tail -12 "$BOX.log"
 grep -c "already executing" "$BOX.log"                    # 0
 node scripts/ci/tmp-scratch-attribution.mjs --tmp "$BOX" --max 0
-docker stop blz-pg
+docker stop blz684-pg
 ```
 
 Expected: `fail 0`, the c8 thresholds pass (91/77/93/91), no deprecation line, no attributable scratch directory left.
@@ -2039,6 +2409,8 @@ Expected: `fail 0`, the c8 thresholds pass (91/77/93/91), no deprecation line, n
 - [ ] **Step 3: `gh pr checks <PR>` after opening the PR** — every row pass; re-read it before merging (`--watch` can exit 0 on a failure). PR title: `BLZ-684: remote writes — POST /api/new, bearer CSRF exemption, blaze remote mode`; it touches auth, so it is reviewed on its own (spec §8).
 
 ## Operator acceptance (spec §7 step 3, after PR C's Postgres exists)
+
+**Which board this reaches.** The REHEARSAL (spec §7 step 3: a local `blaze board` on machine 1 with `BLAZE_WRITE_PORT=db`, reached from machine 2 over the LAN or a tunnel) is unaffected by the ingress. The LIVE board is reachable in remote mode only after PR C sets the chart's `auth.enabled: false` (D4, spec §5.1) — until then Traefik's basic-auth takes the `Authorization` header and answers `401` before blaze sees the request. Do not try to work around it with both credentials; one header cannot carry both.
 
 On the rehearsal board, with `BLAZE_WRITE_PORT=db` and a `member` token issued by `blaze user add` on the server:
 
@@ -2049,11 +2421,14 @@ node scripts/ops/concurrency-proof.mjs create --project BLZ --count 50 --label m
 node scripts/ops/concurrency-proof.mjs verify m1.json m2.json                               # either machine: PROOF: PASS
 ```
 
+(The `export` here is that dedicated shell's only purpose — close it afterwards; never export the pair in a shell you use for anything else.)
+
 The gate is spec §7 step 3's: 100 distinct ids, 100 rows, 0 errors. The tickets are real; resolve them `wont-do` (or drop `blaze_rehearsal`, step 7) afterwards.
 
 ## Self-review
 
 - **Spec coverage:** §5.4 — `POST /api/new` (Task 2), `/api/link` confirmed absent and added (Task 2, Finding 1), the CSRF rule incl. cookie+bearer and the ADR-0013 addendum (Task 1), CLI remote mode with the refusals and half-set error (Task 3; `ac` resolved by Finding 5), remote reads out of scope (unchanged); §6's server, CLI-to-server end-to-end and 2×50 concurrency tests (Tasks 1, 3, 4); §7 step 3's harness (Task 4). The supervisor twin was checked (Finding 2).
-- **Security constraints:** each of the six pinned behaviours has a named test (Global Constraints, Review Focus).
+- **Security constraints:** each pinned behaviour has a named test (Global Constraints, Review Focus), including round 1's proxy reproduction and the suite's remote-env guard.
+- **Round 1:** B1 → Finding 15 (Task 1); M1 → D4 in the spec + the operator note above; M2 → Finding 17 (Task 3); m1/m2/m5 → Finding 10, m3/m4 → Finding 12, m6 → Finding 11 (Task 2); m7 → Finding 18 (spec, in the plan's commit); m8 → Finding 19.
 - **Placeholders:** none — every code step is the prototype's literal content.
 - **Type consistency:** `requestRemote`'s `{ status, ok, answer }` is what both `runRemote` and the harness read; `REMOTE_VERBS`' keys are what `cli.mjs` checks with `Object.hasOwn`; `/api/new`'s `{ ok, id }` is what `successLine` and `createMany` read.

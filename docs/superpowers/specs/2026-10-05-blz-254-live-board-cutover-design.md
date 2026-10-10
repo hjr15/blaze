@@ -19,6 +19,7 @@ acceptance criterion is answered — met, or amended with the reason recorded on
 | D1 | What does BLZ-254 retire? | **Git ceremony only.** fs mode stays a supported *single-machine* product mode with its allocator (`ids.mjs`, `claims.mjs`). The live board moves to db. |
 | D2 | How does a second machine write after cutover? | **HTTP through `serve.mjs`**, with a bearer token. Postgres stays cluster-internal. |
 | D3 | Where does Postgres run? | **CloudNativePG cluster in `service-platform`**, ArgoCD-managed, with scheduled backups. |
+| D4 (2026-10-10) | Keep the Traefik basic-auth on the board's ingress? | **No — drop it.** Blaze's own authentication (users, browser sessions, bearer tokens) is the single layer. Basic auth occupies the same `Authorization` header a remote bearer request needs, so the two cannot both stand. |
 
 ## 3. Corrections to the ticket, verified 2026-10-05
 
@@ -60,6 +61,9 @@ The migration source is then the reconciled `BLZ-305` tree. blaze-pm is still ne
   sets them on the Deployment. The password comes from the CNPG-generated `blaze-pg-app`
   Secret, by reference only.
 - `BLAZE_WRITE_PORT` stays unset (fs) until the cutover flips it (§7).
+- The chart's `auth.enabled` becomes `false` (Traefik basic-auth removed, D4). Before flipping it,
+  confirm the live board has at least one user (`blaze user` / `identity.db`), so the server's
+  bind-safety check holds — a board with no users refuses to start off loopback.
 
 ### 5.2 Corpus load into Postgres: `blaze db load`
 
@@ -101,13 +105,17 @@ is amended to "`blaze db verify` exits 0". Exit codes: 0 pass, 1 diffs, 2 could 
   `{ ok, id }`.
 - **`POST /api/link`** is already listed in `ROUTE_SCOPES`. The plan confirms it reaches the
   ticket-link verb under db and adds it to `serve.mjs`'s POST handler if it doesn't.
-- **CSRF applies to cookie-authenticated requests only.** A request that authenticated with
-  `Authorization: Bearer` skips the `x-blaze-csrf` check. ADR-0013 §7 already scopes that
-  check to the browser flow, and a bearer token isn't ambient. A request that carries both a
-  cookie and a bearer token is treated as a cookie request (CSRF still required). An
-  ADR-0013 addendum records this.
+- **CSRF applies to every request a browser can be made to send.** A request skips the
+  `x-blaze-csrf` check only when the board has users, it authenticated with
+  `Authorization: Bearer`, it carries no session cookie, its body is `content-type:
+  application/json`, and `sec-fetch-site` is absent, `same-origin` or `none` (amended by PR B's
+  adversarial review: ADR-0034's reverse proxy that injects the bearer header for a browser
+  makes "a bearer token isn't ambient" false on its own). A request that carries both a cookie
+  and a bearer token is a cookie request (CSRF still required). An ADR-0013 addendum records
+  this.
 - **CLI remote mode.** When `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` are both set, `cli.mjs`
-  sends `new`, `move`, `edit`, `resolve`, `log`, `ac` and `link` to the matching endpoint and
+  sends `new`, `move`, `edit`, `resolve`, `log` and `link` to the matching endpoint (there is
+  no CLI `ac` command to forward — the AC toggle is a browser action) and
   prints the server's result. The verb logic and validation run once, on the server. The
   module is `scripts/remote-client.mjs`, using built-in `fetch`.
 - In remote mode, every other command (`import`, `groom`, `db`, `reconcile`, `sprint`, …)
@@ -185,11 +193,11 @@ and db.
 
 | Step | Action | Gate |
 |---|---|---|
-| 1 | PRs A, B and C merged; image deployed with `BLAZE_WRITE_PORT` unset; BLZ-674 published; BLZ-676 and §4 reconciliation done | CI green; the board serves as before |
+| 1 | PRs A, B and C merged; image deployed with `BLAZE_WRITE_PORT` unset; BLZ-674 published; BLZ-676 and §4 reconciliation done; the live board has at least one user, then `auth.enabled: false` (D4) | CI green; the board serves as before, behind blaze's own sign-in |
 | 2 | Freeze: stop every writer on every machine. Run the last `blaze publish` so `.blaze/pending/` drains on each machine (both are non-empty today). Make the pod serve the reconciled tree: change the chart's hostPath to the `v4-spine` worktree. `BLZ-305` is checked out there, so the main checkout can't switch to it. | `.blaze/pending/` empty on every machine |
 | 3 | **Rehearsal** on CNPG database `blaze_rehearsal`: init, load, verify, audit; a local `blaze board` with `BLAZE_WRITE_PORT=db` on machine 1; **two-machine proof** (machine 1 and the operator's second machine each run `scripts/ops/concurrency-proof.mjs`, creating 50 tickets in remote mode against it); pool measurements | Verify exits 0; audit has 0 hard findings; 100 distinct ids, 100 rows, 0 errors |
 | 4 | **Live** (operator go-ahead required): re-count the corpus; `blaze db init`; `blaze db load`; `blaze db verify`; `blaze audit` (db) | Same gates as step 3 |
-| 5 | service-platform PR: set `BLAZE_WRITE_PORT=db` on the Deployment; ArgoCD sync | Smoke test: one remote `blaze new` from each machine shows on the page |
+| 5 | service-platform PR: set `BLAZE_WRITE_PORT=db` on the Deployment (with `auth.enabled: false` already in place, D4); ArgoCD sync | Smoke test: one remote `blaze new` from each machine, through the real ingress, shows on the page |
 | 6 | Unfreeze. PR D (deletion) merges; the service-platform PR deletes `blaze-flush` | `kubectl get cronjob -n blaze` returns nothing |
 | 7 | Drop the `blaze_rehearsal` database | — |
 
@@ -205,7 +213,7 @@ BLZ-254 is a single feature, split on purpose at workspace and rollback boundari
 |---|---|---|---|
 | A — db readiness | blaze | BLZ-675, BLZ-674 (version bump; the publish follows the merge), load, verify, transitions-from-events, governance audit, matrices, readonly guards | Additive; fs and dual behaviour unchanged |
 | B — remote writes | blaze | `/api/new`, bearer CSRF exemption, remote CLI, concurrency proof | Touches auth; reviewed on its own |
-| C — Postgres | service-platform | CNPG cluster and db env (no write-port flip) | Different repo |
+| C — Postgres | service-platform | CNPG cluster and db env (no write-port flip); `auth.enabled: false` once the live board has a user (D4) | Different repo |
 | C2 — flip and flush deletion | service-platform | `BLAZE_WRITE_PORT=db` (step 5); delete `blaze-flush` (step 6) | Runbook-timed |
 | D — retire git ceremony | blaze | §5.5 deletions | High blast radius; merges only after cutover |
 | — | blaze-pm (board operator, never pushed) | BLZ-676, §4 reconciliation, every board move | Data, not code |
