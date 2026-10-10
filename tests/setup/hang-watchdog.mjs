@@ -39,6 +39,8 @@
 // ~10 further runs across two reviewers. Nothing here reproduces it, and a green suite is
 // not evidence it is gone. What is verifiable, and what is tested, is that the failure mode
 // changed: an unbounded hang became a bounded, attributable failure.
+// BLZ-684: first, and for every test process — the suite must never write to a remote board.
+import "./no-remote.mjs";
 import { spawnSync } from "node:child_process";
 import { basename } from "node:path";
 

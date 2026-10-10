@@ -890,6 +890,50 @@ so asking for help can never trigger a mutation — `blaze commit --help` descri
 exits non-zero. For anything past the one-liners — flags, defaults, behaviour —
 this page is the reference.
 
+## Remote mode
+
+With **both** `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` set, `blaze` writes to a board server over
+HTTP instead of to a local tree (BLZ-684). This is how a second machine writes to the live
+board once it is on Postgres (spec §5.4): the verb runs once, on the server, against the store
+the server owns, and under `BLAZE_WRITE_PORT=db` the id comes from the database's counter, so
+two machines creating at once never collide.
+
+| Command | Endpoint |
+|---|---|
+| `blaze new …` | `POST /api/new` |
+| `blaze move <id> <status>` | `POST /api/move` |
+| `blaze edit <id> <field> <value>` | `POST /api/edit` |
+| `blaze resolve <id> <resolution>` | `POST /api/resolve` |
+| `blaze log <id> <minutes> [--date] [--note]` | `POST /api/log` |
+| `blaze link [--rm] <id> <TYPE> <target>` | `POST /api/link` |
+
+The arguments are the local command's own. Each prints one line ending `(remote: <origin>)`,
+or the server's refusal and exit `1`. Every **other** command — `audit`, `reconcile`, `db`,
+`import`, `sprint`, `board`, `show`/`list`-style reads … — is refused with
+`blaze: <cmd> is not available in remote mode`: it needs the board's data on this machine.
+Read the board over `GET /api/live` or the page instead. A remote mode set **half-way** (only
+one of the two variables) is an error for every command, never a silent fallback to writing
+locally. `BLAZE_READONLY` still refuses a write first.
+
+**Scope the two variables to the command, never to your whole shell.** Exported, they turn every
+`blaze` write anywhere on the machine into a write to that server — an agent working on a
+local board, a script, anything. Prefer
+`BLAZE_REMOTE_URL=https://blaze.example.com BLAZE_TOKEN=$(cat ~/.blaze-token) blaze new …`,
+or a dedicated shell (or a `direnv` directory) that exists only to write to the server. The
+engine's own test suite deletes both before any test runs (`tests/setup/no-remote.mjs`), so an
+exported pair can never turn `npm test` into writes to a real board.
+
+The token is sent to `BLAZE_REMOTE_URL`'s origin and nowhere else: every request is built
+against that origin, a redirect is refused rather than followed, plain `http://` is accepted
+only for a loopback host, and no message prints the token. To reach a board on another machine
+that has no TLS — the cutover rehearsal's `blaze board` on machine 1, say — tunnel it rather
+than send the token over the LAN in clear: `ssh -L 4321:127.0.0.1:<port> machine1`, then
+`BLAZE_REMOTE_URL=http://127.0.0.1:4321`. (Machine 1's board must have users; it can stay on
+loopback, since the tunnel arrives there.) Use a `member` token (`blaze user
+add --role member`): a `viewer` token is refused `403` on every write. The server skips the
+CSRF header for such a bearer request (ADR-0013's addendum), so remote mode needs a board with
+users — a loopback board with none still requires the header, and remote mode cannot supply it.
+
 ## Environment variables
 
 | Variable | Controls | Default |
@@ -905,6 +949,8 @@ this page is the reference.
 | `BLAZE_SESSION` | Key for the batch-mode op queue, so parallel sessions isolate. | unset → an id auto-derived from the agent harness session (`auto-<id>`), so a session and its subagents share one queue; only with no harness id either does it fall back to the shared queue |
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
+| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for a loopback host); no path, query, fragment or `user:pass@`. | unset (local) |
+| `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the two is an error for every command. | unset |
 
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
 `blaze.config.json`, then 4321.
