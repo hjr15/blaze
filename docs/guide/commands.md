@@ -125,7 +125,13 @@ closed rather than inheriting the last one's.
 The `x-blaze-csrf` header is **not** authentication — on either server. It is a
 per-process value embedded in the served page, readable by anyone who can `GET /`. It is
 forgery protection for the browser flow, retained as defence-in-depth alongside the token
-check, never as a substitute for it. `blaze start` also requires it on `/control/*`,
+check, never as a substitute for it. On `blaze board`'s `POST /api/*` a request authenticated
+by an `Authorization: Bearer` token, with **no** session cookie, a `content-type:
+application/json` body and no cross-site `sec-fetch-site`, skips it (BLZ-684, ADR-0013's
+addendum) — that is a CLI on another machine, never a browser; a request that carries the
+`blaze_session` cookie, a form or text body, or a browser's cross-site fetch metadata still
+needs it, even when a reverse proxy injected the bearer token, and so does every request on a
+board with no users. `blaze start` also requires it on `/control/*`,
 where it is the only control that covers a loopback board with no users at all: the gate
 has no credential to ask for there, but a page in your own browser can still POST
 cross-origin to `http://localhost:<port>/control/revert` without one.

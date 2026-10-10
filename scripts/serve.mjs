@@ -26,7 +26,7 @@ import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
 import { dbTransitions } from "./model/transitions-db.mjs";
-import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
+import { checkBindSafety, gate, pageScopeFor, csrfRequired } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
 import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admin.mjs";
 import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
@@ -805,7 +805,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // by anyone who can GET /. It is forgery protection for the browser flow, and it
       // is retained as defence-in-depth ALONGSIDE the gate above, which is the thing
       // that asks for a credential. It is removed with the last cookie, not before.
-      if (req.headers["x-blaze-csrf"] !== CSRF) return json(403, { errors: ["bad csrf token"] });
+      // BLZ-684: a request the gate authenticated by bearer token alone — no session cookie
+      // beside it — is exempt (`csrfRequired`, ADR-0013's addendum): the token is not
+      // ambient, and that is what lets a CLI on another machine write over HTTP.
+      if (csrfRequired({ headers: req.headers, store }) && req.headers["x-blaze-csrf"] !== CSRF) {
+        return json(403, { errors: ["bad csrf token"] });
+      }
       // BLZ-121 defence-in-depth, checked here (before any apply* call below,
       // not just inside commitOrQueue) and as a plain 403 rather than a thrown
       // assertWritable(): this handler has no wrapping try/catch, and an

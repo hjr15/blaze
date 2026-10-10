@@ -319,7 +319,11 @@ describe("with identities configured, a token is required and its scope is enfor
     } finally { server.close(); }
   });
 
-  test("the CSRF header is retained as defence-in-depth: a valid token without it is still refused",
+  // BLZ-684 (spec §5.4, ADR-0013's addendum) REVERSES this test's old expectation, on purpose:
+  // a valid bearer token with no session cookie no longer needs the CSRF header — that is what
+  // lets a CLI on another machine write. The cookie flow keeps the header; the cases that pin
+  // it (cookie alone, cookie + bearer) live in tests/serve-csrf-bearer.test.mjs.
+  test("a valid bearer token without the CSRF header — and no cookie — is accepted (BLZ-684)",
     async () => {
       const { root, projects } = board();
       const { token } = await addUser(root, { email: "m@example.com", role: "member" });
@@ -331,8 +335,7 @@ describe("with identities configured, a token is required and its scope is enfor
                      authorization: `Bearer ${token.token}` },
           body: JSON.stringify({ id: "OBA-1", patch: { priority: "high" } }),
         });
-        assert.equal(r.status, 403);
-        assert.match((await r.json()).errors[0], /csrf/i);
+        assert.equal(r.status, 200, await r.text());
       } finally { server.close(); }
     });
 });
