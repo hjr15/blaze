@@ -934,6 +934,16 @@ add --role member`): a `viewer` token is refused `403` on every write. The serve
 CSRF header for such a bearer request (ADR-0013's addendum), so remote mode needs a board with
 users — a loopback board with none still requires the header, and remote mode cannot supply it.
 
+**The two-machine proof** (the cutover rehearsal, BLZ-254 spec §7 step 3) is
+`scripts/ops/concurrency-proof.mjs`, run in remote mode. On each machine,
+`node scripts/ops/concurrency-proof.mjs create --project <KEY> --count 50 --label <machine> > <machine>.json`
+creates the tickets (`--parallel 8` in flight by default) and prints their ids as JSON; then
+`node scripts/ops/concurrency-proof.mjs verify m1.json m2.json` checks every id is distinct
+across all the files and present on the server, and prints `PROOF: PASS` (exit `0`) or the
+duplicated and missing ids (exit `1`). The tickets are real: run it against the rehearsal
+database. The same shape runs in CI against Postgres (`tests/concurrency-proof.test.mjs`: two
+processes × 50 → 100 distinct ids, 100 rows, no gaps).
+
 ## Environment variables
 
 | Variable | Controls | Default |

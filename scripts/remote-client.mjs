@@ -160,6 +160,28 @@ export function successLine(verb, body, answer, origin) {
 }
 
 /**
+ * One request to the configured origin, and nowhere else: the URL is built against
+ * `cfg.origin` (a `path` can only ever be a path on it), the token rides in `Authorization`,
+ * and a redirect is an ERROR rather than followed. Shared by `runRemote` and
+ * `scripts/ops/concurrency-proof.mjs` (BLZ-684), so there is one place that sends the token.
+ * @returns { status, ok, answer } — `answer` is the parsed JSON body, or null
+ */
+export async function requestRemote(cfg, method, path, body, { fetch: fetchImpl = globalThis.fetch } = {}) {
+  const url = new URL(path, `${cfg.origin}/`);
+  if (url.origin !== cfg.origin) throw new Error(`refusing to send the token to ${url.origin}`);
+  const res = await fetchImpl(url, {
+    method,
+    redirect: "error",
+    headers: { accept: "application/json", authorization: `Bearer ${cfg.token}`,
+               ...(body === undefined ? {} : { "content-type": "application/json" }) },
+    ...(body === undefined ? {} : { body: JSON.stringify(body) }),
+  });
+  let answer = null;
+  try { answer = await res.json(); } catch { answer = null; }
+  return { status: res.status, ok: res.ok, statusText: res.statusText, answer };
+}
+
+/**
  * Run one verb against the server.
  * @returns the process exit code: 0 done, 1 refused or failed
  */
@@ -170,24 +192,16 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
   if (!cfg.remote) { err("blaze: remote mode is not configured"); return 1; }
   const req = requestFor(verb, argv);
   if (req.error) { err(req.error); return 1; }
-  const url = new URL(req.path, `${cfg.origin}/`);
   let res;
   try {
-    res = await fetchImpl(url, {
-      method: "POST",
-      redirect: "error",
-      headers: { "content-type": "application/json", accept: "application/json",
-                 authorization: `Bearer ${cfg.token}` },
-      body: JSON.stringify(req.body),
-    });
+    res = await requestRemote(cfg, "POST", req.path, req.body, { fetch: fetchImpl });
   } catch (e) {
-    // `e.message` only: fetch's error never carries the request headers, and nothing here
-    // adds them — but a redirect refusal must read as one, not as a network blip.
+    // The message only: fetch's error never carries the request headers, and nothing here
+    // adds them — a redirect refusal reads as "no answer", never as a success.
     err(`blaze ${verb}: no answer from ${cfg.origin} — ${e?.cause?.message ?? e?.message ?? e}`);
     return 1;
   }
-  let answer = null;
-  try { answer = await res.json(); } catch { answer = null; }
+  const { answer } = res;
   if (!res.ok || !answer || answer.ok !== true) {
     const errors = Array.isArray(answer?.errors) ? answer.errors : [`HTTP ${res.status} ${res.statusText}`.trim()];
     err(`blaze ${verb} failed (${cfg.origin} answered ${res.status}):\n  ${errors.join("\n  ")}`);
