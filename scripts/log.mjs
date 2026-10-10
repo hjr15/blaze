@@ -8,10 +8,16 @@ import { basename, dirname } from "node:path";
 import { locateTicket, ambiguousIdError } from "./model/index.mjs";
 import { serializeTicket } from "./model/ticket.mjs";
 import { roundWorklog } from "./model/time.mjs";
+import { isIsoDate } from "./model/sprints.mjs";
 
 export async function applyLog(projectsDir, id, minutes, opts = {}) {
   const { date = null, note = null, today = null, storage = fsStorage, readStorage = fsReadStorage,
           writePort = fsWritePort(projectsDir, storage) } = opts;
+  // BLZ-684: a given date must be a real one. `--date` (and now `POST /api/log`'s `date`) went
+  // into the worklog verbatim — `not-a-date` landed in a file, and Postgres refused it with a 500.
+  if (date !== null && date !== undefined && !isIsoDate(date)) {
+    return { ok: false, errors: [`a worklog date must be a real YYYY-MM-DD date, got ${JSON.stringify(date)}`] };
+  }
   const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
   if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };

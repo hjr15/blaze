@@ -132,7 +132,10 @@ export async function applyNew(projectsDir, opts = {}) {
   }
   // BLZ-683: `create` — a row that appears between the check above and this write is refused,
   // never overwritten (the db port's rule; the fs port ignores the context).
-  const { file } = await writePort.write(target, { create: true });
+  // BLZ-684: `actor`/`source` reach the event log as every other verb's do, so a ticket created
+  // over `POST /api/new` records WHO (ADR-0013 §6); a CLI create keeps "unknown" and "cli".
+  const { file } = await writePort.write(target,
+    { create: true, actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
   return { ok: true, id, type, project, status, file, claimFile, warnings };
 }

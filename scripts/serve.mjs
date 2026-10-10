@@ -20,6 +20,9 @@ import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
 import { applyEdit, applyToggleAc } from "./edit.mjs";
+import { applyNew } from "./new.mjs";
+import { applyLink } from "./link.mjs";
+import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
 import { stageFor } from "./commit-or-queue.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
@@ -888,12 +891,53 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         return done(r, `${payload.id}: resolve ${payload.resolution}`, "resolve");
       }
       if (u.pathname === "/api/log") {
-        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, today, writePort, readStorage, actor, source: "api" });
+        // BLZ-684: `date` too, so the remote `blaze log --date` means what the local one does.
+        const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, date: payload.date ?? null, today, writePort, readStorage, actor, source: "api" });
         return done(r, `${payload.id}: log ${payload.minutes}m`, "log");
       }
       if (u.pathname === "/api/ac") {
         const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort, readStorage, actor, source: "api" });
         return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
+      }
+      if (u.pathname === "/api/new") {
+        // BLZ-684 (spec §5.4): `blaze new` over HTTP. The same `applyNew` the CLI runs, through
+        // the RESOLVED port — so under db the id comes from project_counter's transactional
+        // allocate, and two machines creating at once can never be handed the same number.
+        //
+        // THE BOUNDARY IS CHECKED BEFORE ANY ID IS ALLOCATED. This route is reachable from the
+        // network, and a value that fails only after allocation (a 200,000-character title is a
+        // file name the OS refuses; an estimate past 2^31 is a column Postgres refuses) burns an
+        // id and answers 500. So: the shape is checked here, and refused as a 422 naming the
+        // field; the rest (types, taxonomy, required fields, the parent rule) is applyNew's.
+        const v = newRequestOrErrors(payload, cfgFor(root).projects);
+        if (v.errors) return json(422, { errors: v.errors });
+        let r;
+        try {
+          r = await applyNew(projectsDir, { ...v.request, today, writePort, readStorage, actor, source: "api" });
+        } catch (e) {
+          // A malformed project key throws (InvalidProjectKeyError, BLZ-402): the caller's input
+          // was refused, so it is a 422 like any other refusal — never a 500.
+          if (e?.name === "InvalidProjectKeyError") return json(422, { errors: [e.message] });
+          throw e;
+        }
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors) });
+        const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "new", id: r.id,
+          message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile].filter(Boolean), lockOpts: LOCK_OPTS });
+        if (commitFailed(c)) return;
+        return json(200, { ok: true, id: r.id, warnings: r.warnings, ...gitOutcome(c) });
+      }
+      if (u.pathname === "/api/link") {
+        // BLZ-684: classified `write` in ROUTE_SCOPES since BLZ-323, and answered by NO handler
+        // here — a POST reached the 404 below. The ticket-link verb, through the resolved port.
+        // The body is shape-checked first, as /api/new's is: `null` or a non-string type is the
+        // caller's mistake (422), not the server's (500).
+        const p = payload && typeof payload === "object" ? payload : {};
+        const bad = ["id", "type", "target"].filter((k) => typeof p[k] !== "string" || !p[k]);
+        if (bad.length) return json(422, { errors: [`${bad.join(", ")} must be non-empty strings`] });
+        const r = await applyLink(projectsDir, p.id, { type: p.type, target: p.target, remove: p.remove === true },
+          { today, writePort, readStorage, actor, source: "api" });
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors) });
+        return done(r, `${p.id}: ${p.remove === true ? "unlink" : "link"} ${p.type} ${p.target}`, "link");
       }
       return json(404, { errors: ["not found"] });
       } finally { await closeWritePort(); }
