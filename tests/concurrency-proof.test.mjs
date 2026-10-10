@@ -135,6 +135,24 @@ describe("the harness, against a filesystem board", () => {
     } finally { server.close(); }
   });
 
+  test("verify FAILS a file that records failed creates, or does not say whether any failed", async () => {
+    const root = gitBoard();
+    const { token } = await addUser(root, { email: "m@example.com", role: "member" });
+    const { server, url } = await serve(root);
+    try {
+      const env = { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token.token };
+      writeFileSync(join(root, "failed.json"), JSON.stringify({ ids: ["ENG-1"], failures: [{}] }));
+      const f = capture();
+      assert.equal(await main(["verify", join(root, "failed.json")], { env, ...f.io }), 1);
+      assert.match(f.err.join("\n"), /failed.json records 1 failed create/);
+      assert.doesNotMatch(f.out.join("\n"), /PROOF: PASS/);
+      writeFileSync(join(root, "nokey.json"), JSON.stringify({ ids: ["ENG-1"] }));
+      const n = capture();
+      assert.equal(await main(["verify", join(root, "nokey.json")], { env, ...n.io }), 1);
+      assert.match(n.err.join("\n"), /nokey.json holds no "failures" list/);
+    } finally { server.close(); }
+  });
+
   test("requestRemote never builds a URL off the configured origin", async () => {
     const cfg = remoteFrom({ BLAZE_REMOTE_URL: "http://127.0.0.1:9", BLAZE_TOKEN: "blz_t" });
     let called = false;

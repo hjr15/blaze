@@ -107,6 +107,11 @@ export async function main(argv, { env = process.env, out = console.log, err = c
       try { parsed = JSON.parse(readFileSync(file, "utf8")); }
       catch (e) { err(`concurrency-proof: cannot read ${file}: ${e.message}`); return 1; }
       if (!Array.isArray(parsed?.ids)) { err(`concurrency-proof: ${file} holds no "ids" list`); return 1; }
+      if (!Array.isArray(parsed.failures)) { err(`concurrency-proof: ${file} holds no "failures" list`); return 1; }
+      if (parsed.failures.length) {
+        err(`concurrency-proof: ${file} records ${parsed.failures.length} failed create(s) — the proof cannot pass over a lost create`);
+        return 1;
+      }
       lists.push(parsed.ids);
     }
     const v = await verifyLists(cfg, lists, { fetch });
