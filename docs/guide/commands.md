@@ -900,16 +900,21 @@ two machines creating at once never collide.
 
 | Command | Endpoint |
 |---|---|
-| `blaze new …` | `POST /api/new` |
+| `blaze new …` | `POST /api/new` (**needs a db-mode board** — see below) |
 | `blaze move <id> <status>` | `POST /api/move` |
 | `blaze edit <id> <field> <value>` | `POST /api/edit` |
 | `blaze resolve <id> <resolution>` | `POST /api/resolve` |
 | `blaze log <id> <minutes> [--date] [--note]` | `POST /api/log` |
 | `blaze link [--rm] <id> <TYPE> <target>` | `POST /api/link` |
 
+`POST /api/new` is answered only when the server runs the database write port
+(`BLAZE_WRITE_PORT=db`). On a file board it is refused `409` and `blaze new` prints that message:
+a file board allocates ids from git, which is single-machine, and the fetch would stall the
+server for every session. The other five verbs work on any board.
+
 The arguments are the local command's own. Each prints one line ending `(remote: <origin>)`,
 or the server's refusal and exit `1`. Every **other** command — `audit`, `reconcile`, `db`,
-`import`, `sprint`, `board`, `show`/`list`-style reads … — is refused with
+`import`, `sprint`, `board`, and the read verbs (`rollup`, `export`, `audit` …) — is refused with
 `blaze: <cmd> is not available in remote mode`: it needs the board's data on this machine.
 Read the board over `GET /api/live` or the page instead. A remote mode set **half-way** (only
 one of the two variables) is an error for every command, never a silent fallback to writing

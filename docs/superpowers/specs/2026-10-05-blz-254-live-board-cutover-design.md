@@ -102,7 +102,9 @@ is amended to "`blaze db verify` exits 0". Exit codes: 0 pass, 1 diffs, 2 could 
 
 - **`POST /api/new`** (scope `write`) calls `applyNew` through the resolved write port, so
   under db the id comes from `project_counter`'s transactional allocate. It returns
-  `{ ok, id }`.
+  `{ ok, id }`. It is **db-mode only**: on a file or dual board it answers `409`, because a file
+  board allocates ids from git (`remoteMaxClaim`'s synchronous, unbounded `git fetch`), which
+  would freeze the server for every session and is single-machine anyway.
 - **`POST /api/link`** is already listed in `ROUTE_SCOPES`. The plan confirms it reaches the
   ticket-link verb under db and adds it to `serve.mjs`'s POST handler if it doesn't.
 - **CSRF applies to every request a browser can be made to send.** A request skips the
@@ -193,7 +195,7 @@ and db.
 
 | Step | Action | Gate |
 |---|---|---|
-| 1 | PRs A, B and C merged; image deployed with `BLAZE_WRITE_PORT` unset; BLZ-674 published; BLZ-676 and §4 reconciliation done; the live board has at least one user, then `auth.enabled: false` (D4) | CI green; the board serves as before, behind blaze's own sign-in |
+| 1 | PRs A, B and C merged; image deployed with `BLAZE_WRITE_PORT` unset; BLZ-674 published; BLZ-676 and §4 reconciliation done; the live board has at least one user, then `auth.enabled: false` (D4). No ingress layer (Traefik, or any proxy) may answer CORS preflights for `/api/*` — the bearer CSRF exemption is only safe if cross-site JSON is never pre-approved | CI green; the board serves as before, behind blaze's own sign-in |
 | 2 | Freeze: stop every writer on every machine. Run the last `blaze publish` so `.blaze/pending/` drains on each machine (both are non-empty today). Make the pod serve the reconciled tree: change the chart's hostPath to the `v4-spine` worktree. `BLZ-305` is checked out there, so the main checkout can't switch to it. | `.blaze/pending/` empty on every machine |
 | 3 | **Rehearsal** on CNPG database `blaze_rehearsal`: init, load, verify, audit; a local `blaze board` with `BLAZE_WRITE_PORT=db` on machine 1; **two-machine proof** (machine 1 and the operator's second machine each run `scripts/ops/concurrency-proof.mjs`, creating 50 tickets in remote mode against it); pool measurements | Verify exits 0; audit has 0 hard findings; 100 distinct ids, 100 rows, 0 errors |
 | 4 | **Live** (operator go-ahead required): re-count the corpus; `blaze db init`; `blaze db load`; `blaze db verify`; `blaze audit` (db) | Same gates as step 3 |
@@ -213,7 +215,7 @@ BLZ-254 is a single feature, split on purpose at workspace and rollback boundari
 |---|---|---|---|
 | A — db readiness | blaze | BLZ-675, BLZ-674 (version bump; the publish follows the merge), load, verify, transitions-from-events, governance audit, matrices, readonly guards | Additive; fs and dual behaviour unchanged |
 | B — remote writes | blaze | `/api/new`, bearer CSRF exemption, remote CLI, concurrency proof | Touches auth; reviewed on its own |
-| C — Postgres | service-platform | CNPG cluster and db env (no write-port flip); `auth.enabled: false` once the live board has a user (D4) | Different repo |
+| C — Postgres | service-platform | CNPG cluster and db env (no write-port flip); `auth.enabled: false` once the live board has a user (D4); no ingress layer (Traefik, or any proxy) may answer CORS preflights for `/api/*` — the bearer CSRF exemption is only safe if cross-site JSON is never pre-approved | Different repo |
 | C2 — flip and flush deletion | service-platform | `BLAZE_WRITE_PORT=db` (step 5); delete `blaze-flush` (step 6) | Runbook-timed |
 | D — retire git ceremony | blaze | §5.5 deletions | High blast radius; merges only after cutover |
 | — | blaze-pm (board operator, never pushed) | BLZ-676, §4 reconciliation, every board move | Data, not code |

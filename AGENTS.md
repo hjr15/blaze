@@ -425,7 +425,9 @@ When the board lives on a server — a deployed `blaze board`, typically on Post
 API token from `blaze user add`). Then `blaze new`, `move`, `edit`, `resolve`, `log` and `link`
 take the same arguments as locally but run on the server, over HTTP, and print one line ending
 `(remote: <origin>)`. Nothing is written locally, so there is no worktree, commit or queue to
-manage, and two agents on two machines creating tickets at once get distinct ids.
+manage, and two agents on two machines creating tickets at once get distinct ids. Remote
+`blaze new` needs a **db-mode** board (`BLAZE_WRITE_PORT=db` on the server): on a file board
+the server refuses it `409`, because file ids come from git and are single-machine.
 
 Every other command is refused in remote mode (it needs the board's data on this machine);
 read the board over `GET /api/live` or the page. Setting only ONE of the two variables is an

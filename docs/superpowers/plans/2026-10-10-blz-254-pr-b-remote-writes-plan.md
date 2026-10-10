@@ -1274,7 +1274,9 @@ test("an exported pair does not leak: a preloaded process, and the `blaze` it sp
     });
     const r = JSON.parse(out);
     assert.deepEqual([r.url, r.token], [null, null], "the preload removed both");
-    assert.doesNotMatch(r.stderr, /remote/, "the spawned blaze ran locally (and found no board here)");
+    // Not /remote/: that matches any checkout path containing "remote" (this branch's own worktree
+    // is BLZ-684-remote-writes). These are the messages remote mode itself prints.
+    assert.doesNotMatch(r.stderr, /remote mode|answered \d{3}|no answer from/, "the spawned blaze ran locally (and found no board here)");
     assert.deepEqual(seen, [], "the recording server received nothing");
   } finally { server.close(); }
 });
@@ -2480,6 +2482,18 @@ node scripts/ops/concurrency-proof.mjs verify m1.json m2.json                   
 (The `export` here is that dedicated shell's only purpose — close it afterwards; never export the pair in a shell you use for anything else.)
 
 The gate is spec §7 step 3's: 100 distinct ids, 100 rows, 0 errors. The tickets are real; resolve them `wont-do` (or drop `blaze_rehearsal`, step 7) afterwards.
+
+## Post-execution changes (final review)
+
+- **`POST /api/new` is db-mode only.** The route answers `409` unless `resolvePorts` resolved
+  `mode === "db"`, before any validation that could allocate. A file board allocates ids through
+  `remoteMaxClaim`, a synchronous, unbounded `git fetch` — one member request froze the whole board
+  server (proven at 30 s+). So every Task 2/3/4 test below that creates a ticket through `/api/new`
+  (serve-api-new, remote-mode, the concurrency-proof harness tests) runs against a db board
+  (SQLite shadow via `dbBoard()` with `BLAZE_WRITE_PORT=db`); the fs-board `/api/new` cases are
+  replaced by one test pinning the 409 (no claim, no file, no git process, prompt answer against a
+  never-answering origin). A plan re-run must not reinstate the fs `/api/new` path.
+- The remote-env-guard regex above is the corrected one (see the note beside it).
 
 ## Self-review
 
