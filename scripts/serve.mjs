@@ -807,10 +807,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // this value is a per-process randomUUID() embedded in the served HTML, readable
       // by anyone who can GET /. It is forgery protection for the browser flow, and it
       // is retained as defence-in-depth ALONGSIDE the gate above, which is the thing
-      // that asks for a credential. It is removed with the last cookie, not before.
-      // BLZ-684: a request the gate authenticated by bearer token alone — no session cookie
-      // beside it — is exempt (`csrfRequired`, ADR-0013's addendum): the token is not
-      // ambient, and that is what lets a CLI on another machine write over HTTP.
+      // that asks for a credential. It stays for every browser-shaped request.
+      // BLZ-684: the one exemption is a bearer-token request with no session cookie, a JSON
+      // content type, and a `sec-fetch-site` that is absent, same-origin or none — the token is
+      // not ambient, and that is what lets a CLI on another machine write over HTTP. The whole
+      // rule, and why each condition is there, is `csrfRequired`'s docblock in
+      // scripts/model/serve-auth.mjs (ADR-0013's addendum); do not re-derive it from here.
       if (csrfRequired({ headers: req.headers, store }) && req.headers["x-blaze-csrf"] !== CSRF) {
         return json(403, { errors: ["bad csrf token"] });
       }
@@ -900,6 +902,12 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
       }
       if (u.pathname === "/api/new") {
+        // BLZ-684 (final review): db mode only, refused BEFORE anything can allocate. A file
+        // board allocates ids from git — `remoteMaxClaim` runs a synchronous, unbounded
+        // `git fetch` — and that would freeze this server for every session on a slow origin.
+        if (mode !== "db") {
+          return json(409, { errors: ["blaze: POST /api/new needs the database write port (BLAZE_WRITE_PORT=db); a file board allocates ids from git and is single-machine"] });
+        }
         // BLZ-684 (spec §5.4): `blaze new` over HTTP. The same `applyNew` the CLI runs, through
         // the RESOLVED port — so under db the id comes from project_counter's transactional
         // allocate, and two machines creating at once can never be handed the same number.

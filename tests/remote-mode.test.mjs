@@ -18,9 +18,16 @@ import { startServer } from "../scripts/serve.mjs";
 import { roundEstimate } from "../scripts/model/time.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { remoteFrom, requestFor, runRemote, REMOTE_VERBS } from "../scripts/remote-client.mjs";
+import { runDb } from "../scripts/db-runner.mjs";
+import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
+import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
+import { dbBoard, QUIET } from "./helpers/db-board.mjs";
 
 const scratch = scratchRegistry();
+// `POST /api/new` is db-mode only (final review), so the servers below run the db write port.
+// This file is its own process; the `blaze()` helper strips the variable from the CLI's env.
+process.env.BLAZE_WRITE_PORT = "db";
 const CLI = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "cli.mjs");
 
 describe("remoteFrom — when remote mode is on, and when it refuses", () => {
@@ -106,12 +113,19 @@ function gitBoard() {
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
   return root;
 }
+/** A db-mode board (SQLite shadow, project ENG) with one user, and the server over it. */
 async function board(role = "member") {
-  const root = gitBoard();
-  const { token } = await addUser(root, { email: "r@example.com", role });
-  const server = startServer({ port: 0, root, projectsDir: join(root, "projects") });
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const { token } = await addUser(roots.dataRoot, { email: "r@example.com", role });
+  const server = startServer({ port: 0, root: roots.dataRoot, projectsDir: roots.projectsDir });
   await new Promise((res) => server.once("listening", res));
-  return { root, server, url: `http://127.0.0.1:${server.address().port}`, token: token.token };
+  return { root: roots.dataRoot, server, url: `http://127.0.0.1:${server.address().port}`, token: token.token };
+}
+/** The row for `id` as the shadow holds it, or null. */
+function row(root, id) {
+  const rs = openSqliteRead(shadowDbPath(root));
+  try { return rs.getTicket(null, id).found; } finally { rs.close(); }
 }
 const capture = () => {
   const out = [], err = [];
@@ -140,20 +154,21 @@ test("runRemote drives all six verbs against the server, and the board changes",
       return { code, out: c.out.join("\n"), err: c.err.join("\n") };
     };
     // 7.5, as round-2 review's parity check: the server rounds it exactly as `blaze new` does locally.
-    const made = await run("new", ["--project", "OBA", "--type", "task", "--estimate", "7.5", "Remote", "two"]);
+    const made = await run("new", ["--project", "ENG", "--type", "task", "--estimate", "7.5", "Remote", "two"]);
     assert.equal(made.code, 0, made.err);
-    assert.equal(made.out, `created OBA-2 (remote: ${url})`);
-    assert.equal((await run("move", ["OBA-2", "in-progress"])).code, 0);
-    assert.equal((await run("edit", ["OBA-2", "priority", "high"])).code, 0);
-    assert.equal((await run("log", ["OBA-2", "15", "--note", "n"])).code, 0);
-    assert.equal((await run("link", ["OBA-2", "Relates", "OBA-1"])).code, 0);
-    assert.equal((await run("resolve", ["OBA-2", "wont-do"])).code, 0);
-    const text = readFileSync(join(root, "projects", "OBA", "in-progress", "OBA-2-remote-two.md"), "utf8");
-    for (const want of [new RegExp(`estimate: ${roundEstimate(7.5)}\\n`), /priority: high/, /minutes: 15, note: n/,
-                        /type: Relates, target: OBA-1/, /resolution: wont-do/]) {
-      assert.match(text, want);
-    }
-    const refused = await run("move", ["OBA-2", "nowhere"]);
+    assert.equal(made.out, `created ENG-2 (remote: ${url})`);
+    assert.equal((await run("move", ["ENG-2", "in-progress"])).code, 0);
+    assert.equal((await run("edit", ["ENG-2", "priority", "high"])).code, 0);
+    assert.equal((await run("log", ["ENG-2", "15", "--note", "n"])).code, 0);
+    assert.equal((await run("link", ["ENG-2", "Relates", "ENG-1"])).code, 0);
+    assert.equal((await run("resolve", ["ENG-2", "wont-do"])).code, 0);
+    const t = row(root, "ENG-2").frontmatter;
+    assert.equal(t.estimate, roundEstimate(7.5));
+    assert.equal(t.priority, "high");
+    assert.deepEqual(t.worklog.map((w) => [w.minutes, w.note]), [[15, "n"]]);
+    assert.deepEqual(t.links, [{ type: "Relates", target: "ENG-1" }]);
+    assert.equal(t.resolution, "wont-do");
+    const refused = await run("move", ["ENG-2", "nowhere"]);
     assert.equal(refused.code, 1);
     assert.match(refused.err, /blaze move failed \(http:\/\/127\.0\.0\.1:\d+ answered 422\)/);
   } finally { server.close(); }
@@ -163,10 +178,10 @@ test("end to end: `blaze new` in remote mode, a real process against a real serv
   const { server, url, token } = await board();
   const elsewhere = scratch(mkdtempSync(join(tmpdir(), "blz684-cwd-")));   // no board here at all
   try {
-    const r = await blaze(["new", "--project", "OBA", "--type", "task", "--estimate", "30", "From", "another", "machine"],
+    const r = await blaze(["new", "--project", "ENG", "--type", "task", "--estimate", "30", "From", "another", "machine"],
                           { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token }, elsewhere);
     assert.equal(r.status, 0, r.stderr);
-    assert.equal(r.stdout.trim(), `created OBA-2 (remote: ${url})`);
+    assert.equal(r.stdout.trim(), `created ENG-2 (remote: ${url})`);
   } finally { server.close(); }
 });
 
@@ -217,14 +232,31 @@ test("an unauthenticated or read-scope caller is refused by the server, and noth
   const { root, server, url } = await board("viewer");
   try {
     const bad = capture();
-    assert.equal(await runRemote("new", ["--project", "OBA", "--type", "task", "--estimate", "30", "x"],
+    assert.equal(await runRemote("new", ["--project", "ENG", "--type", "task", "--estimate", "30", "x"],
       { env: { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: "blz_not-a-real-token" }, ...bad.io }), 1);
     assert.match(bad.err.join("\n"), /answered 401/);
     const { token } = await addUser(root, { email: "v2@example.com", role: "viewer" });
     const c = capture();
-    assert.equal(await runRemote("new", ["--project", "OBA", "--type", "task", "--estimate", "30", "x"],
+    assert.equal(await runRemote("new", ["--project", "ENG", "--type", "task", "--estimate", "30", "x"],
       { env: { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token.token }, ...c.io }), 1);
     assert.match(c.err.join("\n"), /answered 403[\s\S]*does not carry the 'write' scope/);
-    assert.equal(existsSync(join(root, "projects", "OBA", "defined", "OBA-2-x.md")), false);
+    assert.equal(row(root, "ENG-2"), null);
   } finally { server.close(); }
+});
+
+test("remote `blaze new` against a file board prints the server's 409 as-is, and nothing is created", async () => {
+  // The one board here that is NOT db mode: the server refuses `/api/new` on it (final review).
+  const root = gitBoard();
+  const { token } = await addUser(root, { email: "r@example.com", role: "member" });
+  const server = startServer({ port: 0, root, projectsDir: join(root, "projects") });
+  await new Promise((res) => server.once("listening", res));
+  const saved = process.env.BLAZE_WRITE_PORT;
+  delete process.env.BLAZE_WRITE_PORT;
+  try {
+    const c = capture();
+    assert.equal(await runRemote("new", ["--project", "OBA", "--type", "task", "--estimate", "30", "x"],
+      { env: { BLAZE_REMOTE_URL: `http://127.0.0.1:${server.address().port}`, BLAZE_TOKEN: token.token }, ...c.io }), 1);
+    assert.match(c.err.join("\n"), /answered 409\)[\s\S]*blaze: POST \/api\/new needs the database write port \(BLAZE_WRITE_PORT=db\)/);
+    assert.equal(existsSync(join(root, "projects", "OBA", "defined", "OBA-2-x.md")), false);
+  } finally { server.close(); process.env.BLAZE_WRITE_PORT = saved; }
 });

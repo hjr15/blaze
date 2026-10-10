@@ -1,13 +1,16 @@
 // tests/serve-api-new.test.mjs — BLZ-684 (spec §5.4): `POST /api/new` creates a ticket through
 // the resolved write port, and `POST /api/link` — classified `write` since BLZ-323 but answered
 // by no handler — reaches the ticket-link verb. Both record WHO in the event log (ADR-0013 §6).
-// fs mode runs on a git board (per-op commits); db mode on the SQLite shadow.
+// fs mode runs on a git board (per-op commits); db mode on the SQLite shadow. `/api/new` is
+// db-mode ONLY (final review): a file board allocates ids from git, whose synchronous fetch
+// would freeze the server — so on fs it is a 409, pinned below.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
+import { createServer } from "node:net";
 import { startServer } from "../scripts/serve.mjs";
 import { roundEstimate } from "../scripts/model/time.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
@@ -29,6 +32,9 @@ function gitBoard() {
   writeFileSync(join(root, "projects", "OBA", "defined", "OBA-1-one.md"),
     ["---", "id: OBA-1", "title: one", "type: task", "project: OBA", "priority: medium",
      "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
+  writeFileSync(join(root, "projects", "OBA", "defined", "OBA-2-two.md"),
+    ["---", "id: OBA-2", "title: two", "type: task", "project: OBA", "priority: medium",
+     "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
   execFileSync("git", ["-C", root, "add", "-A"]);
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
   return { dataRoot: root, projectsDir: join(root, "projects") };
@@ -46,73 +52,36 @@ const post = (base, path, body, token) => fetch(`${base}${path}`, {
 });
 
 describe("fs mode", () => {
-  test("POST /api/new creates the ticket, commits it, and answers { ok, id }", async () => {
+  test("POST /api/new is refused as a 409 on a file board — no id claimed, no file, no git process", async () => {
     const roots = gitBoard();
+    // An origin that accepts the connection and never answers: any `git fetch` against it hangs.
+    const hole = createServer(() => {});
+    await new Promise((res) => hole.listen(0, "127.0.0.1", res));
+    execFileSync("git", ["-C", roots.dataRoot, "remote", "add", "origin", `git://127.0.0.1:${hole.address().port}/x`]);
+    const head = () => execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" });
     const { token } = await addUser(roots.dataRoot, { email: "m@example.com", role: "member" });
+    execFileSync("git", ["-C", roots.dataRoot, "add", "-A"]);
+    execFileSync("git", ["-C", roots.dataRoot, "commit", "-q", "-m", "users"]);
+    const before = head();
     const { server, base } = await serve(roots);
     try {
-      const r = await post(base, "/api/new", { project: "OBA", type: "task", title: "made remotely",
-        estimate: 30, labels: ["x"], priority: "high" }, token.token);
+      const t0 = Date.now();
+      const r = await post(base, "/api/new", { project: "OBA", type: "task", title: "refused", estimate: 30 }, token.token);
       const body = await r.json();
-      assert.equal(r.status, 200, JSON.stringify(body));
-      assert.equal(body.ok, true);
-      assert.equal(body.id, "OBA-2");
-      assert.equal(body.committed, true);
-      const file = join(roots.projectsDir, "OBA", "defined", "OBA-2-made-remotely.md");
-      assert.ok(existsSync(file));
-      const text = readFileSync(file, "utf8");
-      assert.match(text, /priority: high/);
-      assert.match(text, /labels: \[x\]/);
-      assert.match(execFileSync("git", ["-C", roots.dataRoot, "log", "-1", "--format=%s"], { encoding: "utf8" }),
-                   /OBA-2: create task/);
-    } finally { server.close(); }
-  });
-
-  test("POST /api/new refuses bad input as a 422 naming why — and burns no id doing it", async () => {
-    const roots = gitBoard();
-    const { token } = await addUser(roots.dataRoot, { email: "m@example.com", role: "member" });
-    const { server, base } = await serve(roots);
-    try {
-      const ok = { project: "OBA", type: "task", title: "t", estimate: 30 };
-      for (const [body, why] of [
-        [{ project: "OBA", type: "task", title: "no estimate" }, /estimate/],
-        [{ project: "OBA", type: "nonsense", title: "t" }, /unknown or missing type/],
-        [{ project: "OBA", type: "task", estimate: 30 }, /title must be a non-empty string/],
-        [{ ...ok, project: "o(" }, /"o\(" is not one this board configures/],
-        [{ ...ok, project: "ZZZ" }, /"ZZZ" is not one this board configures \(OBA\)/],
-        [{ ...ok, estimate: true }, /estimate must be a number of minutes/],
-        [{ ...ok, estimate: 1e12 }, /estimate must be a number of minutes/],
-        [{ ...ok, estimate: 0 }, /estimate must be a number of minutes/],
-        [{ ...ok, title: "x".repeat(301) }, /title is too long \(300 characters max\)/],
-        [{ ...ok, title: "x".repeat(250) }, /title is too long to name the ticket's file/],
-        [{ ...ok, title: "x".repeat(300) }, /title is too long to name the ticket's file/],
-        [{ ...ok, labels: "a,b" }, /labels must be a list of strings/],
-        [{ ...ok, parent: 7 }, /parent must be a string/],
-        [null, /the body must be a JSON object/],
-      ]) {
-        const r = await post(base, "/api/new", body, token.token);
-        assert.equal(r.status, 422, JSON.stringify(body)?.slice(0, 80));
-        assert.match((await r.json()).errors.join(" "), why);
-      }
-      const made = await post(base, "/api/new", { ...ok, estimate: 7.5 }, token.token);
-      assert.equal((await made.json()).id, "OBA-2", "no refused create consumed a number");
-      assert.match(readFileSync(join(roots.projectsDir, "OBA", "defined", "OBA-2-t.md"), "utf8"),
-                   new RegExp(`estimate: ${roundEstimate(7.5)}\\n`), "7.5 is rounded exactly as `blaze new --estimate 7.5` rounds it");
-    } finally { server.close(); }
-  });
-
-  test("POST /api/new with no credential → 401; with a read-scope token → 403; nothing created", async () => {
-    const roots = gitBoard();
-    const { token } = await addUser(roots.dataRoot, { email: "v@example.com", role: "viewer" });
-    const { server, base } = await serve(roots);
-    try {
-      const body = { project: "OBA", type: "task", title: "nope", estimate: 30 };
-      assert.equal((await post(base, "/api/new", body)).status, 401);
-      const viewer = await post(base, "/api/new", body, token.token);
-      assert.equal(viewer.status, 403);
-      assert.match((await viewer.json()).errors[0], /does not carry the 'write' scope/);
-      assert.equal(existsSync(join(roots.projectsDir, "OBA", "defined", "OBA-2-nope.md")), false);
-    } finally { server.close(); }
+      assert.ok(Date.now() - t0 < 2000, `answered promptly (${Date.now() - t0} ms) — nothing waited on the origin`);
+      assert.equal(r.status, 409, JSON.stringify(body));
+      assert.match(body.errors[0], /POST \/api\/new needs the database write port \(BLAZE_WRITE_PORT=db\)/);
+      assert.doesNotMatch(body.errors[0], /\/tmp|\/home|projects\//, "no server path in the refusal");
+      // Invalid input on a file board is the same refusal: the mode is checked before the body is.
+      assert.equal((await post(base, "/api/new", { nonsense: true }, token.token)).status, 409);
+      assert.equal(existsSync(join(roots.projectsDir, "OBA", "defined", "OBA-3-refused.md")), false);
+      assert.equal(existsSync(join(roots.projectsDir, "OBA", "claims")), false, "no claim file");
+      assert.equal(execFileSync("git", ["-C", roots.dataRoot, "status", "--short", "--", "projects"], { encoding: "utf8" }).trim(), "",
+                   "nothing was written to the projects tree");
+      assert.equal(head(), before, "no commit");
+      // The board still answers while a slow origin exists.
+      assert.equal((await fetch(`${base}/api/hash`, { headers: { authorization: `Bearer ${token.token}` } })).status, 200);
+    } finally { server.close(); hole.close(); hole.closeAllConnections?.(); }
   });
 
   test("POST /api/link reaches the ticket-link verb: add, refuse an unknown type, remove", async () => {
@@ -120,8 +89,6 @@ describe("fs mode", () => {
     const { token } = await addUser(roots.dataRoot, { email: "m@example.com", role: "member" });
     const { server, base } = await serve(roots);
     try {
-      assert.equal((await post(base, "/api/new", { project: "OBA", type: "task", title: "two", estimate: 30 },
-                                token.token)).status, 200);
       const add = await post(base, "/api/link", { id: "OBA-1", type: "Relates", target: "OBA-2" }, token.token);
       assert.equal(add.status, 200, await add.text());
       const file = join(roots.projectsDir, "OBA", "defined", "OBA-1-one.md");
@@ -195,3 +162,69 @@ test("db mode: /api/new takes its id from the counter and /api/link writes the r
       if (before === undefined) delete process.env.BLAZE_WRITE_PORT; else process.env.BLAZE_WRITE_PORT = before;
     }
   });
+
+const estimateOf = (roots, id) => {
+  const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+  try { return rs.getTicket(null, id).found.frontmatter.estimate; } finally { rs.close(); }
+};
+
+/** A db-mode board (SQLite shadow) with a member's token, and the server over it. */
+async function dbServer(role = "member") {
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const { token } = await addUser(roots.dataRoot, { email: "m@example.com", role });
+  const before = process.env.BLAZE_WRITE_PORT;
+  process.env.BLAZE_WRITE_PORT = "db";
+  const { server, base } = await serve(roots);
+  const stop = () => {
+    server.close();
+    if (before === undefined) delete process.env.BLAZE_WRITE_PORT; else process.env.BLAZE_WRITE_PORT = before;
+  };
+  const has = (id) => {
+    const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+    try { return Boolean(rs.getTicket(null, id)?.found); } finally { rs.close(); }
+  };
+  return { roots, token: token.token, base, stop, has };
+}
+
+test("db mode: POST /api/new refuses bad input as a 422 naming why — and burns no id doing it", async () => {
+  const { roots, token, base, stop } = await dbServer();
+  try {
+    const ok = { project: "ENG", type: "task", title: "t", estimate: 30 };
+    for (const [body, why] of [
+      [{ project: "ENG", type: "task", title: "no estimate" }, /estimate/],
+      [{ project: "ENG", type: "nonsense", title: "t" }, /unknown or missing type/],
+      [{ project: "ENG", type: "task", estimate: 30 }, /title must be a non-empty string/],
+      [{ ...ok, project: "o(" }, /"o\(" is not one this board configures/],
+      [{ ...ok, project: "ZZZ" }, /"ZZZ" is not one this board configures \(ENG\)/],
+      [{ ...ok, estimate: true }, /estimate must be a number of minutes/],
+      [{ ...ok, estimate: 1e12 }, /estimate must be a number of minutes/],
+      [{ ...ok, estimate: 0 }, /estimate must be a number of minutes/],
+      [{ ...ok, title: "x".repeat(301) }, /title is too long \(300 characters max\)/],
+      [{ ...ok, title: "x".repeat(250) }, /title is too long to name the ticket's file/],
+      [{ ...ok, title: "x".repeat(300) }, /title is too long to name the ticket's file/],
+      [{ ...ok, labels: "a,b" }, /labels must be a list of strings/],
+      [{ ...ok, parent: 7 }, /parent must be a string/],
+      [null, /the body must be a JSON object/],
+    ]) {
+      const r = await post(base, "/api/new", body, token);
+      assert.equal(r.status, 422, JSON.stringify(body)?.slice(0, 80));
+      assert.match((await r.json()).errors.join(" "), why);
+    }
+    const made = await post(base, "/api/new", { ...ok, estimate: 7.5 }, token);
+    assert.equal((await made.json()).id, "ENG-2", "no refused create consumed a number");
+    assert.equal(estimateOf(roots, "ENG-2"), roundEstimate(7.5), "7.5 is rounded exactly as `blaze new --estimate 7.5` rounds it");
+  } finally { stop(); }
+});
+
+test("db mode: POST /api/new with no credential → 401; with a read-scope token → 403; nothing created", async () => {
+  const { token, base, stop, has } = await dbServer("viewer");
+  try {
+    const body = { project: "ENG", type: "task", title: "nope", estimate: 30 };
+    assert.equal((await post(base, "/api/new", body)).status, 401);
+    const viewer = await post(base, "/api/new", body, token);
+    assert.equal(viewer.status, 403);
+    assert.match((await viewer.json()).errors[0], /does not carry the 'write' scope/);
+    assert.equal(has("ENG-2"), false);
+  } finally { stop(); }
+});

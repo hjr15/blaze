@@ -3,10 +3,10 @@
 // The Postgres test is spec §6's: two PROCESSES each fire 50 `POST /api/new` in parallel at one
 // db-mode server, and the result is 100 distinct ids, 100 rows, and no gap the counter did not
 // skip. The rest pins `scripts/ops/concurrency-proof.mjs` — the harness the operator runs on two
-// real machines — against a filesystem board, so it is covered without a database.
+// real machines — against a db-mode board on the SQLite shadow, so it is covered without Postgres.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { spawn, execFileSync } from "node:child_process";
+import { spawn } from "node:child_process";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
@@ -17,25 +17,19 @@ import { runDb } from "../scripts/db-runner.mjs";
 import { remoteFrom, requestRemote } from "../scripts/remote-client.mjs";
 import { createMany, verifyLists, main } from "../scripts/ops/concurrency-proof.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
-import { QUIET } from "./helpers/db-board.mjs";
+import { dbBoard, QUIET } from "./helpers/db-board.mjs";
 import { PG, PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
 
 const scratch = scratchRegistry();
+// The harness drives `POST /api/new`, which the server answers only on the db write port.
+process.env.BLAZE_WRITE_PORT = "db";
 const PROOF = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts", "ops", "concurrency-proof.mjs");
 
-function gitBoard() {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blz684-proof-")));
-  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"]]) {
-    execFileSync("git", ["-C", root, ...a]);
-  }
-  mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["ENG"] }));
-  writeFileSync(join(root, "projects", "ENG", "defined", "ENG-1-one.md"),
-    ["---", "id: ENG-1", "title: one", "type: task", "project: ENG", "priority: medium",
-     "estimate: 30", "created: 2026-01-01", "updated: 2026-01-01", "---", "", "body", ""].join("\n"));
-  execFileSync("git", ["-C", root, "add", "-A"]);
-  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
-  return root;
+/** A db-mode board (SQLite shadow, project ENG holding ENG-1): `/api/new` is db-mode only. */
+async function dbRoot() {
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  return roots.dataRoot;
 }
 async function serve(root) {
   const server = startServer({ port: 0, root, projectsDir: join(root, "projects") });
@@ -60,9 +54,9 @@ function proof(args, env) {
 }
 const num = (id) => Number(id.split("-").pop());
 
-describe("the harness, against a filesystem board", () => {
+describe("the harness, against a db-mode board", () => {
   test("createMany creates distinct tickets in parallel; verifyLists passes them", async () => {
-    const root = gitBoard();
+    const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
     const { server, url } = await serve(root);
     try {
@@ -76,7 +70,7 @@ describe("the harness, against a filesystem board", () => {
   });
 
   test("verifyLists FAILS a duplicate across lists, an id the server lacks, and an empty set", async () => {
-    const root = gitBoard();
+    const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
     const { server, url } = await serve(root);
     try {
@@ -88,7 +82,7 @@ describe("the harness, against a filesystem board", () => {
   });
 
   test("a refused create is counted as a failure, not an id; the run exits 1", async () => {
-    const root = gitBoard();
+    const root = await dbRoot();
     const { token } = await addUser(root, { email: "v@example.com", role: "viewer" });
     const { server, url } = await serve(root);
     try {
@@ -104,7 +98,7 @@ describe("the harness, against a filesystem board", () => {
   });
 
   test("main: create prints JSON a later verify reads; bad arguments print the usage", async () => {
-    const root = gitBoard();
+    const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
     const { server, url } = await serve(root);
     try {
@@ -136,7 +130,7 @@ describe("the harness, against a filesystem board", () => {
   });
 
   test("verify FAILS a file that records failed creates, or does not say whether any failed", async () => {
-    const root = gitBoard();
+    const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
     const { server, url } = await serve(root);
     try {
