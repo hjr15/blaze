@@ -145,6 +145,31 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
   process.exit(1);
 }
 
+// BLZ-684 (spec §5.4): REMOTE MODE. With BLAZE_REMOTE_URL and BLAZE_TOKEN both set, the six
+// ticket verbs go to the board server over HTTP and nothing else runs here: every other command
+// needs the board's data on this machine, so it is refused rather than run against whatever
+// local tree happens to be in the working directory. Half-set is an error for EVERY command —
+// never a silent fallback to writing locally. Decided after the read-only gate (a refused write
+// is refused in both modes) and before the schema preflight (there is no local board to judge).
+// Imported only when either variable is set, so a local invocation loads nothing new.
+if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
+  const { remoteFrom, runRemote, REMOTE_VERBS } = await import("./remote-client.mjs");
+  const remote = remoteFrom(process.env);
+  if (remote.error) { console.error(remote.error); process.exit(1); }
+  if (remote.remote) {
+    if (!Object.hasOwn(REMOTE_VERBS, key)) {
+      console.error(`blaze: ${key} is not available in remote mode — BLAZE_REMOTE_URL is set, and `
+        + `${key} needs the board's data on this machine. Remote mode runs: `
+        + `${Object.keys(REMOTE_VERBS).join(", ")}.`);
+      process.exit(1);
+    }
+    process.exitCode = await runRemote(key, rest);
+    // Not process.exit(): stdout to a pipe is asynchronous, and the reply is the whole output.
+    await new Promise((res) => process.stdout.write("", res));
+    process.exit(process.exitCode);
+  }
+}
+
 // BLZ-56: a malformed schema override fails LOUD, here, before the verb runs.
 //
 // Every verb dispatches through this file, so it is the one place a load-path check can

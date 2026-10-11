@@ -35,6 +35,8 @@ export const ROUTE_SCOPES = {
   "POST /api/resolve": "write",
   "POST /api/log": "write",
   "POST /api/ac": "write",
+  // BLZ-684: creating a ticket over HTTP — the remote CLI's `blaze new`.
+  "POST /api/new": "write",
 
   // v4 (BLZ-323): artifact model, links, gates, baselines, custom fields, matrix and
   // coverage. POST /api/field is "admin", not "write": defining a filterable field
@@ -155,6 +157,42 @@ export function cookieFrom(headers, name) {
 export function sessionFrom(headers) {
   const value = cookieFrom(headers, SESSION_COOKIE);
   return value.startsWith(SESSION_PREFIX) ? value : "";
+}
+
+/** `content-type` is exactly `application/json` (parameters such as `; charset=utf-8` allowed). */
+export function isJsonContentType(headers) {
+  const raw = String(headers?.["content-type"] ?? headers?.["Content-Type"] ?? "");
+  return raw.split(";")[0].trim().toLowerCase() === "application/json";
+}
+
+/**
+ * BLZ-684 (spec §5.4, ADR-0013 §7 and its addendum): does this request have to carry the
+ * `x-blaze-csrf` header?
+ *
+ * CSRF is a browser being made to send a request it did not mean to. A bearer token in
+ * `Authorization` is not ambient for a CLI — but ADR-0034 also documents a reverse proxy that
+ * authenticates a BROWSER by its own ambient means and then injects the bearer header. Behind
+ * that proxy a header-present check alone is no protection: a cross-site `<form
+ * enctype="text/plain">` POST is a simple request (no preflight), the proxy adds the token,
+ * and the write lands. So the request must also be one a cross-site page CANNOT make without a
+ * preflight, which this server never approves. Exempt only when ALL of these hold:
+ *   - the board has users (`store`), so the gate actually judged the bearer token — on a
+ *     loopback board with no users the gate asks for nothing, and the header is all there is;
+ *   - a bearer token was presented (`bearerFrom` — a session pasted into it does not count);
+ *   - NO session cookie rides along — a request carrying both is a cookie request;
+ *   - `content-type` is `application/json`: a cross-site page can only send JSON after a
+ *     preflight, and a `text/plain`/form body is exactly the simple request CSRF uses;
+ *   - `sec-fetch-site` is absent, `same-origin` or `none`. Every current browser sends it on
+ *     every request; a CLI (`fetch` in Node) sends none. `cross-site`/`same-site` is a browser
+ *     reporting that another site started the request, whatever header a proxy then added.
+ */
+export function csrfRequired({ headers, store }) {
+  if (!store) return true;
+  if (!bearerFrom(headers)) return true;
+  if (cookieFrom(headers, SESSION_COOKIE) !== "") return true;
+  if (!isJsonContentType(headers)) return true;
+  const site = String(headers?.["sec-fetch-site"] ?? "").trim().toLowerCase();
+  return !(site === "" || site === "same-origin" || site === "none");
 }
 
 /**

@@ -28,9 +28,10 @@ export async function applyLink(projectsDir, id, { type, target, remove = false 
   const fm = { ...found.frontmatter };
   fm.links = remove ? removeLink(fm.links, type, target) : addLink(fm.links, type, target);
   if (today) fm.updated = today;
+  // BLZ-684: the event records who, as move/log already do (ADR-0013 §6).
   const { file } = await writePort.write({
     project: found.project, status: found.status,
     frontmatter: fm, body: found.body, currentFile: found.file,
-  });
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   return { ok: true, id, file };
 }

@@ -418,6 +418,26 @@ It's an env guard against an agent *reaching* for a mutating verb through the
 normal CLI/API surfaces (including a running `blaze board`'s write API) — not
 a sandbox. Code that calls `node:fs` directly still bypasses it.
 
+## Remote mode (writing from another machine)
+
+When the board lives on a server — a deployed `blaze board`, typically on Postgres — set
+**both** `BLAZE_REMOTE_URL` (the server's origin, `https://…`) and `BLAZE_TOKEN` (a `member`
+API token from `blaze user add`). Then `blaze new`, `move`, `edit`, `resolve`, `log` and `link`
+take the same arguments as locally but run on the server, over HTTP, and print one line ending
+`(remote: <origin>)`. Nothing is written locally, so there is no worktree, commit or queue to
+manage, and two agents on two machines creating tickets at once get distinct ids. Remote
+`blaze new` needs a **db-mode** board (`BLAZE_WRITE_PORT=db` on the server): on a file board
+the server refuses it `409`, because file ids come from git and are single-machine.
+
+Every other command is refused in remote mode (it needs the board's data on this machine);
+read the board over `GET /api/live` or the page. Setting only ONE of the two variables is an
+error for every command — never a silent local write. The token is only ever sent to
+`BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for a
+loopback host only. Set the two **per command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`)
+or in a shell used only for that — never as a global `export`, which would send every `blaze`
+write on the machine to the server. See
+[the command reference](https://github.com/hjr15/blaze/blob/main/docs/guide/commands.md#remote-mode).
+
 ## Querying the board
 
 ```bash

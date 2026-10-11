@@ -128,3 +128,34 @@ deliberately: tokens derived from a user's access require a user to derive them 
 **Explicitly deferred**, and not to be built ahead of a customer who asks: SSO/OIDC
 wiring itself, a permissions matrix beyond three roles, cross-tenant isolation, billing,
 and per-project roles. The schema anticipates them; none is built.
+
+## Addendum (2026-10-10, BLZ-684) — a CLI's bearer request skips the CSRF header; a browser's never does
+
+§7 says the CSRF check is "retained only while any part of the browser flow uses a cookie".
+BLZ-684 (the live-board cutover's remote writes, spec §5.4) draws the line per REQUEST:
+`blaze board`'s `POST /api/*` handler skips the `x-blaze-csrf` check when, and only when,
+`csrfRequired` (`serve-auth.mjs`) finds ALL of these:
+
+- the board has users, so the gate actually judged the token — on a loopback board with no
+  users the gate asks for nothing and the header is the only control left;
+- an `Authorization: Bearer` token (a session credential pasted there is not one);
+- **no** `blaze_session` cookie — a request carrying both is a cookie request;
+- `content-type: application/json` (parameters allowed);
+- `sec-fetch-site` absent, `same-origin` or `none`.
+
+**Why the last two, and not just "a bearer header is present".** §7's argument — "a foreign
+page cannot attach it" — holds for a CLI, and fails for the deployment
+[ADR-0034](0034-a-browser-signs-in-a-token-does-not.md) documents beside it: a reverse proxy
+that authenticates a *browser* by its own ambient means (SSO, basic auth, a cookie of its own)
+and then injects `Authorization: Bearer` toward the board. Behind that proxy the bearer header
+IS ambient. A hostile page can make the browser send a `<form enctype="text/plain">` POST — a
+simple request, never preflighted — and the proxy adds the token; adversarial review reproduced
+exactly that landing a write. So the exemption also requires a request a cross-site page cannot
+make without a preflight (JSON), and that the browser has not reported a cross-site or
+same-site initiator (`sec-fetch-site`, sent by every current browser on every request, and by
+no CLI). This server answers no CORS preflight, so a cross-site page can never send the JSON.
+`tests/serve-csrf-bearer.test.mjs` pins every side, including that proxy, end to end.
+
+Why it is needed at all: a CLI on another machine (`BLAZE_REMOTE_URL` + `BLAZE_TOKEN`) has no
+page to read the per-process CSRF value from. `blaze start`'s `/control/*` routes are unchanged —
+they still require the header from every caller; no remote verb uses them.

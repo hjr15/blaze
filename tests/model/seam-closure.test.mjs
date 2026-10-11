@@ -2042,7 +2042,9 @@ const WRITE_ALLOWED = new Map([
   // BLZ-670: the mutating block resolves both ports per request (resolvePorts) and stages by mode (stageFor).
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
     "ensureIdentityIgnored", "addUser", "stageFor", "loadIdentity", "reconcile",
-    "resolvePorts", "pageHtml", "viewEnvelope"]],
+    "resolvePorts", "pageHtml", "viewEnvelope",
+    // BLZ-684: `POST /api/new` runs `blaze new`'s own verb, on exactly new-runner.mjs's footing.
+    "applyNew"]],
   ["user-runner.mjs", ["ensureIdentityIgnored", "addUser", "setUserPassword"]],
   // `blaze new` allocates the id and writes its claim — the allocator, deleted at Phase 2,
   // and on exactly the footing of ids.mjs and claims.mjs above.
