@@ -1,8 +1,19 @@
-# blaze board — zero-dependency Node app. Data (projects/ + .git) is bind-mounted
+# blaze board — a Node app whose one runtime module is the optional pg driver (BLZ-692). Data (projects/ + .git) is bind-mounted
 # at runtime, NOT baked. git is required: commit-on-edit shells out to it.
 FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 RUN apk add --no-cache git
 WORKDIR /app
+# BLZ-692: the one runtime module the engine can load — the Postgres driver, an
+# OPTIONAL peer that a file board never imports. Without it Postgres mode in the
+# pod (BLAZE_WRITE_PORT=db, `blaze db init/load`) fails on `import("pg")`. The
+# version comes from the lockfile so the image and CI run the same driver;
+# build-image.yml imports it inside the built image before pushing. It installs
+# BEFORE package.json is copied: pg is also a devDependency there, so an install
+# beside package.json either drops it (--omit=dev) or drags in the dev tools.
+COPY package-lock.json /tmp/package-lock.json
+RUN npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund \
+      "pg@$(node -p 'require("/tmp/package-lock.json").packages["node_modules/pg"].version')" \
+ && rm /tmp/package-lock.json && npm cache clean --force
 COPY package.json ./
 COPY scripts/ ./scripts/
 # No blaze.config.json here — engine and data are separate (the engine/data

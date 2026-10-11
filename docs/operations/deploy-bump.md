@@ -30,8 +30,11 @@ Owned by [`.github/workflows/build-image.yml`](../../.github/workflows/build-ima
 which now has two jobs: `build` (pre-existing — pushes `ghcr.io/hjr15/blaze:latest` and
 `:${{ github.sha }}`) and `bump` (INF-798 — writes the digest that job produced, plus the
 commit it was built from, into the chart repo). Only paths that can change the built
-image (`scripts/**`, `package.json`, `Dockerfile`, the workflow itself) trigger a run —
-a docs-only or test-only push rolls nothing, which is intended.
+image (`scripts/**`, `package.json`, `package-lock.json`, `Dockerfile`, the workflow
+itself) trigger a run — a docs-only or test-only push rolls nothing, which is intended.
+The lockfile is in that list because it pins the image's one installed module, the
+`pg` driver (BLZ-692). Before pushing, `build` loads the image locally and imports
+`pg` inside it, so an image that cannot reach Postgres never gets a digest bumped.
 
 ## What is live right now?
 

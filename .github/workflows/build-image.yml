@@ -1,7 +1,8 @@
 name: Build blaze image
 # Build + push the container image for the board engine, then bump the pin the
 # deploy chart in hjr15/service-platform actually reads (INF-798). The engine is
-# a zero-dependency Node app; data (projects/ + .git) is bind-mounted at
+# a Node app whose only installed module is the optional pg driver
+# (BLZ-692, verified in the image below before the push); data (projects/ + .git) is bind-mounted at
 # runtime, never baked (see Dockerfile). Consumers pin the pushed image by
 # digest.
 #
@@ -15,7 +16,7 @@ name: Build blaze image
 on:
   push:
     branches: [main]
-    paths: ["scripts/**", "package.json", "Dockerfile", ".github/workflows/build-image.yml"]
+    paths: ["scripts/**", "package.json", "package-lock.json", "Dockerfile", ".github/workflows/build-image.yml"]
   workflow_dispatch: {}
 
 # One deploy target, one Deployment. Two concurrent bumps would race the digest
@@ -42,6 +43,18 @@ jobs:
           registry: ghcr.io
           username: ${{ github.actor }}
           password: ${{ secrets.GITHUB_TOKEN }}
+      # BLZ-692: Postgres mode needs `pg` inside the image. Build once, load it
+      # locally and import the driver before anything is pushed, so an image
+      # that cannot reach Postgres never reaches the cluster.
+      - name: Build for verification
+        uses: docker/build-push-action@v6
+        with:
+          context: .
+          load: true
+          push: false
+          tags: blaze:verify
+      - name: Verify the pg driver loads in the image
+        run: docker run --rm blaze:verify node -e 'import("pg").then((m) => console.log("pg ok", typeof m.default.Pool))'
       - name: Build and push
         id: push
         uses: docker/build-push-action@v6
