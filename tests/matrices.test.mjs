@@ -10,7 +10,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync } from "node:fs";
+import { cpSync, mkdtempSync, readFileSync, writeFileSync, existsSync, readdirSync, rmSync, mkdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -127,3 +127,45 @@ test("an unknown argument, or --out with no value, is refused with the usage", (
     assert.match(r.stderr, /usage: blaze matrices/);
   }
 });
+
+// BLZ-690 ----------------------------------------------------------------------------------------
+test("blaze matrices --check: a committed matrix that is MISSING is drift, named, and not created", () => {
+  const root = copy();
+  rmSync(join(root, "docs", "matrices", NAMES[1]));
+  const r = matrices(root, ["--check"]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /MATRIX DRIFT — regenerate: eng-architecture-matrix\.md$/m);
+  assert.equal(existsSync(join(root, "docs", "matrices", NAMES[1])), false, "--check writes nothing");
+});
+
+test("blaze matrices --project KEY renders that project only, and --check agrees", () => {
+  const root = copy();
+  mkdirSync(join(root, "projects", "OPS", "defined"), { recursive: true });
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["ENG", "OPS"] }));
+  const out = join(root, "one");
+  const r = matrices(root, ["--project", "ENG", "--out", out]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readdirSync(out).sort(), [...NAMES].sort(), "ENG's two files, no OPS file");
+  assert.equal(matrices(root, ["--project", "ENG", "--check"]).status, 0);
+});
+
+test("blaze matrices --project refuses a key that is neither configured nor held, and writes nothing", () => {
+  const root = copy();
+  const out = join(root, "nope");
+  for (const args of [["--project", "NOPE", "--out", out], ["--project", "eng", "--check"]]) {
+    const r = matrices(root, args);
+    assert.equal(r.status, 1, `${args.join(" ")}: ${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, /--project [A-Za-z]+ is not a project on this board \(known: ENG\)/);
+    assert.doesNotMatch(r.stdout, /in sync/);
+  }
+  assert.equal(existsSync(out), false);
+});
+
+test("blaze matrices --project accepts a project the store holds even when the config does not list it", () => {
+  const root = copy();
+  mkdirSync(join(root, "projects", "OPS", "defined"), { recursive: true });
+  const r = matrices(root, ["--project", "OPS", "--out", join(root, "ops")]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.deepEqual(readdirSync(join(root, "ops")).sort(), ["ops-architecture-matrix.md", "ops-requirements-matrix.md"]);
+});
+

@@ -366,7 +366,7 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
-| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. It judges every finding, whatever `--kind` narrowed the listing to. The plain report ends `fail-on <kinds>: N finding(s) — FAIL`, `— pass` or `— could not observe the whole board`; under `--json` the same verdict is `failOnVerdict` (`fail`, `pass`, `could-not-observe`, with the blinding kinds in `failOnBlind`), and a `fail` is also said on stderr. `ok` in the JSON is still the hard-kind verdict, not the gate's. |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
@@ -389,7 +389,12 @@ resolved store, so it works under `fs`, `dual` and `db`, and each rule is the sc
   leaves for a title-only ticket.
 - **`config-project-drift`** (soft, was `config_drift_check.py`): `blaze.config.json`'s
   `projects` and the projects the store holds disagree, in either direction. Not raised when the
-  config lists no projects at all.
+  config lists no projects at all. **What "the store holds" means differs by mode.** Under `fs`
+  and `dual` it is the directories under `projects/` — a project directory with no tickets yet
+  (only a `project.json`, or empty status folders) counts as held. Under `db` it is the project
+  keys that have at least one live ticket row, so the same freshly created, still-empty project
+  is reported as drift in `db` mode and not in `fs` mode. The fix either way is a ticket or a
+  config line, never a code change.
 
 `blaze audit --fail-on duplicate-status` is the gate `duplicate_id_check.py` was: it fails on a
 duplicated id alone, on a board that already carries other hard findings.
@@ -399,6 +404,14 @@ a project outside the list still exists, so `blaze audit --projects BLZ` does no
 `BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged. The
 governance kinds follow the same rule: an in-scope parent's open child in another project still
 counts for `terminal-parent-open-child`, and `config-project-drift` names only listed projects.
+
+**An unscoped run judges the configured projects but resolves against the whole store.** With no
+`--projects`, the projects judged are `blaze.config.json`'s `projects` (or, when it lists none,
+every project the store holds). Links and parents still resolve against *every* ticket the store
+holds, including tickets in a project directory the config does not list. So a link into an
+unlisted project is not a `dangling-target`, and an unlisted project's open child still counts
+for its listed parent's `terminal-parent-open-child`. The unlisted project itself is never judged.
+It shows up once, as `config-project-drift`.
 
 **`duplicate-status`** is the one finding that comes from the *walk* rather than
 from frontmatter. Status is the directory, so an id resolving to files under two
@@ -714,7 +727,7 @@ was a zero `diff -r` against that script's output for the live board.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--project <KEY>` | One project only. | every project in `blaze.config.json` |
+| `--project <KEY>` | One project only. The key must be one `blaze.config.json` lists or the store holds; anything else (a typo, the wrong case) is refused with exit `1`, naming the known projects, and nothing is written or checked. | every project in `blaze.config.json` |
 | `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
 | `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
 
@@ -768,10 +781,14 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 | Subcommand | SQLite | Postgres |
 |---|---|---|
 | `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
-| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. Rows it deliberately drops or collapses — a dangling parent or link, a repeated link, label or component, a worklog entry under half a minute — are counted, and the load says that `blaze db verify` will report each as a value difference. The git history is read before the transaction opens. |
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
 | `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value (unknown frontmatter keys included), the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
+
+`verify` and `status` only read, so both run under `BLAZE_READONLY=1`; `init`, `seed-counter` and
+`load` are refused. The exemption is decided by the subcommand itself — `blaze db load verify` is
+still a load, and still refused.
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 

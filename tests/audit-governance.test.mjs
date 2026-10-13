@@ -217,3 +217,44 @@ test("--fail-on exits 2 when the walk could not observe the whole board, never a
     assert.match(r.stderr, /unreadable-ticket-directory/);
   } finally { chmodSync(dir, 0o755); }
 });
+
+// BLZ-690: the cases BLZ-681's --fail-on tests left implicit.
+test("--fail-on with an unloadable config exits 2 (could not observe), even with no finding of the named kind", () => {
+  const { dataRoot, projectsDir } = board();
+  writeFileSync(join(dataRoot, "blaze.config.json"), JSON.stringify({ key: "eng", projects: ["ENG", "OPS"] }));
+  const r = audit(projectsDir, ["--fail-on", "duplicate-status"]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /--fail-on cannot pass — the run could not observe the whole board \(config-unloadable\)/);
+  assert.match(r.stdout, /fail-on duplicate-status: 0 finding\(s\) — could not observe the whole board/);
+  const json = audit(projectsDir, ["--json", "--fail-on", "duplicate-status"]);
+  assert.equal(json.status, 2);
+  const out = JSON.parse(json.stdout);
+  assert.deepEqual([out.failing, out.failOnVerdict, out.failOnBlind], [0, "could-not-observe", ["config-unloadable"]],
+    "--json says WHY a 0-failing run did not pass, not just failing: 0");
+});
+
+test("--fail-on with --kind: --kind narrows what is LISTED, --fail-on still judges every finding", () => {
+  const { projectsDir } = board();
+  const r = audit(projectsDir, ["--kind", "empty-body", "--fail-on", "terminal-parent-open-child"]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stdout, /ENG-2 {2}empty-body/);
+  assert.doesNotMatch(r.stdout, /ENG-1 {2}terminal-parent-open-child/, "only the --kind is listed");
+  assert.match(r.stdout, /fail-on terminal-parent-open-child: 1 finding\(s\) — FAIL/);
+  const json = JSON.parse(audit(projectsDir, ["--json", "--kind", "empty-body", "--fail-on", "terminal-parent-open-child"]).stdout);
+  assert.deepEqual(json.findings.map((f) => f.kind), ["empty-body"]);
+  assert.deepEqual([json.failing, json.failOnVerdict], [1, "fail"]);
+});
+
+test("--fail-on --json carries the verdict the exit code gives, distinct from `ok` (which is about HARD kinds)", () => {
+  const { projectsDir } = board();
+  const fail = audit(projectsDir, ["--json", "--fail-on", "empty-body"]);
+  const f = JSON.parse(fail.stdout);
+  assert.equal(fail.status, 1);
+  assert.deepEqual([f.ok, f.failOnVerdict], [true, "fail"], "ok=true is the hard-kind verdict; the gate failed");
+  assert.match(fail.stderr, /blaze audit: --fail-on empty-body: 1 finding\(s\) — FAIL \(exit 1\)/);
+  const pass = audit(projectsDir, ["--json", "--fail-on", "duplicate-status"]);
+  assert.equal(pass.status, 0);
+  assert.equal(JSON.parse(pass.stdout).failOnVerdict, "pass");
+  assert.equal(pass.stderr, "", "a passing gate is quiet on stderr");
+});
+

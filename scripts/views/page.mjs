@@ -133,13 +133,22 @@ export function sublineHtml(m) {
 
 // ---- JSON fragment envelope (client swap target) ---------------------------
 
+/**
+ * BLZ-690: is `view` one this page will render? The configured views (the caller's `views`, else
+ * the board's config), with `board` always on — the rule `viewEnvelope` and `pageHtml` gate on,
+ * exported so a caller can skip work for a view that will not be rendered (`dbTransitions`).
+ */
+export function viewEnabled(view, views, pDir) {
+  const V = { ...(views ?? cfgFor(pDir).views), board: true };
+  return VIEW_NAMES.includes(view) && Boolean(V[view]);
+}
+
 export function viewEnvelope({ project = "all", focus = null, flat = false, sprint = null, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views, tickets = null } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   // Clamp: board must always be enabled regardless of what the caller passes
   // (config.mjs already forces this for cfg.views, but a direct caller — e.g.
   // a future supervisor — could pass { board: false } and strand every view).
-  const V = { ...(views ?? cfgFor(pDir).views), board: true };
-  if (!VIEW_NAMES.includes(view) || !V[view]) return null;
+  if (!viewEnabled(view, views, pDir)) return null;
   const m = boardModel(pDir, { project, focus, flat, tickets });
   return {
     view,

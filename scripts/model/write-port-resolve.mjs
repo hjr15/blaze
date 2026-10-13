@@ -17,6 +17,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { fsStorage, slugify } from "./storage.mjs";
 import { allocateId } from "./ids.mjs";
 import { remoteMaxClaim, writeClaim } from "./claims.mjs";
@@ -54,6 +55,65 @@ export function pgExec(client) {
     async run(sql, params = []) { await client.query(sql, params); },
     async all(sql, params = []) { return (await client.query(sql, params)).rows; },
   };
+}
+
+/** A `file:` URI that opens `path` read-only (`mode=ro`). NEVER `immutable=1`: that skips locking
+ *  and change detection, so a writer that opens and checkpoints after the open check tears the
+ *  counts or reads as SQLITE_CORRUPT. A `mode=ro` reader locks like any other: it reads through a
+ *  live WAL, and a database NOT in WAL mode gets no new file. A WAL database it opens with no
+ *  `-shm` beside it does get the `-wal`/`-shm` sidecars (SQLite needs the shared-memory index to
+ *  read WAL safely); their contents are SQLite's, and blaze.db/config.db are never written. */
+function readOnlyUri(path) {
+  const u = pathToFileURL(path);
+  u.searchParams.set("mode", "ro");
+  return u;
+}
+
+/** SQLITE_READONLY_DIRECTORY: a WAL database whose directory will not take its `-shm` file. */
+const READONLY_DIRECTORY = 1544;
+
+/**
+ * BLZ-690: the shadow opened READ-ONLY, for `blaze db status` — which runs under BLAZE_READONLY
+ * and so must not write the shadow: no `.blaze` mkdir, no WAL switch, no DDL, and a handle that
+ * cannot write. The same refusals as `openShadow` (no shadow, a version it cannot read, a missing
+ * config namespace), plus one of its own: a WAL database in a directory SQLite may not create
+ * the shared-memory file in is refused by name rather than as "attempt to write a readonly
+ * database". Only `db` (to close) and `exec.all` are meant for use.
+ */
+export async function openShadowReadOnly(dataRoot) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const path = shadowDbPath(dataRoot);
+  if (!existsSync(path)) {
+    throw new Error(`blaze: no shadow database at ${path}.\nCreate it and load the board into it first:\n\n    blaze db init\n`);
+  }
+  const db = new DatabaseSync(readOnlyUri(path), { readOnly: true });
+  const exec = sqliteExec(db);
+  const { configDbPathFor } = await import("./config-schema.mjs");
+  const { judgeDbSchema, readSchemaFactsSync } = await import("./db-schema-version.mjs");
+  let state;
+  try { state = judgeDbSchema(readSchemaFactsSync(exec)); }
+  catch (e) {
+    db.close();
+    if (e?.errcode === READONLY_DIRECTORY) {
+      throw new Error(`blaze: cannot read the shadow database read-only: it is in WAL mode and `
+        + `${dirname(path)} is not writable, so SQLite cannot create the shared-memory file (-shm) a `
+        + "WAL reader needs. Run this where that directory is writable.");
+    }
+    throw e;
+  }
+  if (!state.ok || state.state === "empty") {
+    db.close();
+    throw new Error(`blaze: ${state.ok ? "the shadow database has no Blaze schema — run 'blaze db init --force'" : state.error}`);
+  }
+  const cfgPath = configDbPathFor(path);
+  if (!existsSync(cfgPath)) {
+    db.close();
+    throw new Error(`blaze: the config namespace is missing at ${cfgPath}, but the shadow database beside it `
+      + "exists. The namespace is derived, so rebuild rather than repair it: run 'blaze db init --force'.");
+  }
+  db.exec(`ATTACH DATABASE '${readOnlyUri(cfgPath).href.replace(/'/g, "''")}' AS blaze_config;`);
+  assertConfigNamespace(db, cfgPath);
+  return { db, exec, path };
 }
 
 /**

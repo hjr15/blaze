@@ -58,9 +58,19 @@ let tickets, keys;
 try {
   tickets = [...(await rs.readStorage.listTickets(projectsDir))];
   const configured = loadConfig({ root: dataRoot }).projects ?? [];
-  keys = opts.project ? [opts.project]
-    : (configured.length ? configured : await rs.readStorage.listProjects(projectsDir));
+  const held = await rs.readStorage.listProjects(projectsDir);
+  // BLZ-690: a --project key must name a project this board has — configured, or held by the
+  // store. An unknown key (a typo, the wrong case) rendered two EMPTY matrices: written out as
+  // real files, or reported by --check as drift against files that never existed.
+  if (opts.project && !configured.includes(opts.project) && !held.includes(opts.project)) {
+    const known = [...new Set([...configured, ...held])].sort();
+    console.error(`blaze matrices: --project ${opts.project} is not a project on this board `
+      + `(known: ${known.join(", ") || "none"})`);
+    process.exitCode = 1;
+  }
+  keys = opts.project ? [opts.project] : (configured.length ? configured : held);
 } finally { await rs.close(); }
+if (process.exitCode) process.exit();
 if (!keys.length) {
   // A run that rendered nothing must not report that everything is in sync.
   console.error(`blaze matrices: no projects found under ${projectsDir}`);

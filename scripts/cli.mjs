@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isReadonly } from "./readonly.mjs";
+import { isReadonly, subVerbOf } from "./readonly.mjs";
 import { exitCodeForSpawn } from "./model/spawn-exit-code.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -27,10 +27,12 @@ const node = (file, args = []) => spawnSync(process.execPath, [join(here, file),
 // separately, see readonly.mjs) and `rollup` (a report) are the only false.
 const SUBCOMMANDS = {
   db: { file: "db-runner.mjs", desc: "create/seed/inspect the database and the dual-write soak", mutates: true,
-        // BLZ-679: `verify` only reads (the migration gate an inspecting agent must be able to run).
-        // Matched like any readOnlyFlag; every OTHER db verb (load, init, seed-counter, status) is
-        // still refused here, and each of them also carries its own runner-level guard.
-        readOnlyFlags: ["verify"] },
+        // BLZ-679 / BLZ-690: `verify` (the migration gate an inspecting agent must be able to
+        // run) and `status` (counts and the soak's divergence log) only read. Matched against the
+        // db VERB — the first positional — never anywhere on the line, so `db load verify` is
+        // still a load. Every other db verb is refused here; `init`, `seed-counter` and `load`
+        // also carry their own runner-level guard (`writableOr` in db-runner.mjs).
+        readOnlyVerbs: ["verify", "status"] },
   init: { file: "init-runner.mjs", desc: "set up a new board (first-run wizard)", mutates: true },
   start: { file: "supervisor.mjs", desc: "run the reconcile/groomer loops (default)", mutates: true, noArgs: true },
   board: { file: "serve.mjs", desc: "serve the board viewer", mutates: false, noArgs: true },
@@ -139,7 +141,11 @@ if (!sub) { printUsage(); process.exit(1); }
 // `blaze commit --status`. The exemption is per-invocation and opt-in per verb, never a
 // blanket "read-only unless it looks like a write": the verb stays `mutates: true`, so
 // every other spelling of it is still refused here.
-const readOnlyInvocation = (sub.readOnlyFlags ?? []).some((f) => rest.includes(f));
+// BLZ-690: `readOnlyVerbs` is the same exemption for a verb with sub-verbs (`db`), matched
+// against the sub-verb itself rather than any word on the line.
+const subVerb = subVerbOf(rest);
+const readOnlyInvocation = (sub.readOnlyFlags ?? []).some((f) => rest.includes(f))
+  || (sub.readOnlyVerbs ?? []).includes(subVerb);
 if (isReadonly() && sub.mutates && !readOnlyInvocation) {
   console.error(`blaze: read-only mode (BLAZE_READONLY=1) — refusing to run a mutating command: ${key}`);
   process.exit(1);

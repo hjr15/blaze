@@ -404,12 +404,26 @@ report.ok = !report.findings.some((f) => HARD_KINDS.has(f.kind));
 
 const findings = opts.kind ? report.findings.filter((f) => f.kind === opts.kind) : report.findings;
 // BLZ-681: with --fail-on the exit code answers "is there a finding of THESE kinds", and only that.
+// It judges EVERY finding, whatever `--kind` narrowed the listing to.
 const failOn = opts.failOn ? new Set(opts.failOn) : null;
 const failing = failOn ? report.findings.filter((f) => failOn.has(f.kind)).length : null;
+// A --fail-on run that could not observe the whole board (an unread status directory, a config
+// that did not load) cannot vouch for the absence of the named kinds: exit 2, "could not run",
+// never a clean 0.
+const BLIND_KINDS = ["unreadable-ticket-directory", "config-unloadable"];
+const blind = failOn ? BLIND_KINDS.filter((k) => report.findings.some((f) => f.kind === k)) : [];
+// BLZ-690: the gate's verdict, said in words in both outputs. Under --json, `failing: 0` beside
+// an exit of 2 — or `ok: true` (the HARD-kind verdict) beside an exit of 1 — read as a pass.
+const verdict = !failOn ? null : blind.length ? "could-not-observe" : failing ? "fail" : "pass";
+const VERDICT_TEXT = { "could-not-observe": "could not observe the whole board", fail: "FAIL", pass: "pass" };
 
 if (opts.json) {
   console.log(JSON.stringify({ ...report, findings,
-    ...(failOn ? { failOn: [...failOn], failing } : {}) }, null, 2));
+    ...(failOn ? { failOn: [...failOn], failing, failOnVerdict: verdict, failOnBlind: blind } : {}) }, null, 2));
+  // stdout stays pure JSON; a failing gate also says so on stderr, in the plain report's words.
+  if (verdict === "fail") {
+    console.error(`blaze audit: --fail-on ${[...failOn].join(",")}: ${failing} finding(s) — FAIL (exit 1)`);
+  }
 } else {
   console.log("=== blaze audit ===");
   // Named UNCONDITIONALLY, ahead of any --kind filtering: the plain report's summary line
@@ -433,18 +447,14 @@ if (opts.json) {
     if (!report.findings.length) console.log("  clean");
   }
   console.log(`  ok=${report.ok}${report.ok ? "" : "  (hard findings present)"}`);
-  if (failOn) console.log(`  fail-on ${[...failOn].join(",")}: ${failing} finding(s)`);
+  if (failOn) console.log(`  fail-on ${[...failOn].join(",")}: ${failing} finding(s) — ${VERDICT_TEXT[verdict]}`);
 }
 
 // Set the code rather than calling process.exit(): stdout to a PIPE is asynchronous, and
 // exiting immediately after a large console.log truncates it mid-write. The --json payload
 // on a real board is well past the pipe buffer, so this is not theoretical — it truncated
 // at 64KB the first time it was piped.
-// BLZ-681: a --fail-on run that could not observe the whole board (an unread status directory,
-// a config that did not load) cannot vouch for the absence of the named kinds: exit 2, "could
-// not run", never a clean 0.
-const BLIND_KINDS = ["unreadable-ticket-directory", "config-unloadable"];
-const blind = failOn ? BLIND_KINDS.filter((k) => report.findings.some((f) => f.kind === k)) : [];
+// BLZ-681: `blind` (above) — a --fail-on run that could not observe the whole board exits 2.
 if (blind.length) {
   console.error(`blaze audit: --fail-on cannot pass — the run could not observe the whole board (${blind.join(", ")}); fix that first`);
 }

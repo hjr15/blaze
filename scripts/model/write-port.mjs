@@ -25,13 +25,25 @@ import { fsReadStorage } from "./read-storage.mjs";
 import { counterUpsertSql } from "./seed-counter.mjs";
 import { safeJson } from "./safe-json.mjs";
 
-/** Stable stringify: object keys sorted, array order preserved. */
+/** Stable stringify: object keys sorted, array order preserved. LENIENT on purpose — scalars
+ *  are String()ed, so the soak does not report `1` vs `"1"` between a file and a database. */
 function canonical(v) {
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
   if (v && typeof v === "object") {
     return `{${Object.keys(v).sort().map((k) => `${k}:${canonical(v[k])}`).join(",")}}`;
   }
   return v === null || v === undefined ? "" : String(v);
+}
+
+/** BLZ-690: the TYPE-PRESERVING stable stringify — JSON for every scalar, keys sorted and
+ *  quoted at every depth — for `blaze db verify`, the migration gate. It must be at least as
+ *  strict as the soak: `1`/`"1"`, `null`/`""`, `{}`/`"{}"` and `["a,b"]`/`["a","b"]` all differ. */
+export function canonicalStrict(v) {
+  if (Array.isArray(v)) return `[${v.map(canonicalStrict).join(",")}]`;
+  if (v && typeof v === "object") {
+    return `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canonicalStrict(v[k])}`).join(",")}}`;
+  }
+  return v === undefined ? "undefined" : JSON.stringify(v);
 }
 
 /** The value-level identity of a ticket. Paths and byte order are deliberately absent. */

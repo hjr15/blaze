@@ -5,15 +5,15 @@
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { mkdirSync, renameSync } from "node:fs";
+import { mkdirSync, renameSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { importTransitionsExec } from "../scripts/migrate/import-transitions.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
-import { sqliteExec } from "../scripts/model/write-port-resolve.mjs";
+import { sqliteExec, shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
 import { dbTransitions } from "../scripts/model/transitions-db.mjs";
 import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
-import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
+import { viewEnabled } from "../scripts/views/page.mjs";
 import { postgresReader } from "../scripts/model/pg-storage.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { startServer, CSRF } from "../scripts/serve.mjs";
@@ -67,6 +67,22 @@ describe("the pure parts", () => {
     assert.equal(await dbTransitions(rs, "db", "board", "/p"), undefined, "no other view pays for the query");
     assert.equal(await dbTransitions(rs, "fs", "metrics", "/p"), undefined, "fs keeps git");
     assert.equal(await dbTransitions(rs, "dual", "metrics", "/p"), undefined, "dual keeps git");
+  });
+
+  test("dbTransitions skips the query when the metrics view is disabled", async () => {
+    let queried = 0;
+    const rs = { listTransitions: async () => { queried++; return []; } };
+    assert.equal(await dbTransitions(rs, "db", "metrics", "/p", { enabled: false }), undefined);
+    assert.equal(queried, 0, "a disabled view renders nothing, so it must not pay for the query");
+    await dbTransitions(rs, "db", "metrics", "/p", { enabled: true });
+    assert.equal(queried, 1);
+  });
+
+  test("viewEnabled is the page's own rule: the configured views, board always on", () => {
+    assert.equal(viewEnabled("metrics", { metrics: false }), false);
+    assert.equal(viewEnabled("metrics", { metrics: true }), true);
+    assert.equal(viewEnabled("board", { board: false }), true);
+    assert.equal(viewEnabled("nonsense", { metrics: true }), false);
   });
 });
 
@@ -151,6 +167,53 @@ for (const [name, boot] of [
     });
   });
 }
+
+// BLZ-690 review: end to end, `blaze start`'s /view/metrics and /?view=metrics with the metrics
+// view DISABLED must never query the history. The shadow's `ticket_transition` view is replaced
+// by one that raises when it is READ (it still prepares, so the reader opens): any query of it
+// is then a 500. The control — metrics enabled — proves the trap fires when the query runs.
+async function trappedSupervisor(roots, metrics) {
+  const cfgFile = join(roots.dataRoot, "blaze.config.json");
+  writeFileSync(cfgFile, JSON.stringify({ ...JSON.parse(readFileSync(cfgFile, "utf8")), views: { metrics } }));
+  const h = new DatabaseSync(shadowDbPath(roots.dataRoot));
+  try {
+    h.exec(`DROP VIEW ticket_transition;
+            CREATE VIEW ticket_transition AS SELECT 'x' AS id, 'a' AS "from", 'b' AS "to", 't' AS ts
+              WHERE json('trap: listTransitions was called') IS NOT NULL;`);
+  } finally { h.close(); }
+  const app = createApp(loadConfig({ root: roots.dataRoot }), { root: roots.dataRoot });
+  app.server.listen(0, "127.0.0.1");
+  await new Promise((res) => app.server.once("listening", res));
+  return app.server;
+}
+
+test("blaze start under db, metrics DISABLED: neither metrics route ever calls listTransitions", async () => {
+  await withDbBoard(async (roots) => {
+    const server = await trappedSupervisor(roots, false);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    try {
+      const v = await fetch(`${base}/view/metrics`);
+      assert.equal(v.status, 404, "a disabled view is unknown — and answered without the query");
+      const p = await fetch(`${base}/?view=metrics`);
+      assert.equal(p.status, 200, "the page falls back to the board without the query");
+    } finally { server.closeAllConnections(); await new Promise((r) => server.close(r)); }
+  });
+});
+
+test("…and the trap fires when metrics is ENABLED (the control)", async () => {
+  await withDbBoard(async (roots) => {
+    const server = await trappedSupervisor(roots, true);
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const origErr = console.error; console.error = () => {};
+    try {
+      const v = await fetch(`${base}/view/metrics`).catch((e) => ({ status: `error ${e.message}` }));
+      assert.notEqual(v.status, 200, "the query ran and hit the trap");
+    } finally {
+      console.error = origErr;
+      server.closeAllConnections(); await new Promise((r) => server.close(r));
+    }
+  });
+});
 
 test("Postgres `blaze db load` imports the git history as transition events", PG_SKIP, async () => {
   const db = await scratchPgDb("transitions");

@@ -9,11 +9,11 @@ import { existsSync, rmSync } from "node:fs";
 import { readRegularFileSync } from "./model/regular-file.mjs";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
-         readSoakState, pgExec, openCheckedPg, describePgTarget } from "./model/write-port-resolve.mjs";
+         readSoakState, pgExec, openCheckedPg, describePgTarget, openShadowReadOnly } from "./model/write-port-resolve.mjs";
 import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
-import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { loadCorpusAsync, verifyDiffRows } from "./migrate/load-corpus.mjs";
 import { importTransitionsExec } from "./migrate/import-transitions.mjs";
 import { buildTransitions } from "./model/transitions.mjs";
 import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
@@ -21,7 +21,7 @@ import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
-import { assertWritable } from "./readonly.mjs";
+import { assertWritable, subVerbOf } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
 
@@ -50,9 +50,10 @@ function dbConfigOr(ctx) {
 
 /**
  * BLZ-668: the per-runner BLAZE_READONLY guard every mutating runner carries (AGENTS.md), for a
- * direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. Called by `init` and
- * `seed-counter` AFTER the config is resolved (a bad project key is still named first, as in
- * the other runners) and BEFORE anything is opened or written. `status` only reads.
+ * direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. Called by `init`,
+ * `seed-counter` and `load` AFTER the config is resolved (a bad project key is still named
+ * first, as in the other runners) and BEFORE anything is opened or written. `status` and
+ * `verify` only read, so they carry none — and cli.mjs's `readOnlyVerbs` lets both through.
  */
 function writableOr(ctx, what) {
   try { assertWritable(`run blaze db ${what}`, ctx.env); return true; }
@@ -159,6 +160,28 @@ async function seedCounterCmd(ctx) {
   }
 }
 
+/**
+ * Every substitution and every dropped or collapsed row, named (BLZ-280: a tally that reports
+ * only successes cannot be trusted) — one spelling for the Postgres load and the SQLite init.
+ * BLZ-690: then the consequence. Each such row leaves a ticket's database value different from
+ * its file. zeroDiff reports per ticket and FIELD, so two repeated labels on one ticket are one
+ * difference: hence "up to".
+ */
+function printLosses(tally, log, consequence, remedy) {
+  if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
+  if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
+  if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
+  if (tally.duplicateLinks) log(`  ⚠ repeated links collapsed: ${tally.duplicateLinks}`);
+  if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+  const collapsed = tally.collapsed.labels + tally.collapsed.components;
+  if (collapsed) log(`  ⚠ repeated labels/components collapsed: ${collapsed}`);
+  const lossy = verifyDiffRows(tally).total;
+  if (lossy) {
+    log(`  ⚠ ${lossy} row(s) above were dropped or collapsed — ${consequence} up to ${lossy} value difference(s)`);
+    log(`    from the files. ${remedy}`);
+  }
+}
+
 /** BLZ-680: what the transition import did, in one line — and, loudly, when there was no git
  *  history to import from at all (a copy with no `.git`), which must not read as "no moves". */
 function transitionsLine(h, dataRoot) {
@@ -202,10 +225,20 @@ async function loadCmd(ctx) {
   const exec = pgExec(client);
   const where = describePgTarget(dbConfig.connection);
   try {
+    // BLZ-690: the git-era history is read BEFORE the transaction opens. Walking git's rename
+    // log is the slowest step of the load and touches no database; inside BEGIN it held the
+    // transaction (and every lock the TRUNCATE took) open for the whole walk.
+    let built;
+    try { built = ctx.buildTransitions({ root: dataRoot }); }
+    catch (e) {
+      err(`blaze db load: could not read the git history at ${dataRoot} — ${e.message}`);
+      err("Nothing was loaded.");
+      return 1;
+    }
     await exec.run("BEGIN", []);
-    let tally, seeded, history;
+    let tally, seeded, history, held;
     try {
-      const held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
+      held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
       if (held > 0 && !replace) {
         await exec.run("ROLLBACK", []);
         err(`blaze db load: ${where} already holds ${held} ticket(s). Nothing was loaded.`);
@@ -226,7 +259,6 @@ async function loadCmd(ctx) {
       // db the metrics view reads `ticket_transition`, and git's log stops growing at cutover.
       // Through BLZ-281's import rules (import-transitions.mjs). `head === null` means no git
       // history could be read at the data root — said below, never passed off as "none".
-      const built = buildTransitions({ root: dataRoot });
       history = { ...(await importTransitionsExec(exec, built,
                     { knownIds: new Set(tally.typeById.keys()), dialect: "postgres" })), head: built.head };
       // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
@@ -241,16 +273,17 @@ async function loadCmd(ctx) {
       err("Nothing was loaded: the load runs in one transaction.");
       return 1;
     }
-    log(`loaded ${where}${replace ? "  (--replace: the previous tickets were erased first)" : ""}`);
+    // BLZ-690: "erased" only when there was something to erase.
+    const replaced = !replace ? ""
+      : held > 0 ? `  (--replace: the previous ${held} ticket(s) were erased first)`
+        : "  (--replace: the database held no tickets — nothing to erase)";
+    log(`loaded ${where}${replaced}`);
     log(`  tickets      ${tally.tickets}`);
     log(`  links        ${tally.links}`);
     log(`  worklog      ${tally.worklog}`);
     log(`  labels       ${tally.labels}   components ${tally.components}`);
-    // Every substitution is named (BLZ-280). A tally that reports only successes cannot be trusted.
-    if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
-    if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
-    if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
-    if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+    printLosses(tally, log,
+      "'blaze db verify' will report", "Fix them in the files and reload with --replace, or accept them.");
     log(transitionsLine(history, dataRoot));
     if (tally.skipped.noId || tally.skipped.badId) {
       log(`  ⚠ files skipped: ${tally.skipped.noId} with no id, ${tally.skipped.badId} with a malformed id`);
@@ -323,7 +356,7 @@ async function verifyCmd(ctx) {
   return 1;
 }
 
-async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
+async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransitions: buildHistory }) {
   const path = shadowDbPath(dataRoot);
   if (existsSync(path) && !force) {
     err(`blaze db init: ${path} already exists.\n`);
@@ -366,6 +399,8 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
 
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.
+  // BLZ-690: which of the pair THIS run creates — so a failure below removes only those.
+  const existed = new Map([[path, existsSync(path)], [cfgPath, existsSync(cfgPath)]]);
   let db, exec;
   try { ({ db, exec } = await openShadow(dataRoot, { create: true })); }
   catch (e) { console.error(e.message); process.exit(1); }
@@ -407,13 +442,32 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
     db.exec(setMigrationModeSql("sqlite", false));
     // BLZ-680: the same git-era history `blaze db load` imports on Postgres, so a SQLite board
     // switched to BLAZE_WRITE_PORT=db keeps its metrics history too. One transaction: a file
-    // database commits each autocommitted INSERT to disk on its own.
-    db.exec("BEGIN");
-    const built = buildTransitions({ root: dataRoot });
-    const history = { ...(await importTransitionsExec(exec, built,
-      { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
-      head: built.head };
-    db.exec("COMMIT");
+    // database commits each autocommitted INSERT to disk on its own. BLZ-690: git is read
+    // before BEGIN (as on Postgres), and a failed import is ROLLED BACK and named rather than
+    // escaping as a stack trace with the transaction still open.
+    let history;
+    try {
+      const built = buildHistory({ root: dataRoot });
+      db.exec("BEGIN");
+      history = { ...(await importTransitionsExec(exec, built,
+        { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
+        head: built.head };
+      db.exec("COMMIT");
+    } catch (e) {
+      if (db.isTransaction) { try { db.exec("ROLLBACK"); } catch { /* the original error is what matters */ } }
+      // BLZ-690: a shadow with tickets but no history must not be left for BLAZE_WRITE_PORT=dual
+      // to open as though init had finished. Remove what THIS run created — never a file that
+      // was there before it.
+      db.close();
+      const removed = discardCreated(existed);
+      err(`blaze db init: importing the git history failed: ${e.message}`);
+      err(removed.length === 2
+        ? "Nothing was kept: removed the shadow database and config namespace this run created."
+        : `None of that history was kept${removed.length ? `; removed ${removed.join(", ")}` : ""}. `
+          + `The shadow at ${path} is incomplete — rebuild it with 'blaze db init --force'.`);
+      err("Fix the cause, then run 'blaze db init' again.");
+      return 1;
+    }
     // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
     // handed out that may not have a ticket yet). It can only RAISE a counter.
     await seedCounter(exec, await corpusMaxima({ projectsDir, readStorage: fsReadStorage }),
@@ -426,21 +480,33 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
     log(`  worklog      ${tally.worklog}`);
     log(`  labels       ${tally.labels}   components ${tally.components}`);
     log(transitionsLine(history, dataRoot));
-    // Every substitution is named. A tally that reports only successes is a tally that
-    // cannot be trusted (BLZ-280).
-    if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
-    if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
-    if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
+    printLosses(tally, log, "the shadow now holds", "The dual-write soak will see them too; fix them in the files and rebuild with --force, or accept them.");
     if (tally.skipped.insertFailed.length) {
-      log(`  ⚠ rows the database refused: ${tally.skipped.insertFailed.length}`);
+      // BLZ-690: each refusal took its WHOLE ticket (the per-ticket savepoint), not one row.
+      log(`  ⚠ ticket(s) refused (whole ticket rolled back): ${tally.skipped.insertFailed.length}`);
       for (const f of tally.skipped.insertFailed.slice(0, 5)) log(`      ${f.id}: ${f.reason}`);
     }
     log(`\nNow run the board with BLAZE_WRITE_PORT=dual to soak it. The filesystem stays`);
     log(`the source of truth; divergences land in ${divergenceLogPath(dataRoot)}.`);
     return 0;
   } finally {
-    db.close();
+    if (db.isOpen) db.close();   // the history-failure path closed it to remove the files
   }
+}
+
+/**
+ * BLZ-690: remove each file that did NOT exist before (`existed`: Map<path, boolean>) — the ones
+ * this run created — and leave every pre-existing one alone. Returns the paths removed.
+ */
+export function discardCreated(existed) {
+  const removed = [];
+  for (const [p, was] of existed) {
+    if (was || !existsSync(p)) continue;
+    rmSync(p, { force: true });
+    for (const side of [`${p}-wal`, `${p}-shm`]) rmSync(side, { force: true });
+    removed.push(p);
+  }
+  return removed;
 }
 
 async function status({ dataRoot, log }) {
@@ -452,9 +518,12 @@ async function status({ dataRoot, log }) {
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.
   let db, exec;
-  try { ({ db, exec } = await openShadow(dataRoot)); }
+  try { ({ db, exec } = await openShadowReadOnly(dataRoot)); }
   catch (e) { console.error(e.message); process.exit(1); }
   try {
+    // BLZ-690: ONE read transaction, so every count below comes from the same snapshot even
+    // while a dual-write soak is committing beside it.
+    db.exec("BEGIN");
     const n = (t) => exec.all(`SELECT count(*) AS n FROM ${t}`)[0].n;
     log(`shadow database ${path}`);
     log(`  schema       v${exec.all("SELECT value FROM blaze_meta WHERE key='schema_version'")[0]?.value}`);
@@ -469,6 +538,7 @@ async function status({ dataRoot, log }) {
     const byKind = Object.fromEntries(acByKind.map((r) => [r.kind, r.n]));
     log(`  criteria     ${byKind.criterion ?? 0}`);
     log(`  AC notes     ${byKind.note ?? 0}`);
+    db.exec("COMMIT");
   } finally { db.close(); }
 
   // Is the soak actually ON right now? A week of "no divergences" from a board whose
@@ -519,7 +589,8 @@ async function status({ dataRoot, log }) {
 
 export async function runDb(argv, io = {}) {
   const { log = console.log, err = console.error } = io;
-  const cmd = argv.find((a) => !a.startsWith("-"));
+  // BLZ-690: the same rule cli.mjs's read-only exemption uses, so the two can never disagree.
+  const cmd = subVerbOf(argv);
   const force = argv.includes("--force");
   const replace = argv.includes("--replace");
   if (!cmd || argv.includes("--help") || argv.includes("-h")) { log(USAGE); return cmd ? 0 : 1; }
@@ -530,6 +601,8 @@ export async function runDb(argv, io = {}) {
   const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, replace, log, err,
                 resolveDbConfig: io.resolveDbConfig ?? resolveDatabaseConfig,
                 openPgClient: io.openPostgresClient ?? openPostgresClient,
+                // Injectable so a test can see WHEN the git walk runs, and make it fail.
+                buildTransitions: io.buildTransitions ?? buildTransitions,
                 env: io.env ?? process.env };
   if (cmd === "init") return init(ctx);
   if (cmd === "seed-counter") return seedCounterCmd(ctx);

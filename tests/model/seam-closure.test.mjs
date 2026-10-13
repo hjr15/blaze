@@ -916,7 +916,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["ci/temp-cleanup-guard.mjs", { writes: [], sanctioned: [],
     inert: ["TESTS_DIR", "DEBT_FILE", "scanSource", "NOT_CORPUS", "testFiles", "scanCorpus",
       "readDebt", "compareToDebt"] }],
-  ["db-runner.mjs", { writes: ["runDb"], sanctioned: [], inert: ["USAGE"] }],
+  // BLZ-690: `discardCreated` removes caller-named files (init's own half-built shadow pair) — a
+  // caller-chosen destination, so a write; exported only so its keep-what-existed rule is tested.
+  ["db-runner.mjs", { writes: ["runDb", "discardCreated"], sanctioned: [], inert: ["USAGE"] }],
   // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
   // the loader that goes through it.
   ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity"], sanctioned: [],
@@ -942,7 +944,10 @@ const SEAM_WRITE_PROVIDERS = new Map([
         "resolveReadStorage", "withReadStorage",
         // BLZ-668: `blaze db init`/`seed-counter` open Postgres through the resolver's own
         // checked open, and name the target in refusals. A client connect and a string — no fs.
-        "openCheckedPg", "describePgTarget"] }],
+        "openCheckedPg", "describePgTarget",
+        // BLZ-690: `blaze db status`'s opener — a read-only (immutable / mode=ro) SQLite open, no
+        // mkdir, no WAL switch, no -wal/-shm. Reaches no write.
+        "openShadowReadOnly"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
@@ -1027,11 +1032,15 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // documents to its caller, and the import it feeds writes through BLZ-629's
   // `applyImport` and the injected write port, unchanged. The day it grows a
   // writer, that pin reddens and this comment is where to look.
-  ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
+  // BLZ-690: `canonicalStrict` is exported for `blaze db verify`'s extras comparison — a pure
+  // type-preserving stable-stringify, no fs in it.
+  ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "canonicalStrict", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
   ["supervisor.mjs", { writes: ["createApp", "startSupervisor"], sanctioned: [], inert: ["activityScript", "SHA_RE", "SUPERVISOR_HOST", "SUPERVISOR_SCOPES", "newFindingEvents", "newForgeErrorEvents", "newRunErrorEvent", "supervisorScopeFor"] }],
-  ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml"] }],
+  // BLZ-690: `viewEnabled` is the configured-views rule — it reads the board config (memoised
+  // `loadConfig`) and writes nothing.
+  ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml", "viewEnabled"] }],
   ["reconcile.mjs", { writes: ["buildBranchMap", "reconcile"], sanctioned: [],
     inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
       "idsFromSubject", "claimCorroborated", "prTitleClaim", "betterPr", "buildPrMap",

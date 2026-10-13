@@ -7,18 +7,23 @@
 // Each Postgres test gets its OWN scratch database. Run with --test-concurrency=1.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
-import { corpusRows, relationRows, loadCorpus, loadCorpusAsync } from "../scripts/migrate/load-corpus.mjs";
+import { corpusRows, relationRows, loadCorpus, loadCorpusAsync, verifyDiffRows } from "../scripts/migrate/load-corpus.mjs";
+import { buildTransitions } from "../scripts/model/transitions.mjs";
+import { shadowDbPath, openShadow, sqliteExec } from "../scripts/model/write-port-resolve.mjs";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
-import { sqliteExec } from "../scripts/model/write-port-resolve.mjs";
 import { postgresReader } from "../scripts/model/pg-storage.mjs";
 import { writeClaim } from "../scripts/model/claims.mjs";
-import { runDb } from "../scripts/db-runner.mjs";
+import { runDb, discardCreated } from "../scripts/db-runner.mjs";
 import { dbBoard } from "./helpers/db-board.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 import { PG, PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+
+const scratch = scratchRegistry();
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const pgHost = () => escapeRegExp(new URL(PG).hostname);
@@ -62,6 +67,23 @@ test("corpusRows builds once: repeated labels collapse, a dropped worklog is nam
   assert.equal(two.links.length, 2, "dangling is decided by the executor, against what loaded");
   assert.deepEqual([...maxNum], [["ENG", 2]]);
   assert.equal(report.tickets, 0, "the builder inserts nothing, so it counts no loaded ticket");
+  assert.deepEqual(report.collapsed, { labels: 1, components: 0 }, "the repeated x is counted, not just dropped");
+});
+
+test("relationRows counts a repeated link it collapses", () => {
+  const t = (id, links) => ({ id, parent: "", links });
+  const rel = relationRows([t("A-1", [{ type: "Blocks", target: "A-2" }, { type: "Blocks", target: "A-2" }]), t("A-2", [])],
+                           new Map([["A-1", "task"], ["A-2", "task"]]));
+  assert.equal(rel.links.length, 1);
+  assert.equal(rel.duplicateLinks, 1);
+});
+
+test("verifyDiffRows: every row the load dropped or collapsed — each one a value diff in verify", () => {
+  const tally = { danglingParents: 1, danglingLinks: 2, duplicateLinks: 1,
+                  skipped: { worklogDropped: [{}, {}, {}] }, collapsed: { labels: 4, components: 5 } };
+  assert.deepEqual(verifyDiffRows(tally),
+    { danglingParents: 1, danglingLinks: 2, duplicateLinks: 1, worklogDropped: 3, labels: 4, components: 5, total: 16 });
+  assert.equal(verifyDiffRows({ skipped: { worklogDropped: [] } }).total, 0);
 });
 
 test("relationRows links only what loaded: a dangling link and parent are counted, never forged", () => {
@@ -93,13 +115,59 @@ test("the two executors cannot drift: async over SQLite tallies exactly what the
   const drop = ({ criteria, notes, acHeadings, ...rest }) => rest;
   assert.deepEqual(drop(b), drop(a));
   assert.deepEqual([...typeById.keys()].sort(), ["ENG-1", "ENG-2"]);
-  for (const t of ["ticket", "ticket_link", "ticket_label", "worklog_entry"]) {
-    assert.equal(db.prepare(`SELECT count(*) n FROM ${t}`).get().n, sync.prepare(`SELECT count(*) n FROM ${t}`).get().n, t);
+  // Row VALUES, not just counts: two executors that inserted the same number of rows with a
+  // different value in one of them have drifted. `ac_heading` is the derived AC index the async
+  // executor leaves empty (below); worklog's `id` is an autoincrement surrogate.
+  const rows = (h, sql) => h.prepare(sql).all().map((r) => ({ ...r }));
+  const cols = (h, table, skip) => h.prepare(`SELECT name FROM pragma_table_info('${table}')`).all()
+    .map((r) => r.name).filter((c) => !skip.includes(c));
+  for (const [table, skip, order] of [["ticket", ["ac_heading"], "id"],
+                                      ["ticket_link", [], "src_id, link_type, target_id"],
+                                      ["ticket_label", [], "ticket_id, ord"],
+                                      ["ticket_component", [], "ticket_id, ord"],
+                                      ["worklog_entry", ["id"], "ticket_id, on_date, minutes"]]) {
+    const sql = `SELECT ${cols(sync, table, skip).join(", ")} FROM ${table} ORDER BY ${order}`;
+    assert.deepEqual(rows(db, sql), rows(sync, sql), table);
   }
+  assert.ok(rows(sync, "SELECT * FROM ticket").length === 2 && rows(sync, "SELECT * FROM worklog_entry").length === 1,
+    "the comparison above compared real rows, not two empty tables");
   assert.equal(db.prepare("SELECT count(*) n FROM acceptance_criterion").get().n, 0,
     "the async executor leaves the derived AC index empty (spec §5.2)");
   assert.equal(sync.prepare("SELECT count(*) n FROM acceptance_criterion").get().n, 1);
   assert.equal(b.labels, 2, "x, y — the repeated x is not a row and is not counted");
+});
+
+/** A real node:sqlite handle whose statements throw when `failWhen(sql, args)` says so. */
+function failingDb(failWhen) {
+  const db = new DatabaseSync(":memory:");
+  db.exec(SQLITE_PRAGMAS); db.exec(SQLITE_DDL);
+  return { db, handle: {
+    exec: (sql) => db.exec(sql),
+    prepare(sql) {
+      const st = db.prepare(sql);
+      return { run: (...args) => { if (failWhen(sql, args)) throw new Error("injected refusal"); return st.run(...args); },
+               get: (...a) => st.get(...a), all: (...a) => st.all(...a) };
+    },
+  } };
+}
+
+test("sync loadCorpus: a ticket whose LABEL is refused goes whole — no half-loaded ticket row", () => {
+  const { projectsDir } = board();
+  const { db, handle } = failingDb((sql, args) => /INTO ticket_label/.test(sql) && args[0] === "ENG-2");
+  const r = loadCorpus(handle, projectsDir, { today: "2026-10-05" });
+  assert.deepEqual(r.skipped.insertFailed.map((f) => f.id), ["ENG-2"]);
+  assert.equal(r.tickets, 1);
+  assert.deepEqual(db.prepare("SELECT id FROM ticket").all().map((x) => x.id), ["ENG-1"],
+    "ENG-2's ticket row rolled back with its refused label (a savepoint per ticket)");
+  assert.equal(db.prepare("SELECT count(*) n FROM worklog_entry").get().n, 0);
+});
+
+test("sync loadCorpus: a failure outside the per-ticket savepoint rolls the whole load back", () => {
+  const { projectsDir } = board();
+  const { db, handle } = failingDb((sql) => /project_counter/.test(sql));
+  assert.throws(() => loadCorpus(handle, projectsDir, { today: "2026-10-05" }), /injected refusal/);
+  assert.equal(db.isTransaction, false, "no transaction left open on the handle");
+  assert.equal(db.prepare("SELECT count(*) n FROM ticket").get().n, 0);
 });
 
 test("an unknown dialect is refused before anything runs", async () => {
@@ -121,6 +189,8 @@ test("acceptance: init → load → the reader holds the board; the counter foll
     assert.match(c.text(), /links\s+1/);
     assert.match(c.text(), /dangling links dropped: 1/);
     assert.match(c.text(), /worklog entries dropped: 1/);
+    assert.match(c.text(), /repeated labels\/components collapsed: 1/);
+    assert.match(c.text(), /3 row\(s\) above were dropped or collapsed — 'blaze db verify' will report up to 3 value difference\(s\)/);
     assert.match(c.text(), /ENG\s+9 → 9/, "init already seeded 9 from the claim; load keeps it");
     assert.match(c.text(), /blaze db verify/);
 
@@ -160,11 +230,45 @@ test("a second load is REFUSED and changes nothing; --replace reloads and never 
 
     const rep = capture();
     assert.equal(await runDb(["load", "--replace"], { ...rep.io, roots, ...pgIo(db.url) }), 0, rep.text());
-    assert.match(rep.text(), /--replace: the previous tickets were erased first/);
+    assert.match(rep.text(), /--replace: the previous 2 ticket\(s\) were erased first/);
     assert.equal(await count(db.url, "SELECT count(*) n FROM ticket"), 2);
     assert.equal(await count(db.url, "SELECT count(*) n FROM ticket_link"), 1);
     assert.equal(await count(db.url, "SELECT n FROM project_counter WHERE project_key = 'ENG'"), 40,
       "a number already issued is never issued again — --replace does not reset the counter");
+  } finally { await db.drop(); }
+});
+
+test("--replace on an EMPTY database says nothing was erased", PG_SKIP, async () => {
+  const db = await scratchPgDb("replaceempty");
+  try {
+    const roots = board();
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    const c = capture();
+    assert.equal(await runDb(["load", "--replace"], { ...c.io, roots, ...pgIo(db.url) }), 0, c.text());
+    assert.doesNotMatch(c.text(), /were erased/);
+    assert.match(c.text(), /--replace: the database held no tickets — nothing to erase/);
+  } finally { await db.drop(); }
+});
+
+test("the git history is read BEFORE the load's transaction opens", PG_SKIP, async () => {
+  const db = await scratchPgDb("buildfirst");
+  try {
+    const roots = board();
+    assert.equal(await runDb(["init"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    const order = [];
+    const io = {
+      ...pgIo(db.url),
+      openPostgresClient: async (url) => {
+        const cl = await pgClient(url);
+        const query = cl.query.bind(cl);
+        cl.query = (text, ...rest) => { if (/^\s*BEGIN/i.test(String(text))) order.push("BEGIN"); return query(text, ...rest); };
+        return cl;
+      },
+      buildTransitions: (opts) => { order.push("build"); return buildTransitions(opts); },
+    };
+    const c = capture();
+    assert.equal(await runDb(["load"], { ...c.io, roots, ...io }), 0, c.text());
+    assert.deepEqual(order, ["build", "BEGIN"], "a git walk must not hold the transaction open");
   } finally { await db.drop(); }
 });
 
@@ -241,3 +345,52 @@ test("load refuses a SQLite board, a database with no schema, and BLAZE_READONLY
     assert.match(ro.text(), /read-only mode \(BLAZE_READONLY=1\) — refusing to run blaze db load/);
   } finally { await db.drop(); }
 });
+
+test("SQLite init: a failed transition import is named, and the half-built shadow it CREATED is removed", async () => {
+  const roots = board();
+  const blaze = join(roots.dataRoot, ".blaze");
+  mkdirSync(blaze, { recursive: true });
+  writeFileSync(join(blaze, "state.json"), "{}\n");          // pre-existing, not init's: must survive
+  const c = capture();
+  const exploding = { head: "x", get transitions() { throw new Error("injected transitions failure"); } };
+  assert.equal(await runDb(["init"], { ...c.io, roots, buildTransitions: () => exploding }), 1, c.text());
+  assert.match(c.text(), /importing the git history failed: injected transitions failure/);
+  assert.match(c.text(), /removed the shadow database and config namespace this run created/);
+  assert.equal(existsSync(shadowDbPath(roots.dataRoot)), false, "no half-built shadow left for BLAZE_WRITE_PORT=dual");
+  assert.equal(existsSync(join(blaze, "config.db")), false);
+  assert.equal(readFileSync(join(blaze, "state.json"), "utf8"), "{}\n", "a file init did not create is untouched");
+  await assert.rejects(openShadow(roots.dataRoot), /no shadow database/, "dual mode cannot open it");
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0, "and a plain re-run (no --force) succeeds");
+});
+
+test("discardCreated removes only what did not exist before", () => {
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blz690-discard-")));
+  const made = join(dir, "made.db"), kept = join(dir, "kept.db");
+  writeFileSync(kept, "old");
+  const existed = new Map([[made, false], [kept, true]]);
+  writeFileSync(made, "new"); writeFileSync(kept, "overwritten?");
+  assert.deepEqual(discardCreated(existed), [made]);
+  assert.equal(existsSync(made), false);
+  assert.equal(existsSync(kept), true, "a pre-existing file is never deleted");
+});
+
+test("SQLite init names what it dropped and collapsed as the Postgres load does, and refusals as whole tickets", async () => {
+  const roots = board();
+  // A repeated link, and a ticket the CHECK refuses (lower-case id under ENG).
+  writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-3-dup.md"),
+    ["---", "id: ENG-3", "title: dup", "type: task", "project: ENG", "estimate: 30",
+     "links:", "  - { type: Blocks, target: ENG-1 }", "  - { type: Blocks, target: ENG-1 }",
+     "---", "", "x", ""].join("\n"));
+  mkdirSync(join(roots.projectsDir, "ENG", "done"), { recursive: true });
+  writeFileSync(join(roots.projectsDir, "ENG", "done", "eng-7-bad.md"),
+    ["---", "id: eng-7", "title: bad", "type: task", "project: ENG", "---", "", "x", ""].join("\n"));
+  const c = capture();
+  assert.equal(await runDb(["init"], { ...c.io, roots }), 0, c.text());
+  assert.match(c.text(), /repeated links collapsed: 1/);
+  assert.match(c.text(), /repeated labels\/components collapsed: 1/);
+  assert.match(c.text(), /worklog entries dropped: 1/);
+  assert.match(c.text(), /4 row\(s\) above were dropped or collapsed — the shadow now holds up to 4 value difference\(s\)/);
+  assert.match(c.text(), /ticket\(s\) refused \(whole ticket rolled back\): 1/);
+  assert.doesNotMatch(c.text(), /rows the database refused/);
+});
+
