@@ -727,7 +727,7 @@ was a zero `diff -r` against that script's output for the live board.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--project <KEY>` | One project only. | every project in `blaze.config.json` |
+| `--project <KEY>` | One project only. The key must be one `blaze.config.json` lists or the store holds; anything else (a typo, the wrong case) is refused with exit `1`, naming the known projects, and nothing is written or checked. | every project in `blaze.config.json` |
 | `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
 | `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
 
