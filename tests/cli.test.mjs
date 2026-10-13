@@ -302,16 +302,29 @@ test("BLZ-639: cli.mjs's final process.exit routes the spawn result through exit
     "cli.mjs's final process.exit must use exitCodeForSpawn(r), not a bare r.status ?? 0");
 });
 
-// BLZ-679: `blaze db verify` only reads, so BLAZE_READONLY must not refuse it at dispatch —
-// but it is the ONLY db verb that passes; every other spelling is still refused.
-test("BLAZE_READONLY=1: `db verify` is not refused at dispatch, `db load` still is", () => {
+// BLZ-679 / BLZ-690: `blaze db verify` and `blaze db status` only read, so BLAZE_READONLY must
+// not refuse them at dispatch — they are the ONLY db verbs that pass; every other is refused.
+test("BLAZE_READONLY=1: `db verify` and `db status` are not refused at dispatch, `db load` still is", () => {
   const env = { ...process.env, BLAZE_READONLY: "1" };
   const refusal = /refusing to run a mutating command/;
-  const verify = spawnSync(process.execPath, [cli, "db", "verify"], { encoding: "utf8", env });
-  assert.doesNotMatch(verify.stderr, refusal, verify.stderr);
-  for (const sub of ["load", "init", "seed-counter", "status"]) {
+  for (const sub of ["verify", "status"]) {
+    const r = spawnSync(process.execPath, [cli, "db", sub], { encoding: "utf8", env });
+    assert.doesNotMatch(r.stderr, refusal, `${sub}: ${r.stderr}`);
+  }
+  for (const sub of ["load", "init", "seed-counter"]) {
     const r = spawnSync(process.execPath, [cli, "db", sub], { encoding: "utf8", env });
     assert.equal(r.status, 1, `${sub}: ${r.stderr}`);
     assert.match(r.stderr, refusal, sub);
+  }
+});
+
+// BLZ-690: the read-only exemption is decided by the db VERB (the first positional), not by the
+// word appearing anywhere — `blaze db load verify` is a load, and dispatch must refuse it.
+test("BLAZE_READONLY=1: a mutating db verb is refused at dispatch even with `verify`/`status` later on the line", () => {
+  const env = { ...process.env, BLAZE_READONLY: "1" };
+  for (const args of [["load", "verify"], ["init", "status"], ["--replace", "load", "status"]]) {
+    const r = spawnSync(process.execPath, [cli, "db", ...args], { encoding: "utf8", env });
+    assert.equal(r.status, 1, `${args.join(" ")}: ${r.stderr}`);
+    assert.match(r.stderr, /refusing to run a mutating command: db/, args.join(" "));
   }
 });

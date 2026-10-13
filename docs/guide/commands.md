@@ -773,6 +773,10 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 | `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value (unknown frontmatter keys included), the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 
+`verify` and `status` only read, so both run under `BLAZE_READONLY=1`; `init`, `seed-counter` and
+`load` are refused. The exemption is decided by the subcommand itself — `blaze db load verify` is
+still a load, and still refused.
+
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 
 1. Stop the supervisor and every other writer (`blaze new`, `blaze import`, the groomer, any

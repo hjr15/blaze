@@ -50,9 +50,10 @@ function dbConfigOr(ctx) {
 
 /**
  * BLZ-668: the per-runner BLAZE_READONLY guard every mutating runner carries (AGENTS.md), for a
- * direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. Called by `init` and
- * `seed-counter` AFTER the config is resolved (a bad project key is still named first, as in
- * the other runners) and BEFORE anything is opened or written. `status` only reads.
+ * direct `node db-runner.mjs` that bypasses cli.mjs's dispatch gate. Called by `init`,
+ * `seed-counter` and `load` AFTER the config is resolved (a bad project key is still named
+ * first, as in the other runners) and BEFORE anything is opened or written. `status` and
+ * `verify` only read, so they carry none — and cli.mjs's `readOnlyVerbs` lets both through.
  */
 function writableOr(ctx, what) {
   try { assertWritable(`run blaze db ${what}`, ctx.env); return true; }
