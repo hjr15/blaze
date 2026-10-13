@@ -168,13 +168,14 @@ const estimateOf = (roots, id) => {
   try { return rs.getTicket(null, id).found.frontmatter.estimate; } finally { rs.close(); }
 };
 
-/** A db-mode board (SQLite shadow) with a member's token, and the server over it. */
-async function dbServer(role = "member") {
+/** A db-mode board (SQLite shadow) with a member's token, and the server over it. `port`
+ *  is the BLAZE_WRITE_PORT the server runs ("dual" for the soak mode). */
+async function dbServer(role = "member", port = "db") {
   const roots = dbBoard();
   assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
   const { token } = await addUser(roots.dataRoot, { email: "m@example.com", role });
   const before = process.env.BLAZE_WRITE_PORT;
-  process.env.BLAZE_WRITE_PORT = "db";
+  process.env.BLAZE_WRITE_PORT = port;
   const { server, base } = await serve(roots);
   const stop = () => {
     server.close();
@@ -226,5 +227,54 @@ test("db mode: POST /api/new with no credential → 401; with a read-scope token
     assert.equal(viewer.status, 403);
     assert.match((await viewer.json()).errors[0], /does not carry the 'write' scope/);
     assert.equal(has("ENG-2"), false);
+  } finally { stop(); }
+});
+
+test("BLZ-691: db mode — POST /api/new carries labels, priority and components onto the row", async () => {
+  const { roots, token, base, stop } = await dbServer();
+  try {
+    const r = await post(base, "/api/new", { project: "ENG", type: "task", title: "labelled", estimate: 30,
+                                             priority: "high", labels: ["alpha", "beta"], components: ["core"] }, token);
+    const body = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(body));
+    const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+    try {
+      const fm = rs.getTicket(null, body.id).found.frontmatter;
+      assert.deepEqual([fm.priority, fm.labels, fm.components], ["high", ["alpha", "beta"], ["core"]]);
+    } finally { rs.close(); }
+  } finally { stop(); }
+});
+
+test("BLZ-691: BLAZE_READONLY=1 refuses POST /api/new and /api/link with a 403 — nothing allocated, nothing linked", async () => {
+  const { roots, token, base, stop, has } = await dbServer();
+  const before = process.env.BLAZE_READONLY;
+  process.env.BLAZE_READONLY = "1";
+  try {
+    for (const [path, body] of [["/api/new", { project: "ENG", type: "task", title: "ro", estimate: 30 }],
+                                ["/api/link", { id: "ENG-1", type: "Relates", target: "ENG-1" }]]) {
+      const r = await post(base, path, body, token);
+      assert.equal(r.status, 403, path);
+      assert.match((await r.json()).errors[0], /read-only mode \(BLAZE_READONLY=1\)/, path);
+    }
+    assert.equal(has("ENG-2"), false);
+    const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+    try { assert.deepEqual(rs.getTicket(null, "ENG-1").found.frontmatter.links ?? [], []); } finally { rs.close(); }
+    if (before === undefined) delete process.env.BLAZE_READONLY; else process.env.BLAZE_READONLY = before;
+    const ok = await post(base, "/api/new", { project: "ENG", type: "task", title: "rw", estimate: 30 }, token);
+    assert.equal((await ok.json()).id, "ENG-2", "the read-only refusals consumed no number");
+  } finally {
+    if (before === undefined) delete process.env.BLAZE_READONLY; else process.env.BLAZE_READONLY = before;
+    stop();
+  }
+});
+
+test("BLZ-691: dual mode — POST /api/new is refused 409 like a file board, before anything is allocated", async () => {
+  const { roots, token, base, stop, has } = await dbServer("member", "dual");
+  try {
+    const r = await post(base, "/api/new", { project: "ENG", type: "task", title: "dual", estimate: 30 }, token);
+    assert.equal(r.status, 409);
+    assert.match((await r.json()).errors[0], /POST \/api\/new needs the database write port \(BLAZE_WRITE_PORT=db\)/);
+    assert.equal(has("ENG-2"), false);
+    assert.equal(existsSync(join(roots.projectsDir, "ENG", "defined", "ENG-2-dual.md")), false);
   } finally { stop(); }
 });

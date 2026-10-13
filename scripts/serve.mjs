@@ -813,6 +813,14 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       // not ambient, and that is what lets a CLI on another machine write over HTTP. The whole
       // rule, and why each condition is there, is `csrfRequired`'s docblock in
       // scripts/model/serve-auth.mjs (ADR-0013's addendum); do not re-derive it from here.
+      //
+      // BLZ-691 — A NOTE FOR THE NEXT POST ROUTE. This branch is also reached by a POST to a
+      // path OUTSIDE /api/*, and those never went through `gate()` above (only /api/* and the
+      // page routes do). `csrfRequired` trusts that the gate has already judged the bearer
+      // token; for an ungated path it has not, so ANY `Authorization: Bearer x` string earns the
+      // exemption. Harmless today — every handler below is under /api/, and anything else ends
+      // in the 404 — but a POST route added here outside /api/ would be both unauthenticated
+      // AND CSRF-exempt. Put a new POST route under /api/ and classify it in ROUTE_SCOPES.
       if (csrfRequired({ headers: req.headers, store }) && req.headers["x-blaze-csrf"] !== CSRF) {
         return json(403, { errors: ["bad csrf token"] });
       }
