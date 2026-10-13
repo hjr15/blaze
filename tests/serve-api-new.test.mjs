@@ -263,6 +263,7 @@ test("BLZ-691: BLAZE_READONLY=1 refuses POST /api/new and /api/link with a 403 â
     const ok = await post(base, "/api/new", { project: "ENG", type: "task", title: "rw", estimate: 30 }, token);
     assert.equal((await ok.json()).id, "ENG-2", "the read-only refusals consumed no number");
   } finally {
+    // Repeats the in-body restore for the failure path: an assertion above throws before it.
     if (before === undefined) delete process.env.BLAZE_READONLY; else process.env.BLAZE_READONLY = before;
     stop();
   }

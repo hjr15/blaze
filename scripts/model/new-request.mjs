@@ -1,6 +1,7 @@
 // scripts/model/new-request.mjs — the network boundary of `POST /api/new` and the remote
 // refusals (BLZ-684). Pure, so it is unit-tested apart from a server, and run by `serve.mjs`
 // BEFORE any id is allocated.
+import { realpathSync } from "node:fs";
 import { slugify } from "./storage.mjs";
 
 /** The longest title `POST /api/new` accepts, in characters (Unicode code points, not UTF-16
@@ -87,15 +88,26 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
  *  an absolute path in `refusing to overwrite /srv/…/projects/ENG/…` is reduced to its
  *  `projects/…` tail. BLZ-691: the board's REAL `projectsDir` is reduced the same way —
  *  `/srv/board/tickets/ENG/…` reads `projects/ENG/…` — so a projects directory that is not
- *  named `projects` does not leak either. Only that directory itself or a path under it is
- *  replaced, never a sibling whose name merely starts the same. */
+ *  named `projects` does not leak either, and neither does its `realpath` when the configured
+ *  path is a symlink. Matched only where a path STARTS (start of text, after whitespace, a
+ *  quote, `(`, `[` or a backtick — never inside `/mnt/srv/…`) and where the directory ENDS (end
+ *  of text, a separator, whitespace, a quote, a bracket, `,` `:` `;` a backtick, or a `.` that
+ *  ends the sentence) — never a sibling such as `tickets-old` or `tickets.bak`. */
 export function withoutServerPaths(errors, { projectsDir = null } = {}) {
-  const dir = projectsDir ? String(projectsDir).replace(/[\\/]+$/, "") : "";
-  const escaped = dir.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
-  const real = dir ? new RegExp(`${escaped}(?=$|[\\\\/\\s"')])`, "g") : null;
+  const real = projectsDirPattern(projectsDir);
   return errors.map((e) => {
     let s = String(e);
     if (real) s = s.replace(real, "projects");
     return s.replace(/(^|[\s"'(])\/\S*?\/(projects\/)/g, "$1$2");
   });
+}
+
+function projectsDirPattern(projectsDir) {
+  const dir = projectsDir ? String(projectsDir).replace(/[\\/]+$/, "") : "";
+  if (!dir) return null;
+  const dirs = new Set([dir]);
+  try { dirs.add(realpathSync(dir).replace(/[\\/]+$/, "")); } catch { /* absent or unreadable: the configured path alone */ }
+  const alts = [...dirs].filter(Boolean).sort((a, b) => b.length - a.length)
+    .map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`(?<=^|[\\s"'(\\[\`])(?:${alts.join("|")})(?=$|[\\\\/\\s"'()\\[\\],:;\`]|\\.(?![\\w-]))`, "g");
 }
