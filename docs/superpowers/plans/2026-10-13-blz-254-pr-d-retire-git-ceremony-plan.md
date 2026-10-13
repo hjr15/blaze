@@ -139,3 +139,532 @@ Why none of this weakens the guard:
 - The two removed fixtures named a module that no longer exists, so they can prove nothing.
 
 ---
+## Task order and routing
+
+Consumers first and modules last, so every commit is green:
+
+| # | Task | Implementer | Reviewer |
+|---|---|---|---|
+| 1 | reconcile and the supervisor feed stop committing | **opus** (two 1,000-line oracles are reworked) | opus |
+| 2 | the board server stops committing; the page drops its git sentence | **opus** (security-adjacent POST handler, page golden) | opus |
+| 3 | the CLI ticket verbs and `blaze sprint` stop committing | sonnet | opus |
+| 4 | `blaze import` stops staging | sonnet | opus |
+| 5 | `blaze commit` and `blaze publish` are removed, with a named refusal | sonnet | opus |
+| 6 | delete the ceremony modules; `commit-lock.mjs` → `dir-lock.mjs` | **opus** (seam-closure) | opus |
+| 7 | `commitMode` is a removed config key (`SCHEMA_VERSION` 3) | sonnet | opus |
+| 8 | delete `missingClaimErrors` | sonnet | opus |
+| 9 | ADR-0006/0008 addenda, superseded ADRs, the spec amendment, 0.9.0, the docs sweep | sonnet (all text is given here) | opus |
+| 10 | matrices header — **conditional** on blaze-pm retiring `build_matrices.py` | sonnet | opus |
+| 11 | whole-branch verification and the merge-gate record | haiku runs the read-only checks; **opus** does the whole-branch review | — |
+
+Tasks 1–4 are independent of one another in code, but all four edit `tests/model/seam-closure.test.mjs` and two edit `tests/board-overstatement-guards.test.mjs`, so they run **sequentially**. Task 5 needs Task 1 (the oracle no longer spawns `commit-runner.mjs`). Task 6 needs 1–5. Tasks 7–10 need 6. Task 11 is last.
+
+---
+
+### Task 1: reconcile and the supervisor feed stop committing
+
+**Files:**
+- Rename + rewrite: `scripts/reconcile-commit-report.mjs` → `scripts/reconcile-apply-report.mjs` (`git mv`)
+- Modify: `scripts/reconcile.mjs`, `scripts/supervisor.mjs`
+- Modify tests: `tests/board-overstatement-oracle.test.mjs`, `tests/board-overstatement-guards.test.mjs`, `tests/reconcile-change-report-oracle.test.mjs`, `tests/reconcile-feed-truth-oracle.test.mjs`, `tests/reconcile-unfinished-pass.test.mjs`, `tests/reconcile.test.mjs`, `tests/reconcile-project-filter.test.mjs`, `tests/reconcile-pertype.test.mjs`, `tests/reconcile-db-mode.test.mjs`, `tests/model/seam-closure.test.mjs` (ledger rows 2030-2032, 2147-2149)
+- Delete tests: `tests/reconcile-commit-routing.test.mjs` (every test pins how reconcile routed its commit: lock, batch queue, per-op commit, hook failure); `tests/commit-step-attribution.test.mjs` (pins `commitFile`'s `step` field as read by `commitOutcomeFrom`, both deleted)
+- Docs: `docs/guide/commands.md` `## reconcile` (the `--apply` paragraph)
+
+**Interfaces:**
+- Produces: `appliedLine({ mode, movedCount, nonMovedCount }) → string` in `scripts/reconcile-apply-report.mjs`. `reconcile(opts)` takes no `commit`/`stage`/`mode`. It returns `{ ok, changes, pushed, missingRepos, scannedRepos, configuredRepos, forgeErrors, gitErrors, findings, scannedProjects, scopedTickets, dryRun }` (refusals: `+ error`; standalone: `+ standalone: true`), with no `committed`/`commitOutcome`/`commitError`.
+
+- [ ] **Step 1: Write the failing tests.**
+
+In `tests/reconcile-db-mode.test.mjs`, replace the import line `import { stageFor } from "../scripts/commit-or-queue.mjs";` with nothing (delete it), and replace
+
+```js
+  const r = await reconcile({ fetch: false, commit: true, dryRun: false, root: board,
+    writePort, stage: stageFor("db"), mode: "db" });
+```
+
+with
+
+```js
+  const r = await reconcile({ fetch: false, dryRun: false, root: board, writePort });
+```
+
+and replace `  assert.equal(r.commitOutcome, "db");` with
+
+```js
+  // BLZ-254 (spec §5.5): reconcile never commits, so its result carries no commit outcome.
+  for (const k of ["committed", "commitOutcome", "commitError"]) {
+    assert.equal(Object.hasOwn(r, k), false, `reconcile's result still carries \`${k}\``);
+  }
+```
+
+In `tests/reconcile.test.mjs` (the "unrelated dirty file" test, `:265-282`), replace
+
+```js
+    const applied = await reconcile({ dryRun: false, commit: true, root });
+    assert.equal(applied.ok, true);
+    assert.equal(applied.committed, true);
+
+    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
+    assert.doesNotMatch(files, /UNRELATED\.txt/);
+    assert.match(files, /ZZZ-1-.*\.md/);
+```
+
+with
+
+```js
+    const headBefore = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const applied = await reconcile({ dryRun: false, root });
+    assert.equal(applied.ok, true);
+    // BLZ-254 (spec §5.5): the board never commits. The move is in the working tree, HEAD is
+    // where it was, and the unrelated file is untouched beside it.
+    assert.equal(Object.hasOwn(applied, "committed"), false);
+    assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore,
+      "reconcile --apply must not commit");
+    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" });
+    assert.match(dirty, /ZZZ-1-.*\.md/, "the move itself is on disk");
+```
+
+(the existing `assert.match(status, /UNRELATED\.txt/)` after it stays).
+
+In `tests/reconcile-project-filter.test.mjs` ("AC-3: the --apply commit names only the tickets in scope", `:326-349`), rename the test to `"AC-3: an --apply run scoped to INF writes only INF's tickets"` and replace the body between `try {` and `} finally {` with
+
+```js
+      const headBefore = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const r = await reconcile({ root, dryRun: false, projects: ["INF"] });
+      assert.equal(r.ok, true, r.error);
+      // BLZ-254: no commit any more; the scope is read off the working tree instead.
+      assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore,
+        "reconcile --apply must not commit");
+      const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"],
+        { encoding: "utf8" });
+      assert.match(dirty, /INF/, "the run in scope wrote INF's ticket");
+      assert.doesNotMatch(dirty, /OBA/,
+        "a session that owns INF must not write OBA — the ticket in one line");
+```
+
+In the same file, the BLZ-470 test at `:1280-1296`: replace
+
+```js
+      const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+        { encoding: "utf8" });
+      assert.doesNotMatch(files, /projects\/OBA/, "nor committed");
+```
+
+with
+
+```js
+      const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"],
+        { encoding: "utf8" });
+      assert.doesNotMatch(dirty, /projects\/OBA/, "nor written");   // BLZ-254: nothing is committed
+```
+
+In `tests/reconcile-pertype.test.mjs` (`:93-130`), replace `const r = await reconcile({ fetch: false, commit: true, dryRun: false, root });` with `const r = await reconcile({ fetch: false, dryRun: false, root });`, and replace the block from `  // (2) git log: a commit really exists, …` through `"the applied run must leave the board's tree fully committed");` with
+
+```js
+  // (2) git log: BLZ-254 (spec §5.5) — an applied run makes NO commit; the move is in the
+  // working tree for the operator to version.
+  const commitsAfter = Number(execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"],
+    { encoding: "utf8" }).trim());
+  assert.equal(commitsAfter, commitsBefore, "an applied run must not commit");
+  const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"],
+    { encoding: "utf8" });
+  assert.match(dirty, /OBA-1/, `the move must be in the working tree, status was ${JSON.stringify(dirty)}`);
+```
+
+and change the next message from `"an applied, committing run must still never report a push"` to `"an applied run must still never report a push"`. Also update the BLZ-423 comment above it: its "really committed" sentence becomes "really applied (and, since BLZ-254, made no commit)".
+
+- [ ] **Step 2: Run them and watch them fail.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reconcile-db-mode.test.mjs tests/reconcile.test.mjs tests/reconcile-project-filter.test.mjs tests/reconcile-pertype.test.mjs
+```
+
+Expected: FAIL. `reconcile-db-mode` fails with "reconcile's result still carries `committed`"; `reconcile.test`, `reconcile-pertype` and the AC-3 test fail with "must not commit" (HEAD moved).
+
+- [ ] **Step 3: Replace the report module.**
+
+```bash
+git mv scripts/reconcile-commit-report.mjs scripts/reconcile-apply-report.mjs
+```
+
+Overwrite `scripts/reconcile-apply-report.mjs` with:
+
+```js
+// scripts/reconcile-apply-report.mjs — the one line `blaze reconcile --apply` prints for the
+// writes it made.
+//
+// BLZ-254 (spec §5.5): reconcile no longer commits. Until then its writes went through
+// `commitOrQueue`, and this module (as reconcile-commit-report.mjs, BLZ-404/BLZ-422)
+// classified seven commit outcomes — committed, no-op, queued, locked, failed, db, none —
+// each with its own wording and exit code. The board never commits now, so there is one
+// outcome per store and nothing to classify: the files changed (fs, dual), or the rows did (db).
+//
+// The two-quantity rule is unchanged (BLZ-401, BLZ-447). This is a WRITE-RECORD surface, so
+// it says "N ticket(s) updated without a status change", never the preview's "other
+// update(s)", and a quantity that is zero is not stated at all.
+export function appliedLine({ mode, movedCount, nonMovedCount }) {
+  const suffix = nonMovedCount
+    ? `, ${nonMovedCount} ticket(s) updated without a status change`
+    : "";
+  if (mode === "db") return `reconcile: ${movedCount} ticket(s) moved${suffix} in the database.`;
+  return `reconcile: ${movedCount} ticket(s) moved${suffix} in the board's files — `
+    + "reconcile makes no git commit.";
+}
+```
+
+- [ ] **Step 4: Strip the commit block from `scripts/reconcile.mjs`.**
+
+1. Imports. Delete `import { commitOrQueue, stageFor } from "./commit-or-queue.mjs";` (`:29`), and replace `import { commitOutcomeFrom, applySummary } from "./reconcile-commit-report.mjs";` (`:31`) with `import { appliedLine } from "./reconcile-apply-report.mjs";`.
+2. Signature (`:1852-1862`). Replace
+
+   ```js
+     fetch = false, commit = false, dryRun = true, root, projectsDir,
+   ```
+
+   with `  fetch = false, dryRun = true, root, projectsDir,`. Then replace the whole `// BLZ-670: \`stage\` is how this pass files its writes …` comment and its `  stage = commitOrQueue, mode,` line with:
+
+   ```js
+     // BLZ-254 (spec §5.5): `commit`, `stage` and `mode` are gone. They existed only to file this
+     // pass's writes into git (BLZ-404, BLZ-670), and the board never commits now.
+   ```
+3. Every early `return { … }` in `reconcile()` (`:1910-2030`, eight sites). Delete the three keys `committed: false,`, `commitOutcome: "none",` and `commitError: null,` from each object, and re-wrap the line so it stays under the file's ~100-column habit. When done, `rg -n 'committed:|commitOutcome|commitError' scripts/reconcile.mjs` prints only comment lines.
+4. `touched`. Delete `  const touched = [];` (`:2037`). In the write branch (`:2414-2421`), replace
+
+   ```js
+         if (d.moved) {
+           const { file: dest } = await port.move(target);
+           touched.push(t.file);
+           if (dest !== t.file) touched.push(dest);
+         } else {
+           const { file } = await port.write(target);
+           touched.push(file);
+         }
+   ```
+
+   with
+
+   ```js
+         // BLZ-254: nothing collects the written paths any more — they were the commit's pathspec.
+         if (d.moved) await port.move(target);
+         else await port.write(target);
+   ```
+5. The commit block (`:2455-2522`). Delete from `  let committed = false;` through the closing `  }` of `if (commit && !dryRun && touched.length) { … }`, inclusive, and put in its place:
+
+   ```js
+     // BLZ-254 (spec §5.5): the commit block that stood here is deleted. Since BLZ-404 it routed
+     // this pass's writes through commitOrQueue (a per-op commit, a batch-queue entry, or a lock
+     // refusal) and reported which as `commitOutcome`. The board never commits now: in fs mode the
+     // files changed and the operator versions them; in db mode the rows did.
+   ```
+6. The return (`:2552`). Replace `  return { ok: true, changes, committed, commitOutcome, commitError, pushed,` with `  return { ok: true, changes, pushed,`.
+7. The CLI (`:2628-2636`). Replace
+
+   ```js
+       r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
+   ```
+
+   with `    r = await reconcile({ fetch: fetchFlag, dryRun: !apply,`, and replace `      stage: stageFor(ports.mode), mode: ports.mode });` with `      });`. Keep the `readStorage`/`writePort` line above it, so the call becomes `…, readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,\n      });`.
+8. The CLI's apply tail (`:2777-2799`). Replace from `  // BLZ-404 (review finding 1): the CLI's own commit block is the same code path the` to the end of the `if (apply) { … }` block with:
+
+   ```js
+     // BLZ-254: an applied run says what it wrote and where, in the write-record vocabulary
+     // (BLZ-447). There is no commit outcome to report and so no non-zero exit for one.
+     if (apply) console.log(appliedLine({ mode: ports.mode, movedCount, nonMovedCount }));
+   ```
+9. Leave the `BLZ-404 round 5` comment above `if (!r.changes.length)` as it is. Edit its last sentence to read: "… nothing about the state of the git tree, which may be dirty for reasons this pass neither caused nor can see — and, since BLZ-254, is dirty after every applied pass, because reconcile no longer commits."
+
+- [ ] **Step 5: Strip the supervisor's commit feed (`scripts/supervisor.mjs`).**
+
+1. Delete `import { stageFor } from "./commit-or-queue.mjs";` (`:15`).
+2. In `runReconcile` (`:301-303`), replace
+
+   ```js
+         const r = await reconcile({ fetch: true, commit: true, dryRun, root, projectsDir,
+           readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,
+           stage: stageFor(ports.mode), mode: ports.mode });
+   ```
+
+   with
+
+   ```js
+         const r = await reconcile({ fetch: true, dryRun, root, projectsDir,
+           readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null });
+   ```
+3. Delete from the comment `// BLZ-404 (review finding 2): \`grep -n "committed" scripts/supervisor.mjs\` used to` (`:324`) through the closing `}` of `if (r.commitOutcome === "queued") { … }` (`:369`), inclusive. Keep the `BLZ-404 round 5` comment after it. In its place put:
+
+   ```js
+           // BLZ-254 (spec §5.5): the `locked`/`failed` ("DIRTY TREE") and `queued` events that stood
+           // here reported reconcile's commit outcome. Reconcile no longer commits, so there is no
+           // outcome to report: the per-ticket `reconcile` events above are the whole account.
+   ```
+4. Update the `runReconcile` docblock comment (`:285`), "the alternative here is a loop that is inert while its own config asks it to commit", to "… inert while its own config asks it to apply".
+
+- [ ] **Step 6: Rework the two reconcile oracles and the guards file.**
+
+**`tests/reconcile-change-report-oracle.test.mjs`.** The two `commitMode: "batch"` run modes are deleted, and every `--apply` mode now asserts "no commit" and the applied line.
+1. Replace the two constants `COMMITTED_LINE_RE` and `QUEUED_LINE_RE` (`:234-235`) with:
+
+   ```js
+   // BLZ-254: the --apply line (scripts/reconcile-apply-report.mjs, fs arm). It replaced the
+   // committed/queued pair when reconcile stopped committing (spec §5.5).
+   const APPLIED_LINE_RE = /reconcile: (\d+) ticket\(s\) moved(?:, (\d+) ticket\(s\) updated without a status change)? in the board's files — reconcile makes no git commit\./;
+   ```
+2. Delete `COMMIT_SUBJECT_MOVED_RE`, `COMMIT_SUBJECT_NONMOVED_RE` and the BLZ-477 comment above them (`:236-243`). There is no commit subject left to pin.
+3. In `modeBudget` (`:362-376`), replace the last two lines (the `// The commit message's two quantities …` comment through `+ (mode.commit ? (mode.queued ? 0 : 2) + SUMMARY_LINE_CLAUSES : 0);`) with:
+
+   ```js
+       // BLZ-254: an applied run makes no commit (1: HEAD unmoved), then states the two
+       // quantities in its applied line (SUMMARY_LINE_CLAUSES).
+       + (mode.apply ? 1 + SUMMARY_LINE_CLAUSES : 0);
+   ```
+4. In `modes` (`:400-422`), delete the two `commitMode: "batch"` entries and their comments, and delete the `commit: …` key from the remaining three. They become `{ label: "dry-run (unfiltered)", args: [], groundArgs: ["--apply"], apply: false, dryRunTail: true }`, `{ label: "--apply (unfiltered)", args: ["--apply"], apply: true }` and `{ label: "--apply --project ZZZ", args: ["--project", "ZZZ", "--apply"], apply: true }`.
+5. Before the `spawnSync` of each mode, capture `const headBefore = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();`. Then replace the whole `if (mode.commit) { … }` block (`:517-545`) with:
+
+   ```js
+           if (mode.apply) {
+             // BLZ-254 (spec §5.5): an applied run writes the files and makes NO commit.
+             eq(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore,
+               `${mode.label}: reconcile --apply moved HEAD — the board never commits`);
+             assertSummaryLine({ label: mode.label, what: "applied line",
+               re: APPLIED_LINE_RE, text: res.stdout, movedGT, nonMovedGT });
+           }
+   ```
+6. Fix the header comment's mode list and the BLZ-439/BLZ-477 notes that name the queued modes. Say the queued modes were deleted with `commitMode` (BLZ-254).
+
+**`tests/board-overstatement-oracle.test.mjs`.** The commit-outcome dimension goes, and consumers 3 and 4 go with it (they pinned `commitOutcomeFrom`/`applySummary` and `blaze commit`'s subject, both deleted). What remains is 9 shapes × 2 runs × 2 consumers = **36 cells**.
+1. Imports: delete the `commitOutcomeFrom`/`applySummary`, `commitFile`, `commitOrQueue`, `acquireLock`/`releaseLock` and `readEntries`/`sessionId` import lines (`:96-100`). Add `import { isDeepStrictEqual } from "node:util";`.
+2. Delete `const COMMIT_BIN = …` (`:146`) and the whole `applyOutcomeEnv` function and its section comment (`:430-454`).
+3. Replace `const OUTCOMES = [...]` and `const CONSUMERS = [...]` (`:194-196`) with:
+
+   ```js
+   // BLZ-254 (spec §5.5): reconcile no longer commits, so the five commit outcomes this
+   // dimension used to range over (committed / no-op / queued / locked / failed) are gone.
+   // What still distinguishes two runs of `--apply` is whether the board has ALREADY been
+   // applied: a first pass writes what it decides, a second pass on the same tree has
+   // nothing left to decide (BLZ-445's reachable "nothing happened", kept).
+   const RUNS = ["first-apply", "second-apply"];
+
+   // Consumers 3 (commitOutcomeFrom + applySummary) and 4 (`blaze commit`'s subject) are
+   // deleted with the modules they pinned.
+   const CONSUMERS = ["dashboard-toast", "reconcile-cli"];
+   ```
+4. Replace `budgetFor` (`:234-276`) with:
+
+   ```js
+   function budgetFor(shape, run, consumer) {
+     if (consumer === "dashboard-toast") {
+       let n = 1;                                    // (2) git log: a preview never commits
+       if (shape.refused) {
+         n += 3;                                     // says REFUSED / not in-sync / no move count
+       } else {
+         n += shape.moves ? 2 : 1;                   // the move count is right, or absent
+         n += shape.other ? 2 : 1;                   // ditto the non-moving count
+         if (!shape.moves && !shape.other) n += 2;   // BLZ-450: which in-sync wording, and qualified?
+         n += 3;                                     // CLEARED count, findings presence, forge presence
+       }
+       // The wording-invariant clause compares against the FIRST run's text, so it does not
+       // run on that first run.
+       if (run !== RUNS[0]) n += 1;
+       return n;
+     }
+     // reconcile-cli. 1: HEAD never moves (BLZ-254) — on every cell, refused or not.
+     if (shape.refused) return 1 + 3;              // + exit 1 + reason + no applied line
+     let n = 1 + 2;                                // + exit 0 + BLZ-468 forge integrity
+     if (run === "second-apply") return n + 2;     // the first pass wrote iff the shape changes; nothing left
+     return n + (shapeChanges(shape) ? 2 : 1);     // applied line + its moved count, or "nothing to do"
+   }
+   ```
+5. In `assertCellBudget`, rename the `outcome` parameter and messages to `run`. In the main test, replace the three dimension-size assertions and the `CELLS` loop with `RUNS` (size 2), `CONSUMERS` (size 2), `CELLS.length === 36` and the message `"the cross-product must be 9 × 2 × 2 = 36 cells"`. Rename the test to `"BLZ-426 + BLZ-422: no board surface overstates, across the cross-product"` and its sub-tests to `` `${shape.name} × ${run}` ``.
+6. Consumer 1 (dashboard-toast). Delete `const teardown = applyOutcomeEnv(root, outcome);` and the `teardown();` call in its `finally`. Replace `outcome` with `run` in every message. Keep the invariant clause, with its message changed to `` `${shape.name}/${run}: the toast changed wording between two fresh boards — a preview must read identically` ``.
+7. Consumer 2 (reconcile-cli). Replace everything from `const cliRoot = mkdtempSync(join(tmp, \`cli-${shape.name}-${outcome}-\`));` through the consumer's closing `} finally { cliTeardown(); }` with:
+
+   ```js
+             const cliRoot = mkdtempSync(join(tmp, `cli-${shape.name}-${run}-`));
+             const cliProjects = materializeBoard(cliRoot, fixture);
+             const cliCellStart = clauses;   // BLZ-452: this cell's own budget
+             const headBefore = head(cliRoot);
+             let firstWrote = null;
+             if (run === "second-apply") {
+               const snapBefore = snapshotBoard(cliProjects);
+               spawnSync(process.execPath, [RECONCILE_BIN, "--apply", ...shape.cliArgs],
+                 { cwd: cliRoot, encoding: "utf8", env });
+               firstWrote = !isDeepStrictEqual(snapshotBoard(cliProjects), snapBefore);
+             }
+             const res = spawnSync(process.execPath, [RECONCILE_BIN, "--apply", ...shape.cliArgs],
+               { cwd: cliRoot, encoding: "utf8", env });
+             const out = `${res.stdout}\n${res.stderr}`;
+
+             // BLZ-254 (spec §5.5): reconcile never commits — not on a first pass, not on a second,
+             // not on a refusal. `git log` is the ground truth, never the CLI's own words.
+             eq(head(cliRoot), headBefore,
+               `${shape.name}/${run}: reconcile moved HEAD — the board never commits; output was ${JSON.stringify(out)}`);
+
+             if (!shape.refused) {
+               eq(res.status, 0, `${shape.name}/${run}: expected exit 0, got ${res.status} — output was ${JSON.stringify(out)}`);
+               // BLZ-468: the run's own forge account against the fixture's declaration — the clause
+               // that catches a transient `gh` failure emptying this shape's only delivery signal.
+               eq(/^reconcile: FORGE (UNREADABLE|DATA) —/m.test(res.stderr), Boolean(shape.expectForge),
+                 `${shape.name}/${run}: this fixture declares expectForge=${Boolean(shape.expectForge)} but the run ` +
+                 `${/^reconcile: FORGE /m.test(res.stderr) ? "reported" : "reported no"} forge problem — output was ${JSON.stringify(out)}`);
+             }
+
+             if (shape.refused) {
+               eq(res.status, 1, `${shape.name}/${run}: a refused run must exit non-zero`);
+               matches(res.stderr, /^reconcile: /m, `${shape.name}/${run}: a refused run must say why`);
+               notMatches(res.stdout, /ticket\(s\) moved/,
+                 `${shape.name}/${run}: a refused run claimed writes it never made`);
+             } else if (run === "second-apply") {
+               // BLZ-445, kept: the first pass wrote exactly when this board has something to change,
+               // and the second finds nothing at all.
+               eq(firstWrote, shapeChanges(shape),
+                 `${shape.name}/${run}: the FIRST pass must write exactly when this board has something ` +
+                 "to change — otherwise the second pass is not a second pass at all");
+               matches(out, /no code-bound change found — nothing to do\./,
+                 `${shape.name}/${run}: a second pass must report an empty pass — output was ${JSON.stringify(out)}`);
+             } else if (shapeChanges(shape)) {
+               const m = /reconcile: (\d+) ticket\(s\) moved/.exec(res.stdout);
+               ok(m, `${shape.name}/${run}: ${gt.changedIds.length} ticket(s) changed but the CLI printed no applied line — ` +
+                 `output was ${JSON.stringify(out)}`);
+               eq(Number(m[1]), gt.moved,
+                 `${shape.name}/${run}: the applied line's moved count must equal the real one (${gt.moved})`);
+             } else {
+               matches(out, /no code-bound change found — nothing to do\./,
+                 `${shape.name}/${run}: nothing changes on this board, so the run must say so — output was ${JSON.stringify(out)}`);
+             }
+             assertCellBudget(clauses - cliCellStart, shape, run, "reconcile-cli");
+             cellsEvaluated += 1;
+   ```
+
+   Then delete consumers 3 and 4 entirely (from `// CONSUMER 3: commitOutcomeFrom + applySummary …` to just before `rmSync(cliRoot, { recursive: true, force: true });`).
+8. The tail: `cellsEvaluated` is compared with 36, with the message `"every one of the 36 cells must be evaluated"`. The `console.log` label becomes `BLZ-426 + BLZ-422 oracle`.
+9. The header comment. Rewrite the BLZ-422/BLZ-427 bullets and "THE CROSS-PRODUCT" block to describe 9 × 2 × 2 = 36, and add one paragraph headed `BLZ-254` saying what went and why: reconcile stopped committing, `blaze commit` was deleted, and consumers 3–4 and the outcome dimension went with them. Delete the ground-truth sources (2) "whether a commit actually exists" (it is now "that no commit exists") and (3) "the pending-ledger FILE". Keep the BLZ-446 section and the second top-level test **unchanged**.
+
+**`tests/reconcile-feed-truth-oracle.test.mjs`** (the supervisor's applied run, `:437-540`):
+1. Replace the commit-existence block — from the comment `// BLZ-404 (review finding 3): a commit-existence clause, …` through the `eq(boardTreeDirty, "", …);` clause — with:
+
+   ```js
+         // BLZ-254 (spec §5.5): the loop applies and NEVER commits. Ground truth is `git` alone:
+         // the commit count did not move, and the working tree's changed tickets are exactly the
+         // ones the feed published — no move left out of the tree, no write the feed did not name.
+         const commitCountAfter = Number(
+           execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
+         eq(commitCountAfter, commitCountBefore, "applied: the reconcile loop must not commit");
+         const dirtyIds = new Set(execFileSync("git",
+           ["-C", root, "status", "--porcelain", "--untracked-files=all", "--", join(root, "projects", KEY)],
+           { encoding: "utf8" }).split("\n").map((l) => (/(ORC-\d+)/.exec(l) || [])[1]).filter(Boolean));
+         deepEq([...movedIds].filter((id) => !dirtyIds.has(id)), [],
+           "applied: every ticket the filesystem shows as moved must be a working-tree change");
+         const eventIds = new Set(reconcileEvents.map((e) => e.id));
+         deepEq([...dirtyIds].filter((id) => !eventIds.has(id)).sort(), [],
+           "applied: the working tree changed a ticket the feed never published a reconcile event for");
+   ```
+2. Change the budget line to `const budget = groundTruthBudget(before, movedIds) + 6;` (3 non-vacuity + 1 no-commit + 2 tree/feed agreement). Remove `nonMovedGroundTruth` and its comment.
+3. In the header comments (`:29-31`, `:141-142`, `:253-260`), say that `root` is a git repo so that "no commit" can be checked against `git log` (it used to be so that a commit could land).
+4. If `deepEq` is not already defined in this file, use `eq(JSON.stringify(…), "[]", …)` instead, so the clause still goes through a counting wrapper (`grep -n "const deepEq" tests/reconcile-feed-truth-oracle.test.mjs`).
+
+**`tests/reconcile-unfinished-pass.test.mjs`:**
+1. Delete the two describes `"BLZ-404 round 5: the cross-pass dirty-tree detector is deleted — …"` (`:87-243`) and `"BLZ-404 round 2 (blocking 3): the supervisor feed reports 'queued', …"` (`:245-287`). Every test in them pins a commit outcome (lock, hook, batch queue, the "queued" feed event).
+2. Delete the `acquireLock, releaseLock` import (`:34`) and the now-unused `headCount` helper.
+3. In the kept describe, replace both occurrences (use `replace_all`) of
+
+   ```js
+         assert.equal(porcelain(root), "", "test setup: OBA must be fully in sync before ORC is added");
+   ```
+
+   with
+
+   ```js
+         // BLZ-254: reconcile no longer commits — in fs mode the operator versions the files.
+         execFileSync("git", ["-C", root, "add", "-A"]);
+         execFileSync("git", ["-C", root, "commit", "-q", "-m", "operator commits the seed pass"]);
+         assert.equal(porcelain(root), "", "test setup: OBA must be fully in sync before ORC is added");
+   ```
+4. Add a header paragraph: `// BLZ-254: the round-2/round-5 describes are deleted — they pinned reconcile's commit outcomes (locked, failed, queued), and reconcile no longer commits. The --project blast-radius describe is kept; its HEAD clauses now read "reconcile made no commit at all".`
+
+**`tests/board-overstatement-guards.test.mjs`:**
+1. Imports: delete the `commitOutcomeFrom, applySummary, COMMIT_OUTCOMES` line and add `import { appliedLine } from "../scripts/reconcile-apply-report.mjs";`.
+2. In `describe("BLZ-422: …")`, delete the three tests `"reconcile's commit outcome distinguishes no-op from committed"`, `"the no-op's rendered line does not claim a commit"` and `"BLZ-670: a db-mode apply says the moves are in the database, never 'already matched HEAD'"`, and add in their place:
+
+   ```js
+     test("BLZ-254: an applied reconcile names its store and never claims a commit", () => {
+       const fs = appliedLine({ mode: "fs", movedCount: 3, nonMovedCount: 1 });
+       assert.match(fs, /^reconcile: 3 ticket\(s\) moved, 1 ticket\(s\) updated without a status change in the board's files/);
+       assert.match(fs, /makes no git commit/);
+       assert.doesNotMatch(fs, /\bcommitted\b|queued|HEAD/, "the board never commits — no line may say it did");
+       const db = appliedLine({ mode: "db", movedCount: 2, nonMovedCount: 0 });
+       assert.equal(db, "reconcile: 2 ticket(s) moved in the database.");
+       assert.equal(appliedLine({ mode: "dual", movedCount: 1, nonMovedCount: 0 }),
+         appliedLine({ mode: "fs", movedCount: 1, nonMovedCount: 0 }), "dual writes the files, so it reads as fs");
+     });
+   ```
+
+   (The remaining tests in this describe — `commitFile`'s empty-diff no-op and `commitSuffix` — are deleted in Tasks 6 and 3.)
+3. Delete `describe("BLZ-427: \`blaze commit\`'s subject counts tickets and names every op", …)` whole (`:225-373`). It pins `OP_LABEL`, `summarizeEntries`, `commitOrQueue`'s ledger entry and reconcile's ledger entry, which are all deleted. Delete the `OP_LABEL, entryIds, summarizeEntries` and `readEntries, sessionId` imports with it.
+4. In `describe("BLZ-447: …")`:
+   - Replace the loop body of `"the write-record surface says 'N ticket(s) updated without a status change'"` with a loop over `["fs", "db"]` that calls `appliedLine({ mode, movedCount: 2, nonMovedCount: 3 })`, keeping both assertions.
+   - Delete `"BLZ-481: the locked and failed lines state the SAME two quantities every other arm does"` (no locked/failed arm exists).
+   - In `"neither surface states the quantity at all when it is zero"`, replace the `applySummary({ outcome: "committed", … }).text` call with `appliedLine({ mode: "fs", movedCount: 2, nonMovedCount: 0 })`.
+   - In the describe's comment, replace `scripts/reconcile-commit-report.mjs` with `scripts/reconcile-apply-report.mjs`, and replace "the dry-run tail and the commit subject … COMMITTED_LINE_RE and QUEUED_LINE_RE" with "the dry-run tail (DRYRUN_TAIL_RE) and the applied line (APPLIED_LINE_RE)".
+
+- [ ] **Step 7: Seam-closure (ledger rows 2030-2032 and 2147-2149).**
+
+Replace
+
+```js
+  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts) and hands `stageFor(mode)`
+  // in as the stage; `commitOrQueue` stays as reconcile()'s default stage.
+  ["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage", "resolvePorts", "stageFor"]],
+```
+
+with
+
+```js
+  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts).
+  // BLZ-254: commitOrQueue/stageFor removed — reconcile no longer stages its writes (spec §5.5).
+  ["reconcile.mjs", ["appendRegularFileSync", "fsStorage", "resolvePorts"]],
+```
+
+and replace
+
+```js
+  // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts) and stages by mode (stageFor).
+```
+
+```js
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
+```
+
+(the two lines, with the BLZ-673 comment between them unchanged) so that the first reads `// BLZ-670: runReconcile resolves both ports in db mode (resolvePorts).`, a new line `// BLZ-254: stageFor removed — reconcile no longer stages (spec §5.5).` is added after the BLZ-673 comment, and the entry ends `…, "viewEnvelope", "resolvePorts"]],`.
+
+- [ ] **Step 8: Delete the two tests whose subjects are gone.**
+
+```bash
+git rm tests/reconcile-commit-routing.test.mjs tests/commit-step-attribution.test.mjs
+```
+
+- [ ] **Step 9: Docs.** In `docs/guide/commands.md` `## reconcile`, replace every sentence that says `--apply` commits (or queues under `commitMode: batch`) with: "`--apply` writes the moves: to the ticket files on a file board (`fs`, `dual`), or to the database under `BLAZE_WRITE_PORT=db`. **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where." Find the sentences with `grep -n "commit" docs/guide/commands.md | sed -n '/^1[4-9][0-9]:/p;/^20[0-9]:/p'`.
+
+- [ ] **Step 10: Run the task's tests, then the suite.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reconcile*.test.mjs tests/board-overstatement-*.test.mjs tests/model/seam-closure.test.mjs tests/supervisor*.test.mjs
+node scripts/ci/temp-cleanup-guard.mjs --write && git diff --stat scripts/ci/temp-cleanup-debt.json
+npm test 2>&1 | tail -9
+```
+
+Expected: all pass. The debt file shows only removals (the two deleted files) or lowered counts. `npm test` reports `fail 0`. `rg -n "reconcile-commit-report|commitOutcome|applySummary" scripts tests` prints nothing except `// BLZ-254` comments.
+
+- [ ] **Step 11: Commit.**
+
+```bash
+git add scripts/reconcile.mjs scripts/supervisor.mjs scripts/reconcile-apply-report.mjs \
+  tests/reconcile-db-mode.test.mjs tests/reconcile.test.mjs tests/reconcile-project-filter.test.mjs \
+  tests/reconcile-pertype.test.mjs tests/reconcile-change-report-oracle.test.mjs \
+  tests/board-overstatement-oracle.test.mjs tests/board-overstatement-guards.test.mjs \
+  tests/reconcile-feed-truth-oracle.test.mjs tests/reconcile-unfinished-pass.test.mjs \
+  tests/model/seam-closure.test.mjs scripts/ci/temp-cleanup-debt.json docs/guide/commands.md
+git status --short   # the git mv and git rm are already staged; nothing else may be listed
+git commit -m "BLZ-687: reconcile and the supervisor feed stop committing (spec §5.5)"
+```
+
+---
