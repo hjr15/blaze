@@ -928,7 +928,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           if (e?.name === "InvalidProjectKeyError") return json(422, { errors: [e.message] });
           throw e;
         }
-        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors) });
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
         const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "new", id: r.id,
           message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile].filter(Boolean), lockOpts: LOCK_OPTS });
         if (commitFailed(c)) return;
@@ -944,7 +944,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         if (bad.length) return json(422, { errors: [`${bad.join(", ")} must be non-empty strings`] });
         const r = await applyLink(projectsDir, p.id, { type: p.type, target: p.target, remove: p.remove === true },
           { today, writePort, readStorage, actor, source: "api" });
-        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors) });
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
         return done(r, `${p.id}: ${p.remove === true ? "unlink" : "link"} ${p.type} ${p.target}`, "link");
       }
       return json(404, { errors: ["not found"] });

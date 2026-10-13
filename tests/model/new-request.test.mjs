@@ -17,7 +17,7 @@ test("every refusal is named, and they are all reported at once", () => {
     priority: 2, sprint: [], labels: [1], estimate: 2147483648 }, ["ENG"]);
   assert.deepEqual(r.errors, ["project must be a non-empty string", "type must be a non-empty string",
     "title is too long (300 characters max)", "priority must be a string", "sprint must be a string",
-    "labels must be a list of strings", "estimate must be a number of minutes above 0"]);
+    "labels must be a list of strings", "estimate must be a number of minutes above 0 and at most 2147483645"]);
   for (const body of [null, [], "x", 3]) assert.deepEqual(newRequestOrErrors(body).errors, ["the body must be a JSON object"]);
   assert.equal(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 2147483645 }, ["ENG"]).request.extra.estimate, 2147483645);
   assert.equal(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 7.5 }, ["ENG"]).request.extra.estimate, 7.5,
@@ -43,4 +43,38 @@ test("withoutServerPaths keeps the ticket's place on the board and drops the ser
     "refusing to overwrite /srv/data/projects/ENG/defined/ENG-2-t.md",
     'link target does not resolve: "ENG-9"',
   ]), ["refusing to overwrite projects/ENG/defined/ENG-2-t.md", 'link target does not resolve: "ENG-9"']);
+});
+
+test("BLZ-691: withoutServerPaths also strips the board's REAL projects directory, whatever it is named", () => {
+  const projectsDir = "/srv/board/tickets";
+  assert.deepEqual(withoutServerPaths([
+    "refusing to overwrite /srv/board/tickets/ENG/defined/ENG-2-t.md",
+    "cannot read /srv/board/tickets",
+    "cannot read '/srv/board/tickets/ENG/project.json'",
+  ], { projectsDir }), [
+    "refusing to overwrite projects/ENG/defined/ENG-2-t.md",
+    "cannot read projects",
+    "cannot read 'projects/ENG/project.json'",
+  ]);
+  assert.deepEqual(withoutServerPaths(["at /srv/board/tickets/ENG/x.md"], { projectsDir: "/srv/board/tickets/" }),
+                   ["at projects/ENG/x.md"], "a trailing separator on projectsDir is the same directory");
+  assert.deepEqual(withoutServerPaths(["at /srv/board/ticketsX/a"], { projectsDir }), ["at /srv/board/ticketsX/a"],
+                   "only the directory itself, never a sibling whose name starts the same");
+  assert.deepEqual(withoutServerPaths(["at /srv/data/projects/ENG/a.md"]), ["at projects/ENG/a.md"],
+                   "no projectsDir given: the /projects/ rule alone, as before");
+});
+
+test("BLZ-691: the estimate refusal names its upper bound", () => {
+  assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 2147483646 }, ["ENG"]).errors,
+                   ["estimate must be a number of minutes above 0 and at most 2147483645"]);
+});
+
+test("BLZ-691: the 300-character title cap counts characters (code points), not UTF-16 units", () => {
+  // 200 astral characters are 400 UTF-16 units — and 200 characters. The slug drops them, so
+  // the file name fits; the only bound in play is the character cap, which they are under.
+  const title = "\u{1F600}".repeat(200);
+  assert.equal(title.length, 400);
+  assert.ok(newRequestOrErrors({ project: "ENG", type: "task", title }, ["ENG"]).request);
+  assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "\u{1F600}".repeat(NEW_TITLE_MAX + 1) }, ["ENG"]).errors,
+                   ["title is too long (300 characters max)"]);
 });
