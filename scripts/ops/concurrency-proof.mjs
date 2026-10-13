@@ -21,7 +21,7 @@
 // database) — the proof never deletes anything itself.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { remoteFrom, requestRemote } from "../remote-client.mjs";
+import { remoteFrom, requestRemote, failureLine } from "../remote-client.mjs";
 
 const USAGE = `usage: node scripts/ops/concurrency-proof.mjs create --project <KEY> --count <n>
          [--type task] [--estimate 15] [--parallel 8] [--label <name>]
@@ -76,6 +76,8 @@ export async function verifyLists(cfg, lists, { fetch } = {}) {
 /** The CLI. @returns the exit code */
 export async function main(argv, { env = process.env, out = console.log, err = console.error, fetch } = {}) {
   const [mode, ...rest] = argv;
+  // The mode first (BLZ-691): a mistyped mode is a usage error, whatever the environment holds.
+  if (mode !== "create" && mode !== "verify") { err(USAGE); return 1; }
   const cfg = remoteFrom(env);
   if (cfg.error) { err(cfg.error); return 1; }
   if (!cfg.remote) { err(`concurrency-proof: remote mode is not configured\n\n${USAGE}`); return 1; }
@@ -114,7 +116,14 @@ export async function main(argv, { env = process.env, out = console.log, err = c
       }
       lists.push(parsed.ids);
     }
-    const v = await verifyLists(cfg, lists, { fetch });
+    // BLZ-691: a network error or a refused redirect REJECTS (requestRemote does not catch);
+    // uncaught, it ended the run as an unhandled rejection with a stack. One line instead.
+    let v;
+    try { v = await verifyLists(cfg, lists, { fetch }); }
+    catch (e) {
+      err(failureLine("concurrency-proof", cfg.origin, e));
+      return 1;
+    }
     out(`${v.total} ids from ${lists.length} list(s): ${v.distinct} distinct, `
       + `${v.duplicates.length} duplicated, ${v.missing.length} not on the server`);
     if (v.duplicates.length) out(`  duplicated: ${v.duplicates.join(", ")}`);
@@ -122,8 +131,6 @@ export async function main(argv, { env = process.env, out = console.log, err = c
     out(v.ok ? "PROOF: PASS" : "PROOF: FAIL");
     return v.ok ? 0 : 1;
   }
-  err(USAGE);
-  return 1;
 }
 
 if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {

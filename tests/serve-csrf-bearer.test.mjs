@@ -96,6 +96,11 @@ describe("csrfRequired — the rule, as a function", () => {
       assert.equal(csrfRequired({ headers: { ...bearer, "sec-fetch-site": site }, store }), true, site);
     }
   });
+  test("BLZ-691: a comma-joined sec-fetch-site that names cross-site anywhere is not exempt", () => {
+    for (const site of ["same-origin, cross-site", "none, cross-site", "same-origin,same-origin"]) {
+      assert.equal(csrfRequired({ headers: { ...bearer, "sec-fetch-site": site }, store }), true, site);
+    }
+  });
   test("no credential, a session pasted as a bearer, or a board with no users: required", () => {
     assert.equal(csrfRequired({ headers: json, store }), true);
     assert.equal(csrfRequired({ headers: { ...json, authorization: "Bearer blz_sess.x" }, store }), true);

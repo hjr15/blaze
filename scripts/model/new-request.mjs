@@ -1,11 +1,18 @@
 // scripts/model/new-request.mjs — the network boundary of `POST /api/new` and the remote
 // refusals (BLZ-684). Pure, so it is unit-tested apart from a server, and run by `serve.mjs`
 // BEFORE any id is allocated.
+import { realpathSync } from "node:fs";
 import { slugify } from "./storage.mjs";
 
-/** The longest title `POST /api/new` accepts — a sanity bound on what one request may carry.
- *  It is NOT what keeps the file name legal; `ticketFileNameFits` is. */
+/** The longest title `POST /api/new` accepts, in characters (Unicode code points, not UTF-16
+ *  units — an emoji is one) — a sanity bound on what one request may carry. It is NOT what
+ *  keeps the file name legal; `ticketFileNameFits` is. */
 export const NEW_TITLE_MAX = 300;
+
+/** The largest estimate (minutes) the column holds once `applyNew` rounds it to the nearest 5:
+ *  2^31 - 1 is the Postgres `integer` ceiling, and 2147483645 is the last value that still
+ *  rounds to a multiple of 5 at or below it. */
+export const NEW_ESTIMATE_MAX = 2147483645;
 
 /** The longest file name (in bytes) the filesystems Blaze runs on accept. */
 export const FILE_NAME_MAX_BYTES = 255;
@@ -28,9 +35,12 @@ const NEW_STRING_FIELDS = ["parent", "assignee", "likelihood", "impact", "reason
 /**
  * `POST /api/new`'s body → `applyNew`'s options, or the reasons it is refused. Pure, and run
  * BEFORE anything is allocated. A wrong-typed field is refused by name, never coerced or
- * silently dropped; `estimate` must be a whole number of minutes that fits the column; a
- * `project` must be one this board configures (when it configures any) — a member must not be
- * able to mint a new project key over the network.
+ * silently dropped; `estimate` must be a finite number of minutes above 0 and at most
+ * `NEW_ESTIMATE_MAX` — a fraction is accepted and rounded to the nearest 5 by `applyNew`, as
+ * `blaze new --estimate` is; a `project` must be one this board configures (when it configures
+ * any) — a member must not be able to mint a new project key over the network. A board that
+ * configures NO projects keeps `blaze new`'s own behaviour, which creates the key: that is
+ * documented in docs/architecture.md (the `/api/new` row).
  * @returns { request } | { errors: string[] }
  */
 export function newRequestOrErrors(payload, configuredProjects = []) {
@@ -40,7 +50,7 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
   for (const k of ["project", "type", "title"]) {
     if (typeof p[k] !== "string" || !p[k].trim()) errors.push(`${k} must be a non-empty string`);
   }
-  if (typeof p.title === "string" && p.title.length > NEW_TITLE_MAX) {
+  if (typeof p.title === "string" && [...p.title].length > NEW_TITLE_MAX) {
     errors.push(`title is too long (${NEW_TITLE_MAX} characters max)`);
   } else if (typeof p.title === "string" && typeof p.project === "string"
              && !ticketFileNameFits(p.project, p.title)) {
@@ -62,8 +72,8 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
   // A finite positive number, as `blaze new --estimate` takes: `applyNew` rounds it to the
   // nearest 5 (`roundEstimate`) on both paths, so 7.5 is 10 locally and remotely alike.
   if (p.estimate !== undefined
-      && !(typeof p.estimate === "number" && Number.isFinite(p.estimate) && p.estimate > 0 && p.estimate <= 2147483645)) {
-    errors.push("estimate must be a number of minutes above 0");
+      && !(typeof p.estimate === "number" && Number.isFinite(p.estimate) && p.estimate > 0 && p.estimate <= NEW_ESTIMATE_MAX)) {
+    errors.push(`estimate must be a number of minutes above 0 and at most ${NEW_ESTIMATE_MAX}`);
   }
   if (errors.length) return { errors };
   const extra = {};
@@ -76,7 +86,28 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
 
 /** A refusal sent to a remote caller names a ticket, never where the server keeps its files:
  *  an absolute path in `refusing to overwrite /srv/…/projects/ENG/…` is reduced to its
- *  `projects/…` tail. */
-export function withoutServerPaths(errors) {
-  return errors.map((e) => String(e).replace(/(^|[\s"'(])\/\S*?\/(projects\/)/g, "$1$2"));
+ *  `projects/…` tail. BLZ-691: the board's REAL `projectsDir` is reduced the same way —
+ *  `/srv/board/tickets/ENG/…` reads `projects/ENG/…` — so a projects directory that is not
+ *  named `projects` does not leak either, and neither does its `realpath` when the configured
+ *  path is a symlink. Matched only where a path STARTS (start of text, after whitespace, a
+ *  quote, `(`, `[` or a backtick — never inside `/mnt/srv/…`) and where the directory ENDS (end
+ *  of text, a separator, whitespace, a quote, a bracket, `,` `:` `;` a backtick, or a `.` that
+ *  ends the sentence) — never a sibling such as `tickets-old` or `tickets.bak`. */
+export function withoutServerPaths(errors, { projectsDir = null } = {}) {
+  const real = projectsDirPattern(projectsDir);
+  return errors.map((e) => {
+    let s = String(e);
+    if (real) s = s.replace(real, "projects");
+    return s.replace(/(^|[\s"'(])\/\S*?\/(projects\/)/g, "$1$2");
+  });
+}
+
+function projectsDirPattern(projectsDir) {
+  const dir = projectsDir ? String(projectsDir).replace(/[\\/]+$/, "") : "";
+  if (!dir) return null;
+  const dirs = new Set([dir]);
+  try { dirs.add(realpathSync(dir).replace(/[\\/]+$/, "")); } catch { /* absent or unreadable: the configured path alone */ }
+  const alts = [...dirs].filter(Boolean).sort((a, b) => b.length - a.length)
+    .map((d) => d.replace(/[.*+?^${}()|[\]\\]/g, "\\$&"));
+  return new RegExp(`(?<=^|[\\s"'(\\[\`])(?:${alts.join("|")})(?=$|[\\\\/\\s"'()\\[\\],:;\`]|\\.(?![\\w-]))`, "g");
 }
