@@ -187,7 +187,7 @@ test("acceptance: init → load → the reader holds the board; the counter foll
     assert.match(c.text(), /dangling links dropped: 1/);
     assert.match(c.text(), /worklog entries dropped: 1/);
     assert.match(c.text(), /repeated labels\/components collapsed: 1/);
-    assert.match(c.text(), /3 row\(s\) above were dropped or collapsed — 'blaze db verify' will report each as a value difference/);
+    assert.match(c.text(), /3 row\(s\) above were dropped or collapsed — 'blaze db verify' will report up to 3 value difference\(s\)/);
     assert.match(c.text(), /ENG\s+9 → 9/, "init already seeded 9 from the claim; load keeps it");
     assert.match(c.text(), /blaze db verify/);
 
@@ -356,3 +356,24 @@ test("SQLite init: a transition import that fails is ROLLED BACK and named, neve
     h.exec("BEGIN IMMEDIATE"); h.exec("ROLLBACK");   // not left locked mid-transaction
   } finally { h.close(); }
 });
+
+test("SQLite init names what it dropped and collapsed as the Postgres load does, and refusals as whole tickets", async () => {
+  const roots = board();
+  // A repeated link, and a ticket the CHECK refuses (lower-case id under ENG).
+  writeFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-3-dup.md"),
+    ["---", "id: ENG-3", "title: dup", "type: task", "project: ENG", "estimate: 30",
+     "links:", "  - { type: Blocks, target: ENG-1 }", "  - { type: Blocks, target: ENG-1 }",
+     "---", "", "x", ""].join("\n"));
+  mkdirSync(join(roots.projectsDir, "ENG", "done"), { recursive: true });
+  writeFileSync(join(roots.projectsDir, "ENG", "done", "eng-7-bad.md"),
+    ["---", "id: eng-7", "title: bad", "type: task", "project: ENG", "---", "", "x", ""].join("\n"));
+  const c = capture();
+  assert.equal(await runDb(["init"], { ...c.io, roots }), 0, c.text());
+  assert.match(c.text(), /repeated links collapsed: 1/);
+  assert.match(c.text(), /repeated labels\/components collapsed: 1/);
+  assert.match(c.text(), /worklog entries dropped: 1/);
+  assert.match(c.text(), /4 row\(s\) above were dropped or collapsed — the shadow now holds up to 4 value difference\(s\)/);
+  assert.match(c.text(), /ticket\(s\) refused \(whole ticket rolled back\): 1/);
+  assert.doesNotMatch(c.text(), /rows the database refused/);
+});
+

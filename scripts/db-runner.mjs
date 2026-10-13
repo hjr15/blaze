@@ -160,6 +160,28 @@ async function seedCounterCmd(ctx) {
   }
 }
 
+/**
+ * Every substitution and every dropped or collapsed row, named (BLZ-280: a tally that reports
+ * only successes cannot be trusted) — one spelling for the Postgres load and the SQLite init.
+ * BLZ-690: then the consequence. Each such row leaves a ticket's database value different from
+ * its file. zeroDiff reports per ticket and FIELD, so two repeated labels on one ticket are one
+ * difference: hence "up to".
+ */
+function printLosses(tally, log, consequence, remedy) {
+  if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
+  if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
+  if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
+  if (tally.duplicateLinks) log(`  ⚠ repeated links collapsed: ${tally.duplicateLinks}`);
+  if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+  const collapsed = tally.collapsed.labels + tally.collapsed.components;
+  if (collapsed) log(`  ⚠ repeated labels/components collapsed: ${collapsed}`);
+  const lossy = verifyDiffRows(tally).total;
+  if (lossy) {
+    log(`  ⚠ ${lossy} row(s) above were dropped or collapsed — ${consequence} up to ${lossy} value difference(s)`);
+    log(`    from the files. ${remedy}`);
+  }
+}
+
 /** BLZ-680: what the transition import did, in one line — and, loudly, when there was no git
  *  history to import from at all (a copy with no `.git`), which must not read as "no moves". */
 function transitionsLine(h, dataRoot) {
@@ -260,21 +282,8 @@ async function loadCmd(ctx) {
     log(`  links        ${tally.links}`);
     log(`  worklog      ${tally.worklog}`);
     log(`  labels       ${tally.labels}   components ${tally.components}`);
-    // Every substitution is named (BLZ-280). A tally that reports only successes cannot be trusted.
-    if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
-    if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
-    if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
-    if (tally.duplicateLinks) log(`  ⚠ repeated links collapsed: ${tally.duplicateLinks}`);
-    if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
-    const collapsed = tally.collapsed.labels + tally.collapsed.components;
-    if (collapsed) log(`  ⚠ repeated labels/components collapsed: ${collapsed}`);
-    // BLZ-690: each of those rows leaves a ticket's database value different from its file, so
-    // verify WILL fail on them. Said here, so that FAIL is expected rather than alarming.
-    const lossy = verifyDiffRows(tally).total;
-    if (lossy) {
-      log(`  ⚠ ${lossy} row(s) above were dropped or collapsed — 'blaze db verify' will report each as a value difference`);
-      log("    on its ticket. Fix them in the files and reload with --replace, or accept them.");
-    }
+    printLosses(tally, log,
+      "'blaze db verify' will report", "Fix them in the files and reload with --replace, or accept them.");
     log(transitionsLine(history, dataRoot));
     if (tally.skipped.noId || tally.skipped.badId) {
       log(`  ⚠ files skipped: ${tally.skipped.noId} with no id, ${tally.skipped.badId} with a malformed id`);
@@ -460,13 +469,10 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransit
     log(`  worklog      ${tally.worklog}`);
     log(`  labels       ${tally.labels}   components ${tally.components}`);
     log(transitionsLine(history, dataRoot));
-    // Every substitution is named. A tally that reports only successes is a tally that
-    // cannot be trusted (BLZ-280).
-    if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
-    if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
-    if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
+    printLosses(tally, log, "the shadow now holds", "The dual-write soak will see them too; fix them in the files and rebuild with --force, or accept them.");
     if (tally.skipped.insertFailed.length) {
-      log(`  ⚠ rows the database refused: ${tally.skipped.insertFailed.length}`);
+      // BLZ-690: each refusal took its WHOLE ticket (the per-ticket savepoint), not one row.
+      log(`  ⚠ ticket(s) refused (whole ticket rolled back): ${tally.skipped.insertFailed.length}`);
       for (const f of tally.skipped.insertFailed.slice(0, 5)) log(`      ${f.id}: ${f.reason}`);
     }
     log(`\nNow run the board with BLAZE_WRITE_PORT=dual to soak it. The filesystem stays`);
