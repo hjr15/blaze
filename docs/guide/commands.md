@@ -366,7 +366,7 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
-| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. It judges every finding, whatever `--kind` narrowed the listing to. The plain report ends `fail-on <kinds>: N finding(s) — FAIL`, `— pass` or `— could not observe the whole board`; under `--json` the same verdict is `failOnVerdict` (`fail`, `pass`, `could-not-observe`, with the blinding kinds in `failOnBlind`), and a `fail` is also said on stderr. `ok` in the JSON is still the hard-kind verdict, not the gate's. |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
@@ -389,7 +389,12 @@ resolved store, so it works under `fs`, `dual` and `db`, and each rule is the sc
   leaves for a title-only ticket.
 - **`config-project-drift`** (soft, was `config_drift_check.py`): `blaze.config.json`'s
   `projects` and the projects the store holds disagree, in either direction. Not raised when the
-  config lists no projects at all.
+  config lists no projects at all. **What "the store holds" means differs by mode.** Under `fs`
+  and `dual` it is the directories under `projects/` — a project directory with no tickets yet
+  (only a `project.json`, or empty status folders) counts as held. Under `db` it is the project
+  keys that have at least one live ticket row, so the same freshly created, still-empty project
+  is reported as drift in `db` mode and not in `fs` mode. The fix either way is a ticket or a
+  config line, never a code change.
 
 `blaze audit --fail-on duplicate-status` is the gate `duplicate_id_check.py` was: it fails on a
 duplicated id alone, on a board that already carries other hard findings.
@@ -399,6 +404,14 @@ a project outside the list still exists, so `blaze audit --projects BLZ` does no
 `BLZ-134 → INF-750` a `dangling-target`; only the listed projects' tickets are judged. The
 governance kinds follow the same rule: an in-scope parent's open child in another project still
 counts for `terminal-parent-open-child`, and `config-project-drift` names only listed projects.
+
+**An unscoped run judges the configured projects but resolves against the whole store.** With no
+`--projects`, the projects judged are `blaze.config.json`'s `projects` (or, when it lists none,
+every project the store holds). Links and parents still resolve against *every* ticket the store
+holds, including tickets in a project directory the config does not list. So a link into an
+unlisted project is not a `dangling-target`, and an unlisted project's open child still counts
+for its listed parent's `terminal-parent-open-child`. The unlisted project itself is never judged.
+It shows up once, as `config-project-drift`.
 
 **`duplicate-status`** is the one finding that comes from the *walk* rather than
 from frontmatter. Status is the directory, so an id resolving to files under two
