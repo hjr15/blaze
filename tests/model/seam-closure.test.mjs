@@ -1027,9 +1027,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // documents to its caller, and the import it feeds writes through BLZ-629's
   // `applyImport` and the injected write port, unchanged. The day it grows a
   // writer, that pin reddens and this comment is where to look.
-  // BLZ-690: `canonical` is exported for `blaze db verify`'s extras comparison — a pure
-  // stable-stringify, no fs in it.
-  ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "canonical", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
+  // BLZ-690: `canonicalStrict` is exported for `blaze db verify`'s extras comparison — a pure
+  // type-preserving stable-stringify, no fs in it.
+  ["model/write-port.mjs", { writes: [], sanctioned: [], inert: ["COLUMN_FIELDS", "WRITE_PORT_ENV", "canonicalStrict", "dbWritePort", "dualWritePort", "extraFields", "fsWritePort", "selectWritePort", "ticketValue", "valueDiff"] }],
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
   ["supervisor.mjs", { writes: ["createApp", "startSupervisor"], sanctioned: [], inert: ["activityScript", "SHA_RE", "SUPERVISOR_HOST", "SUPERVISOR_SCOPES", "newFindingEvents", "newForgeErrorEvents", "newRunErrorEvent", "supervisorScopeFor"] }],

@@ -100,9 +100,23 @@ test("verifyLoad reads the source corpus ONCE, for all four conditions", () => {
   assert.equal(reads, 1, "zeroDiff, the extras and the expected counts share one read");
 });
 
-test("the extras comparison uses write-port's canonical value, not a second copy of it", () => {
+test("the extras comparison is TYPE-PRESERVING: each lenient-equal pair is a difference", () => {
+  // BLZ-690 review: write-port's soak `canonical` stringifies scalars and leaves strings
+  // unquoted, so every pair below compared equal. The migration gate must be at least as strict.
+  const pairs = [[1, "1"], [true, "true"], [null, ""], [{}, "{}"], [["a,b"], ["a", "b"]],
+                 [{ a: "1,b:2" }, { a: 1, b: 2 }]];
+  for (const [a, b] of pairs) {
+    const d = extraDiffs([{ frontmatter: { id: "A-1", k: a } }], [{ frontmatter: { id: "A-1", k: b } }]);
+    // `null` and "" are dropped by extraFields on BOTH sides (absent) — compare inside an object.
+    const d2 = extraDiffs([{ frontmatter: { id: "A-1", k: { v: a } } }], [{ frontmatter: { id: "A-1", k: { v: b } } }]);
+    assert.ok(d.length === 1 || d2.length === 1, `${JSON.stringify(a)} vs ${JSON.stringify(b)} must differ`);
+    assert.equal(d2.length, 1, `nested: ${JSON.stringify(a)} vs ${JSON.stringify(b)} must differ`);
+  }
+});
+
+test("the extras comparison uses write-port's shared canonicalStrict, not a local copy", () => {
   const src = readFileSync(new URL("../scripts/migrate/verify-load.mjs", import.meta.url), "utf8");
-  assert.match(src, /import \{[^}]*\bcanonical\b[^}]*\} from "\.\.\/model\/write-port\.mjs"/);
+  assert.match(src, /import \{[^}]*\bcanonicalStrict\b[^}]*\} from "\.\.\/model\/write-port\.mjs"/);
   assert.doesNotMatch(src, /const canon\b/, "no local stable-stringify beside the shared one");
 });
 

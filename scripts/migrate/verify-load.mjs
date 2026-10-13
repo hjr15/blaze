@@ -17,13 +17,14 @@
 import { zeroDiff } from "./zero-diff.mjs";
 import { corpusRows, relationRows } from "./load-corpus.mjs";
 import { parseAcBlocks } from "../model/ac-blocks.mjs";
-import { extraFields, canonical } from "../model/write-port.mjs";
+import { extraFields, canonicalStrict } from "../model/write-port.mjs";
 
 /**
  * Condition 1's other half: the frontmatter keys that have no column, ticket by ticket, as the
  * file holds them and as the database reads them back. `extraFields` is the loader's own rule
- * for what goes to `extra_json`, applied to both sides, and write-port's `canonical` is its own
- * value identity (key order is never a difference) — the one the dual-write soak compares by.
+ * for what goes to `extra_json`, applied to both sides, compared by write-port's `canonicalStrict`:
+ * key order is never a difference, but TYPE always is (`1` is not `"1"`) — the gate is never
+ * more lenient than the soak's `canonical`.
  * A difference is SHOWN as plain JSON, which is what an operator reads.
  * @returns [{ id, field: "extra", source, loaded }] for each ticket whose extras differ
  */
@@ -35,7 +36,7 @@ export function extraDiffs(sourceTickets, loadedTickets) {
     const b = loaded.get(id);
     if (!id || !b) continue;   // a missing id is condition 2's finding, not this one's
     const want = extraFields(t.frontmatter), got = extraFields(b.frontmatter);
-    if (canonical(want) !== canonical(got)) {
+    if (canonicalStrict(want) !== canonicalStrict(got)) {
       out.push({ id, field: "extra", source: JSON.stringify(want), loaded: JSON.stringify(got) });
     }
   }
