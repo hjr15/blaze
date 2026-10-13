@@ -929,8 +929,13 @@ engine's own test suite deletes both before any test runs (`tests/setup/no-remot
 exported pair can never turn `npm test` into writes to a real board.
 
 The token is sent to `BLAZE_REMOTE_URL`'s origin and nowhere else: every request is built
-against that origin, a redirect is refused rather than followed, plain `http://` is accepted
-only for a loopback host, and no message prints the token. To reach a board on another machine
+against that origin, a redirect is refused rather than followed (`blaze <verb>: refused a
+redirect from <origin>`), plain `http://` is accepted only for a loopback host spelled
+`127.x.x.x`, `[::1]` or `localhost` (other spellings, such as `[::ffff:127.0.0.1]` or
+`localhost.`, are refused), and no message prints the token. **Proxies:** with
+`NODE_USE_ENV_PROXY=1`, Node's `fetch` honours `HTTP_PROXY`/`HTTPS_PROXY`, and a loopback
+`http://` URL is sent through the proxy — token in clear — unless `NO_PROXY` covers it. Leave
+`NODE_USE_ENV_PROXY` unset for remote mode, or set `NO_PROXY=127.0.0.1,::1,localhost`. To reach a board on another machine
 that has no TLS — the cutover rehearsal's `blaze board` on machine 1, say — tunnel it rather
 than send the token over the LAN in clear: `ssh -L 4321:127.0.0.1:<port> machine1`, then
 `BLAZE_REMOTE_URL=http://127.0.0.1:4321`. (Machine 1's board must have users; it can stay on
@@ -964,7 +969,7 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | `BLAZE_SESSION` | Key for the batch-mode op queue, so parallel sessions isolate. | unset → an id auto-derived from the agent harness session (`auto-<id>`), so a session and its subagents share one queue; only with no harness id either does it fall back to the shared queue |
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
-| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for a loopback host); no path, query, fragment or `user:pass@`. | unset (local) |
+| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
 | `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the two is an error for every command. | unset |
 
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in

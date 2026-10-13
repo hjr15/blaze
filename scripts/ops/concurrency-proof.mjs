@@ -21,7 +21,7 @@
 // database) — the proof never deletes anything itself.
 import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
-import { remoteFrom, requestRemote } from "../remote-client.mjs";
+import { remoteFrom, requestRemote, failureLine } from "../remote-client.mjs";
 
 const USAGE = `usage: node scripts/ops/concurrency-proof.mjs create --project <KEY> --count <n>
          [--type task] [--estimate 15] [--parallel 8] [--label <name>]
@@ -121,7 +121,7 @@ export async function main(argv, { env = process.env, out = console.log, err = c
     let v;
     try { v = await verifyLists(cfg, lists, { fetch }); }
     catch (e) {
-      err(`concurrency-proof: no answer from ${cfg.origin} — ${e?.cause?.message ?? e?.message ?? e}`);
+      err(failureLine("concurrency-proof", cfg.origin, e));
       return 1;
     }
     out(`${v.total} ids from ${lists.length} list(s): ${v.distinct} distinct, `

@@ -61,6 +61,16 @@ describe("remoteFrom — when remote mode is on, and when it refuses", () => {
     }
     assert.match(remoteFrom(env("https://blaze.example.com", "blz a")).error, /whitespace/);
   });
+  test("BLZ-691: plain http is accepted for 127.x, [::1] and localhost — and refused for the spellings URL rewrites", () => {
+    assert.equal(remoteFrom(env("http://[::1]:4321", "blz_t")).origin, "http://[::1]:4321");
+    assert.equal(remoteFrom(env("http://127.9.9.9:4321", "blz_t")).origin, "http://127.9.9.9:4321");
+    // `new URL` normalises [::ffff:127.0.0.1] to [::ffff:7f00:1], and keeps the trailing dot
+    // of `localhost.`: neither is on the accepted list, so both are refused. That is the safe
+    // direction (the token is not sent), and the docs name the three accepted forms.
+    for (const url of ["http://[::ffff:127.0.0.1]:4321", "http://localhost.:4321"]) {
+      assert.match(remoteFrom(env(url, "blz_t")).error, /plain http to/, url);
+    }
+  });
 });
 
 describe("requestFor — argv parsed as the local runner parses it", () => {
@@ -79,6 +89,12 @@ describe("requestFor — argv parsed as the local runner parses it", () => {
     assert.deepEqual(requestFor("link", ["--rm", "ENG-1", "Blocks", "ENG-2"]),
                      { path: "/api/link", body: { id: "ENG-1", type: "Blocks", target: "ENG-2", remove: true } });
     assert.deepEqual(Object.keys(REMOTE_VERBS), ["new", "move", "edit", "resolve", "log", "link"]);
+  });
+  test("BLZ-691: extra positionals are ignored, exactly as the local runners ignore them", () => {
+    assert.deepEqual(requestFor("move", ["ENG-1", "done", "extra"]), requestFor("move", ["ENG-1", "done"]));
+    assert.deepEqual(requestFor("resolve", ["ENG-1", "done", "extra"]), requestFor("resolve", ["ENG-1", "done"]));
+    assert.deepEqual(requestFor("log", ["ENG-1", "5", "extra"]), requestFor("log", ["ENG-1", "5"]));
+    assert.deepEqual(requestFor("link", ["ENG-1", "Blocks", "ENG-2", "x"]), requestFor("link", ["ENG-1", "Blocks", "ENG-2"]));
   });
   test("a missing argument, an unknown flag, or a derived field is refused before any request", () => {
     for (const [verb, argv, why] of [
@@ -225,6 +241,9 @@ test("the token goes to BLAZE_REMOTE_URL's origin only — a redirect elsewhere 
     assert.deepEqual(seen, [{ server: "first", path: "/api/new", auth: "Bearer blz_secret" }],
       "the configured origin got exactly one request; the redirect target got none");
     assert.doesNotMatch(c.err.join("\n"), /blz_secret/);
+    // BLZ-691: the server DID answer — with a redirect, which was refused. Not "no answer".
+    assert.match(c.err.join("\n"), /^blaze new: refused a redirect from http:\/\/127\.0\.0\.1:\d+ — /);
+    assert.doesNotMatch(c.err.join("\n"), /no answer|unexpected redirect/);
   } finally { first.close(); other.close(); }
 });
 
@@ -259,4 +278,20 @@ test("remote `blaze new` against a file board prints the server's 409 as-is, and
     assert.match(c.err.join("\n"), /answered 409\)[\s\S]*blaze: POST \/api\/new needs the database write port \(BLAZE_WRITE_PORT=db\)/);
     assert.equal(existsSync(join(root, "projects", "OBA", "defined", "OBA-2-x.md")), false);
   } finally { server.close(); process.env.BLAZE_WRITE_PORT = saved; }
+});
+
+test("BLZ-691: a non-numeric --estimate or minutes reaches the server as null, and the server refuses it by name", async () => {
+  const { root, server, url, token } = await board();
+  try {
+    const env = { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token };
+    assert.equal(requestFor("new", ["--project", "ENG", "--type", "task", "--estimate", "abc", "t"]).body.estimate, NaN);
+    const n = capture();
+    assert.equal(await runRemote("new", ["--project", "ENG", "--type", "task", "--estimate", "abc", "t"], { env, ...n.io }), 1);
+    assert.match(n.err.join("\n"), /answered 422\)[\s\S]*estimate must be a number of minutes/);
+    assert.equal(row(root, "ENG-2"), null, "nothing created");
+    const l = capture();
+    assert.equal(await runRemote("log", ["ENG-1", "abc"], { env, ...l.io }), 1);
+    assert.match(l.err.join("\n"), /answered 422\)/);
+    assert.deepEqual(row(root, "ENG-1").frontmatter.worklog ?? [], [], "nothing logged");
+  } finally { server.close(); }
 });

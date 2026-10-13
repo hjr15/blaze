@@ -151,11 +151,12 @@ describe("the harness, against a db-mode board", () => {
     const root = await dbRoot();
     writeFileSync(join(root, "ids.json"), JSON.stringify({ ids: ["ENG-1"], failures: [] }));
     const env = { BLAZE_REMOTE_URL: "http://127.0.0.1:9", BLAZE_TOKEN: "blz_secret" };
-    for (const cause of [new Error("connect ECONNREFUSED 127.0.0.1:9"), new Error("unexpected redirect")]) {
+    for (const [cause, line] of [[new Error("connect ECONNREFUSED 127.0.0.1:9"), /^concurrency-proof: no answer from http:\/\/127\.0\.0\.1:9 — connect ECONNREFUSED/],
+                                 [new Error("unexpected redirect"), /^concurrency-proof: refused a redirect from http:\/\/127\.0\.0\.1:9 — /]]) {
       const c = capture();
       const fetch = async () => { throw new TypeError("fetch failed", { cause }); };
       assert.equal(await main(["verify", join(root, "ids.json")], { env, fetch, ...c.io }), 1, cause.message);
-      assert.match(c.err.join("\n"), /^concurrency-proof: no answer from http:\/\/127\.0\.0\.1:9 — /, cause.message);
+      assert.match(c.err.join("\n"), line, cause.message);
       assert.doesNotMatch(c.err.join("\n"), /blz_secret|\n\s+at /, "no token, no stack");
       assert.doesNotMatch(c.out.join("\n"), /PROOF: PASS/);
     }

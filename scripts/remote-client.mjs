@@ -72,6 +72,12 @@ const commaList = (v) => String(v ?? "").split(",").map((s) => s.trim()).filter(
 
 /**
  * argv (after the verb) → the request, parsed exactly as the local runner parses it.
+ *
+ * Two consequences of "exactly", kept on purpose (BLZ-691): positionals past the ones a verb
+ * takes are ignored, as move-, resolve-, log- and link-runner.mjs ignore them; and a
+ * non-numeric `--estimate` or `<minutes>` becomes `NaN`, as the local runners' `Number()`
+ * does. JSON has no NaN, so it is sent as `null` — and the SERVER refuses that `422`, naming
+ * the field. Validation stays on the server, in one place.
  * @returns { path, body } | { error }
  */
 export function requestFor(verb, argv) {
@@ -146,6 +152,20 @@ export function requestFor(verb, argv) {
   return r.error ? r : { path, body: { id: r.pos[0], type: r.pos[1], target: r.pos[2], remove } };
 }
 
+/**
+ * Why a request got no usable answer, as one line (BLZ-691). `redirect: "error"` makes fetch
+ * reject a 3xx with `TypeError("fetch failed", { cause: "unexpected redirect" })`; the server
+ * DID answer, so that reads as a refused redirect, never as "no answer". The message only:
+ * fetch's error never carries the request headers, so the token cannot appear in it.
+ */
+export function failureLine(prefix, origin, e) {
+  const cause = String(e?.cause?.message ?? e?.message ?? e);
+  if (cause === "unexpected redirect") {
+    return `${prefix}: refused a redirect from ${origin} — the token is sent to that origin only, never on to where it points`;
+  }
+  return `${prefix}: no answer from ${origin} — ${cause}`;
+}
+
 /** The line a successful response prints — the local verb's wording, marked remote. */
 export function successLine(verb, body, answer, origin) {
   const at = `(remote: ${origin})`;
@@ -164,7 +184,8 @@ export function successLine(verb, body, answer, origin) {
  * `cfg.origin` (a `path` can only ever be a path on it), the token rides in `Authorization`,
  * and a redirect is an ERROR rather than followed. Shared by `runRemote` and
  * `scripts/ops/concurrency-proof.mjs` (BLZ-684), so there is one place that sends the token.
- * @returns { status, ok, answer } — `answer` is the parsed JSON body, or null
+ * @returns { status, ok, statusText, answer } — `answer` is the parsed JSON body, or null
+ * @throws when no response arrives: a network error, or a redirect (refused, never followed)
  */
 export async function requestRemote(cfg, method, path, body, { fetch: fetchImpl = globalThis.fetch } = {}) {
   const url = new URL(path, `${cfg.origin}/`);
@@ -196,9 +217,8 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
   try {
     res = await requestRemote(cfg, "POST", req.path, req.body, { fetch: fetchImpl });
   } catch (e) {
-    // The message only: fetch's error never carries the request headers, and nothing here
-    // adds them — a redirect refusal reads as "no answer", never as a success.
-    err(`blaze ${verb}: no answer from ${cfg.origin} — ${e?.cause?.message ?? e?.message ?? e}`);
+    // A refused redirect or no answer at all — never a success (`failureLine`).
+    err(failureLine(`blaze ${verb}`, cfg.origin, e));
     return 1;
   }
   const { answer } = res;

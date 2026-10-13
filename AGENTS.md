@@ -433,7 +433,8 @@ Every other command is refused in remote mode (it needs the board's data on this
 read the board over `GET /api/live` or the page. Setting only ONE of the two variables is an
 error for every command — never a silent local write. The token is only ever sent to
 `BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for a
-loopback host only. Set the two **per command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`)
+loopback host only (`127.x.x.x`, `[::1]` or `localhost`; with `NODE_USE_ENV_PROXY=1` set, keep
+loopback in `NO_PROXY` or the token goes to the proxy in clear). Set the two **per command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`)
 or in a shell used only for that — never as a global `export`, which would send every `blaze`
 write on the machine to the server. See
 [the command reference](https://github.com/hjr15/blaze/blob/main/docs/guide/commands.md#remote-mode).
