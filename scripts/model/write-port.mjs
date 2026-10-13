@@ -25,8 +25,10 @@ import { fsReadStorage } from "./read-storage.mjs";
 import { counterUpsertSql } from "./seed-counter.mjs";
 import { safeJson } from "./safe-json.mjs";
 
-/** Stable stringify: object keys sorted, array order preserved. */
-function canonical(v) {
+/** Stable stringify: object keys sorted, array order preserved. Exported (BLZ-690) so
+ *  `blaze db verify`'s extras comparison uses the same value identity as the dual-write
+ *  divergence check rather than a second copy of it. */
+export function canonical(v) {
   if (Array.isArray(v)) return `[${v.map(canonical).join(",")}]`;
   if (v && typeof v === "object") {
     return `{${Object.keys(v).sort().map((k) => `${k}:${canonical(v[k])}`).join(",")}}`;

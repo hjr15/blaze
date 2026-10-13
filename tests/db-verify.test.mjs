@@ -7,13 +7,12 @@
 // in a loaded board (prove-test-discriminates-by-injecting-regression).
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { writeFileSync } from "node:fs";
+import { readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
 import { verifyLoad, expectedCounts, criteriaFromBody, extraDiffs, VERIFY_TABLES } from "../scripts/migrate/verify-load.mjs";
-import { runner } from "./helpers/db-board.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
-import { dbBoard } from "./helpers/db-board.mjs";
+import { dbBoard, runner } from "./helpers/db-board.mjs";
 import { PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
 
 function board() {
@@ -77,6 +76,34 @@ test("condition 2 alone: a ticket missing from the database fails", () => {
                          counts: expectedCounts(fsReadStorage, projectsDir) });
   assert.deepEqual(v.failures, ["the id sets differ: 1 missing from the database, 0 only in the database"]);
   assert.deepEqual(v.report.missing, ["ENG-2"]);
+});
+
+test("condition 2 alone, the other side: a ticket only in the database fails", () => {
+  const { projectsDir } = board();
+  const loaded = asLoaded(projectsDir);
+  const stray = loaded.find((t) => t.frontmatter.id === "ENG-1");
+  loaded.push({ ...stray, frontmatter: { ...stray.frontmatter, id: "ENG-9" } });
+  const v = verifyLoad({ source: fsReadStorage, sourceRoot: projectsDir, loadedTickets: loaded,
+                         counts: expectedCounts(fsReadStorage, projectsDir) });
+  assert.deepEqual(v.failures, ["the id sets differ: 0 missing from the database, 1 only in the database"]);
+  assert.deepEqual(v.report.missing, []);
+  assert.deepEqual(v.report.extra, ["ENG-9"]);
+});
+
+test("verifyLoad reads the source corpus ONCE, for all four conditions", () => {
+  const { projectsDir } = board();
+  let reads = 0;
+  const counting = { listTickets: (root) => { reads++; return fsReadStorage.listTickets(root); } };
+  const v = verifyLoad({ source: counting, sourceRoot: projectsDir, loadedTickets: asLoaded(projectsDir),
+                         counts: expectedCounts(fsReadStorage, projectsDir) });
+  assert.equal(v.ok, true, v.failures.join("; "));
+  assert.equal(reads, 1, "zeroDiff, the extras and the expected counts share one read");
+});
+
+test("the extras comparison uses write-port's canonical value, not a second copy of it", () => {
+  const src = readFileSync(new URL("../scripts/migrate/verify-load.mjs", import.meta.url), "utf8");
+  assert.match(src, /import \{[^}]*\bcanonical\b[^}]*\} from "\.\.\/model\/write-port\.mjs"/);
+  assert.doesNotMatch(src, /const canon\b/, "no local stable-stringify beside the shared one");
 });
 
 test("condition 3 alone: a row count the builder does not predict fails, every table checked", () => {

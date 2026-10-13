@@ -17,18 +17,14 @@
 import { zeroDiff } from "./zero-diff.mjs";
 import { corpusRows, relationRows } from "./load-corpus.mjs";
 import { parseAcBlocks } from "../model/ac-blocks.mjs";
-import { extraFields } from "../model/write-port.mjs";
-
-/** Stable JSON: object keys sorted at every depth, so key order is never a difference. */
-const canon = (v) => (Array.isArray(v) ? `[${v.map(canon).join(",")}]`
-  : v && typeof v === "object"
-    ? `{${Object.keys(v).sort().map((k) => `${JSON.stringify(k)}:${canon(v[k])}`).join(",")}}`
-    : JSON.stringify(v));
+import { extraFields, canonical } from "../model/write-port.mjs";
 
 /**
  * Condition 1's other half: the frontmatter keys that have no column, ticket by ticket, as the
  * file holds them and as the database reads them back. `extraFields` is the loader's own rule
- * for what goes to `extra_json`, applied to both sides.
+ * for what goes to `extra_json`, applied to both sides, and write-port's `canonical` is its own
+ * value identity (key order is never a difference) — the one the dual-write soak compares by.
+ * A difference is SHOWN as plain JSON, which is what an operator reads.
  * @returns [{ id, field: "extra", source, loaded }] for each ticket whose extras differ
  */
 export function extraDiffs(sourceTickets, loadedTickets) {
@@ -38,8 +34,10 @@ export function extraDiffs(sourceTickets, loadedTickets) {
     const id = String(t.frontmatter?.id ?? "");
     const b = loaded.get(id);
     if (!id || !b) continue;   // a missing id is condition 2's finding, not this one's
-    const want = canon(extraFields(t.frontmatter)), got = canon(extraFields(b.frontmatter));
-    if (want !== got) out.push({ id, field: "extra", source: want, loaded: got });
+    const want = extraFields(t.frontmatter), got = extraFields(b.frontmatter);
+    if (canonical(want) !== canonical(got)) {
+      out.push({ id, field: "extra", source: JSON.stringify(want), loaded: JSON.stringify(got) });
+    }
   }
   return out;
 }
@@ -89,15 +87,20 @@ export function criteriaFromBody(body) {
  * @returns { ok, failures: string[], report, expected, countDiffs }
  */
 export function verifyLoad({ source, sourceRoot, loadedTickets, counts, criteriaOf = criteriaFromBody }) {
+  // BLZ-690: the source corpus is read ONCE and every condition judges that one snapshot. Three
+  // reads (zeroDiff, the extras, the expected counts) cost three walks of a 2,500-ticket board
+  // and could each see a different board if a file changed in between.
+  const sourceTickets = [...source.listTickets(sourceRoot)];
+  const snapshot = { listTickets: () => sourceTickets };
   const bodies = new Map(loadedTickets.map((t) => [String(t.frontmatter?.id), t.body ?? ""]));
-  const report = zeroDiff(source, sourceRoot, { listTickets: () => loadedTickets },
+  const report = zeroDiff(snapshot, sourceRoot, { listTickets: () => loadedTickets },
                           { criteriaFor: (id) => criteriaOf(bodies.get(id)) });
-  report.valueDiffs.push(...extraDiffs([...source.listTickets(sourceRoot)], loadedTickets));
+  report.valueDiffs.push(...extraDiffs(sourceTickets, loadedTickets));
   // zeroDiff computed `ok` before the extras diffs were appended, so recompute it: `ok` must not
   // say true on an extras-only diff.
   report.ok = !report.valueDiffs.length && !report.missing.length && !report.extra.length
     && !report.criteriaDiffs.length && !report.frozenViolations.length;
-  const expected = expectedCounts(source, sourceRoot);
+  const expected = expectedCounts(snapshot, sourceRoot);
   const countDiffs = VERIFY_TABLES
     .filter((t) => expected[t] !== counts[t])
     .map((t) => ({ table: t, expected: expected[t], loaded: counts[t] }));
