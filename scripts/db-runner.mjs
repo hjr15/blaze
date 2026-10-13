@@ -399,6 +399,8 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransit
 
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.
+  // BLZ-690: which of the pair THIS run creates — so a failure below removes only those.
+  const existed = new Map([[path, existsSync(path)], [cfgPath, existsSync(cfgPath)]]);
   let db, exec;
   try { ({ db, exec } = await openShadow(dataRoot, { create: true })); }
   catch (e) { console.error(e.message); process.exit(1); }
@@ -453,8 +455,17 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransit
       db.exec("COMMIT");
     } catch (e) {
       if (db.isTransaction) { try { db.exec("ROLLBACK"); } catch { /* the original error is what matters */ } }
-      err(`blaze db init: the shadow at ${path} was built, but importing the git history failed: ${e.message}`);
-      err("None of that history was kept. Fix the cause, then rebuild with 'blaze db init --force'.");
+      // BLZ-690: a shadow with tickets but no history must not be left for BLAZE_WRITE_PORT=dual
+      // to open as though init had finished. Remove what THIS run created — never a file that
+      // was there before it.
+      db.close();
+      const removed = discardCreated(existed);
+      err(`blaze db init: importing the git history failed: ${e.message}`);
+      err(removed.length === 2
+        ? "Nothing was kept: removed the shadow database and config namespace this run created."
+        : `None of that history was kept${removed.length ? `; removed ${removed.join(", ")}` : ""}. `
+          + `The shadow at ${path} is incomplete — rebuild it with 'blaze db init --force'.`);
+      err("Fix the cause, then run 'blaze db init' again.");
       return 1;
     }
     // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
@@ -479,8 +490,23 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransit
     log(`the source of truth; divergences land in ${divergenceLogPath(dataRoot)}.`);
     return 0;
   } finally {
-    db.close();
+    if (db.isOpen) db.close();   // the history-failure path closed it to remove the files
   }
+}
+
+/**
+ * BLZ-690: remove each file that did NOT exist before (`existed`: Map<path, boolean>) — the ones
+ * this run created — and leave every pre-existing one alone. Returns the paths removed.
+ */
+export function discardCreated(existed) {
+  const removed = [];
+  for (const [p, was] of existed) {
+    if (was || !existsSync(p)) continue;
+    rmSync(p, { force: true });
+    for (const side of [`${p}-wal`, `${p}-shm`]) rmSync(side, { force: true });
+    removed.push(p);
+  }
+  return removed;
 }
 
 async function status({ dataRoot, log }) {

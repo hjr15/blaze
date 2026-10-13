@@ -916,7 +916,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["ci/temp-cleanup-guard.mjs", { writes: [], sanctioned: [],
     inert: ["TESTS_DIR", "DEBT_FILE", "scanSource", "NOT_CORPUS", "testFiles", "scanCorpus",
       "readDebt", "compareToDebt"] }],
-  ["db-runner.mjs", { writes: ["runDb"], sanctioned: [], inert: ["USAGE"] }],
+  // BLZ-690: `discardCreated` removes caller-named files (init's own half-built shadow pair) — a
+  // caller-chosen destination, so a write; exported only so its keep-what-existed rule is tested.
+  ["db-runner.mjs", { writes: ["runDb", "discardCreated"], sanctioned: [], inert: ["USAGE"] }],
   // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
   // the loader that goes through it.
   ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity"], sanctioned: [],

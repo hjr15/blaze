@@ -7,20 +7,23 @@
 // Each Postgres test gets its OWN scratch database. Run with --test-concurrency=1.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, writeFileSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, readFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
 import { corpusRows, relationRows, loadCorpus, loadCorpusAsync, verifyDiffRows } from "../scripts/migrate/load-corpus.mjs";
 import { buildTransitions } from "../scripts/model/transitions.mjs";
-import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
+import { shadowDbPath, openShadow, sqliteExec } from "../scripts/model/write-port-resolve.mjs";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
-import { sqliteExec } from "../scripts/model/write-port-resolve.mjs";
 import { postgresReader } from "../scripts/model/pg-storage.mjs";
 import { writeClaim } from "../scripts/model/claims.mjs";
-import { runDb } from "../scripts/db-runner.mjs";
+import { runDb, discardCreated } from "../scripts/db-runner.mjs";
 import { dbBoard } from "./helpers/db-board.mjs";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 import { PG, PG_SKIP, scratchPgDb, pgClient } from "./helpers/pg-scratch.mjs";
+
+const scratch = scratchRegistry();
 
 const escapeRegExp = (s) => s.replace(/[.*+?^${}()|[\]\\]/g, "\\$&");
 const pgHost = () => escapeRegExp(new URL(PG).hostname);
@@ -343,18 +346,32 @@ test("load refuses a SQLite board, a database with no schema, and BLAZE_READONLY
   } finally { await db.drop(); }
 });
 
-test("SQLite init: a transition import that fails is ROLLED BACK and named, never a crash", async () => {
+test("SQLite init: a failed transition import is named, and the half-built shadow it CREATED is removed", async () => {
   const roots = board();
+  const blaze = join(roots.dataRoot, ".blaze");
+  mkdirSync(blaze, { recursive: true });
+  writeFileSync(join(blaze, "state.json"), "{}\n");          // pre-existing, not init's: must survive
   const c = capture();
   const exploding = { head: "x", get transitions() { throw new Error("injected transitions failure"); } };
   assert.equal(await runDb(["init"], { ...c.io, roots, buildTransitions: () => exploding }), 1, c.text());
   assert.match(c.text(), /importing the git history failed: injected transitions failure/);
-  assert.match(c.text(), /blaze db init --force/);
-  const h = new DatabaseSync(shadowDbPath(roots.dataRoot));
-  try {
-    assert.equal(h.prepare("SELECT count(*) n FROM ticket_event").get().n, 0);
-    h.exec("BEGIN IMMEDIATE"); h.exec("ROLLBACK");   // not left locked mid-transaction
-  } finally { h.close(); }
+  assert.match(c.text(), /removed the shadow database and config namespace this run created/);
+  assert.equal(existsSync(shadowDbPath(roots.dataRoot)), false, "no half-built shadow left for BLAZE_WRITE_PORT=dual");
+  assert.equal(existsSync(join(blaze, "config.db")), false);
+  assert.equal(readFileSync(join(blaze, "state.json"), "utf8"), "{}\n", "a file init did not create is untouched");
+  await assert.rejects(openShadow(roots.dataRoot), /no shadow database/, "dual mode cannot open it");
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0, "and a plain re-run (no --force) succeeds");
+});
+
+test("discardCreated removes only what did not exist before", () => {
+  const dir = scratch(mkdtempSync(join(tmpdir(), "blz690-discard-")));
+  const made = join(dir, "made.db"), kept = join(dir, "kept.db");
+  writeFileSync(kept, "old");
+  const existed = new Map([[made, false], [kept, true]]);
+  writeFileSync(made, "new"); writeFileSync(kept, "overwritten?");
+  assert.deepEqual(discardCreated(existed), [made]);
+  assert.equal(existsSync(made), false);
+  assert.equal(existsSync(kept), true, "a pre-existing file is never deleted");
 });
 
 test("SQLite init names what it dropped and collapsed as the Postgres load does, and refusals as whole tickets", async () => {
