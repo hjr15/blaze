@@ -59,7 +59,11 @@ function emptyReport() {
     tickets: 0, links: 0, worklog: 0, criteria: 0, notes: 0, acHeadings: 0,
     labels: 0, components: 0,
     skipped: { worklogDropped: [], noId: 0, badId: 0, insertFailed: [] },
-    danglingLinks: 0, danglingParents: 0,
+    danglingLinks: 0, danglingParents: 0, duplicateLinks: 0,
+    // BLZ-690: a label or component repeated on one ticket is ONE row (the primary key refuses
+    // the second). Counted, because the file still lists it twice and `blaze db verify` will
+    // see the difference.
+    collapsed: { labels: 0, components: 0 },
     // A ticket with no title still loads — losing it would be worse — but the id is
     // substituted, and substituting is inventing. Counted so the tally never claims a
     // clean load when 40 titles were manufactured.
@@ -104,6 +108,10 @@ export function corpusRows(source, projectsDir, { today = null } = {}) {
     if (!String(fm.priority ?? "").trim()) report.defaultsApplied.priority++;
     const assignee = String(fm.assignee ?? "").trim() || "unassigned";
     if (!String(fm.assignee ?? "").trim()) report.defaultsApplied.assignee++;
+    const labels = asList(fm.labels), components = asList(fm.components);
+    const uniqueLabels = unique(labels), uniqueComponents = unique(components);
+    report.collapsed.labels += labels.length - uniqueLabels.length;
+    report.collapsed.components += components.length - uniqueComponents.length;
 
     // Worklog: Math.round because `minutes` is INTEGER and STRICT refuses a REAL. COUNTED,
     // never silently skipped — `Math.round(0.4)` is 0, and this file's header promises every
@@ -137,8 +145,8 @@ export function corpusRows(source, projectsDir, { today = null } = {}) {
       // BLZ-295. Without these the migration silently dropped every one of them: 926 of
       // 2,561 tickets (36.2%) carry at least one, and extra_json is what keeps the
       // round-trip promise for keys nobody has thought of yet.
-      labels: unique(asList(fm.labels)),
-      components: unique(asList(fm.components)),
+      labels: uniqueLabels,
+      components: uniqueComponents,
       ac: ac.blocks,
       worklog, worklogDropped,
       parent: String(fm.parent ?? "").trim(),
@@ -160,7 +168,7 @@ export function corpusRows(source, projectsDir, { today = null } = {}) {
  */
 export function relationRows(tickets, typeById) {
   const parents = [], links = [];
-  let danglingParents = 0, danglingLinks = 0;
+  let danglingParents = 0, danglingLinks = 0, duplicateLinks = 0;
   const seen = new Set();
   for (const t of tickets) {
     if (!typeById.has(t.id)) continue;
@@ -171,12 +179,32 @@ export function relationRows(tickets, typeById) {
     for (const l of t.links) {
       if (!typeById.has(l.target)) { danglingLinks++; continue; }
       const k = `${t.id}\u0000${l.type}\u0000${l.target}`;
-      if (seen.has(k)) continue;
+      if (seen.has(k)) { duplicateLinks++; continue; }
       seen.add(k);
       links.push({ src: t.id, type: l.type, target: l.target });
     }
   }
-  return { parents, links, danglingParents, danglingLinks };
+  return { parents, links, danglingParents, danglingLinks, duplicateLinks };
+}
+
+/**
+ * BLZ-690: the rows a load DROPPED or COLLAPSED — a dangling parent or link, a repeated link, a
+ * worklog entry under half a minute, a repeated label or component. Each is deliberate (the
+ * database cannot hold it, or holds it once), and each leaves the ticket's value in the database
+ * different from its file, so `blaze db verify` reports every one as a value difference. The
+ * load says so up front, so a FAIL on exactly these is not read as a broken load.
+ * @param tally  a loader's report (either executor)
+ */
+export function verifyDiffRows(tally) {
+  const out = {
+    danglingParents: tally.danglingParents ?? 0,
+    danglingLinks: tally.danglingLinks ?? 0,
+    duplicateLinks: tally.duplicateLinks ?? 0,
+    worklogDropped: tally.skipped?.worklogDropped?.length ?? 0,
+    labels: tally.collapsed?.labels ?? 0,
+    components: tally.collapsed?.components ?? 0,
+  };
+  return { ...out, total: Object.values(out).reduce((a, b) => a + b, 0) };
 }
 
 /**
@@ -201,52 +229,60 @@ export function loadCorpus(db, projectsDir, { source = fsReadStorage, today = nu
 
   const typeById = new Map();
   db.exec("BEGIN");
-  for (const t of tickets) {
-    try {
-      insTicket.run(...t.values);
-      t.labels.forEach((l, ord) => insLabel.run(t.id, t.project, l, ord));
-      t.components.forEach((c, ord) => insComponent.run(t.id, t.project, c, ord));
-    } catch (e) {
-      // Named, not swallowed: the tally is only trustworthy if a refusal is visible.
-      report.skipped.insertFailed.push({ id: t.id, reason: String(e.message).slice(0, 120) });
-      continue;
-    }
-    report.tickets++;
-    report.labels += t.labels.length;
-    report.components += t.components.length;
-    typeById.set(t.id, t.type);
-    if (t.acHeading) report.acHeadings++;
-    for (const [i, b] of t.ac.entries()) {
-      insAc.run(t.id, i, b.kind, b.text, b.kind === "criterion" && b.checked ? 1 : 0);
-      b.kind === "criterion" ? report.criteria++ : report.notes++;
-    }
-    report.skipped.worklogDropped.push(...t.worklogDropped);
-    for (const w of t.worklog) {
-      // The try/catch because a single bad worklog row once killed the entire load with an
-      // uncaught throw and left the BEGIN uncommitted. Now it is a counted skip like any other.
+  try {
+    for (const t of tickets) {
+      // BLZ-690: the async executor's rule — each ticket under its own SAVEPOINT, and a refusal
+      // anywhere in it (its row, a label, a criterion, a worklog entry) takes the WHOLE ticket.
+      // A ticket row left behind by its refused label was counted as refused yet still loaded:
+      // a half-loaded ticket, and a tally that disagreed with the table it describes.
+      db.exec("SAVEPOINT blaze_load_ticket");
       try {
-        insWork.run(t.id, w.date, w.minutes, w.note);
-        report.worklog++;
+        insTicket.run(...t.values);
+        t.labels.forEach((l, ord) => insLabel.run(t.id, t.project, l, ord));
+        t.components.forEach((c, ord) => insComponent.run(t.id, t.project, c, ord));
+        for (const [i, b] of t.ac.entries()) {
+          insAc.run(t.id, i, b.kind, b.text, b.kind === "criterion" && b.checked ? 1 : 0);
+        }
+        for (const w of t.worklog) insWork.run(t.id, w.date, w.minutes, w.note);
+        db.exec("RELEASE SAVEPOINT blaze_load_ticket");
       } catch (e) {
-        report.skipped.insertFailed.push({ id: t.id, reason: `worklog: ${String(e.message).slice(0, 100)}` });
+        db.exec("ROLLBACK TO SAVEPOINT blaze_load_ticket");
+        db.exec("RELEASE SAVEPOINT blaze_load_ticket");
+        // Named, not swallowed: the tally is only trustworthy if a refusal is visible.
+        report.skipped.insertFailed.push({ id: t.id, reason: String(e.message).slice(0, 120) });
+        continue;
       }
+      report.tickets++;
+      report.labels += t.labels.length;
+      report.components += t.components.length;
+      typeById.set(t.id, t.type);
+      if (t.acHeading) report.acHeadings++;
+      for (const b of t.ac) b.kind === "criterion" ? report.criteria++ : report.notes++;
+      report.worklog += t.worklog.length;
+      report.skipped.worklogDropped.push(...t.worklogDropped);
     }
+
+    const rel = relationRows(tickets, typeById);
+    for (const p of rel.parents) setParent.run(p.parent, p.parentType, p.id);
+    for (const l of rel.links) insLink.run(l.src, l.type, l.target);
+    report.links = rel.links.length;
+    report.danglingParents = rel.danglingParents;
+    report.danglingLinks = rel.danglingLinks;
+    report.duplicateLinks = rel.duplicateLinks;
+
+    // BLZ-667: seed the db-mode allocator, so its first number follows the corpus's last
+    // rather than colliding with it. The MAX, not the count — numbering has gaps. And never
+    // lower an existing counter: a number already issued must not be issued twice.
+    // BLZ-668: the upsert is spelled once, in seed-counter.mjs, for both dialects.
+    const seed = db.prepare(counterUpsertSql("sqlite"));
+    for (const [key, n] of maxNum) seed.run(key, n);
+    db.exec("COMMIT");
+  } catch (e) {
+    // BLZ-690: a throw outside the per-ticket savepoint (pass two, the counter seed) must not
+    // leave the BEGIN open on the caller's handle.
+    try { db.exec("ROLLBACK"); } catch { /* the original error is what matters */ }
+    throw e;
   }
-
-  const rel = relationRows(tickets, typeById);
-  for (const p of rel.parents) setParent.run(p.parent, p.parentType, p.id);
-  for (const l of rel.links) insLink.run(l.src, l.type, l.target);
-  report.links = rel.links.length;
-  report.danglingParents = rel.danglingParents;
-  report.danglingLinks = rel.danglingLinks;
-
-  // BLZ-667: seed the db-mode allocator, so its first number follows the corpus's last
-  // rather than colliding with it. The MAX, not the count — numbering has gaps. And never
-  // lower an existing counter: a number already issued must not be issued twice.
-  // BLZ-668: the upsert is spelled once, in seed-counter.mjs, for both dialects.
-  const seed = db.prepare(counterUpsertSql("sqlite"));
-  for (const [key, n] of maxNum) seed.run(key, n);
-  db.exec("COMMIT");
   return report;
 }
 
@@ -344,5 +380,6 @@ export async function loadCorpusAsync(exec, projectsDir, { source = fsReadStorag
   report.links = links;
   report.danglingParents = rel.danglingParents;
   report.danglingLinks = rel.danglingLinks;
+  report.duplicateLinks = rel.duplicateLinks;
   return { ...report, typeById };
 }

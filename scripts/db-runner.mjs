@@ -13,7 +13,7 @@ import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
 import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
-import { loadCorpusAsync } from "./migrate/load-corpus.mjs";
+import { loadCorpusAsync, verifyDiffRows } from "./migrate/load-corpus.mjs";
 import { importTransitionsExec } from "./migrate/import-transitions.mjs";
 import { buildTransitions } from "./model/transitions.mjs";
 import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
@@ -203,10 +203,20 @@ async function loadCmd(ctx) {
   const exec = pgExec(client);
   const where = describePgTarget(dbConfig.connection);
   try {
+    // BLZ-690: the git-era history is read BEFORE the transaction opens. Walking git's rename
+    // log is the slowest step of the load and touches no database; inside BEGIN it held the
+    // transaction (and every lock the TRUNCATE took) open for the whole walk.
+    let built;
+    try { built = ctx.buildTransitions({ root: dataRoot }); }
+    catch (e) {
+      err(`blaze db load: could not read the git history at ${dataRoot} — ${e.message}`);
+      err("Nothing was loaded.");
+      return 1;
+    }
     await exec.run("BEGIN", []);
-    let tally, seeded, history;
+    let tally, seeded, history, held;
     try {
-      const held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
+      held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
       if (held > 0 && !replace) {
         await exec.run("ROLLBACK", []);
         err(`blaze db load: ${where} already holds ${held} ticket(s). Nothing was loaded.`);
@@ -227,7 +237,6 @@ async function loadCmd(ctx) {
       // db the metrics view reads `ticket_transition`, and git's log stops growing at cutover.
       // Through BLZ-281's import rules (import-transitions.mjs). `head === null` means no git
       // history could be read at the data root — said below, never passed off as "none".
-      const built = buildTransitions({ root: dataRoot });
       history = { ...(await importTransitionsExec(exec, built,
                     { knownIds: new Set(tally.typeById.keys()), dialect: "postgres" })), head: built.head };
       // Spec §5.2: the counter is seeded from what was just loaded (seedCounter reads the
@@ -242,7 +251,11 @@ async function loadCmd(ctx) {
       err("Nothing was loaded: the load runs in one transaction.");
       return 1;
     }
-    log(`loaded ${where}${replace ? "  (--replace: the previous tickets were erased first)" : ""}`);
+    // BLZ-690: "erased" only when there was something to erase.
+    const replaced = !replace ? ""
+      : held > 0 ? `  (--replace: the previous ${held} ticket(s) were erased first)`
+        : "  (--replace: the database held no tickets — nothing to erase)";
+    log(`loaded ${where}${replaced}`);
     log(`  tickets      ${tally.tickets}`);
     log(`  links        ${tally.links}`);
     log(`  worklog      ${tally.worklog}`);
@@ -251,7 +264,17 @@ async function loadCmd(ctx) {
     if (tally.titleFallbacks) log(`  ⚠ titles substituted from id: ${tally.titleFallbacks}`);
     if (tally.danglingParents) log(`  ⚠ dangling parents counted: ${tally.danglingParents}`);
     if (tally.danglingLinks) log(`  ⚠ dangling links dropped: ${tally.danglingLinks}`);
+    if (tally.duplicateLinks) log(`  ⚠ repeated links collapsed: ${tally.duplicateLinks}`);
     if (tally.skipped.worklogDropped.length) log(`  ⚠ worklog entries dropped: ${tally.skipped.worklogDropped.length}`);
+    const collapsed = tally.collapsed.labels + tally.collapsed.components;
+    if (collapsed) log(`  ⚠ repeated labels/components collapsed: ${collapsed}`);
+    // BLZ-690: each of those rows leaves a ticket's database value different from its file, so
+    // verify WILL fail on them. Said here, so that FAIL is expected rather than alarming.
+    const lossy = verifyDiffRows(tally).total;
+    if (lossy) {
+      log(`  ⚠ ${lossy} row(s) above were dropped or collapsed — 'blaze db verify' will report each as a value difference`);
+      log("    on its ticket. Fix them in the files and reload with --replace, or accept them.");
+    }
     log(transitionsLine(history, dataRoot));
     if (tally.skipped.noId || tally.skipped.badId) {
       log(`  ⚠ files skipped: ${tally.skipped.noId} with no id, ${tally.skipped.badId} with a malformed id`);
@@ -324,7 +347,7 @@ async function verifyCmd(ctx) {
   return 1;
 }
 
-async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
+async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransitions: buildHistory }) {
   const path = shadowDbPath(dataRoot);
   if (existsSync(path) && !force) {
     err(`blaze db init: ${path} already exists.\n`);
@@ -408,13 +431,23 @@ async function initSqlite({ dataRoot, projectsDir, force, log, err }) {
     db.exec(setMigrationModeSql("sqlite", false));
     // BLZ-680: the same git-era history `blaze db load` imports on Postgres, so a SQLite board
     // switched to BLAZE_WRITE_PORT=db keeps its metrics history too. One transaction: a file
-    // database commits each autocommitted INSERT to disk on its own.
-    db.exec("BEGIN");
-    const built = buildTransitions({ root: dataRoot });
-    const history = { ...(await importTransitionsExec(exec, built,
-      { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
-      head: built.head };
-    db.exec("COMMIT");
+    // database commits each autocommitted INSERT to disk on its own. BLZ-690: git is read
+    // before BEGIN (as on Postgres), and a failed import is ROLLED BACK and named rather than
+    // escaping as a stack trace with the transaction still open.
+    let history;
+    try {
+      const built = buildHistory({ root: dataRoot });
+      db.exec("BEGIN");
+      history = { ...(await importTransitionsExec(exec, built,
+        { knownIds: new Set(exec.all("SELECT id FROM ticket", []).map((r) => r.id)), dialect: "sqlite" })),
+        head: built.head };
+      db.exec("COMMIT");
+    } catch (e) {
+      if (db.isTransaction) { try { db.exec("ROLLBACK"); } catch { /* the original error is what matters */ } }
+      err(`blaze db init: the shadow at ${path} was built, but importing the git history failed: ${e.message}`);
+      err("None of that history was kept. Fix the cause, then rebuild with 'blaze db init --force'.");
+      return 1;
+    }
     // BLZ-669: loadCorpus seeded from the tickets; this adds the `.ids/` claims (a number
     // handed out that may not have a ticket yet). It can only RAISE a counter.
     await seedCounter(exec, await corpusMaxima({ projectsDir, readStorage: fsReadStorage }),
@@ -531,6 +564,8 @@ export async function runDb(argv, io = {}) {
   const ctx = { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir, force, replace, log, err,
                 resolveDbConfig: io.resolveDbConfig ?? resolveDatabaseConfig,
                 openPgClient: io.openPostgresClient ?? openPostgresClient,
+                // Injectable so a test can see WHEN the git walk runs, and make it fail.
+                buildTransitions: io.buildTransitions ?? buildTransitions,
                 env: io.env ?? process.env };
   if (cmd === "init") return init(ctx);
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
