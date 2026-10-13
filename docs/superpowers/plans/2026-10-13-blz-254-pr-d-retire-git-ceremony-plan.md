@@ -929,3 +929,243 @@ git commit -m "BLZ-687: the board server stops committing; its 200 body is { ok,
 Expected: all green. `rg -n "write-outcome|writeOutcome|gitOutcome" scripts tests` prints nothing.
 
 ---
+### Task 3: the CLI ticket verbs and `blaze sprint` stop committing
+
+**Files:**
+- Modify: `scripts/new-runner.mjs`, `scripts/move-runner.mjs`, `scripts/edit-runner.mjs`, `scripts/link-runner.mjs`, `scripts/log-runner.mjs`, `scripts/resolve-runner.mjs`, `scripts/sprint-runner.mjs`
+- Create: `tests/verbs-make-no-commit.test.mjs`
+- Modify tests: `tests/runner-dataroot.test.mjs`, `tests/board-overstatement-guards.test.mjs` (one test), `tests/sprint-runner-stamp-warning.test.mjs` (comment), `tests/model/seam-closure.test.mjs` (ledger rows 2062, 2083-2088)
+- Delete tests: `tests/runner-batch.test.mjs` (every test pins a runner queueing in `commitMode: "batch"`), `tests/edit-runner-batch.test.mjs` (the same, for `blaze edit`)
+- Docs: `docs/guide/commands.md` (`## new`, `## move`, `## edit`, `## link`, `## resolve`, `## log`, `## sprint`: drop "commits"/"queues" from each), `docs/guide/getting-started.md:156-160`
+
+**Interfaces:**
+- Consumes: nothing new.
+- Produces: each verb's success line without a commit suffix (`created OBA-3 → <path>`, `OBA-1: in-progress → in-review`, `OBA-1: priority = high`, `OBA-1: added Relates → OBA-2`, `logged 30m to OBA-1 (total …)`, `OBA-1: resolution → wont-do`, `created S1`, `active sprint: S1`), exit 0, nothing staged, `HEAD` unmoved.
+
+- [ ] **Step 1: Write the failing test.** Create `tests/verbs-make-no-commit.test.mjs`:
+
+```js
+// tests/verbs-make-no-commit.test.mjs — BLZ-687 (BLZ-254 PR D, spec §5.5).
+//
+// "The board never commits. In fs mode the user versions the files themselves." Every CLI
+// verb that used to commit (per-op) or queue (batch) its write is driven here, end to end
+// through cli.mjs, against an fs board that IS a git repo — so a commit, a staged path or a
+// leftover "(queued for blaze commit)" suffix would all be visible. Each must change the
+// working tree, stage nothing, leave HEAD where it was, and print no git vocabulary.
+//
+// D1 keeps fs mode's single-machine allocator: the last test pins that `blaze new` still
+// allocates through the claim ledger (`.ids/<n>`), one number after the other.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync, execFileSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const cli = join(REPO, "scripts", "cli.mjs");
+const git = (root, ...a) => execFileSync("git", ["-C", root, ...a], { encoding: "utf8" }).trim();
+
+function board(t) {
+  const root = mkdtempSync(join(tmpdir(), "blz687-verbs-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  git(root, "init", "-q");
+  git(root, "config", "user.email", "t@t.t");
+  git(root, "config", "user.name", "t");
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "OBA", projects: ["OBA"] }));
+  mkdirSync(join(root, "projects", "OBA", "in-progress"), { recursive: true });
+  for (const n of [1, 2]) {
+    writeFileSync(join(root, "projects", "OBA", "in-progress", `OBA-${n}.md`),
+      `---\nid: OBA-${n}\ntype: task\nproject: OBA\ntitle: OBA-${n}\npriority: medium\nestimate: 30\n---\n\nbody\n`);
+  }
+  git(root, "add", "-A");
+  git(root, "commit", "-q", "-m", "seed");
+  return root;
+}
+
+function run(root, args) {
+  const env = { ...process.env };
+  for (const k of ["BLAZE_WRITE_PORT", "BLAZE_READONLY", "BLAZE_REMOTE_URL", "BLAZE_TOKEN",
+                   "BLAZE_PROJECTS_DIR", "BLAZE_COMMIT_MODE", "BLAZE_SESSION"]) delete env[k];
+  return spawnSync(process.execPath, [cli, ...args], { cwd: root, env, encoding: "utf8" });
+}
+
+const GIT_WORDS = /queued for blaze commit|no commit created|commit failed|commit manually/;
+
+const VERBS = [
+  ["new", ["new", "--project", "OBA", "--type", "task", "--estimate", "30", "a new ticket"]],
+  ["move", ["move", "OBA-1", "in-review"]],
+  ["edit", ["edit", "OBA-1", "priority", "high"]],
+  ["link", ["link", "OBA-1", "Relates", "OBA-2"]],
+  ["log", ["log", "OBA-1", "30"]],
+  ["resolve", ["resolve", "OBA-2", "wont-do"]],
+  ["sprint new", ["sprint", "new", "Sprint 1", "--start", "2026-01-01", "--end", "2026-01-14"]],
+];
+
+for (const [name, args] of VERBS) {
+  test(`blaze ${name} writes, stages nothing, creates no commit, and says nothing about git`, (t) => {
+    const root = board(t);
+    const before = git(root, "rev-parse", "HEAD");
+    const r = run(root, args);
+    assert.equal(r.status, 0, `${name}: ${r.stdout}${r.stderr}`);
+    assert.notEqual(git(root, "status", "--porcelain", "--untracked-files=all"), "",
+      `${name} must change the working tree`);
+    assert.equal(git(root, "diff", "--cached", "--name-only"), "", `${name} must stage nothing`);
+    assert.equal(git(root, "rev-parse", "HEAD"), before, `${name} must not commit`);
+    assert.doesNotMatch(r.stdout + r.stderr, GIT_WORDS, `${name} printed git vocabulary`);
+  });
+}
+
+test("fs-mode blaze new still allocates through the claim ledger (D1)", (t) => {
+  const root = board(t);
+  const a = run(root, ["new", "--project", "OBA", "--type", "task", "--estimate", "30", "first"]);
+  const b = run(root, ["new", "--project", "OBA", "--type", "task", "--estimate", "30", "second"]);
+  assert.equal(a.status, 0, a.stderr);
+  assert.equal(b.status, 0, b.stderr);
+  assert.match(a.stdout, /^created OBA-3 → /m);
+  assert.match(b.stdout, /^created OBA-4 → /m, "the second create must take the next number");
+  for (const n of [3, 4]) {
+    assert.ok(existsSync(join(root, "projects", "OBA", ".ids", String(n))), `the claim .ids/${n} must be written`);
+  }
+});
+```
+
+- [ ] **Step 2: Run it and watch it fail.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/verbs-make-no-commit.test.mjs
+```
+
+Expected: the seven verb tests FAIL with "must not commit" (the default `commitMode` is `per-op`). The allocator test PASSES already; it is a guard, not a red step.
+
+- [ ] **Step 3: The six ticket runners.** In each of `new-runner.mjs`, `move-runner.mjs`, `edit-runner.mjs`, `link-runner.mjs`, `log-runner.mjs` and `resolve-runner.mjs`:
+1. Delete the line `import { stageFor, commitSuffix } from "./commit-or-queue.mjs";`.
+2. Replace
+
+   ```js
+   let cfg;
+   try { cfg = loadConfig({ root: dataRoot }); }
+   ```
+
+   with
+
+   ```js
+   // The call IS the config-schema guard (ADR-0002); its value was read only for `commitMode`,
+   // which BLZ-254 removed.
+   try { loadConfig({ root: dataRoot }); }
+   ```
+3. Replace the tail. The `// BLZ-670: db mode stages only files …` comment, the `const c = stageFor(mode)(…)` line and the `if (!c.ok) { … commit manually …}` line all go, and the `console.log` loses `${commitSuffix(c)}`:
+
+   | Runner | Final line |
+   |---|---|
+   | new | ``console.log(`created ${r.id}${mode === "db" ? "" : ` → ${r.file}`}`);`` (keep its BLZ-670 comment about `r.file` being an id handle) |
+   | move | ``console.log(`${id}: ${r.from} → ${r.to}${r.resolution ? ` (resolution: ${r.resolution})` : ""}`);`` |
+   | edit | ``console.log(`${id}: ${field} = ${value}`);`` |
+   | link | ``console.log(`${id}: ${remove ? "removed" : "added"} ${type} → ${target}`);`` (also delete `const verb = remove ? "unlink" : "link";`, now unused) |
+   | log | ``console.log(`logged ${r.minutes}m to ${r.id} (total ${formatMinutes(r.total_worklog_minutes)})`);`` |
+   | resolve | ``console.log(`${id}: resolution → ${resolution}`);`` |
+
+   Precede each with `// BLZ-254 (spec §5.5): the verb writes and stops — the board never commits.`
+4. In move/edit/link/log/resolve, drop `mode, ` from `const { writePort, readStorage, mode, close: closePorts } = __wp;` (now unused). new-runner keeps it.
+5. Headers and the BLZ-121 comments. Each runner's header says "then commit (or queue)" or "then commits (or queues)". Replace that with "and writes; it makes no commit (BLZ-254)". In each `BLZ-121 defence-in-depth` comment, replace the explanation that names `commitOrQueue` with: "`apply*` writes the ticket file via direct node:fs calls, so the guard must run before it; cli.mjs is still the primary gate." Do the same in `log-runner`, `link-runner`, `resolve-runner` and `new-runner`. `rg -n "commitOrQueue|commitSuffix|stageFor|commitMode" scripts/*-runner.mjs` prints nothing for these six.
+
+- [ ] **Step 4: `scripts/sprint-runner.mjs`.**
+1. Delete `import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";`.
+2. Apply the same `let cfg; try { cfg = loadConfig(…) }` → `try { loadConfig(…) }` change (`:25-26`).
+3. Replace
+
+   ```js
+       const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "sprint", id, message: `sprint: create ${id}`, files: ["sprints.json"] });
+       if (!c.ok) { console.error(`blaze sprint: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
+       console.log(`created ${id}${commitSuffix(c)}`);
+   ```
+
+   with `    console.log(\`created ${id}\`);   // BLZ-254: no commit`, and the `active` twin (`:84-86`) with `    console.log(\`active sprint: ${id}\`);   // BLZ-254: no commit`.
+4. Fix the BLZ-121 comment (`:36-40`) the same way as Step 3.5.
+
+- [ ] **Step 5: The other tests.**
+- `tests/runner-dataroot.test.mjs`:
+  - In `dataRepo()`, drop `, commitMode: "per-op"` from the config.
+  - Test 1: replace the two lines after `// …the DATA repo committed (per-op mode)…` with:
+
+    ```js
+      // …the DATA repo holds it uncommitted — BLZ-254: the board never commits…
+      assert.match(execFileSync("git", ["-C", data, "status", "--porcelain", "--untracked-files=all"],
+        { encoding: "utf8" }), /ZZZ-2-dataroot-proof/);
+    ```
+  - Test 2: replace its two `subject` lines with:
+
+    ```js
+      const before = head(data);
+      // (the runner already ran above this line in the original — move `const before = head(data);` ABOVE the execFileSync)
+      assert.match(readFileSync(join(data, "projects", "ZZZ", "in-progress", "ZZZ-1.md"), "utf8"), /minutes: 30/);
+      assert.equal(head(data), before, "BLZ-254: the log is written, not committed");
+    ```
+
+    That is: capture `before` before the `execFileSync` of `log-runner.mjs`, then assert the file and the unmoved HEAD. Add `readFileSync` to the `node:fs` import.
+  - Delete test 3, `"batch mode queues into the DATA repo's .blaze ledger"` (pins a batch queue).
+- `tests/board-overstatement-guards.test.mjs`: delete the test `"each per-ticket verb says so when no commit was created"` (it pinned `commitSuffix`, whose callers are now gone). Then delete `commitSuffix` from the `commit-or-queue.mjs` import line, leaving `import { commitOrQueue } from "../scripts/commit-or-queue.mjs";`.
+- `tests/sprint-runner-stamp-warning.test.mjs:34-40`: drop `, commitMode: "per-op"`. Replace the comment "A real git repo: `commitOrQueue` runs on the write path, and without one the runner exits 1 …" with "A real git repo, as a board usually is; since BLZ-254 the runner never touches git, so the assertions below do not depend on it."
+- `tests/new-runner.test.mjs:1-5` and `tests/link-runner.test.mjs:1-5`: replace the header sentences about "makes a REAL git commit … commitMode: \"batch\" (no commits)" with "Runner spawn-test isolation is mandatory: a spawned runner with no BLAZE_PROJECTS_DIR writes into the REAL worktree." (The `commitMode` keys in their configs are removed in Task 7.)
+
+- [ ] **Step 6: Seam-closure (ledger rows 2062 and 2083-2088).**
+
+```js
+  ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+```
+
+→
+
+```js
+  ["sprint-runner.mjs", ["saveSprints"]],   // BLZ-254: commitOrQueue removed — no commit
+```
+
+and
+
+```js
+  // ...their six CLI runners resolve the write port and hand the result to the commit queue.
+  // BLZ-670: each resolves BOTH ports once (resolvePorts) and stages by mode (stageFor), so a
+  // db-mode verb reads the database and never stages a ticket that is only a row.
+  ["edit-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["link-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["log-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["move-runner.mjs", ["stageFor", "resolvePorts"]],
+  ["new-runner.mjs", ["applyNew", "stageFor", "resolvePorts"]],
+  ["resolve-runner.mjs", ["stageFor", "resolvePorts"]],
+```
+
+→
+
+```js
+  // ...their six CLI runners resolve the write port.
+  // BLZ-670: each resolves BOTH ports once (resolvePorts), so a db-mode verb reads the database.
+  // BLZ-254: stageFor removed from all six — the verbs stage nothing (spec §5.5).
+  ["edit-runner.mjs", ["resolvePorts"]],
+  ["link-runner.mjs", ["resolvePorts"]],
+  ["log-runner.mjs", ["resolvePorts"]],
+  ["move-runner.mjs", ["resolvePorts"]],
+  ["new-runner.mjs", ["applyNew", "resolvePorts"]],
+  ["resolve-runner.mjs", ["resolvePorts"]],
+```
+
+- [ ] **Step 7: Delete the batch-runner tests, update the docs, run, commit.**
+
+```bash
+git rm tests/runner-batch.test.mjs tests/edit-runner-batch.test.mjs
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/verbs-make-no-commit.test.mjs tests/runner-*.test.mjs tests/new-runner.test.mjs tests/link-runner.test.mjs tests/sprint-runner-stamp-warning.test.mjs tests/readonly.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs
+node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+npm test 2>&1 | tail -9
+git add scripts/new-runner.mjs scripts/move-runner.mjs scripts/edit-runner.mjs scripts/link-runner.mjs \
+  scripts/log-runner.mjs scripts/resolve-runner.mjs scripts/sprint-runner.mjs tests/verbs-make-no-commit.test.mjs \
+  tests/runner-dataroot.test.mjs tests/board-overstatement-guards.test.mjs tests/sprint-runner-stamp-warning.test.mjs \
+  tests/new-runner.test.mjs tests/link-runner.test.mjs tests/model/seam-closure.test.mjs \
+  scripts/ci/temp-cleanup-debt.json docs/guide/commands.md docs/guide/getting-started.md
+git commit -m "BLZ-687: the CLI ticket verbs and blaze sprint stop committing (spec §5.5)"
+```
+
+Doc text for `getting-started.md:156-160`: "Blaze does not commit. Every mutating command above changes the ticket files (or, under `BLAZE_WRITE_PORT=db`, the database) and stops. On a file board, version the files with git yourself, as often as suits you. A board with more than one writer belongs in db mode (see [ADR-0006](../decisions/0006-database-is-the-sole-source-of-truth.md))." In `commands.md`, every verb section loses the clause that says the verb commits or queues.
+
+`readonly.test.mjs` is in the run list on purpose. Its "bypassing cli.mjs refuses BEFORE writing" tests must stay green now that the runners never reach a commit. Its queue snapshots still work, because `pending-ledger.mjs` exists until Task 6.
+
+---
