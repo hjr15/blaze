@@ -521,6 +521,9 @@ async function status({ dataRoot, log }) {
   try { ({ db, exec } = await openShadowReadOnly(dataRoot)); }
   catch (e) { console.error(e.message); process.exit(1); }
   try {
+    // BLZ-690: ONE read transaction, so every count below comes from the same snapshot even
+    // while a dual-write soak is committing beside it.
+    db.exec("BEGIN");
     const n = (t) => exec.all(`SELECT count(*) AS n FROM ${t}`)[0].n;
     log(`shadow database ${path}`);
     log(`  schema       v${exec.all("SELECT value FROM blaze_meta WHERE key='schema_version'")[0]?.value}`);
@@ -535,6 +538,7 @@ async function status({ dataRoot, log }) {
     const byKind = Object.fromEntries(acByKind.map((r) => [r.kind, r.n]));
     log(`  criteria     ${byKind.criterion ?? 0}`);
     log(`  AC notes     ${byKind.note ?? 0}`);
+    db.exec("COMMIT");
   } finally { db.close(); }
 
   // Is the soak actually ON right now? A week of "no divergences" from a board whose

@@ -7,14 +7,16 @@
 // a soak must never raise. It briefly convinced me the database was corrupting data.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, statSync, readFileSync, chmodSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, readFileSync, chmodSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDb } from "../scripts/db-runner.mjs";
 import { writeClaim } from "../scripts/model/claims.mjs";
-import { openShadow } from "../scripts/model/write-port-resolve.mjs";
+import { openShadow, openShadowReadOnly } from "../scripts/model/write-port-resolve.mjs";
+import { DatabaseSync } from "node:sqlite";
+import { createHash } from "node:crypto";
 import { scratchRegistry } from "./helpers/scratch.mjs";
 import { subVerbOf } from "../scripts/readonly.mjs";
 
@@ -159,33 +161,88 @@ describe("blaze db under BLAZE_READONLY", () => {
 
 // BLZ-690 review: `db status` runs under BLAZE_READONLY, so it must not write — not even the
 // -wal/-shm files or the WAL journal-mode switch a read-write open makes.
-// A read-write WAL open creates -wal/-shm and deletes them again on close, so a before/after
-// listing cannot see it. Making `.blaze` and its files read-only can: any write — a journal file,
-// the WAL switch — then fails, and only a genuinely read-only open still answers.
-test("db status opens the shadow READ-ONLY: it works with .blaze and its files unwritable, and changes nothing",
+// BLZ-690: status opens the shadow `mode=ro` — never `immutable=1`, which skips locking and
+// change detection and can return torn counts (or SQLITE_CORRUPT) when a writer checkpoints. The
+// real guarantees, each pinned below: the CONTENTS of blaze.db and config.db never change; a
+// database not in WAL mode gets no new file at all; a WAL database in an unwritable directory is
+// refused with an error that names why; and a live writer is read through, one snapshot per run.
+const sha = (f) => createHash("sha256").update(readFileSync(f)).digest("hex");
+
+test("db status never modifies blaze.db or config.db", async () => {
+  const roots = board();
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+  const dir = join(roots.dataRoot, ".blaze");
+  const before = ["blaze.db", "config.db"].map((f) => sha(join(dir, f)));
+  const c = capture();
+  assert.equal(await runDb(["status"], { ...c.io, env: { BLAZE_READONLY: "1" }, roots }), 0, c.text());
+  assert.match(c.text(), /tickets\s+1/);
+  assert.match(c.text(), /criteria\s+2/);
+  assert.deepEqual(["blaze.db", "config.db"].map((f) => sha(join(dir, f))), before);
+});
+
+test("openShadowReadOnly creates no file for a database not in WAL mode", async () => {
+  const roots = board();
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+  const dir = join(roots.dataRoot, ".blaze");
+  for (const f of ["blaze.db", "config.db"]) {
+    const h = new DatabaseSync(join(dir, f)); h.exec("PRAGMA journal_mode = DELETE"); h.close();
+  }
+  const listing = readdirSync(dir).sort();
+  const { db, exec } = await openShadowReadOnly(roots.dataRoot);
+  try {
+    assert.equal(exec.all("SELECT count(*) AS n FROM ticket")[0].n, 1);
+    assert.throws(() => db.exec("DELETE FROM ticket"), /readonly/, "the handle cannot write");
+  } finally { db.close(); }
+  assert.deepEqual(readdirSync(dir).sort(), listing);
+});
+
+test("openShadowReadOnly names an unwritable directory it cannot read a WAL database from",
   { skip: process.getuid && process.getuid() === 0 ? "root ignores mode bits" : false }, async () => {
   const roots = board();
   assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
   const dir = join(roots.dataRoot, ".blaze");
-  const snap = () => readdirSync(dir).sort().map((f) => {
-    const st = statSync(join(dir, f));
-    return `${f} ${st.size} ${st.mtimeMs}`;
-  });
-  const before = snap();
-  const files = readdirSync(dir);
-  for (const f of files) chmodSync(join(dir, f), 0o444);
   chmodSync(dir, 0o555);
   try {
-    const c = capture();
-    assert.equal(await runDb(["status"], { ...c.io, env: { BLAZE_READONLY: "1" }, roots }), 0, c.text());
-    assert.match(c.text(), /tickets\s+1/);
-    assert.match(c.text(), /criteria\s+2/);
-  } finally {
-    chmodSync(dir, 0o755);
-    for (const f of files) chmodSync(join(dir, f), 0o644);
-  }
-  assert.deepEqual(snap().map((x) => x.replace(/ [\d.]+$/, "")), before.map((x) => x.replace(/ [\d.]+$/, "")),
-    "status created, removed or resized a file");
+    await assert.rejects(openShadowReadOnly(roots.dataRoot),
+      /cannot read the shadow database read-only: it is in WAL mode and .*\.blaze is not writable/);
+  } finally { chmodSync(dir, 0o755); }
+});
+
+test("openShadowReadOnly opened with NO writer still sees a writer that arrives later (no immutable snapshot)", async () => {
+  const roots = board();
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+  const ro = await openShadowReadOnly(roots.dataRoot);   // no -wal now: the race window
+  try {
+    const count = () => ro.exec.all("SELECT count(*) AS n FROM acceptance_criterion")[0].n;
+    const before = count();
+    const writer = await openShadow(roots.dataRoot);
+    try {
+      writer.db.prepare("INSERT INTO acceptance_criterion (ticket_id, ord, kind, text, checked) VALUES ('ENG-1', 91, 'note', 'n', 0)").run();
+      writer.db.exec("PRAGMA wal_checkpoint(TRUNCATE)");
+    } finally { writer.db.close(); }
+    assert.equal(count(), before + 1, "the read-only handle locks and detects change like any reader");
+  } finally { ro.db.close(); }
+});
+
+test("db status reads through a live writer: no error, and each run's counts are one snapshot", async () => {
+  const roots = board();
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+  const writer = await openShadow(roots.dataRoot);   // held open across both reads: WAL is live
+  try {
+    const notes = (t) => Number(/AC notes\s+(\d+)/.exec(t)[1]);
+    const first = capture();
+    assert.equal(await runDb(["status"], { ...first.io, roots }), 0, first.text());
+    writer.db.exec("BEGIN");
+    writer.db.prepare("INSERT INTO acceptance_criterion (ticket_id, ord, kind, text, checked) VALUES ('ENG-1', 90, 'note', 'n', 0)").run();
+    const during = capture();
+    assert.equal(await runDb(["status"], { ...during.io, roots }), 0, during.text());
+    assert.equal(notes(during.text()), notes(first.text()), "an uncommitted write is not seen");
+    writer.db.exec("COMMIT");
+    const second = capture();
+    assert.equal(await runDb(["status"], { ...second.io, roots }), 0, second.text());
+    assert.equal(notes(second.text()), notes(first.text()) + 1, "the committed write is");
+    assert.match(second.text(), /tickets\s+1/);
+  } finally { writer.db.close(); }
 });
 
 test("cli.mjs and runDb pick the db sub-verb by ONE rule (subVerbOf)", () => {
