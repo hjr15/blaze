@@ -668,3 +668,264 @@ git commit -m "BLZ-687: reconcile and the supervisor feed stop committing (spec 
 ```
 
 ---
+### Task 2: the board server stops committing; the page drops its git sentence
+
+**Files:**
+- Modify: `scripts/serve.mjs` (`:26` import, `:840-870` the response helpers, `:888-953` the route bodies)
+- Delete: `scripts/views/write-outcome.mjs`
+- Modify: `scripts/views/page.mjs` (`:11` import, `:52-58` `writeOutcomeSource`, `:423-440` `blazePost`)
+- Regenerate: `tests/views/page-golden.html`
+- Modify tests: `tests/serve-endpoints.test.mjs`, `tests/serve-db-mode.test.mjs`, `tests/serve-api-new.test.mjs`, `tests/board-overstatement-guards.test.mjs` (the BLZ-449 describe), `tests/model/seam-closure.test.mjs` (ledger row 2051-2053)
+- Delete tests: `tests/serve-batch.test.mjs` (every test pins `commitMode: "batch"` queueing through the server), `tests/serve-batch-per-op.test.mjs` (every test pins "per-op mode adds exactly one commit")
+- Docs: `docs/guide/commands.md` `## board` (the write paragraph), `docs/architecture.md` (HTTP table: the 200 body)
+
+**Interfaces:**
+- Produces: every `POST /api/{move,edit,resolve,log,ac,link}` 200 body is exactly `{ ok: true, db: <mode === "db">, …extra }` (`extra` = `{ resolution }` for `/api/move`, nothing for the others). `POST /api/new`'s is `{ ok: true, id, warnings, db: true }`. There is no `committed`, no `queued`, and no 503 for a held lock.
+
+- [ ] **Step 1: Write the failing tests.**
+
+In `tests/serve-endpoints.test.mjs`:
+1. Delete the import `import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";` (`:27`) and the test `"POST /api/log responds 503 when the commit lock is held (not a generic 500)"` (`:178-191`). No lock exists on the write path.
+2. Add, after `const post = …` (`:99`):
+
+   ```js
+   const headOf = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+   // BLZ-254 (spec §5.5): the board server never commits. A write changes the file and leaves
+   // HEAD where it was; the body names the store and says nothing about git.
+   async function assertWroteNoCommit(fx, res, extra = {}) {
+     const body = await res.json();
+     assert.equal(res.status, 200, JSON.stringify(body));
+     assert.deepEqual(body, { ok: true, db: false, ...extra }, "the 200 body is { ok, db, …extra } and nothing else");
+     assert.notEqual(execFileSync("git", ["-C", fx.root, "status", "--porcelain"], { encoding: "utf8" }).trim(), "",
+       "the write must be on disk");
+     return body;
+   }
+   ```
+3. Replace the five "…and commits" tests (`:101-113`, `:147-154`, `:156-164`, `:166-176`, `:193-199`) with:
+
+   ```js
+   test("POST /api/move moves the file and creates no commit", async () => {
+     const fx = repo();
+     const { server, base } = await boot(fx);
+     const before = headOf(fx.root);
+     await assertWroteNoCommit(fx, await post(base, "/api/move", { id: "OBA-1", to: "done" }), { resolution: "done" });
+     assert.ok(existsSync(join(fx.projects, "OBA", "done", "OBA-1.md")), "the file moved to done/");
+     assert.equal(existsSync(join(fx.projects, "OBA", "in-review", "OBA-1.md")), false, "and left in-review/");
+     assert.equal(headOf(fx.root), before, "the board server must not commit");
+     server.close(); rmSync(fx.root, { recursive: true, force: true });
+   });
+
+   test("POST /api/edit patches a field and creates no commit", async () => {
+     const fx = repo();
+     const { server, base } = await boot(fx);
+     const before = headOf(fx.root);
+     await assertWroteNoCommit(fx, await post(base, "/api/edit", { id: "OBA-1", patch: { assignee: "ryan" } }));
+     assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /assignee: ryan/);
+     assert.equal(headOf(fx.root), before, "the board server must not commit");
+     server.close(); rmSync(fx.root, { recursive: true, force: true });
+   });
+
+   test("POST /api/ac toggles an AC checkbox and creates no commit", async () => {
+     const fx = repo();
+     const { server, base } = await boot(fx);
+     const before = headOf(fx.root);
+     await assertWroteNoCommit(fx, await post(base, "/api/ac", { id: "OBA-1", index: 0, checked: true }));
+     assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /- \[x\] one/);
+     assert.equal(headOf(fx.root), before, "the board server must not commit");
+     server.close(); rmSync(fx.root, { recursive: true, force: true });
+   });
+
+   test("POST /api/log appends a worklog entry and creates no commit", async () => {
+     const fx = repo();
+     const { server, base } = await boot(fx);
+     const before = headOf(fx.root);
+     await assertWroteNoCommit(fx, await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" }));
+     assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /minutes: 15/);
+     assert.equal(headOf(fx.root), before, "the board server must not commit");
+     server.close(); rmSync(fx.root, { recursive: true, force: true });
+   });
+
+   test("POST /api/resolve overrides resolution and creates no commit", async () => {
+     const fx = repo();
+     const { server, base } = await boot(fx);
+     const before = headOf(fx.root);
+     await assertWroteNoCommit(fx, await post(base, "/api/resolve", { id: "OBA-1", resolution: "wont-do" }));
+     assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /resolution: wont-do/);
+     assert.equal(headOf(fx.root), before, "the board server must not commit");
+     server.close(); rmSync(fx.root, { recursive: true, force: true });
+   });
+   ```
+
+   Add `existsSync` to the file's `node:fs` import if it is missing. Keep the BLZ-121 comment on the readonly test (`:125-129`) and replace its words "not just inside commitOrQueue" with "before any verb runs".
+4. In `tests/serve-db-mode.test.mjs:49`, replace
+
+   ```js
+         assert.deepEqual(body, { ok: true, committed: false, queued: false, db: true, resolution: body.resolution });
+   ```
+
+   with
+
+   ```js
+         // BLZ-254: the body names the store and nothing about git — the commit path is gone.
+         assert.deepEqual(body, { ok: true, db: true, resolution: body.resolution });
+   ```
+
+   and replace the two comment lines above it ("Final review: the body names the store, …") with that one comment.
+5. In `tests/serve-api-new.test.mjs:142`, replace
+
+   ```js
+         assert.deepEqual([body.id, body.db, body.committed], ["ENG-2", true, false]);
+   ```
+
+   with
+
+   ```js
+         assert.deepEqual(body, { ok: true, id: "ENG-2", warnings: body.warnings, db: true },
+           "BLZ-254: no committed/queued — the server never commits");
+   ```
+6. In `tests/board-overstatement-guards.test.mjs`, replace `describe("BLZ-449: the dashboard surfaces the git outcome of a write", …)` (`:482-572`) whole with:
+
+   ```js
+   // BLZ-254 (spec §5.5): BLZ-449 gave the page a sentence for the server's `committed`/`queued`
+   // fields. The server no longer commits and no longer sends them, so the sentence and its
+   // module (scripts/views/write-outcome.mjs) are deleted — and the page must not keep any of
+   // its git vocabulary, which would now describe nothing.
+   describe("BLZ-254: the dashboard says nothing about git after a write", () => {
+     test("the served page carries no write-outcome function and no git-outcome sentence", () => {
+       const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
+       assert.doesNotMatch(html, /BLAZE_WRITE_OUTCOME/, "the injected write-outcome function is gone");
+       assert.doesNotMatch(html, /queued for blaze commit|already matched HEAD|nothing was added to git log/,
+         "no sentence about a commit the board no longer makes");
+     });
+   });
+   ```
+
+   Delete the `writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END` import line.
+
+- [ ] **Step 2: Run them and watch them fail.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve-endpoints.test.mjs tests/serve-db-mode.test.mjs tests/serve-api-new.test.mjs tests/board-overstatement-guards.test.mjs
+```
+
+Expected: FAIL. The deepEqual sees `committed`/`queued`, "the board server must not commit" fails, and the page still matches `/BLAZE_WRITE_OUTCOME/`.
+
+- [ ] **Step 3: The server (`scripts/serve.mjs`).**
+
+1. Delete `import { stageFor } from "./commit-or-queue.mjs";` (`:26`).
+2. Replace from the comment `      // in-place ops only — use the inline path for ops that rename (see /api/move)` (`:840`) through the end of the `done` arrow (`:870`, the line `      };` after `return json(200, { ok: true, ...gitOutcome(c), ...extra });`) with:
+
+   ```js
+         // BLZ-254 (spec §5.5): the board never commits. A 200 body names the STORE and nothing
+         // about git: `db` says whether the write landed in the database or in the files. The git
+         // fields (`committed`/`queued`, BLZ-422) went with the commit path, and so did the 503 a
+         // held commit lock used to earn — nothing on this path takes a lock any more.
+         // BLZ-670: resolved below, inside the try, but declared here because `done` reports by
+         // the resolved mode.
+         let writePort, readStorage, mode, closeWritePort;
+         const done = (r, extra = {}) => {
+           if (!r.ok) return json(422, { errors: r.errors });
+           return json(200, { ok: true, db: mode === "db", ...extra });
+         };
+   ```
+3. `/api/move` (`:888-894`). Replace
+
+   ```js
+           if (!r.ok) return json(422, { errors: r.errors });
+           const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
+           const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
+           if (commitFailed(c)) return;
+           return json(200, { ok: true, ...gitOutcome(c), resolution: r.resolution });
+   ```
+
+   with `        return done(r, { resolution: r.resolution });`.
+4. `/api/edit`, `/api/resolve`, `/api/log`, `/api/ac`. Replace each `return done(r, <message>, "<op>");` with `return done(r);` (four sites; `rg -n 'return done\(r, `' scripts/serve.mjs` must print nothing afterwards).
+5. `/api/new` (`:942-945`). Replace
+
+   ```js
+           const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "new", id: r.id,
+             message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile].filter(Boolean), lockOpts: LOCK_OPTS });
+           if (commitFailed(c)) return;
+           return json(200, { ok: true, id: r.id, warnings: r.warnings, ...gitOutcome(c) });
+   ```
+
+   with `        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db" });`.
+6. `/api/link` (`:957`). Replace `return done(r, \`${p.id}: ${p.remove === true ? "unlink" : "link"} ${p.type} ${p.target}\`, "link");` with `return done(r);`.
+7. Fix the comment above the read-only check (`:830`): "checked here (before any apply* call below, not just inside commitOrQueue)" → "checked here, before any apply* call below". Fix the BLZ-133 comment at `:48` ("reading commitMode from the engine root was already wrong") to say "reading config from the engine root …".
+8. `rg -n 'stageFor|commitFailed|gitOutcome|LOCK_OPTS|commitMode' scripts/serve.mjs` must print nothing.
+
+- [ ] **Step 4: The page (`scripts/views/page.mjs`), and the module.**
+
+1. Delete `import { writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END } from "./write-outcome.mjs";` (`:11`).
+2. Delete the `// BLZ-449: the same construction …` comment and the `writeOutcomeSource()` function (`:52-58`).
+3. In the client template (`:423-440`), delete the four-line `// BLZ-449: the sentence a WRITE gets. …` comment and the `${writeOutcomeSource()}` line. Then replace
+
+   ```js
+           if (res.ok) {
+             // BLZ-449: the 200 body carries committed/queued (serve.mjs's gitOutcome,
+             // added by BLZ-422) and this consumer used to discard it. A queued write and an
+             // idempotent re-write that git had nothing to commit both looked identical to a
+             // real commit from here — on a board whose model is one op, one commit.
+             const j = await res.json().catch(() => null);
+             const note = writeOutcome(j);
+             if (note) toast(note);
+             window.blazeSwapView(document.documentElement.dataset.view);
+             return true;
+           }
+   ```
+
+   with
+
+   ```js
+           if (res.ok) {
+             // BLZ-254: a successful write says nothing — the board no longer commits, so there
+             // is no git outcome to report (BLZ-449's sentence is deleted with the commit path).
+             window.blazeSwapView(document.documentElement.dataset.view);
+             return true;
+           }
+   ```
+4. `git rm scripts/views/write-outcome.mjs`
+5. Regenerate the golden page: `rm tests/views/page-golden.html && node --test --import=./tests/setup/hang-watchdog.mjs tests/views/page-golden.test.mjs && node --test --import=./tests/setup/hang-watchdog.mjs tests/views/page-golden.test.mjs`. The first run writes it and the second compares. Then `git diff --stat tests/views/page-golden.html` must show **only deletions**: the injected function, its comment and the three removed lines in `blazePost`. Read the diff. Any added line other than the BLZ-254 comment means something else drifted, so stop and investigate.
+
+- [ ] **Step 5: Seam-closure (ledger row 2051-2053).** Replace
+
+```js
+  // BLZ-670: the mutating block resolves both ports per request (resolvePorts) and stages by mode (stageFor).
+  ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
+    "ensureIdentityIgnored", "addUser", "stageFor", "loadIdentity", "reconcile",
+```
+
+with
+
+```js
+  // BLZ-670: the mutating block resolves both ports per request (resolvePorts).
+  // BLZ-254: stageFor removed — the server stages nothing (spec §5.5).
+  ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
+    "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile",
+```
+
+- [ ] **Step 6: Delete the two batch-mode server tests.**
+
+```bash
+git rm tests/serve-batch.test.mjs tests/serve-batch-per-op.test.mjs
+```
+
+- [ ] **Step 7: Docs.**
+- `docs/guide/commands.md` `## board`: the paragraph on what a dashboard write does now reads "A write from the page (or `POST /api/*`) changes the ticket file (`fs`, `dual`) or row (`db`) and **makes no commit** (BLZ-254). The 200 body is `{ ok: true, db }` plus the route's own fields."
+- `docs/architecture.md` HTTP table: replace any mention of `committed`/`queued` in the POST rows with `db`.
+
+- [ ] **Step 8: Run, then commit.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/views/*.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs tests/remote-mode.test.mjs tests/setup-flow.test.mjs tests/signin-flow.test.mjs
+node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+npm test 2>&1 | tail -9
+git add scripts/serve.mjs scripts/views/page.mjs tests/views/page-golden.html tests/serve-endpoints.test.mjs \
+  tests/serve-db-mode.test.mjs tests/serve-api-new.test.mjs tests/board-overstatement-guards.test.mjs \
+  tests/model/seam-closure.test.mjs scripts/ci/temp-cleanup-debt.json docs/guide/commands.md docs/architecture.md
+git commit -m "BLZ-687: the board server stops committing; its 200 body is { ok, db } (spec §5.5)"
+```
+
+Expected: all green. `rg -n "write-outcome|writeOutcome|gitOutcome" scripts tests` prints nothing.
+
+---
