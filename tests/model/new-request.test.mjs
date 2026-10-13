@@ -4,7 +4,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, symlinkSync, realpathSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { scratchRegistry } from "../helpers/scratch.mjs";
 import { newRequestOrErrors, withoutServerPaths, ticketFileNameFits, NEW_TITLE_MAX } from "../../scripts/model/new-request.mjs";
+
+const scratch = scratchRegistry();
 
 test("a well-formed body becomes applyNew's options, untouched", () => {
   assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 30,
@@ -96,7 +99,7 @@ test("BLZ-691 review M2: projectsDir is matched only where a path starts, never 
 });
 
 test("BLZ-691 review M3: a symlinked projectsDir is stripped by its real path too; a missing one does not throw", () => {
-  const base = realpathSync(mkdtempSync(join(tmpdir(), "blz691-real-")));
+  const base = realpathSync(scratch(mkdtempSync(join(tmpdir(), "blz691-real-"))));
   const real = join(base, "real-projects");
   mkdirSync(real);
   const link = join(base, "linked");
