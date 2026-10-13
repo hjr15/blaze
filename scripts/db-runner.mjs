@@ -9,7 +9,7 @@ import { existsSync, rmSync } from "node:fs";
 import { readRegularFileSync } from "./model/regular-file.mjs";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { openShadow, shadowDbPath, configDbPath, divergenceLogPath,
-         readSoakState, pgExec, openCheckedPg, describePgTarget } from "./model/write-port-resolve.mjs";
+         readSoakState, pgExec, openCheckedPg, describePgTarget, openShadowReadOnly } from "./model/write-port-resolve.mjs";
 import { resolveDatabaseConfig } from "./model/database-config.mjs";
 import { openPostgresClient } from "./init-pg.mjs";
 import { corpusMaxima, seedCounter } from "./model/seed-counter.mjs";
@@ -21,7 +21,7 @@ import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
-import { assertWritable } from "./readonly.mjs";
+import { assertWritable, subVerbOf } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
 
@@ -492,7 +492,7 @@ async function status({ dataRoot, log }) {
   // `blaze db status` is the command an operator runs to DIAGNOSE a version refusal, so it
   // must print the refusal rather than a stack trace about it.
   let db, exec;
-  try { ({ db, exec } = await openShadow(dataRoot)); }
+  try { ({ db, exec } = await openShadowReadOnly(dataRoot)); }
   catch (e) { console.error(e.message); process.exit(1); }
   try {
     const n = (t) => exec.all(`SELECT count(*) AS n FROM ${t}`)[0].n;
@@ -559,7 +559,8 @@ async function status({ dataRoot, log }) {
 
 export async function runDb(argv, io = {}) {
   const { log = console.log, err = console.error } = io;
-  const cmd = argv.find((a) => !a.startsWith("-"));
+  // BLZ-690: the same rule cli.mjs's read-only exemption uses, so the two can never disagree.
+  const cmd = subVerbOf(argv);
   const force = argv.includes("--force");
   const replace = argv.includes("--replace");
   if (!cmd || argv.includes("--help") || argv.includes("-h")) { log(USAGE); return cmd ? 0 : 1; }

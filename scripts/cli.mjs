@@ -3,7 +3,7 @@
 import { spawnSync } from "node:child_process";
 import { join, dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
-import { isReadonly } from "./readonly.mjs";
+import { isReadonly, subVerbOf } from "./readonly.mjs";
 import { exitCodeForSpawn } from "./model/spawn-exit-code.mjs";
 
 const here = dirname(fileURLToPath(import.meta.url));
@@ -143,7 +143,7 @@ if (!sub) { printUsage(); process.exit(1); }
 // every other spelling of it is still refused here.
 // BLZ-690: `readOnlyVerbs` is the same exemption for a verb with sub-verbs (`db`), matched
 // against the sub-verb itself rather than any word on the line.
-const subVerb = rest.find((a) => !a.startsWith("-"));
+const subVerb = subVerbOf(rest);
 const readOnlyInvocation = (sub.readOnlyFlags ?? []).some((f) => rest.includes(f))
   || (sub.readOnlyVerbs ?? []).includes(subVerb);
 if (isReadonly() && sub.mutates && !readOnlyInvocation) {

@@ -17,6 +17,7 @@ import { existsSync, mkdirSync } from "node:fs";
 import { appendFileSync } from "node:fs";
 import { readRegularFileSync } from "./regular-file.mjs";
 import { join, dirname } from "node:path";
+import { pathToFileURL } from "node:url";
 import { fsStorage, slugify } from "./storage.mjs";
 import { allocateId } from "./ids.mjs";
 import { remoteMaxClaim, writeClaim } from "./claims.mjs";
@@ -54,6 +55,47 @@ export function pgExec(client) {
     async run(sql, params = []) { await client.query(sql, params); },
     async all(sql, params = []) { return (await client.query(sql, params)).rows; },
   };
+}
+
+/** A `file:` URI that opens `path` without writing anything. With no `-wal` beside it the file
+ *  is fully checkpointed, so `immutable=1` reads it exactly and creates no -wal/-shm; with one
+ *  (a writer is live) `mode=ro` reads through the existing WAL. */
+function readOnlyUri(path) {
+  const u = pathToFileURL(path);
+  u.searchParams.set(existsSync(`${path}-wal`) ? "mode" : "immutable", existsSync(`${path}-wal`) ? "ro" : "1");
+  return u;
+}
+
+/**
+ * BLZ-690: the shadow opened READ-ONLY, for `blaze db status` — which runs under BLAZE_READONLY
+ * and so must write nothing: no `.blaze` mkdir, no WAL switch, no -wal/-shm files. The same
+ * refusals as `openShadow` (no shadow, a version it cannot read, a missing config namespace).
+ * Only `db` (to close) and `exec.all` are meant for use.
+ */
+export async function openShadowReadOnly(dataRoot) {
+  const { DatabaseSync } = await import("node:sqlite");
+  const path = shadowDbPath(dataRoot);
+  if (!existsSync(path)) {
+    throw new Error(`blaze: no shadow database at ${path}.\nCreate it and load the board into it first:\n\n    blaze db init\n`);
+  }
+  const db = new DatabaseSync(readOnlyUri(path), { readOnly: true });
+  const exec = sqliteExec(db);
+  const { configDbPathFor } = await import("./config-schema.mjs");
+  const { judgeDbSchema, readSchemaFactsSync } = await import("./db-schema-version.mjs");
+  const state = judgeDbSchema(readSchemaFactsSync(exec));
+  if (!state.ok || state.state === "empty") {
+    db.close();
+    throw new Error(`blaze: ${state.ok ? "the shadow database has no Blaze schema — run 'blaze db init --force'" : state.error}`);
+  }
+  const cfgPath = configDbPathFor(path);
+  if (!existsSync(cfgPath)) {
+    db.close();
+    throw new Error(`blaze: the config namespace is missing at ${cfgPath}, but the shadow database beside it `
+      + "exists. The namespace is derived, so rebuild rather than repair it: run 'blaze db init --force'.");
+  }
+  db.exec(`ATTACH DATABASE '${readOnlyUri(cfgPath).href.replace(/'/g, "''")}' AS blaze_config;`);
+  assertConfigNamespace(db, cfgPath);
+  return { db, exec, path };
 }
 
 /**

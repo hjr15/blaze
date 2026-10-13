@@ -942,7 +942,10 @@ const SEAM_WRITE_PROVIDERS = new Map([
         "resolveReadStorage", "withReadStorage",
         // BLZ-668: `blaze db init`/`seed-counter` open Postgres through the resolver's own
         // checked open, and name the target in refusals. A client connect and a string — no fs.
-        "openCheckedPg", "describePgTarget"] }],
+        "openCheckedPg", "describePgTarget",
+        // BLZ-690: `blaze db status`'s opener — a read-only (immutable / mode=ro) SQLite open, no
+        // mkdir, no WAL switch, no -wal/-shm. Reaches no write.
+        "openShadowReadOnly"] }],
   // Both reach the BLZ_MEASURE census, which is this module's own narrow exemption above.
   // The seven the allowlist gained in round 5, for TAKING a primitive rather than for reaching
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption

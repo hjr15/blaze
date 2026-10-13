@@ -19,3 +19,10 @@ export function isReadonly(env = process.env) {
 export function assertWritable(what, env = process.env) {
   if (isReadonly(env)) throw new Error(`blaze: read-only mode (BLAZE_READONLY=1) — refusing to ${what}`);
 }
+
+// BLZ-690: the sub-verb of a verb that has them (`blaze db <verb>`) — the first argument that is
+// not a flag. ONE rule, shared by cli.mjs's read-only exemption and db-runner.mjs's dispatch, so
+// the verb the gate lets through is always the verb the runner runs.
+export function subVerbOf(argv) {
+  return argv.find((a) => !a.startsWith("-"));
+}

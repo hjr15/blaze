@@ -7,13 +7,16 @@
 // a soak must never raise. It briefly convinced me the database was corrupting data.
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, readdirSync, statSync, readFileSync, chmodSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { runDb } from "../scripts/db-runner.mjs";
 import { writeClaim } from "../scripts/model/claims.mjs";
 import { openShadow } from "../scripts/model/write-port-resolve.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
+import { subVerbOf } from "../scripts/readonly.mjs";
 
 // BLZ-503: every scratch directory this file mints, removed when the file is done with
 // it. Registered rather than written as a test's trailing statement, so a failing
@@ -153,3 +156,51 @@ describe("blaze db under BLAZE_READONLY", () => {
     assert.equal(await runDb(["status"], { ...capture().io, roots: board(), env: { BLAZE_READONLY: "1" } }), 0);
   });
 });
+
+// BLZ-690 review: `db status` runs under BLAZE_READONLY, so it must not write — not even the
+// -wal/-shm files or the WAL journal-mode switch a read-write open makes.
+// A read-write WAL open creates -wal/-shm and deletes them again on close, so a before/after
+// listing cannot see it. Making `.blaze` and its files read-only can: any write — a journal file,
+// the WAL switch — then fails, and only a genuinely read-only open still answers.
+test("db status opens the shadow READ-ONLY: it works with .blaze and its files unwritable, and changes nothing",
+  { skip: process.getuid && process.getuid() === 0 ? "root ignores mode bits" : false }, async () => {
+  const roots = board();
+  assert.equal(await runDb(["init"], { ...capture().io, roots }), 0);
+  const dir = join(roots.dataRoot, ".blaze");
+  const snap = () => readdirSync(dir).sort().map((f) => {
+    const st = statSync(join(dir, f));
+    return `${f} ${st.size} ${st.mtimeMs}`;
+  });
+  const before = snap();
+  const files = readdirSync(dir);
+  for (const f of files) chmodSync(join(dir, f), 0o444);
+  chmodSync(dir, 0o555);
+  try {
+    const c = capture();
+    assert.equal(await runDb(["status"], { ...c.io, env: { BLAZE_READONLY: "1" }, roots }), 0, c.text());
+    assert.match(c.text(), /tickets\s+1/);
+    assert.match(c.text(), /criteria\s+2/);
+  } finally {
+    chmodSync(dir, 0o755);
+    for (const f of files) chmodSync(join(dir, f), 0o644);
+  }
+  assert.deepEqual(snap().map((x) => x.replace(/ [\d.]+$/, "")), before.map((x) => x.replace(/ [\d.]+$/, "")),
+    "status created, removed or resized a file");
+});
+
+test("cli.mjs and runDb pick the db sub-verb by ONE rule (subVerbOf)", () => {
+  assert.equal(subVerbOf(["--replace", "load", "verify"]), "load");
+  assert.equal(subVerbOf(["--force"]), undefined);
+  const here = (f) => readFileSync(fileURLToPath(new URL(`../scripts/${f}`, import.meta.url)), "utf8");
+  for (const f of ["cli.mjs", "db-runner.mjs"]) {
+    assert.match(here(f), /subVerbOf\((rest|argv)\)/, `${f} must use subVerbOf`);
+  }
+  // And end to end: the verb dispatch exempts is the verb the runner runs.
+  const cli = fileURLToPath(new URL("../scripts/cli.mjs", import.meta.url));
+  const roots = board();
+  const r = spawnSync(process.execPath, [cli, "db", "--force", "status"],
+    { encoding: "utf8", env: { ...process.env, BLAZE_READONLY: "1", BLAZE_PROJECTS_DIR: roots.projectsDir } });
+  assert.equal(r.status, 0, r.stderr);
+  assert.match(r.stdout, /no shadow database/, "the runner ran STATUS, the verb dispatch let through");
+});
+
