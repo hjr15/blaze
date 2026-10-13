@@ -9,8 +9,11 @@
 // `undefined` means "not mine to answer": the page then derives it from git, lazily, exactly as
 // before — fs and dual are untouched, and no view but metrics pays for the query.
 
-/** @returns the `{ id, from, to, ts }` list under db for the metrics view, else `undefined`. */
-export async function dbTransitions(readStorage, mode, view, root) {
-  if (mode !== "db" || view !== "metrics") return undefined;
+// BLZ-690: `enabled: false` — the metrics view is switched off in the config — also answers
+// `undefined`: the page will not render it, so nothing may pay for its query.
+
+/** @returns the `{ id, from, to, ts }` list under db for an enabled metrics view, else `undefined`. */
+export async function dbTransitions(readStorage, mode, view, root, { enabled = true } = {}) {
+  if (mode !== "db" || view !== "metrics" || !enabled) return undefined;
   return readStorage.listTransitions(root);
 }

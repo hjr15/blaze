@@ -10,10 +10,10 @@ import { join } from "node:path";
 import { importTransitionsExec } from "../scripts/migrate/import-transitions.mjs";
 import { DatabaseSync } from "node:sqlite";
 import { SQLITE_DDL, SQLITE_PRAGMAS } from "../scripts/model/sqlite-schema.mjs";
-import { sqliteExec } from "../scripts/model/write-port-resolve.mjs";
+import { sqliteExec, shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
 import { dbTransitions } from "../scripts/model/transitions-db.mjs";
 import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
-import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
+import { viewEnabled } from "../scripts/views/page.mjs";
 import { postgresReader } from "../scripts/model/pg-storage.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { startServer, CSRF } from "../scripts/serve.mjs";
@@ -67,6 +67,22 @@ describe("the pure parts", () => {
     assert.equal(await dbTransitions(rs, "db", "board", "/p"), undefined, "no other view pays for the query");
     assert.equal(await dbTransitions(rs, "fs", "metrics", "/p"), undefined, "fs keeps git");
     assert.equal(await dbTransitions(rs, "dual", "metrics", "/p"), undefined, "dual keeps git");
+  });
+
+  test("dbTransitions skips the query when the metrics view is disabled", async () => {
+    let queried = 0;
+    const rs = { listTransitions: async () => { queried++; return []; } };
+    assert.equal(await dbTransitions(rs, "db", "metrics", "/p", { enabled: false }), undefined);
+    assert.equal(queried, 0, "a disabled view renders nothing, so it must not pay for the query");
+    await dbTransitions(rs, "db", "metrics", "/p", { enabled: true });
+    assert.equal(queried, 1);
+  });
+
+  test("viewEnabled is the page's own rule: the configured views, board always on", () => {
+    assert.equal(viewEnabled("metrics", { metrics: false }), false);
+    assert.equal(viewEnabled("metrics", { metrics: true }), true);
+    assert.equal(viewEnabled("board", { board: false }), true);
+    assert.equal(viewEnabled("nonsense", { metrics: true }), false);
   });
 });
 

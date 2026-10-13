@@ -1033,7 +1033,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // BLZ-571 (#174) renamed `ACTIVITY_SCRIPT` to the nonce-taking `activityScript`, and the
   // pin caught it on the rebase: a template of inline HTML, no fs in it.
   ["supervisor.mjs", { writes: ["createApp", "startSupervisor"], sanctioned: [], inert: ["activityScript", "SHA_RE", "SUPERVISOR_HOST", "SUPERVISOR_SCOPES", "newFindingEvents", "newForgeErrorEvents", "newRunErrorEvent", "supervisorScopeFor"] }],
-  ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml"] }],
+  // BLZ-690: `viewEnabled` is the configured-views rule — it reads the board config (memoised
+  // `loadConfig`) and writes nothing.
+  ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml", "viewEnabled"] }],
   ["reconcile.mjs", { writes: ["buildBranchMap", "reconcile"], sanctioned: [],
     inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
       "idsFromSubject", "claimCorroborated", "prTitleClaim", "betterPr", "buildPrMap",

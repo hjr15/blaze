@@ -27,7 +27,7 @@ import { stageFor } from "./commit-or-queue.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
-import { pageHtml, viewEnvelope, CSRF } from "./views/page.mjs";
+import { pageHtml, viewEnvelope, viewEnabled, CSRF } from "./views/page.mjs";
 import { dbTransitions } from "./model/transitions-db.mjs";
 import { checkBindSafety, gate, pageScopeFor, csrfRequired } from "./model/serve-auth.mjs";
 import { loadIdentity } from "./model/identity-db.mjs";
@@ -754,7 +754,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           view: vm[1],
           // BLZ-680: under db the metrics history is the database's (ticket_transition); left
           // undefined otherwise, so fs and dual still take it from git, lazily, as before.
-          transitions: await dbTransitions(rs, mode, vm[1], projectsDir),
+          transitions: await dbTransitions(rs, mode, vm[1], projectsDir,
+                                           { enabled: viewEnabled(vm[1], views, projectsDir) }),
           project: u.searchParams.get("project") || "all",
           focus: u.searchParams.get("focus") || null,
           flat: u.searchParams.get("flat") === "1",
@@ -792,7 +793,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       try {
         html = await reading(async (rs, mode) => pageHtml({ project, focus, flat, sprint, view, views,
           projectsDir, nonce, tickets: await allTickets(rs),
-          transitions: await dbTransitions(rs, mode, view, projectsDir) }));
+          transitions: await dbTransitions(rs, mode, view, projectsDir,
+                                           { enabled: viewEnabled(view, views, projectsDir) }) }));
       } catch (e) {
         console.error("blaze: the board page could not be rendered:", boardFailureReason(e));
         return send(req, res, 500, "text/html; charset=utf-8",

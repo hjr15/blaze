@@ -7,7 +7,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
 import { pageHtml } from "./serve.mjs";
-import { viewEnvelope, CSRF } from "./views/page.mjs";
+import { viewEnvelope, viewEnabled, CSRF } from "./views/page.mjs";
 import { dbTransitions } from "./model/transitions-db.mjs";
 import { createBus } from "./event-bus.mjs";
 import { reconcile } from "./reconcile.mjs";
@@ -613,7 +613,8 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         const envelope = viewEnvelope({
           view: vm[1],
           // BLZ-680: serve.mjs's rule — the database's history under db, git's otherwise.
-          transitions: await dbTransitions(rs, mode, vm[1], projectsDir),
+          transitions: await dbTransitions(rs, mode, vm[1], projectsDir,
+                                           { enabled: viewEnabled(vm[1], undefined, projectsDir) }),
           project: u.searchParams.get("project") || "all",
           focus: u.searchParams.get("focus") || null,
           flat: u.searchParams.get("flat") === "1",
@@ -649,7 +650,8 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       let html;
       try {
         html = await reading(async (rs, mode) => pageHtml({
-          transitions: await dbTransitions(rs, mode, u.searchParams.get("view") || "board", projectsDir),
+          transitions: await dbTransitions(rs, mode, u.searchParams.get("view") || "board", projectsDir,
+            { enabled: viewEnabled(u.searchParams.get("view") || "board", undefined, projectsDir) }),
           project: u.searchParams.get("project") || "all",
           focus: u.searchParams.get("focus") || null,
           flat: u.searchParams.get("flat") === "1",
