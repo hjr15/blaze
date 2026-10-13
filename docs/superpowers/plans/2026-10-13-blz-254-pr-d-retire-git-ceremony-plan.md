@@ -1094,16 +1094,17 @@ Expected: the seven verb tests FAIL with "must not commit" (the default `commitM
       assert.match(execFileSync("git", ["-C", data, "status", "--porcelain", "--untracked-files=all"],
         { encoding: "utf8" }), /ZZZ-2-dataroot-proof/);
     ```
-  - Test 2: replace its two `subject` lines with:
+  - Test 2 (`"cwd inside a data repo works with no env (ladder rung 2)"`): replace its body between `const data = dataRepo();` and the first `rmSync` with
 
     ```js
       const before = head(data);
-      // (the runner already ran above this line in the original — move `const before = head(data);` ABOVE the execFileSync)
+      execFileSync(process.execPath, [join(eng, "scripts", "log-runner.mjs"), "ZZZ-1", "30"],
+        { cwd: data, env: { ...process.env, BLAZE_PROJECTS_DIR: "" } });
       assert.match(readFileSync(join(data, "projects", "ZZZ", "in-progress", "ZZZ-1.md"), "utf8"), /minutes: 30/);
       assert.equal(head(data), before, "BLZ-254: the log is written, not committed");
     ```
 
-    That is: capture `before` before the `execFileSync` of `log-runner.mjs`, then assert the file and the unmoved HEAD. Add `readFileSync` to the `node:fs` import.
+    and add `readFileSync` to the file's `node:fs` import.
   - Delete test 3, `"batch mode queues into the DATA repo's .blaze ledger"` (pins a batch queue).
 - `tests/board-overstatement-guards.test.mjs`: delete the test `"each per-ticket verb says so when no commit was created"` (it pinned `commitSuffix`, whose callers are now gone). Then delete `commitSuffix` from the `commit-or-queue.mjs` import line, leaving `import { commitOrQueue } from "../scripts/commit-or-queue.mjs";`.
 - `tests/sprint-runner-stamp-warning.test.mjs:34-40`: drop `, commitMode: "per-op"`. Replace the comment "A real git repo: `commitOrQueue` runs on the write path, and without one the runner exits 1 …" with "A real git repo, as a board usually is; since BLZ-254 the runner never touches git, so the assertions below do not depend on it."
@@ -1167,5 +1168,245 @@ git commit -m "BLZ-687: the CLI ticket verbs and blaze sprint stop committing (s
 Doc text for `getting-started.md:156-160`: "Blaze does not commit. Every mutating command above changes the ticket files (or, under `BLAZE_WRITE_PORT=db`, the database) and stops. On a file board, version the files with git yourself, as often as suits you. A board with more than one writer belongs in db mode (see [ADR-0006](../decisions/0006-database-is-the-sole-source-of-truth.md))." In `commands.md`, every verb section loses the clause that says the verb commits or queues.
 
 `readonly.test.mjs` is in the run list on purpose. Its "bypassing cli.mjs refuses BEFORE writing" tests must stay green now that the runners never reach a commit. Its queue snapshots still work, because `pending-ledger.mjs` exists until Task 6.
+
+---
+### Task 4: `blaze import` stops staging
+
+**Files:**
+- Modify: `scripts/model/import-apply.mjs` (`:58` import, `:355-385` `applyImport`'s docblock and context, `:389`, `:480-516` the returns and the staging block, `:554-556` `runImport`'s options, `:653-665` the call and trailer)
+- Modify: `scripts/model/import-mapping.mjs` (`:48` import, `:536-538`, `:711-736` `runMappedImport`, `:786-808` and `:1003-1033` `runRepair`)
+- Modify: `scripts/import-runner.mjs` (`:32` import, `:159-160` `cfg`, `:206-209`, `:233-237`)
+- Modify tests: `tests/model/import-apply.test.mjs`, `tests/model/import-mapping-repair.test.mjs`, `tests/import-runner.test.mjs`, `tests/db-mode-reads.test.mjs`, `tests/import-db-mode.test.mjs`, `tests/reserve-window.test.mjs`, `tests/markdown-round-trip.test.mjs`, `tests/helpers/csv-round-trip.mjs`, `tests/model/seam-closure.test.mjs` (ledger rows 2107-2108, 2121-2122, 2142-2143)
+- Docs: `docs/design/csv-import-and-export.md` (§5.1 exit-4 row and "Exit 0 does not mean committed", §5.2's repair exit-4 row and the precedence paragraph, §5.4), `docs/guide/commands.md` `## import`
+
+**Interfaces:**
+- Produces:
+  - `applyImport(plan, { projectsDir, dataRoot, receiptPath, writePort?, onPair?, appendReceipt? }) → { exitCode, written, notWritten, files, errors }`, with no `stage`, `commitMode`, `message`, `staged` or `commit`.
+  - `runImport`/`runMappedImport`/`runRepair` lose the `stage` and `commitMode` options.
+  - Exit 4 means "the board changed and the run did not finish cleanly" for write failures only.
+  - The trailer reads `imported N ticket(s)` / `repaired N row(s)`, followed by the receipt (and map) path.
+
+- [ ] **Step 1: Write the failing tests.**
+
+In `tests/import-runner.test.mjs`, replace the test `"staging goes through commitOrQueue under the \`import\` op — scoped to what it wrote, never git add -A"` (`:142-149`) with:
+
+```js
+test("BLZ-254: import --apply writes tickets, claims and its receipt, stages nothing and makes no commit", (t) => {
+  const root = board(t);
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const r = run(root, ["--apply", csvAt(root, row())]);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(ticketExists(root), true, "the ticket is written");
+  assert.equal(execFileSync("git", ["-C", root, "diff", "--cached", "--name-only"], { encoding: "utf8" }).trim(), "",
+    "an import stages nothing (spec §5.5)");
+  assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), before,
+    "an import makes no commit");
+  assert.match(r.stdout, /^imported 1 ticket\(s\)$/m);
+  assert.match(r.stdout, /receipt: import-receipts\//, "the receipt is still the run's record");
+  assert.doesNotMatch(r.stdout + r.stderr, /queued|commit/i, "the trailer claims nothing about git");
+});
+```
+
+Use the file's own helpers (`board`, `run`, `csvAt`, `row`, `ticketExists`). If `execFileSync` is not imported, add it to the `node:child_process` import. If `board(t)` already git-inits the root, drop the init loop and keep the `before`/`after` assertions.
+
+In `tests/model/import-apply.test.mjs`:
+1. Replace `describe("BLZ-629: staging", …)` (`:565-596`) whole with:
+
+   ```js
+   // BLZ-254 (spec §5.5): an import no longer stages. Its tickets (or rows), claims, receipt and
+   // map are written as files; in fs mode the operator versions them, in db mode only the record
+   // files are files at all. `applyImport` no longer takes a `stage` and no longer reports one.
+   describe("BLZ-254: an import stages nothing", () => {
+     test("the result reports what was written and carries no staging fields", async (t) => {
+       const root = boardRoot(t);
+       const plan = await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
+       const r = await applyImport(plan, ctxFor(root));
+       assert.equal(r.exitCode, 0, JSON.stringify(r.errors));
+       assert.deepEqual(r.written, ["BLZ-1", "BLZ-2"]);
+       assert.equal(r.files.filter((f) => f.endsWith(".md")).length, 2);
+       for (const k of ["staged", "commit"]) {
+         assert.equal(Object.hasOwn(r, k), false, `applyImport's result still carries \`${k}\``);
+       }
+     });
+
+     test("on a git board the run leaves HEAD and the index untouched", async (t) => {
+       const root = boardRoot(t, { git: true });
+       for (const a of [["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                        ["commit", "-q", "--allow-empty", "-m", "seed"]]) {
+         spawnSync("git", ["-C", root, ...a], { encoding: "utf8" });
+       }
+       const head = () => spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+       const before = head();
+       const r = await applyImport(await planFor(root, cells({ id: "BLZ-1" })), ctxFor(root));
+       assert.equal(r.exitCode, 0, JSON.stringify(r.errors));
+       assert.equal(head(), before, "no commit");
+       assert.equal(spawnSync("git", ["-C", root, "diff", "--cached", "--name-only"], { encoding: "utf8" }).stdout.trim(), "",
+         "nothing staged");
+     });
+   });
+   ```
+2. Delete `"exit 4 — every write landed and STAGING failed"` (`:347-356`). That condition no longer exists.
+3. In `"exit 0 — a clean apply, with the trailer naming the port and whether the commit actually happened"` (`:376-386`), rename it to `"exit 0 — a clean apply, with a trailer that claims nothing about git"`. Replace its `runImport` call's second line `commitMode: "batch", stage: () => ({ ok: true, committed: false, queued: true }),` with nothing, and replace its last assertion with
+
+   ```js
+       assert.match(r.report, /imported 1 ticket\(s\)/);
+       assert.doesNotMatch(r.report, /queued|commit/i,
+         "BLZ-254: the board never commits, so the trailer must not talk about a commit");
+   ```
+4. Delete the `OP_LABEL` import (`:28`). Remove every `stage: …` key from the remaining calls (`:88`, `:224`, `:269`, `:284`, `:301`, `:315`), which are dead arguments once the parameter is gone. Then `rg -n "stage[:=]|OP_LABEL|commitMode" tests/model/import-apply.test.mjs` prints nothing.
+5. The comment at `:124` ("the reverse order's residue is a missingClaimErrors ERROR on the operator's board") stays until Task 8.
+
+In `tests/model/import-mapping-repair.test.mjs`:
+- Delete the tests `"staging goes through commitOrQueue under a NEW \`import-repair\` op"` (`:452-466`) and `"every record written and staging failed is exit 4, not 0"` (`:468-476`).
+- Add in their place:
+
+  ```js
+    test("BLZ-254: repair --apply writes its records and stages nothing", async (t) => {
+      const { root } = await crashedAtRowTwo(t);
+      const r = await runRepair({
+        receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root, apply: true,
+      });
+      assert.equal(r.exitCode, 0, r.report);
+      assert.equal(mapLines(root).length, 2, "the writes landed");
+      assert.match(r.report, /^repaired \d+ row\(s\)$/m);
+      assert.doesNotMatch(r.report, /queued|commit|STAGING/i, "the trailer claims nothing about git");
+    });
+  ```
+
+  If the old staging test's `exitCode` for this fixture was not 0 (check what `crashedAtRowTwo` + `apply: true` returned before, by reading the test above it), assert that same code.
+- Delete the `OP_LABEL` import (`:24`), the `noStage` helper (`:84`) and every `stage: noStage` argument.
+
+In `tests/db-mode-reads.test.mjs:32-56`, rename the test to `"import --apply writes through the db, writes (and never commits) its receipt, and a move can read the row"`. Replace the comment above it ("stageFor's POSITIVE half …") with `// BLZ-254: the tickets are rows; the receipt is a real file, written and NOT committed (spec §5.5).`, and replace
+
+```js
+    const committed = git("log", "-1", "--name-only", "--format=");
+    assert.match(committed, new RegExp(`^${RECEIPT_DIR}/\\S+\\.jsonl$`, "m"),
+      `the receipt is committed:\n${committed}`);
+    assert.doesNotMatch(committed, /\.md$/m, `no ticket file is committed in db mode:\n${committed}`);
+```
+
+with
+
+```js
+    assert.equal(git("rev-list", "--count", "HEAD").trim(), "1", "the import makes no commit");
+    const untracked = git("status", "--porcelain", "--untracked-files=all");
+    assert.match(untracked, new RegExp(`^\\?\\? ${RECEIPT_DIR}/\\S+\\.jsonl$`, "m"),
+      `the receipt is written, untracked:\n${untracked}`);
+    assert.doesNotMatch(untracked, /\.md$/m, `no ticket file exists in db mode:\n${untracked}`);
+```
+
+In `tests/import-db-mode.test.mjs` (`:41`, `:73`, `:142`, `:163`), `tests/reserve-window.test.mjs:43`, `tests/markdown-round-trip.test.mjs:85` and `tests/helpers/csv-round-trip.mjs:55`, delete the `stage: () => (…)` argument (and `commitMode` where present). These are dead arguments.
+
+- [ ] **Step 2: Run and watch them fail.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/import-runner.test.mjs tests/model/import-apply.test.mjs tests/model/import-mapping-repair.test.mjs tests/db-mode-reads.test.mjs
+```
+
+Expected: FAIL. The new import-runner test sees a commit (default `per-op`). `applyImport`'s result still carries `staged`. The db-mode receipt is committed. The trailer matches `/commit/`.
+
+- [ ] **Step 3: `scripts/model/import-apply.mjs`.**
+1. Delete `import { commitOrQueue, commitSuffix } from "../commit-or-queue.mjs";` (`:58`).
+2. In `applyImport`'s docblock (`:355-370`), delete the `@param ctx.stage …` lines (two) and change `@returns { exitCode, written, notWritten, files, staged, commit, errors }` to `@returns { exitCode, written, notWritten, files, errors } — BLZ-254: no staging (spec §5.5)`.
+3. In its context destructuring (`:373-381`), delete `    stage = commitOrQueue,`, `    commitMode = "per-op",` and `    message = null,`.
+4. Delete `  let commit = null;` (`:389`).
+5. In every `return { … }` from `applyImport` (`:485-492`), delete `staged: false, commit: null, `.
+6. Replace from `  // --- staging (§5.4). Scoped to exactly the files it wrote, never` (`:495`) through `  return { exitCode: 0, written, notWritten, files, staged: true, commit, errors: [] };` (`:516`) with:
+
+   ```js
+     // BLZ-254 (spec §5.5): staging is gone. Until then the run ended by handing exactly the files it
+     // wrote (tickets, claims, receipt) to commitOrQueue under the `import` op, and a staging
+     // failure was a third route to exit 4. The board never commits now: the files are written,
+     // and in fs mode the operator versions them.
+     return { exitCode: 0, written, notWritten, files, errors: [] };
+   ```
+
+   (The `if (files.length === 0) { return … }` just above it now returns the same shape; keep it.)
+7. In `runImport`'s options (`:554-556`), delete `commitMode = "per-op",` from the `now = new Date(), commitMode = "per-op",` line (it becomes `now = new Date(),`), and `stage = commitOrQueue, ` from the next line (it becomes `appendReceipt = appendRegularFileSync,`).
+8. In the call (`:653-655`), drop `stage, ` and `commitMode` from `projectsDir, dataRoot, receiptPath, writePort, onPair, stage, appendReceipt, commitMode,`.
+9. In the trailer (`:665`), replace `` say("", `imported ${r.written.length} ticket(s)${r.commit ? commitSuffix(r.commit) : ""}`); `` with `` say("", `imported ${r.written.length} ticket(s)`); ``.
+10. `rg -n "stage|commitMode|commitSuffix|staged" scripts/model/import-apply.mjs` prints only comments. Edit the `§5.4` comments that still describe staging to past tense with "(removed by BLZ-254)".
+
+- [ ] **Step 4: `scripts/model/import-mapping.mjs`.**
+1. Delete `import { commitOrQueue, commitSuffix } from "../commit-or-queue.mjs";` (`:48`).
+2. In `runMappedImport`'s options (`:536-538`), delete `commitMode = "per-op"` and `stage = commitOrQueue`.
+3. In its `applyImport` call (`:711-723`), drop `commitMode` from the first line. Delete the `// The map is a committed record (§6), so it is staged …` comment and the whole `stage: mapping.sourceIdColumn ? … : stage,` property.
+4. Trailer (`:736`): `` say("", `imported ${r.written.length} ticket(s)`); ``.
+5. `runRepair`'s docblock (`:788`): "staged through `commitOrQueue` under the `import-repair` op (§5.4)" becomes "written as files and never staged (BLZ-254, spec §5.5)". Delete `commitMode = "per-op"` and `stage = commitOrQueue` from its options (`:806-807`).
+6. Replace the staging block (`:1004-1031`, from `  let commit = null;` through the closing `}` of `if (files.length) { … }`) with nothing, and the trailer (`:1033`) with `` say("", `repaired ${states.size - people.length} row(s)`); ``. Also edit the §5.2 precedence comment that explained "Staging failure wins", noting the case is gone (BLZ-254).
+
+- [ ] **Step 5: `scripts/import-runner.mjs`.**
+1. Delete `import { stageFor } from "./commit-or-queue.mjs";` (`:32`).
+2. Delete `        commitMode: cfg.commitMode,` (`:208`) and `      commitMode: cfg.commitMode,` (`:235`). Replace `readStorage: rs.readStorage, stage: stageFor(rs.mode),` with `readStorage: rs.readStorage,`, and `readStorage: wp.readStorage, stage: stageFor(wp.mode),` with `readStorage: wp.readStorage,`.
+3. If `cfg` now has no reads (`grep -n "cfg\." scripts/import-runner.mjs`), change `let cfg; try { cfg = loadConfig(…) }` to `try { loadConfig(…) }`, with the same comment as Task 3.
+4. Fix the comments that say "staging keeps only the record files" or "staging goes by mode" (`:197-198`, `:229`): "BLZ-254: nothing is staged".
+
+- [ ] **Step 6: Seam-closure (ledger rows 2107-2108, 2121-2122, 2142-2143).**
+
+```js
+  ["model/import-apply.mjs", ["fsAllocators", "commitOrQueue",
+    "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
+```
+
+→
+
+```js
+  ["model/import-apply.mjs", ["fsAllocators",   // BLZ-254: commitOrQueue removed — no staging
+    "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
+```
+
+```js
+  ["model/import-mapping.mjs", ["appendRegularFileSync", "mkdirSync", "truncateSync",
+    "commitOrQueue", "applyImport", "pruneReceipts"]],
+```
+
+→
+
+```js
+  ["model/import-mapping.mjs", ["appendRegularFileSync", "mkdirSync", "truncateSync",
+    "applyImport", "pruneReceipts"]],   // BLZ-254: commitOrQueue removed — no staging
+```
+
+```js
+  ["import-runner.mjs",
+    ["resolvePorts", "stageFor", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
+```
+
+→
+
+```js
+  // BLZ-254: stageFor removed — import stages nothing (spec §5.5).
+  ["import-runner.mjs",
+    ["resolvePorts", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
+```
+
+The prose comments above these entries that justify `commitOrQueue` ("`commitOrQueue` is the staging front door", twice) each get a trailing `(removed by BLZ-254)`. Do **not** delete those sentences. A comment change that keeps the history readable is not an assertion change.
+
+- [ ] **Step 7: Docs, run, commit.**
+
+`docs/design/csv-import-and-export.md`:
+- At the top of §5.4 "Staging", add:
+  > **Amended 2026-10-13 (BLZ-254, spec §5.5): there is no staging.** The board never commits. An import writes its tickets (or, under db, rows), claims, receipt and map, and stops. In fs mode the operator versions them. The rest of this section is the historical design.
+- In §5.1's exit-code table, delete ", **or** every write landed and staging failed" from the exit-4 row.
+- Replace the paragraph starting "**Exit 0 does not mean "committed".**" with: "**Exit 0 means the writes finished.** Since BLZ-254 no import commits, on any board. The trailer names the receipt (and the map), which are the run's record."
+- In §5.2, delete the `repair --apply: every write landed and staging failed` row and the "Staging failure wins" paragraph, leaving one line: "(The staging-failure precedence rule that stood here was removed with staging, BLZ-254.)"
+
+`docs/guide/commands.md` `## import`: drop every sentence about staging or commits, and say once: "`--apply` writes and makes no commit (BLZ-254)."
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/import*.test.mjs tests/model/import-*.test.mjs tests/db-mode-reads.test.mjs tests/reserve-window.test.mjs tests/markdown-round-trip.test.mjs tests/csv-round-trip.test.mjs tests/model/seam-closure.test.mjs
+node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+npm test 2>&1 | tail -9
+git add scripts/model/import-apply.mjs scripts/model/import-mapping.mjs scripts/import-runner.mjs \
+  tests/model/import-apply.test.mjs tests/model/import-mapping-repair.test.mjs tests/import-runner.test.mjs \
+  tests/db-mode-reads.test.mjs tests/import-db-mode.test.mjs tests/reserve-window.test.mjs \
+  tests/markdown-round-trip.test.mjs tests/helpers/csv-round-trip.mjs tests/model/seam-closure.test.mjs \
+  scripts/ci/temp-cleanup-debt.json docs/design/csv-import-and-export.md docs/guide/commands.md
+git commit -m "BLZ-687: blaze import stops staging; its records are written, not committed (spec §5.5)"
+```
 
 ---
