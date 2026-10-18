@@ -91,11 +91,11 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 
 ## Review Focus
 
-1. **An agent, script or the flush Job runs `blaze commit` / `blaze publish` (any flags, `--help`, under `BLAZE_READONLY`, in remote mode)** → one stderr sentence naming the removal and the replacement, exit 1, nothing touched. Pinned in Task 1 (`tests/cli-removed-commands.test.mjs`, all five spellings).
+1. **An agent, script or the flush Job runs `blaze commit` / `blaze publish` (any flags, `--help`, under `BLAZE_READONLY`, in remote mode)** → one stderr sentence naming the removal and the replacement, exit 1, nothing touched. Pinned in Task 5 (`tests/cli-removed-commands.test.mjs`, every spelling).
 2. **A browser click on the dashboard after the upgrade** → the 200 body is exactly `{ ok: true, db: <bool>, …extra }` with no `committed`/`queued`, the file (fs) or row (db) changes, `HEAD` does not move, and the page shows no git sentence. Pinned in Task 2 (`POST /api/<verb> writes the file and creates no commit`, ×5 routes; `serve-db-mode`'s exact body).
-3. **An fs board in a git repo, driven by every CLI verb and `reconcile --apply`** → the files change, nothing is staged, `HEAD` is unmoved, no output line mentions a commit or a queue, and `blaze new` still allocates through the claim ledger (n, then n+1, `.ids/<n>` written). Pinned in Task 3 (`tests/verbs-make-no-commit.test.mjs`) and Task 4 (the change-report oracle's `HEAD unchanged` clause per apply mode).
+3. **An fs board in a git repo, driven by every CLI verb and `reconcile --apply`** → the files change, nothing is staged, `HEAD` is unmoved, no output line mentions a commit or a queue, and `blaze new` still allocates through the claim ledger (n, then n+1, `.ids/<n>` written). Pinned in Task 3 (`tests/verbs-make-no-commit.test.mjs`) and Task 1 (the change-report oracle's `HEAD unchanged` clause per apply mode).
 4. **A deployed board whose ConfigMap still says `commitMode: "batch"`, restarted on the new image** → it loads, serves `GET /` with 200, warns exactly once, and has no `commitMode` on its config. Pinned in Task 7 (`tests/config-commitmode-ignored.test.mjs`): the file key ×3 values incl. `null`, `BLAZE_COMMIT_MODE`, a `blaze` verb through `cli.mjs` warning once across its two processes, and a real server start.
-5. **`blaze import --apply` on a git-backed board** → tickets (or rows), receipt and source-id map are written. Nothing is staged, `HEAD` is unmoved, exit 0, and the trailer names the receipt and claims no commit. Pinned in Task 5 (`import --apply stages nothing`).
+5. **`blaze import --apply` on a git-backed board** → tickets (or rows), receipt and source-id map are written. Nothing is staged, `HEAD` is unmoved, exit 0, and the trailer names the receipt and claims no commit. Pinned in Task 4 (`BLZ-254: import --apply writes tickets, claims and its receipt, stages nothing and makes no commit`).
 
 ---
 
@@ -144,7 +144,7 @@ Each edit carries `// BLZ-254:` on the line above it, or as a trailing comment w
 | 2129-2134 | import-lock's comment "through `commit-lock.mjs`'s primitive" | `commit-lock.mjs` → `dir-lock.mjs` in the comment, `// BLZ-254: renamed` | name swap (comment) | 6 |
 | 2142-2143 | `["import-runner.mjs", ["resolvePorts", "stageFor", "runImport", …]]` | `"stageFor"` removed; `// BLZ-254` above | removal | 4 |
 | 2147-2149 | `["supervisor.mjs", [… "resolvePorts", "stageFor"]]` | `"stageFor"` removed; `// BLZ-254` above | removal | 1 |
-| 2093, 2116-2117 | prose: "`commitOrQueue` is the staging front door" (twice, import-apply's and import-mapping's justifications) | sentence kept, `(removed by BLZ-254)` appended | comment-only | 4 |
+| 2093, 2116-2117 | prose: "`commitOrQueue` is the staging front door" (twice, import-apply's and import-mapping's justifications) | sentence kept, `(removed by BLZ-254)` appended **on the same line as `commitOrQueue`**. At 2093 append after "front door". At 2116-2117 the sentence wraps ("`commitOrQueue` is the staging" / "front door under the `import-repair` op"), so rewrap the two lines so that 2116 ends "… (§4.2 — park before you clear). `commitOrQueue` (removed by BLZ-254) was the" and 2117 starts "staging front door under the `import-repair` op, and …"; then Task 6 Step 6's leftover-name check sees the name and its annotation together | comment-only | 4 |
 | 2140-2141 | `// BLZ-670: the apply path resolves both ports (resolvePorts) and hands \`stageFor(mode)\` in as` / `// the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.` | `// BLZ-670: the apply path resolves both ports (resolvePorts); repair resolves a reader only (resolveReadStorage, inert).` + `// BLZ-254: stageFor removed — nothing is staged.` | comment-only | 4 |
 | 2530 | `["pending-ledger.mjs", "{ appendEntry }", "appendEntry"],` | deleted; `// BLZ-254: pending-ledger.mjs deleted` | removal | 6 |
 | 2531 | `["commit-lock.mjs", "{ acquireLock }", "acquireLock"],` | `["dir-lock.mjs", "{ acquireDirLock }", "acquireDirLock"],  // BLZ-254: commit-lock.mjs → dir-lock.mjs` | name swap (the module and its surviving member) | 6 |
@@ -1701,7 +1701,11 @@ git rm scripts/commit-runner.mjs scripts/publish-runner.mjs \
   ```
 
   Also: in `## Help`, "`blaze commit --help` describes `commit`, it does not flush" becomes "`blaze move --help` describes `move`, it does not move anything". Replace `## Commit modes` (`:995-1004`) with one sentence: "`commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits." Delete the `BLAZE_SESSION` row and mark the `BLAZE_COMMIT_MODE` row "ignored since 0.9.0" in of the environment-variable table if present (`grep -n "BLAZE_COMMIT_MODE\|BLAZE_SESSION" docs/guide/commands.md`).
-- Also in `docs/guide/commands.md` (review M5): the `[commit](#commit)` row of the command index at `:22` goes (add `[Removed commands](#removed-commands)`); the `#commit` links and the "run `blaze commit`" advice inside `## reconcile` (`:165-186`) go. The `## Help` sentence is line-wrapped, so search for `blaze commit --help` across the line break (`grep -n -A1 "blaze commit" docs/guide/commands.md`), not for the whole sentence.
+- Also in `docs/guide/commands.md` (review M5): the `[commit](#commit)` row of the command index at `:22` goes (add `[Removed commands](#removed-commands)`); the paragraph inside `## reconcile` at `:165-186` (from "Reconcile does **not** auto-recover an uncommitted prior pass" through "commit the tree by hand.") is replaced whole by exactly:
+
+  > Reconcile never commits (BLZ-254). An applied pass leaves its moves in the working tree, and the next run reports only what *it* found. That is most likely no code-bound change, since the earlier pass already wrote the files, and it never makes a claim about the state of the git tree. If `git status` shows changes under `projects/`, they are this or earlier passes' writes, or your own edits. Review them and commit them yourself.
+
+  That removes both `#commit` links with it. The `## Help` sentence is line-wrapped, so search for `blaze commit --help` across the line break (`grep -n -A1 "blaze commit" docs/guide/commands.md`), not for the whole sentence.
 - `docs/decisions/0033-…md:150` links the deleted `docs/operations/queue-store-migration.md`. Keep the ADR body and replace the link target with the text `(the procedure was deleted with the queue store, BLZ-254)`.
 - `Dockerfile:2`: "commit-on-edit shells out to [git]" becomes "reconcile and the fs groomer shell out to git".
 - `scripts/views/reconcile-summary.mjs:87-101` comments name `reconcile-commit-report.mjs`. Change them to `reconcile-apply-report.mjs`. That file's source is injected into the page, so regenerate `tests/views/page-golden.html` as in Task 2 Step 4.5, and stage both. (If Task 1 already did this, skip it.)
@@ -2211,9 +2215,9 @@ unchanged; layer 2b's remote sweep (`remoteMaxClaim`) still runs, and is harmles
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reindex-unclaimed-id.test.mjs tests/ids-*.test.mjs tests/model/index*.test.mjs tests/csv-round-trip.test.mjs tests/model/import-apply.test.mjs tests/read-path-fifo.test.mjs tests/reindex*.test.mjs
-npm test 2>&1 | tail -9
+# THE DEBT STEP (Global Constraints) — run its block here, BEFORE npm test (Task 8 deletes tests; review I2/N3)
+npm test 2>&1 | tail -9    # fail 0; without the debt step first it shows 2 fails (temp-cleanup-guard, quoted-sources)
 rg -n "missingClaimErrors" scripts tests   # comments only
-# THE DEBT STEP (Global Constraints) — run its block here (Task 8 deletes tests; review I2)
 git add scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
 git add scripts/model/index.mjs scripts/reindex.mjs scripts/model/claims.mjs tests/reindex-unclaimed-id.test.mjs \
   tests/ids-rollback.test.mjs tests/model/index-fs-hatches.test.mjs tests/csv-round-trip.test.mjs \
@@ -2454,7 +2458,7 @@ git diff --stat origin/main...HEAD | tail -1
 Expected test count: the baseline 5,432, minus the deleted files' tests, plus the new ones. Record the exact before/after in the PR body. The count drops by the tests in the 24 deleted test files (2 + 2 + 3 + 15 + 2 across Tasks 1, 2, 3, 5 and 6; `tests/commit-lock.test.mjs` is renamed, not deleted). That is the deletion, and every file is named in Tasks 1–6 with its reason.
 
 - [ ] **Step 2 (opus): the whole-branch review.** Use `superpowers:requesting-code-review` against the spec's §5.5 table, this plan's Review Focus, and the seam-closure ledger. The reviewer must specifically try to refute:
-  - "no seam-closure assertion was weakened" (diff the file against `3a0ac78`, and count `assert` lines touched: zero);
+  - "no seam-closure assertion was weakened" (run Task 6 Step 5's row-based diff audit against `3a0ac78`: Rule 1 prints only the signed-off lines, and every Rule 2 line has its removed twin);
   - "fs-mode `blaze new` still allocates" (`tests/verbs-make-no-commit.test.mjs`);
   - "no executable reference to a deleted module remains".
 
