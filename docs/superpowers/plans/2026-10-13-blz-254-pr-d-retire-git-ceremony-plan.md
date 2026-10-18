@@ -1410,3 +1410,365 @@ git commit -m "BLZ-687: blaze import stops staging; its records are written, not
 ```
 
 ---
+### Task 5: `blaze commit` and `blaze publish` are removed, with a named refusal
+
+**Files:**
+- Modify: `scripts/cli.mjs` (`:21-27` mutates comment, `:84-90` and `:96` table entries, `:110-132` dispatch, `:178-207` the schema-preflight comment and Set)
+- Delete: `scripts/commit-runner.mjs`, `scripts/publish-runner.mjs`, `docs/operations/queue-store-migration.md`, `docs/operations/migrate-queue-store.sh`
+- Create: `tests/cli-removed-commands.test.mjs`
+- Modify tests: `tests/cli.test.mjs`, `tests/readonly.test.mjs`, `tests/schema-fail-loud-on-load.test.mjs`, `tests/temp-cleanup-guard.test.mjs`, `tests/model/seam-closure.test.mjs` (ledger row 956, and row 2044 with its comment sentence)
+- Delete tests (every test in each spawns `commit-runner.mjs`/`publish-runner.mjs`, or pins the pending ledger only those runners drain):
+  - `tests/commit-runner.test.mjs`, `tests/commit-runner-branch-guard.test.mjs`
+  - `tests/commit-status.test.mjs`, `tests/commit-status-provenance.test.mjs`
+  - `tests/commit-drain-concurrent-clear.test.mjs`, `tests/commit-drain-quarantine.test.mjs`, `tests/commit-settled-drain.test.mjs`
+  - `tests/commit-four-working-copies.test.mjs`, `tests/commit-queueops-count.test.mjs`, `tests/commit-session-queue-scope.test.mjs`, `tests/commit-worktree-provenance.test.mjs`
+  - `tests/flush-real-blaze-commit.test.mjs`, `tests/publish.test.mjs`, `tests/queue-store-migration-provenance.test.mjs` (runs the deleted `.sh`)
+  - `tests/pending-ledger.test.mjs`, `tests/pending-ledger-queue-root.test.mjs` (both spawn `commit-runner.mjs`; their module goes in Task 6)
+- Docs: `docs/guide/commands.md` (`## commit` → `## Removed commands`; `## Help`; `## Commit modes`), `README.md:129`, `docs/schema-customization.md:362-366`, `docs/schema-versioning.md:44-48`
+
+**Interfaces:**
+- Produces: `REMOVED_COMMANDS` in `cli.mjs` (`{ commit: "…", publish: "…" }`). `blaze commit …` / `blaze publish …` write one stderr line, `blaze: \`<cmd>\` was removed in 0.9.0 (BLZ-254) — <reason>`, and exit 1. `SUBCOMMANDS` holds 22 entries; `SCHEMA_PREFLIGHT_EXEMPT` is `["audit", "init"]`.
+
+- [ ] **Step 1: Write the failing test.** Create `tests/cli-removed-commands.test.mjs`:
+
+```js
+// tests/cli-removed-commands.test.mjs — BLZ-687 (BLZ-254 PR D, spec §5.5).
+//
+// `blaze commit` and `blaze publish` are deleted. A removed verb gets a NAMED refusal, not the
+// unknown-command fallback (a usage dump on stdout and exit 1 with no sentence): its callers
+// — the nightly flush Job until C2 deletes it, and every agent whose instructions still say
+// "run blaze commit" — must learn what changed and what to do, not that they mistyped.
+// The refusal fires before --help, before the read-only gate and before remote mode, so
+// every spelling gets the same sentence, and nothing on disk moves.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync, execFileSync } from "node:child_process";
+import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const cli = join(REPO, "scripts", "cli.mjs");
+
+function board(t) {
+  const root = mkdtempSync(join(tmpdir(), "blz687-removed-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "OBA", projects: ["OBA"] }));
+  execFileSync("git", ["-C", root, "add", "-A"]);
+  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
+  return root;
+}
+
+function run(root, args, extraEnv = {}) {
+  const env = { ...process.env };
+  for (const k of ["BLAZE_WRITE_PORT", "BLAZE_READONLY", "BLAZE_REMOTE_URL", "BLAZE_TOKEN", "BLAZE_PROJECTS_DIR"]) delete env[k];
+  return spawnSync(process.execPath, [cli, ...args], { cwd: root, env: { ...env, ...extraEnv }, encoding: "utf8" });
+}
+
+const SPELLINGS = [
+  ["commit", [], {}], ["commit", ["--all"], {}], ["commit", ["--status"], {}], ["commit", ["--help"], {}],
+  ["commit", [], { BLAZE_READONLY: "1" }],
+  ["commit", [], { BLAZE_REMOTE_URL: "http://127.0.0.1:9", BLAZE_TOKEN: "t" }],
+  ["publish", [], {}], ["publish", ["--help"], {}], ["publish", [], { BLAZE_READONLY: "1" }],
+  ["publish", [], { BLAZE_REMOTE_URL: "http://127.0.0.1:9", BLAZE_TOKEN: "t" }],
+];
+
+for (const [cmd, args, env] of SPELLINGS) {
+  test(`blaze ${[cmd, ...args].join(" ")} ${Object.keys(env).join("+") || ""} is refused by name`, (t) => {
+    const root = board(t);
+    const head = () => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const before = head();
+    const r = run(root, [cmd, ...args], env);
+    assert.equal(r.status, 1, `${r.stdout}${r.stderr}`);
+    assert.match(r.stderr, new RegExp(`^blaze: \`${cmd}\` was removed in 0\\.9\\.0 \\(BLZ-254\\)`, "m"));
+    assert.match(r.stderr, /BLAZE_WRITE_PORT=db/, "the refusal names the replacement for concurrent writers");
+    assert.doesNotMatch(r.stdout, /usage: blaze/, "a removed verb is not the unknown-command fallback");
+    assert.equal(head(), before, "nothing moved");
+  });
+}
+
+test("the usage listing no longer offers commit or publish", () => {
+  const r = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
+  assert.equal(r.status, 0);
+  assert.doesNotMatch(r.stdout, /^\s+(commit|publish)\s/m);
+});
+```
+
+- [ ] **Step 2: Run it.** `node --test --import=./tests/setup/hang-watchdog.mjs tests/cli-removed-commands.test.mjs`. Expected: FAIL. `blaze commit` runs the real runner, `--help` exits 0, and the usage lists `commit`.
+
+- [ ] **Step 3: `scripts/cli.mjs`.**
+1. Delete the `commit:` entry and its four-line BLZ-499 comment (`:84-90`), and the `publish:` entry (`:96`).
+2. After the `SUBCOMMANDS` object, add:
+
+   ```js
+   // BLZ-254 (spec §5.5): verbs this engine no longer has, and what to do instead. A removed verb
+   // is REFUSED BY NAME rather than falling through to the unknown-command usage dump, the same
+   // rule config's REMOVED_KEYS applies to a key (BLZ-298): its callers (a flush Job, an agent
+   // whose instructions predate the removal) must learn what changed, not that they mistyped.
+   const REMOVED_COMMANDS = {
+     commit: "the board no longer commits",
+     publish: "there are no pending queues to sweep and no flush to trigger",
+   };
+   const REMOVED_ADVICE = "In fs mode, version the board's files yourself with git; for more than one "
+     + "writer, use db mode (BLAZE_WRITE_PORT=db).";
+   ```
+3. Directly after `const [cmd, ...rest] = process.argv.slice(2);` (before the `--help` checks), add:
+
+   ```js
+   // Before --help, the read-only gate and remote mode, so every spelling gets the same sentence.
+   if (cmd !== undefined && Object.hasOwn(REMOVED_COMMANDS, cmd)) {
+     console.error(`blaze: \`${cmd}\` was removed in 0.9.0 (BLZ-254) — ${REMOVED_COMMANDS[cmd]}. ${REMOVED_ADVICE}`);
+     process.exit(1);
+   }
+   ```
+4. Fix the `--help` comment at `:113-115`: "`blaze commit --help`" becomes "`blaze move --help`".
+5. The schema preflight (`:178-207`):
+   - "THREE EXEMPTIONS" → "TWO EXEMPTIONS".
+   - Delete the `commit —` bullet (three lines).
+   - "That leaves 21 of the 24 subcommands" → "That leaves 20 of the 22 subcommands".
+   - Change the Set to `new Set(["audit", "init"])`.
+   - Add one comment line: `// BLZ-254: \`commit\` was the third exemption; the verb is gone.`
+   - Keep the stated-count history sentence ("the list said two while the Set below held three") as it is. It is history, and `tests/cli.test.mjs` pins the arithmetic.
+6. The mutates comment at `:21-27`: "`start` runs the supervisor, which drives the groomer loop (git-commits)" stays true (Finding 6), so leave it. "`reconcile` defaults to a dry-run but `--apply` commits" becomes "… `--apply` writes".
+7. The BLZ-499 comment at `:143-146` ("today only `blaze commit --status`") becomes "today `blaze matrices --check`".
+
+- [ ] **Step 4: Delete the runners, their tests and the queue-store procedure.**
+
+```bash
+git rm scripts/commit-runner.mjs scripts/publish-runner.mjs \
+  docs/operations/queue-store-migration.md docs/operations/migrate-queue-store.sh \
+  tests/commit-runner.test.mjs tests/commit-runner-branch-guard.test.mjs tests/commit-status.test.mjs \
+  tests/commit-status-provenance.test.mjs tests/commit-drain-concurrent-clear.test.mjs \
+  tests/commit-drain-quarantine.test.mjs tests/commit-settled-drain.test.mjs \
+  tests/commit-four-working-copies.test.mjs tests/commit-queueops-count.test.mjs \
+  tests/commit-session-queue-scope.test.mjs tests/commit-worktree-provenance.test.mjs \
+  tests/flush-real-blaze-commit.test.mjs tests/publish.test.mjs \
+  tests/queue-store-migration-provenance.test.mjs tests/pending-ledger.test.mjs \
+  tests/pending-ledger-queue-root.test.mjs
+```
+
+`package.json`'s `"commit": "node scripts/commit-runner.mjs"` npm script is deleted too (`scripts` block, `:33`).
+
+- [ ] **Step 5: The surviving tests.**
+- `tests/cli.test.mjs`:
+  - In `"blaze --help prints the full usage listing …"`, the name list becomes `["reconcile", "sprint", "matrices", "migrate", "rollup"]`.
+  - Replace `"blaze commit --help prints subcommand help, exits 0, and never spawns the runner"` (`:34-56`) with the same test for `blaze move --help`: same fixture, `appendEntry` seeding, byte-identical queue and unmoved HEAD. `pending-ledger.mjs` still exists here; Task 6 rewrites this test's seed. Name it `"blaze move --help prints subcommand help, exits 0, and never spawns the runner"`.
+  - The schema-preflight arithmetic test needs no edit. It re-derives TWO / 20 of 22 from the code.
+- `tests/readonly.test.mjs`: delete the three tests `"BLAZE_READONLY=1 blaze commit: …"` (`:108-116`), `"BLAZE_READONLY=1 node scripts/commit-runner.mjs (bypassing cli.mjs) also refuses and commits nothing"` (`:180-215`, with its comment block) and `"BLAZE_READONLY=1 node scripts/commit-runner.mjs --help still works"` (`:217-226`). Removed commands are covered by `tests/cli-removed-commands.test.mjs`, including under `BLAZE_READONLY`.
+- `tests/schema-fail-loud-on-load.test.mjs`: replace `"\`blaze commit\` is exempt — it flushes git and reads no schema"` (`:169-178`) with
+
+  ```js
+    test("BLZ-254: `blaze commit` is no longer an exemption — it is a removed verb, refused before the preflight", () => {
+      const root = board(MALFORMED);
+      try {
+        const r = run(root, ["commit"]);
+        assert.equal(r.status, 1);
+        assert.match(r.stderr, /`commit` was removed in 0\.9\.0/);
+        assert.doesNotMatch(r.stderr, /is not valid/, "the removal refusal comes first, so the schema is never judged");
+      } finally { rmSync(root, { recursive: true, force: true }); }
+    });
+  ```
+- `tests/temp-cleanup-guard.test.mjs`: delete `"BLZ-603: tests/commit-settled-drain.test.mjs — the file the ticket names — has none left"` (`:88-93`). Its subject file is deleted. The equality ratchet over every remaining file still holds every leak (`scripts/ci/temp-cleanup-guard.mjs`'s header still names the file as BLZ-603's origin; leave that history).
+- `tests/model/seam-closure.test.mjs`:
+  - Ledger row 956: replace `  ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports` with `  // BLZ-254: commit-runner.mjs (blaze commit) deleted.`
+  - Ledger row 2044: delete `  ["commit-runner.mjs", ["acquireLock", "releaseLock", "clearLedger", "quarantineDropped"]],`, and in the comment above it replace the sentence "`blaze commit` owns the commit lock and drains the ledger it has just committed; the quarantine sidecar is BLZ-531's." with `// BLZ-254: commit-runner.mjs deleted (blaze commit).` (the commit-or-queue and serve-commit sentences stay until Task 6).
+
+- [ ] **Step 6: Docs.**
+- `docs/guide/commands.md`: replace the whole `## commit` section (`:514-704`, through the end of "The subject line counts TICKETS…") with:
+
+  ```markdown
+  ## Removed commands
+
+  | Command | Removed in | Instead |
+  |---|---|---|
+  | `blaze commit` | 0.9.0 (BLZ-254) | Nothing to flush: no verb queues or commits any more. On a file board, commit the changed files yourself. |
+  | `blaze publish` | 0.9.0 (BLZ-254) | Nothing to sweep and no flush Job to trigger. For more than one writer, run the board in db mode (`BLAZE_WRITE_PORT=db`) and write to it over HTTP ([Remote mode](#remote-mode)). |
+
+  Both are refused by name, on stderr, with exit 1, whatever flags follow. The last release that has them is `@hjr15/blaze-board@0.8.0`.
+  ```
+
+  Also: in `## Help`, "`blaze commit --help` describes `commit`, it does not flush" becomes "`blaze move --help` describes `move`, it does not move anything". Delete `## Commit modes` (`:995-1004`); Task 7 removes the key it describes. Delete the `BLAZE_COMMIT_MODE` and `BLAZE_SESSION` rows of the environment-variable table if present (`grep -n "BLAZE_COMMIT_MODE\|BLAZE_SESSION" docs/guide/commands.md`).
+- `README.md:129`: delete the `blaze commit` table row.
+- `docs/schema-customization.md:362-366`: "There are two more exemptions — **three in all** — **`blaze init`**, …, and **`blaze commit`**, … That leaves **19 of the 22** subcommands" becomes "There is one more exemption — **two in all** — **`blaze init`**, which runs before a board exists. That leaves **20 of the 22** subcommands running the check."
+- `docs/schema-versioning.md:46-48`: delete the sentence "`blaze commit` is the one command that is genuinely schema-agnostic … stays uncovered by design."
+
+- [ ] **Step 7: Run, commit.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/cli*.test.mjs tests/readonly.test.mjs tests/schema-fail-loud-on-load.test.mjs tests/temp-cleanup-guard.test.mjs tests/model/seam-closure.test.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs
+node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json   # only removed lines
+npm test 2>&1 | tail -9
+rg -n "commit-runner|publish-runner" scripts tests README.md AGENTS.md docs/guide   # only BLZ-254 comments
+git add scripts/cli.mjs package.json tests/cli-removed-commands.test.mjs tests/cli.test.mjs tests/readonly.test.mjs \
+  tests/schema-fail-loud-on-load.test.mjs tests/temp-cleanup-guard.test.mjs tests/model/seam-closure.test.mjs \
+  scripts/ci/temp-cleanup-debt.json docs/guide/commands.md README.md docs/schema-customization.md docs/schema-versioning.md
+git commit -m "BLZ-687: remove blaze commit and blaze publish, refused by name (spec §5.5)"
+```
+
+If `tests/shipped-doc-links.test.mjs` fails on a link to the deleted `docs/operations/queue-store-migration.md`, the link is in `AGENTS.md`'s Commit-modes section. Task 9 rewrites that section, so do that one link's removal here: delete the sentence "migrate them with [the queue-store migration procedure](…)".
+
+---
+
+### Task 6: delete the ceremony modules; `commit-lock.mjs` → `dir-lock.mjs`
+
+**Files:**
+- Delete: `scripts/commit-or-queue.mjs`, `scripts/serve-commit.mjs`, `scripts/pending-ledger.mjs`, `scripts/commit-summary.mjs`, `scripts/branch-guard.mjs`
+- Rename + trim: `scripts/commit-lock.mjs` → `scripts/dir-lock.mjs` (`git mv`)
+- Modify: `scripts/model/import-lock.mjs` (`:5-38` comment and import), `scripts/readonly.mjs` (`:1-25` comments)
+- Rename + trim test: `tests/commit-lock.test.mjs` → `tests/dir-lock.test.mjs` (`git mv`)
+- Modify tests: `tests/read-path-residue-fifo.test.mjs` (the BLZ-512 describe), `tests/model/import-lock.test.mjs` (comments), `tests/board-overstatement-guards.test.mjs` (last BLZ-422 remnant), `tests/cli.test.mjs` (`--help` seed), `tests/readonly.test.mjs` (queue snapshots), `tests/model/seam-closure.test.mjs` (every remaining ledger row)
+- Delete tests: `tests/commit-or-queue.test.mjs`, `tests/serve-commit.test.mjs`
+
+**Interfaces:**
+- Produces: `scripts/dir-lock.mjs` exports exactly `acquireDirLock(dir, opts) → { ok, owner? }` and `releaseDirLock(dir)`, unchanged in behaviour (BLZ-640). Nothing exports `acquireLock`, `releaseLock`, `lockPath`, `commitOrQueue`, `stageFor`, `commitSuffix`, `commitFile`, `appendEntry`, `OP_LABEL` or `checkBranch` any more.
+
+- [ ] **Step 1: The rename, test first.**
+
+```bash
+git mv tests/commit-lock.test.mjs tests/dir-lock.test.mjs
+```
+
+In `tests/dir-lock.test.mjs`, change the import to `import { acquireDirLock, releaseDirLock } from "../scripts/dir-lock.mjs";`. Rewrite each of the six tests to take a lock **directory** (`const dir = join(root, ".blaze", "x.lock")`) and call `acquireDirLock(dir, opts)` / `releaseDirLock(dir)` where they called `acquireLock(root, opts)` / `releaseLock(root)`, with paths built from `dir` where they used `lockPath(root)`. Every assertion stays as it is: same retries, same staleness arms (dead pid, aged-out, NaN ts, ownerless grace). Header: `// tests/dir-lock.test.mjs — BLZ-640's lock mechanism, kept by BLZ-254 for model/import-lock.mjs. Was tests/commit-lock.test.mjs; the commit-lock POLICY it also wrapped is deleted (spec §5.5).`
+
+Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/dir-lock.test.mjs`. Expected: FAIL, `Cannot find module '…/scripts/dir-lock.mjs'`.
+
+- [ ] **Step 2: Make it pass.**
+
+```bash
+git mv scripts/commit-lock.mjs scripts/dir-lock.mjs
+```
+
+In `scripts/dir-lock.mjs`:
+- Replace the header (`:1-13`) with:
+
+  ```js
+  // scripts/dir-lock.mjs — an advisory lock over a caller-supplied DIRECTORY: an atomically
+  // mkdir'ed directory holding owner.json {pid, session, ts}, bounded retry, and theft of a lock
+  // whose owner is dead, aged out, or long ownerless. Zero-dependency. (BLZ-640)
+  //
+  // BLZ-254 (spec §5.5): this was scripts/commit-lock.mjs, which also bound the mechanism to the
+  // board's commit lock (`acquireLock`/`releaseLock` over `.blaze/commit.lock/`). The board no
+  // longer commits, so that policy is deleted. The mechanism stays because
+  // `scripts/model/import-lock.mjs` (out of BLZ-254's scope, guarding `blaze import --apply` in
+  // every mode) is built on it, and design §8 item 8 forbids a second copy of the staleness logic.
+  ```
+- Delete `lockPath` (`:23-25`), and `acquireLock`/`releaseLock` with their docblock (`:131-143`). Fix the BLZ-512 comment (`:17-20`) to name `acquireDirLock`, and drop its "every board write behind the lock" clause.
+- Keep the `node:fs` and `node:path` imports the mechanism uses (`mkdirSync, rmSync, writeFileSync, statSync`; `join, dirname, basename`).
+
+In `scripts/model/import-lock.mjs`, change `:38` to `import { acquireDirLock, releaseDirLock } from "../dir-lock.mjs";`. In the header comment (`:5-22`), replace each `commit-lock.mjs` with `dir-lock.mjs`, and delete the sentences that contrast the import lock with "`acquireLock` … taken inside `commitFile`" and with "`commitOrQueue` returns from the ledger". Replace them with: "Since BLZ-254 there is no commit lock to contrast it with; this is the only policy on dir-lock.mjs's mechanism."
+
+Run `tests/dir-lock.test.mjs` and `tests/model/import-lock.test.mjs` (plus `tests/import-lock-contention.test.mjs`). Expected: PASS. In `tests/model/import-lock.test.mjs`, comments only: `commit-lock.mjs` → `dir-lock.mjs`, and "`tests/commit-lock.test.mjs`" → "`tests/dir-lock.test.mjs`". Its sentences contrasting a 60 s commit age-out describe a deleted policy, so mark them `(the commit lock, deleted by BLZ-254)`. Change no assertion.
+
+- [ ] **Step 3: Delete the five modules and their two unit tests.**
+
+```bash
+git rm scripts/commit-or-queue.mjs scripts/serve-commit.mjs scripts/pending-ledger.mjs \
+  scripts/commit-summary.mjs scripts/branch-guard.mjs \
+  tests/commit-or-queue.test.mjs tests/serve-commit.test.mjs
+```
+
+`scripts/readonly.mjs`: replace the header's "imported by cli.mjs (the dispatch gate) and commit-or-queue.mjs + pending-ledger.mjs (defence-in-depth …)" with "imported by cli.mjs (the dispatch gate) and by every mutating runner and serve.mjs (defence-in-depth …)". In `assertWritable`'s comment, replace "callers that reach commitOrQueue/appendEntry directly" with "runners and handlers reached without cli.mjs".
+
+- [ ] **Step 4: The surviving tests that still import a deleted module.** `rg -ln "commit-or-queue|serve-commit|pending-ledger|commit-summary|branch-guard|commit-lock" tests` must list only the files below, and each is fixed as shown:
+- `tests/board-overstatement-guards.test.mjs`: delete the whole remaining `describe("BLZ-422: a no-op is never reported as a commit", …)`. Its two surviving tests are `commitFile`'s empty-diff no-op (module deleted) and Task 1's `"BLZ-254: an applied reconcile names its store and never claims a commit"`. **Move that second test** into `describe("BLZ-447: …")` before deleting the describe. Delete the `commitFile` and `commitOrQueue` imports and the now-unused `gitRepo`/`head` helpers if nothing else calls them (`grep -n "gitRepo()\|head(" tests/board-overstatement-guards.test.mjs`). Update the header comment's list of tickets (drop BLZ-427 and the BLZ-442 note about `commitOrQueue`).
+- `tests/cli.test.mjs` (the `move --help` test from Task 5): delete the `appendEntry`/`ledgerPath` import and the queue seeding. The test keeps "exits 0, prints the usage, HEAD unmoved, and the ticket tree byte-identical" (snapshot `projects/OBA/backlog/OBA-1.md` before and after).
+- `tests/readonly.test.mjs`:
+  - Delete the `appendEntry, ledgerPath` import.
+  - `board()` drops `commitMode: "batch"` from its config. Its comment becomes "A throwaway git-backed board with one ticket, so tree and HEAD assertions are meaningful."
+  - In `assertRefusedAndUntouched`, delete the `appendEntry(...)` seed, the `queue`/`beforeQueue` lines and the "queue file must be byte-identical" assertion.
+  - Rename each test from "tree/queue/HEAD" to "tree/HEAD".
+  - Header: "rather than at commitOrQueue (too late — …)" becomes "rather than in each runner alone (move.mjs and friends write before anything else could refuse)".
+- `tests/read-path-residue-fifo.test.mjs` `describe("BLZ-512: commit-lock's readOwner is the site the inventory missed", …)` (`:162-…`): rename to `"BLZ-512: dir-lock's readOwner is the site the inventory missed"`. Its probe imports `acquireDirLock` from `${mod("dir-lock.mjs")}` and acquires a lock directory whose `owner.json` is a FIFO, where it used `acquireLock(root)` with `.blaze/commit.lock/owner.json`. Keep every assertion (no hang, the named `NotARegularFileError` refusal). In the header (`:13-16`), `scripts/commit-lock.mjs` becomes `scripts/dir-lock.mjs`. Delete the `scripts/pending-ledger.mjs IS ALREADY GUARDED` bullet and replace it with `// (pending-ledger.mjs, the other site here, was deleted by BLZ-254.)`. If a test in that file drives `pending-ledger.mjs` itself, delete that test, because the module is gone.
+- `tests/model/import-lock.test.mjs`: comments only (Step 2).
+- `tests/reconcile-delivery-truth.test.mjs:252`: comment only. "`scripts/commit-runner.mjs` writes every batch board commit's body as …" becomes "`blaze commit` (deleted by BLZ-254) wrote every batch board commit's body as …". The rule it explains still guards the historical commits on every board.
+
+- [ ] **Step 5: Seam-closure, every remaining ledger row (99, 94, 875-887, 960-963, 1952, 2040-2046, 2129-2134, 2530, 2531, 2567).** Apply exactly the "After" column of the ledger table at the top of this plan. Spelled out:
+
+```js
+    "model/ids.mjs", "model/claims.mjs",  // the fs allocator — kept, BLZ-254 D1
+```
+
+```js
+    "dir-lock.mjs", "reindex.mjs", "supervisor.mjs",  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
+```
+
+```js
+  // BLZ-254: pending-ledger.mjs deleted (spec §5.5).
+  // The lock mechanism: a lock DIRECTORY under a caller-supplied path, taken and released.
+  // BLZ-640 added `acquireDirLock`/`releaseDirLock` — the SAME mkdir +
+  // owner.json + dead-PID-theft mechanism over a caller-supplied lock
+  // DIRECTORY, which is what design §8 item 8's "this reuses that mechanism
+  // rather than a second one" asks for. They create and remove a directory, so
+  // they are writes.
+  // BLZ-254: commit-lock.mjs → dir-lock.mjs; the commit-lock policy (acquireLock, releaseLock, lockPath) is deleted.
+  ["dir-lock.mjs", { writes: ["acquireDirLock", "releaseDirLock"],
+    sanctioned: [], inert: [] }],
+```
+
+```js
+  // BLZ-254: commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
+```
+
+(in place of the BLZ-670 comment and the two WRITE_MAP entries at 960-963)
+
+```js
+  ["dir-lock.mjs", "*"],  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
+```
+
+```js
+  // BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
+```
+
+(in place of the comment's second paragraph and the two entries left at 2045-2046)
+
+```js
+  // BLZ-640. The import lock reaches node:fs through `dir-lock.mjs`'s   // BLZ-254: renamed from commit-lock.mjs
+```
+
+```js
+    // BLZ-254: pending-ledger.mjs deleted (its `{ appendEntry }` row).
+    ["dir-lock.mjs", "{ acquireDirLock }", "acquireDirLock"],  // BLZ-254: commit-lock.mjs → dir-lock.mjs
+```
+
+```js
+    // BLZ-254: pending-ledger.mjs deleted (its `{ readForDrain, listQueues }` row).
+```
+
+Then check that nothing else in the file names a deleted module: `rg -n "commit-or-queue|serve-commit|pending-ledger|commit-runner|commit-lock|commitOrQueue|stageFor|commitFile|acquireLock|releaseLock|appendEntry|clearLedger|quarantineDropped|readForDrain|listQueues" tests/model/seam-closure.test.mjs`. The only hits allowed are `// BLZ-254` lines and the round-5 history prose at `:273`. Then **prove no assertion was weakened**:
+
+```bash
+git diff 3a0ac78 -- tests/model/seam-closure.test.mjs | grep '^[-+]' | grep -v '^[-+][-+]' > /tmp/seam.diff   # review only; delete after
+grep -c 'assert' /tmp/seam.diff    # must print 0 — no assert line was added or removed
+```
+
+and run the file. It must pass with the **same test count** as at baseline (`node --test tests/model/seam-closure.test.mjs 2>&1 | grep '^ℹ tests'`, compared with the same command on `git stash`-free `git worktree add /tmp/blz687-base 3a0ac78`; remove that worktree after).
+
+- [ ] **Step 6: The tree is clean of the deleted names.**
+
+```bash
+rg -n "commit-or-queue|serve-commit|pending-ledger|commit-summary|branch-guard|commit-lock|commit-runner|publish-runner|reconcile-commit-report|write-outcome" scripts tests
+rg -n "\b(commitOrQueue|stageFor|commitSuffix|commitFile|acquireLock|releaseLock|appendEntry|OP_LABEL|summarizeEntries|checkBranch|commitOutcomeFrom|applySummary|writeOutcome)\b" scripts tests
+```
+
+Both may print only `// BLZ-254` comment lines and prose comments that describe history. Every hit in executable code is a defect. (Spec §6, "Deletion": "`rg` finds no reference to a deleted module.")
+
+- [ ] **Step 7: Run, commit.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/dir-lock.test.mjs tests/model/import-lock.test.mjs tests/import-lock-contention.test.mjs tests/read-path-residue-fifo.test.mjs tests/readonly.test.mjs tests/cli.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs tests/groomer-containment.test.mjs
+node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+npm test 2>&1 | tail -9
+git add scripts/dir-lock.mjs scripts/model/import-lock.mjs scripts/readonly.mjs tests/dir-lock.test.mjs \
+  tests/read-path-residue-fifo.test.mjs tests/model/import-lock.test.mjs tests/board-overstatement-guards.test.mjs \
+  tests/cli.test.mjs tests/readonly.test.mjs tests/reconcile-delivery-truth.test.mjs tests/model/seam-closure.test.mjs \
+  scripts/ci/temp-cleanup-debt.json
+git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → dir-lock.mjs (spec §5.5)"
+```
+
+`tests/groomer-containment.test.mjs` is in the run on purpose. Its "a .blaze/commit.lock directory that wedges every other Blaze write" case still has to be **refused and removed** as an out-of-bounds write by the groomer. That test asserts the groomer's containment, not the lock, so it stays unchanged. Its comment's claim that the lock "wedges every other Blaze write" is now history. Add `(it did, before BLZ-254)`.
+
+---
