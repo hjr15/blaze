@@ -1772,3 +1772,248 @@ git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → 
 `tests/groomer-containment.test.mjs` is in the run on purpose. Its "a .blaze/commit.lock directory that wedges every other Blaze write" case still has to be **refused and removed** as an out-of-bounds write by the groomer. That test asserts the groomer's containment, not the lock, so it stays unchanged. Its comment's claim that the lock "wedges every other Blaze write" is now history. Add `(it did, before BLZ-254)`.
 
 ---
+### Task 7: `commitMode` is a removed config key (`SCHEMA_VERSION` 3)
+
+**Files:**
+- Modify: `scripts/model/schema-version.mjs` (`:17`, `:30-36`), `scripts/config.mjs` (`:30`, `:268-276` BLZ-461 comment, `:305`), `scripts/ci/smoke.sh:22`
+- Modify fixtures: `tests/fixtures/board-gate-real-shape/blaze.config.json`, `tests/fixtures/legacy-board/blaze.config.json` (drop `"commitMode"`)
+- Modify tests: `tests/config.test.mjs` (`:131-151`, `:285`), `tests/model/schema-config.test.mjs:57-62`, and every remaining test that writes `commitMode` into a config
+- Docs: `docs/schema-versioning.md` (the window table `:20` and a "Version 3" bullet after `:99`), `docs/guide/schema.md:110,130`, `AGENTS.md` (Configuration paragraph, the BLZ-461 paragraph, `schemaVersion` "currently `1..1`")
+
+**Interfaces:**
+- Produces: `REMOVED_KEYS.commitMode` (a string reason); `SCHEMA_VERSION === 3`. `loadConfig` throws `blaze: blaze.config.json sets a key this engine no longer reads: commitMode — …` for any value (including `null`). For `BLAZE_COMMIT_MODE` set to any value, it throws `blaze: BLAZE_COMMIT_MODE is no longer read — …`. `cfg.commitMode` is never set.
+
+- [ ] **Step 1: Write the failing tests.** In `tests/config.test.mjs`, replace the three tests at `:131-151` with:
+
+```js
+// BLZ-254 (spec §5.5): the board no longer commits, so nothing reads `commitMode`. BLZ-298's rule
+// for a key nothing reads: refuse it, never drop it silently (scripts/model/schema-version.mjs).
+test("BLZ-254: commitMode is refused as a removed key, naming what to do", () => {
+  for (const value of ["batch", "per-op", null]) {
+    const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
+    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: value }));
+    assert.throws(() => loadConfig({ root, env: {} }),
+      (e) => /no longer reads/.test(e.message) && /commitMode/.test(e.message) && /BLAZE_WRITE_PORT=db/.test(e.message),
+      `commitMode: ${JSON.stringify(value)} must be refused`);
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("BLZ-254: a board without commitMode loads, and its config has no commitMode", () => {
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
+  const cfg = loadConfig({ root, env: {} });
+  assert.equal(Object.hasOwn(cfg, "commitMode"), false);
+  rmSync(root, { recursive: true, force: true });
+});
+
+test("BLZ-254: BLAZE_COMMIT_MODE is refused, never silently ignored", () => {
+  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
+  for (const v of ["batch", "per-op", ""]) {
+    assert.throws(() => loadConfig({ root, env: { BLAZE_COMMIT_MODE: v } }),
+      /BLAZE_COMMIT_MODE is no longer read/, `BLAZE_COMMIT_MODE=${JSON.stringify(v)} must be refused`);
+  }
+  rmSync(root, { recursive: true, force: true });
+});
+```
+
+and at `:285` change `withConfig({ key: "OBA", projects: ["OBA"], commitMode: "batch" })` to `withConfig({ key: "OBA", projects: ["OBA"] })`, with the comment "Mirrors the compat-legacy fixture's exact shape" kept (the fixture loses the key in this task too). In `tests/model/schema-config.test.mjs:57-62`, the test becomes `"the engine's compat window is currently [1, 3]"`, with the comment `// BLZ-298 bumped to 2 (provider/terminal/codeRepo); BLZ-254 bumped to 3 (commitMode). MIN stays 1.` and `assert.equal(SCHEMA_VERSION, 3);`.
+
+Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/config.test.mjs tests/model/schema-config.test.mjs`. Expected: FAIL (no throw; `SCHEMA_VERSION` is 2).
+
+- [ ] **Step 2: Implement.**
+- `scripts/model/schema-version.mjs`:
+  - `export const SCHEMA_VERSION = 3;`
+  - Add to `REMOVED_KEYS`:
+
+    ```js
+      // BLZ-254 (spec §5.5): the board no longer commits or queues, so this has nothing to choose.
+      commitMode: "the board no longer commits (BLZ-254) — in fs mode version the files yourself; "
+                + "for more than one writer, use db mode (BLAZE_WRITE_PORT=db)",
+    ```
+  - Prefix the `REMOVED_KEYS` docblock with "Keys removed from the config contract (BLZ-298, BLZ-254)".
+  - The derived census comment (`:87-99`) is unchanged. The fixture corpus still has exactly one carrier, `board-gate-removed-key`, because both `commitMode` fixtures lose the key below, and `tests/schema-version-fixture-census.test.mjs` re-derives it.
+- `scripts/config.mjs`:
+  - Delete `  commitMode: "per-op",` (`:30`).
+  - Replace `  if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;` (`:305`) with:
+
+    ```js
+      // BLZ-254: REMOVED_KEYS' rule, applied to the environment twin of the removed `commitMode`
+      // key — set (even empty) is refused, because "set and silently ignored" is the defect.
+      if (env.BLAZE_COMMIT_MODE !== undefined) {
+        throw new Error("blaze: BLAZE_COMMIT_MODE is no longer read — the board no longer commits "
+          + "(BLZ-254). Unset it. In fs mode version the files yourself; for more than one writer, "
+          + "use db mode (BLAZE_WRITE_PORT=db).");
+      }
+    ```
+  - In the BLZ-461 comment (`:273`), "`move-runner.mjs` reads `cfg` only for `cfg.commitMode`" becomes "`move-runner.mjs` read `cfg` only for `cfg.commitMode` (removed by BLZ-254; it now reads no `cfg` field at all)".
+- `scripts/ci/smoke.sh:22`: `printf '{"key":"OBA","projects":["OBA"]}\n' > data/blaze.config.json`.
+- Both fixtures: delete the `"commitMode": …` line (and the trailing comma it leaves on the line above).
+
+- [ ] **Step 3: Every other test config.** Run `rg -ln 'commitMode|BLAZE_COMMIT_MODE' tests`. After Tasks 1–6, the expected remaining files are `tests/new-runner.test.mjs`, `tests/link-runner.test.mjs`, `tests/runner-flag-guard.test.mjs`, `tests/cli-key-refusal.test.mjs`, `tests/board-gate.test.mjs`, `tests/import-runner.test.mjs`, `tests/model/import-lock.test.mjs` and `tests/reconcile-feed-truth-oracle.test.mjs` (plus any the earlier tasks left).
+- Delete `commitMode` from every config those files write.
+- Delete any `BLAZE_COMMIT_MODE` they set.
+- Leave comments that only describe history, with `(removed by BLZ-254)` appended.
+
+`board-gate.test.mjs:30` lists `commitMode` among the real board's keys. Remove it from the list and add "(commitMode was removed from the real board's config by BLZ-254)". Afterwards `rg -n 'commitMode' tests --glob '!**/*.md'` prints only comment lines.
+
+- [ ] **Step 4: Docs.**
+- `docs/schema-versioning.md`:
+  - The window table: `SCHEMA_VERSION` | `3`.
+  - After the "Version 2 shipped with its migration path" bullet, add: "- **Version 3 (BLZ-254) removed `commitMode`** (and its `BLAZE_COMMIT_MODE` override). The board no longer commits, so the key had nothing left to choose. The migration is the same as version 2's: delete the key. The refusal names it."
+- `docs/guide/schema.md`: delete the `commitMode` row (`:110`) and the `"commitMode": "batch",` line of the example (`:130`).
+- `AGENTS.md`: the Configuration paragraph's key list drops `commitMode`; the BLZ-461 paragraph's "`move-runner.mjs` reads `cfg` only for `cfg.commitMode`" becomes "read … (removed by BLZ-254)"; "(currently `1..1`)" becomes "(currently `1..3`)".
+
+- [ ] **Step 5: Run, commit.**
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/config*.test.mjs tests/model/schema-config.test.mjs tests/schema-version-*.test.mjs tests/board-gate.test.mjs tests/compat-legacy.test.mjs tests/cli-key-refusal.test.mjs tests/schema-fail-loud-on-load.test.mjs tests/config-key-validation.test.mjs
+npm test 2>&1 | tail -9
+git add scripts/model/schema-version.mjs scripts/config.mjs scripts/ci/smoke.sh tests/fixtures/board-gate-real-shape/blaze.config.json \
+  tests/fixtures/legacy-board/blaze.config.json tests/config.test.mjs tests/model/schema-config.test.mjs \
+  $(git diff --name-only -- tests) docs/schema-versioning.md docs/guide/schema.md AGENTS.md
+git commit -m "BLZ-687: commitMode is a removed config key; SCHEMA_VERSION 3 (spec §5.5, BLZ-298's rule)"
+```
+
+The docs table at `docs/schema-versioning.md:20` is pinned by `"BLZ-356: the documented SCHEMA_VERSION matches the constant"`. That test going green is the check.
+
+---
+
+### Task 8: delete `missingClaimErrors`
+
+**Files:**
+- Modify: `scripts/model/index.mjs` (`:13` the claims import, `:355-398` the function and its comment), `scripts/reindex.mjs` (`:8`, `:72-98`)
+- Modify tests: `tests/ids-rollback.test.mjs`, `tests/model/index-fs-hatches.test.mjs`, `tests/csv-round-trip.test.mjs`, `tests/model/import-apply.test.mjs:124` (message only), `tests/read-path-fifo.test.mjs:476` (comment only)
+- Add a test to: `tests/reindex.test.mjs` (`grep -ln "reindex" tests/*.test.mjs` to find the file that drives `scripts/reindex.mjs` end to end. If none fits, add `tests/reindex-unclaimed-id.test.mjs`)
+- Docs: `docs/decisions/0005-three-layer-id-allocator.md` (one addendum line), AGENTS.md "Derived caches" (no change needed: it never mentioned the claim check; verify with `grep -n claim AGENTS.md`)
+
+**Interfaces:**
+- Produces: `scripts/model/index.mjs` no longer exports `missingClaimErrors` and no longer imports `claims.mjs`. `blaze reindex` blocks only on `idx.errors` (duplicate ids).
+
+- [ ] **Step 1: Write the failing test.** Create `tests/reindex-unclaimed-id.test.mjs`:
+
+```js
+// tests/reindex-unclaimed-id.test.mjs — BLZ-687 (BLZ-254 PR D, spec §3 and §5.5).
+//
+// `missingClaimErrors` (BLZ-136) made `blaze reindex` refuse an id above a project's `.cutover`
+// that had no `.ids/` claim. Spec §5.5 deletes it: under D1 an fs board is single-machine, so
+// there is no second writer whose claim could be missing, and in db mode the check was already
+// skipped. A duplicate id still refuses — that is `buildIndex`'s own error, not the claim check.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const reindex = join(REPO, "scripts", "reindex.mjs");
+
+function board(t, tickets) {
+  const root = mkdtempSync(join(tmpdir(), "blz687-reindex-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "PROJ", projects: ["PROJ"] }));
+  mkdirSync(join(root, "projects", "PROJ", "defined"), { recursive: true });
+  mkdirSync(join(root, "projects", "PROJ", ".ids"), { recursive: true });
+  writeFileSync(join(root, "projects", "PROJ", ".ids", ".cutover"), "5\n");   // the ledger has allocated
+  for (const [file, id] of tickets) {
+    writeFileSync(join(root, "projects", "PROJ", "defined", file),
+      `---\nid: ${id}\ntitle: t\ntype: task\nproject: PROJ\nestimate: 30\n---\n\nbody\n`);
+  }
+  return root;
+}
+const run = (root) => {
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
+  delete env.BLAZE_WRITE_PORT; delete env.BLAZE_READONLY;
+  return spawnSync(process.execPath, [reindex], { cwd: root, env, encoding: "utf8" });
+};
+
+test("an id above the cutover with no claim no longer blocks reindex", (t) => {
+  const root = board(t, [["PROJ-6-x.md", "PROJ-6"]]);
+  const r = run(root);
+  assert.equal(r.status, 0, r.stderr);
+  assert.doesNotMatch(r.stderr, /no claim|unclaimed/);
+  assert.ok(existsSync(join(root, ".blaze", "index.json")), "the index is written");
+});
+
+test("a duplicate id still blocks reindex", (t) => {
+  const root = board(t, [["PROJ-1-a.md", "PROJ-1"], ["PROJ-1-b.md", "PROJ-1"]]);
+  const r = run(root);
+  assert.notEqual(r.status, 0);
+  assert.match(r.stderr, /duplicate ticket id/);
+  assert.equal(existsSync(join(root, ".blaze", "index.json")), false);
+});
+```
+
+Check the cutover file's real name and location in `scripts/model/claims.mjs` (`cutoverPath`), and use that path. Run it. Expected: the first test FAILS (exit 1, "1 unclaimed id"), and the second passes. It is a guard, kept so the deletion cannot widen into the duplicate check.
+
+- [ ] **Step 2: Implement.**
+- `scripts/model/index.mjs`:
+  - Delete `import { claimedNumbers, readCutover, claimPath } from "./claims.mjs";` (`:13`). First check that nothing else in the file uses those three (`grep -n "claimedNumbers\|readCutover\|claimPath" scripts/model/index.mjs`).
+  - Delete the `missingClaimErrors` function and its comment block (from the comment's start above `export function missingClaimErrors` through the function's closing `}`).
+  - Leave one line: `// BLZ-254 (spec §3, §5.5): missingClaimErrors (BLZ-136) is deleted — fs mode is single-machine (D1), and db mode never ran it.`
+- `scripts/reindex.mjs`:
+  - `:8` becomes `import { buildIndex } from "./model/index.mjs";`.
+  - Replace the block from the comment `// BLZ-274 / ADR-0009: the missing-claim check is path-dependent …` through `for (const e of claimErrors) console.error(\`error: ${e}\`);` with `// BLZ-254 (spec §5.5): the missing-claim check (BLZ-136) is deleted; only duplicate ids block.`
+  - Then simplify the blocking section so that it reads:
+
+    ```js
+      // BLZ-134: refuse to write an index built over colliding ids. Writing it would
+      // bake the collision into every consumer while looking like a clean rebuild —
+      // exactly how four duplicate ids sat undetected on the live board. Fail before
+      // the write so the on-disk cache keeps its last known-good state.
+      if (idx.errors.length) {
+        for (const e of idx.errors) console.error(`error: ${e}`);
+        if (!allowDuplicateIds) {
+          const dupes = idx.errors.length;
+          throw new Error(
+            `${dupes} duplicate ticket id${dupes === 1 ? "" : "s"} — refusing to write a corrupt index. ` +
+            `Renumber one side of each collision, then re-run ` +
+            `(or --allow-duplicate-ids to rebuild anyway; the shadowed ticket stays invisible).`
+          );
+        }
+        console.error(`warning: --allow-duplicate-ids — rebuilding anyway; ${idx.errors.length} unresolved finding(s).`);
+      }
+    ```
+
+    Keep the original message text for the duplicate case **byte-identical** (compare with `git show 3a0ac78:scripts/reindex.mjs`). The tests that pin it must not change.
+
+- [ ] **Step 3: The tests that called it.**
+- `tests/ids-rollback.test.mjs`: delete `"BLZ-136 rollback: a ticket issued after cutover with no claim is a MISSING-CLAIM error"` (`:34-46`) and the `missingClaimErrors` import. The other three tests assert `buildIndex(...).errors` (duplicates, the grandfathered cutover, a well-formed board, a ledger-less board) and stay. Their names and comments speak of missing claims as an error, so append `(the missing-claim error itself was deleted by BLZ-254)` to the file's header.
+- `tests/model/index-fs-hatches.test.mjs`: delete `"missingClaimErrors is exported and still detects an unclaimed id"` and `"BLZ-274: a missing claim is no longer mislabelled as a duplicate id"`, and drop `missingClaimErrors` from the import. Fix the header ("filesystem three ways: walkTickets, missingClaimErrors … and …") to two ways. Add a one-line test in their place:
+
+  ```js
+  test("BLZ-254: missingClaimErrors is gone from the index module", async () => {
+    const mod = await import("../../scripts/model/index.mjs");
+    assert.equal(Object.hasOwn(mod, "missingClaimErrors"), false);
+  });
+  ```
+- `tests/csv-round-trip.test.mjs`: in `describe("BLZ-630: every imported ticket has a claim", …)`, keep `"a claim file exists for every created ticket, asserted DIRECTLY"`. It pins import writing claims, which fs mode still does (D1). Delete the two tests that call `missingClaimErrors` (`:272-299`), the import at `:42`, and the sentence at `:100` that cites its early return. Replace that sentence with "(BLZ-254 deleted `missingClaimErrors`; the claim's existence is what is pinned)".
+- `tests/model/import-apply.test.mjs:124`: in the message "the reverse order's residue is a missingClaimErrors ERROR on the operator's board", replace "a missingClaimErrors ERROR" with "an unclaimed id". The assertion is unchanged, because claim-before-write still matters to the allocator.
+- `tests/read-path-fifo.test.mjs:476`: comment only. "`missingClaimErrors` answers it by STAYING SILENT" becomes "`missingClaimErrors` (deleted by BLZ-254) answered it by staying silent".
+- `scripts/model/claims.mjs:71`: the comment naming `missingClaimErrors` gets the same "(deleted by BLZ-254)" note. The code is unchanged.
+
+- [ ] **Step 4: Docs, run, commit.** `docs/decisions/0005-three-layer-id-allocator.md`: append
+
+```markdown
+## Addendum (2026-10-13, BLZ-254) — fs is single-machine; the read-side claim check is gone
+
+BLZ-254 (D1) keeps this allocator as fs mode's, and fs mode is now a single-machine mode: a board
+with more than one writer runs in db mode, where `project_counter`'s row lock allocates. The
+read-side backstop BLZ-136 added — `blaze reindex` refusing an id above the cutover with no claim
+(`missingClaimErrors`) — is deleted, because on one machine there is no second writer whose claim
+could be missing. Layers 1 and 2 (the scan and the `O_EXCL` reservation plus the claim ledger) are
+unchanged; layer 2b's remote sweep (`remoteMaxClaim`) still runs, and is harmless with no remote.
+```
+
+```bash
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reindex-unclaimed-id.test.mjs tests/ids-*.test.mjs tests/model/index*.test.mjs tests/csv-round-trip.test.mjs tests/model/import-apply.test.mjs tests/read-path-fifo.test.mjs tests/reindex*.test.mjs
+npm test 2>&1 | tail -9
+rg -n "missingClaimErrors" scripts tests   # comments only
+git add scripts/model/index.mjs scripts/reindex.mjs scripts/model/claims.mjs tests/reindex-unclaimed-id.test.mjs \
+  tests/ids-rollback.test.mjs tests/model/index-fs-hatches.test.mjs tests/csv-round-trip.test.mjs \
+  tests/model/import-apply.test.mjs tests/read-path-fifo.test.mjs docs/decisions/0005-three-layer-id-allocator.md
+git commit -m "BLZ-687: delete missingClaimErrors and its reindex call (spec §5.5)"
+```
+
+---
