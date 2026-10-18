@@ -376,14 +376,20 @@ the corpus is empty — a run that measured nothing is never reported as a pass.
 that could not read the whole board.
 
 **Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
-resolved store, so it works under `fs`, `dual` and `db`, and each rule is the script's own:
+resolved store, so it works under `fs`, `dual` and `db`. Each rule started as the script's own,
+and BLZ-689 corrected the first one:
 
-- **`terminal-parent-open-child`** (soft for now, was `terminal_parent_scan.py`): a ticket in
-  `done`, `achieved`, `mitigated`, `accepted` or `obsolete` with a child that is not — any type
-  pair, across projects. The parent asserts the work is finished while the child says it is not.
-  Soft at first: blaze-pm's `BLZ-305-v4-spine` held 66 such parents (279 open children) on
-  2026-10-05. They are groomed under a separate ticket, and the kind becomes hard once the count
-  is zero; until then `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
+- **`terminal-parent-open-child`** (soft, was `terminal_parent_scan.py`): a terminal ticket with
+  a child that is not terminal, any type pair, across projects. The parent says the work is
+  finished while the child says it is not. **Terminal is judged per ticket, from its own type's
+  workflow** (BLZ-689), on both sides of the edge. So a requirement in `implemented`, `verified`
+  or `rejected` counts as terminal, the same as a feature in `done` or an ADR in `accepted`. A
+  goal whose requirements are all `verified` is clean. A `verified` requirement with an open
+  feature is a finding. **Open `risk` children are exempt.** A risk is parented to the decision
+  or requirement it threatens, and it stays open while that parent is terminal. It stays soft:
+  the owner has chosen to leave several real findings on blaze-pm's board for now, and a hard
+  kind would turn the board gate red. Hard promotion is deferred until those rows are resolved.
+  Until then, `blaze audit --fail-on terminal-parent-open-child` gates on this kind alone.
 - **`empty-body`** (soft, was `empty_body_scan.py`): a non-terminal ticket whose body is only
   headings, blank lines, empty checkboxes, bare bullets and HTML comments — what `blaze new`
   leaves for a title-only ticket.

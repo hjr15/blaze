@@ -11,7 +11,7 @@ import { mkdtempSync, mkdirSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { governanceFindings, isScaffoldLine, bodyIsEmpty, TERMINAL_PARENT_STATUSES,
+import { governanceFindings, isScaffoldLine, bodyIsEmpty,
          EMPTY_BODY_TERMINAL, HARD_KINDS, SOFT_KINDS } from "../scripts/model/audit.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
@@ -24,8 +24,7 @@ const t = (id, status, { type = "task", parent = "", body = "Some prose." } = {}
   ({ frontmatter: { id, type, parent }, status, body });
 
 describe("the rules, as the scripts wrote them", () => {
-  test("the two terminal sets are the scripts' sets, verbatim", () => {
-    assert.deepEqual([...TERMINAL_PARENT_STATUSES].sort(), ["accepted", "achieved", "done", "mitigated", "obsolete"]);
+  test("empty-body's terminal set is the script's set, verbatim", () => {
     assert.deepEqual([...EMPTY_BODY_TERMINAL].sort(),
       ["accepted", "achieved", "done", "implemented", "mitigated", "obsolete", "rejected"]);
   });
@@ -43,13 +42,56 @@ describe("the rules, as the scripts wrote them", () => {
       t("ENG-10", "in-progress", { parent: "ENG-1" }), t("ENG-2", "defined", { parent: "ENG-1" }),
       t("OPS-3", "done", { parent: "ENG-1" }),
       t("ENG-5", "achieved", { type: "goal" }), t("OPS-9", "proposed", { type: "requirement", parent: "ENG-5" }),
-      t("ENG-7", "implemented", { type: "requirement" }), t("ENG-8", "defined", { parent: "ENG-7" }),
       t("ENG-11", "defined", { parent: "ENG-404" }),
     ] }).filter((x) => x.kind === "terminal-parent-open-child");
     assert.deepEqual(f, [
       { ticket: "ENG-1", kind: "terminal-parent-open-child", detail: "feature done with 2/3 children open: ENG-2, ENG-10" },
       { ticket: "ENG-5", kind: "terminal-parent-open-child", detail: "goal achieved with 1/1 children open: OPS-9" },
-    ], "`implemented` is not in the script's set, and a dangling parent is dangling-parent's job");
+    ], "a dangling parent is dangling-parent's job");
+  });
+
+  // BLZ-689: terminality is the ticket's own TYPE's workflow, on both sides of the edge.
+  test("terminal-parent-open-child: a verified requirement whose children are implemented/verified is not a finding", () => {
+    const f = governanceFindings({ tickets: [
+      t("ENG-1", "verified", { type: "requirement" }),
+      t("ENG-2", "implemented", { type: "requirement", parent: "ENG-1" }),
+      t("ENG-3", "verified", { type: "requirement", parent: "ENG-1" }),
+      t("ENG-4", "achieved", { type: "goal" }),
+      t("ENG-5", "verified", { type: "requirement", parent: "ENG-4" }),
+      t("ENG-6", "rejected", { type: "requirement", parent: "ENG-4" }),
+    ] }).filter((x) => x.kind === "terminal-parent-open-child");
+    assert.deepEqual(f, []);
+  });
+
+  test("terminal-parent-open-child: a terminal requirement with an open non-risk child IS a finding", () => {
+    const f = governanceFindings({ tickets: [
+      t("ENG-7", "implemented", { type: "requirement" }), t("ENG-8", "defined", { type: "feature", parent: "ENG-7" }),
+      t("ENG-9", "verified", { type: "requirement" }), t("ENG-10", "in-progress", { type: "feature", parent: "ENG-9" }),
+    ] }).filter((x) => x.kind === "terminal-parent-open-child");
+    assert.deepEqual(f, [
+      { ticket: "ENG-7", kind: "terminal-parent-open-child", detail: "requirement implemented with 1/1 children open: ENG-8" },
+      { ticket: "ENG-9", kind: "terminal-parent-open-child", detail: "requirement verified with 1/1 children open: ENG-10" },
+    ]);
+  });
+
+  test("terminal-parent-open-child: open risk children are exempt", () => {
+    const f = governanceFindings({ tickets: [
+      t("ENG-1", "accepted", { type: "architecture" }),
+      t("ENG-2", "identified", { type: "risk", parent: "ENG-1" }),
+      t("ENG-3", "identified", { type: "risk", parent: "ENG-1" }),
+    ] }).filter((x) => x.kind === "terminal-parent-open-child");
+    assert.deepEqual(f, [], "a risk stays open against the decision it threatens");
+  });
+
+  test("terminal-parent-open-child: with an open risk and an open task, only the task is named", () => {
+    const f = governanceFindings({ tickets: [
+      t("ENG-1", "accepted", { type: "architecture" }),
+      t("ENG-2", "identified", { type: "risk", parent: "ENG-1" }),
+      t("ENG-3", "defined", { type: "task", parent: "ENG-1" }),
+    ] }).filter((x) => x.kind === "terminal-parent-open-child");
+    assert.deepEqual(f, [
+      { ticket: "ENG-1", kind: "terminal-parent-open-child", detail: "architecture accepted with 1/2 children open: ENG-3" },
+    ]);
   });
 
   test("empty-body: scaffold-only bodies, non-terminal tickets only", () => {
