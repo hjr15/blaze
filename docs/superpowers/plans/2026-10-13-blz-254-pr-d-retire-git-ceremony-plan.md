@@ -1741,11 +1741,10 @@ git rm scripts/commit-or-queue.mjs scripts/serve-commit.mjs scripts/pending-ledg
 Then check that nothing else in the file names a deleted module: `rg -n "commit-or-queue|serve-commit|pending-ledger|commit-runner|commit-lock|commitOrQueue|stageFor|commitFile|acquireLock|releaseLock|appendEntry|clearLedger|quarantineDropped|readForDrain|listQueues" tests/model/seam-closure.test.mjs`. The only hits allowed are `// BLZ-254` lines and the round-5 history prose at `:273`. Then **prove no assertion was weakened**:
 
 ```bash
-git diff 3a0ac78 -- tests/model/seam-closure.test.mjs | grep '^[-+]' | grep -v '^[-+][-+]' > /tmp/seam.diff   # review only; delete after
-grep -c 'assert' /tmp/seam.diff    # must print 0 — no assert line was added or removed
+git diff 3a0ac78 -- tests/model/seam-closure.test.mjs | grep '^[-+]' | grep -v '^[-+][-+]' | grep -c 'assert'   # must print 0
 ```
 
-and run the file. It must pass with the **same test count** as at baseline (`node --test tests/model/seam-closure.test.mjs 2>&1 | grep '^ℹ tests'`, compared with the same command on `git stash`-free `git worktree add /tmp/blz687-base 3a0ac78`; remove that worktree after).
+(no `assert` line was added or removed), and run the file. It must pass with the **same test count** as at baseline: compare `node --test --import=./tests/setup/hang-watchdog.mjs tests/model/seam-closure.test.mjs 2>&1 | grep '^ℹ tests'` with the same command in a throwaway worktree of `3a0ac78` (`git worktree add <scratchpad>/blz687-base 3a0ac78`, then `git worktree remove` it).
 
 - [ ] **Step 6: The tree is clean of the deleted names.**
 
@@ -2245,9 +2244,9 @@ rg -n "commit-or-queue|serve-commit|pending-ledger|commit-summary|branch-guard|c
 git diff --stat origin/main...HEAD | tail -1
 ```
 
-Expected test count: the baseline 5,432, minus the deleted files' tests, plus the new ones. Record the exact before/after in the PR body. The count drops by roughly the size of the 28 deleted test files. That is the deletion, and every file is named in Tasks 1–6 with its reason.
+Expected test count: the baseline 5,432, minus the deleted files' tests, plus the new ones. Record the exact before/after in the PR body. The count drops by the tests in the 24 deleted test files (2 + 2 + 2 + 16 + 2 across Tasks 1, 2, 3, 5 and 6; `tests/commit-lock.test.mjs` is renamed, not deleted). That is the deletion, and every file is named in Tasks 1–6 with its reason.
 
-- [ ] **Step 2 (opus): the whole-branch review.** Use `adversarial-plan-review-before-execution`'s sibling for code, `superpowers:requesting-code-review`, against the spec's §5.5 table, this plan's Review Focus, and the seam-closure ledger. The reviewer must specifically try to refute:
+- [ ] **Step 2 (opus): the whole-branch review.** Use `superpowers:requesting-code-review` against the spec's §5.5 table, this plan's Review Focus, and the seam-closure ledger. The reviewer must specifically try to refute:
   - "no seam-closure assertion was weakened" (diff the file against `3a0ac78`, and count `assert` lines touched: zero);
   - "fs-mode `blaze new` still allocates" (`tests/verbs-make-no-commit.test.mjs`);
   - "no executable reference to a deleted module remains".
