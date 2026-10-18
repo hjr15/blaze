@@ -276,6 +276,66 @@ with
       assert.doesNotMatch(dirty, /projects\/OBA/, "nor written");   // BLZ-254: nothing is committed
 ```
 
+Four more sites in `tests/reconcile-project-filter.test.mjs` read a commit (review C1). Define this once, near the file's other helpers:
+
+```js
+// BLZ-254: reconcile no longer commits, so the scope is read off the working tree under projects/.
+const dirtyPaths = (root) => execFileSync("git",
+  ["-C", root, "status", "--porcelain", "--untracked-files=all", "--", "projects"], { encoding: "utf8" })
+  .split("\n").filter(Boolean).map((l) => l.slice(3));
+```
+
+1. `"BLZ-394: scope follows the DIRECTORY, not just the frontmatter"` (`:556-563`): drop `commit: true, ` from the `reconcile({…})` call, and replace
+
+   ```js
+       const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+         { encoding: "utf8" });
+       assert.doesNotMatch(files, /projects\/OBA/,
+         "a commit scoped to INF must not touch projects/OBA, whatever the frontmatter says");
+   ```
+
+   with
+
+   ```js
+       const files = dirtyPaths(root);
+       assert.ok(files.length > 0, "the INF move must be in the working tree");
+       assert.ok(!files.some((f) => f.startsWith("projects/OBA")),
+         `a run scoped to INF must not write projects/OBA, whatever the frontmatter says: ${files.join(", ")}`);
+   ```
+2. Delete `test("BLZ-394: the --apply commit subject carries the scope", …)` (`:570-589`) whole, leaving `// BLZ-254: "the --apply commit subject carries the scope" is deleted — reconcile writes no commit, so there is no subject.`
+3. The BLZ-486 test (`:698-700`): replace
+
+   ```js
+       const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+         { encoding: "utf8" });
+       assert.doesNotMatch(files, /projects\/OBA/);
+   ```
+
+   with
+
+   ```js
+       const files = dirtyPaths(root);
+       assert.ok(!files.some((f) => f.startsWith("projects/OBA")), files.join(", "));
+   ```
+4. BLZ-451 AC-5 (`:855-858`): replace
+
+   ```js
+         const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
+           { encoding: "utf8" }).split("\n").filter(Boolean);
+         assert.ok(files.every((f) => f.includes("INF-1")),
+           `the commit filed something outside the scope: ${files.join(", ")}`);
+   ```
+
+   with
+
+   ```js
+         const files = dirtyPaths(root);
+         assert.ok(files.length > 0 && files.every((f) => f.includes("INF-1")),
+           `the run wrote something outside the scope (or nothing): ${files.join(", ")}`);
+   ```
+
+   Use the same helper in the AC-3 and BLZ-470 edits above (in place of their inline `git status` calls), so every scope check reads `projects/` only.
+
 In `tests/reconcile-pertype.test.mjs` (`:93-130`), replace `const r = await reconcile({ fetch: false, commit: true, dryRun: false, root });` with `const r = await reconcile({ fetch: false, dryRun: false, root });`, and replace the block from `  // (2) git log: a commit really exists, …` through `"the applied run must leave the board's tree fully committed");` with
 
 ```js
@@ -297,7 +357,7 @@ and change the next message from `"an applied, committing run must still never r
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reconcile-db-mode.test.mjs tests/reconcile.test.mjs tests/reconcile-project-filter.test.mjs tests/reconcile-pertype.test.mjs
 ```
 
-Expected: FAIL. `reconcile-db-mode` fails with "reconcile's result still carries `committed`"; `reconcile.test`, `reconcile-pertype` and the AC-3 test fail with "must not commit" (HEAD moved).
+Expected: FAIL, but only on the `Object.hasOwn(…, "committed")` clauses (`reconcile-db-mode` and `reconcile.test`; review M1 measured `fail 2`). Dropping `commit: true` from the calls already stops the old code committing, so the "must not commit" clauses pass at this step. They are regression guards for Step 4, not red steps.
 
 - [ ] **Step 3: Replace the report module.**
 
@@ -870,7 +930,8 @@ Expected: FAIL. The deepEqual sees `committed`/`queued`, "the board server must 
    with `        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db" });`.
 6. `/api/link` (`:957`). Replace `return done(r, \`${p.id}: ${p.remove === true ? "unlink" : "link"} ${p.type} ${p.target}\`, "link");` with `return done(r);`.
 7. Fix the comment above the read-only check (`:830`): "checked here (before any apply* call below, not just inside commitOrQueue)" → "checked here, before any apply* call below". Fix the BLZ-133 comment at `:48` ("reading commitMode from the engine root was already wrong") to say "reading config from the engine root …".
-8. `rg -n 'stageFor|commitFailed|gitOutcome|LOCK_OPTS|commitMode' scripts/serve.mjs` must print nothing.
+8. `reconcilePreview` (`scripts/serve.mjs:85`) still passes `commit: false` and `mode` to `reconcile()`. Both are dead after Task 1, so delete them (review M2).
+9. `rg -n 'stageFor|commitFailed|gitOutcome|LOCK_OPTS|commitMode|commit: false' scripts/serve.mjs` must print nothing.
 
 - [ ] **Step 4: The page (`scripts/views/page.mjs`), and the module.**
 
@@ -953,7 +1014,7 @@ Expected: all green. `rg -n "write-outcome|writeOutcome|gitOutcome" scripts test
 - Modify: `scripts/new-runner.mjs`, `scripts/move-runner.mjs`, `scripts/edit-runner.mjs`, `scripts/link-runner.mjs`, `scripts/log-runner.mjs`, `scripts/resolve-runner.mjs`, `scripts/sprint-runner.mjs`
 - Create: `tests/verbs-make-no-commit.test.mjs`
 - Modify tests: `tests/runner-dataroot.test.mjs`, `tests/board-overstatement-guards.test.mjs` (one test), `tests/sprint-runner-stamp-warning.test.mjs` (comment), `tests/model/seam-closure.test.mjs` (ledger rows 2062, 2083-2088)
-- Delete tests: `tests/runner-batch.test.mjs` (every test pins a runner queueing in `commitMode: "batch"`), `tests/edit-runner-batch.test.mjs` (the same, for `blaze edit`)
+- Delete tests: `tests/runner-batch.test.mjs` (every test pins a runner queueing in `commitMode: "batch"`), `tests/edit-runner-batch.test.mjs` (the same, for `blaze edit`), `tests/commit-status.test.mjs` (its fixture spawns `new-runner.mjs` in batch mode and reads the queue entry the runner no longer writes — review C2; it also drives `blaze commit --status`, deleted in Task 5)
 - Docs: `docs/guide/commands.md` (`## new`, `## move`, `## edit`, `## link`, `## resolve`, `## log`, `## sprint`: drop "commits"/"queues" from each), `docs/guide/getting-started.md:156-160`
 
 **Interfaces:**
@@ -1171,7 +1232,7 @@ and
 - [ ] **Step 7: Delete the batch-runner tests, update the docs, run, commit.**
 
 ```bash
-git rm tests/runner-batch.test.mjs tests/edit-runner-batch.test.mjs
+git rm tests/runner-batch.test.mjs tests/edit-runner-batch.test.mjs tests/commit-status.test.mjs
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/verbs-make-no-commit.test.mjs tests/runner-*.test.mjs tests/new-runner.test.mjs tests/link-runner.test.mjs tests/sprint-runner-stamp-warning.test.mjs tests/readonly.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs
 # THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
@@ -1194,7 +1255,7 @@ Doc text for `getting-started.md:156-160`: "Blaze does not commit. Every mutatin
 - Modify: `scripts/model/import-apply.mjs` (`:58` import, `:355-385` `applyImport`'s docblock and context, `:389`, `:480-516` the returns and the staging block, `:554-556` `runImport`'s options, `:653-665` the call and trailer)
 - Modify: `scripts/model/import-mapping.mjs` (`:48` import, `:536-538`, `:711-736` `runMappedImport`, `:786-808` and `:1003-1033` `runRepair`)
 - Modify: `scripts/import-runner.mjs` (`:32` import, `:159-160` `cfg`, `:206-209`, `:233-237`)
-- Modify tests: `tests/model/import-apply.test.mjs`, `tests/model/import-mapping-repair.test.mjs`, `tests/import-runner.test.mjs`, `tests/db-mode-reads.test.mjs`, `tests/import-db-mode.test.mjs`, `tests/reserve-window.test.mjs`, `tests/markdown-round-trip.test.mjs`, `tests/helpers/csv-round-trip.mjs`, `tests/model/seam-closure.test.mjs` (ledger rows 2107-2108, 2121-2122, 2142-2143)
+- Modify tests: `tests/model/import-apply.test.mjs`, `tests/model/import-mapping-repair.test.mjs`, `tests/import-runner.test.mjs`, `tests/db-mode-reads.test.mjs`, `tests/groomer-db-mode.test.mjs` (`:276`), `tests/import-db-mode.test.mjs`, `tests/reserve-window.test.mjs`, `tests/markdown-round-trip.test.mjs`, `tests/helpers/csv-round-trip.mjs`, `tests/model/seam-closure.test.mjs` (ledger rows 2107-2108, 2121-2122, 2142-2143)
 - Docs: `docs/design/csv-import-and-export.md` (§5.1 exit-4 row and "Exit 0 does not mean committed", §5.2's repair exit-4 row and the precedence paragraph, §5.4), `docs/guide/commands.md` `## import`
 
 **Interfaces:**
@@ -1211,8 +1272,9 @@ In `tests/import-runner.test.mjs`, replace the test `"staging goes through commi
 ```js
 test("BLZ-254: import --apply writes tickets, claims and its receipt, stages nothing and makes no commit", (t) => {
   const root = board(t);
+  // `board(t)` creates only empty directories, so the seed commit must be --allow-empty (review C3).
   for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
-                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
+                   ["commit", "-q", "--allow-empty", "-m", "seed"]]) {
     execFileSync("git", ["-C", root, ...a]);
   }
   const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -1229,7 +1291,7 @@ test("BLZ-254: import --apply writes tickets, claims and its receipt, stages not
 });
 ```
 
-Use the file's own helpers (`board`, `run`, `csvAt`, `row`, `ticketExists`). If `execFileSync` is not imported, add it to the `node:child_process` import. If `board(t)` already git-inits the root, drop the init loop and keep the `before`/`after` assertions.
+Use the file's own helpers (`board`, `run`, `csvAt`, `row`, `ticketExists`). If `execFileSync` is not imported, add it to the `node:child_process` import. (`board(t)` does not git-init, checked by the review, so the loop stays.) Expected red at Step 2: `an import makes no commit` (HEAD moved).
 
 In `tests/model/import-apply.test.mjs`:
 1. Replace `describe("BLZ-629: staging", …)` (`:565-596`) whole with:
@@ -1315,6 +1377,22 @@ with
     assert.match(untracked, new RegExp(`^\\?\\? ${RECEIPT_DIR}/\\S+\\.jsonl$`, "m"),
       `the receipt is written, untracked:\n${untracked}`);
     assert.doesNotMatch(untracked, /\.md$/m, `no ticket file exists in db mode:\n${untracked}`);
+```
+
+In `tests/groomer-db-mode.test.mjs:276-277` (review C4), replace
+
+```js
+  assert.notEqual(execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    headBefore, "the import's commit is not rewound");
+```
+
+with
+
+```js
+  // BLZ-254: the import makes no commit, so HEAD stays put — and the groomer moved it neither way.
+  // The receipt clause above still guards "not rewound".
+  assert.equal(execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    headBefore, "neither the import nor the groomer commits or rewinds");
 ```
 
 In `tests/import-db-mode.test.mjs` (`:41`, `:73`, `:142`, `:163`), `tests/reserve-window.test.mjs:43`, `tests/markdown-round-trip.test.mjs:85` and `tests/helpers/csv-round-trip.mjs:55`, delete the `stage: () => (…)` argument (and `commitMode` where present). These are dead arguments.
@@ -1416,12 +1494,12 @@ The prose comments above these entries that justify `commitOrQueue` ("`commitOrQ
 `docs/guide/commands.md` `## import`: drop every sentence about staging or commits, and say once: "`--apply` writes and makes no commit (BLZ-254)."
 
 ```bash
-node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/import*.test.mjs tests/model/import-*.test.mjs tests/db-mode-reads.test.mjs tests/reserve-window.test.mjs tests/markdown-round-trip.test.mjs tests/csv-round-trip.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/import*.test.mjs tests/model/import-*.test.mjs tests/db-mode-reads.test.mjs tests/groomer-db-mode.test.mjs tests/reserve-window.test.mjs tests/markdown-round-trip.test.mjs tests/csv-round-trip.test.mjs tests/model/seam-closure.test.mjs
 # THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 git add scripts/model/import-apply.mjs scripts/model/import-mapping.mjs scripts/import-runner.mjs \
   tests/model/import-apply.test.mjs tests/model/import-mapping-repair.test.mjs tests/import-runner.test.mjs \
-  tests/db-mode-reads.test.mjs tests/import-db-mode.test.mjs tests/reserve-window.test.mjs \
+  tests/db-mode-reads.test.mjs tests/groomer-db-mode.test.mjs tests/import-db-mode.test.mjs tests/reserve-window.test.mjs \
   tests/markdown-round-trip.test.mjs tests/helpers/csv-round-trip.mjs tests/model/seam-closure.test.mjs \
   scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/design/csv-import-and-export.md docs/guide/commands.md
 git commit -m "BLZ-687: blaze import stops staging; its records are written, not committed (spec §5.5)"
@@ -1437,7 +1515,7 @@ git commit -m "BLZ-687: blaze import stops staging; its records are written, not
 - Modify tests: `tests/cli.test.mjs`, `tests/readonly.test.mjs`, `tests/schema-fail-loud-on-load.test.mjs`, `tests/temp-cleanup-guard.test.mjs`, `tests/model/seam-closure.test.mjs` (ledger row 956, and row 2044 with its comment sentence)
 - Delete tests (every test in each spawns `commit-runner.mjs`/`publish-runner.mjs`, or pins the pending ledger only those runners drain):
   - `tests/commit-runner.test.mjs`, `tests/commit-runner-branch-guard.test.mjs`
-  - `tests/commit-status.test.mjs`, `tests/commit-status-provenance.test.mjs`
+  - `tests/commit-status-provenance.test.mjs` (`tests/commit-status.test.mjs` already went in Task 3)
   - `tests/commit-drain-concurrent-clear.test.mjs`, `tests/commit-drain-quarantine.test.mjs`, `tests/commit-settled-drain.test.mjs`
   - `tests/commit-four-working-copies.test.mjs`, `tests/commit-queueops-count.test.mjs`, `tests/commit-session-queue-scope.test.mjs`, `tests/commit-worktree-provenance.test.mjs`
   - `tests/flush-real-blaze-commit.test.mjs`, `tests/publish.test.mjs`, `tests/queue-store-migration-provenance.test.mjs` (runs the deleted `.sh`)
@@ -1559,7 +1637,7 @@ test("the usage listing no longer offers commit or publish", () => {
 ```bash
 git rm scripts/commit-runner.mjs scripts/publish-runner.mjs \
   docs/operations/queue-store-migration.md docs/operations/migrate-queue-store.sh \
-  tests/commit-runner.test.mjs tests/commit-runner-branch-guard.test.mjs tests/commit-status.test.mjs \
+  tests/commit-runner.test.mjs tests/commit-runner-branch-guard.test.mjs \
   tests/commit-status-provenance.test.mjs tests/commit-drain-concurrent-clear.test.mjs \
   tests/commit-drain-quarantine.test.mjs tests/commit-settled-drain.test.mjs \
   tests/commit-four-working-copies.test.mjs tests/commit-queueops-count.test.mjs \
@@ -1695,7 +1773,7 @@ git rm scripts/commit-or-queue.mjs scripts/serve-commit.mjs scripts/pending-ledg
 - `tests/board-overstatement-guards.test.mjs`: delete the whole remaining `describe("BLZ-422: a no-op is never reported as a commit", …)`. Its two surviving tests are `commitFile`'s empty-diff no-op (module deleted) and Task 1's `"BLZ-254: an applied reconcile names its store and never claims a commit"`. **Move that second test** into `describe("BLZ-447: …")` before deleting the describe. Delete the `commitFile` and `commitOrQueue` imports and the now-unused `gitRepo`/`head` helpers if nothing else calls them (`grep -n "gitRepo()\|head(" tests/board-overstatement-guards.test.mjs`). Update the header comment's list of tickets (drop BLZ-427 and the BLZ-442 note about `commitOrQueue`).
 - `tests/cli.test.mjs` (the `move --help` test from Task 5): delete the `appendEntry`/`ledgerPath` import and the queue seeding. The test keeps "exits 0, prints the usage, HEAD unmoved, and the ticket tree byte-identical" (snapshot `projects/OBA/backlog/OBA-1.md` before and after).
 - `tests/readonly.test.mjs`:
-  - Delete the `appendEntry, ledgerPath` import.
+  - Delete the `appendEntry, ledgerPath` import. `appendEntry` seeds the queue in two helpers, `assertRefusedAndUntouched` (`:62`) and the direct-invocation helper (`:149`); remove both seeds (review M4). The stack-trace regex at `:180`, `/at commitOrQueue|…/`, becomes `/at Object\.<anonymous>|node:internal/`.
   - `board()` drops `commitMode: "batch"` from its config. Its comment becomes "A throwaway git-backed board with one ticket, so tree and HEAD assertions are meaningful."
   - In `assertRefusedAndUntouched`, delete the `appendEntry(...)` seed, the `queue`/`beforeQueue` lines and the "queue file must be byte-identical" assertion.
   - Rename each test from "tree/queue/HEAD" to "tree/HEAD".
@@ -1758,11 +1836,30 @@ git rm scripts/commit-or-queue.mjs scripts/serve-commit.mjs scripts/pending-ledg
 
 Then check that nothing else in the file names a deleted module: `rg -n "commit-or-queue|serve-commit|pending-ledger|commit-runner|commit-lock|commitOrQueue|stageFor|commitFile|acquireLock|releaseLock|appendEntry|clearLedger|quarantineDropped|readForDrain|listQueues" tests/model/seam-closure.test.mjs`. The only hits allowed are `// BLZ-254` lines and the round-5 history prose at `:273`. Then **prove no assertion was weakened**:
 
+**The audit (review I3; the old `grep -c assert` check passed with a surviving fixture row deleted).** The guard's assertions are DATA ROWS (`ALLOWED`, `WRITE_ALLOWED`, `WRITE_MAP`, `WRITE_SITES`, the `cases`/`quiet` fixture tables), so the proof is about rows: every removed non-comment line must name a deleted module or member.
+
 ```bash
-git diff 3a0ac78 -- tests/model/seam-closure.test.mjs | grep '^[-+]' | grep -v '^[-+][-+]' | grep -c 'assert'   # must print 0
+DEL='pending-ledger|commit-lock|commit-or-queue|serve-commit|commit-runner|stageFor|commitOrQueue|commitFile|commitSuffix|acquireLock|releaseLock|lockPath|appendEntry|clearLedger|quarantineDropped|readForDrain|listQueues|sessionId|ledgerPath'
+# Rule 1 — removals. Prints every removed code line that names nothing deleted.
+git diff -U0 3a0ac78 -- tests/model/seam-closure.test.mjs | grep '^-[^-]' | sed 's/^-//' | grep -vE '^\s*//' | grep -vE "$DEL"
+# Rule 2 — additions. Prints every added code line (comments excluded) for side-by-side review.
+git diff -U0 3a0ac78 -- tests/model/seam-closure.test.mjs | grep '^+[^+]' | sed 's/^+//' | grep -vE '^\s*//'
 ```
 
-(no `assert` line was added or removed), and run the file. It must pass with the **same test count** as at baseline: compare `node --test --import=./tests/setup/hang-watchdog.mjs tests/model/seam-closure.test.mjs 2>&1 | grep '^ℹ tests'` with the same command in a throwaway worktree of `3a0ac78` (`git worktree add <scratchpad>/blz687-base 3a0ac78`, then `git worktree remove` it).
+Rule 1 may print exactly these, and the reviewer signs each off by name:
+- line 94's entry (`"model/ids.mjs", "model/claims.mjs",` — its trailing comment changed, the entry did not; it reappears unchanged in Rule 2);
+- the continuation lines of the multi-line `pending-ledger.mjs` `WRITE_MAP` entry (`"readForDrain", …`, `"worktreeBranchOwners", "belongsHere", "outstandingFiles",`, `"consumedPrefixIntact"] }],`), which belong to a deleted module even though they do not repeat its name.
+
+Anything else Rule 1 prints is a weakened guard. Restore it.
+
+Rule 2: every added code line must be one of these:
+- (a) a removed line with only deleted tokens taken out (e.g. `["sprint-runner.mjs", ["saveSprints"]],`);
+- (b) the `commit-lock.mjs`→`dir-lock.mjs` / `acquireLock`→`acquireDirLock` swap (`["dir-lock.mjs", "*"]`, the `dir-lock.mjs` `ALLOWED`/`WRITE_MAP` entries, the fixture row);
+- (c) a removed line re-wrapped with a `// BLZ-254` trailing comment.
+
+For each added line, find its removed twin in the same hunk. A line with no twin is an additive change the constraint forbids.
+
+Then run the file. It must pass with the same test count as at baseline: compare `node --test --import=./tests/setup/hang-watchdog.mjs tests/model/seam-closure.test.mjs 2>&1 | grep '^ℹ tests'` with the same command in a throwaway worktree of `3a0ac78` (`git worktree add <scratchpad>/blz687-base 3a0ac78`, then `git worktree remove` it).
 
 - [ ] **Step 6: The tree is clean of the deleted names.**
 
@@ -1771,7 +1868,7 @@ rg -n "commit-or-queue|serve-commit|pending-ledger|commit-summary|branch-guard|c
 rg -n "\b(commitOrQueue|stageFor|commitSuffix|commitFile|acquireLock|releaseLock|appendEntry|OP_LABEL|summarizeEntries|checkBranch|commitOutcomeFrom|applySummary|writeOutcome)\b" scripts tests
 ```
 
-Both may print only `// BLZ-254` comment lines and prose comments that describe history. Every hit in executable code is a defect. (Spec §6, "Deletion": "`rg` finds no reference to a deleted module.")
+In `scripts/`, both may print only comment lines (`// BLZ-254 …`, or history prose that says the thing was deleted). In `tests/model/seam-closure.test.mjs`, the only non-`// BLZ-254` hits allowed are the three history comments the ledger names (lines 273, 2034, 2067 at `3a0ac78`). Every hit in executable code is a defect. The rule for comments (review I5): a comment naming a deleted module either says it was deleted (`// BLZ-254 …`, or `(deleted by BLZ-254)` appended), or is one of those three history lines. Nothing is excluded from the grep silently. (Spec §6, "Deletion": "`rg` finds no reference to a deleted module.")
 
 - [ ] **Step 7: Run, commit.**
 
@@ -1781,7 +1878,7 @@ node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests
 npm test 2>&1 | tail -9
 git add scripts/dir-lock.mjs scripts/model/import-lock.mjs scripts/readonly.mjs tests/dir-lock.test.mjs \
   tests/read-path-residue-fifo.test.mjs tests/model/import-lock.test.mjs tests/board-overstatement-guards.test.mjs \
-  tests/cli.test.mjs tests/readonly.test.mjs tests/reconcile-delivery-truth.test.mjs tests/model/seam-closure.test.mjs \
+  tests/cli.test.mjs tests/readonly.test.mjs tests/reconcile-delivery-truth.test.mjs tests/groomer-containment.test.mjs tests/model/seam-closure.test.mjs \
   scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
 git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → dir-lock.mjs (spec §5.5)"
 ```
@@ -1944,8 +2041,10 @@ Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/config-commitmod
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/config*.test.mjs tests/model/schema-config.test.mjs tests/schema-version-*.test.mjs tests/board-gate.test.mjs tests/compat-legacy.test.mjs tests/cli-key-refusal.test.mjs tests/model/seam-closure.test.mjs
+# THE DEBT STEP (Global Constraints) — run its block here (Task 7 deletes three config.test.mjs tests; review I2)
 npm test 2>&1 | tail -9
-git add scripts/config.mjs scripts/ci/smoke.sh tests/config-commitmode-ignored.test.mjs tests/config.test.mjs \
+git add scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md \
+  scripts/config.mjs scripts/ci/smoke.sh tests/config-commitmode-ignored.test.mjs tests/config.test.mjs \
   $(git diff --name-only -- tests) docs/guide/schema.md docs/schema-versioning.md AGENTS.md
 git commit -m "BLZ-687: commitMode is ignored with a one-time warning — the board never commits (spec §5.5)"
 ```
@@ -2084,6 +2183,8 @@ unchanged; layer 2b's remote sweep (`remoteMaxClaim`) still runs, and is harmles
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reindex-unclaimed-id.test.mjs tests/ids-*.test.mjs tests/model/index*.test.mjs tests/csv-round-trip.test.mjs tests/model/import-apply.test.mjs tests/read-path-fifo.test.mjs tests/reindex*.test.mjs
 npm test 2>&1 | tail -9
 rg -n "missingClaimErrors" scripts tests   # comments only
+# THE DEBT STEP (Global Constraints) — run its block here (Task 8 deletes tests; review I2)
+git add scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
 git add scripts/model/index.mjs scripts/reindex.mjs scripts/model/claims.mjs tests/reindex-unclaimed-id.test.mjs \
   tests/ids-rollback.test.mjs tests/model/index-fs-hatches.test.mjs tests/csv-round-trip.test.mjs \
   tests/model/import-apply.test.mjs tests/read-path-fifo.test.mjs docs/decisions/0005-three-layer-id-allocator.md
@@ -2320,7 +2421,7 @@ rg -n "commit-or-queue|serve-commit|pending-ledger|commit-summary|branch-guard|c
 git diff --stat origin/main...HEAD | tail -1
 ```
 
-Expected test count: the baseline 5,432, minus the deleted files' tests, plus the new ones. Record the exact before/after in the PR body. The count drops by the tests in the 24 deleted test files (2 + 2 + 2 + 16 + 2 across Tasks 1, 2, 3, 5 and 6; `tests/commit-lock.test.mjs` is renamed, not deleted). That is the deletion, and every file is named in Tasks 1–6 with its reason.
+Expected test count: the baseline 5,432, minus the deleted files' tests, plus the new ones. Record the exact before/after in the PR body. The count drops by the tests in the 24 deleted test files (2 + 2 + 3 + 15 + 2 across Tasks 1, 2, 3, 5 and 6; `tests/commit-lock.test.mjs` is renamed, not deleted). That is the deletion, and every file is named in Tasks 1–6 with its reason.
 
 - [ ] **Step 2 (opus): the whole-branch review.** Use `superpowers:requesting-code-review` against the spec's §5.5 table, this plan's Review Focus, and the seam-closure ledger. The reviewer must specifically try to refute:
   - "no seam-closure assertion was weakened" (diff the file against `3a0ac78`, and count `assert` lines touched: zero);
