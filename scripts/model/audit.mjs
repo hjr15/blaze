@@ -14,6 +14,7 @@
 // the fill queue is a gate people learn to skip, which costs the hard findings too.
 import { resolveSchema, collectSchemaProblems } from "./schema-config.mjs";
 import { LINK_TYPES } from "./links.mjs";
+import { isTerminal, WORKFLOWS } from "./workflows.mjs";
 
 /** Every soft kind this module can emit. Exported so `blaze audit --help` prints what exists
  *  rather than a hand-kept list, which went stale twice — once for `schema-invalid` and
@@ -23,12 +24,14 @@ export const SOFT_KINDS = [
   "terminal-goal-unverified-requirement", "schema-invalid",
   "deadline-unreachable", "dependency-cycle", "schedule-stale", "schedule-empty",
   // BLZ-681: re-homed from blaze-pm's governance scripts — `governanceFindings` below says why
-  // each is soft. `terminal-parent-open-child` is soft AT FIRST only: a terminal ticket with a
-  // non-terminal child asserts the work is finished while the child says it is not, which is the
-  // corpus being WRONG — but MEASURED before shipping (the BLZ-353 lesson), blaze-pm's
-  // BLZ-305-v4-spine at 8bd7fd3d holds 66 such parents with 279 open children. Shipped hard it
-  // would fail `blaze audit` on the live board on day one. They are groomed under a separate
-  // ticket, and the kind moves to HARD_KINDS once the count is zero.
+  // each is soft. `terminal-parent-open-child`: a terminal ticket with a non-terminal child
+  // asserts the work is finished while the child says it is not, which is the corpus being
+  // WRONG — but MEASURED before shipping (the BLZ-353 lesson), blaze-pm's BLZ-305-v4-spine at
+  // 8bd7fd3d held 66 such parents with 279 open children, so it shipped soft. BLZ-689 made the
+  // rule correct (per-type terminality, open risk children exempt) and KEPT it soft: the owner
+  // chose to leave several real findings in place for now, and a hard kind would turn the board
+  // gate red. Hard promotion is deferred until those rows are resolved; until then
+  // `blaze audit --fail-on terminal-parent-open-child` gates on it alone.
   "empty-body", "config-project-drift", "terminal-parent-open-child",
 ];
 
@@ -327,11 +330,22 @@ export function auditCorpus({ tickets = [], projects = {}, config = null, univer
 // Each RULE is ported exactly — the sets and patterns below are the scripts' own — so the
 // finding count on a board is the count the script reported for it.
 
-/** `terminal_parent_scan.py`'s TERMINAL: the terminal statuses of the delivery, goal and risk
- *  workflows. Deliberately the script's fixed set, not the resolved schema's terminals: an
- *  `implemented` requirement with an open delivery child is the normal state of a requirement
- *  being built, and the script never flagged it. */
-export const TERMINAL_PARENT_STATUSES = new Set(["done", "achieved", "mitigated", "accepted", "obsolete"]);
+/** BLZ-689: is `status` terminal for a ticket of `type`? Judged per ticket from its type's
+ *  workflow (`workflows.mjs`, defaults plus the board's override) — on BOTH sides of the
+ *  parent/child edge. The script's old fixed set (`done/achieved/mitigated/accepted/obsolete`)
+ *  missed a requirement's `implemented`, `verified` and `rejected`, so a goal whose
+ *  requirements were all `verified` was a false positive (NCA-1), and a `verified` requirement
+ *  with an open feature was a false negative. A type the schema does not know (schema-invalid's
+ *  job) falls back to "terminal in any workflow", so it is neither crashed on nor invented. */
+export function isTerminalFor(type, status) {
+  try { return isTerminal(type, status); }
+  catch { return Object.values(WORKFLOWS).some((w) => (w.terminal ?? []).includes(status)); }
+}
+
+/** BLZ-689 (owner decision 2026-10-18): an open `risk` child never makes its parent a
+ *  terminal-parent-open-child. Risks are deliberately parented to the decision or requirement
+ *  they threaten, and stay open while that parent is accepted/implemented. */
+export const TERMINAL_PARENT_EXEMPT_CHILD_TYPES = new Set(["risk"]);
 
 /** `empty_body_scan.py`'s TERMINAL_STATUSES: a terminal ticket with no body is a weaker
  *  historical record, not an active breach, so it is not reported. */
@@ -373,8 +387,9 @@ export function governanceFindings({ tickets = [], universe = null, configProjec
                                      storeProjects = [], scopeProjects = null } = {}) {
   const findings = [];
 
-  // terminal-parent-open-child — SOFT until the live board is groomed (see SOFT_KINDS), then
-  // hard. Children are found across the whole universe (not just the
+  // terminal-parent-open-child — SOFT (see SOFT_KINDS): hard promotion is deferred while the
+  // owner-kept rows stand. Terminality is per type (isTerminalFor); open risk children are
+  // exempt. Children are found across the whole universe (not just the
   // scoped tickets), so a cross-project parent is still caught; a dangling parent is `dangling-parent`'s job.
   const byId = new Map();
   for (const t of universe ?? tickets) {
@@ -390,9 +405,12 @@ export function governanceFindings({ tickets = [], universe = null, configProjec
   }
   for (const parent of [...children.keys()].filter((p) => byId.has(p) && inScope.has(p)).sort(idOrder)) {
     const p = byId.get(parent);
-    if (!TERMINAL_PARENT_STATUSES.has(p.status)) continue;
+    if (!isTerminalFor(p.type, p.status)) continue;
     const kids = children.get(parent);
-    const open = kids.filter((k) => !TERMINAL_PARENT_STATUSES.has(byId.get(k).status)).sort(idOrder);
+    const open = kids.filter((k) => {
+      const c = byId.get(k);
+      return !TERMINAL_PARENT_EXEMPT_CHILD_TYPES.has(c.type) && !isTerminalFor(c.type, c.status);
+    }).sort(idOrder);
     if (!open.length) continue;
     findings.push({ ticket: parent, kind: "terminal-parent-open-child",
       detail: `${p.type} ${p.status} with ${open.length}/${kids.length} children open: ${open.join(", ")}` });
