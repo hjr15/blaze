@@ -4,7 +4,7 @@
 
 **Goal:** Delete every git-era write mechanism the live board needed (spec §5.5): `blaze commit`, `blaze publish`, the commit lock, the pending ledgers, `commit-or-queue`/`stageFor`, `serve-commit`, and `missingClaimErrors`. Board verbs, the board server, reconcile and `blaze import` then write files (fs) or rows (db) and never commit, while fs mode keeps its single-machine allocator (`ids.mjs`, `claims.mjs`, D1).
 
-**Architecture:** Consumers are cut first and modules deleted last, so the suite is green at every commit. Task 1 removes the two verbs, and a removed verb gets a named refusal at dispatch. Tasks 2–5 stop each caller staging: the server (its 200 body becomes `{ ok, db, … }`), the six ticket verbs and `sprint`, reconcile and the supervisor feed, and import. Task 6 deletes the now-unreferenced modules. The one primitive that survives (`acquireDirLock`/`releaseDirLock`, which `model/import-lock.mjs` needs) moves to `scripts/dir-lock.mjs`. Task 7 makes `commitMode` ignored with a one-time warning, and Task 8 retires `missingClaimErrors`. Task 9 carries the ADRs, the spec amendment and the version, and Task 10 is the conditional matrices header. `tests/model/seam-closure.test.mjs` changes only by exact name swaps or removals, each marked `// BLZ-254:`, in the same task as the code that makes it necessary.
+**Architecture:** Consumers are cut first and modules deleted last, so the suite is green at every commit. Tasks 1–4 stop each caller staging: reconcile and the supervisor feed (Task 1), the server (Task 2, its 200 body becomes `{ ok, db, … }`), the six ticket verbs and `sprint` (Task 3), and import (Task 4). Task 5 removes the two verbs, and a removed verb gets a named refusal at dispatch. Task 6 deletes the now-unreferenced modules. The one primitive that survives (`acquireDirLock`/`releaseDirLock`, which `model/import-lock.mjs` needs) moves to `scripts/dir-lock.mjs`. Task 7 makes `commitMode` ignored with a one-time warning, and Task 8 retires `missingClaimErrors`. Task 9 carries the ADRs, the spec amendment and the version, and Task 10 is the conditional matrices header. `tests/model/seam-closure.test.mjs` changes only by exact name swaps or removals, each marked `// BLZ-254:`, in the same task as the code that makes it necessary.
 
 **Tech Stack:** Node 24 ESM, `node:test`, `node:sqlite`, `pg` 8 (Postgres tests gated `PG_SKIP`), git.
 
@@ -31,9 +31,25 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 - **`tests/model/seam-closure.test.mjs`: only exact name swaps or removals of deleted modules' entries, each with a `// BLZ-254:` comment, and no assertion weakened.** No new map entry, no new member, no relaxed comparison. Every line touched is listed in the owning task, and the full list is in "Seam-closure ledger" below.
 - **A test file is deleted only when every test in it covers a deleted module or a deleted behaviour.** A file that also covers surviving behaviour is edited instead. Each deletion is listed with its reason in the owning task.
 - **TDD where behaviour changes:** the server's 200 body, the CLI's removed-verb refusal, a verb that writes and creates no commit, reconcile's applied line, `commitMode` ignored with one warning, and `blaze reindex` no longer refusing an unclaimed id. Each gets a failing test first.
+- **No plan step may reach the live cluster (I8).** `scripts/publish-runner.mjs` runs `kubectl create job -n blaze --from=cronjob/blaze-flush …` against the ambient kube context (on the operator's machine, `k3d-service-platform`). Until Task 5 deletes it, any command that could reach `blaze publish` runs with `KUBECONFIG=/dev/null` and a `PATH` whose first entry is a stub `kubectl` that exits 1. That covers every red run, and every `npm test` before Task 5 lands. Set it up once per shell:
+  ```bash
+  STUB=$(mktemp -d "${TMPDIR:-/tmp}/blz687-nokube-XXXXXX") && printf '#!/bin/sh\necho "kubectl disabled for BLZ-687" >&2; exit 1\n' > "$STUB/kubectl" && chmod +x "$STUB/kubectl"
+  export KUBECONFIG=/dev/null PATH="$STUB:$PATH"
+  ```
+  `tests/cli-removed-commands.test.mjs` also builds its own stub in `run()` (Task 5). No step runs `kubectl` against a real context.
+- **New test files use `tests/helpers/scratch.mjs` (I9):** `import { scratchRegistry } from "./helpers/scratch.mjs"; const scratch = scratchRegistry();` at module scope, and `scratch(mkdtempSync(join(tmpdir(), "<literal-prefix>-")))` for every scratch directory. Keep the literal prefix inside `mkdtempSync` for the attribution scan. No per-test `t.after(() => rmSync(…))`.
 - **Mode comes only from `resolveWriteMode(env)`** (or the `mode` the resolvers return). Nothing sniffs `writePort.name`.
 - **Test hygiene the suite enforces:** scratch dirs via `mkdtempSync(join(tmpdir(), "<literal-prefix>-"))` with cleanup in `t.after`/`finally`. No `rmSync` reached only after an assertion (the `temp-cleanup-guard` ratchet). A spawned process gets an env with `BLAZE_WRITE_PORT`/`BLAZE_READONLY`/`BLAZE_REMOTE_URL`/`BLAZE_TOKEN` DELETED, never set to `""`.
-- **`scripts/ci/temp-cleanup-debt.json` is held to equality** by `tests/temp-cleanup-guard.test.mjs`. Every task that deletes or edits a test file regenerates it with `node scripts/ci/temp-cleanup-guard.mjs --write` and checks `git diff scripts/ci/temp-cleanup-debt.json` shows **only removed lines or lowered counts**. A raised count is a new leak and is fixed in the test, not recorded.
+- **THE DEBT STEP.** `scripts/ci/temp-cleanup-debt.json` is held to equality by `tests/temp-cleanup-guard.test.mjs`, and its size is quoted in `docs/ci.md` ("454 sites across 65 files" at baseline). That quote is registered in `scripts/ci/quoted-sources.mjs` and pinned by `tests/quoted-sources.test.mjs`. Every task that deletes or edits a test file (Tasks 1–8) runs this exact block before its commit, and stages all three files:
+  ```bash
+  node scripts/ci/temp-cleanup-guard.mjs --write \
+    && OLD=$(grep -o '[0-9]* sites across [0-9]* files' scripts/ci/quoted-sources.mjs | head -1) \
+    && NEW=$(node -e 'const f=JSON.parse(require("fs").readFileSync("scripts/ci/temp-cleanup-debt.json","utf8")).files;const v=Object.values(f);console.log(`${v.reduce((a,b)=>a+b,0)} sites across ${v.length} files`)') \
+    && sed -i "s/$OLD/$NEW/" scripts/ci/quoted-sources.mjs docs/ci.md \
+    && git diff scripts/ci/temp-cleanup-debt.json && echo "quote: $OLD -> $NEW"
+  # stage: scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
+  ```
+  The debt diff must show **only removed lines or lowered counts**. A raised count is a new leak and is fixed in the test, not recorded. The one exception is Task 6's rename, `"dir-lock.test.mjs": 6` replacing `"commit-lock.test.mjs": 6`, which is the same file. The review measured this sequence (sites/files) after each task: 453/65, 446/63, 438/61, 438/61, 386/56, 379/54, 376/54, 375/54. A different figure is not wrong in itself, but read the diff before accepting it.
 - **Commits:** one per task (two where a task says so), subject `BLZ-687: …`. Stage with an explicit pathspec (`git add <paths>`; `git rm` for deletions), never `git add -A`. **No `Co-Authored-By` or `Signed-off-by` trailer** (hjr15/blaze hygiene CI). No `/home/` path or `*.howman.link` hostname in an added non-Markdown line. Never run `git config`. Never push from a task.
 - **Every task ends:** the task's named tests pass; `npm test` is green (fail 0); `git status --short` prints nothing; and `rg -n '<the task's deleted names>' scripts tests` prints only what the task says may remain.
 - **Environment for every command** (`npm ci --ignore-scripts` once if `node_modules/` is absent):
@@ -85,20 +101,20 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 
 | File | Task | Change |
 |---|---|---|
-| `scripts/cli.mjs` | 1 | `commit`/`publish` out of `SUBCOMMANDS`; `REMOVED_COMMANDS` refusal; `SCHEMA_PREFLIGHT_EXEMPT` loses `commit` |
-| `scripts/commit-runner.mjs`, `scripts/publish-runner.mjs` | 1 | **deleted** |
+| `scripts/cli.mjs` | 5 | `commit`/`publish` out of `SUBCOMMANDS`; `REMOVED_COMMANDS` refusal; `SCHEMA_PREFLIGHT_EXEMPT` loses `commit` |
+| `scripts/commit-runner.mjs`, `scripts/publish-runner.mjs` | 5 | **deleted** |
 | `scripts/serve.mjs` | 2 | no staging; 200 body `{ ok, db, … }`; no 503 lock arm |
 | `scripts/views/write-outcome.mjs` | 2 | **deleted**; `scripts/views/page.mjs` stops injecting it |
 | `scripts/{new,move,edit,link,log,resolve,sprint}-runner.mjs` | 3 | no staging, no commit suffix |
-| `scripts/reconcile.mjs`, `scripts/supervisor.mjs` | 4 | no commit block; result fields; applied line; feed |
-| `scripts/reconcile-commit-report.mjs` → `scripts/reconcile-apply-report.mjs` | 4 | `git mv`; only `appliedLine` remains |
-| `scripts/model/import-apply.mjs`, `scripts/model/import-mapping.mjs`, `scripts/import-runner.mjs` | 5 | no staging |
+| `scripts/reconcile.mjs`, `scripts/supervisor.mjs` | 1 | no commit block; result fields; applied line; feed |
+| `scripts/reconcile-commit-report.mjs` → `scripts/reconcile-apply-report.mjs` | 1 | `git mv`; only `appliedLine` remains |
+| `scripts/model/import-apply.mjs`, `scripts/model/import-mapping.mjs`, `scripts/import-runner.mjs` | 4 | no staging |
 | `scripts/commit-or-queue.mjs`, `scripts/serve-commit.mjs`, `scripts/pending-ledger.mjs`, `scripts/commit-summary.mjs`, `scripts/branch-guard.mjs` | 6 | **deleted** |
 | `scripts/commit-lock.mjs` → `scripts/dir-lock.mjs` | 6 | `git mv`; policy half deleted |
 | `scripts/model/import-lock.mjs`, `scripts/readonly.mjs` | 6 | import path; comments |
 | `scripts/config.mjs`, `scripts/model/schema-version.mjs` | 7 | `commitMode`/`BLAZE_COMMIT_MODE` ignored with a one-time warning; `SCHEMA_VERSION` stays 2 |
 | `scripts/model/index.mjs`, `scripts/reindex.mjs` | 8 | `missingClaimErrors` and its call deleted |
-| `tests/model/seam-closure.test.mjs` | 2–6 | name swaps/removals only (ledger below) |
+| `tests/model/seam-closure.test.mjs` | 1–6 | name swaps/removals only (ledger below) |
 | `package.json`, `package-lock.json`, `tests/package.test.mjs` | 9 | 0.9.0 |
 | ADR-0006 (addendum), ADR-0008 (addendum), ADR-0032/0033/0035 (superseded), the spec (amendment), README, AGENTS.md, `docs/guide/*`, `docs/architecture.md`, `docs/diagrams/architecture.md`, `docs/design/csv-import-and-export.md`, `docs/schema-versioning.md`, `docs/schema-customization.md` | 1–9 | docs, in the task that changes the behaviour, plus Task 9's sweep |
 | `scripts/model/matrices.mjs`, `tests/fixtures/matrices-board/docs/matrices/*.md` | 10 | conditional header |
@@ -113,24 +129,26 @@ Each edit carries `// BLZ-254:` on the line above it, or as a trailing comment w
 | 99 | `"pending-ledger.mjs", "commit-lock.mjs", "reindex.mjs", "supervisor.mjs",` | `"dir-lock.mjs", "reindex.mjs", "supervisor.mjs",  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs` | removal + name swap | 6 |
 | 875-879 | `["pending-ledger.mjs", { writes: [...], … }]` and its comment line 875 | deleted, replaced by `// BLZ-254: pending-ledger.mjs deleted (spec §5.5).` | removal | 6 |
 | 880-887 | `["commit-lock.mjs", { writes: ["acquireLock", "releaseLock", "acquireDirLock", "releaseDirLock"], sanctioned: [], inert: ["lockPath"] }]` | `["dir-lock.mjs", { writes: ["acquireDirLock", "releaseDirLock"], sanctioned: [], inert: [] }]` with the comment block kept and `// BLZ-254: commit-lock.mjs → dir-lock.mjs; the commit-lock policy (acquireLock, releaseLock, lockPath) is deleted.` added | name swap + removal of deleted members | 6 |
-| 956 | `["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports` | deleted, replaced by `// BLZ-254: commit-runner.mjs (blaze commit) deleted.` | removal | 1 |
+| 956 | `["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports` | deleted, replaced by `// BLZ-254: commit-runner.mjs (blaze commit) deleted.` | removal | 5 |
 | 960-963 | `commit-or-queue.mjs` and `serve-commit.mjs` WRITE_MAP entries (+ the BLZ-670 comment on 960) | deleted, replaced by `// BLZ-254: commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).` | removal | 6 |
 | 1952 | `["pending-ledger.mjs", "*"], ["commit-lock.mjs", "*"],` | `["dir-lock.mjs", "*"],  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs` | removal + name swap | 6 |
-| 2030-2032 | `["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage", "resolvePorts", "stageFor"]]` | `["reconcile.mjs", ["appendRegularFileSync", "fsStorage", "resolvePorts"]],  // BLZ-254: commitOrQueue/stageFor deleted` (the BLZ-670 comment's second sentence, "`commitOrQueue` stays as reconcile()'s default stage", is deleted with them) | removal of deleted members | 4 |
-| 2040-2046 | the `commit-runner`/`commit-or-queue`/`serve-commit` sentences of the comment, and the three WRITE_SITES entries 2044-2046 | the three entries deleted. The comment's second paragraph ("`blaze commit` owns the commit lock … the same lock.") is replaced by `// BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).` | removal | 1 (2044 and its sentence), 6 (2045-2046) |
+| 2030-2032 | `["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage", "resolvePorts", "stageFor"]]` | `["reconcile.mjs", ["appendRegularFileSync", "fsStorage", "resolvePorts"]],  // BLZ-254: commitOrQueue/stageFor deleted` (the BLZ-670 comment's second sentence, "`commitOrQueue` stays as reconcile()'s default stage", is deleted with them) | removal of deleted members | 1 |
+| 2040-2046 | the `commit-runner`/`commit-or-queue`/`serve-commit` sentences of the comment, and the three WRITE_SITES entries 2044-2046 | the three entries deleted. The comment's second paragraph ("`blaze commit` owns the commit lock … the same lock.") is replaced by `// BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).` | removal | 5 (2044 and its sentence), 6 (2045-2046) |
 | 2051-2053 | `serve.mjs` WRITE_SITES `… "addUser", "stageFor", "loadIdentity", …` | `"stageFor"` removed; the BLZ-670 comment gains `// BLZ-254: stageFor deleted — the server stages nothing.` | removal of a deleted member | 2 |
 | 2062 | `["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]]` | `["sprint-runner.mjs", ["saveSprints"]],  // BLZ-254: commitOrQueue deleted` | removal | 3 |
 | 2083-2088 | six runners, each `["stageFor", "resolvePorts"]` (new-runner `["applyNew", "stageFor", "resolvePorts"]`) | `"stageFor"` removed from each; `// BLZ-254: stageFor deleted — the verbs stage nothing.` above the six | removal | 3 |
-| 2107-2108 | `["model/import-apply.mjs", ["fsAllocators", "commitOrQueue", …]]` | `"commitOrQueue"` removed; `// BLZ-254` trailing | removal | 5 |
-| 2121-2122 | `["model/import-mapping.mjs", [… "commitOrQueue", "applyImport", "pruneReceipts"]]` | `"commitOrQueue"` removed; `// BLZ-254` trailing | removal | 5 |
+| 2107-2108 | `["model/import-apply.mjs", ["fsAllocators", "commitOrQueue", …]]` | `"commitOrQueue"` removed; `// BLZ-254` trailing | removal | 4 |
+| 2121-2122 | `["model/import-mapping.mjs", [… "commitOrQueue", "applyImport", "pruneReceipts"]]` | `"commitOrQueue"` removed; `// BLZ-254` trailing | removal | 4 |
 | 2129-2134 | import-lock's comment "through `commit-lock.mjs`'s primitive" | `commit-lock.mjs` → `dir-lock.mjs` in the comment, `// BLZ-254: renamed` | name swap (comment) | 6 |
-| 2142-2143 | `["import-runner.mjs", ["resolvePorts", "stageFor", "runImport", …]]` | `"stageFor"` removed; `// BLZ-254` above | removal | 5 |
-| 2147-2149 | `["supervisor.mjs", [… "resolvePorts", "stageFor"]]` | `"stageFor"` removed; `// BLZ-254` above | removal | 4 |
+| 2142-2143 | `["import-runner.mjs", ["resolvePorts", "stageFor", "runImport", …]]` | `"stageFor"` removed; `// BLZ-254` above | removal | 4 |
+| 2147-2149 | `["supervisor.mjs", [… "resolvePorts", "stageFor"]]` | `"stageFor"` removed; `// BLZ-254` above | removal | 1 |
+| 2093, 2116-2117 | prose: "`commitOrQueue` is the staging front door" (twice, import-apply's and import-mapping's justifications) | sentence kept, `(removed by BLZ-254)` appended | comment-only | 4 |
+| 2140-2141 | `// BLZ-670: the apply path resolves both ports (resolvePorts) and hands \`stageFor(mode)\` in as` / `// the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.` | `// BLZ-670: the apply path resolves both ports (resolvePorts); repair resolves a reader only (resolveReadStorage, inert).` + `// BLZ-254: stageFor removed — nothing is staged.` | comment-only | 4 |
 | 2530 | `["pending-ledger.mjs", "{ appendEntry }", "appendEntry"],` | deleted; `// BLZ-254: pending-ledger.mjs deleted` | removal | 6 |
 | 2531 | `["commit-lock.mjs", "{ acquireLock }", "acquireLock"],` | `["dir-lock.mjs", "{ acquireDirLock }", "acquireDirLock"],  // BLZ-254: commit-lock.mjs → dir-lock.mjs` | name swap (the module and its surviving member) | 6 |
 | 2567 | `["pending-ledger.mjs", "{ readForDrain, listQueues }"],` | deleted; `// BLZ-254: pending-ledger.mjs deleted` | removal | 6 |
 
-Line 273's prose (`appendEntry`, `acquireLock` named as round-5 examples) is a historical record of a past review and is **not** edited. Line numbers shift as earlier tasks land. Each task finds its entries by the quoted text, not the number.
+**Comment lines that stay, by name (I5 ruling).** Three prose comments name a deleted member as part of a review's *history*, and they are **not** edited: line 273 (round 5's examples, `appendEntry`, `acquireLock`), line 2034 (round 5, D3: "`saveState`, `appendEntry`, `acquireLock` and their kin") and line 2067 (round 7, Finding 2's list: "`fsStorage`, `resolveWritePort`, `commitOrQueue`, …"). Rewriting history prose would make the guard's own record lie about what the reviewers found. Every other line that names a deleted module or member is either a ledger row above or fails Task 6 Step 6, whose allowance lists exactly these three lines. Line numbers shift as earlier tasks land. Each task finds its entries by the quoted text, not the number.
 
 Why none of this weakens the guard:
 - The surviving allowlist entries are unchanged.
@@ -648,7 +666,7 @@ git rm tests/reconcile-commit-routing.test.mjs tests/commit-step-attribution.tes
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/reconcile*.test.mjs tests/board-overstatement-*.test.mjs tests/model/seam-closure.test.mjs tests/supervisor*.test.mjs
-node scripts/ci/temp-cleanup-guard.mjs --write && git diff --stat scripts/ci/temp-cleanup-debt.json
+# THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 ```
 
@@ -662,7 +680,7 @@ git add scripts/reconcile.mjs scripts/supervisor.mjs scripts/reconcile-apply-rep
   tests/reconcile-pertype.test.mjs tests/reconcile-change-report-oracle.test.mjs \
   tests/board-overstatement-oracle.test.mjs tests/board-overstatement-guards.test.mjs \
   tests/reconcile-feed-truth-oracle.test.mjs tests/reconcile-unfinished-pass.test.mjs \
-  tests/model/seam-closure.test.mjs scripts/ci/temp-cleanup-debt.json docs/guide/commands.md
+  tests/model/seam-closure.test.mjs scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/guide/commands.md
 git status --short   # the git mv and git rm are already staged; nothing else may be listed
 git commit -m "BLZ-687: reconcile and the supervisor feed stop committing (spec §5.5)"
 ```
@@ -918,11 +936,11 @@ git rm tests/serve-batch.test.mjs tests/serve-batch-per-op.test.mjs
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/serve*.test.mjs tests/views/*.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs tests/remote-mode.test.mjs tests/setup-flow.test.mjs tests/signin-flow.test.mjs
-node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+# THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 git add scripts/serve.mjs scripts/views/page.mjs tests/views/page-golden.html tests/serve-endpoints.test.mjs \
   tests/serve-db-mode.test.mjs tests/serve-api-new.test.mjs tests/board-overstatement-guards.test.mjs \
-  tests/model/seam-closure.test.mjs scripts/ci/temp-cleanup-debt.json docs/guide/commands.md docs/architecture.md
+  tests/model/seam-closure.test.mjs scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/guide/commands.md docs/architecture.md
 git commit -m "BLZ-687: the board server stops committing; its 200 body is { ok, db } (spec §5.5)"
 ```
 
@@ -1155,13 +1173,13 @@ and
 ```bash
 git rm tests/runner-batch.test.mjs tests/edit-runner-batch.test.mjs
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/verbs-make-no-commit.test.mjs tests/runner-*.test.mjs tests/new-runner.test.mjs tests/link-runner.test.mjs tests/sprint-runner-stamp-warning.test.mjs tests/readonly.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs
-node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+# THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 git add scripts/new-runner.mjs scripts/move-runner.mjs scripts/edit-runner.mjs scripts/link-runner.mjs \
   scripts/log-runner.mjs scripts/resolve-runner.mjs scripts/sprint-runner.mjs tests/verbs-make-no-commit.test.mjs \
   tests/runner-dataroot.test.mjs tests/board-overstatement-guards.test.mjs tests/sprint-runner-stamp-warning.test.mjs \
   tests/new-runner.test.mjs tests/link-runner.test.mjs tests/model/seam-closure.test.mjs \
-  scripts/ci/temp-cleanup-debt.json docs/guide/commands.md docs/guide/getting-started.md
+  scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/guide/commands.md docs/guide/getting-started.md
 git commit -m "BLZ-687: the CLI ticket verbs and blaze sprint stop committing (spec §5.5)"
 ```
 
@@ -1399,13 +1417,13 @@ The prose comments above these entries that justify `commitOrQueue` ("`commitOrQ
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/import*.test.mjs tests/model/import-*.test.mjs tests/db-mode-reads.test.mjs tests/reserve-window.test.mjs tests/markdown-round-trip.test.mjs tests/csv-round-trip.test.mjs tests/model/seam-closure.test.mjs
-node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+# THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 git add scripts/model/import-apply.mjs scripts/model/import-mapping.mjs scripts/import-runner.mjs \
   tests/model/import-apply.test.mjs tests/model/import-mapping-repair.test.mjs tests/import-runner.test.mjs \
   tests/db-mode-reads.test.mjs tests/import-db-mode.test.mjs tests/reserve-window.test.mjs \
   tests/markdown-round-trip.test.mjs tests/helpers/csv-round-trip.mjs tests/model/seam-closure.test.mjs \
-  scripts/ci/temp-cleanup-debt.json docs/design/csv-import-and-export.md docs/guide/commands.md
+  scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/design/csv-import-and-export.md docs/guide/commands.md
 git commit -m "BLZ-687: blaze import stops staging; its records are written, not committed (spec §5.5)"
 ```
 
@@ -1600,12 +1618,12 @@ git rm scripts/commit-runner.mjs scripts/publish-runner.mjs \
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/cli*.test.mjs tests/readonly.test.mjs tests/schema-fail-loud-on-load.test.mjs tests/temp-cleanup-guard.test.mjs tests/model/seam-closure.test.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs
-node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json   # only removed lines
+# THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 rg -n "commit-runner|publish-runner" scripts tests README.md AGENTS.md docs/guide   # only BLZ-254 comments
 git add scripts/cli.mjs package.json tests/cli-removed-commands.test.mjs tests/cli.test.mjs tests/readonly.test.mjs \
   tests/schema-fail-loud-on-load.test.mjs tests/temp-cleanup-guard.test.mjs tests/model/seam-closure.test.mjs \
-  scripts/ci/temp-cleanup-debt.json docs/guide/commands.md README.md docs/schema-customization.md docs/schema-versioning.md
+  scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/guide/commands.md README.md docs/schema-customization.md docs/schema-versioning.md
 git commit -m "BLZ-687: remove blaze commit and blaze publish, refused by name (spec §5.5)"
 ```
 
@@ -1759,12 +1777,12 @@ Both may print only `// BLZ-254` comment lines and prose comments that describe 
 
 ```bash
 node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/dir-lock.test.mjs tests/model/import-lock.test.mjs tests/import-lock-contention.test.mjs tests/read-path-residue-fifo.test.mjs tests/readonly.test.mjs tests/cli.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs tests/groomer-containment.test.mjs
-node scripts/ci/temp-cleanup-guard.mjs --write && git diff scripts/ci/temp-cleanup-debt.json
+# THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 git add scripts/dir-lock.mjs scripts/model/import-lock.mjs scripts/readonly.mjs tests/dir-lock.test.mjs \
   tests/read-path-residue-fifo.test.mjs tests/model/import-lock.test.mjs tests/board-overstatement-guards.test.mjs \
   tests/cli.test.mjs tests/readonly.test.mjs tests/reconcile-delivery-truth.test.mjs tests/model/seam-closure.test.mjs \
-  scripts/ci/temp-cleanup-debt.json
+  scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
 git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → dir-lock.mjs (spec §5.5)"
 ```
 
