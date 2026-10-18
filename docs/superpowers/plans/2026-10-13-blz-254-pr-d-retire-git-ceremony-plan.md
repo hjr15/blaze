@@ -2017,3 +2017,296 @@ git commit -m "BLZ-687: delete missingClaimErrors and its reindex call (spec §5
 ```
 
 ---
+### Task 9: ADR addenda, superseded ADRs, the spec amendment, 0.9.0, and the docs sweep
+
+**Files:**
+- Modify: `docs/decisions/0006-database-is-the-sole-source-of-truth.md` (addendum), `docs/decisions/0008-v3-ships-as-hjr15-blaze.md` (addendum), `docs/decisions/0032-…md`, `0033-…md`, `0035-…md` (status line), `docs/decisions/0038-…md` (one sentence)
+- Modify: `docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md` (dated amendment)
+- Modify: `package.json`, `package-lock.json`, `tests/package.test.mjs`, `docs/guide/why-blaze.md:111-113,165`
+- Modify: `README.md`, `AGENTS.md`, `docs/architecture.md`, `docs/diagrams/architecture.md`, `docs/guide/how-it-works.md`, `docs/guide/driving-with-an-ai-agent.md`, `docs/guide/getting-started.md` (if Task 3 left anything), `docs/guide/commands.md` (Remote mode, env table)
+
+**Version decision (recorded in ADR-0008's addendum):** **0.9.0, not published.**
+- Removing two commands is a breaking CLI change. In 0.x the repo signals a break with the minor (the 0.7.0 release commit, `09f12a3`, for the Node 24 floor; ADR-0008's own 0.8.0 addendum).
+- ADR-0008 freezes the `@hjr15/blaze-board` line at 0.8.0, its last release, and promises that 0.8.0 "keeps working exactly as [why-blaze.md] describes" (with `blaze commit`). So 0.9.0 is the version stamp of the engine tree and image. It is **never published under `@hjr15/blaze-board`**. The next publish is the `@hjr15/blaze` rename, out of scope here.
+- Bumping is what keeps a later publish honest. If the tree stayed at 0.8.0, `npm publish` from `main` after this PR would ship the breaking tree as the very version ADR-0008 froze.
+- There is no CHANGELOG in this repo. Releases are described in their commit/PR body (precedent: `release: 0.7.0 (#55)`), so the PR body carries the "Breaking" section (Task 11).
+
+- [ ] **Step 1: The version, test first.** In `tests/package.test.mjs`, replace the BLZ-674 test with:
+
+```js
+// BLZ-674 cut 0.8.0 as the LAST @hjr15/blaze-board release (ADR-0008's addendum). BLZ-687
+// (BLZ-254 PR D) removes `blaze commit` and `blaze publish` — breaking, so the minor moves — and
+// the tree becomes 0.9.0, which is NOT published under this name: the line stays frozen at 0.8.0.
+test("BLZ-687: this tree is 0.9.0 — the git ceremony is gone, and 0.8.0 stays the frozen release", async () => {
+  assert.equal(pkg.version, "0.9.0");
+  const lock = JSON.parse(readFileSync(join(REPO, "package-lock.json"), "utf8"));
+  assert.equal(lock.version, "0.9.0", "package-lock.json's top-level version must move with it");
+  assert.equal(lock.packages[""].version, "0.9.0", "…and its root package entry");
+  assert.equal(pkg.scripts.commit, undefined, "the `npm run commit` script ran the deleted commit-runner");
+  const { idsFromCommitMessage } = await import("../scripts/reconcile.mjs");
+  assert.deepEqual(idsFromCommitMessage("BLZ-675: x (#9)\n\n* BLZ-674: y\n* BLZ-678: z", "BLZ"),
+    ["BLZ-675", "BLZ-674", "BLZ-678"], "a bundled squash still recovers every child");
+});
+```
+
+Run it (FAIL: version 0.8.0). Then set `"version": "0.9.0"` in `package.json` and in both places in `package-lock.json` (`npm version 0.9.0 --no-git-tag-version --ignore-scripts` does both; check `git diff package-lock.json` touches only those two lines). Run it again (PASS).
+
+- [ ] **Step 2: ADR-0006 addendum.** Append to `docs/decisions/0006-database-is-the-sole-source-of-truth.md`:
+
+```markdown
+## Addendum (2026-10-13, BLZ-254) — concurrent writers need db mode; fs is single-machine
+
+This ADR is still *Proposed*. BLZ-254 does not accept it whole, and it does not retire files. The
+operator's decision D1 (2026-10-05, BLZ-254 spec §2) splits the product in two:
+
+- **db mode (`BLAZE_WRITE_PORT=db`) is the multi-machine mode.** The live board runs it. Ids come
+  from `project_counter`'s transactional allocate; a second machine writes over HTTP (`blaze`
+  remote mode, `POST /api/*` with a bearer token). This is the only supported way for two
+  writers — two sessions, two machines, an agent and a person — to share one board.
+- **fs mode is a supported single-machine mode.** It keeps its allocator (`ids.mjs`,
+  `claims.mjs`, ADR-0005) and nothing else of the git era: since 0.9.0 the board **never
+  commits**. `blaze commit`, `blaze publish`, `commitMode`, the pending ledgers, the commit lock
+  and the server's per-click commit are deleted (BLZ-254 §5.5). The person who owns an fs board
+  versions its files with git themselves, when and how they choose. (The fs groomer loop and
+  the one-shot `blaze migrate` still commit their own changes; they were outside §5.5's table.)
+
+Running an fs board with more than one concurrent writer is unsupported. The failures that
+motivated this ADR — a ticket in two status directories, one id minted twice in two trees — are
+exactly what such a board can still produce, and nothing in the engine now tries to paper over
+them with a queue or a lock.
+```
+
+- [ ] **Step 3: ADR-0008 addendum, and why-blaze.** Append to `docs/decisions/0008-v3-ships-as-hjr15-blaze.md`:
+
+```markdown
+## Addendum (2026-10-13, BLZ-687) — the tree moves to 0.9.0, unpublished
+
+BLZ-254's PR D removes `blaze commit` and `blaze publish` and the configuration key `commitMode` —
+a breaking change, which in 0.x moves the minor. The tree is therefore **0.9.0**. It is **not
+published as `@hjr15/blaze-board`**: the freeze at 0.8.0 above stands, and 0.8.0 (cut before
+PR D merged) is the last release with the git-commit workflow. 0.9.0 names the engine tree and
+the image built from it; the next npm publish is the `@hjr15/blaze` rename this ADR decides.
+The bump exists so that a publish from `main` can never ship the breaking tree under the frozen
+version's number.
+```
+
+In `docs/guide/why-blaze.md`, after "**`@hjr15/blaze-board` is frozen at 0.8.0**, its last release (…)", add: "The engine tree has since moved to 0.9.0, which removed `blaze commit` and `blaze publish`. 0.9.0 is not published under this name."
+
+- [ ] **Step 4: ADRs 0032, 0033, 0035 are superseded; ADR-0038 gets one sentence.** In each of `0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`, `0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md` and `0035-nothing-to-commit-is-a-settled-drain-not-a-failed-one.md`, change the status line from `- **Status:** Accepted` to `- **Status:** Superseded (2026-10-13, BLZ-254): the pending ledger, \`blaze commit\` and the commit path this decides are deleted — see ADR-0006's BLZ-254 addendum`. Leave the body unchanged; it is the record. (Check each file's status-line spelling first with `sed -n 1,6p`.) In ADR-0038, after the sentence at `:94` ("That stays BLZ-254's explicit decision."), add: "BLZ-254 decided it: `commit-or-queue.mjs` and `stageFor` are deleted, and no write mode stages anything (2026-10-13)."
+
+- [ ] **Step 5: The spec amendment.** Append to `docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md` (and leave the original sections unedited, so the decision history reads in order):
+
+```markdown
+## 11. Amendments
+
+### 2026-10-13 (BLZ-687, PR D plan)
+
+1. **§5.1, backups.** "a scheduled `Backup` (daily, retained 14 days)" was replaced by an operator
+   decision on 2026-10-11: a daily `pg_dump --format=custom` CronJob (`blaze-pg-backup`) into the
+   host directory `~/cluster-data/blaze-pg-backups`, verified with `pg_restore --list`, 14 days
+   kept, never pruned behind a dump under half the size of the largest kept, failing into the
+   existing `CronJobLastRunFailed`/`CronJobStale` alerts. PGDATA is on a host PV adopted across
+   cluster resets. Recorded in hjr15/service-platform ADR-0024
+   (`docs/decisions/0024-cnpg-operator-and-blaze-pg-host-pv-backups.md`, merged in #112). The CNPG
+   scheduled `Backup` needs an object store or CSI snapshots, and k3d has neither.
+2. **§5.8 and §7's rollback follow from 1.** "CNPG backup and point-in-time restore" (§5.8, the
+   groom-undo row) and "restore from CNPG if needed" (§7, Rollback) now mean **restore the most
+   recent verified daily `pg_dump`** — there is no point-in-time recovery, so the recovery point
+   is up to one day old. `ticket_event` history is unchanged as the first resort.
+3. **§5.5, the deletion table, is completed by PR D's plan**
+   (`docs/superpowers/plans/2026-10-13-blz-254-pr-d-retire-git-ceremony-plan.md`, Findings 1–7):
+   - `commit-lock.mjs`'s policy is deleted but its mechanism is renamed `dir-lock.mjs`, because
+     `import-lock.mjs` (out of scope, kept) is built on it;
+   - `branch-guard.mjs`, `commit-summary.mjs`, `views/write-outcome.mjs` and the queue-store
+     migration procedure are deleted with their only callers, and `reconcile-commit-report.mjs`
+     shrinks to `reconcile-apply-report.mjs`;
+   - "the board never commits" covers reconcile's own commit, the supervisor's commit-outcome
+     feed, import's staging and `blaze sprint`;
+   - `commitMode` becomes a removed config key (`SCHEMA_VERSION` 3), and `BLAZE_COMMIT_MODE` is
+     refused — so the deployed ConfigMap and blaze-pm's `blaze.config.json` drop the key before
+     PR D merges;
+   - the fs groomer's and `blaze migrate`'s own commits are not in the table and stay;
+   - the tree is 0.9.0, unpublished (ADR-0008's addendum).
+4. **§5.6, `build_matrices.py`.** Its retirement is a blaze-pm data-repo step, done by the board
+   operator after cutover (delete the script and its test, regenerate the matrices with
+   `blaze matrices`). The engine's "Regenerate with" header follows it (PR D, Task 10, conditional).
+```
+
+- [ ] **Step 6: The docs sweep.** Every sentence that describes the board committing, queueing, flushing or locking is rewritten to say it writes and does not commit. Each file's hits:
+
+```bash
+grep -nE 'blaze commit|blaze publish|pending-ledger|\.blaze/pending|commitMode|commit-lock|commit\.lock|blaze-flush|BLAZE_COMMIT_MODE|queued for|commit lock|per-op|commit-on-(edit|mutation)|commits (scoped|immediately)|and commits' \
+  README.md AGENTS.md docs/architecture.md docs/diagrams/architecture.md docs/guide/*.md docs/schema-*.md
+```
+
+What each must say after the edit:
+- `AGENTS.md`:
+  - The intro sentence ("…validates every write against the schema below and commits scoped to the files it touched") ends at "…validates every write against the schema below; it does not commit (version the files yourself, or run the board in db mode)".
+  - Replace the whole `## Commit modes` section, from its heading through the end of the "Working-tree cross-talk …" paragraph, **keeping** `### Read-only mode` (now its own `##` section), with:
+
+    ```markdown
+    ## The board does not commit
+
+    Since 0.9.0 (BLZ-254) no `blaze` verb, no `/api/*` write and no `reconcile --apply` commits,
+    stages or queues anything. On a file board the verbs change `projects/` and stop; commit the
+    changes yourself, scoped as you like. `blaze commit`, `blaze publish` and the `commitMode`
+    key are gone. The verbs are refused by name, the key is refused at load, and the last release
+    that has them is `@hjr15/blaze-board@0.8.0`. The fs groomer loop (`blaze start`) still commits
+    its own grooms, and `blaze migrate` its one-shot import.
+
+    **One machine, one writer.** A file board is single-machine (ADR-0006's BLZ-254 addendum).
+    For parallel sessions or a second machine, run the board in db mode
+    (`BLAZE_WRITE_PORT=db`) and write to it over HTTP — see "Remote mode" below. Two sessions
+    sharing one file board can still trample each other's working tree; use a worktree per
+    session, and expect to reconcile the files by hand.
+    ```
+  - In `### Read-only mode`'s verb list, drop `commit`.
+  - In "Detail panel", "toggle via the existing commit-on-edit `/api/ac` path" becomes "toggle via `/api/ac`".
+  - In "Inline field editing", "An edit commits through the same commit-on-mutation path as move/log/resolve" becomes "An edit writes through the same path as move/log/resolve".
+  - In "Data-root ladder", "(`blaze.config.json` + `projects/` + the git history tickets commit into)" becomes "(`blaze.config.json` + `projects/`)".
+  - In "Remote mode", "so there is no worktree, commit or queue to manage" becomes "so there is no worktree to manage".
+- `README.md`:
+  - `:16` "every mutation is a small, revertable commit" becomes "every mutation is a plain file change you can review and commit with git (or, for many writers, a row in Postgres)".
+  - `:113-114`: `blaze new` "writes the ticket, validates it against the schema" and stops; delete "and commits it — one small commit per ticket, scoped to the files it actually touched".
+  - `:147`: the sentence ending "in place and commit." ends "in place.".
+- `docs/architecture.md:34,58,77-127`:
+  - The runner box loses `commit`.
+  - The `.blaze/` box loses `pending/…`, `pending/<session>.corrupt` and `commit.lock/`.
+  - The runner paragraph becomes "maps each CLI verb to a `*-runner.mjs` that wraps a pure `apply*`/model core and resolves the write port. Nothing commits (BLZ-254)". Delete the batch/session/lock/branch-guard/commit-summary paragraphs and the `commit-or-queue.mjs, pending-ledger.mjs, and …` sentence at `:127`.
+- `docs/diagrams/architecture.md:15,71-73`: drop the pending-ops and commit-lock clauses, and "— in `per-op` mode — commits just that file; in `batch` mode it queues…" becomes "and writes it; nothing is committed (BLZ-254)".
+- `docs/guide/how-it-works.md`:
+  - `:76`: replace the batch clause with "(the board itself never commits since BLZ-254)".
+  - `:359` ("`blaze`'s own batch commits write their ledger as `- <KEY>-<n>: <board op>`, so…") becomes "`blaze commit` (removed by BLZ-254) wrote its ledger as `- <KEY>-<n>: <board op>`, and those commits remain in board histories, so…". Reconcile's rule still guards them.
+  - `:402-404`: replace with "No verb commits (BLZ-254); version the board's files yourself."
+- `docs/guide/driving-with-an-ai-agent.md:85-115`: replace the batch-mode bullet and the example block that runs `blaze commit` with the AGENTS.md "One machine, one writer" paragraph above, plus `BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …` as the multi-agent path.
+- `docs/guide/commands.md`: the env-variable table loses `BLAZE_COMMIT_MODE` and `BLAZE_SESSION` (only the pending ledger read it; check `grep -rn BLAZE_SESSION scripts` first, and keep the row if anything still reads it).
+
+Afterwards, the grep above prints only lines that are about history (each saying "removed by BLZ-254" or "0.8.0") or about the groomer's/migrate's own commits.
+
+- [ ] **Step 7: Run, commit.**
+
+```bash
+node --test --import=./tests/setup/hang-watchdog.mjs tests/package.test.mjs tests/shipped-doc-links.test.mjs tests/commands-doc-quiet-pins.test.mjs tests/config.test.mjs
+npm test 2>&1 | tail -9
+git add package.json package-lock.json tests/package.test.mjs docs/decisions/0006-*.md docs/decisions/0008-*.md \
+  docs/decisions/0032-*.md docs/decisions/0033-*.md docs/decisions/0035-*.md docs/decisions/0038-*.md \
+  docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md docs/guide/why-blaze.md README.md AGENTS.md \
+  docs/architecture.md docs/diagrams/architecture.md docs/guide/how-it-works.md docs/guide/driving-with-an-ai-agent.md \
+  docs/guide/getting-started.md docs/guide/commands.md
+git commit -m "BLZ-687: ADR-0006/0008 addenda, superseded queue ADRs, spec amendment, 0.9.0, docs sweep"
+```
+
+If `docs/diagrams/*.md` changes, check whether the repo regenerates embedded diagrams (`scripts/embed_diagrams.py`, `tests/test_embed_diagrams.py`). If a test pins the embedded copy, run `python3 scripts/embed_diagrams.py` as that test's message says, and stage the result.
+
+---
+
+### Task 10 (CONDITIONAL): the matrices header names `blaze matrices`
+
+**Run this task only if the board operator has retired blaze-pm's script.** That is a blaze-pm data-repo step, done after cutover, never pushed:
+
+```bash
+test ! -e /home/rnamwoh/Documents/Code/blaze-pm-worktrees/v4-spine/scripts/build_matrices.py && echo RETIRED || echo STILL-THERE
+```
+
+(Use whichever checkout is authoritative at the time: spec §4 names `BLZ-305-v4-spine`.) On `STILL-THERE`, **skip this task**. Record "Task 10 skipped: build_matrices.py still in blaze-pm" in the PR body, and leave BLZ-687's sibling note: the header change is a one-line follow-up once the operator retires the script. On 2026-10-13 it was STILL-THERE.
+
+**Files:** `scripts/model/matrices.mjs:80-83,113-114`, `tests/fixtures/matrices-board/docs/matrices/*.md` (regenerated), `tests/matrices.test.mjs` (header comment), `docs/guide/commands.md` `## matrices`.
+
+- [ ] **Step 1: Failing test.** Add to `tests/matrices.test.mjs`:
+
+```js
+test("BLZ-687: the derived-view header names the engine's own verb, not blaze-pm's retired script", async () => {
+  const { requirementsMatrix, architectureMatrix } = await import("../scripts/model/matrices.mjs");
+  for (const text of [requirementsMatrix([], "ENG", () => ""), architectureMatrix([], "ENG", () => "")]) {
+    assert.match(text, /Regenerate with `blaze matrices`/);
+    assert.doesNotMatch(text, /build_matrices\.py/);
+  }
+});
+```
+
+Run it: FAIL.
+
+- [ ] **Step 2: Implement.** In both headers, replace `` "`python3 scripts/build_matrices.py`" `` with `` "`blaze matrices`" ``, keeping the rest of each sentence byte-identical. Regenerate the fixture's committed output with the engine itself: `node scripts/cli.mjs matrices --out tests/fixtures/matrices-board/docs/matrices`, run from `tests/fixtures/matrices-board` with `BLAZE_PROJECTS_DIR` set to its `projects/`, using the exact invocation `tests/matrices.test.mjs` uses for its zero-diff check. The diff must change **only the header line** of each file (`git diff --stat` shows one line each). Update the file's header comment: the oracle now compares against the engine's own committed output, since the script is retired.
+
+- [ ] **Step 3: Run `tests/matrices.test.mjs`, commit** `BLZ-687: matrices header names blaze matrices (build_matrices.py retired in blaze-pm)`. Tell the board operator that blaze-pm's 22 committed matrix files now differ by that one header line, and that `blaze matrices` regenerates them.
+
+---
+
+### Task 11: whole-branch verification and the merge-gate record
+
+- [ ] **Step 1 (haiku, read-only): the numbers.**
+
+```bash
+npm test 2>&1 | tail -9                       # fail 0; record tests/pass/skipped
+npm run test:coverage 2>&1 | tail -15         # c8 thresholds 91/77/93/91 hold
+node scripts/ci/hygiene-check.mjs              # clean (no trailers, no /home paths in non-Markdown)
+git log --format='%B' origin/main..HEAD | grep -ciE 'co-authored-by|signed-off-by'   # 0
+rg -n "commit-or-queue|serve-commit|pending-ledger|commit-summary|branch-guard|commit-lock|commit-runner|publish-runner|reconcile-commit-report|write-outcome|missingClaimErrors" scripts   # comments only
+git diff --stat origin/main...HEAD | tail -1
+```
+
+Expected test count: the baseline 5,432, minus the deleted files' tests, plus the new ones. Record the exact before/after in the PR body. The count drops by roughly the size of the 28 deleted test files. That is the deletion, and every file is named in Tasks 1–6 with its reason.
+
+- [ ] **Step 2 (opus): the whole-branch review.** Use `adversarial-plan-review-before-execution`'s sibling for code, `superpowers:requesting-code-review`, against the spec's §5.5 table, this plan's Review Focus, and the seam-closure ledger. The reviewer must specifically try to refute:
+  - "no seam-closure assertion was weakened" (diff the file against `3a0ac78`, and count `assert` lines touched: zero);
+  - "fs-mode `blaze new` still allocates" (`tests/verbs-make-no-commit.test.mjs`);
+  - "no executable reference to a deleted module remains".
+
+  Adjudicate the findings with `adjudicate-reviewer-findings-against-ground-truth`.
+
+- [ ] **Step 3: The PR (draft), never merged by this plan.** Push the branch and open a **draft** PR titled `BLZ-687: retire the git ceremony (BLZ-254 PR D)`. The body:
+  - a **Breaking** section (`blaze commit`/`blaze publish` removed; `commitMode`/`BLAZE_COMMIT_MODE` refused; `SCHEMA_VERSION` 3; the server's 200 body drops `committed`/`queued`; reconcile's result drops `committed`/`commitOutcome`/`commitError`; import's result drops `staged`/`commit`; version 0.9.0, unpublished);
+  - the baseline and final test counts;
+  - the deleted-test list with reasons;
+  - the seam-closure ledger;
+  - the MERGE GATE checklist from the top of this plan, verbatim, unticked.
+
+  The PR stays draft until the operator reports cutover step 6 and says "merge PR D". At that point re-run the gate's six checks and record each result in a PR comment before `gh pr merge`.
+
+---
+
+## Self-review (run 2026-10-18 against the spec)
+
+**Spec coverage (§5.5, row by row):**
+- `commit-lock.mjs` → Task 6 (policy deleted, mechanism renamed; Finding 1).
+- Pending ledgers → Tasks 5–6 (the module, `.blaze/pending/` and `pending-commit.jsonl` handling all live in `pending-ledger.mjs`/`commit-runner.mjs`; merge gate 2 is the "after the final flush" condition).
+- `commit-runner.mjs`, `serve-commit.mjs` → Tasks 5, 6.
+- `publish-runner.mjs` → Task 5.
+- `commit-or-queue.mjs`/`stageFor`, "serve.mjs responses drop `committed`/`queued` and keep `db`" → Tasks 1–4 (callers), Task 2 (the response, TDD), Task 6 (the module).
+- `blaze-flush` and service-platform ADR 0017 → out of scope (C2), named in merge gate 3.
+- `missingClaimErrors` → Task 8.
+- `claims.mjs`/`ids.mjs` kept → pinned by Task 3's allocator test.
+- `seed-counter`'s `.ids/` source kept → untouched (no task edits `seed-counter.mjs`).
+- `import-lock`/`ref-claim`/`ref-allocator` → not deleted (import-lock only re-points its import, Task 6).
+- "seam-closure only name swaps or removals, each `// BLZ-254:`, every line listed" → the ledger plus Tasks 1–6, and Task 6 Step 5's zero-`assert`-lines check.
+- ADR-0006 addendum and README → Task 9.
+- §6 "Deletion" (suite green, seam-closure passes, `rg` clean, fs `blaze new` still allocates) → Task 6 Step 6, Task 3, Task 11.
+- §7 "PR D merges after step 6" → the MERGE GATE.
+- The spec §5.1 amendment → Task 9 Step 5.
+- The matrices header → Task 10 (conditional).
+
+**Placeholder scan:** no TBD/TODO.
+
+Three steps tell the implementer to locate a line by grep before editing:
+- Task 1 Step 9's `commands.md` sentences;
+- Task 7 Step 3's residual configs;
+- Task 9 Step 6's doc sweep.
+
+In each, the target wording is given and the grep is the completeness check, not a substitute for the content. Task 4 Step 1's import-runner test gives its fallback if `board(t)` already git-inits.
+
+**Type consistency:**
+- `appliedLine({ mode, movedCount, nonMovedCount })` is defined in Task 1 and used in Tasks 1 and 6.
+- `acquireDirLock`/`releaseDirLock` keep their signatures.
+- `done(r, extra)` (Task 2) replaces `done(r, msg, op, extra)` at all six call sites.
+- `applyImport`'s new return is used consistently in Task 4's tests.
+
+**Ordering risks checked:**
+- Task 1 must precede Task 5, because the old oracle spawned `commit-runner.mjs`.
+- Every test file that imports a module deleted in Task 6 is listed in Task 6 Step 4, and found by the `rg -ln` there.
+- `tests/temp-cleanup-guard.test.mjs` reads `commit-settled-drain.test.mjs` by name, so it is handled in Task 5.
+
+## Open questions for the operator
+
+1. **0.8.0 publish timing (merge gate 5).** npm's latest is still 0.7.0. Should BLZ-674's 0.8.0 be published from `3a0ac78` (or later pre-D `main`) before PR D merges, or skipped?
+2. **`commitMode` as a hard refusal (Finding 5, Task 7).** This follows BLZ-298's precedent and bumps `SCHEMA_VERSION` to 3. It requires the ConfigMap and blaze-pm's config to drop the key before PR D's image deploys (merge gate 4). The alternative is to accept and ignore the key, which keeps the pod safe if the ConfigMap lags but breaks BLZ-298's rule. The plan takes the refusal.
+3. **The fs groomer's and `blaze migrate`'s own commits (Finding 6).** They are outside §5.5's table and are kept. Should "the board never commits" extend to them in a follow-up ticket?
