@@ -16,11 +16,13 @@
 
 ## MERGE GATE — read before anything else
 
+**Mechanics (operator ruling, review I7).** PR D is opened as a **draft** with the `do-not-merge` label, and it stays a draft until every line below holds and the operator has said "merge PR D". Only then is it marked ready, the label removed, and the gate re-checked in a PR comment. No step of this plan marks it ready.
+
 PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and only on the operator's explicit go-ahead.** Pushing the branch and opening the PR as a draft is fine. `gh pr merge` is not, whoever asks, until every line below holds and the operator has said "merge PR D":
 
 1. **Cutover §7 steps 1–5 are done.** The live board serves and writes from Postgres (`BLAZE_WRITE_PORT=db` on the Deployment, smoke test passed). Step 6's unfreeze is the moment PR D merges.
 2. **`.blaze/pending/` and `.blaze/pending-commit.jsonl` are empty on every machine** (§7 step 2's last `blaze publish` ran). After this PR, no engine can drain them.
-3. **The `blaze-flush` CronJob is gone, or its deletion merges in the same window** (the C2 PR, §8). service-platform pins the blaze image to every `main` merge automatically (`chore(deploy): pin blaze to <sha>`), so the next nightly flush after PR D's image lands would run `blaze commit --all` and get the removed-verb refusal (exit 1, `CronJobLastRunFailed`). Check: `kubectl get cronjob -n blaze` lists no `blaze-flush`.
+3. **The service-platform C2 PR that deletes the `blaze-flush` CronJob is merged AND synced before PR D merges** (operator ruling, review I7; no longer "the same window"). service-platform pins the blaze image to every `main` merge automatically (`chore(deploy): pin blaze to <sha>`). If the CronJob still existed, its next run would call `blaze commit --all` (`flush-configmap.yaml:212`, an `execFileSync`). That gets the removed-verb refusal (Task 5: stderr sentence, **exit 1**) and throws, so **the flush Job fails before publishing anything**: its later steps, including pushing main's existing ahead-commits, never run. The failure is loud (`CronJobLastRunFailed`), but it is still a failure, and the ordering rule prevents it. Check: `kubectl get cronjob -n blaze` lists no `blaze-flush`, **and** ArgoCD reports the blaze app `Synced`/`Healthy` at a service-platform revision that contains C2.
 4. **(Not a gate any more — operator ruling 2026-10-18.)** `commitMode` is ignored with a one-time warning (Task 7), so a ConfigMap or blaze-pm config that still carries it cannot crash-loop the pod. Dropping the key is a post-merge cleanup (see "Post-merge checklist").
 5. **0.8.0 published (BLZ-674).** The operator publishes `@hjr15/blaze-board@0.8.0` from `main` before PR D merges (operator ruling 2026-10-18). Check: `npm view @hjr15/blaze-board version` prints `0.8.0`. It was `0.7.0` on 2026-10-13. PR D's tree is 0.9.0 (Task 9), so no later publish can ship the breaking tree as 0.8.0.
 6. CI is green on the PR's head, and the whole-branch review (Task 11) is upheld.
@@ -75,7 +77,7 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
    blaze: `commit` was removed in 0.9.0 (BLZ-254) — the board no longer commits. In fs mode, version the board's files yourself with git; for more than one writer, use db mode (BLAZE_WRITE_PORT=db).
    ```
    It applies before `--help`, before the read-only gate and before remote mode, so `blaze commit --help`, `BLAZE_READONLY=1 blaze commit` and a remote-mode `blaze publish` all get the same sentence. A removed verb never appears in the usage listing.
-5. **`commitMode` is ignored with a one-time warning (operator ruling 2026-10-18), not refused** (Task 7). Nothing reads it after Task 3. A hard refusal (BLZ-298's rule for removed keys) would crash-loop the deployed board while its ConfigMap still sets `"commitMode": "batch"`. So `loadConfig` warns once per process and drops the key, and `BLAZE_COMMIT_MODE` is treated the same. `SCHEMA_VERSION` stays 2: no config that loaded before fails now.
+5. **`commitMode` is ignored with a one-time warning (operator ruling 2026-10-18), not refused** (Task 7). Nothing reads it after Task 3. A hard refusal (BLZ-298's rule for removed keys) would crash-loop the deployed board while its ConfigMap still sets `"commitMode": "batch"`. So `loadConfig` warns once per command (a process and its children) and drops the key, and `BLAZE_COMMIT_MODE` is treated the same. `SCHEMA_VERSION` stays 2: no config that loaded before fails now.
 6. **The fs groomer and `blaze migrate` still commit.** `scripts/loops/groomer.mjs:712-713` commits a groom in fs mode, behind BLZ-347's containment (a db groom, `groomOnceDb`, never does). `scripts/migrate-runner.mjs:77-85` commits a one-shot Jira import. Neither is in §5.5's table, Recon A §7 missed the groomer, and spec §10 puts fs behaviour beyond the table out of scope. Both stay, and the docs say so rather than claim "Blaze never commits". They are a follow-up ticket under BLZ-254 (see "Out of scope / follow-ups").
 7. **`missingClaimErrors` deletion is a behaviour change in fs mode, and that is the spec's decision (§3, §5.5).** `blaze reindex` no longer refuses an id above a project's `.cutover` that has no `.ids/` claim (BLZ-136's check). Duplicate ids still block (`idx.errors`). Under D1 a single-machine fs board has no second writer whose claim could be missing, and the live board is db (where the check was already skipped, `reindex.mjs:85`).
 8. **The board server's 503 "commit lock held" response is gone.** Nothing takes a lock on the write path any more (Task 2).
@@ -92,7 +94,7 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 1. **An agent, script or the flush Job runs `blaze commit` / `blaze publish` (any flags, `--help`, under `BLAZE_READONLY`, in remote mode)** → one stderr sentence naming the removal and the replacement, exit 1, nothing touched. Pinned in Task 1 (`tests/cli-removed-commands.test.mjs`, all five spellings).
 2. **A browser click on the dashboard after the upgrade** → the 200 body is exactly `{ ok: true, db: <bool>, …extra }` with no `committed`/`queued`, the file (fs) or row (db) changes, `HEAD` does not move, and the page shows no git sentence. Pinned in Task 2 (`POST /api/<verb> writes the file and creates no commit`, ×5 routes; `serve-db-mode`'s exact body).
 3. **An fs board in a git repo, driven by every CLI verb and `reconcile --apply`** → the files change, nothing is staged, `HEAD` is unmoved, no output line mentions a commit or a queue, and `blaze new` still allocates through the claim ledger (n, then n+1, `.ids/<n>` written). Pinned in Task 3 (`tests/verbs-make-no-commit.test.mjs`) and Task 4 (the change-report oracle's `HEAD unchanged` clause per apply mode).
-4. **A deployed board whose ConfigMap still says `commitMode: "batch"`, restarted on the new image** → it loads, serves `GET /` with 200, warns exactly once, and has no `commitMode` on its config. Pinned in Task 7 (`tests/config-commitmode-ignored.test.mjs`: file key ×3 values incl. `null`, `BLAZE_COMMIT_MODE`, and a real server start).
+4. **A deployed board whose ConfigMap still says `commitMode: "batch"`, restarted on the new image** → it loads, serves `GET /` with 200, warns exactly once, and has no `commitMode` on its config. Pinned in Task 7 (`tests/config-commitmode-ignored.test.mjs`): the file key ×3 values incl. `null`, `BLAZE_COMMIT_MODE`, a `blaze` verb through `cli.mjs` warning once across its two processes, and a real server start.
 5. **`blaze import --apply` on a git-backed board** → tickets (or rows), receipt and source-id map are written. Nothing is staged, `HEAD` is unmoved, exit 0, and the trailer names the receipt and claims no commit. Pinned in Task 5 (`import --apply stages nothing`).
 
 ---
@@ -764,7 +766,7 @@ git commit -m "BLZ-687: reconcile and the supervisor feed stop committing (spec 
 
 In `tests/serve-endpoints.test.mjs`:
 1. Delete the import `import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";` (`:27`) and the test `"POST /api/log responds 503 when the commit lock is held (not a generic 500)"` (`:178-191`). No lock exists on the write path.
-2. Add, after `const post = …` (`:99`):
+2. Add, after `const post = …` (`:68`):
 
    ```js
    const headOf = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
@@ -1037,18 +1039,19 @@ Expected: all green. `rg -n "write-outcome|writeOutcome|gitOutcome" scripts test
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
+const scratch = scratchRegistry();
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(REPO, "scripts", "cli.mjs");
 const git = (root, ...a) => execFileSync("git", ["-C", root, ...a], { encoding: "utf8" }).trim();
 
 function board(t) {
-  const root = mkdtempSync(join(tmpdir(), "blz687-verbs-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz687-verbs-")));
   git(root, "init", "-q");
   git(root, "config", "user.email", "t@t.t");
   git(root, "config", "user.name", "t");
@@ -1539,17 +1542,18 @@ git commit -m "BLZ-687: blaze import stops staging; its records are written, not
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, writeFileSync, chmodSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
+const scratch = scratchRegistry();
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const cli = join(REPO, "scripts", "cli.mjs");
 
 function board(t) {
-  const root = mkdtempSync(join(tmpdir(), "blz687-removed-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz687-removed-")));
   for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"]]) {
     execFileSync("git", ["-C", root, ...a]);
   }
@@ -1559,9 +1563,18 @@ function board(t) {
   return root;
 }
 
+// I8: the red run (Step 2) executes the REAL publish-runner, which shells out to
+// `kubectl create job --from=cronjob/blaze-flush` against the ambient context. It must never reach
+// a cluster: no kubeconfig, an unknown context, and a `kubectl` on PATH that refuses.
+const NOKUBE = scratch(mkdtempSync(join(tmpdir(), "blz687-nokube-")));
+writeFileSync(join(NOKUBE, "kubectl"), '#!/bin/sh\necho "kubectl disabled for BLZ-687" >&2\nexit 1\n');
+chmodSync(join(NOKUBE, "kubectl"), 0o755);
+
 function run(root, args, extraEnv = {}) {
   const env = { ...process.env };
   for (const k of ["BLAZE_WRITE_PORT", "BLAZE_READONLY", "BLAZE_REMOTE_URL", "BLAZE_TOKEN", "BLAZE_PROJECTS_DIR"]) delete env[k];
+  Object.assign(env, { KUBECONFIG: "/dev/null", BLAZE_FLUSH_CONTEXT: "blz687-no-such-context",
+    PATH: `${NOKUBE}:${process.env.PATH}` });
   return spawnSync(process.execPath, [cli, ...args], { cwd: root, env: { ...env, ...extraEnv }, encoding: "utf8" });
 }
 
@@ -1594,7 +1607,7 @@ test("the usage listing no longer offers commit or publish", () => {
 });
 ```
 
-- [ ] **Step 2: Run it.** `node --test --import=./tests/setup/hang-watchdog.mjs tests/cli-removed-commands.test.mjs`. Expected: FAIL. `blaze commit` runs the real runner, `--help` exits 0, and the usage lists `commit`.
+- [ ] **Step 2: Run it** in a shell set up per Global Constraints' no-kube rule (`KUBECONFIG=/dev/null`, stub `kubectl` first on `PATH`): `node --test --import=./tests/setup/hang-watchdog.mjs tests/cli-removed-commands.test.mjs`. Afterwards `kubectl --context k3d-service-platform get jobs -n blaze` (run from a normal shell) shows no new `blaze-flush-manual-*` job. Expected: FAIL. `blaze commit` runs the real runner, `--help` exits 0, and the usage lists `commit`.
 
 - [ ] **Step 3: `scripts/cli.mjs`.**
 1. Delete the `commit:` entry and its four-line BLZ-499 comment (`:84-90`), and the `publish:` entry (`:96`).
@@ -1684,10 +1697,14 @@ git rm scripts/commit-runner.mjs scripts/publish-runner.mjs \
   | `blaze commit` | 0.9.0 (BLZ-254) | Nothing to flush: no verb queues or commits any more. On a file board, commit the changed files yourself. |
   | `blaze publish` | 0.9.0 (BLZ-254) | Nothing to sweep and no flush Job to trigger. For more than one writer, run the board in db mode (`BLAZE_WRITE_PORT=db`) and write to it over HTTP ([Remote mode](#remote-mode)). |
 
-  Both are refused by name, on stderr, with exit 1, whatever flags follow. The last release that has them is `@hjr15/blaze-board@0.8.0`.
+  Both are refused by name, on stderr, with exit 1 (non-zero, so a script or a Job that still calls them fails loudly), whatever flags follow. The last release that has them is `@hjr15/blaze-board@0.8.0`.
   ```
 
   Also: in `## Help`, "`blaze commit --help` describes `commit`, it does not flush" becomes "`blaze move --help` describes `move`, it does not move anything". Replace `## Commit modes` (`:995-1004`) with one sentence: "`commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits." Delete the `BLAZE_SESSION` row and mark the `BLAZE_COMMIT_MODE` row "ignored since 0.9.0" in of the environment-variable table if present (`grep -n "BLAZE_COMMIT_MODE\|BLAZE_SESSION" docs/guide/commands.md`).
+- Also in `docs/guide/commands.md` (review M5): the `[commit](#commit)` row of the command index at `:22` goes (add `[Removed commands](#removed-commands)`); the `#commit` links and the "run `blaze commit`" advice inside `## reconcile` (`:165-186`) go. The `## Help` sentence is line-wrapped, so search for `blaze commit --help` across the line break (`grep -n -A1 "blaze commit" docs/guide/commands.md`), not for the whole sentence.
+- `docs/decisions/0033-…md:150` links the deleted `docs/operations/queue-store-migration.md`. Keep the ADR body and replace the link target with the text `(the procedure was deleted with the queue store, BLZ-254)`.
+- `Dockerfile:2`: "commit-on-edit shells out to [git]" becomes "reconcile and the fs groomer shell out to git".
+- `scripts/views/reconcile-summary.mjs:87-101` comments name `reconcile-commit-report.mjs`. Change them to `reconcile-apply-report.mjs`. That file's source is injected into the page, so regenerate `tests/views/page-golden.html` as in Task 2 Step 4.5, and stage both. (If Task 1 already did this, skip it.)
 - `README.md:129`: delete the `blaze commit` table row.
 - `docs/schema-customization.md:362-366`: "There are two more exemptions — **three in all** — **`blaze init`**, …, and **`blaze commit`**, … That leaves **19 of the 22** subcommands" becomes "There is one more exemption — **two in all** — **`blaze init`**, which runs before a board exists. That leaves **20 of the 22** subcommands running the check."
 - `docs/schema-versioning.md:46-48`: delete the sentence "`blaze commit` is the one command that is genuinely schema-agnostic … stays uncovered by design."
@@ -1888,7 +1905,7 @@ git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → 
 ---
 ### Task 7: `commitMode` is ignored with a one-time warning (operator ruling, 2026-10-18)
 
-**Ruling.** Not a hard refusal. A deployed ConfigMap or blaze-pm config that still carries the key must never crash-loop the pod (the `provider` outage shape). When `commitMode` is present, in the file or as `BLAZE_COMMIT_MODE`, `loadConfig` warns **once per process** and ignores it.
+**Ruling.** Not a hard refusal. A deployed ConfigMap or blaze-pm config that still carries the key must never crash-loop the pod (the `provider` outage shape). When `commitMode` is present, in the file or as `BLAZE_COMMIT_MODE`, `loadConfig` warns **once per command** and ignores it. A `blaze <verb>` is two processes: `cli.mjs`'s schema preflight loads config, then the runner it spawns loads it again (review I6 measured two warnings). So the first warning also sets `BLAZE_COMMIT_MODE_WARNED=1` in `process.env`. Every child spawned after it inherits that, and a process that sees it set stays silent. The guarantee is "once per command tree": a process plus everything it spawns after warning.
 
 **`SCHEMA_VERSION` stays 2.** Warn-and-ignore removes nothing from the set of configs that load, so nothing in the contract breaks. ADR-0002 bumps only for a breaking change. BLZ-298's bump accompanied *refusals*, and this is not one. A bump would also make every board stamped `3` unloadable by the 0.8.0 engine, for no gain. `REMOVED_KEYS` is not touched. This is a deliberate, recorded exception to BLZ-298's "never drop silently" rule: the drop is not silent, it warns.
 
@@ -1900,7 +1917,7 @@ git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → 
 - Docs: `docs/guide/schema.md:110,130`, `docs/schema-versioning.md` (one bullet), `AGENTS.md` (Configuration paragraph, BLZ-461 paragraph; also fix the stale "(currently `1..1`)" → "(currently `1..2`)")
 
 **Interfaces:**
-- Produces: `loadConfig` never sets `cfg.commitMode`. If the raw file has the key (any value, `null` included) or `env.BLAZE_COMMIT_MODE !== undefined`, it writes exactly once per process to stderr: `blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it`. `__resetCommitModeWarningForTests()` is exported for tests that need the once-only behaviour per case.
+- Produces: `loadConfig` never sets `cfg.commitMode`. If the raw file has the key (any value, `null` included) or `env.BLAZE_COMMIT_MODE !== undefined`, it writes `blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it` to stderr once per command tree. It is suppressed when `process.env.BLAZE_COMMIT_MODE_WARNED === "1"`, and set after the first write. No new export (the reset seam the first draft had has no caller and is dropped).
 
 - [ ] **Step 1: Write the failing tests.** Create `tests/config-commitmode-ignored.test.mjs`:
 
@@ -1913,30 +1930,32 @@ git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → 
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
+const scratch = scratchRegistry();
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const config = pathToFileURL(join(REPO, "scripts", "config.mjs")).href;
 const serve = pathToFileURL(join(REPO, "scripts", "serve.mjs")).href;
 const WARNING = "blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it";
 
 function board(t, cfg) {
-  const root = mkdtempSync(join(tmpdir(), "blz687-cm-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz687-cm-")));
   mkdirSync(join(root, "projects", "OBA", "defined"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "defined", "OBA-1.md"),
     "---\nid: OBA-1\ntitle: t\ntype: task\nproject: OBA\nestimate: 30\n---\n\nbody\n");
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify(cfg));
   return root;
 }
-// A fresh process per case, so "once per process" is observable and no module state leaks.
+// A fresh process per case, with the "already warned" mark cleared, so the once-only rule is observable.
 function node(src, env = {}) {
   const e = { ...process.env, ...env };
   for (const k of ["BLAZE_WRITE_PORT", "BLAZE_READONLY", "BLAZE_REMOTE_URL", "BLAZE_TOKEN"]) delete e[k];
   if (!("BLAZE_COMMIT_MODE" in env)) delete e.BLAZE_COMMIT_MODE;
+  delete e.BLAZE_COMMIT_MODE_WARNED;   // each case starts unwarned
   return spawnSync(process.execPath, ["--input-type=module", "-e", src], { env: e, encoding: "utf8" });
 }
 const count = (s) => s.split(WARNING).length - 1;
@@ -1972,6 +1991,16 @@ test("a board without commitMode loads silently", (t) => {
   assert.equal(count(r.stderr), 0);
 });
 
+test("a blaze verb through cli.mjs warns ONCE — the preflight and the spawned runner share one warning", (t) => {
+  const root = board(t, { key: "OBA", projects: ["OBA"], commitMode: "batch" });
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
+  for (const k of ["BLAZE_WRITE_PORT", "BLAZE_READONLY", "BLAZE_REMOTE_URL", "BLAZE_TOKEN", "BLAZE_COMMIT_MODE",
+                   "BLAZE_COMMIT_MODE_WARNED"]) delete env[k];
+  const r = spawnSync(process.execPath, [join(REPO, "scripts", "cli.mjs"), "rollup"], { cwd: root, env, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(count(r.stderr), 1, `one command, one warning — stderr was ${JSON.stringify(r.stderr)}`);
+});
+
 test("the board server STARTS and serves on a config that still says commitMode: batch (no crash-loop)", (t) => {
   const root = board(t, { key: "OBA", projects: ["OBA"], commitMode: "batch" });
   const r = node(`import { startServer } from ${JSON.stringify(serve)};
@@ -2001,9 +2030,9 @@ Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/config-commitmod
    // own — must keep LOADING (a refusal crash-loops the pod: the `provider` outage), so the key is
    // ignored and said once per process. Deliberately NOT a REMOVED_KEYS entry: those refuse.
    const COMMIT_MODE_WARNING = "blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it";
-   let commitModeWarned = false;
-   /** Test seam: lets an in-process test observe the once-only warning per case. */
-   export function __resetCommitModeWarningForTests() { commitModeWarned = false; }
+   // Once per COMMAND, not per process: cli.mjs's preflight and the runner it spawns are two processes,
+   // so the first warning marks the environment every later child inherits (review I6).
+   const COMMIT_MODE_WARNED_ENV = "BLAZE_COMMIT_MODE_WARNED";
    ```
 3. Immediately after the `if (!version.ok) { … }` block (`:202-205`), add:
 
@@ -2017,13 +2046,13 @@ Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/config-commitmod
 
    ```js
    function warnCommitModeIgnored() {
-     if (commitModeWarned) return;
-     commitModeWarned = true;
+     if (process.env[COMMIT_MODE_WARNED_ENV] === "1") return;
+     process.env[COMMIT_MODE_WARNED_ENV] = "1";
      process.stderr.write(`${COMMIT_MODE_WARNING}\n`);
    }
    ```
 6. BLZ-461 comment (`:273`): "`move-runner.mjs` reads `cfg` only for `cfg.commitMode`" becomes "read `cfg` only for `cfg.commitMode` (ignored since BLZ-254; it now reads no `cfg` field at all)".
-7. **Seam check.** `config.mjs` is `*`-allowlisted in seam-closure's `ALLOWED` (a registry, `:96`) and is not in `WRITE_MAP`'s pinned exports. If `tests/model/seam-closure.test.mjs` pins `config.mjs`'s export list anywhere (`grep -n '"config.mjs"' tests/model/seam-closure.test.mjs`), adding the export is an **additive** seam change, which this plan's constraint forbids. In that case, do not export the reset seam: drop `__resetCommitModeWarningForTests`, and rely on the subprocess-per-case tests above, which need no seam.
+7. No new export is added to `config.mjs`, so seam-closure is untouched by this task.
 
 `scripts/ci/smoke.sh:22`: `printf '{"key":"OBA","projects":["OBA"]}\n' > data/blaze.config.json`, so the smoke run is warning-free.
 
@@ -2074,17 +2103,18 @@ git commit -m "BLZ-687: commitMode is ignored with a one-time warning — the bo
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
+import { scratchRegistry } from "./helpers/scratch.mjs";
 
+const scratch = scratchRegistry();
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const reindex = join(REPO, "scripts", "reindex.mjs");
 
 function board(t, tickets) {
-  const root = mkdtempSync(join(tmpdir(), "blz687-reindex-"));
-  t.after(() => rmSync(root, { recursive: true, force: true }));
+  const root = scratch(mkdtempSync(join(tmpdir(), "blz687-reindex-")));
   writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "PROJ", projects: ["PROJ"] }));
   mkdirSync(join(root, "projects", "PROJ", "defined"), { recursive: true });
   mkdirSync(join(root, "projects", "PROJ", ".ids"), { recursive: true });
@@ -2224,7 +2254,7 @@ test("BLZ-687: this tree is 0.9.0 — the git ceremony is gone, and 0.8.0 stays 
 });
 ```
 
-Run it (FAIL: version 0.8.0). Then set `"version": "0.9.0"` in `package.json` and in both places in `package-lock.json` (`npm version 0.9.0 --no-git-tag-version --ignore-scripts` does both; check `git diff package-lock.json` touches only those two lines). Run it again (PASS).
+Run it (FAIL: version 0.8.0). Nothing in `package.json` enforces "never published" (review M8). Add a `"prepublishOnly": "node -e \"console.error('blaze: 0.9.0 is not published as @hjr15/blaze-board (ADR-0008 addendum); the next publish is the @hjr15/blaze rename'); process.exit(1)\""` script, and pin it in the same test: `assert.match(pkg.scripts.prepublishOnly, /not published/)`. Then set `"version": "0.9.0"` in `package.json` and in both places in `package-lock.json` (`npm version 0.9.0 --no-git-tag-version --ignore-scripts` does both; check `git diff package-lock.json` touches only those two lines). Run it again (PASS).
 
 - [ ] **Step 2: ADR-0006 addendum.** Append to `docs/decisions/0006-database-is-the-sole-source-of-truth.md`:
 
@@ -2238,7 +2268,7 @@ operator's decision D1 (2026-10-05, BLZ-254 spec §2) splits the product in two:
   from `project_counter`'s transactional allocate; a second machine writes over HTTP (`blaze`
   remote mode, `POST /api/*` with a bearer token). This is the only supported way for two
   writers — two sessions, two machines, an agent and a person — to share one board.
-- **fs mode is a supported single-machine mode.** It keeps its allocator (`ids.mjs`,
+- **fs mode is a supported single-machine mode, on a git working tree.** `blaze new`'s reservation needs one (`ids.mjs`: "is not inside a git worktree — cannot reserve ticket ids safely", review M7). It keeps its allocator (`ids.mjs`,
   `claims.mjs`, ADR-0005) and nothing else of the git era: since 0.9.0 the board **never
   commits**. `blaze commit`, `blaze publish`, `commitMode`, the pending ledgers, the commit lock
   and the server's per-click commit are deleted (BLZ-254 §5.5). The person who owns an fs board
@@ -2267,7 +2297,7 @@ version's number.
 
 In `docs/guide/why-blaze.md`, after "**`@hjr15/blaze-board` is frozen at 0.8.0**, its last release (…)", add: "The engine tree has since moved to 0.9.0, which removed `blaze commit` and `blaze publish`. 0.9.0 is not published under this name."
 
-- [ ] **Step 4: ADRs 0032, 0033, 0035 are superseded; ADR-0038 gets one sentence.** In each of `0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`, `0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md` and `0035-nothing-to-commit-is-a-settled-drain-not-a-failed-one.md`, change the status line from `- **Status:** Accepted` to `- **Status:** Superseded (2026-10-13, BLZ-254): the pending ledger, \`blaze commit\` and the commit path this decides are deleted — see ADR-0006's BLZ-254 addendum`. Leave the body unchanged; it is the record. (Check each file's status-line spelling first with `sed -n 1,6p`.) In ADR-0038, after the sentence at `:94` ("That stays BLZ-254's explicit decision."), add: "BLZ-254 decided it: `commit-or-queue.mjs` and `stageFor` are deleted, and no write mode stages anything (2026-10-13)."
+- [ ] **Step 4: ADRs 0032, 0033, 0035 are superseded; ADR-0038 gets one sentence.** In each of `0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`, `0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md` and `0035-nothing-to-commit-is-a-settled-drain-not-a-failed-one.md`, change the status line from `- **Status:** Accepted` to `- **Status:** Superseded (2026-10-13, BLZ-254): the pending ledger, \`blaze commit\` and the commit path this decides are deleted — see ADR-0006's BLZ-254 addendum`. Leave the body unchanged; it is the record. (Check each file's status-line spelling first with `sed -n 1,6p`.) In ADR-0038, after the sentence at `:94` that ends "That stays BLZ-254's explicit decision" (it continues past an em dash; add after that whole sentence), add: "BLZ-254 decided it: `commit-or-queue.mjs` and `stageFor` are deleted, and no write mode stages anything (2026-10-13)."
 
 - [ ] **Step 5: The spec amendment.** Append to `docs/superpowers/specs/2026-10-05-blz-254-live-board-cutover-design.md` (and leave the original sections unedited, so the decision history reads in order):
 
@@ -2430,7 +2460,7 @@ Expected test count: the baseline 5,432, minus the deleted files' tests, plus th
 
   Adjudicate the findings with `adjudicate-reviewer-findings-against-ground-truth`.
 
-- [ ] **Step 3: The PR (draft), never merged by this plan.** Push the branch and open a **draft** PR titled `BLZ-687: retire the git ceremony (BLZ-254 PR D)`. The body:
+- [ ] **Step 3: The PR (draft), never merged by this plan.** Push the branch and open a **draft** PR titled `BLZ-687: retire the git ceremony (BLZ-254 PR D)`, with the `do-not-merge` label (`gh pr create --draft --label do-not-merge …`; create the label first if the repo lacks it). The body:
   - a **Breaking** section (`blaze commit`/`blaze publish` removed; `commitMode`/`BLAZE_COMMIT_MODE` ignored with a one-time warning; the server's 200 body drops `committed`/`queued`; reconcile's result drops `committed`/`commitOutcome`/`commitError`; import's result drops `staged`/`commit`; version 0.9.0, unpublished);
   - the baseline and final test counts;
   - the deleted-test list with reasons;
@@ -2480,6 +2510,26 @@ In each, the target wording is given and the grep is the completeness check, not
 - Task 1 must precede Task 5, because the old oracle spawned `commit-runner.mjs`.
 - Every test file that imports a module deleted in Task 6 is listed in Task 6 Step 4, and found by the `rg -ln` there.
 - `tests/temp-cleanup-guard.test.mjs` reads `commit-settled-drain.test.mjs` by name, so it is handled in Task 5.
+
+## Adversarial review round 1 (2026-10-19), applied
+
+The review (`…-plan-review.md`, untracked) applied Tasks 1–9 literally and ran `npm test` after each one. Each red it found is now fixed in the owning task:
+- after Task 1: fail 4 + a quote fail → C1 (four `reconcile-project-filter` sites) and I1 (THE DEBT STEP);
+- after Task 3: fail 4 → C2 (`commit-status.test.mjs` deleted in Task 3);
+- after Task 4: fail 1 + a test that could not run → C3 (`--allow-empty` seed), C4 (`groomer-db-mode:276`);
+- after Tasks 7 and 8: fail 2 → I2 (the debt step added to both).
+
+With those fixes in scratch, the reviewer measured fail 0 after every task: 5358, 5358, 5329→green, 5177, 5167 and 5168 tests. The other fixes:
+- I3: the seam audit is now row-based.
+- I4: the ledger and table numbering match the task bodies.
+- I5: the comment rule.
+- I6: one warning per command tree, tested through `cli.mjs`.
+- I7: the draft + `do-not-merge` label, and C2 merged and synced first.
+- I8: the no-kube rule and the stub `kubectl`.
+- I9: `scratchRegistry`.
+- Minors M1–M9.
+
+**Rejected:** I7's optional "warn when `.blaze/pending/` is non-empty". Merge gate 2 already requires every queue to be empty before the merge, and that check would be new engine code outside spec §5.5's deletions (§10) for a state the gate rules out.
 
 ## Post-merge checklist (after PR D merges at cutover step 6)
 
