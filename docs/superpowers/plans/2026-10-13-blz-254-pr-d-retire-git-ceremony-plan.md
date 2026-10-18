@@ -4,7 +4,7 @@
 
 **Goal:** Delete every git-era write mechanism the live board needed (spec §5.5): `blaze commit`, `blaze publish`, the commit lock, the pending ledgers, `commit-or-queue`/`stageFor`, `serve-commit`, and `missingClaimErrors`. Board verbs, the board server, reconcile and `blaze import` then write files (fs) or rows (db) and never commit, while fs mode keeps its single-machine allocator (`ids.mjs`, `claims.mjs`, D1).
 
-**Architecture:** Consumers are cut first and modules deleted last, so the suite is green at every commit. Task 1 removes the two verbs, and a removed verb gets a named refusal at dispatch. Tasks 2–5 stop each caller staging: the server (its 200 body becomes `{ ok, db, … }`), the six ticket verbs and `sprint`, reconcile and the supervisor feed, and import. Task 6 deletes the now-unreferenced modules. The one primitive that survives (`acquireDirLock`/`releaseDirLock`, which `model/import-lock.mjs` needs) moves to `scripts/dir-lock.mjs`. Tasks 7 and 8 retire `commitMode` and `missingClaimErrors`. Task 9 carries the ADRs, the spec amendment and the version, and Task 10 is the conditional matrices header. `tests/model/seam-closure.test.mjs` changes only by exact name swaps or removals, each marked `// BLZ-254:`, in the same task as the code that makes it necessary.
+**Architecture:** Consumers are cut first and modules deleted last, so the suite is green at every commit. Task 1 removes the two verbs, and a removed verb gets a named refusal at dispatch. Tasks 2–5 stop each caller staging: the server (its 200 body becomes `{ ok, db, … }`), the six ticket verbs and `sprint`, reconcile and the supervisor feed, and import. Task 6 deletes the now-unreferenced modules. The one primitive that survives (`acquireDirLock`/`releaseDirLock`, which `model/import-lock.mjs` needs) moves to `scripts/dir-lock.mjs`. Task 7 makes `commitMode` ignored with a one-time warning, and Task 8 retires `missingClaimErrors`. Task 9 carries the ADRs, the spec amendment and the version, and Task 10 is the conditional matrices header. `tests/model/seam-closure.test.mjs` changes only by exact name swaps or removals, each marked `// BLZ-254:`, in the same task as the code that makes it necessary.
 
 **Tech Stack:** Node 24 ESM, `node:test`, `node:sqlite`, `pg` 8 (Postgres tests gated `PG_SKIP`), git.
 
@@ -21,8 +21,8 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 1. **Cutover §7 steps 1–5 are done.** The live board serves and writes from Postgres (`BLAZE_WRITE_PORT=db` on the Deployment, smoke test passed). Step 6's unfreeze is the moment PR D merges.
 2. **`.blaze/pending/` and `.blaze/pending-commit.jsonl` are empty on every machine** (§7 step 2's last `blaze publish` ran). After this PR, no engine can drain them.
 3. **The `blaze-flush` CronJob is gone, or its deletion merges in the same window** (the C2 PR, §8). service-platform pins the blaze image to every `main` merge automatically (`chore(deploy): pin blaze to <sha>`), so the next nightly flush after PR D's image lands would run `blaze commit --all` and get the removed-verb refusal (exit 1, `CronJobLastRunFailed`). Check: `kubectl get cronjob -n blaze` lists no `blaze-flush`.
-4. **No config the deployed pod loads sets `commitMode`** (Task 7 makes it a removed key, which is a hard refusal). The pod reads the service-platform ConfigMap, `deploy/apps/blaze/chart/templates/configmap.yaml`, which sets `"commitMode": "batch"` today. A refusal there crash-loops the board: the socket binds, then `cfgFor(root)` throws, which is exactly the `provider` outage that ConfigMap's own comment records. Check: `git -C <service-platform> show origin/main:deploy/apps/blaze/chart/templates/configmap.yaml | grep -c commitMode` prints `0`. blaze-pm's own `blaze.config.json` (on `BLZ-305-v4-spine`) also sets it, so the board operator deletes it there too (a data-repo step, never pushed).
-5. **`@hjr15/blaze-board@0.8.0` is published from a tree that still has `blaze commit`** (BLZ-674's operator-gated publish, from `3a0ac78` or any earlier post-PR-A `main`), or the operator has decided not to publish 0.8.0. npm holds 0.7.0 as the latest today (checked 2026-10-13). ADR-0008's addendum promises 0.8.0 as the last file-based release "keeps working exactly as this page describes", and PR D's tree is 0.9.0 (Task 9), so a publish after the merge cannot accidentally ship the breaking tree as 0.8.0.
+4. **(Not a gate any more — operator ruling 2026-10-18.)** `commitMode` is ignored with a one-time warning (Task 7), so a ConfigMap or blaze-pm config that still carries it cannot crash-loop the pod. Dropping the key is a post-merge cleanup (see "Post-merge checklist").
+5. **0.8.0 published (BLZ-674).** The operator publishes `@hjr15/blaze-board@0.8.0` from `main` before PR D merges (operator ruling 2026-10-18). Check: `npm view @hjr15/blaze-board version` prints `0.8.0`. It was `0.7.0` on 2026-10-13. PR D's tree is 0.9.0 (Task 9), so no later publish can ship the breaking tree as 0.8.0.
 6. CI is green on the PR's head, and the whole-branch review (Task 11) is upheld.
 
 ## Global Constraints
@@ -30,7 +30,7 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 - **Scope is spec §5.5's table, and nothing beyond it** (spec §10: "Any change to fs or dual behaviour beyond §5.5's deletions" is out of scope). **Kept:** `scripts/model/claims.mjs`, `scripts/model/ids.mjs`, `fsAllocators`, and `seed-counter.mjs`'s `.ids/` source (D1). **Out of scope:** `scripts/model/import-lock.mjs`, `ref-claim.mjs` and `ref-allocator.mjs` are not deleted. Also out of scope is the service-platform side (deleting `blaze-flush`, `flush-configmap.yaml`, the chart's `flush:` values, superseding service-platform ADR 0017), which belongs to the C2 PR. The fs groomer's own `git commit` (`scripts/loops/groomer.mjs:712-713`) and `blaze migrate`'s (`scripts/migrate-runner.mjs:77-85`) are not in §5.5's table, so they stay (see Finding 6).
 - **`tests/model/seam-closure.test.mjs`: only exact name swaps or removals of deleted modules' entries, each with a `// BLZ-254:` comment, and no assertion weakened.** No new map entry, no new member, no relaxed comparison. Every line touched is listed in the owning task, and the full list is in "Seam-closure ledger" below.
 - **A test file is deleted only when every test in it covers a deleted module or a deleted behaviour.** A file that also covers surviving behaviour is edited instead. Each deletion is listed with its reason in the owning task.
-- **TDD where behaviour changes:** the server's 200 body, the CLI's removed-verb refusal, a verb that writes and creates no commit, reconcile's applied line, `commitMode` refused, and `blaze reindex` no longer refusing an unclaimed id. Each gets a failing test first.
+- **TDD where behaviour changes:** the server's 200 body, the CLI's removed-verb refusal, a verb that writes and creates no commit, reconcile's applied line, `commitMode` ignored with one warning, and `blaze reindex` no longer refusing an unclaimed id. Each gets a failing test first.
 - **Mode comes only from `resolveWriteMode(env)`** (or the `mode` the resolvers return). Nothing sniffs `writePort.name`.
 - **Test hygiene the suite enforces:** scratch dirs via `mkdtempSync(join(tmpdir(), "<literal-prefix>-"))` with cleanup in `t.after`/`finally`. No `rmSync` reached only after an assertion (the `temp-cleanup-guard` ratchet). A spawned process gets an env with `BLAZE_WRITE_PORT`/`BLAZE_READONLY`/`BLAZE_REMOTE_URL`/`BLAZE_TOKEN` DELETED, never set to `""`.
 - **`scripts/ci/temp-cleanup-debt.json` is held to equality** by `tests/temp-cleanup-guard.test.mjs`. Every task that deletes or edits a test file regenerates it with `node scripts/ci/temp-cleanup-guard.mjs --write` and checks `git diff scripts/ci/temp-cleanup-debt.json` shows **only removed lines or lowered counts**. A raised count is a new leak and is fixed in the test, not recorded.
@@ -59,8 +59,8 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
    blaze: `commit` was removed in 0.9.0 (BLZ-254) — the board no longer commits. In fs mode, version the board's files yourself with git; for more than one writer, use db mode (BLAZE_WRITE_PORT=db).
    ```
    It applies before `--help`, before the read-only gate and before remote mode, so `blaze commit --help`, `BLAZE_READONLY=1 blaze commit` and a remote-mode `blaze publish` all get the same sentence. A removed verb never appears in the usage listing.
-5. **`commitMode` becomes a removed config key, with `SCHEMA_VERSION` 2 → 3** (Task 7). Nothing reads it after Task 3. BLZ-298's rule (`schema-version.mjs:20-28`) is that a key nothing reads is a hard error rather than a silent drop, and that removal bumped `SCHEMA_VERSION` (docs/schema-versioning.md, "Version 2 shipped with its migration path"). `BLAZE_COMMIT_MODE` is refused the same way. **This is what makes merge-gate line 4 load-bearing** (open question 2 offers the alternative).
-6. **The fs groomer and `blaze migrate` still commit.** `scripts/loops/groomer.mjs:712-713` commits a groom in fs mode, behind BLZ-347's containment (a db groom, `groomOnceDb`, never does). `scripts/migrate-runner.mjs:77-85` commits a one-shot Jira import. Neither is in §5.5's table, Recon A §7 missed the groomer, and spec §10 puts fs behaviour beyond the table out of scope. Both stay, and the docs say so rather than claim "Blaze never commits" (open question 3).
+5. **`commitMode` is ignored with a one-time warning (operator ruling 2026-10-18), not refused** (Task 7). Nothing reads it after Task 3. A hard refusal (BLZ-298's rule for removed keys) would crash-loop the deployed board while its ConfigMap still sets `"commitMode": "batch"`. So `loadConfig` warns once per process and drops the key, and `BLAZE_COMMIT_MODE` is treated the same. `SCHEMA_VERSION` stays 2: no config that loaded before fails now.
+6. **The fs groomer and `blaze migrate` still commit.** `scripts/loops/groomer.mjs:712-713` commits a groom in fs mode, behind BLZ-347's containment (a db groom, `groomOnceDb`, never does). `scripts/migrate-runner.mjs:77-85` commits a one-shot Jira import. Neither is in §5.5's table, Recon A §7 missed the groomer, and spec §10 puts fs behaviour beyond the table out of scope. Both stay, and the docs say so rather than claim "Blaze never commits". They are a follow-up ticket under BLZ-254 (see "Out of scope / follow-ups").
 7. **`missingClaimErrors` deletion is a behaviour change in fs mode, and that is the spec's decision (§3, §5.5).** `blaze reindex` no longer refuses an id above a project's `.cutover` that has no `.ids/` claim (BLZ-136's check). Duplicate ids still block (`idx.errors`). Under D1 a single-machine fs board has no second writer whose claim could be missing, and the live board is db (where the check was already skipped, `reindex.mjs:85`).
 8. **The board server's 503 "commit lock held" response is gone.** Nothing takes a lock on the write path any more (Task 2).
 9. **Spec conflicts, amended in Task 9:**
@@ -76,7 +76,7 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 1. **An agent, script or the flush Job runs `blaze commit` / `blaze publish` (any flags, `--help`, under `BLAZE_READONLY`, in remote mode)** → one stderr sentence naming the removal and the replacement, exit 1, nothing touched. Pinned in Task 1 (`tests/cli-removed-commands.test.mjs`, all five spellings).
 2. **A browser click on the dashboard after the upgrade** → the 200 body is exactly `{ ok: true, db: <bool>, …extra }` with no `committed`/`queued`, the file (fs) or row (db) changes, `HEAD` does not move, and the page shows no git sentence. Pinned in Task 2 (`POST /api/<verb> writes the file and creates no commit`, ×5 routes; `serve-db-mode`'s exact body).
 3. **An fs board in a git repo, driven by every CLI verb and `reconcile --apply`** → the files change, nothing is staged, `HEAD` is unmoved, no output line mentions a commit or a queue, and `blaze new` still allocates through the claim ledger (n, then n+1, `.ids/<n>` written). Pinned in Task 3 (`tests/verbs-make-no-commit.test.mjs`) and Task 4 (the change-report oracle's `HEAD unchanged` clause per apply mode).
-4. **A board whose config (or environment) still says `commitMode`** → loading it refuses with the removed-key message naming `commitMode` and what to do. It never silently ignores it. Pinned in Task 7, which covers the file key, the null spelling and `BLAZE_COMMIT_MODE`.
+4. **A deployed board whose ConfigMap still says `commitMode: "batch"`, restarted on the new image** → it loads, serves `GET /` with 200, warns exactly once, and has no `commitMode` on its config. Pinned in Task 7 (`tests/config-commitmode-ignored.test.mjs`: file key ×3 values incl. `null`, `BLAZE_COMMIT_MODE`, and a real server start).
 5. **`blaze import --apply` on a git-backed board** → tickets (or rows), receipt and source-id map are written. Nothing is staged, `HEAD` is unmoved, exit 0, and the trailer names the receipt and claims no commit. Pinned in Task 5 (`import --apply stages nothing`).
 
 ---
@@ -96,7 +96,7 @@ PR D is built and reviewed now. It **merges only after cutover step 6 (§7), and
 | `scripts/commit-or-queue.mjs`, `scripts/serve-commit.mjs`, `scripts/pending-ledger.mjs`, `scripts/commit-summary.mjs`, `scripts/branch-guard.mjs` | 6 | **deleted** |
 | `scripts/commit-lock.mjs` → `scripts/dir-lock.mjs` | 6 | `git mv`; policy half deleted |
 | `scripts/model/import-lock.mjs`, `scripts/readonly.mjs` | 6 | import path; comments |
-| `scripts/config.mjs`, `scripts/model/schema-version.mjs` | 7 | `commitMode` removed key; `BLAZE_COMMIT_MODE` refused; `SCHEMA_VERSION` 3 |
+| `scripts/config.mjs`, `scripts/model/schema-version.mjs` | 7 | `commitMode`/`BLAZE_COMMIT_MODE` ignored with a one-time warning; `SCHEMA_VERSION` stays 2 |
 | `scripts/model/index.mjs`, `scripts/reindex.mjs` | 8 | `missingClaimErrors` and its call deleted |
 | `tests/model/seam-closure.test.mjs` | 2–6 | name swaps/removals only (ledger below) |
 | `package.json`, `package-lock.json`, `tests/package.test.mjs` | 9 | 0.9.0 |
@@ -151,7 +151,7 @@ Consumers first and modules last, so every commit is green:
 | 4 | `blaze import` stops staging | sonnet | opus |
 | 5 | `blaze commit` and `blaze publish` are removed, with a named refusal | sonnet | opus |
 | 6 | delete the ceremony modules; `commit-lock.mjs` → `dir-lock.mjs` | **opus** (seam-closure) | opus |
-| 7 | `commitMode` is a removed config key (`SCHEMA_VERSION` 3) | sonnet | opus |
+| 7 | `commitMode` is ignored with a one-time warning | sonnet | opus |
 | 8 | delete `missingClaimErrors` | sonnet | opus |
 | 9 | ADR-0006/0008 addenda, superseded ADRs, the spec amendment, 0.9.0, the docs sweep | sonnet (all text is given here) | opus |
 | 10 | matrices header — **conditional** on blaze-pm retiring `build_matrices.py` | sonnet | opus |
@@ -1591,7 +1591,7 @@ git rm scripts/commit-runner.mjs scripts/publish-runner.mjs \
   Both are refused by name, on stderr, with exit 1, whatever flags follow. The last release that has them is `@hjr15/blaze-board@0.8.0`.
   ```
 
-  Also: in `## Help`, "`blaze commit --help` describes `commit`, it does not flush" becomes "`blaze move --help` describes `move`, it does not move anything". Delete `## Commit modes` (`:995-1004`); Task 7 removes the key it describes. Delete the `BLAZE_COMMIT_MODE` and `BLAZE_SESSION` rows of the environment-variable table if present (`grep -n "BLAZE_COMMIT_MODE\|BLAZE_SESSION" docs/guide/commands.md`).
+  Also: in `## Help`, "`blaze commit --help` describes `commit`, it does not flush" becomes "`blaze move --help` describes `move`, it does not move anything". Replace `## Commit modes` (`:995-1004`) with one sentence: "`commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits." Delete the `BLAZE_SESSION` row and mark the `BLAZE_COMMIT_MODE` row "ignored since 0.9.0" in of the environment-variable table if present (`grep -n "BLAZE_COMMIT_MODE\|BLAZE_SESSION" docs/guide/commands.md`).
 - `README.md:129`: delete the `blaze commit` table row.
 - `docs/schema-customization.md:362-366`: "There are two more exemptions — **three in all** — **`blaze init`**, …, and **`blaze commit`**, … That leaves **19 of the 22** subcommands" becomes "There is one more exemption — **two in all** — **`blaze init`**, which runs before a board exists. That leaves **20 of the 22** subcommands running the check."
 - `docs/schema-versioning.md:46-48`: delete the sentence "`blaze commit` is the one command that is genuinely schema-agnostic … stays uncovered by design."
@@ -1771,109 +1771,166 @@ git commit -m "BLZ-687: delete the commit ceremony modules; commit-lock.mjs → 
 `tests/groomer-containment.test.mjs` is in the run on purpose. Its "a .blaze/commit.lock directory that wedges every other Blaze write" case still has to be **refused and removed** as an out-of-bounds write by the groomer. That test asserts the groomer's containment, not the lock, so it stays unchanged. Its comment's claim that the lock "wedges every other Blaze write" is now history. Add `(it did, before BLZ-254)`.
 
 ---
-### Task 7: `commitMode` is a removed config key (`SCHEMA_VERSION` 3)
+### Task 7: `commitMode` is ignored with a one-time warning (operator ruling, 2026-10-18)
+
+**Ruling.** Not a hard refusal. A deployed ConfigMap or blaze-pm config that still carries the key must never crash-loop the pod (the `provider` outage shape). When `commitMode` is present, in the file or as `BLAZE_COMMIT_MODE`, `loadConfig` warns **once per process** and ignores it.
+
+**`SCHEMA_VERSION` stays 2.** Warn-and-ignore removes nothing from the set of configs that load, so nothing in the contract breaks. ADR-0002 bumps only for a breaking change. BLZ-298's bump accompanied *refusals*, and this is not one. A bump would also make every board stamped `3` unloadable by the 0.8.0 engine, for no gain. `REMOVED_KEYS` is not touched. This is a deliberate, recorded exception to BLZ-298's "never drop silently" rule: the drop is not silent, it warns.
 
 **Files:**
-- Modify: `scripts/model/schema-version.mjs` (`:17`, `:30-36`), `scripts/config.mjs` (`:30`, `:268-276` BLZ-461 comment, `:305`), `scripts/ci/smoke.sh:22`
-- Modify fixtures: `tests/fixtures/board-gate-real-shape/blaze.config.json`, `tests/fixtures/legacy-board/blaze.config.json` (drop `"commitMode"`)
-- Modify tests: `tests/config.test.mjs` (`:131-151`, `:285`), `tests/model/schema-config.test.mjs:57-62`, and every remaining test that writes `commitMode` into a config
-- Docs: `docs/schema-versioning.md` (the window table `:20` and a "Version 3" bullet after `:99`), `docs/guide/schema.md:110,130`, `AGENTS.md` (Configuration paragraph, the BLZ-461 paragraph, `schemaVersion` "currently `1..1`")
+- Modify: `scripts/config.mjs` (`:30` default, a module-level `let` flag, the warn after `checkSchemaVersion(file)` at `:194`, `:268-276` BLZ-461 comment, `:305` the env override), `scripts/ci/smoke.sh:22`
+- Create: `tests/config-commitmode-ignored.test.mjs`
+- Modify tests: `tests/config.test.mjs:131-151`, and every test that writes `commitMode` into a config only to choose a commit mode (Step 3)
+- Fixtures: **unchanged**. `board-gate-real-shape` and `legacy-board` keep `"commitMode"`, so they now exercise the ignore path, as the real boards do until the post-merge cleanup.
+- Docs: `docs/guide/schema.md:110,130`, `docs/schema-versioning.md` (one bullet), `AGENTS.md` (Configuration paragraph, BLZ-461 paragraph; also fix the stale "(currently `1..1`)" → "(currently `1..2`)")
 
 **Interfaces:**
-- Produces: `REMOVED_KEYS.commitMode` (a string reason); `SCHEMA_VERSION === 3`. `loadConfig` throws `blaze: blaze.config.json sets a key this engine no longer reads: commitMode — …` for any value (including `null`). For `BLAZE_COMMIT_MODE` set to any value, it throws `blaze: BLAZE_COMMIT_MODE is no longer read — …`. `cfg.commitMode` is never set.
+- Produces: `loadConfig` never sets `cfg.commitMode`. If the raw file has the key (any value, `null` included) or `env.BLAZE_COMMIT_MODE !== undefined`, it writes exactly once per process to stderr: `blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it`. `__resetCommitModeWarningForTests()` is exported for tests that need the once-only behaviour per case.
 
-- [ ] **Step 1: Write the failing tests.** In `tests/config.test.mjs`, replace the three tests at `:131-151` with:
+- [ ] **Step 1: Write the failing tests.** Create `tests/config-commitmode-ignored.test.mjs`:
 
 ```js
-// BLZ-254 (spec §5.5): the board no longer commits, so nothing reads `commitMode`. BLZ-298's rule
-// for a key nothing reads: refuse it, never drop it silently (scripts/model/schema-version.mjs).
-test("BLZ-254: commitMode is refused as a removed key, naming what to do", () => {
-  for (const value of ["batch", "per-op", null]) {
-    const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
-    writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: value }));
-    assert.throws(() => loadConfig({ root, env: {} }),
-      (e) => /no longer reads/.test(e.message) && /commitMode/.test(e.message) && /BLAZE_WRITE_PORT=db/.test(e.message),
-      `commitMode: ${JSON.stringify(value)} must be refused`);
-    rmSync(root, { recursive: true, force: true });
-  }
+// tests/config-commitmode-ignored.test.mjs — BLZ-687 (BLZ-254 PR D), operator ruling 2026-10-18.
+//
+// `commitMode` chose how the board committed; the board no longer commits. A config that still
+// carries it (the deployed ConfigMap, blaze-pm's own config, any older board) must keep LOADING —
+// a refusal there crash-loops the pod — so the key is ignored with ONE warning per process.
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join, dirname } from "node:path";
+import { fileURLToPath, pathToFileURL } from "node:url";
+
+const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
+const config = pathToFileURL(join(REPO, "scripts", "config.mjs")).href;
+const serve = pathToFileURL(join(REPO, "scripts", "serve.mjs")).href;
+const WARNING = "blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it";
+
+function board(t, cfg) {
+  const root = mkdtempSync(join(tmpdir(), "blz687-cm-"));
+  t.after(() => rmSync(root, { recursive: true, force: true }));
+  mkdirSync(join(root, "projects", "OBA", "defined"), { recursive: true });
+  writeFileSync(join(root, "projects", "OBA", "defined", "OBA-1.md"),
+    "---\nid: OBA-1\ntitle: t\ntype: task\nproject: OBA\nestimate: 30\n---\n\nbody\n");
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify(cfg));
+  return root;
+}
+// A fresh process per case, so "once per process" is observable and no module state leaks.
+function node(src, env = {}) {
+  const e = { ...process.env, ...env };
+  for (const k of ["BLAZE_WRITE_PORT", "BLAZE_READONLY", "BLAZE_REMOTE_URL", "BLAZE_TOKEN"]) delete e[k];
+  if (!("BLAZE_COMMIT_MODE" in env)) delete e.BLAZE_COMMIT_MODE;
+  return spawnSync(process.execPath, ["--input-type=module", "-e", src], { env: e, encoding: "utf8" });
+}
+const count = (s) => s.split(WARNING).length - 1;
+
+for (const value of ["batch", "per-op", null]) {
+  test(`commitMode: ${JSON.stringify(value)} loads, is ignored, and warns exactly once`, (t) => {
+    const root = board(t, { key: "OBA", projects: ["OBA"], commitMode: value });
+    const r = node(`import { loadConfig } from ${JSON.stringify(config)};
+      const a = loadConfig({ root: ${JSON.stringify(root)}, env: {} });
+      const b = loadConfig({ root: ${JSON.stringify(root)}, env: {} });
+      console.log(JSON.stringify([Object.hasOwn(a, "commitMode"), Object.hasOwn(b, "commitMode"), a.key]));`);
+    assert.equal(r.status, 0, r.stderr);
+    assert.deepEqual(JSON.parse(r.stdout), [false, false, "OBA"]);
+    assert.equal(count(r.stderr), 1, `expected the warning exactly once, stderr was ${JSON.stringify(r.stderr)}`);
+  });
+}
+
+test("BLAZE_COMMIT_MODE is ignored with the same single warning", (t) => {
+  const root = board(t, { key: "OBA", projects: ["OBA"] });
+  const r = node(`import { loadConfig } from ${JSON.stringify(config)};
+    const c = loadConfig({ root: ${JSON.stringify(root)}, env: { BLAZE_COMMIT_MODE: "batch" } });
+    console.log(Object.hasOwn(c, "commitMode"));`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "false");
+  assert.equal(count(r.stderr), 1);
 });
 
-test("BLZ-254: a board without commitMode loads, and its config has no commitMode", () => {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
-  const cfg = loadConfig({ root, env: {} });
-  assert.equal(Object.hasOwn(cfg, "commitMode"), false);
-  rmSync(root, { recursive: true, force: true });
+test("a board without commitMode loads silently", (t) => {
+  const root = board(t, { key: "OBA", projects: ["OBA"] });
+  const r = node(`import { loadConfig } from ${JSON.stringify(config)};
+    loadConfig({ root: ${JSON.stringify(root)}, env: {} });`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(count(r.stderr), 0);
 });
 
-test("BLZ-254: BLAZE_COMMIT_MODE is refused, never silently ignored", () => {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
-  for (const v of ["batch", "per-op", ""]) {
-    assert.throws(() => loadConfig({ root, env: { BLAZE_COMMIT_MODE: v } }),
-      /BLAZE_COMMIT_MODE is no longer read/, `BLAZE_COMMIT_MODE=${JSON.stringify(v)} must be refused`);
-  }
-  rmSync(root, { recursive: true, force: true });
+test("the board server STARTS and serves on a config that still says commitMode: batch (no crash-loop)", (t) => {
+  const root = board(t, { key: "OBA", projects: ["OBA"], commitMode: "batch" });
+  const r = node(`import { startServer } from ${JSON.stringify(serve)};
+    const s = startServer({ projectsDir: ${JSON.stringify(join(root, "projects"))}, root: ${JSON.stringify(root)}, port: 0 });
+    s.once("listening", async () => {
+      const res = await fetch("http://127.0.0.1:" + s.address().port + "/");
+      console.log(res.status);
+      s.close(); process.exit(0);
+    });`);
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(r.stdout.trim(), "200", `the board must serve, got ${r.stdout} / ${r.stderr}`);
+  assert.equal(count(r.stderr), 1, "and say once that the key is ignored");
 });
 ```
 
-and at `:285` change `withConfig({ key: "OBA", projects: ["OBA"], commitMode: "batch" })` to `withConfig({ key: "OBA", projects: ["OBA"] })`, with the comment "Mirrors the compat-legacy fixture's exact shape" kept (the fixture loses the key in this task too). In `tests/model/schema-config.test.mjs:57-62`, the test becomes `"the engine's compat window is currently [1, 3]"`, with the comment `// BLZ-298 bumped to 2 (provider/terminal/codeRepo); BLZ-254 bumped to 3 (commitMode). MIN stays 1.` and `assert.equal(SCHEMA_VERSION, 3);`.
+In `tests/config.test.mjs`, delete the three tests at `:131-151` ("commitMode defaults to per-op", "commitMode is read from blaze.config.json", "BLAZE_COMMIT_MODE env overrides the file"). They pin behaviour the ruling removes, and the new file covers what replaces it. The `withConfig({ …, commitMode: "batch" })` at `:285` stays: it mirrors the legacy fixture, which keeps the key.
 
-Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/config.test.mjs tests/model/schema-config.test.mjs`. Expected: FAIL (no throw; `SCHEMA_VERSION` is 2).
+Run `node --test --import=./tests/setup/hang-watchdog.mjs tests/config-commitmode-ignored.test.mjs`. Expected: FAIL. `commitMode` is present on the config and no warning is printed. The server test may pass already; it is the guard that the ruling exists for.
 
-- [ ] **Step 2: Implement.**
-- `scripts/model/schema-version.mjs`:
-  - `export const SCHEMA_VERSION = 3;`
-  - Add to `REMOVED_KEYS`:
+- [ ] **Step 2: Implement (`scripts/config.mjs`).**
+1. Delete `  commitMode: "per-op",` from `DEFAULTS` (`:30`).
+2. Near the top of the module (after the imports), add:
 
-    ```js
-      // BLZ-254 (spec §5.5): the board no longer commits or queues, so this has nothing to choose.
-      commitMode: "the board no longer commits (BLZ-254) — in fs mode version the files yourself; "
-                + "for more than one writer, use db mode (BLAZE_WRITE_PORT=db)",
-    ```
-  - Prefix the `REMOVED_KEYS` docblock with "Keys removed from the config contract (BLZ-298, BLZ-254)".
-  - The derived census comment (`:87-99`) is unchanged. The fixture corpus still has exactly one carrier, `board-gate-removed-key`, because both `commitMode` fixtures lose the key below, and `tests/schema-version-fixture-census.test.mjs` re-derives it.
-- `scripts/config.mjs`:
-  - Delete `  commitMode: "per-op",` (`:30`).
-  - Replace `  if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;` (`:305`) with:
+   ```js
+   // BLZ-254 (PR D, operator ruling 2026-10-18): `commitMode` chose how the board committed, and the
+   // board no longer commits. A config that still carries it — the deployed ConfigMap, blaze-pm's
+   // own — must keep LOADING (a refusal crash-loops the pod: the `provider` outage), so the key is
+   // ignored and said once per process. Deliberately NOT a REMOVED_KEYS entry: those refuse.
+   const COMMIT_MODE_WARNING = "blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it";
+   let commitModeWarned = false;
+   /** Test seam: lets an in-process test observe the once-only warning per case. */
+   export function __resetCommitModeWarningForTests() { commitModeWarned = false; }
+   ```
+3. Immediately after the `if (!version.ok) { … }` block (`:202-205`), add:
 
-    ```js
-      // BLZ-254: REMOVED_KEYS' rule, applied to the environment twin of the removed `commitMode`
-      // key — set (even empty) is refused, because "set and silently ignored" is the defect.
-      if (env.BLAZE_COMMIT_MODE !== undefined) {
-        throw new Error("blaze: BLAZE_COMMIT_MODE is no longer read — the board no longer commits "
-          + "(BLZ-254). Unset it. In fs mode version the files yourself; for more than one writer, "
-          + "use db mode (BLAZE_WRITE_PORT=db).");
-      }
-    ```
-  - In the BLZ-461 comment (`:273`), "`move-runner.mjs` reads `cfg` only for `cfg.commitMode`" becomes "`move-runner.mjs` read `cfg` only for `cfg.commitMode` (removed by BLZ-254; it now reads no `cfg` field at all)".
-- `scripts/ci/smoke.sh:22`: `printf '{"key":"OBA","projects":["OBA"]}\n' > data/blaze.config.json`.
-- Both fixtures: delete the `"commitMode": …` line (and the trailing comma it leaves on the line above).
+   ```js
+     if (file && file.commitMode !== undefined) warnCommitModeIgnored();
+   ```
 
-- [ ] **Step 3: Every other test config.** Run `rg -ln 'commitMode|BLAZE_COMMIT_MODE' tests`. After Tasks 1–6, the expected remaining files are `tests/new-runner.test.mjs`, `tests/link-runner.test.mjs`, `tests/runner-flag-guard.test.mjs`, `tests/cli-key-refusal.test.mjs`, `tests/board-gate.test.mjs`, `tests/import-runner.test.mjs`, `tests/model/import-lock.test.mjs` and `tests/reconcile-feed-truth-oracle.test.mjs` (plus any the earlier tasks left).
-- Delete `commitMode` from every config those files write.
-- Delete any `BLAZE_COMMIT_MODE` they set.
-- Leave comments that only describe history, with `(removed by BLZ-254)` appended.
+   and after `const cfg = { ...DEFAULTS, ...file };` add `  delete cfg.commitMode;   // BLZ-254: ignored, never carried`.
+4. Replace `  if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;` (`:305`) with `  if (env.BLAZE_COMMIT_MODE !== undefined) warnCommitModeIgnored();   // BLZ-254: ignored`.
+5. Add the helper beside the flag:
 
-`board-gate.test.mjs:30` lists `commitMode` among the real board's keys. Remove it from the list and add "(commitMode was removed from the real board's config by BLZ-254)". Afterwards `rg -n 'commitMode' tests --glob '!**/*.md'` prints only comment lines.
+   ```js
+   function warnCommitModeIgnored() {
+     if (commitModeWarned) return;
+     commitModeWarned = true;
+     process.stderr.write(`${COMMIT_MODE_WARNING}\n`);
+   }
+   ```
+6. BLZ-461 comment (`:273`): "`move-runner.mjs` reads `cfg` only for `cfg.commitMode`" becomes "read `cfg` only for `cfg.commitMode` (ignored since BLZ-254; it now reads no `cfg` field at all)".
+7. **Seam check.** `config.mjs` is `*`-allowlisted in seam-closure's `ALLOWED` (a registry, `:96`) and is not in `WRITE_MAP`'s pinned exports. If `tests/model/seam-closure.test.mjs` pins `config.mjs`'s export list anywhere (`grep -n '"config.mjs"' tests/model/seam-closure.test.mjs`), adding the export is an **additive** seam change, which this plan's constraint forbids. In that case, do not export the reset seam: drop `__resetCommitModeWarningForTests`, and rely on the subprocess-per-case tests above, which need no seam.
+
+`scripts/ci/smoke.sh:22`: `printf '{"key":"OBA","projects":["OBA"]}\n' > data/blaze.config.json`, so the smoke run is warning-free.
+
+- [ ] **Step 3: Test configs that set the key only to pick a commit mode.** Run `rg -ln 'commitMode|BLAZE_COMMIT_MODE' tests`. In each file that writes `commitMode` into a scratch config purely to choose a mode, which no longer means anything (expected after Tasks 1–6: `tests/new-runner.test.mjs`, `tests/link-runner.test.mjs`, `tests/runner-flag-guard.test.mjs`, `tests/cli-key-refusal.test.mjs`, `tests/import-runner.test.mjs`, `tests/model/import-lock.test.mjs`, `tests/reconcile-feed-truth-oracle.test.mjs`), delete the key so their runs are warning-free. Any test that asserts an **empty stderr** on such a board would otherwise fail on the warning, and those are found the same way. Leave the two fixtures, `tests/config.test.mjs:285` and `tests/board-gate.test.mjs`'s description untouched: they are deliberately the "real board still carries it" shape.
 
 - [ ] **Step 4: Docs.**
-- `docs/schema-versioning.md`:
-  - The window table: `SCHEMA_VERSION` | `3`.
-  - After the "Version 2 shipped with its migration path" bullet, add: "- **Version 3 (BLZ-254) removed `commitMode`** (and its `BLAZE_COMMIT_MODE` override). The board no longer commits, so the key had nothing left to choose. The migration is the same as version 2's: delete the key. The refusal names it."
-- `docs/guide/schema.md`: delete the `commitMode` row (`:110`) and the `"commitMode": "batch",` line of the example (`:130`).
-- `AGENTS.md`: the Configuration paragraph's key list drops `commitMode`; the BLZ-461 paragraph's "`move-runner.mjs` reads `cfg` only for `cfg.commitMode`" becomes "read … (removed by BLZ-254)"; "(currently `1..1`)" becomes "(currently `1..3`)".
+- `docs/guide/schema.md:110`: the `commitMode` row becomes "`commitMode` | **Ignored since 0.9.0** (BLZ-254): the board never commits. Loading warns once; remove it." Delete the `"commitMode": "batch",` line from the example (`:130`).
+- `docs/schema-versioning.md`, after the "Version 2 …" bullet: "- **`commitMode` (BLZ-254, 0.9.0) is ignored, not removed.** The board no longer commits, but a config that still sets the key must keep loading (a refusal would crash-loop a deployed board), so `loadConfig` warns once and ignores it. `SCHEMA_VERSION` therefore stays 2: no config that loaded before fails to load now."
+- `AGENTS.md`:
+  - The Configuration paragraph drops `commitMode` from the key list.
+  - The BLZ-461 paragraph's "reads `cfg` only for `cfg.commitMode`" becomes "read … (ignored since BLZ-254)".
+  - "(currently `1..1`)" becomes "(currently `1..2`)".
 
 - [ ] **Step 5: Run, commit.**
 
 ```bash
-node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/config*.test.mjs tests/model/schema-config.test.mjs tests/schema-version-*.test.mjs tests/board-gate.test.mjs tests/compat-legacy.test.mjs tests/cli-key-refusal.test.mjs tests/schema-fail-loud-on-load.test.mjs tests/config-key-validation.test.mjs
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/config*.test.mjs tests/model/schema-config.test.mjs tests/schema-version-*.test.mjs tests/board-gate.test.mjs tests/compat-legacy.test.mjs tests/cli-key-refusal.test.mjs tests/model/seam-closure.test.mjs
 npm test 2>&1 | tail -9
-git add scripts/model/schema-version.mjs scripts/config.mjs scripts/ci/smoke.sh tests/fixtures/board-gate-real-shape/blaze.config.json \
-  tests/fixtures/legacy-board/blaze.config.json tests/config.test.mjs tests/model/schema-config.test.mjs \
-  $(git diff --name-only -- tests) docs/schema-versioning.md docs/guide/schema.md AGENTS.md
-git commit -m "BLZ-687: commitMode is a removed config key; SCHEMA_VERSION 3 (spec §5.5, BLZ-298's rule)"
+git add scripts/config.mjs scripts/ci/smoke.sh tests/config-commitmode-ignored.test.mjs tests/config.test.mjs \
+  $(git diff --name-only -- tests) docs/guide/schema.md docs/schema-versioning.md AGENTS.md
+git commit -m "BLZ-687: commitMode is ignored with a one-time warning — the board never commits (spec §5.5)"
 ```
-
-The docs table at `docs/schema-versioning.md:20` is pinned by `"BLZ-356: the documented SCHEMA_VERSION matches the constant"`. That test going green is the check.
 
 ---
 
@@ -2080,7 +2137,7 @@ them with a queue or a lock.
 ```markdown
 ## Addendum (2026-10-13, BLZ-687) — the tree moves to 0.9.0, unpublished
 
-BLZ-254's PR D removes `blaze commit` and `blaze publish` and the configuration key `commitMode` —
+BLZ-254's PR D removes `blaze commit` and `blaze publish` (and makes the configuration key `commitMode` inert) —
 a breaking change, which in 0.x moves the minor. The tree is therefore **0.9.0**. It is **not
 published as `@hjr15/blaze-board`**: the freeze at 0.8.0 above stands, and 0.8.0 (cut before
 PR D merged) is the last release with the git-commit workflow. 0.9.0 names the engine tree and
@@ -2121,10 +2178,11 @@ In `docs/guide/why-blaze.md`, after "**`@hjr15/blaze-board` is frozen at 0.8.0**
      shrinks to `reconcile-apply-report.mjs`;
    - "the board never commits" covers reconcile's own commit, the supervisor's commit-outcome
      feed, import's staging and `blaze sprint`;
-   - `commitMode` becomes a removed config key (`SCHEMA_VERSION` 3), and `BLAZE_COMMIT_MODE` is
-     refused — so the deployed ConfigMap and blaze-pm's `blaze.config.json` drop the key before
-     PR D merges;
-   - the fs groomer's and `blaze migrate`'s own commits are not in the table and stay;
+   - `commitMode` (and `BLAZE_COMMIT_MODE`) is ignored with a one-time warning rather than refused
+     (operator ruling 2026-10-18), so a config that still carries it keeps loading; `SCHEMA_VERSION`
+     stays 2;
+   - the fs groomer's and `blaze migrate`'s own commits are not in the table, stay in PR D, and are a
+     follow-up ticket under BLZ-254;
    - the tree is 0.9.0, unpublished (ADR-0008's addendum).
 4. **§5.6, `build_matrices.py`.** Its retirement is a blaze-pm data-repo step, done by the board
    operator after cutover (delete the script and its test, regenerate the matrices with
@@ -2149,7 +2207,7 @@ What each must say after the edit:
     Since 0.9.0 (BLZ-254) no `blaze` verb, no `/api/*` write and no `reconcile --apply` commits,
     stages or queues anything. On a file board the verbs change `projects/` and stop; commit the
     changes yourself, scoped as you like. `blaze commit`, `blaze publish` and the `commitMode`
-    key are gone. The verbs are refused by name, the key is refused at load, and the last release
+    key are gone. The verbs are refused by name, the key is ignored with a one-time warning, and the last release
     that has them is `@hjr15/blaze-board@0.8.0`. The fs groomer loop (`blaze start`) still commits
     its own grooms, and `blaze migrate` its one-shot import.
 
@@ -2254,7 +2312,7 @@ Expected test count: the baseline 5,432, minus the deleted files' tests, plus th
   Adjudicate the findings with `adjudicate-reviewer-findings-against-ground-truth`.
 
 - [ ] **Step 3: The PR (draft), never merged by this plan.** Push the branch and open a **draft** PR titled `BLZ-687: retire the git ceremony (BLZ-254 PR D)`. The body:
-  - a **Breaking** section (`blaze commit`/`blaze publish` removed; `commitMode`/`BLAZE_COMMIT_MODE` refused; `SCHEMA_VERSION` 3; the server's 200 body drops `committed`/`queued`; reconcile's result drops `committed`/`commitOutcome`/`commitError`; import's result drops `staged`/`commit`; version 0.9.0, unpublished);
+  - a **Breaking** section (`blaze commit`/`blaze publish` removed; `commitMode`/`BLAZE_COMMIT_MODE` ignored with a one-time warning; the server's 200 body drops `committed`/`queued`; reconcile's result drops `committed`/`commitOutcome`/`commitError`; import's result drops `staged`/`commit`; version 0.9.0, unpublished);
   - the baseline and final test counts;
   - the deleted-test list with reasons;
   - the seam-closure ledger;
@@ -2304,8 +2362,21 @@ In each, the target wording is given and the grep is the completeness check, not
 - Every test file that imports a module deleted in Task 6 is listed in Task 6 Step 4, and found by the `rg -ln` there.
 - `tests/temp-cleanup-guard.test.mjs` reads `commit-settled-drain.test.mjs` by name, so it is handled in Task 5.
 
-## Open questions for the operator
+## Post-merge checklist (after PR D merges at cutover step 6)
 
-1. **0.8.0 publish timing (merge gate 5).** npm's latest is still 0.7.0. Should BLZ-674's 0.8.0 be published from `3a0ac78` (or later pre-D `main`) before PR D merges, or skipped?
-2. **`commitMode` as a hard refusal (Finding 5, Task 7).** This follows BLZ-298's precedent and bumps `SCHEMA_VERSION` to 3. It requires the ConfigMap and blaze-pm's config to drop the key before PR D's image deploys (merge gate 4). The alternative is to accept and ignore the key, which keeps the pod safe if the ConfigMap lags but breaks BLZ-298's rule. The plan takes the refusal.
-3. **The fs groomer's and `blaze migrate`'s own commits (Finding 6).** They are outside §5.5's table and are kept. Should "the board never commits" extend to them in a follow-up ticket?
+1. **Drop `commitMode` from the two configs that still carry it.** Until then, the pod logs one warning per process.
+   - The service-platform ConfigMap (`deploy/apps/blaze/chart/templates/configmap.yaml`): a service-platform PR, which can ride with C2.
+   - blaze-pm's `blaze.config.json` on the authoritative tree: a board-operator data-repo step, never pushed.
+   - Check: `git -C <service-platform> show origin/main:deploy/apps/blaze/chart/templates/configmap.yaml | grep -c commitMode` prints `0`, and the pod's log has no `commitMode is ignored` line after its next restart.
+2. Task 10 (matrices header) runs once the board operator retires `build_matrices.py` in blaze-pm.
+
+## Out of scope / follow-ups
+
+- **Ticket to file under BLZ-254 (the coordinator files it):** "The fs groomer's and `blaze migrate`'s own git commits". `scripts/loops/groomer.mjs:712-713` commits each fs groom behind BLZ-347's containment, and `scripts/migrate-runner.mjs:77-85` commits a one-shot Jira import. Neither was in spec §5.5's table, so PR D keeps both. The ticket decides whether "the board never commits" extends to them.
+- The service-platform side (`blaze-flush`, its ConfigMap and values, ADR 0017 superseded) is the C2 PR.
+
+## Operator rulings (2026-10-18), applied
+
+1. 0.8.0 is published from `main` before PR D merges (BLZ-674). That is merge gate 5.
+2. `commitMode` is ignored with a one-time warning, not refused, and `SCHEMA_VERSION` stays 2 (Task 7, Finding 5).
+3. The groomer and migrate commits are out of scope for PR D and recorded as a follow-up above.
