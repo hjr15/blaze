@@ -13,8 +13,8 @@
 //     ONCE ANY TICKET HAS BEEN WRITTEN, NO LATER FAILURE MAY EXIT ANYTHING
 //     BUT 4.
 //
-// It covers ticket writes, reservations, claims, STAGING and RECEIPT APPENDS
-// alike. That is why the whole write loop and the staging call sit inside one
+// It covers ticket writes, reservations, claims and RECEIPT APPENDS alike (and,
+// until BLZ-254 removed it, STAGING). That is why the whole write loop sits inside one
 // `try` whose catch consults `boardChanged` — an uncaught throw from a
 // per-row `appendRegularFileSync` on ENOSPC would otherwise exit 1, which
 // §5.1 declares means "unchanged — nothing written".

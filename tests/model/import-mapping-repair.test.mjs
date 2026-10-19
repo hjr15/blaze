@@ -448,11 +448,13 @@ describe("`blaze import repair` refusals, before any write", () => {
 
   test("BLZ-254: repair --apply writes its records and stages nothing", async (t) => {
     const { root } = await crashedAtRowTwo(t);
+    const ticketsBefore = tickets(root);
     const r = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root, apply: true,
     });
     assert.equal(r.exitCode, 0, r.report);
     assert.equal(mapLines(root).length, 2, "the writes landed");
+    assert.deepEqual(tickets(root), ticketsBefore, "§4.3: `repair` never writes a ticket");
     assert.match(r.report, /^repaired \d+ row\(s\)$/m);
     assert.doesNotMatch(r.report, /queued|commit|STAGING/i, "the trailer claims nothing about git");
   });

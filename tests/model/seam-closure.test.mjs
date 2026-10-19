@@ -2138,8 +2138,7 @@ const WRITE_ALLOWED = new Map([
   // one `planImport`, two readers (§4.5), and `repair` writes records only.
   // BLZ-640 adds `withImportLock`, which the runner wraps all three verbs in
   // under `--apply` — the seam design §8 item 8 puts the lock at.
-  // BLZ-670: the apply path resolves both ports (resolvePorts) and hands `stageFor(mode)` in as
-  // the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.
+  // BLZ-670: the apply path resolves both ports (resolvePorts); repair resolves a reader only (resolveReadStorage, inert).
   // BLZ-254: stageFor removed — import stages nothing (spec §5.5).
   ["import-runner.mjs",
     ["resolvePorts", "runImport", "runMappedImport", "runRepair", "withImportLock"]],

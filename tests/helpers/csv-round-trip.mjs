@@ -50,8 +50,7 @@ export async function importInto({ csvPath, B }) {
     projectsDir: join(B, "projects"),
     dataRoot: B,
     apply: true,
-    // Staging is §5.4's concern and is tested in tests/model/import-apply.test.mjs;
-    // a git tree here would only add a failure mode to a gate about data.
+    // BLZ-254: an import stages nothing, so no git tree is needed here.
   });
 }
 

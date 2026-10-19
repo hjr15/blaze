@@ -1010,7 +1010,7 @@ a **separate process** and a monkey-patch in the parent reaches nothing inside i
 `execSync`, `execFile` and `fork`.
 
 **The property is narrower and truer than "no spawn": NO AGENT COMMAND IS EXECUTED.** "No spawn"
-is simply false for a correct importer — staging shells out to `git`, and `transitions.mjs:62`
+is simply false for a correct importer — staging used to shell out to `git` (removed by BLZ-254), and `transitions.mjs:62`
 spawns one too. What must never happen is that the *configured agent command* runs on the import
 path.
 
@@ -1735,9 +1735,9 @@ a different receipt shape, not this one with a `BEGIN` in front.
 **Reads, since BLZ-670.** The board `import` reads to decide create/update/skip come from the
 database in `db` mode, per
 [ADR-0038](../decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md); this section's
-atomicity claim is about the *write* side only and is unchanged by that. What `import` commits to
-git in `db` mode is unchanged too: only its receipt and the source-id map, never the ticket
-writes themselves — see §5.4.
+atomicity claim is about the *write* side only and is unchanged by that. What `import` writes as
+files in `db` mode is unchanged too: only its receipt and the source-id map, never the ticket
+writes themselves (BLZ-254: written, never staged — see §5.4).
 
 ### 5.4 Staging
 
@@ -1921,8 +1921,8 @@ therefore also where help, the `BLAZE_READONLY` gate and the description come fr
 `propose-mapping` and `repair` are **subcommands of `import`**, not top-level verbs, so both
 inherit the `mutates: true` gate: `propose-mapping` writes a mapping file, and `repair` — the
 inspection path, §5.3 — writes, under `--apply` only, up to **five** records (`<receipt>.corrupt`,
-`<map>.corrupt`, the truncated map, the pair, the `resolved`) and stages them through
-`commitOrQueue` (§5.4). Neither adds an entry to `SUBCOMMANDS`; `import-runner.mjs` dispatches on its
+`<map>.corrupt`, the truncated map, the pair, the `resolved`) and writes them as files
+(BLZ-254: never staged — §5.4). Neither adds an entry to `SUBCOMMANDS`; `import-runner.mjs` dispatches on its
 first argument — `repair` in-process, `propose-mapping` by spawning `import-mapping-runner.mjs`
 the way `cli.mjs:9` spawns a runner, so the proposer stays out of `import-runner.mjs`'s static
 graph and §4.3's surviving assertion holds. `repair` is not called `resolve` because

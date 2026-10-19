@@ -164,9 +164,9 @@ async function main() {
   }
 
   // BLZ-121 defence-in-depth, hoisted before any write for the same reason
-  // new-runner.mjs hoists it: the apply writes claims and tickets before it
-  // ever reaches commitOrQueue's own guard, so gating only there would leave
-  // a written-but-uncommitted tree. Only for `--apply` — a dry run writes
+  // new-runner.mjs hoists it: the apply writes claims and tickets, so the refusal has to come
+  // before the first write. BLZ-254: this is now the runner's ONLY BLAZE_READONLY guard —
+  // commitOrQueue's own guard, which used to sit behind it, was removed by BLZ-254. Only for `--apply` — a dry run writes
   // nothing and is a legitimate thing to run under BLAZE_READONLY.
   if (opts.apply) {
     try {
@@ -181,7 +181,7 @@ async function main() {
   // taken around the CALL is a lock taken before all four, which is where §8
   // item 8 puts it ("before the prune and the exit-5 check, since those are
   // what a second run must not race past"). It is held until the verb returns,
-  // which is until staging has returned.
+  // which is until the last write has returned (staging, removed by BLZ-254, used to follow it).
   //
   // ONLY UNDER `--apply`: a dry run writes nothing, opens no record and is a
   // legitimate thing to run against a board mid-import. The lock guards the
