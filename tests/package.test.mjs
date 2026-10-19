@@ -18,17 +18,19 @@ test("package identity", () => {
   assert.equal(pkg.engines?.node, ">=24", "engine floor matches the tested Node line — node:sqlite needs 24 (BLZ-264)");
 });
 
-// BLZ-674. npm already holds a 0.7.0 cut BEFORE BLZ-131's squash-body reconcile landed, and a
-// registry never accepts the same version twice — so the fix reaches blaze-pm only under a NEW
-// version. The publish itself is an operator step after merge; this pins what it will publish.
-test("BLZ-674: the next publish is 0.8.0, and it carries BLZ-131's squash-body reconcile", async () => {
-  assert.equal(pkg.version, "0.8.0");
+// BLZ-674 cut 0.8.0 as the LAST @hjr15/blaze-board release (ADR-0008's addendum). BLZ-687
+// (BLZ-254 PR D) removes `blaze commit` and `blaze publish` — breaking, so the minor moves — and
+// the tree becomes 0.9.0, which is NOT published under this name: the line stays frozen at 0.8.0.
+test("BLZ-687: this tree is 0.9.0 — the git ceremony is gone, and 0.8.0 stays the frozen release", async () => {
+  assert.equal(pkg.version, "0.9.0");
   const lock = JSON.parse(readFileSync(join(REPO, "package-lock.json"), "utf8"));
-  assert.equal(lock.version, "0.8.0", "package-lock.json's top-level version must move with it");
-  assert.equal(lock.packages[""].version, "0.8.0", "…and its root package entry");
+  assert.equal(lock.version, "0.9.0", "package-lock.json's top-level version must move with it");
+  assert.equal(lock.packages[""].version, "0.9.0", "…and its root package entry");
+  assert.equal(pkg.scripts.commit, undefined, "the `npm run commit` script ran the deleted commit-runner");
+  assert.match(pkg.scripts.prepublishOnly, /not published/);
   const { idsFromCommitMessage } = await import("../scripts/reconcile.mjs");
   assert.deepEqual(idsFromCommitMessage("BLZ-675: x (#9)\n\n* BLZ-674: y\n* BLZ-678: z", "BLZ"),
-    ["BLZ-675", "BLZ-674", "BLZ-678"], "a bundled squash recovers every child");
+    ["BLZ-675", "BLZ-674", "BLZ-678"], "a bundled squash still recovers every child");
 });
 
 // BLZ-474 / ADR-0028: the `docs/` assertion below is LOAD-BEARING, not incidental tidiness.

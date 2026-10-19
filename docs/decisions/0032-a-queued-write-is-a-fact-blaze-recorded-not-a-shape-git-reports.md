@@ -1,6 +1,6 @@
 # ADR-0032 — a queued write is a fact blaze recorded, not a shape git reports
 
-- **Status:** Accepted
+- **Status:** Superseded (2026-10-13, BLZ-254): the pending ledger, `blaze commit` and the commit path this decides are deleted — see ADR-0006's BLZ-254 addendum
 - **Date:** 2026-08-29
 - **Deciders:** Ryan Howman
 - **Tickets:** BLZ-432 (the cross-pass design question), BLZ-499 (the surface this decision calls

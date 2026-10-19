@@ -90,3 +90,24 @@ surfaced on the metrics view rather than buried.
   Postgres and no config.
 - This repo's own ADRs stay in `docs/decisions/` and stay readable without the
   board.
+
+## Addendum (2026-10-13, BLZ-254) — concurrent writers need db mode; fs is single-machine
+
+This ADR is still *Proposed*. BLZ-254 does not accept it whole, and it does not retire files. The
+operator's decision D1 (2026-10-05, BLZ-254 spec §2) splits the product in two:
+
+- **db mode (`BLAZE_WRITE_PORT=db`) is the multi-machine mode.** The live board runs it. Ids come
+  from `project_counter`'s transactional allocate; a second machine writes over HTTP (`blaze`
+  remote mode, `POST /api/*` with a bearer token). This is the only supported way for two
+  writers — two sessions, two machines, an agent and a person — to share one board.
+- **fs mode is a supported single-machine mode, on a git working tree.** `blaze new`'s reservation needs one (`ids.mjs`: "is not inside a git worktree — cannot reserve ticket ids safely", review M7). It keeps its allocator (`ids.mjs`,
+  `claims.mjs`, ADR-0005) and nothing else of the git era: since 0.9.0 the board **never
+  commits**. `blaze commit`, `blaze publish`, `commitMode`, the pending ledgers, the commit lock
+  and the server's per-click commit are deleted (BLZ-254 §5.5). The person who owns an fs board
+  versions its files with git themselves, when and how they choose. (The fs groomer loop and
+  the one-shot `blaze migrate` still commit their own changes; they were outside §5.5's table.)
+
+Running an fs board with more than one concurrent writer is unsupported. The failures that
+motivated this ADR — a ticket in two status directories, one id minted twice in two trees — are
+exactly what such a board can still produce, and nothing in the engine now tries to paper over
+them with a queue or a lock.

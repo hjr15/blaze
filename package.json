@@ -1,6 +1,6 @@
 {
   "name": "@hjr15/blaze-board",
-  "version": "0.8.0",
+  "version": "0.9.0",
   "description": "A file-based, git-native issue board that AI coding agents can drive. Tickets are markdown; status is the directory.",
   "keywords": [
     "issue-tracker",
@@ -29,6 +29,7 @@
     "README.md"
   ],
   "scripts": {
+    "prepublishOnly": "node -e \"console.error('blaze: 0.9.0 is not published as @hjr15/blaze-board (ADR-0008 addendum); the next publish is the @hjr15/blaze rename'); process.exit(1)\"",
     "start": "node scripts/supervisor.mjs",
     "board": "node scripts/serve.mjs",
     "reconcile": "node scripts/reconcile.mjs",

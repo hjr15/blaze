@@ -71,10 +71,8 @@ blaze reconcile --project BLZ,INF --apply
 ```
 
 Without it, every configured project reconciles, exactly as before. The point is
-blast radius: `--apply` writes ticket files directly, then commits every file it
-touched the same way every other mutating verb does (or queues them for `blaze
-commit`, under `commitMode: "batch"` — see "Commit modes" in AGENTS.md), so a
-session that owns three tickets would otherwise author a commit moving fifteen it
+blast radius: `--apply` writes ticket files directly, and leaves them in the working tree (the board itself never commits since BLZ-254), so a
+session that owns three tickets would otherwise move fifteen it
 never looked at. An unknown key is refused outright — it does
 not quietly reconcile nothing, which would be indistinguishable from an in-sync
 board — and every run says which projects it scanned, so a narrowed run cannot be
@@ -356,7 +354,7 @@ The third row was **2** at `blaze-pm` `bd1d151d` (131 commits, an ancestor of
 `ff5f36c2`); `BLZ-259` joined it when `e3beaec3` landed. Quote this table with its sha or
 it is not reproducible.
 
-`blaze`'s own batch commits write their ledger as `- <KEY>-<n>: <board op>`, so
+`blaze commit` (removed by BLZ-254) wrote its ledger as `- <KEY>-<n>: <board op>`, and those commits remain in board histories, so
 "moved a ticket" and "edited its labels" read as delivery under the loosest rule. That
 is BLZ-130's failure — the board saying shipped when it is not — arriving through the
 other door, and it is why neither condition was dropped as redundant.
@@ -399,13 +397,7 @@ healthy pass, so a condition that returns after you fix it is reported again.
 
 ## Commit model
 
-By default (`commitMode: "per-op"`) every mutating verb commits immediately,
-scoped to only the files it touched — one ticket created, one commit. Opt into
-`commitMode: "batch"` to queue ops instead and flush them with `blaze commit`;
-`BLAZE_SESSION` keys the queue so parallel sessions (multiple agents, multiple
-terminals) don't collide. Detail on both modes, and on running several agents
-against one board at once, lives in [`commands.md`](commands.md) and
-[`driving-with-an-ai-agent.md`](driving-with-an-ai-agent.md).
+No verb commits (BLZ-254); version the board's files yourself.
 
 ---
 

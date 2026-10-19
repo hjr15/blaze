@@ -55,9 +55,9 @@ blaze new --project ENG --type task "Fix the export bug" --estimate 30
 `task`, `story`, and `bug` all require `--estimate` (minutes, rounded to the
 nearest 5) — there's no such thing as an unestimated unit of delivery work in
 Blaze. The command allocates the next id (`ENG-1`), writes a schema-valid
-ticket file into `projects/ENG/defined/`, and commits it.
+ticket file into `projects/ENG/defined/`. It does not commit.
 
-You should see a new commit and a new file. Every ticket `new` creates gets
+You should see a new file (`git status` shows it untracked). Every ticket `new` creates gets
 the same scaffolded body — `## Context`, `## Acceptance Criteria` with one
 empty checkbox, and `## Notes` — for you or your agent to fill in.
 
@@ -122,7 +122,7 @@ projects/ENG/defined/ENG-1-fix-the-export-bug.md
   → projects/ENG/in-progress/ENG-1-fix-the-export-bug.md
 ```
 
-— and commits the move. Refresh the board and `ENG-1` has jumped columns,
+— and stops there; it does not commit. Refresh the board and `ENG-1` has jumped columns,
 because the column is nothing but a directory listing.
 
 Log time against it as you work:
@@ -132,7 +132,7 @@ blaze log ENG-1 45
 ```
 
 This appends a worklog entry (minutes rounded to the nearest 1) to the ticket
-file and commits.
+file.
 
 ## Step 6 — close it (optional)
 

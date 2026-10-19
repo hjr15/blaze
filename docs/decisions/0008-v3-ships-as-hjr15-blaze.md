@@ -80,3 +80,13 @@ gets **one more release, 0.8.0** — a minor, because it also carries the databa
 (`blaze db load`/`verify`, `blaze matrices`, `blaze audit --fail-on`). The freeze moves to
 0.8.0 on the same terms: the rename decision above is unchanged, and so is the promise that an
 existing user is not upgraded by accident.
+
+## Addendum (2026-10-13, BLZ-687) — the tree moves to 0.9.0, unpublished
+
+BLZ-254's PR D removes `blaze commit` and `blaze publish` (and makes the configuration key `commitMode` inert) —
+a breaking change, which in 0.x moves the minor. The tree is therefore **0.9.0**. It is **not
+published as `@hjr15/blaze-board`**: the freeze at 0.8.0 above stands, and 0.8.0 (cut before
+PR D merged) is the last release with the git-commit workflow. 0.9.0 names the engine tree and
+the image built from it; the next npm publish is the `@hjr15/blaze` rename this ADR decides.
+The bump exists so that a publish from `main` can never ship the breaking tree under the frozen
+version's number.

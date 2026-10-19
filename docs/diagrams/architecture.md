@@ -11,9 +11,8 @@ dispatch to thin `*-runner.mjs` wrappers around pure cores in `scripts/model/`,
 `blaze start` boots the supervisor (web board + the reconcile and groomer loops),
 and `blaze board` serves the read/write web board on its own. Every component
 reads and writes the same markdown ticket files under `projects/<KEY>/<status>/`;
-the derived `.blaze/` caches are disposable, while the pending queues hold
-queued-but-uncommitted batch ops (session-keyed since v0.4.0) and the advisory
-`commit.lock/` serializes git writes. Git is the history and the bus. The board
+the derived `.blaze/` caches are disposable. Nothing commits (BLZ-254); git is
+the history and the bus, versioned by the board's owner. The board
 is a rendering over the files, never a second source of truth.
 
 ```mermaid
@@ -23,7 +22,7 @@ flowchart TB
     subgraph Runners["CLI verbs → *-runner.mjs"]
         direction LR
         R1["new · move · edit<br/>resolve · log"]
-        R2["commit · rollup<br/>reindex · migrate"]
+        R2["rollup · reindex<br/>migrate"]
     end
 
     subgraph Sup["blaze start → supervisor.mjs"]
@@ -47,7 +46,7 @@ flowchart TB
     subgraph Data["Data repo (own git history)"]
         direction TB
         Files["projects/&lt;KEY&gt;/&lt;status&gt;/&lt;id&gt;-slug.md<br/>(source of truth)"]
-        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)<br/>pending/&lt;session&gt;.jsonl + fallback queue<br/>commit.lock/ (write coordination)"]
+        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)"]
     end
 
     CLI --> Runners
@@ -68,9 +67,7 @@ flowchart TB
 
 - **`blaze move ENG-12 in-review`** → `move-runner.mjs` calls the pure `move-plan`
   core (validates the transition against the ticket type's workflow), writes the
-  file to the new status directory, and — in `per-op` mode — commits just that
-  file; in `batch` mode it queues the op to `.blaze/pending-commit.jsonl` for a
-  later `blaze commit`.
+  file to the new status directory, and writes it; nothing is committed (BLZ-254).
 - **Dragging a card in the web board** POSTs `/api/move`; `serve.mjs` runs the same
   `move-plan` core, so the CLI and the board can never disagree on what a legal
   move is. A rejected move returns a 422 and the card snaps back — the server is

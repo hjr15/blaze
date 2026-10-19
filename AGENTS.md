@@ -4,8 +4,8 @@ Blaze is a file-based issue tracker. **A ticket's status is the directory it sit
 in** — `projects/<KEY>/<status>/<KEY>-<n>-slug.md` — there is no `status:` field, so
 it cannot drift. Any coding agent can drive it with ordinary file tools (`ls`,
 `grep`, `git mv`), or with the `blaze` CLI, which is the recommended path since it
-validates every write against the schema below and commits scoped to the files it
-touched.
+validates every write against the schema below; it does not commit (version the files
+yourself, or run the board in db mode).
 
 ## Types & workflow
 
@@ -235,8 +235,7 @@ creation time, not an ongoing constraint `blaze edit` re-checks.
 
 ## Data-root ladder
 
-The engine (this install) and the data (`blaze.config.json` + `projects/` + the git
-history tickets commit into) can live in different trees. Every command resolves
+The engine (this install) and the data (`blaze.config.json` + `projects/`) can live in different trees. Every command resolves
 roots the same way:
 
 1. `BLAZE_PROJECTS_DIR` env — an explicit `projects/` directory; the data root is
@@ -286,114 +285,25 @@ silently dropped), a `type` outside `Blocks`/`Relates`/`Duplicate`/`Cloners`, or
 a `target` that doesn't resolve to a known ticket id (dangling). Warnings are
 also stored on the index (`idx.warnings`) for any consumer that wants them.
 
-## Commit modes
+## The board does not commit
 
-`blaze.config.json`'s `commitMode` decides how CLI verbs commit:
+Since 0.9.0 (BLZ-254) no `blaze` verb, no `/api/*` write and no `reconcile --apply` commits,
+stages or queues anything. On a file board the verbs change `projects/` and stop; commit the
+changes yourself, scoped as you like. `blaze commit`, `blaze publish` and the `commitMode`
+key are gone. The verbs are refused by name, the key is ignored with a one-time warning, and the last release
+that has them is `@hjr15/blaze-board@0.8.0`. The fs groomer loop (`blaze start`) still commits
+its own grooms, and `blaze migrate` its one-shot import.
 
-- `per-op` (default) — each `new`/`move`/`log`/`resolve`/`edit`/`reconcile --apply`
-  commits immediately, scoped to exactly the file(s) it touched (never a broad
-  `git add -A`).
-- `batch` — the op is appended to a pending queue instead; run `blaze commit` to
-  flush your queue into one commit (subject = a per-op count summary, body = one
-  line per queued op).
+**One machine, one writer.** A file board is single-machine (ADR-0006's BLZ-254 addendum).
+For parallel sessions or a second machine, run the board in db mode
+(`BLAZE_WRITE_PORT=db`) and write to it over HTTP — see "Remote mode" below. Two sessions
+sharing one file board can still trample each other's working tree; use a worktree per
+session, and expect to reconcile the files by hand.
 
-### Sessions (parallel agents on one board)
-
-Sessions isolate **by default** when the caller has a session identity — you
-don't need to set anything for two agents on the same board to stay out of
-each other's way. Batch ops queue to `<store>/.blaze/pending/<session>.jsonl`, where
-`<session>` is `BLAZE_SESSION` if set, else `auto-<harness session id>` when
-the agent harness exposes one (stable across invocations and inherited by
-every descendant, unlike `process.ppid` — a fresh shell per command means a
-fresh pid, not a stable per-session identity). With neither set, there is no
-reliable identity to derive a queue name from: the op queues to the shared
-`.blaze/pending-commit.jsonl` fallback instead (see below).
-
-**The store is one per REPOSITORY, not one per working copy** (BLZ-556, ADR-0033).
-`<store>` is `.blaze/` beside the repository's shared `.git` — i.e. the main
-checkout — so every linked worktree of the board writes to and reads from the
-same queues. `blaze commit --status` prints the store it resolved on its first
-line. Before this, `.blaze/pending/` was resolved against whichever working copy
-you happened to be in, and 210 ops ended up scattered across four of them while
-the nightly flush drained the one it mounts (19) and reported success.
-
-One store means you can now SEE every worktree's ops. It does not mean you may
-commit them: an op's files exist in the checkout that queued it and nowhere else,
-so `blaze commit` drains only the ops queued in **its own** working tree, leaves
-the rest in place byte-for-byte, names which working tree they belong to, and
-exits **3**. Run `blaze commit` from that worktree to flush them. Exit 3 means
-"flushed what this tree could reach, and there is more it cannot" — distinct from
-1 (a refusal) and 2 (`--status` reporting incompletely).
-
-Every queued op records its working tree, including the main checkout, which records
-the empty string. That matters on a **detached HEAD** (rebase, bisect, `checkout
-<sha>`, a detached review worktree): no branch is recorded there, so the working tree
-is the op's only provenance, and omitting it would let any other worktree drain and
-delete the op. `blaze commit` also takes the lock on the **store** as well as on its
-own working tree, so two worktrees can never drain one queue file at the same time.
-
-If you are upgrading a board that queued ops before this change, they are still in
-each working copy's own `.blaze/` and nothing reads them there. `blaze commit`
-names them and refuses to report success. The engine never moves, merges or deletes a queue file.
-
-- `blaze commit` flushes **only your queue** — a parallel *session*'s queued WIP
-  never rides your commit, whether or not either of you set `BLAZE_SESSION`.
-  (Your own subagents are a different matter — see the queue-unit note below.)
-- `blaze commit --all` sweeps every session queue plus the shared legacy
-  fallback (end-of-day / bundler path, e.g. the deployed CronJob's
-  sole-committer run); body lines are tagged `[<session>]`. It's the
-  quiescent/end-of-day sweep: ops a session appends mid-sweep survive (each
-  queue clears exactly the bytes it read, so a late append isn't lost), but
-  prefer running it when sessions are idle. `--all` is unchanged by any of
-  this — it always drains the fallback, no `--shared` needed.
-- `BLAZE_SESSION` is purely an optional override — set it for a
-  stable/readable queue name instead of the harness-derived
-  `auto-<harness session id>`; it's never required for isolation when a
-  harness id is present.
-- **The queue's unit is the session, not the individual agent — deliberately.**
-  A harness session id is inherited by every subagent that session spawns, so a
-  session *and all its subagents* share one queue. That is the intended
-  contract: the batch unit is the session (one commit per session's batch), and
-  a parent must be able to flush ops its subagents queued — per-agent queues
-  would strand that work under an id nobody ever flushes. The trade-off to know:
-  **a subagent running `blaze commit` also flushes its siblings' in-flight ops.**
-  So treat flushing as the parent session's job (or the bundler's), never a
-  subagent's — and prefer `BLAZE_READONLY=1` for any inspection-only subagent,
-  which removes the question entirely. Give a subagent its own `BLAZE_SESSION`
-  only if you genuinely want its ops kept separate; then remember to flush that
-  queue, or `--all` will.
-- With no identity at all (neither `BLAZE_SESSION` nor a harness id), the
-  caller's "own queue" IS the shared fallback — the same file every other
-  no-identity caller reads and writes. A plain `blaze commit` then **refuses**
-  to drain it if it holds anything, naming the op count on stderr, since it
-  may hold another session's work. Pass `--shared` to drain it deliberately,
-  or set `BLAZE_SESSION` for a queue of your own. If the fallback is empty,
-  it's just the ordinary "nothing to flush" — not an error.
-- `--shared` names the **fallback**, not "my own queue, wherever that
-  resolves to": `blaze commit --shared` drains ONLY
-  `.blaze/pending-commit.jsonl`, unconditionally — even when the caller also
-  has a real session identity (`BLAZE_SESSION` or a harness id), in which
-  case the caller's own per-session queue is left untouched. It is the
-  deliberate-drain escape hatch for the fallback specifically, not a synonym
-  for "flush whatever is mine."
-- A session id that no longer resolves to the same queue (e.g. `BLAZE_SESSION`
-  changed between runs) orphans whatever was still queued under the old name —
-  `blaze commit` then reports "nothing to flush" but hints at the orphaned
-  queue by name and count on stderr; `--all` recovers it.
-
-Concurrent commits serialize on an advisory `.blaze/commit.lock/` (stale locks
-from dead processes are stolen automatically). If your flush is behind an
-already-fetched `origin/main`, `blaze commit` warns — rebase before publishing;
-the engine itself never pushes.
-
-Working-tree cross-talk is tolerated by design: sessions sharing one checkout
-see each other's on-disk ticket moves in `git status` until the owning session
-flushes. Use a git worktree per session when you need hard isolation.
-
-### Read-only mode
+## Read-only mode
 
 `BLAZE_READONLY=1` makes `blaze` refuse every mutating subcommand
-(`new`/`move`/`edit`/`link`/`resolve`/`log`/`commit`/`reindex`/`sprint`/
+(`new`/`move`/`edit`/`link`/`resolve`/`log`/`reindex`/`sprint`/
 `reconcile`/`groom`/`start`, and `matrices` unless `--check`) at dispatch — it exits non-zero naming the
 command and the env var, and never spawns the runner, so nothing is written.
 `board` and `rollup` are unaffected, and any `--help` still works — the point
@@ -422,7 +332,7 @@ When the board lives on a server — a deployed `blaze board`, typically on Post
 **both** `BLAZE_REMOTE_URL` (the server's origin, `https://…`) and `BLAZE_TOKEN` (a `member`
 API token from `blaze user add`). Then `blaze new`, `move`, `edit`, `resolve`, `log` and `link`
 take the same arguments as locally but run on the server, over HTTP, and print one line ending
-`(remote: <origin>)`. Nothing is written locally, so there is no worktree, commit or queue to
+`(remote: <origin>)`. Nothing is written locally, so there is no worktree to
 manage, and two agents on two machines creating tickets at once get distinct ids. Remote
 `blaze new` needs a **db-mode** board (`BLAZE_WRITE_PORT=db` on the server): on a file board
 the server refuses it `409`, because file ids come from git and are single-machine.
@@ -512,7 +422,7 @@ of truth, full CLI/`grep` parity preserved:
   description, a full frontmatter table, parent breadcrumb + children list, and
   links. Served (escaped) by **`GET /api/panel?id=<KEY-n>`** → the panel-content
   HTML (`scripts/views/panel-content.mjs`); 404 JSON for an unknown id. AC
-  checkboxes in the panel toggle via the existing commit-on-edit `/api/ac` path.
+  checkboxes in the panel toggle via `/api/ac`.
   `window.blazePanel.open(id)` / `.close()` is the shared seam other views (map
   node-click, field editing) build on.
 - **Inline field editing** — the panel's Fields table and title heading are
@@ -523,7 +433,7 @@ of truth, full CLI/`grep` parity preserved:
   `applyEdit` (what it accepts) — no field the UI offers can be one the server
   rejects. `id`/`type`/`status`/`resolution`/`project`/dates are always
   read-only; status/resolution only change via drag/move + resolve. An edit
-  commits through the same commit-on-mutation path as move/log/resolve.
+  writes through the same path as move/log/resolve.
 
 ## Grooming rules
 
@@ -567,8 +477,8 @@ message on any stream. Only an unset `BLAZE_KEY` means "no override".
 
 The refusal is **defensive, not a fix for a misbehaving verb** (BLZ-461). An earlier
 version of this paragraph said an unset shell variable made `blaze move` run "against a
-different board than it asked for", and that does not reproduce: `move-runner.mjs` reads
-`cfg` only for `cfg.commitMode` (ignored since BLZ-254), and `blaze new`'s prefix comes from `--project`, not
+different board than it asked for", and that does not reproduce: `move-runner.mjs` reads no
+value from `cfg` at all (it calls `loadConfig` only as the schema guard; its one use, `cfg.commitMode`, was removed by BLZ-254), and `blaze new`'s prefix comes from `--project`, not
 `cfg.key`. `cfg.key`'s derived matchers have exactly one consumer in the engine —
 `scripts/loops/groomer.mjs`'s legacy flat-layout branch, which is reachable only on a board
 whose status directories sit at the repo root, never on the `projects/<KEY>/<status>/`

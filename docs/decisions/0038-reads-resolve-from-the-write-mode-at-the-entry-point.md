@@ -92,7 +92,7 @@ board click in `db` mode says nothing rather than "the file already matched HEAD
 **This decides staging, not deletion.** `stageFor(mode)` makes `db`-mode writes stop corrupting
 the git tree; it does not decide whether `commit-or-queue.mjs` itself is deleted once the
 filesystem seam is gone. That stays BLZ-254's explicit decision — this ADR only makes the current
-staging code behave correctly under a mode it was never written for.
+staging code behave correctly under a mode it was never written for. BLZ-254 decided it: `commit-or-queue.mjs` and `stageFor` are deleted, and no write mode stages anything (2026-10-13).
 
 One more `db`-mode consequence follows from the same handle problem: `blaze schedule
 migrate-dates --write` rewrites ticket files directly through `fsStorage`, so in `db` mode it now

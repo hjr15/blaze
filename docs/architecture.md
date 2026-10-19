@@ -31,7 +31,7 @@ flowchart TB
     subgraph Runners["CLI verbs → *-runner.mjs"]
         direction LR
         R1["new · move · edit<br/>resolve · log"]
-        R2["commit · rollup<br/>reindex · migrate"]
+        R2["rollup · reindex<br/>migrate"]
     end
 
     subgraph Sup["blaze start → supervisor.mjs"]
@@ -55,7 +55,7 @@ flowchart TB
     subgraph Data["Data repo (own git history)"]
         direction TB
         Files["projects/&lt;KEY&gt;/&lt;status&gt;/&lt;id&gt;-slug.md<br/>(source of truth)"]
-        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)<br/>pending/&lt;session&gt;.jsonl + fallback queue<br/>pending/&lt;session&gt;.corrupt (quarantined unparseable lines)<br/>commit.lock/ (write coordination)"]
+        Caches[".blaze/ — index.json · transitions.json<br/>activity.jsonl (derived, disposable)"]
     end
 
     CLI --> Runners
