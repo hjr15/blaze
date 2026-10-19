@@ -25,13 +25,6 @@ function boardWith(tickets, claims) {
   return { root, projects };
 }
 
-// Hole: a ticket committed without its claim — by hand, or because a merge
-// strategy auto-resolved the claim away — merges as silently as it did before.
-// BLZ-274 / ADR-0009 moved this check OUT of buildIndex and into the reindex runner:
-// it reads the id-claims ledger off disk, so leaving it in the pure index made a
-// filesystem-fed and a database-fed index return different `errors` arrays. The
-// protection is unchanged — only where it is invoked. This test now asserts it where
-// it lives, which is also closer to the behaviour that matters (reindex refusing).
 // `git merge -X theirs` auto-resolves the claim conflict and leaves BOTH ticket
 // files. Layer 2 alone cannot stop that, so the duplicate must still be caught —
 // this pins the backstop rather than assuming it.

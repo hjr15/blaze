@@ -433,8 +433,8 @@ export async function applyImport(plan, ctx) {
         // ledger entry that number will ever get, and in db mode the counter must pass it
         // or a later db-mode `new` hands the number out again (BLZ-671). The crash residue
         // is then the harmless one (a claim with no ticket, which only advances the
-        // allocation floor) rather than the damaging one (a ticket with no claim, a
-        // `missingClaimErrors` ERROR on the operator's board after every partial apply).
+        // allocation floor) rather than the damaging one (a ticket with no claim, an
+        // unclaimed id on the operator's board after every partial apply).
         ({ claimFile } = await writePort.reserve(id, { project, title: ticket.frontmatter.title }));
       }
 

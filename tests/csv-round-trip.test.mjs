@@ -31,7 +31,7 @@
 import { test, describe, before } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdirSync, writeFileSync, existsSync, rmSync, readdirSync, mkdtempSync } from "node:fs";
+import { mkdirSync, writeFileSync, existsSync, rmSync, mkdtempSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { exportCsv } from "../scripts/model/export-rows.mjs";
@@ -94,7 +94,7 @@ describe("BLZ-630: the fixture is the gate's real content", () => {
       "on DIFFERENT tickets — on the live board these are not a shared cohort");
   });
 
-  test("the fixture project carries a .ids/.cutover marker — without it the claim guard is structurally untestable", () => {
+  test("the fixture project keeps a .ids/.cutover marker for the allocator floor (BLZ-254 deleted the claim guard that once needed it)", () => {
     assert.equal(existsSync(cutoverPath(FIXTURE_PROJECTS, "BLZ")), true,
       "(BLZ-254 deleted `missingClaimErrors`; the claim's existence is what is pinned)");
   });
@@ -261,7 +261,7 @@ describe("BLZ-630: every imported ticket has a claim", () => {
       const n = Number(id.split("-")[1]);
       assert.equal(existsSync(claimPath(join(B, "projects"), project, n)), true,
         `${id} was imported with no .ids/ claim — its id is not provably unique, and `
-        + `\`blaze audit\` errors on every such ticket above the project's cutover`);
+        + `the allocator floor cannot see it`);
     }
   });
 });

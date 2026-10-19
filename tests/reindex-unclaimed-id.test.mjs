@@ -31,7 +31,7 @@ function board(tickets) {
 }
 const run = (root) => {
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
-  delete env.BLAZE_WRITE_PORT; delete env.BLAZE_READONLY;
+  delete env.BLAZE_WRITE_PORT; delete env.BLAZE_READONLY; delete env.BLAZE_REMOTE_URL; delete env.BLAZE_TOKEN;
   return spawnSync(process.execPath, [reindex], { cwd: root, env, encoding: "utf8" });
 };
 

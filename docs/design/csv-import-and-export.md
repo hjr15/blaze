@@ -3,6 +3,12 @@
 **Status:** design, for review · **Date:** 2026-09-08 · **Tickets:** BLZ-587, BLZ-588, BLZ-589
 · **Decision:** [ADR-0037](../decisions/0037-an-inferred-column-mapping-is-a-proposal-a-person-accepts-never-an-import.md)
 
+> **BLZ-254 note (2026-10-13).** This document is a historical design record. Several modules it
+> cites as current were deleted by BLZ-254's PR D: `missingClaimErrors`, `commit-or-queue.mjs`
+> (`commitOrQueue`), `commit-summary.mjs`, `pending-ledger.mjs`, `branch-guard.mjs` and
+> `serve-commit.mjs`; `commit-lock.mjs` became `dir-lock.mjs`. Where a line cites one it is marked
+> "deleted by BLZ-254"; the design rationale around it is left as written.
+
 This is phase 3 of
 [`../superpowers/plans/2026-08-31-blaze-app-adoption-and-import-standard.md`](../superpowers/plans/2026-08-31-blaze-app-adoption-and-import-standard.md).
 Its §5 Q1 and Q2 are **answered and binding** and are not reopened here:
@@ -273,7 +279,7 @@ coverage assertion reads the **registry**, not the corpus.
   (`scripts/model/time.mjs:29-33`), because the database column is `INTEGER` with a `% 5 = 0`
   CHECK. The comment there records that the two writers once disagreed three ways about
   `estimate: 7` — filesystem `7`, `loadCorpus` `null`, write-port `5`.
-- **An id needs a claim.** `missingClaimErrors` (`scripts/model/index.mjs:353-377`) makes a ticket
+- **An id needs a claim.** `missingClaimErrors` (deleted by BLZ-254) (`scripts/model/index.mjs:353-377`) makes a ticket
   whose id has no `.ids/` claim an **error**, not a warning, for any number above the project's
   cutover marker. `applyNew` writes the claim with the ticket (`scripts/new.mjs:123`). An importer
   that allocates ids and skips claims produces a board that fails `blaze audit` on every imported
@@ -686,7 +692,7 @@ minimum:
 - **gaps in the id sequence**, so the round trip cannot pass by renumbering;
 - **a `.ids/.cutover` marker on the fixture project, and an assertion that a claim file exists for
   every created ticket.** Without the marker the fixture is *structurally incapable* of catching a
-  regression in §5.5: `missingClaimErrors` returns early at `scripts/model/index.mjs:367`
+  regression in §5.5: `missingClaimErrors` (deleted by BLZ-254) returns early at `scripts/model/index.mjs:367`
   (`if (cutover === null) continue;`) and `ensureCutover` has one call site, inside `allocateId`
   (`scripts/model/ids.mjs:72`) — so a fresh board never allocates, never gets a marker, and stays
   silent forever. An importer that regressed to skipping claims would pass CI indefinitely and
@@ -986,12 +992,12 @@ specification into a pinned property.
 this document specified three static-graph assertions, and **two of the three are unsatisfiable.**
 Measured by walking the transitive `import` graph from the modules this design itself names as
 importer dependencies (`schema.mjs`, `workflows.mjs`, `ids.mjs`, `rules.mjs`, `taxonomy.mjs`,
-`index.mjs`, `write-port.mjs`, `commit-or-queue.mjs`):
+`index.mjs`, `write-port.mjs`, `commit-or-queue.mjs` (deleted by BLZ-254)):
 
 | | Result |
 |---|---|
 | modules reached | **26** |
-| importing `node:child_process` | **6** — `config.mjs` (via `workflows.mjs` → `ambientSchemaOverride`), `model/claims.mjs` (via `index.mjs`), `model/git-common.mjs` (via `ids.mjs`), and `branch-guard.mjs`, `pending-ledger.mjs`, `serve-commit.mjs` (all via `commit-or-queue.mjs`) |
+| importing `node:child_process` | **6** — `config.mjs` (via `workflows.mjs` → `ambientSchemaOverride`), `model/claims.mjs` (via `index.mjs`), `model/git-common.mjs` (via `ids.mjs`), and `branch-guard.mjs` (deleted by BLZ-254), `pending-ledger.mjs`, `serve-commit.mjs` (all via `commit-or-queue.mjs`) |
 | mentioning `agentCommand` | **1** — `config.mjs`, which **defines** it at `:21` and populates it from `BLAZE_AGENT_COMMAND` at `:271` |
 
 Every one of those edges is required by the importer's own work. So "no module in the graph
@@ -1218,8 +1224,8 @@ Four separations, each because the remedy differs:
   Stated once, so it cannot be satisfied in one place and missed in another: **once any ticket has
   been written, no later failure may exit anything but 4** — and see the process-boundary limit
   below, which is where that promise genuinely stops. An earlier draft asserted `4` was the
-  only board-changed code while routing staging through `commitOrQueue` *after* the writes — and
-  `commitOrQueue` **throws**, at `scripts/commit-or-queue.mjs:18-21` on an op absent from
+  only board-changed code while routing staging through `commitOrQueue` (deleted by BLZ-254) *after* the writes — and
+  `commitOrQueue` (deleted by BLZ-254) **throws**, at `scripts/commit-or-queue.mjs:18-21` on an op absent from
   `OP_LABEL` and at `:27` via `assertWritable`, so an uncaught throw exited 1. The repair caught
   the staging call and then **reintroduced the identical shape in the receipt** (§5.3, mistake 3),
   which appends per row during the writes and can fail on `ENOSPC`. Two instances of one bug in
@@ -1474,7 +1480,7 @@ have shipped the defect §5.5 was rewritten to prevent. Claim-before-write rathe
   ticket, which is the orphan-reservation class §5.5 already accepts: `allocateId` folds
   `maxClaim` into its floor (`scripts/model/ids.mjs:74`), so an orphan claim advances the floor
   and nothing else, and no audit rule reports a claim without a ticket. The reverse order's
-  residue — a ticket with no claim — is a `missingClaimErrors` **error**
+  residue — a ticket with no claim — is a `missingClaimErrors` (deleted by BLZ-254) **error**
   (`scripts/model/index.mjs:353-377`) on the operator's board after every partial apply.
 
 `writeClaim` is a plain `writeFileSync` (`scripts/model/claims.mjs:34-39`), so re-creating a row
@@ -1648,7 +1654,7 @@ cache.
 only the *open* (*"if the receipt cannot be opened for append, the import does not start"*), while
 appending per row **during** the writes. An append that fails mid-run — `ENOSPC`, the very failure
 §5.3 names — throws after writes have landed, and an uncaught throw exits **1**, which §5.1
-declares means *"unchanged — nothing written"*. Identical shape to the `commitOrQueue` defect
+declares means *"unchanged — nothing written"*. Identical shape to the `commitOrQueue` (deleted by BLZ-254) defect
 fixed four paragraphs earlier, in the code written to record it.
 
 So **every receipt append — and every `source-ids` append, which in the sequence above follows the ticket write — sits
@@ -1664,7 +1670,7 @@ open my own log"* is a different fact with a different remedy. Board unchanged; 
 
 1. **"Staged with the tickets, so it reaches upstream in the same commit" is false on both paths
    that matter.** On exit 4, staging either failed or never ran. On a clean run against a
-   `commitMode: "batch"` board, §5.1 already says `commitOrQueue` *queues* rather than commits.
+   `commitMode: "batch"` board, §5.1 already says `commitOrQueue` (deleted by BLZ-254) *queues* rather than commits.
    The honest claim is narrower: **the receipt is on disk before the writes it describes**, which
    is what an operator needs; it is staged only if staging runs and succeeds, and the run's
    trailer says which happened.
@@ -1711,7 +1717,7 @@ open my own log"* is a different fact with a different remedy. Board unchanged; 
    *before a ticket write* — the prune (item 2) and the `source-ids` lookup (§4.2) — is read-only:
    it reports a torn line and acts conservatively (keep the receipt; refuse the import), and it
    never parks. A park that failed in the pre-write phase would fall under no exit code, which is
-   the defect this section has now fixed twice and does not intend to fix a third time. `scripts/pending-ledger.mjs`'s
+   the defect this section has now fixed twice and does not intend to fix a third time. `scripts/pending-ledger.mjs` (deleted by BLZ-254)'s
    `parseRecords`/`quarantineDropped` is the shape to follow, including its buffer-in/bytes-out
    discipline: `toString("utf8")` maps an incomplete trailing multibyte sequence to U+FFFD, which
    re-encodes as different bytes, and a torn line is exactly where that happens.
@@ -1743,8 +1749,8 @@ writes themselves (BLZ-254: written, never staged — see §5.4).
 
 > **Amended 2026-10-13 (BLZ-254, spec §5.5): there is no staging.** The board never commits. An import writes its tickets (or, under db, rows), claims, receipt and map, and stops. In fs mode the operator versions them. The rest of this section is the historical design.
 
-The importer stages **exactly the files it wrote**, through `commitOrQueue`
-(`scripts/commit-or-queue.mjs:11`), which is *"scoped to exactly the touched files (never `git add
+The importer stages **exactly the files it wrote**, through `commitOrQueue` (deleted by BLZ-254)
+(`scripts/commit-or-queue.mjs:11` (deleted by BLZ-254)), which is *"scoped to exactly the touched files (never `git add
 -A`)"*.
 
 **Correction to an earlier draft, which inverted its own citation.** That draft said `blaze
@@ -1767,11 +1773,11 @@ The importer's own staging is narrower still than migrate's, and for a reason th
 stylistic: it creates and updates but never deletes (§7), so it has no deletion to stage and can
 name each file explicitly rather than relying on `-A` over a directory.
 
-**`commitOrQueue` throws on an op it has no word for** (`scripts/commit-or-queue.mjs:18-21`,
-against `OP_LABEL` at `scripts/commit-summary.mjs:14-24`), and neither `import` nor `repair` is
+**`commitOrQueue` (deleted by BLZ-254) throws on an op it has no word for** (`scripts/commit-or-queue.mjs:18-21`,
+against `OP_LABEL` at `scripts/commit-summary.mjs:14-24` (deleted by BLZ-254)), and neither `import` nor `repair` is
 in that table today. So B2 adds `import` and C1 adds `import-repair` to `OP_LABEL` as part of
 landing the verbs — a one-line addition each, named here because a runner that reaches
-`commitOrQueue` without it exits 1 on its first successful apply, which is §5.1's exit-4
+`commitOrQueue` (deleted by BLZ-254) without it exits 1 on its first successful apply, which is §5.1's exit-4
 argument made real by omission.
 
 **`repair --apply` stages what it wrote, through the same call.** Its **files** are at most
@@ -1779,7 +1785,7 @@ argument made real by omission.
 **records** (§6): the map is touched by up to two of them (truncate, then the reconstructed pair
 appended), and the receipt by one (`resolved`). Every one of those files is a committed record
 (§6's table), so they must reach a commit the way the tickets do: one
-`commitOrQueue` after the last `resolved`, op `import-repair`, files named explicitly. In batch
+`commitOrQueue` (deleted by BLZ-254) after the last `resolved`, op `import-repair`, files named explicitly. In batch
 mode that queues, exactly as for the importer, and the trailer says which. A staging failure
 after the writes is exit 4 (§5.2) — the records are on disk and the refusal is lifted; only the
 commit is missing — and a dry run stages nothing because it wrote nothing.
@@ -1798,7 +1804,7 @@ mechanism:
   itself.
 - `ensureCutover` is likewise called from exactly one place — `scripts/model/ids.mjs:72`, **inside
   `allocateId`** — so a project that has ever allocated carries a cutover marker.
-- `missingClaimErrors` (`scripts/model/index.mjs:353-377`) then reports **an error, not a
+- `missingClaimErrors` (deleted by BLZ-254) (`scripts/model/index.mjs:353-377`) then reports **an error, not a
   warning**, for every id above that marker with no claim.
 
 Put together: importing rows with **explicit ids** into any project that has ever allocated would
@@ -1837,7 +1843,7 @@ So the honest position, rather than a guarantee that does not exist:
 - **Both are harmless but not invisible.** `allocateId` takes the max across disk, claims,
   reservations and the remote (`:74`), so an orphan of either kind only advances the floor; it
   can never cause a reissue, and no audit rule reports a claim without a ticket —
-  `missingClaimErrors` checks the converse, and the ledger already holds such claims by design
+  `missingClaimErrors` (deleted by BLZ-254) checks the converse, and the ledger already holds such claims by design
   as tombstones for deleted tickets (`scripts/model/ids.mjs:62-63`). What either costs is a gap in the id sequence,
   which on this board is meaningful — a gap is normally evidence a ticket was deleted. What
   the re-import does with an orphan claim differs by path: on the **explicit-id** path the row
@@ -1954,16 +1960,16 @@ graph and §4.3's surviving assertion holds. `repair` is not called `resolve` be
   `import-runner.mjs` around all three verbs under `--apply`, and a contended lock is exit 5.
   The rest of this bullet is the record of why the commit lock never enforced it, which is still
   worth keeping: an earlier draft said it did. That lock is `acquireLock` inside
-  `commitFile` (`scripts/serve-commit.mjs:9`), taken at `git add` time *after* every write has
-  landed, and not taken at all on a `commitMode: "batch"` board, where `commitOrQueue` returns
-  from the ledger append before `commitFile` is ever called (`scripts/commit-or-queue.mjs:28-69`).
+  `commitFile` (`scripts/serve-commit.mjs:9` (deleted by BLZ-254)), taken at `git add` time *after* every write has
+  landed, and not taken at all on a `commitMode: "batch"` board, where `commitOrQueue` (deleted by BLZ-254) returns
+  from the ledger append before `commitFile` is ever called (`scripts/commit-or-queue.mjs:28-69` (deleted by BLZ-254)).
   It serialises the commit, not the write phase. Two `--apply` runs started together under
   `--allocate-ids` and one `sourceIdColumn` mapping would each pass the exit-5 check (each
   sees the other's receipt as empty), each allocate a number for the same source key, and each
   append a pair — the lookup's first-occurrence rule (§4.2) keeps one, and the other is a
   ticket with a pair nothing reads: a duplicate, by the mechanism §4.2 exists to prevent. The
   fix is an import-scoped lock and it is filed as §8 item 8 rather than specified here, because
-  it is one atomically-`mkdirSync`'ed lock directory (matching `scripts/commit-lock.mjs`, not a
+  it is one atomically-`mkdirSync`'ed lock directory (matching `scripts/commit-lock.mjs` (renamed `dir-lock.mjs` by BLZ-254), not a
   `wx` file) and its own test, and this document has already spent six rounds on the records it
   would protect.
 - **Streaming.** The file is read whole. Forward references and duplicate detection both need the
@@ -2064,20 +2070,20 @@ not cover, one of which (item 6) is an engine-wide defect this design merely ran
    next reader does not go looking for a defect that was fixed.
 8. **Nothing serialises the write phase of two concurrent imports.** §7 states one-import-at-a-
    time as an operator constraint and says why the commit lock does not enforce it: it is taken
-   inside `commitFile` after the writes (`scripts/serve-commit.mjs:9`) and never in batch mode.
+   inside `commitFile` after the writes (`scripts/serve-commit.mjs:9` (deleted by BLZ-254)) and never in batch mode.
    The fix is an import-scoped lock: an atomically-`mkdirSync`'ed lock directory under
-   `import-receipts/` (not a `wx` lockfile — `scripts/commit-lock.mjs:5` already takes its
+   `import-receipts/` (not a `wx` lockfile — `scripts/commit-lock.mjs:5` (renamed `dir-lock.mjs` by BLZ-254) already takes its
    `.blaze/commit.lock/` this way, via `mkdirSync(dir)` throwing `EEXIST` while held, plus an
    `owner.json`; this reuses that mechanism rather than a second one) taken before the pre-write
    phase (before the prune and the exit-5 check, since those are what a second run must not race
    past), held until staging returns, stale-stolen on a dead owner PID the way
-   `scripts/commit-lock.mjs` already does, and a contended lock is exit 5 — a record the run must
+   `scripts/commit-lock.mjs` (renamed `dir-lock.mjs` by BLZ-254) already does, and a contended lock is exit 5 — a record the run must
    establish before it may write, which is that code's definition. One test: two `--apply` runs
    over one file, one exits 5 with nothing written, the board holds each source key once. Its
    own ticket, blocking nothing in this design's gates and everything in its concurrency claim.
 
    **BLZ-640 (this ticket) landed it.** `scripts/model/import-lock.mjs` takes
-   `import-receipts/import.lock/` through `commit-lock.mjs`'s own `acquireDirLock` — the same
+   `import-receipts/import.lock/` through `commit-lock.mjs` (renamed `dir-lock.mjs` by BLZ-254)'s own `acquireDirLock` — the same
    atomic `mkdirSync`, the same `owner.json` `{pid, session, ts}`, the same
    `process.kill(pid, 0)` theft of a dead owner's lock, generalised over the lock directory
    rather than copied into a second implementation. The seam is `scripts/import-runner.mjs`,
@@ -2131,14 +2137,14 @@ from.
 |---|---|---|---|---|
 | B1 | **The plan** (`scripts/model/import-plan.mjs`) | Whole-file read, id set, forward references, duplicate detection, create/update/skip/refuse classification, every §5.2 refusal. **Pure — no writes** | **BLZ-587** | A2 |
 | B2 | **The apply** (`scripts/model/import-apply.mjs` + `blaze import`) | Walk the plan through the injected write port; **a claim per created ticket on BOTH the explicit-id and `--allocate-ids` paths, as its own step before the ticket write** (§5.3 step 4, §5.5); the once-any-ticket-is-written-only-exit-4 invariant covering writes, staging **and** receipt appends (§5.1); the receipt (intent / allocated / done, plus the `resolved` that C1's `blaze import repair` appends, whose presence is what lifts the exit-5 refusal; §5.3) and its **four-state** inspection rule (orphan / pair-absent / nothing / pair-without-ticket, the last left for a person) with its **pre-write, best-effort, exit-code-neutral** 90-day prune and torn-line quarantine; exit codes 0–5, with 5's two receipt cases (unopenable; unresolved prior receipt) tested here and its two map cases (unopenable; torn line) tested in C1, which owns the map; **a SIGKILL-mid-write test asserting the code AND that unmatched-`intent` ⊇ not-on-disk with the difference ≤ 1** (§5.1), which requires `appendRegularFileSync` for every receipt and map append (§5.1); the prune's read-only, never-quarantining reader with torn-`intent`-means-unmatched (§5.3); dry run by default | **BLZ-587** | B1, A3 |
-| B3 | **The round-trip gate — gates 1, 2 and 3** | `tests/csv-round-trip.test.mjs` (a `node --test` suite, **not** `board-gate.yml` — it needs a temp board and must be runnable locally); the fixture, incl. `not_before`/`deadline`/`sprint` and a **`priority`-absent and `assignee`-absent row**, and a **`.ids/.cutover` marker plus per-ticket claim assertions** (without the marker `missingClaimErrors` returns early at `index.mjs:367` and the claim guard is structurally impossible), none of which any enum assertion can reach; **gate 2** with its `listTickets` wrapper (§3.3), since `zero-diff.mjs:81` hard-codes `listTickets(null)`; **gate 3**; the enum-coverage assertion; `zeroDiff`'s `compared`/`fieldsChecked` positive control | **BLZ-589** | B2 |
+| B3 | **The round-trip gate — gates 1, 2 and 3** | `tests/csv-round-trip.test.mjs` (a `node --test` suite, **not** `board-gate.yml` — it needs a temp board and must be runnable locally); the fixture, incl. `not_before`/`deadline`/`sprint` and a **`priority`-absent and `assignee`-absent row**, and a **`.ids/.cutover` marker plus per-ticket claim assertions** (without the marker `missingClaimErrors` (deleted by BLZ-254) returns early at `index.mjs:367` and the claim guard is structurally impossible), none of which any enum assertion can reach; **gate 2** with its `listTickets` wrapper (§3.3), since `zero-diff.mjs:81` hard-codes `listTickets(null)`; **gate 3**; the enum-coverage assertion; `zeroDiff`'s `compared`/`fieldsChecked` positive control | **BLZ-589** | B2 |
 | B4 | **The blanking revert test** | Blank — not remove — one exported column and assert **gate 2** goes red for the reason its name gives. Separated from B3 because it is the test that proves B3 discriminates, and a gate merged without it is a gate nobody has falsified | **BLZ-589** | B3 |
 
 ### Phase C — the mapping layer
 
 | # | Item | Scope | Ticket | Depends on |
 |---|---|---|---|---|
-| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, **`sourceIdColumn`**, the `name`-equals-basename rule with `canonical` reserved, and the durable **`source-ids/<name>.jsonl`** store — an **outcome** log appended per row **between the ticket write and `done`** (§5.3 step 6) through `appendRegularFileSync`, opened before any write under exit 5, append-only with first-occurrence lookup; **and the inspection verb `blaze import repair <receipt>`** (§5.3) — **dry run by default, writes under `--apply`** (ADR-0037 §4), the receipt read, the mapping-file check (absent ⇒ exit 3 before any write), the four-state rule, park → truncate → pair → `resolved` in that order, the torn-receipt `\n` + `torn-line-parked` rule, exit 5 whenever a row remains unresolved (dry run and apply alike), staging through `commitOrQueue` with a new `import-repair` `OP_LABEL` entry (§5.4); **estimate 240 min** for the verb within C1. **Two tests:** an unwritable map ⇒ exit 5 with nothing written; **the map append itself failed at row N** ⇒ ticket N on disk, N−1 pairs, no `done`; re-import refuses with 5; `repair --apply` ⇒ N pairs and a `pair-appended` `resolved` after the pair, with a kill between the two appends leaving the refusal in force; then rows above N created, 1..N skipped, no duplicate, no phantom. **No model** | **gap — new ticket** | B1, B2 |
+| C1 | **Mapping file + deterministic apply** (`scripts/model/import-mapping.mjs`) | The §4.2 format, the closed `transform` vocabulary, the `sha256` header check, `unmapped` completeness, **`sourceIdColumn`**, the `name`-equals-basename rule with `canonical` reserved, and the durable **`source-ids/<name>.jsonl`** store — an **outcome** log appended per row **between the ticket write and `done`** (§5.3 step 6) through `appendRegularFileSync`, opened before any write under exit 5, append-only with first-occurrence lookup; **and the inspection verb `blaze import repair <receipt>`** (§5.3) — **dry run by default, writes under `--apply`** (ADR-0037 §4), the receipt read, the mapping-file check (absent ⇒ exit 3 before any write), the four-state rule, park → truncate → pair → `resolved` in that order, the torn-receipt `\n` + `torn-line-parked` rule, exit 5 whenever a row remains unresolved (dry run and apply alike), staging through `commitOrQueue` (deleted by BLZ-254) with a new `import-repair` `OP_LABEL` entry (§5.4); **estimate 240 min** for the verb within C1. **Two tests:** an unwritable map ⇒ exit 5 with nothing written; **the map append itself failed at row N** ⇒ ticket N on disk, N−1 pairs, no `done`; re-import refuses with 5; `repair --apply` ⇒ N pairs and a `pair-appended` `resolved` after the pair, with a kill between the two appends leaving the refusal in force; then rows above N created, 1..N skipped, no duplicate, no phantom. **No model** | **gap — new ticket** | B1, B2 |
 | C2 | **The proposer + the confirmation** (`scripts/model/import-mapping-propose.mjs`, `blaze import propose-mapping`) | Spawn `agentCommand`; render §4.4; write the mapping file and nothing else | **gap — new ticket** | C1 |
 | C3 | **The boundary guard** | §4.3's assertions over a **PATH-shadowed sentinel stub** (`stubGh` pattern, `tests/reconcile-delivery-truth.test.mjs:65-73`): **two** stubs with **two** sentinels; import succeeds leaving neither; `propose-mapping` fails with `ENV_HIT`; `propose-mapping` with `BLAZE_AGENT_COMMAND` **unset** fails with `PATH_HIT` (without which the PATH arm is never executed); both repointed at benign stubs, `propose-mapping` succeeds. Plus the one surviving static assertion. Explicitly **not** the first draft's three static assertions (two unsatisfiable) nor the second draft's in-process patch (`cli.mjs:9` spawns a separate process) | **gap — new ticket** | C2 |
 
