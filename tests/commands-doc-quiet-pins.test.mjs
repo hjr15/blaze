@@ -190,3 +190,18 @@ describe("BLZ-471: commands.md's `--quiet` row says what the flag actually gates
     }
   });
 });
+
+// BLZ-687 (BLZ-254): relocated verbatim from the deleted tests/commit-status.test.mjs. It guards
+// doc drift for `blaze reconcile`, which survives the git-ceremony retirement.
+describe("the page and the verb do not drift (BLZ-499, BLZ-501)", () => {
+  test("BLZ-501: docs/design.md does not quote a product string the CLI no longer emits", () => {
+    // Whitespace-normalised on purpose. The first version of this fix left the dead string
+    // in the file line-WRAPPED, and a naive /.../ match walked straight past it — the test
+    // passed while the defect stood. The revert rule caught that; matching the collapsed
+    // text is what makes this assertion mean anything.
+    const design = readFileSync(join(REPO, "docs", "design.md"), "utf8").replace(/\s+/g, " ");
+    assert.doesNotMatch(design, /standalone board — nothing to reconcile/,
+      "the live string is `reconcile: no projects configured — nothing to reconcile.`; "
+      + "quoting a dead one is exactly BLZ-433's class of defect");
+  });
+});

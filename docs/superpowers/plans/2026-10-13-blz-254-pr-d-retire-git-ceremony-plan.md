@@ -1016,7 +1016,7 @@ Expected: all green. `rg -n "write-outcome|writeOutcome|gitOutcome" scripts test
 - Modify: `scripts/new-runner.mjs`, `scripts/move-runner.mjs`, `scripts/edit-runner.mjs`, `scripts/link-runner.mjs`, `scripts/log-runner.mjs`, `scripts/resolve-runner.mjs`, `scripts/sprint-runner.mjs`
 - Create: `tests/verbs-make-no-commit.test.mjs`
 - Modify tests: `tests/runner-dataroot.test.mjs`, `tests/board-overstatement-guards.test.mjs` (one test), `tests/sprint-runner-stamp-warning.test.mjs` (comment), `tests/model/seam-closure.test.mjs` (ledger rows 2062, 2083-2088)
-- Delete tests: `tests/runner-batch.test.mjs` (every test pins a runner queueing in `commitMode: "batch"`), `tests/edit-runner-batch.test.mjs` (the same, for `blaze edit`), `tests/commit-status.test.mjs` (its fixture spawns `new-runner.mjs` in batch mode and reads the queue entry the runner no longer writes — review C2; it also drives `blaze commit --status`, deleted in Task 5)
+- Delete tests: `tests/runner-batch.test.mjs` (every test pins a runner queueing in `commitMode: "batch"`), `tests/edit-runner-batch.test.mjs` (the same, for `blaze edit`), `tests/commit-status.test.mjs` (**first relocate its test "BLZ-501: docs/design.md does not quote a product string the CLI no longer emits" verbatim, with its describe `the page and the verb do not drift (BLZ-499, BLZ-501)`, to the end of `tests/commands-doc-quiet-pins.test.mjs`: it guards reconcile doc drift and survives this PR**; then delete the file. Its fixture spawns `new-runner.mjs` in batch mode and reads the queue entry the runner no longer writes — review C2; it also drives `blaze commit --status`, deleted in Task 5)
 - Docs: `docs/guide/commands.md` (`## new`, `## move`, `## edit`, `## link`, `## resolve`, `## log`, `## sprint`: drop "commits"/"queues" from each), `docs/guide/getting-started.md:156-160`
 
 **Interfaces:**
@@ -1188,7 +1188,7 @@ Expected: the seven verb tests FAIL with "must not commit" (the default `commitM
 
     and add `readFileSync` to the file's `node:fs` import.
   - Delete test 3, `"batch mode queues into the DATA repo's .blaze ledger"` (pins a batch queue).
-- `tests/board-overstatement-guards.test.mjs`: delete the test `"each per-ticket verb says so when no commit was created"` (it pinned `commitSuffix`, whose callers are now gone). Then delete `commitSuffix` from the `commit-or-queue.mjs` import line, leaving `import { commitOrQueue } from "../scripts/commit-or-queue.mjs";`.
+- `tests/board-overstatement-guards.test.mjs`: delete the test `"each per-ticket verb says so when no commit was created"` (it pinned `commitSuffix`; its last callers, `scripts/model/import-apply.mjs` and `import-mapping.mjs`, go in Task 4, so only its unit test is dropped here, with the guard describe). Then delete `commitSuffix` from the `commit-or-queue.mjs` import line, leaving `import { commitOrQueue } from "../scripts/commit-or-queue.mjs";`.
 - `tests/sprint-runner-stamp-warning.test.mjs:34-40`: drop `, commitMode: "per-op"`. Replace the comment "A real git repo: `commitOrQueue` runs on the write path, and without one the runner exits 1 …" with "A real git repo, as a board usually is; since BLZ-254 the runner never touches git, so the assertions below do not depend on it."
 - `tests/new-runner.test.mjs:1-5` and `tests/link-runner.test.mjs:1-5`: replace the header sentences about "makes a REAL git commit … commitMode: \"batch\" (no commits)" with "Runner spawn-test isolation is mandatory: a spawned runner with no BLAZE_PROJECTS_DIR writes into the REAL worktree." (The `commitMode` keys in their configs are removed in Task 7.)
 
@@ -1235,14 +1235,15 @@ and
 - [ ] **Step 7: Delete the batch-runner tests, update the docs, run, commit.**
 
 ```bash
+# relocate the BLZ-501 test into tests/commands-doc-quiet-pins.test.mjs FIRST (Files list above), then:
 git rm tests/runner-batch.test.mjs tests/edit-runner-batch.test.mjs tests/commit-status.test.mjs
-node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/verbs-make-no-commit.test.mjs tests/runner-*.test.mjs tests/new-runner.test.mjs tests/link-runner.test.mjs tests/sprint-runner-stamp-warning.test.mjs tests/readonly.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs
+node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs tests/verbs-make-no-commit.test.mjs tests/runner-*.test.mjs tests/new-runner.test.mjs tests/link-runner.test.mjs tests/commands-doc-quiet-pins.test.mjs tests/sprint-runner-stamp-warning.test.mjs tests/readonly.test.mjs tests/board-overstatement-guards.test.mjs tests/model/seam-closure.test.mjs
 # THE DEBT STEP (Global Constraints) — run its block here
 npm test 2>&1 | tail -9
 git add scripts/new-runner.mjs scripts/move-runner.mjs scripts/edit-runner.mjs scripts/link-runner.mjs \
   scripts/log-runner.mjs scripts/resolve-runner.mjs scripts/sprint-runner.mjs tests/verbs-make-no-commit.test.mjs \
   tests/runner-dataroot.test.mjs tests/board-overstatement-guards.test.mjs tests/sprint-runner-stamp-warning.test.mjs \
-  tests/new-runner.test.mjs tests/link-runner.test.mjs tests/model/seam-closure.test.mjs \
+  tests/new-runner.test.mjs tests/link-runner.test.mjs tests/commands-doc-quiet-pins.test.mjs tests/model/seam-closure.test.mjs \
   scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md docs/guide/commands.md docs/guide/getting-started.md
 git commit -m "BLZ-687: the CLI ticket verbs and blaze sprint stop committing (spec §5.5)"
 ```
