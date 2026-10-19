@@ -581,7 +581,7 @@ test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => 
   const tmp = mkdtempSync(join(tmpdir(), "blz394-disc-"));
   const root = twoProjectBoard(tmp);
   // BLZ-404 (review finding 1): `root` must be a real git repo. Before reconcile's commit
-  // block routed through `commitOrQueue` -> `commitFile`, a non-repo `root` silently
+  // block routed through `commitOrQueue` -> `commitFile` (both removed by BLZ-254), a non-repo `root` silently
   // failed `git add`/`git commit` and the CLI never checked the result — this test passed
   // by accident while nothing was ever actually committed. Now a failed commit is reported
   // and exits non-zero (finding 2), so the fixture needs a real repo to prove the SCOPE

@@ -5,11 +5,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEntry, ledgerPath } from "../scripts/pending-ledger.mjs";
 import { constants as osConstants } from "node:os";
 import { exitCodeForSpawn } from "../scripts/model/spawn-exit-code.mjs";
 
@@ -41,9 +40,10 @@ test("blaze move --help prints subcommand help, exits 0, and never spawns the ru
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "x");
-  appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: x", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t" });
-  const queue = ledgerPath(root);
-  const beforeBytes = readFileSync(queue);
+  // BLZ-254: the pending-ledger queue it also snapshotted is deleted; the ticket is the witness.
+  const ticket = join(root, "projects", "OBA", "backlog", "OBA-1.md");
+  const beforeBytes = readFileSync(ticket);
+  const beforeTree = readdirSync(join(root, "projects", "OBA", "backlog"));
   const beforeHead = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
@@ -52,7 +52,8 @@ test("blaze move --help prints subcommand help, exits 0, and never spawns the ru
 
   assert.equal(r.status, 0);
   assert.match(r.stdout, /move/i);
-  assert.deepEqual(readFileSync(queue), beforeBytes, "runner must never have run — queue byte-identical");
+  assert.deepEqual(readFileSync(ticket), beforeBytes, "runner must never have run — ticket byte-identical");
+  assert.deepEqual(readdirSync(join(root, "projects", "OBA", "backlog")), beforeTree, "runner must never have run — ticket tree unchanged");
   assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), beforeHead, "HEAD must not move");
   rmSync(root, { recursive: true, force: true });
 });

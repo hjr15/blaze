@@ -741,7 +741,7 @@ export async function runMappedImport(opts) {
 /** Park raw BYTES, never a re-encoded string: `toString("utf8")` maps an
  *  incomplete trailing multibyte sequence to U+FFFD, which re-encodes as
  *  different bytes — and a torn line is exactly where that happens. The
- *  buffer-in/bytes-out discipline is `pending-ledger.mjs`'s
+ *  buffer-in/bytes-out discipline was `pending-ledger.mjs`'s (deleted by BLZ-254)
  *  `quarantineDropped`, followed here rather than reinvented. */
 function parkBytes(path, bytes, append) {
   const stamp = Buffer.from(`${new Date().toISOString()}\t`, "utf8");

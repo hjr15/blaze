@@ -91,12 +91,12 @@ test("no module outside the seam stats or lists the projects tree directly", () 
   const ALLOWED = new Set([
     "model/index.mjs", "model/read-storage.mjs",
     "model/storage.mjs",        // the WRITE seam owns file creation
-    "model/ids.mjs", "model/claims.mjs",  // the allocator, deleted at Phase 2
+    "model/ids.mjs", "model/claims.mjs",  // the fs allocator — kept, BLZ-254 D1
     "model/transitions.mjs",    // git rename history, not the ticket store
     "model/sprints.mjs", "config.mjs",    // registries, not tickets
     "migrate/jira-import.mjs",  // a migration path, not a live verb
     "loops/groomer.mjs",        // hashes file text against git porcelain
-    "pending-ledger.mjs", "commit-lock.mjs", "reindex.mjs", "supervisor.mjs",
+    "dir-lock.mjs", "reindex.mjs", "supervisor.mjs",  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
     // BLZ-629: lists and stats `import-receipts/` — the run RECORDS, to find
     // the latest receipt for a mapping and to prune the ones past retention.
     // It never lists or stats the PROJECTS tree, which is what this guard is
@@ -872,19 +872,16 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["reindex.mjs", { writes: [], sanctioned: [], inert: [] }],       // derived caches, no exports
   ["migrate-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["cli.mjs", { writes: [], sanctioned: [], inert: [] }],
-  // The pending ledger: an op queue under a caller-supplied root, appended to and cleared.
-  ["pending-ledger.mjs", { writes: ["appendEntry", "clearLedger", "quarantineDropped"], sanctioned: [], inert: ["sessionId", "queueRoot", "ledgerPath", "readQueue", "readEntries",
-      "readForDrain", "quarantinePath", "listQueues", "listQueuesResult", "strandedQueues",
-      "worktreeBranchOwners", "belongsHere", "outstandingFiles",
-      "consumedPrefixIntact"] }],   // BLZ-608 (#175): a byte comparison, and the pin caught it
-  // The commit lock: a lockfile under a caller-supplied root, taken and released.
+  // BLZ-254: pending-ledger.mjs deleted (spec §5.5).
+  // The lock mechanism: a lock DIRECTORY under a caller-supplied path, taken and released.
   // BLZ-640 added `acquireDirLock`/`releaseDirLock` — the SAME mkdir +
   // owner.json + dead-PID-theft mechanism over a caller-supplied lock
   // DIRECTORY, which is what design §8 item 8's "this reuses that mechanism
   // rather than a second one" asks for. They create and remove a directory, so
-  // they are writes on exactly the footing `acquireLock`/`releaseLock` are.
-  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock", "acquireDirLock", "releaseDirLock"],
-    sanctioned: [], inert: ["lockPath"] }],
+  // they are writes.
+  // BLZ-254: commit-lock.mjs → dir-lock.mjs; the commit-lock policy (acquireLock, releaseLock, lockPath) is deleted.
+  ["dir-lock.mjs", { writes: ["acquireDirLock", "releaseDirLock"],
+    sanctioned: [], inert: [] }],
   ["migrate/jira-import.mjs", { writes: ["runLive"], sanctioned: [],
     inert: ["loadNormalized", "runDryRun"] }],
   ["migrate/jira-client.mjs", { writes: ["writeRawCache"], sanctioned: [],
@@ -957,10 +954,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["matrices-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // BLZ-682: a CLI verb, no exports
-  // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
-  ["commit-or-queue.mjs", { writes: ["commitOrQueue", "stageFor"], sanctioned: [],
-    inert: ["commitSuffix"] }],
-  ["serve-commit.mjs", { writes: ["commitFile"], sanctioned: [], inert: [] }],
+  // BLZ-254: commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
   ["serve.mjs", { writes: ["startServer"], sanctioned: [],
     inert: ["CSRF", "boardModel", "contentHash", "liveModel", "pageHtml",
       "reconcilePreview"] }],
@@ -1949,7 +1943,7 @@ const WRITE_ALLOWED = new Map([
   ["model/ids.mjs", "*"], ["model/claims.mjs", "*"],   // the allocator, deleted at Phase 2
   ["model/transitions.mjs", "*"], ["model/sprints.mjs", "*"],  // caches and registries
   ["reindex.mjs", "*"],                          // derived, gitignored caches
-  ["pending-ledger.mjs", "*"], ["commit-lock.mjs", "*"],
+  ["dir-lock.mjs", "*"],  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
   ["migrate/jira-import.mjs", "*"], ["migrate-runner.mjs", "*"],
   ["migrate/jira-client.mjs", "*"], ["loops/groomer.mjs", "*"],
   // BLZ-285. `blaze init` writes blaze.config.json, project.json and .gitignore — config,
@@ -2037,12 +2031,7 @@ const WRITE_ALLOWED = new Map([
   // each is named to the members it actually takes, and the load-bearing test below checks
   // every one of those names is still reached.
   //
-  // BLZ-254: commit-runner.mjs deleted (blaze commit).
-  // `commit-or-queue` is the other half: it records an op on
-  // the ledger when the lock is held elsewhere. `serve-commit` is the board server taking the
-  // same lock.
-  ["commit-or-queue.mjs", ["appendEntry", "commitFile"]],
-  ["serve-commit.mjs", ["acquireLock", "releaseLock"]],
+  // BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
   // First-run setup: the board server issues the setup-token CREDENTIAL, clears it when setup
   // completes, and keeps both it and the identity database out of git. `blaze user add` does
   // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
@@ -2126,7 +2115,7 @@ const WRITE_ALLOWED = new Map([
   // ADR-0037 §3 expressed as a guard rather than as a comment.
   ["model/import-mapping-propose.mjs", ["mkdirSync", "writeRegularFileSync"]],
   ["import-mapping-runner.mjs", ["runProposeMapping"]],
-  // BLZ-640. The import lock reaches node:fs through `commit-lock.mjs`'s
+  // BLZ-640. The import lock reaches node:fs through `dir-lock.mjs`'s   // BLZ-254: renamed from commit-lock.mjs
   // primitive and nowhere else: `acquireDirLock` does the atomic `mkdirSync`
   // and writes `owner.json`, `releaseDirLock` removes the directory. There is
   // no third member and no direct node:fs call in the module at all, which is
@@ -2528,8 +2517,8 @@ test("a write primitive is a write wherever it is imported from", () => {
     ["model/transitions.mjs", "{ loadTransitions }", "loadTransitions"],
     ["model/identity-db.mjs", "{ loadIdentity }", "loadIdentity"],
     ["model/storage.mjs", "{ fsStorage }", "fsStorage"],
-    ["pending-ledger.mjs", "{ appendEntry }", "appendEntry"],
-    ["commit-lock.mjs", "{ acquireLock }", "acquireLock"],
+    // BLZ-254: pending-ledger.mjs deleted (its `{ appendEntry }` row).
+    ["dir-lock.mjs", "{ acquireDirLock }", "acquireDirLock"],  // BLZ-254: commit-lock.mjs → dir-lock.mjs
     ["model/setup-token.mjs", "{ issueSetupToken }", "issueSetupToken"],
     ["model/sprints.mjs", "{ saveSprints }", "saveSprints"],
     ["model/claims.mjs", "{ writeClaim as put }", "writeClaim"],
@@ -2565,7 +2554,7 @@ test("a write primitive is a write wherever it is imported from", () => {
     ["model/regular-file.mjs", "{ readRegularFileSync }"],
     // ...and inert exports, which reach nothing mutating at all
     ["model/sprints.mjs", "{ loadSprints, addSprint }"],
-    ["pending-ledger.mjs", "{ readForDrain, listQueues }"],
+    // BLZ-254: pending-ledger.mjs deleted (its `{ readForDrain, listQueues }` row).
     ["model/transitions.mjs", "{ parseTransitions, buildTransitions }"],
     ["model/storage.mjs", "{ slugify, ticketPath }"],
     ["model/write-port.mjs", "{ fsWritePort, dualWritePort }"],

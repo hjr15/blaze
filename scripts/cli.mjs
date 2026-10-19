@@ -144,7 +144,7 @@ if (!sub) { printUsage(); process.exit(1); }
 
 // BLZ-121: refuse to even spawn a mutating runner under BLAZE_READONLY — the
 // one genuine write choke point (every verb dispatches through here). Gating
-// later (e.g. at commitOrQueue) is too late: move.mjs and friends write/rename
+// later (e.g. at commitOrQueue, removed by BLZ-254) was too late: move.mjs and friends write/rename
 // the ticket file before they ever reach a commit decision, so declining only
 // the commit would leave a relocated-but-uncommitted file in a shared tree.
 //

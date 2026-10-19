@@ -249,7 +249,7 @@ test("BLZ-131: a child whose bullet is only on an unmerged branch does NOT move"
 // Round 2 — defects an adversarial review found before merge
 // =============================================================================
 
-// FINDING 1, the critical one. `scripts/commit-runner.mjs` writes every batch board
+// FINDING 1, the critical one. `blaze commit` (deleted by BLZ-254) wrote every batch board
 // commit's body as `- <message> [<session>]`, and those messages are `KEY-n: <board
 // op>`. The board repo is itself a configured codeRepo for its own project, which is
 // the hazard INF-735's comment already names. So a first cut that honoured any

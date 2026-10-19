@@ -1,4 +1,4 @@
-// tests/board-overstatement-guards.test.mjs — BLZ-426 + BLZ-422 + BLZ-427.
+// tests/board-overstatement-guards.test.mjs — BLZ-426 + BLZ-450 + BLZ-447 + BLZ-254.
 //
 // The cross-product oracle (tests/board-overstatement-oracle.test.mjs) proves these
 // three surfaces agree with the filesystem and `git log` over 160 generated cells.
@@ -6,34 +6,26 @@
 // re-introducing the defect turns a test red whose name says what broke, rather than
 // a cell coordinate. Each is proven by reverting its production hunk on a committed
 // tree and watching exactly the named test below fail (recorded in the PR body).
+// Where a guard pins a seam rather than a production hunk, it says so in its own name.
 //
-// BLZ-442 corrected that claim, which was not true of every guard here. The test named
-// for reconcile's ledger ids never invoked `reconcile` — it called `commitOrQueue` with a
-// hand-written `ids` array — so deleting the `ids:` hunk from reconcile.mjs left this
-// whole file 14/14 GREEN and only the oracle noticed, at a cell coordinate. That test is
-// now two: one that says plainly it pins `commitOrQueue`'s ledger SHAPE and reverts
-// nothing in reconcile, and one that drives the real `reconcile()` and reads the ledger
-// file it actually wrote. Where a guard pins a seam rather than a production hunk, it
-// says so in its own name.
+// BLZ-254 (spec §5.5): BLZ-422's and BLZ-427's describes are deleted. They pinned
+// `commitFile`'s no-op and `commitOrQueue`'s ledger (both deleted by BLZ-254), and
+// `blaze commit`'s subject — all gone with the commit ceremony.
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "../scripts/views/reconcile-summary.mjs";
 import { pageHtml } from "../scripts/views/page.mjs";
-import { commitFile } from "../scripts/serve-commit.mjs";
-import { commitOrQueue } from "../scripts/commit-or-queue.mjs";
 import { appliedLine } from "../scripts/reconcile-apply-report.mjs";
 
 /** Every scratch directory this file mints, removed once the file is done with them
  *  (BLZ-491). `tinyBoard()` had no teardown at all — four call sites, four
  *  `/tmp/blz-guards-board-*` directories per run, 356 of them on the machine where this was
- *  written — and `gitRepo()`'s callers each clean up in their own `finally`, which is one
- *  forgotten `finally` away from the same leak. Registering here means the teardown belongs
- *  to the helper rather than to every caller of it.
+ *  written. Registering here means the teardown belongs to the helper rather than to every
+ *  caller of it.
  *
  *  The litter was harmless on its own. What it cost is that `/tmp` noise could not be told
  *  from a real leak, and BLZ-485's mutation runner now asserts ZERO leftover
@@ -43,18 +35,6 @@ import { appliedLine } from "../scripts/reconcile-apply-report.mjs";
 const SCRATCH = [];
 after(() => { for (const dir of SCRATCH) rmSync(dir, { recursive: true, force: true }); });
 const scratch = (dir) => { SCRATCH.push(dir); return dir; };
-
-function gitRepo() {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blz-guards-")));
-  execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
-  execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
-  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
-  writeFileSync(join(root, "t.md"), "one\n");
-  execFileSync("git", ["-C", root, "add", "-A"]);
-  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
-  return root;
-}
-const head = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 function tinyBoard() {
   const dir = scratch(mkdtempSync(join(tmpdir(), "blz-guards-board-")));
@@ -156,42 +136,6 @@ describe("BLZ-426: the dashboard never renders a refusal as an in-sync board", (
   });
 });
 
-describe("BLZ-422: a no-op is never reported as a commit", () => {
-  test("commitFile's empty-diff no-op is not reported as a commit", () => {
-    const root = gitRepo();
-    try {
-      const f = join(root, "t.md");
-      const before = head(root);
-      writeFileSync(f, "one\n"); // byte-identical: the idempotent re-write
-      const c = commitFile(root, f, "T-1: edit");
-      assert.equal(head(root), before, "fixture check: git really had nothing to commit");
-      assert.equal(c.ok, true, "a benign no-op must stay benign — an idempotent re-write is not an error");
-      assert.equal(c.committed, false,
-        "commitFile reported a commit that is not in `git log` — BLZ-422's own defect");
-      assert.equal(c.noop, true, "the no-op must be nameable, not merely inferable");
-
-      writeFileSync(f, "two\n");
-      const c2 = commitFile(root, f, "T-1: edit");
-      assert.notEqual(head(root), before, "fixture check: a real commit really happened");
-      assert.equal(c2.committed, true, "a real commit must say so");
-      assert.notDeepEqual(c, c2, "a no-op and a real commit must not return the same shape");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("BLZ-254: an applied reconcile names its store and never claims a commit", () => {
-    const fs = appliedLine({ mode: "fs", movedCount: 3, nonMovedCount: 1 });
-    assert.match(fs, /^reconcile: 3 ticket\(s\) moved, 1 ticket\(s\) updated without a status change in the board's files/);
-    assert.match(fs, /makes no git commit/);
-    assert.doesNotMatch(fs, /\bcommitted\b|queued|HEAD/, "the board never commits — no line may say it did");
-    const db = appliedLine({ mode: "db", movedCount: 2, nonMovedCount: 0 });
-    assert.equal(db, "reconcile: 2 ticket(s) moved in the database.");
-    assert.equal(appliedLine({ mode: "dual", movedCount: 1, nonMovedCount: 0 }),
-      appliedLine({ mode: "fs", movedCount: 1, nonMovedCount: 0 }), "dual writes the files, so it reads as fs");
-  });
-});
-
 // BLZ-254: BLZ-427's describe (`blaze commit`'s subject counts tickets and names every op) is
 // deleted — it pinned OP_LABEL, summarizeEntries and the pending-ledger entries of commitOrQueue
 // and reconcile, all of which are deleted with `blaze commit` (spec §5.5).
@@ -240,14 +184,14 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
   // The rule, decided rather than converged, and written down in both files it governs
   // (scripts/views/reconcile-summary.mjs and scripts/reconcile-apply-report.mjs):
   // PREVIEW surfaces say "other update(s)"; WRITE-RECORD surfaces say "N ticket(s)
-  // updated without a status change". Measured: 4 sites, 2 vocabularies, and no site is
-  // on the wrong side.
+  // updated without a status change". Measured: 3 sites, 2 vocabularies, and no site is
+  // on the wrong side (BLZ-254 left one applied line, scripts/reconcile-apply-report.mjs).
   //
-  // This file pins the TWO sites in the files it can reach. reconcile.mjs's other ones —
-  // the dry-run tail (DRYRUN_TAIL_RE) and the applied line (APPLIED_LINE_RE) — belong to a
-  // different owner and are pinned by name in tests/reconcile-change-report-oracle.test.mjs
-  // ("other update(s)" and "updated without a status change" respectively), against
-  // filesystem ground truth. Full convergence to ONE vocabulary would
+  // This file pins the TWO sites in the files it can reach (the preview summary and the
+  // applied line). reconcile.mjs's other one — the dry-run tail (DRYRUN_TAIL_RE) — belongs
+  // to a different owner and is pinned by name in tests/reconcile-change-report-oracle.test.mjs
+  // ("other update(s)"), against filesystem ground truth, as is the applied line it prints
+  // (APPLIED_LINE_RE, "updated without a status change"). Full convergence to ONE vocabulary would
   // require editing reconcile.mjs, so the ticket's second option was taken deliberately.
   test("the preview surface says 'other update(s)'", () => {
     const text = reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: false }] });
@@ -270,6 +214,17 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
   });
 
   // BLZ-254: BLZ-481's locked/failed test is deleted — no locked or failed arm exists now.
+
+  test("BLZ-254: an applied reconcile names its store and never claims a commit", () => {
+    const fs = appliedLine({ mode: "fs", movedCount: 3, nonMovedCount: 1 });
+    assert.match(fs, /^reconcile: 3 ticket\(s\) moved, 1 ticket\(s\) updated without a status change in the board's files/);
+    assert.match(fs, /makes no git commit/);
+    assert.doesNotMatch(fs, /\bcommitted\b|queued|HEAD/, "the board never commits — no line may say it did");
+    const db = appliedLine({ mode: "db", movedCount: 2, nonMovedCount: 0 });
+    assert.equal(db, "reconcile: 2 ticket(s) moved in the database.");
+    assert.equal(appliedLine({ mode: "dual", movedCount: 1, nonMovedCount: 0 }),
+      appliedLine({ mode: "fs", movedCount: 1, nonMovedCount: 0 }), "dual writes the files, so it reads as fs");
+  });
 
   test("neither surface states the quantity at all when it is zero", () => {
     assert.doesNotMatch(reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: true }] }),

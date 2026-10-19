@@ -2,7 +2,7 @@
 // writes it made.
 //
 // BLZ-254 (spec §5.5): reconcile no longer commits. Until then its writes went through
-// `commitOrQueue`, and this module (as reconcile-commit-report.mjs, BLZ-404/BLZ-422)
+// `commitOrQueue` (removed by BLZ-254), and this module (as reconcile-commit-report.mjs, BLZ-404/BLZ-422)
 // classified seven commit outcomes — committed, no-op, queued, locked, failed, db, none —
 // each with its own wording and exit code. The board never commits now, so there is one
 // outcome per store and nothing to classify: the files changed (fs, dual), or the rows did (db).

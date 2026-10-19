@@ -483,7 +483,7 @@ export async function applyImport(plan, ctx) {
   }
 
   // BLZ-254 (spec §5.5): staging is gone. Until then the run ended by handing exactly the files it
-  // wrote (tickets, claims, receipt) to commitOrQueue under the `import` op, and a staging
+  // wrote (tickets, claims, receipt) to commitOrQueue (removed by BLZ-254) under the `import` op, and a staging
   // failure was a third route to exit 4. The board never commits now: the files are written,
   // and in fs mode the operator versions them.
   return { exitCode: 0, written, notWritten, files, errors: [] };

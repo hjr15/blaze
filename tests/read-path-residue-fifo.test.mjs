@@ -10,13 +10,11 @@
 // (`timeout -s KILL`), and each produced `EXIT=137` — the child had to be killed. Three of
 // the work order's own claims were checked against HEAD and one of them was already stale:
 //
-//   * `scripts/commit-lock.mjs`'s `readOwner` IS a real site and was missing from BLZ-493's
-//     inventory entirely — the ELEVENTH. Reproduced: `acquireLock` on a contended
-//     `.blaze/commit.lock/` whose `owner.json` is a FIFO never returns.
-//   * `scripts/pending-ledger.mjs` IS ALREADY GUARDED at HEAD. It imports
-//     `readRegularFileSync`/`writeRegularFileSync`/`appendRegularFileSync` and has no bare
-//     `readFileSync` left. The correction the ticket carries was true when it was filed and
-//     is not true now; nothing is changed there, and ADR-0031's table says so.
+//   * `scripts/dir-lock.mjs`'s `readOwner` IS a real site and was missing from BLZ-493's
+//     inventory entirely — the ELEVENTH. Reproduced: the lock (then
+//     `acquireLock`, deleted by BLZ-254) on a contended lock directory whose `owner.json`
+//     is a FIFO never returns.
+// (pending-ledger.mjs, the other site here, was deleted by BLZ-254.)
 //   * `scripts/model/setup-token.mjs` IS reachable PRE-AUTH, from `serve.mjs`'s `POST
 //     /setup` — the single highest-priority site here, because a hang on it is reachable by
 //     an unauthenticated caller and wedges the one route that makes the install usable.
@@ -159,16 +157,17 @@ describe("BLZ-512: the setup token is the pre-auth surface, and it must not hang
 // The ELEVENTH site — missing from BLZ-493's inventory altogether.
 // =============================================================================
 
-describe("BLZ-512: commit-lock's readOwner is the site the inventory missed", () => {
-  test("acquireLock REFUSES a FIFO owner.json instead of blocking forever", () => {
+describe("BLZ-512: dir-lock's readOwner is the site the inventory missed", () => {
+  test("acquireDirLock REFUSES a FIFO owner.json instead of blocking forever", () => {
     const dir = tmp();
     try {
-      mkdirSync(join(dir, ".blaze", "commit.lock"), { recursive: true });
-      const owner = join(dir, ".blaze", "commit.lock", "owner.json");
+      const lock = join(dir, ".blaze", "x.lock");
+      mkdirSync(lock, { recursive: true });
+      const owner = join(lock, "owner.json");
       fifo(owner);
       const res = child(dir, `
-        import { acquireLock } from ${mod("commit-lock.mjs")};
-        try { console.log("RETURNED", JSON.stringify(acquireLock(${JSON.stringify(dir)}, { retries: 0, delayMs: 1 }))); }
+        import { acquireDirLock } from ${mod("dir-lock.mjs")};
+        try { console.log("RETURNED", JSON.stringify(acquireDirLock(${JSON.stringify(lock)}, { retries: 0, delayMs: 1 }))); }
         catch (e) { console.log("REFUSED", e.code, e.message); }
       `);
       assertRefusal(res.stdout, owner);

@@ -7,13 +7,13 @@
 //            "no code-bound changes" — an in-sync board that is not in sync, it
 //            just never ran.
 //   BLZ-422  the `reconcile --apply` CLI claimed a commit that `git log` did not hold
-//            (`commitFile`'s benign empty-diff no-op read as "committed"). Since BLZ-254
+//            (`commitFile`'s benign empty-diff no-op, deleted by BLZ-254, read as "committed"). Since BLZ-254
 //            the claim it must not make is ANY commit: the CLI's applied line and HEAD
 //            are checked against each other on every cell.
 //
 // BLZ-254 (spec §5.5): reconcile stopped committing, and `blaze commit` was deleted. The
 // commit-outcome dimension (committed / no-op / queued / locked / failed) went with them,
-// and so did consumers 3 (`commitOutcomeFrom` + `applySummary`) and 4 (`blaze commit`'s
+// and so did consumers 3 (`commitOutcomeFrom` + `applySummary`, deleted by BLZ-254) and 4 (`blaze commit`'s
 // subject, BLZ-427), whose modules no longer exist. What is left to vary is whether the
 // board has already been applied once (first-apply / second-apply).
 //
@@ -187,7 +187,7 @@ const shapeChanges = (shape) => Boolean(shape.moves || shape.other);
 // nothing left to decide (BLZ-445's reachable "nothing happened", kept).
 const RUNS = ["first-apply", "second-apply"];
 
-// Consumers 3 (commitOutcomeFrom + applySummary) and 4 (`blaze commit`'s subject) are
+// BLZ-254: consumers 3 (commitOutcomeFrom + applySummary) and 4 (`blaze commit`'s subject) are
 // deleted with the modules they pinned.
 const CONSUMERS = ["dashboard-toast", "reconcile-cli"];
 

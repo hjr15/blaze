@@ -58,7 +58,7 @@ try {
   loadConfig({ root: dataRoot });
   // BLZ-121: reindex is the one mutates:true verb with no defence-in-depth of
   // its own — it writes derived, gitignored caches directly (no
-  // commitOrQueue in its path at all), so without this it would silently
+  // commitOrQueue, removed by BLZ-254, in its path at all), so without this it would silently
   // rebuild .blaze/index.json under BLAZE_READONLY. It doesn't dirty the
   // tracked tree, but "zero guard" is still the odd one out among mutating
   // verbs; add the same guard for uniformity. cli.mjs remains the primary

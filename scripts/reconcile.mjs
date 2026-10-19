@@ -361,8 +361,9 @@ export function idFromSubject(subject, key) {
 // over-claiming is the anchor and the colon, never which separators are listed.
 //
 // Condition 2 exists because the first cut, which honoured any `[*+-]` bullet under any
-// subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
-// writes every batch board commit's body as `- <KEY>-<n>: <board op> [session]`, and
+// subject, turned the board's own ledger into a delivery signal.
+// `commit-runner.mjs` (deleted by BLZ-254) wrote every batch board commit's body as
+// `- <KEY>-<n>: <board op> [session]` — those commits stay in every board's history — and
 // the board repo is itself a configured codeRepo for its own project — the hazard
 // INF-735's comment already names. Measured on the board repo at blaze-pm ff5f36c2
 // (its origin/main, 156 commits) for the INF key alone: 426 ids harvested beyond the
@@ -2434,7 +2435,7 @@ export async function reconcile({
   }
 
   // BLZ-254 (spec §5.5): the commit block that stood here is deleted. Since BLZ-404 it routed
-  // this pass's writes through commitOrQueue (a per-op commit, a batch-queue entry, or a lock
+  // this pass's writes through commitOrQueue, removed by BLZ-254 (a per-op commit, a batch-queue entry, or a lock
   // refusal) and reported which as `commitOutcome`. The board never commits now: in fs mode the
   // files changed and the operator versions them; in db mode the rows did.
   // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`

@@ -74,59 +74,23 @@ flowchart TB
 <!-- DIAGRAM:END -->
 
 - **CLI + runners** — `cli.mjs` maps each verb (`new`, `move`, `edit`, `resolve`,
-  `log`, `commit`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
-  `*-runner.mjs` that wraps a pure `apply*`/model core and then commits via
-  `commit-or-queue.mjs` (per-op commit, or a queued entry in `batch` mode —
-  session-keyed to `<store>/.blaze/pending/<session>.jsonl` since v0.4.0, where
-  `<session>` is `BLAZE_SESSION` if set, else auto-derived from the agent
-  harness's own session id, else the shared legacy fallback when neither is
-  present — so `blaze commit` flushes only the caller's queue, refusing the
-  fallback without `--shared`, and `--all` sweeps them all unconditionally).
-  The harness id is **inherited by every descendant process**, so a session and all
-  of its subagents resolve to ONE queue: any of them flushing takes all of them
-  (BLZ-124), while a different top-level session's queue is never looked at
-  (BLZ-498). Those are not competing claims — they are the same rule, "drain
-  exactly the queue your own session id resolves to", seen at its two boundaries,
-  and `tests/commit-session-queue-scope.test.mjs` observes both in a single run.
-  `<store>` is **the repository, not the working copy** (BLZ-556, ADR-0033):
-  `.blaze/` beside the common `.git`, so every linked worktree shares one set of
-  queues and the flush's existing mount is the only store there is. The resolver is
-  guarded — a bare repo, a submodule and an ambient `GIT_DIR` each resolve
-  `--git-common-dir` somewhere whose parent is not a working tree of this repo — and
-  falls back to the invoking root rather than guessing. Because one store now exposes
-  every worktree's ops, the drain is provenance-aware: it commits only the ops queued
-  in its own working tree (their files exist nowhere else), rewrites the rest
-  byte-for-byte, and exits 3 rather than reporting a flush that left work behind.
-  A queue that is fully drained is **removed**, not truncated to an empty file, so
-  a finished session stops leaving one behind forever (BLZ-498); a partial drain
-  keeps its file and its undrained bytes.
-  Both git-write surfaces serialize on the advisory `commit-lock.mjs`
-  (`.blaze/commit.lock/`, stale locks auto-stolen) — see AGENTS.md
-  "Sessions (parallel agents on one board)".
-  `commitFile` reports `{ ok, committed, step, … }`: `ok` answers "did this go wrong",
-  `committed` answers "is there a new commit", and `step` (`"add"` | `"commit"`)
-  answers WHICH git call refused — carried rather than reconstructed, because `git
-  add` returns first and its failures were being reported under `git commit`'s name
-  (BLZ-502). They differ on the benign empty-diff
-  no-op — an idempotent re-write whose staged tree already matches HEAD — which is
-  `ok: true, committed: false, noop: true` and must never be reported as a commit
-  (BLZ-422). Every verb's success line names that outcome via `commitSuffix`, the
-  same way it already named `(queued for blaze commit)`.
-  `blaze commit`'s subject line is composed in `commit-summary.mjs`: one clause per
-  op, counting **distinct tickets** rather than ops, through `OP_LABEL`. Every
-  queueable op has an entry there and `commit-or-queue.mjs` refuses to queue one that
-  does not, so the subject can never print a raw op name. A queued `reconcile` op
-  records the full `ids` list of the tickets that pass wrote, because one reconcile op
-  covers many tickets while every other verb covers exactly one (BLZ-427).
+  `log`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
+  `*-runner.mjs` that wraps a pure `apply*`/model core and resolves the write
+  port. Nothing commits (BLZ-254): in fs mode the verb writes the ticket file and
+  the operator versions the board with git; in db mode it writes the row. The
+  commit ceremony — `blaze commit`/`blaze publish`, the per-session pending
+  queues, the `.blaze/commit.lock/` commit lock, the branch guard and the
+  commit-subject composer — is deleted (spec §5.5). The lock *mechanism* survives
+  as `dir-lock.mjs` (`acquireDirLock`/`releaseDirLock`, BLZ-640), whose one
+  policy is `model/import-lock.mjs`'s one-import-at-a-time lock.
   `cli.mjs`'s `SUBCOMMANDS` table is the single dispatch point (no separate
   switch) and the only place a verb's `mutates` classification lives:
   `BLAZE_READONLY=1` (AGENTS.md "Read-only mode") makes it refuse to spawn any
-  mutating runner, gated here rather than inside `commit-or-queue.mjs` — every
-  mutating verb writes/renames the ticket file before it ever reaches a commit
-  decision, so declining only the commit would leave a relocated-but-uncommitted
-  file in a shared tree. `commit-or-queue.mjs`, `pending-ledger.mjs`, and
-  `serve.mjs`'s `/api/*` handlers carry the same check as defence-in-depth for
-  callers that reach them by some path other than `cli.mjs` dispatch.
+  mutating runner, gated here rather than in each runner alone — every mutating
+  verb writes/renames the ticket file before anything else could refuse. The
+  mutating runners (via `assertWritable`) and `serve.mjs`'s `/api/*` handlers
+  carry the same check as defence-in-depth for callers that reach them by some
+  path other than `cli.mjs` dispatch.
 - **Model (`scripts/model/`)** — the single home for all rules: `schema`,
   `workflows`, `rules`, `move-plan`, `ticket`, `taxonomy` (validation +
   transitions); `index`, `rollup`, `time`, `ids`, `activity`, `transitions`,
@@ -329,7 +293,7 @@ Scopes are `read` ⊂ `write` ⊂ `admin` by role: **viewer** = `read`, **member
 | Method | Route | Scope | Purpose |
 |---|---|---|---|
 | GET | `/events` | `read` | Server-sent activity stream — it names ticket ids and commit shas |
-| POST | `/control/{reconcile,groomer}/{start,stop,run}` | `write` | Start, stop or fire one pass of a loop. `groomer/run` is the **agent-dispatch** endpoint; `reconcile/run` applies for real and commits locally — it never pushes (BLZ-404 AC-4: `reconcile()` hardcodes `pushed: false` and has no `push` parameter to contradict it). None of them is a read — `start`/`stop` decide whether the other two happen at all |
+| POST | `/control/{reconcile,groomer}/{start,stop,run}` | `write` | Start, stop or fire one pass of a loop. `groomer/run` is the **agent-dispatch** endpoint; `reconcile/run` applies for real and writes the board (no commit since BLZ-254) — it never pushes (BLZ-404 AC-4: `reconcile()` hardcodes `pushed: false` and has no `push` parameter to contradict it). None of them is a read — `start`/`stop` decide whether the other two happen at all |
 | POST | `/control/revert` | `write` | `git revert --no-edit <sha>` on the board repo, for the ↩ button on a groom event |
 | *anything else under* `/control/` | — | **`404 unknown endpoint`** — unclassified is denied |
 

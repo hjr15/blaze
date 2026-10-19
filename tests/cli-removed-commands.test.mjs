@@ -30,7 +30,7 @@ function board(t) {
   return root;
 }
 
-// I8: the red run (Step 2) executes the REAL publish-runner, which shells out to
+// I8: the red run (Step 2) executed the REAL publish-runner (since deleted by BLZ-254), which shelled out to
 // `kubectl create job --from=cronjob/blaze-flush` against the ambient context. It must never reach
 // a cluster: no kubeconfig, an unknown context, and a `kubectl` on PATH that refuses.
 const NOKUBE = scratch(mkdtempSync(join(tmpdir(), "blz687-nokube-")));
