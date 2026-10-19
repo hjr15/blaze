@@ -229,8 +229,8 @@ test("reconcile dry-run detects the move but suppresses the write; apply perform
 // (other in-flight board ops, editor swap files, etc.). This fixture mirrors
 // the real-branch apply setup above, but git-inits `root` itself (the prior
 // fixtures never did — they only asserted file moves, never inspected git
-// history on dataRoot) and passes commit:true so reconcile actually commits.
-test("reconcile --apply commits only touched files, not an unrelated dirty file", async () => {
+// history on dataRoot). BLZ-254: reconcile no longer commits, so HEAD must not move.
+test("reconcile --apply writes only its own tickets and leaves an unrelated dirty file alone", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-code-"));
 

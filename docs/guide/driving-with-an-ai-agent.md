@@ -77,7 +77,7 @@ and opens a PR gets the board updated for it:
 
 ```bash
 blaze reconcile            # dry-run: prints what it would move
-blaze reconcile --apply    # commit the moves locally (never pushes)
+blaze reconcile --apply    # apply the moves locally, leaving the tree dirty (never commits or pushes)
 ```
 
 This is the cleanest division of labour: the agent writes code and manages

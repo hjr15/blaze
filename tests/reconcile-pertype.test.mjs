@@ -66,7 +66,7 @@ test("reconcile dry-run makes no file moves", async () => {
 // precondition rather than trusting the test's own prose. BLZ-423 then replaced THAT
 // assertion's source: it read `r.changes`/`r.committed`/`r.commitOutcome`, which is the
 // subject certifying itself, and now reads the filesystem and `git log`.
-test("pushed stays false on an applied, committing run — the contract push once contradicted", async () => {
+test("pushed stays false on an applied run", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-rec-push-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-rec-push-code-"));
   execFileSync("git", ["-C", codeRepo, "init", "-q", "-b", "main"]);

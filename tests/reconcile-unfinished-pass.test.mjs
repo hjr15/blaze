@@ -26,9 +26,10 @@
 // any code-bound change to make — and says exactly that now, nothing about the state of
 // the git tree.
 //
-// BLZ-254: the round-2/round-5 describes are deleted — they pinned reconcile's commit
-// outcomes (locked, failed, queued), and reconcile no longer commits. The --project
-// blast-radius describe is kept; its HEAD clauses now read "reconcile made no commit at all".
+// BLZ-254: the round-2 describe and the commit-outcome tests of round 5 are deleted — they
+// pinned reconcile's commit outcomes (locked, failed, queued), and reconcile no longer commits.
+// Round 5's untracked-file and in-sync-wording tests are kept (live behaviour), as is the
+// --project blast-radius describe; their HEAD clauses now read "reconcile made no commit at all".
 import { test, describe } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
@@ -92,6 +93,70 @@ function stripProjectMismatchLines(output) {
     .filter((l) => !(l.includes("NEEDS ATTENTION") && l.includes("no single-project run")))
     .join("\n");
 }
+
+// BLZ-254: two tests of the deleted round-5 describe are KEPT here — they pin live behaviour,
+// not a commit outcome: a human's untracked file neither wedges reconcile nor is named by it,
+// and the empty-pass line never claims the board is "in sync". "Never committed" is now read
+// as "HEAD unmoved", and the seed pass is versioned by the operator, since reconcile no longer
+// commits.
+describe("BLZ-404 round 5: reconcile reports only what THIS pass found", () => {
+  test("an untracked non-ticket file under projects/<KEY>/: --apply exits 0, the file is neither committed nor complained about", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r5-notes-"));
+    try {
+      const { root } = movableBoard(tmp);
+
+      // Bring the board to a genuinely in-sync state first.
+      const seed = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+      assert.equal(seed.status, 0, `test setup: the seeding pass must succeed: ${seed.stderr}`);
+      // BLZ-254: reconcile no longer commits — in fs mode the operator versions the files.
+      execFileSync("git", ["-C", root, "add", "-A"]);
+      execFileSync("git", ["-C", root, "commit", "-q", "-m", "operator commits the seed pass"]);
+      assert.equal(porcelain(root), "", "test setup: the board must be fully in sync before the probe");
+
+      // A human's own draft file, untracked and unrelated to any ticket.
+      writeFileSync(join(root, "projects", "OBA", "NOTES.md"), "draft thoughts, not a ticket\n");
+      const before = headSha(root);
+
+      const res = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+
+      assert.equal(res.status, 0,
+        `a human's own untracked file must not wedge reconcile — got status ${res.status}, ` +
+        `stderr: ${res.stderr}`);
+      assert.doesNotMatch((res.stdout + res.stderr), /NOTES\.md/,
+        "reconcile must not single out or complain about a file it never wrote and cannot " +
+        "explain");
+      assert.doesNotMatch((res.stdout + res.stderr), /uncommitted changes this pass did not make/i,
+        "reconcile must not accuse anything of leaving this file behind");
+      assert.equal(headSha(root), before, "HEAD unmoved — reconcile makes no commit, so the file is never committed");
+      const status = porcelain(root, join(root, "projects"));
+      assert.match(status, /\?\? .*NOTES\.md/, "the file must still be untracked, exactly as the human left it");
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+
+  test("the in-sync line says only what reconcile knows — that THIS pass found no code-bound change — nothing about the tree", () => {
+    const tmp = mkdtempSync(join(tmpdir(), "blz404r5-wording-"));
+    try {
+      const { root } = movableBoard(tmp);
+      const seed = spawnSync(process.execPath, [RECONCILE_BIN, "--apply"], { cwd: root, encoding: "utf8" });
+      assert.equal(seed.status, 0, `test setup: the seeding pass must succeed: ${seed.stderr}`);
+
+      const res = spawnSync(process.execPath, [RECONCILE_BIN], { cwd: root, encoding: "utf8" });
+      assert.equal(res.status, 0);
+      // Pinned so a future edit cannot quietly restore an over-claim: the line must not
+      // assert anything is "in sync" (a claim about the WHOLE board's git tree, which
+      // reconcile cannot see) — it may only claim it found nothing to move.
+      assert.doesNotMatch(res.stdout, /in sync/i,
+        "reconcile must not claim the board is 'in sync' — it only knows whether THIS pass " +
+        "found a code-bound change to make");
+      assert.match(res.stdout, /reconcile: no code-bound change found — nothing to do\./,
+        `expected the exact honest wording, got: ${JSON.stringify(res.stdout)}`);
+    } finally {
+      rmSync(tmp, { recursive: true, force: true });
+    }
+  });
+});
 
 describe("BLZ-404 round 3/4/5 (finding 4): --project blast radius covers the REPORT, not just the write", () => {
   test("an in-sync OBA plus a dirty ORC ticket — --project OBA --apply leaves projects/ORC untouched, uncommitted, and unreported", () => {

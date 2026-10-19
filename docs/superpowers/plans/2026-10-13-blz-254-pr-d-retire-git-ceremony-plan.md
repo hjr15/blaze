@@ -643,7 +643,7 @@ export function appliedLine({ mode, movedCount, nonMovedCount }) {
 4. If `deepEq` is not already defined in this file, use `eq(JSON.stringify(…), "[]", …)` instead, so the clause still goes through a counting wrapper (`grep -n "const deepEq" tests/reconcile-feed-truth-oracle.test.mjs`).
 
 **`tests/reconcile-unfinished-pass.test.mjs`:**
-1. Delete the two describes `"BLZ-404 round 5: the cross-pass dirty-tree detector is deleted — …"` (`:87-243`) and `"BLZ-404 round 2 (blocking 3): the supervisor feed reports 'queued', …"` (`:245-287`). Every test in them pins a commit outcome (lock, hook, batch queue, the "queued" feed event).
+1. Delete the describe `"BLZ-404 round 2 (blocking 3): the supervisor feed reports 'queued', …"` (`:245-287`), and from `"BLZ-404 round 5: the cross-pass dirty-tree detector is deleted — …"` (`:87-243`) delete the four tests that pin a commit outcome (the locked commit, the run after it, the batch board, the failing pre-commit hook). **Keep** two round-5 tests, because they pin live behaviour rather than a commit outcome (Task 1 review, fix round 1): `"an untracked non-ticket file under projects/<KEY>/: --apply exits 0, the file is neither committed nor complained about"` (a human's untracked NOTES.md neither wedges reconcile nor is named in its output) and `"the in-sync line says only what reconcile knows …"` (with its `doesNotMatch(/in sync/i)` guard on stdout). Put them in a describe `"BLZ-404 round 5: reconcile reports only what THIS pass found"`. In the first one, version the seed pass with the operator-commit seed from item 3, replace `headCount` with `headSha`, and read "never committed" as "HEAD unmoved". Also move `tests/reconcile-commit-routing.test.mjs`'s `"BLAZE_READONLY refuses before any ticket file is written"` test to this file (minus `commit: true` and its `committed` clause), because it too pins live behaviour (assertWritable is hoisted above the write port) and nothing else covers it.
 2. Delete the `acquireLock, releaseLock` import (`:34`) and the now-unused `headCount` helper.
 3. In the kept describe, replace both occurrences (use `replace_all`) of
 
@@ -659,7 +659,7 @@ export function appliedLine({ mode, movedCount, nonMovedCount }) {
          execFileSync("git", ["-C", root, "commit", "-q", "-m", "operator commits the seed pass"]);
          assert.equal(porcelain(root), "", "test setup: OBA must be fully in sync before ORC is added");
    ```
-4. Add a header paragraph: `// BLZ-254: the round-2/round-5 describes are deleted — they pinned reconcile's commit outcomes (locked, failed, queued), and reconcile no longer commits. The --project blast-radius describe is kept; its HEAD clauses now read "reconcile made no commit at all".`
+4. Add a header paragraph: `// BLZ-254: the round-2 describe and the commit-outcome tests of round 5 are deleted — they pinned reconcile's commit outcomes (locked, failed, queued), and reconcile no longer commits. Round 5's untracked-file and in-sync-wording tests are kept (live behaviour), as is the --project blast-radius describe; their HEAD clauses now read "reconcile made no commit at all".`
 
 **`tests/board-overstatement-guards.test.mjs`:**
 1. Imports: delete the `commitOutcomeFrom, applySummary, COMMIT_OUTCOMES` line and add `import { appliedLine } from "../scripts/reconcile-apply-report.mjs";`.
