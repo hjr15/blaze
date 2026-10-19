@@ -151,14 +151,9 @@ without physically moving it through the workflow, use `resolve` instead:
 blaze resolve ENG-1 wont-do   # done | wont-do | duplicate | cannot-reproduce
 ```
 
-## Every command is a commit
+## Blaze does not commit
 
-By default (`commitMode: per-op`), every mutating command above committed
-immediately, scoped to only the files it touched — `blaze new` is one commit,
-each `blaze move` is one commit, `blaze log` is one commit. There's a `batch`
-mode that queues operations and flushes them with one `blaze commit`
-instead — useful when an AI agent is driving many operations in a session.
-See [Driving Blaze with an AI agent](driving-with-an-ai-agent.md).
+Blaze does not commit. Every mutating command above changes the ticket files (or, under `BLAZE_WRITE_PORT=db`, the database) and stops. On a file board, version the files with git yourself, as often as suits you. A board with more than one writer belongs in db mode (see [ADR-0006](../decisions/0006-database-is-the-sole-source-of-truth.md)).
 
 ## Next steps
 

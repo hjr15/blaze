@@ -1,7 +1,7 @@
 // tests/runner-dataroot.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, cpSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync, readdirSync, cpSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -34,7 +34,7 @@ function dataRepo() {
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
   writeFileSync(join(root, "blaze.config.json"),
-    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], commitMode: "per-op" }));
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"] }));
   mkdirSync(join(root, "projects", "ZZZ", "in-progress"), { recursive: true });
   writeFileSync(join(root, "projects", "ZZZ", "in-progress", "ZZZ-1.md"),
     "---\nid: ZZZ-1\ntype: task\nstatus: in-progress\nestimate: 60\n---\n\nbody\n");
@@ -54,9 +54,9 @@ test("engine in one tree drives a data repo in another via BLAZE_PROJECTS_DIR", 
   const created = readdirSync(join(data, "projects", "ZZZ", "defined"));
   assert.equal(created.length, 1);
   assert.match(created[0], /^ZZZ-2-dataroot-proof/);
-  // …the DATA repo committed (per-op mode)…
-  const subject = execFileSync("git", ["-C", data, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
-  assert.match(subject, /^ZZZ-2: create task$/);
+  // …the DATA repo holds it uncommitted — BLZ-254: the board never commits…
+  assert.match(execFileSync("git", ["-C", data, "status", "--porcelain", "--untracked-files=all"],
+    { encoding: "utf8" }), /ZZZ-2-dataroot-proof/);
   // …and the ENGINE tree did not move (a pre-rewire engine writes here — the
   // whole point of running a disposable copy).
   assert.equal(head(eng), engineHead, "engine tree must be untouched");
@@ -67,32 +67,11 @@ test("engine in one tree drives a data repo in another via BLAZE_PROJECTS_DIR", 
 test("cwd inside a data repo works with no env (ladder rung 2)", () => {
   const eng = engineCopy();
   const data = dataRepo();
+  const before = head(data);
   execFileSync(process.execPath, [join(eng, "scripts", "log-runner.mjs"), "ZZZ-1", "30"],
     { cwd: data, env: { ...process.env, BLAZE_PROJECTS_DIR: "" } });
-  const subject = execFileSync("git", ["-C", data, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
-  assert.equal(subject, "ZZZ-1: log 30m");
-  rmSync(data, { recursive: true, force: true });
-  rmSync(eng, { recursive: true, force: true });
-});
-
-test("batch mode queues into the DATA repo's .blaze ledger", () => {
-  const eng = engineCopy();
-  const data = dataRepo();
-  writeFileSync(join(data, "blaze.config.json"),
-    JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], commitMode: "batch" }));
-  const before = head(data);
-  const env = { ...process.env, BLAZE_PROJECTS_DIR: join(data, "projects") };
-  delete env.BLAZE_SESSION;
-  // Pin a harness id so the queue name is deterministic regardless of
-  // whatever ambient CLAUDE_CODE_SESSION_ID the outer test process happens to
-  // have — unset BLAZE_SESSION + a present harness id auto-derives a queue
-  // keyed to that id (not process.ppid, which changes per invocation).
-  env.CLAUDE_CODE_SESSION_ID = "test-harness-uuid";
-  execFileSync(process.execPath, [join(eng, "scripts", "move-runner.mjs"), "ZZZ-1", "in-review"], { cwd: eng, env });
-  assert.equal(head(data), before, "batch mode must not commit");
-  // The queue still lives under the DATA repo's .blaze/, not the engine's.
-  const ledger = readdirSync(join(data, ".blaze", "pending"));
-  assert.ok(ledger.includes("auto-test-harness-uuid.jsonl"), ".blaze ledger must live in the data repo");
+  assert.match(readFileSync(join(data, "projects", "ZZZ", "in-progress", "ZZZ-1.md"), "utf8"), /minutes: 30/);
+  assert.equal(head(data), before, "BLZ-254: the log is written, not committed");
   rmSync(data, { recursive: true, force: true });
   rmSync(eng, { recursive: true, force: true });
 });

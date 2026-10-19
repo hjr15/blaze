@@ -1,8 +1,5 @@
 // tests/new-runner.test.mjs — CLI spawn tests for `blaze new`'s flag parsing.
-// Runner spawn-test isolation is mandatory: a spawned new-runner.mjs with no
-// BLAZE_PROJECTS_DIR writes into the REAL worktree and makes a REAL git
-// commit. dataRepo()/run() below git-init a throwaway data tree with
-// commitMode: "batch" (no commits) and point the runner at it.
+// Runner spawn-test isolation is mandatory: a spawned runner with no BLAZE_PROJECTS_DIR writes into the REAL worktree.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";

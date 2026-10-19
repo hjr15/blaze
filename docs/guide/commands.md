@@ -250,7 +250,7 @@ blaze new --project <KEY> --type <type> "<title>" [flags]
 ```
 
 Creates a ticket in its type's initial status: allocates the next id,
-writes a schema-valid file, and commits it (or queues it, in batch mode).
+writes a schema-valid file, and stops: it makes no commit (BLZ-254).
 `--project`, `--type`, and the title are required. Unknown flags are
 rejected.
 
@@ -431,7 +431,7 @@ blaze move <id> <status>
 
 Validates the transition against the ticket type's workflow, sets
 `resolution` if the target status is terminal, and relocates the ticket
-file into the target status directory. Commits (or queues, in batch mode).
+file into the target status directory. It makes no commit (BLZ-254).
 
 | Arg | Meaning |
 |---|---|

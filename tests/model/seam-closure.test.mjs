@@ -2060,7 +2060,7 @@ const WRITE_ALLOWED = new Map([
   // and on exactly the footing of ids.mjs and claims.mjs above.
   ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
-  ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+  ["sprint-runner.mjs", ["saveSprints"]],   // BLZ-254: commitOrQueue removed — no commit
   // BLZ-682: `blaze matrices` writes the two derived matrix files per project into --out —
   // generated docs, never a ticket — through the FIFO-safe primitive, after creating the dir.
   ["matrices-runner.mjs", ["mkdirSync", "writeRegularFileSync"]],
@@ -2078,15 +2078,15 @@ const WRITE_ALLOWED = new Map([
   ["move.mjs", ["fsStorage"]],
   ["resolve.mjs", ["fsStorage"]],
   ["schedule-runner.mjs", ["fsStorage"]],
-  // ...their six CLI runners resolve the write port and hand the result to the commit queue.
-  // BLZ-670: each resolves BOTH ports once (resolvePorts) and stages by mode (stageFor), so a
-  // db-mode verb reads the database and never stages a ticket that is only a row.
-  ["edit-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["link-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["log-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["move-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["new-runner.mjs", ["applyNew", "stageFor", "resolvePorts"]],
-  ["resolve-runner.mjs", ["stageFor", "resolvePorts"]],
+  // ...their six CLI runners resolve the write port.
+  // BLZ-670: each resolves BOTH ports once (resolvePorts), so a db-mode verb reads the database.
+  // BLZ-254: stageFor removed from all six — the verbs stage nothing (spec §5.5).
+  ["edit-runner.mjs", ["resolvePorts"]],
+  ["link-runner.mjs", ["resolvePorts"]],
+  ["log-runner.mjs", ["resolvePorts"]],
+  ["move-runner.mjs", ["resolvePorts"]],
+  ["new-runner.mjs", ["applyNew", "resolvePorts"]],
+  ["resolve-runner.mjs", ["resolvePorts"]],
   // BLZ-629 / design §5.3-§5.5. `blaze import --apply` is `blaze new` done N
   // times from a file, and it takes exactly what `new.mjs` and the six
   // runners above take, for exactly their reasons: `allocateId` + `writeClaim`

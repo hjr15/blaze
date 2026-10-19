@@ -25,7 +25,7 @@ import { execFileSync } from "node:child_process";
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "../scripts/views/reconcile-summary.mjs";
 import { pageHtml } from "../scripts/views/page.mjs";
 import { commitFile } from "../scripts/serve-commit.mjs";
-import { commitOrQueue, commitSuffix } from "../scripts/commit-or-queue.mjs";
+import { commitOrQueue } from "../scripts/commit-or-queue.mjs";
 import { appliedLine } from "../scripts/reconcile-apply-report.mjs";
 
 /** Every scratch directory this file mints, removed once the file is done with them
@@ -189,15 +189,6 @@ describe("BLZ-422: a no-op is never reported as a commit", () => {
     assert.equal(db, "reconcile: 2 ticket(s) moved in the database.");
     assert.equal(appliedLine({ mode: "dual", movedCount: 1, nonMovedCount: 0 }),
       appliedLine({ mode: "fs", movedCount: 1, nonMovedCount: 0 }), "dual writes the files, so it reads as fs");
-  });
-
-  test("each per-ticket verb says so when no commit was created", () => {
-    assert.equal(commitSuffix({ ok: true, committed: true }), "");
-    assert.equal(commitSuffix({ ok: true, committed: false, queued: true }), " (queued for blaze commit)");
-    assert.match(commitSuffix({ ok: true, committed: false, noop: true }), /no commit created/i);
-    assert.notEqual(commitSuffix({ ok: true, committed: false, noop: true }),
-      commitSuffix({ ok: true, committed: true }),
-      "an idempotent re-write and a real commit must not print the same line");
   });
 });
 

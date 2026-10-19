@@ -3,7 +3,6 @@
 // Thin CLI over model/sprints.mjs — logic lives there (covered); this file
 // is coverage-excluded (*-runner.mjs), matching new-runner.mjs's pattern.
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { commitOrQueue, commitSuffix } from "./commit-or-queue.mjs";
 import { loadSprints, saveSprints, addSprint, setActive, formatSprintList,
          unstampedRegistryWarning } from "./model/sprints.mjs";
 
@@ -22,8 +21,9 @@ const { dataRoot } = resolveRoots();
 // and, since BLZ-402, on a malformed project key too (BLZ-402 review finding 3:
 // `cli.mjs`'s preflight already catches this for the normal `blaze sprint` path, but a
 // direct `node sprint-runner.mjs` bypasses it entirely).
-let cfg;
-try { cfg = loadConfig({ root: dataRoot }); }
+// The call IS the config-schema guard (ADR-0002); its value was read only for the commit mode,
+// which BLZ-254 removed.
+try { loadConfig({ root: dataRoot }); }
 catch (e) {
   if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
   throw e;
@@ -33,8 +33,8 @@ const [sub, ...rest] = process.argv.slice(2);
 
 try {
   // BLZ-121 defence-in-depth, hoisted above the saveSprints() writes below —
-  // see move-runner.mjs for the rationale (commitOrQueue's own guard fires
-  // too late, after sprints.json is already written). The whole try/catch
+  // `saveSprints` writes sprints.json via direct node:fs calls, so the guard must run before
+  // it; cli.mjs is still the primary gate. The whole try/catch
   // here already turns a thrown `blaze: …` Error into a clean message, so
   // this doesn't need its own catch.
   assertWritable("create/activate a sprint");
@@ -60,9 +60,7 @@ try {
     warnIfUnstamped(before);
     const { registry, id } = addSprint(before, { name: opts.name, start: opts.start, end: opts.end });
     saveSprints({ root: dataRoot }, registry);
-    const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "sprint", id, message: `sprint: create ${id}`, files: ["sprints.json"] });
-    if (!c.ok) { console.error(`blaze sprint: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-    console.log(`created ${id}${commitSuffix(c)}`);
+    console.log(`created ${id}`);   // BLZ-254: no commit
   } else if (sub === "list") {
     for (const a of rest) {
       if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
@@ -81,9 +79,7 @@ try {
     warnIfUnstamped(before);
     const registry = setActive(before, id);
     saveSprints({ root: dataRoot }, registry);
-    const c = commitOrQueue({ root: dataRoot, mode: cfg.commitMode, op: "sprint", id, message: `sprint: set active ${id}`, files: ["sprints.json"] });
-    if (!c.ok) { console.error(`blaze sprint: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-    console.log(`active sprint: ${id}${commitSuffix(c)}`);
+    console.log(`active sprint: ${id}`);   // BLZ-254: no commit
   } else {
     console.error("usage: blaze sprint <new|list|active> ...");
     process.exit(1);

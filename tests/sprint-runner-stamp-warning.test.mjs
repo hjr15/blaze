@@ -33,10 +33,10 @@ function board(registry) {
   const root = mkdtempSync(join(tmpdir(), "blz369r-"));
   mkdirSync(join(root, "projects", "ENG", "defined"), { recursive: true });
   writeFileSync(join(root, "blaze.config.json"),
-    JSON.stringify({ key: "ENG", projects: ["ENG"], commitMode: "per-op" }));
+    JSON.stringify({ key: "ENG", projects: ["ENG"] }));
   writeFileSync(join(root, "sprints.json"), JSON.stringify(registry, null, 2) + "\n");
-  // A real git repo: `commitOrQueue` runs on the write path, and without one the runner exits 1
-  // with "commit failed (status 128)" — which would make every assertion below pass vacuously.
+  // A real git repo, as a board usually is; since BLZ-254 the runner never touches git, so the
+  // assertions below do not depend on it.
   const git = (...a) => spawnSync("git", ["-C", root, ...a], { encoding: "utf8" });
   git("init", "-q");
   git("config", "user.email", "t@t");

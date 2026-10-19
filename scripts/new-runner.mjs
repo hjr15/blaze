@@ -1,10 +1,9 @@
 // scripts/new-runner.mjs — CLI entry for `blaze new`. Parses flags, calls
-// applyNew against the resolved data tree, then commits (or queues) the ticket.
+// applyNew against the resolved data tree and writes; it makes no commit (BLZ-254).
 import { applyNew } from "./new.mjs";
 import { derivedFieldRefusal } from "./model/fields.mjs";
 import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { stageFor, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -15,18 +14,16 @@ const { dataRoot, projectsDir } = resolveRoots();
 // this line, is the one an adversarial review reproduced a raw stack trace from —
 // `cli.mjs`'s preflight already catches this for the normal `blaze new` path, but a
 // direct `node new-runner.mjs` bypasses it entirely).
-let cfg;
-try { cfg = loadConfig({ root: dataRoot }); }
+// The call IS the config-schema guard (ADR-0002); its value was read only for the commit mode,
+// which BLZ-254 removed.
+try { loadConfig({ root: dataRoot }); }
 catch (e) {
   if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
   throw e;
 }
-// BLZ-121 defence-in-depth, hoisted before applyNew below for the same
-// reason as move-runner.mjs: commitOrQueue's own guard fires too late here —
-// applyNew writes the new ticket file via direct node:fs calls before
-// commitOrQueue is ever reached, so a guard only there would create the
-// ticket and merely decline the commit (a dirty-tree failure, not a clean
-// refusal). cli.mjs is still the primary gate for the normal `blaze new`
+// BLZ-121 defence-in-depth, hoisted before applyNew below.
+// `apply*` writes the ticket file via direct node:fs calls, so the guard must run before
+// it; cli.mjs is still the primary gate for the normal `blaze new`
 // path; this only matters for a direct `node new-runner.mjs`. Caught locally
 // so a direct invocation prints a clean `blaze: …` line, not a raw stack trace.
 try {
@@ -117,8 +114,6 @@ await closePorts();
 if (!r.ok) { console.error(`blaze new failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 
-// BLZ-670: db mode stages only files that exist on disk — the ticket is a row, not a file.
-const c = stageFor(mode)({ root: dataRoot, mode: cfg.commitMode, op: "new", id: r.id, message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile] });
-if (!c.ok) { console.error(`blaze new: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
 // BLZ-670: in db mode `r.file` is the id handle, so there is no path to name.
-console.log(`created ${r.id}${mode === "db" ? "" : ` → ${r.file}`}${commitSuffix(c)}`);
+// BLZ-254 (spec §5.5): the verb writes and stops — the board never commits.
+console.log(`created ${r.id}${mode === "db" ? "" : ` → ${r.file}`}`);
