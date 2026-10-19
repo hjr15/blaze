@@ -166,15 +166,13 @@ describe("BLZ-56: the preflight must judge a board the way audit does", () => {
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 
-  test("`blaze commit` is exempt — it flushes git and reads no schema", () => {
-    // commit-runner.mjs imports nothing from the model: it is a git flush of the pending
-    // ledger. Refusing it strands ticket files that verbs have ALREADY relocated but not
-    // committed, which is the hazard cli.mjs's own read-only gate cites.
+  test("BLZ-254: `blaze commit` is no longer an exemption — it is a removed verb, refused before the preflight", () => {
     const root = board(MALFORMED);
     try {
       const r = run(root, ["commit"]);
-      assert.doesNotMatch(r.stderr, /is not valid/,
-        "refusing commit would strand relocated-but-uncommitted ticket files");
+      assert.equal(r.status, 1);
+      assert.match(r.stderr, /`commit` was removed in 0\.9\.0/);
+      assert.doesNotMatch(r.stderr, /is not valid/, "the removal refusal comes first, so the schema is never judged");
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
 });

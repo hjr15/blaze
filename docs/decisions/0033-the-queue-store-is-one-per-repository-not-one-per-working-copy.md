@@ -147,7 +147,7 @@ came to sit in four of them without anyone noticing.
 - The 210 ops already on disk must be moved into the shared store by the operator. This is a data
   operation on a live board and the engine performs no part of it: it counts what is stranded,
   names it, and refuses to report success while it exists. See
-  [queue-store-migration](../operations/queue-store-migration.md).
+  (the procedure was deleted with the queue store, BLZ-254).
 - Until the operator flushes the lanes, the nightly flush exits 3 rather than 0. That is the
   intended outcome: 185 ops queued on `BLZ-305-v4-spine` are not the nightly main-branch flush's to
   commit, and a green run that says so is the defect this ADR removes.

@@ -20,7 +20,7 @@ test("blaze --help prints the full usage listing (all subcommands) and exits 0",
   const r = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /usage: blaze/);
-  for (const name of ["reconcile", "sprint", "commit", "migrate", "rollup"]) {
+  for (const name of ["reconcile", "sprint", "matrices", "migrate", "rollup"]) {
     assert.match(r.stdout, new RegExp(`\\b${name}\\b`));
   }
 });
@@ -31,7 +31,7 @@ test("blaze -h prints the full usage listing and exits 0", () => {
   assert.match(r.stdout, /usage: blaze/);
 });
 
-test("blaze commit --help prints subcommand help, exits 0, and never spawns the runner", () => {
+test("blaze move --help prints subcommand help, exits 0, and never spawns the runner", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cli-help-"));
   execFileSync("git", ["-C", root, "init", "-q"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
@@ -48,10 +48,10 @@ test("blaze commit --help prints subcommand help, exits 0, and never spawns the 
 
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
   delete env.BLAZE_SESSION;
-  const r = spawnSync(process.execPath, [cli, "commit", "--help"], { cwd: root, env, encoding: "utf8" });
+  const r = spawnSync(process.execPath, [cli, "move", "--help"], { cwd: root, env, encoding: "utf8" });
 
   assert.equal(r.status, 0);
-  assert.match(r.stdout, /commit/i);
+  assert.match(r.stdout, /move/i);
   assert.deepEqual(readFileSync(queue), beforeBytes, "runner must never have run — queue byte-identical");
   assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), beforeHead, "HEAD must not move");
   rmSync(root, { recursive: true, force: true });

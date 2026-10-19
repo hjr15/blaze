@@ -33,7 +33,6 @@
     "board": "node scripts/serve.mjs",
     "reconcile": "node scripts/reconcile.mjs",
     "groom": "node scripts/loops/groomer.mjs",
-    "commit": "node scripts/commit-runner.mjs",
     "pretest": "node scripts/ci/require-engine.mjs",
     "test": "node --test --test-timeout=120000 --import=./tests/setup/hang-watchdog.mjs",
     "pretest:coverage": "node scripts/ci/require-engine.mjs",

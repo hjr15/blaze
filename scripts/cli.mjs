@@ -20,7 +20,7 @@ const node = (file, args = []) => spawnSync(process.execPath, [join(here, file),
 // BLAZE_READONLY-gated with no second place to update.
 //
 // mutates classification: `reconcile` defaults to a dry-run but `--apply`
-// commits — classified true unconditionally (simpler and safer than
+// writes — classified true unconditionally (simpler and safer than
 // flag-dependent classification). `start` runs the supervisor, which drives
 // the groomer loop (git-commits), so it's true too. `board` (serve.mjs, the
 // read/write web viewer — its own mutating `/api/*` handlers are gated
@@ -83,22 +83,27 @@ const SUBCOMMANDS = {
   link: { file: "link-runner.mjs", desc: "add/remove a link between tickets", mutates: true },
   resolve: { file: "resolve-runner.mjs", desc: "set a ticket's resolution", mutates: true },
   log: { file: "log-runner.mjs", desc: "log worked minutes against a ticket", mutates: true },
-  // BLZ-499: `--status` is a pure read of the pending ledgers (it prints and exits before
-  // the branch guard, the lock and the git add/commit), so it is exempted from the BLZ-121
-  // gate below by `readOnlyFlags` rather than by declaring the whole verb read-only — the
-  // flush itself very much mutates.
-  commit: { file: "commit-runner.mjs", desc: "flush the pending queue into a commit", mutates: true, readOnlyFlags: ["--status"] },
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
   // BLZ-682: replaces blaze-pm's build_matrices.py. It writes files, so it mutates; `--check`
   // writes nothing and is that verb's read-only invocation (BLZ-499's mechanism).
   matrices: { file: "matrices-runner.mjs", desc: "regenerate the requirements/architecture matrices (--check: report drift only)", mutates: true, readOnlyFlags: ["--check"] },
   migrate: { file: "migrate-runner.mjs", desc: "import tickets from a Jira export", mutates: true },
-  publish: { file: "publish-runner.mjs", desc: "sweep local queues and trigger the flush", mutates: true },
   // BLZ-348: the command serve-auth.mjs's bind refusal has named since BLZ-304, and
   // which did not exist. Adding the first user turns authentication on for the board
   // (ADR-0013 §5 — the bootstrap admin is a user, not an exception), so it mutates.
   user: { file: "user-runner.mjs", desc: "add a user and issue its API token", mutates: true },
 };
+
+// BLZ-254 (spec §5.5): verbs this engine no longer has, and what to do instead. A removed verb
+// is REFUSED BY NAME rather than falling through to the unknown-command usage dump, the same
+// rule config's REMOVED_KEYS applies to a key (BLZ-298): its callers (a flush Job, an agent
+// whose instructions predate the removal) must learn what changed, not that they mistyped.
+const REMOVED_COMMANDS = {
+  commit: "the board no longer commits",
+  publish: "there are no pending queues to sweep and no flush to trigger",
+};
+const REMOVED_ADVICE = "In fs mode, version the board's files yourself with git; for more than one "
+  + "writer, use db mode (BLAZE_WRITE_PORT=db).";
 
 function printUsage() {
   console.log("usage: blaze <command> [args]");
@@ -109,10 +114,16 @@ function printUsage() {
 
 const [cmd, ...rest] = process.argv.slice(2);
 
+// Before --help, the read-only gate and remote mode, so every spelling gets the same sentence.
+if (cmd !== undefined && Object.hasOwn(REMOVED_COMMANDS, cmd)) {
+  console.error(`blaze: \`${cmd}\` was removed in 0.9.0 (BLZ-254) — ${REMOVED_COMMANDS[cmd]}. ${REMOVED_ADVICE}`);
+  process.exit(1);
+}
+
 if (cmd === "--help" || cmd === "-h") { printUsage(); process.exit(0); }
 // A subcommand's OWN --help/-h is handled here, at dispatch, not by the
 // runner: this fires before the runner ever spawns, so discovering the CLI
-// (`blaze commit --help`) can never fall through to a real mutation.
+// (`blaze move --help`) can never fall through to a real mutation.
 if (cmd !== undefined && (rest.includes("--help") || rest.includes("-h"))) {
   // Object.hasOwn, not a plain lookup: SUBCOMMANDS[cmd] would otherwise
   // resolve an inherited Object.prototype key ("constructor", "toString",
@@ -137,8 +148,8 @@ if (!sub) { printUsage(); process.exit(1); }
 // the ticket file before they ever reach a commit decision, so declining only
 // the commit would leave a relocated-but-uncommitted file in a shared tree.
 //
-// BLZ-499: a verb may carry a flag that makes THIS INVOCATION a pure read — today only
-// `blaze commit --status`. The exemption is per-invocation and opt-in per verb, never a
+// BLZ-499: a verb may carry a flag that makes THIS INVOCATION a pure read — today
+// `blaze matrices --check`. The exemption is per-invocation and opt-in per verb, never a
 // blanket "read-only unless it looks like a write": the verb stays `mutates: true`, so
 // every other spelling of it is still refused here.
 // BLZ-690: `readOnlyVerbs` is the same exemption for a verb with sub-verbs (`db`), matched
@@ -181,7 +192,7 @@ if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
 // Every verb dispatches through this file, so it is the one place a load-path check can
 // live without being added to a dozen runners and forgotten in the thirteenth.
 //
-// THREE EXEMPTIONS, ALL DELIBERATE, AND THIS IS AC-4's RECORDED DECISION. The count is
+// TWO EXEMPTIONS, ALL DELIBERATE, AND THIS IS AC-4's RECORDED DECISION. The count is
 // stated because it was wrong once — the list said two while the Set below held three, the
 // `commit` bullet having been appended below the closing paragraph and orphaned from the
 // list. Keep the number, the bullets and the Set in step; prose that asserts what the code
@@ -193,18 +204,15 @@ if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
 //            defect (a throw from inside `auditCorpus` killed `blaze audit` outright,
 //            losing the whole hygiene report) and it stays closed.
 //   init   — runs BEFORE a board exists, so there is no config to validate.
-//   commit — a git flush of the pending ledger. `commit-runner.mjs` imports nothing from
-//            the model, and refusing it would strand ticket files that other verbs have
-//            ALREADY relocated but not committed — the same hazard the read-only gate
-//            above cites for gating too late.
 //
-// That leaves 21 of the 24 subcommands in `SUBCOMMANDS` running this check.
+// That leaves 20 of the 22 subcommands in `SUBCOMMANDS` running this check.
 //
 // The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
 // there would kill every verb before it ran, `audit` included, with a raw stack trace.
 // See ADR-0002 and the note on `assertSchemaValid`.
-const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init", "commit"]);
+const SCHEMA_PREFLIGHT_EXEMPT = new Set(["audit", "init"]);
+// BLZ-254: `commit` was the third exemption; the verb is gone.
 if (!SCHEMA_PREFLIGHT_EXEMPT.has(key)) {
   try {
     const { resolveRoots, loadConfig, listProjects, loadProject } = await import("./config.mjs");

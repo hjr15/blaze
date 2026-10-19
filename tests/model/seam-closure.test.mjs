@@ -953,7 +953,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
   // whose own exports nobody has judged is how the primitive travels one module further.
   // Each of these exports a VERB: what it writes and where is its job, not its caller's.
-  ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
+  // BLZ-254: commit-runner.mjs (blaze commit) deleted.
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["matrices-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // BLZ-682: a CLI verb, no exports
@@ -2037,11 +2037,10 @@ const WRITE_ALLOWED = new Map([
   // each is named to the members it actually takes, and the load-bearing test below checks
   // every one of those names is still reached.
   //
-  // `blaze commit` owns the commit lock and drains the ledger it has just committed; the
-  // quarantine sidecar is BLZ-531's. `commit-or-queue` is the other half: it records an op on
+  // BLZ-254: commit-runner.mjs deleted (blaze commit).
+  // `commit-or-queue` is the other half: it records an op on
   // the ledger when the lock is held elsewhere. `serve-commit` is the board server taking the
   // same lock.
-  ["commit-runner.mjs", ["acquireLock", "releaseLock", "clearLedger", "quarantineDropped"]],
   ["commit-or-queue.mjs", ["appendEntry", "commitFile"]],
   ["serve-commit.mjs", ["acquireLock", "releaseLock"]],
   // First-run setup: the board server issues the setup-token CREDENTIAL, clears it when setup

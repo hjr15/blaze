@@ -105,16 +105,6 @@ test("BLAZE_READONLY=1 blaze resolve: exits non-zero, ticket/queue/HEAD unchange
   rmSync(root, { recursive: true, force: true });
 });
 
-test("BLAZE_READONLY=1 blaze commit: exits non-zero, queue/HEAD unchanged (nothing flushed)", () => {
-  const root = board();
-  // A real, flushable queued op — proves refusal, not "empty queue no-op".
-  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
-  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-2.md"), "x");
-  appendEntry(root, { id: "OBA-2", op: "new", message: "OBA-2: x", files: ["projects/OBA/backlog/OBA-2.md"], ts: "t" });
-  assertRefusedAndUntouched(root, ["commit"], "commit");
-  rmSync(root, { recursive: true, force: true });
-});
-
 test("BLAZE_READONLY=1 blaze reindex: exits non-zero, no .blaze/index.json written, tree/queue/HEAD unchanged", () => {
   const root = board();
   assertRefusedAndUntouched(root, ["reindex"], "reindex");
@@ -171,59 +161,6 @@ test("BLAZE_READONLY=1 node scripts/move-runner.mjs <id> <status> (bypassing cli
   assert.deepEqual(snapshotTree(root), beforeTree, "ticket tree must be byte-identical");
   assert.deepEqual(readFileSync(queue), beforeQueue, "queue file must be byte-identical");
   assert.equal(headOf(root), beforeHead, "HEAD must not move");
-  rmSync(root, { recursive: true, force: true });
-});
-
-// Additional finding (adversarial verifier, HIGH): commit-runner.mjs never
-// imports commitOrQueue/appendEntry — it talks to git directly and only pulls
-// the READ helpers from pending-ledger.mjs (readForDrain/clearLedger/
-// listQueues/sessionId) — so the defence-in-depth other runners get for free
-// via commitOrQueue never applied here. `commit` is the one verb this whole
-// epic exists to make safe by default, so a direct bypass that still commits
-// under BLAZE_READONLY is the worst possible hole to leave open.
-test("BLAZE_READONLY=1 node scripts/commit-runner.mjs (bypassing cli.mjs) also refuses and commits nothing", () => {
-  const root = board();
-  mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
-  writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-2.md"), "x");
-  const session = "t1";
-  appendEntry(root, { id: "OBA-2", op: "new", message: "OBA-2: x", files: ["projects/OBA/backlog/OBA-2.md"], ts: "t", session }, session);
-  const queue = ledgerPath(root, session);
-  const beforeQueue = readFileSync(queue);
-  const beforeTree = snapshotTree(root);
-  const beforeHead = headOf(root);
-  const beforeStatus = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
-
-  const runner = join(REPO, "scripts", "commit-runner.mjs");
-  const r = spawnSync(process.execPath, [runner],
-    { cwd: root, env: { ...process.env, BLAZE_SESSION: session, BLAZE_READONLY: "1" }, encoding: "utf8" });
-
-  assert.notEqual(r.status, 0);
-  assert.match(r.stderr, /read-only mode \(BLAZE_READONLY=1\)/);
-  // The refusal must read as a deliberate decision, not a crash: an agent that
-  // sees a raw stack trace may retry or "work around" it. Same bar as the other
-  // runners' direct-invocation tests.
-  assert.doesNotMatch(r.stderr, /at assertWritable|at Object\.<anonymous>|node:internal/, `expected no raw stack trace, got: ${r.stderr}`);
-  assert.doesNotMatch(r.stdout || "", /flushed/);
-  assert.deepEqual(snapshotTree(root), beforeTree, "ticket tree must be byte-identical");
-  assert.deepEqual(readFileSync(queue), beforeQueue, "queue file must be byte-identical");
-  assert.equal(headOf(root), beforeHead, "HEAD must not move");
-  assert.equal(
-    execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }),
-    beforeStatus,
-    "working tree status must be unchanged",
-  );
-  rmSync(root, { recursive: true, force: true });
-});
-
-// --help is a read: it must still work under BLAZE_READONLY even for the
-// runner invoked directly (bypassing cli.mjs's own --help interception).
-test("BLAZE_READONLY=1 node scripts/commit-runner.mjs --help still works (exit 0, prints usage)", () => {
-  const root = board();
-  const runner = join(REPO, "scripts", "commit-runner.mjs");
-  const r = spawnSync(process.execPath, [runner, "--help"],
-    { cwd: root, env: { ...process.env, BLAZE_READONLY: "1" }, encoding: "utf8" });
-  assert.equal(r.status, 0, r.stderr);
-  assert.match(r.stdout, /usage/i);
   rmSync(root, { recursive: true, force: true });
 });
 

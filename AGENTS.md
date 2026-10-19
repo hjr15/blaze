@@ -334,9 +334,7 @@ own working tree, so two worktrees can never drain one queue file at the same ti
 
 If you are upgrading a board that queued ops before this change, they are still in
 each working copy's own `.blaze/` and nothing reads them there. `blaze commit`
-names them and refuses to report success; migrate them with
-[the queue-store migration procedure](https://github.com/hjr15/blaze/blob/main/docs/operations/queue-store-migration.md).
-The engine never moves, merges or deletes a queue file.
+names them and refuses to report success. The engine never moves, merges or deletes a queue file.
 
 - `blaze commit` flushes **only your queue** — a parallel *session*'s queued WIP
   never rides your commit, whether or not either of you set `BLAZE_SESSION`.

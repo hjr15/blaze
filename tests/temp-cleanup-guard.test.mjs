@@ -85,13 +85,6 @@ test("a", async () => {
   assert.equal(scanSource(src).length, 1);
 });
 
-test("BLZ-603: tests/commit-settled-drain.test.mjs — the file the ticket names — has none left", () => {
-  const src = readFileSync(join(TESTS_DIR, "commit-settled-drain.test.mjs"), "utf8");
-  assert.deepEqual(scanSource(src), [],
-    "every scratch repo and linked worktree in this file must be removed by a hook, not by "
-    + "a statement a failing assertion skips");
-});
-
 test("BLZ-534: tests/model/driver-conformance.test.mjs closes its drivers from a hook", () => {
   const src = readFileSync(join(TESTS_DIR, "model", "driver-conformance.test.mjs"), "utf8");
   assert.deepEqual(scanSource(src), [],

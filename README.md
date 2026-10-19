@@ -126,7 +126,6 @@ small commit per ticket, scoped to the files it actually touched.
 | `blaze edit <id> ...` | Edit ticket fields |
 | `blaze link [--rm] <id> <TYPE> <target>` | Add (or `--rm` remove) a typed link on `<id>` — `TYPE` ∈ `Blocks`/`Relates`/`Duplicate`/`Cloners` |
 | `blaze reindex` | Rebuild/validate the on-disk index (warns on malformed or dangling `links` entries) |
-| `blaze commit` | Flush queued ops into one commit (`commitMode: batch`) |
 | `blaze migrate [--dry-run\|--live] [--project <KEY>]` | Import tickets from an external tracker via a reviewed disposition ledger (`--project` optional — falls back to `blaze.config.json`'s `projects` list) |
 | `blaze board` | Serve the read/write dashboard (kanban + `/api/*` write endpoints) |
 
