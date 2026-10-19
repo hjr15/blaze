@@ -104,7 +104,7 @@ export const REGISTRY = [
   {
     id: "ci-doc-temp-cleanup-debt-size",
     doc: "docs/ci.md",
-    quote: "379 sites across 54 files",
+    quote: "376 sites across 54 files",
     deriver: "temp-cleanup-debt-size",
     why: "the number is the size of a ratchet the whole corpus is held to, quoted as a "
       + "current fact rather than pinned to a commit. It moves whenever a test file is "

@@ -10,6 +10,20 @@ import { SCHEMA_BLOCK_DROPPED } from "./model/schema-marker.mjs";
 
 export const ROOT = join(dirname(fileURLToPath(import.meta.url)), "..");
 
+// BLZ-254 (PR D, operator ruling 2026-10-18): `commitMode` chose how the board committed, and the
+// board no longer commits. A config that still carries it — the deployed ConfigMap, blaze-pm's
+// own — must keep LOADING (a refusal crash-loops the pod: the `provider` outage), so the key is
+// ignored and said once per command tree. Deliberately NOT a REMOVED_KEYS entry: those refuse.
+const COMMIT_MODE_WARNING = "blaze: warning: commitMode is ignored since 0.9.0 — the board never commits; remove it";
+// Once per COMMAND, not per process: cli.mjs's preflight and the runner it spawns are two processes,
+// so the first warning marks the environment every later child inherits (review I6).
+const COMMIT_MODE_WARNED_ENV = "BLAZE_COMMIT_MODE_WARNED";
+function warnCommitModeIgnored() {
+  if (process.env[COMMIT_MODE_WARNED_ENV] === "1") return;
+  process.env[COMMIT_MODE_WARNED_ENV] = "1";
+  process.stderr.write(`${COMMIT_MODE_WARNING}\n`);
+}
+
 const DEFAULTS = {
   key: "TASK",
   projects: [],
@@ -27,7 +41,6 @@ const DEFAULTS = {
   // See scripts/model/rate-limit.mjs for why the LAST element of the chain is the one read.
   trustedProxies: [],
   agentCommand: "claude -p",
-  commitMode: "per-op",
   loops: {
     reconcile: { enabled: true, intervalSec: 60 },
     // BLZ-347 — the groomer ships DISABLED, deliberately. It was `enabled: true`, and the
@@ -203,8 +216,10 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
     if (version.kind === "removed-key") throw new Error(`blaze: ${version.error}`);
     throw new IncompatibleSchemaVersionError(`blaze: ${version.error}`);
   }
+  if (file && file.commitMode !== undefined) warnCommitModeIgnored();
 
   const cfg = { ...DEFAULTS, ...file };
+  delete cfg.commitMode;   // BLZ-254: ignored, never carried
   cfg.loops = {
     reconcile: { ...DEFAULTS.loops.reconcile, ...(file.loops && file.loops.reconcile) },
     groomer: { ...DEFAULTS.loops.groomer, ...(file.loops && file.loops.groomer) },
@@ -269,8 +284,8 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   // "against a different board than it asked for" — DOES NOT REPRODUCE, and the correction
   // is recorded here rather than quietly dropped. Measured on identical boards:
   // `BLAZE_KEY=OPS blaze move ENG-1 in-progress` and the same command with no `BLAZE_KEY`
-  // both print `ENG-1: defined → in-progress`; `move-runner.mjs` reads `cfg` only for
-  // `cfg.commitMode` and `applyMove` never sees it. `blaze new`'s prefix comes from
+  // both print `ENG-1: defined → in-progress`; `move-runner.mjs` read `cfg` only for
+  // `cfg.commitMode` (ignored since BLZ-254; it now reads no `cfg` field at all) and `applyMove` never sees it. `blaze new`'s prefix comes from
   // `--project`, not `cfg.key` (`BLAZE_KEY=OPS blaze new --project ENG` created `ENG-3`),
   // and `loadProject` derives its own matchers from the per-project key.
   //
@@ -302,7 +317,7 @@ export function loadConfig({ root = ROOT, env = process.env, fileName = "blaze.c
   }
   if (env.BLAZE_PORT) cfg.port = Number(env.BLAZE_PORT);
   if (env.BLAZE_AGENT_COMMAND) cfg.agentCommand = env.BLAZE_AGENT_COMMAND;
-  if (env.BLAZE_COMMIT_MODE) cfg.commitMode = env.BLAZE_COMMIT_MODE;
+  if (env.BLAZE_COMMIT_MODE !== undefined) warnCommitModeIgnored();   // BLZ-254: ignored
 
   // BLZ-402: ONE call, made AFTER the env override lands on cfg.key and BEFORE any
   // regex is derived from it — this is what makes the env override validated exactly

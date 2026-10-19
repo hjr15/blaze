@@ -212,7 +212,7 @@ describe("BLZ-402 review finding 3: a project-key refusal never reaches the oper
     try {
       const r = spawnSync(process.execPath,
         [CLI, "new", "--project", "ENG", "--type", "task", "--estimate", "30", "x"],
-        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects"), BLAZE_COMMIT_MODE: "batch" }, encoding: "utf8" });
+        { env: { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") }, encoding: "utf8" });
       assert.equal(r.status, 0, `${r.stdout}\n${r.stderr}`);
     } finally { rmSync(root, { recursive: true, force: true }); }
   });
@@ -311,7 +311,7 @@ describe("BLZ-419: every REACHABLE per-runner key-refusal guard is pinned by a t
         const r = spawnSync(process.execPath, [script(rel), ...args], {
           env: {
             ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects"),
-            BLAZE_COMMIT_MODE: "batch", BLAZE_AGENT_COMMAND: "true",
+            BLAZE_AGENT_COMMAND: "true",
           },
           encoding: "utf8", timeout: 30000,
         });

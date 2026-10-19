@@ -18,7 +18,7 @@ const runnerPath = (name) => fileURLToPath(new URL(`../scripts/${name}`, import.
 // projects/OBA/<status>/OBA-n.md. Mirrors link-runner.test.mjs's fixture.
 function dataRepo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-flagguard-"));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "OBA", projects: ["OBA"], commitMode: "batch" }));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ key: "OBA", projects: ["OBA"] }));
   const dir = join(root, "projects", "OBA", "in-progress");
   mkdirSync(dir, { recursive: true });
   const tk = (id) => `---\nid: ${id}\ntype: task\nproject: OBA\ntitle: ${id}\npriority: medium\nestimate: 30\n---\n\nbody\n`;

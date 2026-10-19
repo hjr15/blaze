@@ -17,7 +17,7 @@ function dataRepo({ key = "OBA", project = null } = {}) {
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
   writeFileSync(join(root, "blaze.config.json"),
-    JSON.stringify({ key, projects: [key], commitMode: "batch" }));
+    JSON.stringify({ key, projects: [key] }));
   mkdirSync(join(root, "projects", key), { recursive: true });
   if (project) writeFileSync(join(root, "projects", key, "project.json"), JSON.stringify(project));
   return root;

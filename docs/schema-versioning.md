@@ -95,6 +95,7 @@ ambient data root.
   program*; the rule remains that the PR shipping a breaking change ships the
   path, whatever shape that path takes. (`blaze migrate` is unrelated — it is
   the external-tracker importer.)
+- **`commitMode` (BLZ-254, 0.9.0) is ignored, not removed.** The board no longer commits, but a config that still sets the key must keep loading (a refusal would crash-loop a deployed board), so `loadConfig` warns once and ignores it. `SCHEMA_VERSION` therefore stays 2: no config that loaded before fails to load now.
 - Decision record:
   [ADR-0002](decisions/0002-config-schema-versioning.md).
 

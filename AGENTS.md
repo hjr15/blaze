@@ -546,7 +546,7 @@ directory, never edit code or any file outside the tracker.
 ## Configuration
 
 `blaze.config.json` (data-repo root): `key`, `projects` (array of project keys the
-board renders), `commitMode`, `port`, and more.
+board renders), `port`, and more.
 
 `key` (and each `--project`/`BLAZE_KEY` value, and each `projects[]` entry) must be
 upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — it is
@@ -568,7 +568,7 @@ message on any stream. Only an unset `BLAZE_KEY` means "no override".
 The refusal is **defensive, not a fix for a misbehaving verb** (BLZ-461). An earlier
 version of this paragraph said an unset shell variable made `blaze move` run "against a
 different board than it asked for", and that does not reproduce: `move-runner.mjs` reads
-`cfg` only for `cfg.commitMode`, and `blaze new`'s prefix comes from `--project`, not
+`cfg` only for `cfg.commitMode` (ignored since BLZ-254), and `blaze new`'s prefix comes from `--project`, not
 `cfg.key`. `cfg.key`'s derived matchers have exactly one consumer in the engine —
 `scripts/loops/groomer.mjs`'s legacy flat-layout branch, which is reachable only on a board
 whose status directories sit at the repo root, never on the `projects/<KEY>/<status>/`
@@ -578,7 +578,7 @@ start silently becoming the file key for a consumer added later.
 
 `schemaVersion` (top-level, optional integer): which schema contract the board
 was written against. Absent = `1` (the pre-versioning baseline). The engine
-refuses to load a board stamped outside its supported window (currently `1..1`)
+refuses to load a board stamped outside its supported window (currently `1..2`)
 instead of silently misreading it — see
 [`docs/schema-versioning.md`](https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md).
 

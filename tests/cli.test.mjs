@@ -60,7 +60,7 @@ test("blaze move --help prints subcommand help, exits 0, and never spawns the ru
 
 test("blaze new -h prints subcommand help and exits 0 without creating a ticket", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cli-help-new-"));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"], commitMode: "batch" }));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"] }));
   mkdirSync(join(root, "projects", "OBA"), { recursive: true });
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
   const r = spawnSync(process.execPath, [cli, "new", "-h"], { env, encoding: "utf8" });
@@ -72,7 +72,7 @@ test("blaze new -h prints subcommand help and exits 0 without creating a ticket"
 
 test("blaze sprint --help prints subcommand help, exits 0, and never spawns the runner", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cli-help-sprint-"));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"], commitMode: "batch" }));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"] }));
   mkdirSync(join(root, "projects", "OBA"), { recursive: true });
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
   const r = spawnSync(process.execPath, [cli, "sprint", "--help"], { env, encoding: "utf8" });

@@ -10,7 +10,7 @@
     "cli.test.mjs": 3,
     "config-key-validation.test.mjs": 19,
     "config-projects.test.mjs": 6,
-    "config.test.mjs": 27,
+    "config.test.mjs": 24,
     "dir-lock.test.mjs": 6,
     "edit-ac.test.mjs": 4,
     "edit-type-retype.test.mjs": 6,
