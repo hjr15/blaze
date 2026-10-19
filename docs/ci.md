@@ -186,7 +186,7 @@ Related, and the same shape one level down: cleanup written as the last statemen
 is skipped by a failing assertion (BLZ-603).
 [`scripts/ci/temp-cleanup-guard.mjs`](../scripts/ci/temp-cleanup-guard.mjs) scans `tests/`
 for that shape and `tests/temp-cleanup-guard.test.mjs` holds the corpus to the per-file
-counts recorded in `scripts/ci/temp-cleanup-debt.json` — **376 sites across 54 files** at
+counts recorded in `scripts/ci/temp-cleanup-debt.json` — **375 sites across 54 files** at
 the time of writing, pre-existing debt that is recorded rather than hidden. The check is an
 equality, so a file cannot gain a site and a file that is cleaned up must drop its entry in
 the same change (`node scripts/ci/temp-cleanup-guard.mjs --write` re-records).

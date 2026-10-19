@@ -39,7 +39,6 @@ import { parseCsv } from "../scripts/model/csv.mjs";
 import { COLUMN_NAMES } from "../scripts/model/csv-schema.mjs";
 import { fsReadStorage } from "../scripts/model/read-storage.mjs";
 import { zeroDiff } from "../scripts/migrate/zero-diff.mjs";
-import { missingClaimErrors } from "../scripts/model/index.mjs";
 import { claimPath, cutoverPath } from "../scripts/model/claims.mjs";
 import { TYPES, PRIORITIES } from "../scripts/model/schema.mjs";
 import { WORKFLOWS, RESOLUTIONS } from "../scripts/model/workflows.mjs";
@@ -97,9 +96,7 @@ describe("BLZ-630: the fixture is the gate's real content", () => {
 
   test("the fixture project carries a .ids/.cutover marker — without it the claim guard is structurally untestable", () => {
     assert.equal(existsSync(cutoverPath(FIXTURE_PROJECTS, "BLZ")), true,
-      "missingClaimErrors returns early at index.mjs:367 when readCutover is null, so a fresh "
-      + "board stays silent forever and an importer that regressed to skipping claims would pass "
-      + "CI indefinitely and fail only on the operator's real board");
+      "(BLZ-254 deleted `missingClaimErrors`; the claim's existence is what is pinned)");
   });
 });
 
@@ -256,8 +253,7 @@ describe("BLZ-630 gate 2: zeroDiff compares the SOURCE board against the importe
 
 describe("BLZ-630: every imported ticket has a claim", () => {
   test("a claim file exists for every created ticket, asserted DIRECTLY", () => {
-    // Directly, so this is independent of `missingClaimErrors`' own early
-    // return — which is exactly the return that makes the audit blind here.
+    // Asserted directly on the claim files (BLZ-254 deleted `missingClaimErrors`).
     const rows = parseCsv(X).slice(1);
     for (const r of rows) {
       const id = r[COLUMN_NAMES.indexOf("id")];
@@ -267,36 +263,6 @@ describe("BLZ-630: every imported ticket has a claim", () => {
         `${id} was imported with no .ids/ claim — its id is not provably unique, and `
         + `\`blaze audit\` errors on every such ticket above the project's cutover`);
     }
-  });
-
-  test("with a cutover marker seeded, missingClaimErrors reports NOTHING on the imported board", () => {
-    // THE TRAP THE TICKET WARNS ABOUT. The importer does not write a
-    // `.cutover` on the explicit-id path — `ensureCutover` has exactly one
-    // call site, inside `allocateId` (ids.mjs:72) — so a freshly imported
-    // board never gets one, `readCutover` returns null, and the check stays
-    // silent no matter how many claims are missing. Seeding the marker is
-    // what makes the guard possible AT ALL.
-    for (const project of ["BLZ", "ZZZ"]) {
-      mkdirSync(join(B, "projects", project, ".ids"), { recursive: true });
-      writeFileSync(cutoverPath(join(B, "projects"), project), "0\n");
-    }
-    const rows = [...fsReadStorage.listTickets(join(B, "projects"))]
-      .map((t) => ({ id: t.frontmatter.id, project: t.project }));
-    assert.ok(rows.length > 0);
-    assert.deepEqual(missingClaimErrors(join(B, "projects"), rows), []);
-  });
-
-  test("and the guard is live: removing one claim makes it fire", () => {
-    // The positive control on the check itself. Without this, "no errors"
-    // could still mean "the check did not run".
-    const victim = readdirSync(join(B, "projects", "BLZ", ".ids")).find((f) => /^\d+$/.test(f));
-    rmSync(join(B, "projects", "BLZ", ".ids", victim));
-    const rows = [{ id: `BLZ-${victim}`, project: "BLZ" }];
-    const errs = missingClaimErrors(join(B, "projects"), rows);
-    assert.equal(errs.length, 1, "the claim guard must actually fire when a claim is missing");
-    assert.match(errs[0], new RegExp(`BLZ-${victim}`));
-    // Put it back so a later test in this file is not affected by the probe.
-    writeFileSync(join(B, "projects", "BLZ", ".ids", victim), `BLZ-${victim} probe\n`);
   });
 });
 

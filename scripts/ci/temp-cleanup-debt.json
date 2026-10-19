@@ -18,7 +18,7 @@
     "groomer-containment.test.mjs": 35,
     "groomer.test.mjs": 8,
     "ids-allocator.test.mjs": 27,
-    "ids-rollback.test.mjs": 5,
+    "ids-rollback.test.mjs": 4,
     "index-duplicate-id.test.mjs": 6,
     "link-runner.test.mjs": 2,
     "link.test.mjs": 6,

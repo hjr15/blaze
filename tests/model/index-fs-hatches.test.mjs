@@ -1,8 +1,8 @@
 // tests/model/index-fs-hatches.test.mjs — BLZ-274, ADR-0009.
 //
 // buildIndex advertises itself as storage-agnostic (index.mjs:4-5) but reached the
-// filesystem three ways: walkTickets, missingClaimErrors (the id-claims ledger) and
-// loadSprints (sprints.json). The read-seam panel found the last two; without them
+// filesystem two ways: walkTickets and loadSprints (sprints.json; BLZ-254 deleted the third,
+// missingClaimErrors). The read-seam panel found the last two; without them
 // the seam ships with live node:fs escape hatches behind it.
 //
 // The precedent for where the claim check belongs is already in the tree —
@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { buildIndex, missingClaimErrors } from "../../scripts/model/index.mjs";
+import { buildIndex } from "../../scripts/model/index.mjs";
 import { scratchRegistry } from "../helpers/scratch.mjs";
 
 // BLZ-503: every scratch directory this file mints, removed when the file is done with
@@ -53,24 +53,9 @@ test("buildIndex.errors still reports duplicate ids", () => {
   assert.match(idx.errors[0], /^duplicate id BLZ-2/);
 });
 
-test("missingClaimErrors is exported and still detects an unclaimed id", () => {
-  const { projects } = board({ withClaim: false });
-  const idx = buildIndex(projects);
-  const errs = missingClaimErrors(projects, idx.rows);
-  assert.equal(errs.length, 1);
-  assert.match(errs[0], /ticket BLZ-5 has no claim/);
-});
-
-test("BLZ-274: a missing claim is no longer mislabelled as a duplicate id", () => {
-  // Before this change buildIndex.errors mixed both kinds, and reindex.mjs labelled
-  // the whole array "N duplicate ticket id(s) — renumber one side of each collision".
-  // On a board with zero duplicates that advice named a collision that did not exist.
-  const { projects } = board({ withClaim: false });
-  const idx = buildIndex(projects);
-  const claims = missingClaimErrors(projects, idx.rows);
-  assert.equal(idx.errors.length, 0, "no duplicate-id errors on this board");
-  assert.equal(claims.length, 1, "but there IS a missing claim");
-  // the two are now separately countable, which is what makes an honest message possible
+test("BLZ-254: missingClaimErrors is gone from the index module", async () => {
+  const mod = await import("../../scripts/model/index.mjs");
+  assert.equal(Object.hasOwn(mod, "missingClaimErrors"), false);
 });
 
 test("buildIndex takes sprints through the seam, not from the filesystem", () => {

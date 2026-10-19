@@ -68,7 +68,7 @@ export function cutoverPath(projectsDir, key) {
 // different state from "cutover is 0". Conflating them made every ticket on an
 // un-migrated board look like it was missing a claim.
 // BLZ-493: the `catch` is the "never allocated through the ledger" answer, and
-// `missingClaimErrors` answers `null` by STAYING SILENT — so a `.cutover` that could not be
+// `missingClaimErrors` (deleted by BLZ-254) answered `null` by STAYING SILENT — so a `.cutover` that could not be
 // read forgives every genuinely missing claim on the board. That is total laundering: the
 // check exists to prove ids are provably unique, and an unreadable marker makes it report
 // that they are. A non-regular file is therefore REFUSED, not turned into `null`. ADR-0031.

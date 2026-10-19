@@ -119,7 +119,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
     const r = await applyImport(plan, ctxFor(root, { writePort: port }));
     assert.equal(r.exitCode, 0);
     assert.deepEqual(claimSeenAtWrite, [true],
-      "claim-before-write: the reverse order's residue is a missingClaimErrors ERROR on the operator's board");
+      "claim-before-write: the reverse order's residue is an unclaimed id on the operator's board");
   });
 
   test("an --allocate-ids create also gets a claim, and an `allocated` receipt entry the moment the id exists", async (t) => {
