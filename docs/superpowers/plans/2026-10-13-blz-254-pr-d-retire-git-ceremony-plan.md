@@ -152,6 +152,13 @@ Each edit carries `// BLZ-254:` on the line above it, or as a trailing comment w
 
 **Comment lines that stay, by name (I5 ruling).** Three prose comments name a deleted member as part of a review's *history*, and they are **not** edited: line 273 (round 5's examples, `appendEntry`, `acquireLock`), line 2034 (round 5, D3: "`saveState`, `appendEntry`, `acquireLock` and their kin") and line 2067 (round 7, Finding 2's list: "`fsStorage`, `resolveWritePort`, `commitOrQueue`, …"). Rewriting history prose would make the guard's own record lie about what the reviewers found. Every other line that names a deleted module or member is either a ledger row above or fails Task 6 Step 6, whose allowance lists exactly these three lines. Line numbers shift as earlier tasks land. Each task finds its entries by the quoted text, not the number.
 
+**Amendment (Task 6 review, 2026-10-19).** The controller ruled that these comment-only corrections are in scope. They change no data row and no assertion. Each one corrects a claim the PR made false: D1 keeps the fs allocator, and Task 6 left four of round 5's seven WRITE_SITES entries. Lines are given at `3a0ac78`; find each by its quoted text.
+- `:856` `// The allocator, deleted at Phase 2. \`allocateId\` and \`writeClaim\` put a claim file under a` → `// The fs allocator — kept, BLZ-254 D1. …` (rest of the line unchanged).
+- `:1949` `["model/ids.mjs", "*"], ["model/claims.mjs", "*"],` keeps the entry byte-identical. Its trailing comment `// the allocator, deleted at Phase 2` → `// the fs allocator — kept, BLZ-254 D1`. Like line 94, the seam audit's Rule 1 prints the old line and Rule 2 prints it back unchanged except for the comment. The reviewer signs it off by name.
+- `:2058` `… its claim — the allocator, deleted at Phase 2,` → `… its claim — the fs allocator (kept, BLZ-254 D1),`.
+- `:2092` `// are the allocator (deleted at Phase 2, on the footing of ids.mjs and` → `// are the fs allocator (kept, BLZ-254 D1; on the footing of ids.mjs and`.
+- A new line goes directly under `// BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).`: `// BLZ-254: so four of round 5's seven remain below (serve.mjs, user-runner.mjs, new.mjs, sprint-runner.mjs).` The round-5 history line itself (`:2034`, "The seven below …") is not edited (I5).
+
 Why none of this weakens the guard:
 - The surviving allowlist entries are unchanged.
 - The dead-entry checks ("an exemption nobody needs", the WRITE_SITES reachability walk) are what *force* each removal: a stale entry fails them.

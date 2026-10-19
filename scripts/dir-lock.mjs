@@ -17,7 +17,7 @@ import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.
 
 /** REFUSE, never launder. `null` from here is read one line below as *"an acquirer between
  *  mkdir and write"* — a sentence about ANOTHER PROCESS — and after `OWNERLESS_GRACE_MS`
- *  that sentence STEALS the lock and lets two writers into the board's git tree at once.
+ *  that sentence STEALS the lock and lets two writers past the lock at once.
  *  A run that could not read `owner.json` has no business saying it. ENOENT, a truncated
  *  write and a malformed body keep the old `null`: those ARE the ownerless state, and Blaze
  *  looked to find them out. */

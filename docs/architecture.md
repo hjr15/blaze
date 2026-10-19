@@ -77,7 +77,8 @@ flowchart TB
   `log`, `rollup`, `reindex`, `migrate`, `reconcile`, `groom`) to a
   `*-runner.mjs` that wraps a pure `apply*`/model core and resolves the write
   port. Nothing commits (BLZ-254): in fs mode the verb writes the ticket file and
-  the operator versions the board with git; in db mode it writes the row. The
+  the operator versions the board with git; in db mode it writes the row; in
+  dual mode it writes the file as the primary and the row as a shadow. The
   commit ceremony — `blaze commit`/`blaze publish`, the per-session pending
   queues, the `.blaze/commit.lock/` commit lock, the branch guard and the
   commit-subject composer — is deleted (spec §5.5). The lock *mechanism* survives
@@ -86,11 +87,10 @@ flowchart TB
   `cli.mjs`'s `SUBCOMMANDS` table is the single dispatch point (no separate
   switch) and the only place a verb's `mutates` classification lives:
   `BLAZE_READONLY=1` (AGENTS.md "Read-only mode") makes it refuse to spawn any
-  mutating runner, gated here rather than in each runner alone — every mutating
-  verb writes/renames the ticket file before anything else could refuse. The
-  mutating runners (via `assertWritable`) and `serve.mjs`'s `/api/*` handlers
-  carry the same check as defence-in-depth for callers that reach them by some
-  path other than `cli.mjs` dispatch.
+  mutating runner. This gate is the first line; the runners' own
+  `assertWritable` calls, and the same check in `serve.mjs`'s `/api/*` handlers,
+  are the second, for callers that reach a write by some path other than
+  `cli.mjs` dispatch (a direct `node scripts/move-runner.mjs`, or the server).
 - **Model (`scripts/model/`)** — the single home for all rules: `schema`,
   `workflows`, `rules`, `move-plan`, `ticket`, `taxonomy` (validation +
   transitions); `index`, `rollup`, `time`, `ids`, `activity`, `transitions`,

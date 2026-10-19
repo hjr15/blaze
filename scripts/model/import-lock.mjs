@@ -51,14 +51,14 @@ export function importLockPath(dataRoot) {
  * kept dir-lock.mjs's defaults) are deliberate.
  *
  *   `retries: 0`   — a contended import lock is exit 5 AT ONCE. The commit
- *                    lock retries ten times at 200 ms because a commit takes
- *                    milliseconds; an import of the live corpus does not, and
+ *                    lock (deleted by BLZ-254) retried ten times at 200 ms
+ *                    because a commit took milliseconds; an import of the live corpus does not, and
  *                    a second run silently sleeping out a 2,850-ticket apply
  *                    would look hung rather than refused. §8 item 8 says "a
  *                    contended lock is exit 5", not "a contended lock waits".
  *   `staleMs: Infinity`
  *                  — never stolen from a LIVE owner on age. The commit lock's
- *                    60 s age-out is right for a commit and catastrophic here:
+ *                    60 s age-out was right for a commit and would be catastrophic here:
  *                    it would hand a second importer the lock in the middle of
  *                    a long apply, which is the very race being closed. The
  *                    DEAD-owner arm is untouched — `process.kill(pid, 0)`

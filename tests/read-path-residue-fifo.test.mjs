@@ -14,7 +14,7 @@
 //     inventory entirely — the ELEVENTH. Reproduced: the lock (then
 //     `acquireLock`, deleted by BLZ-254) on a contended lock directory whose `owner.json`
 //     is a FIFO never returns.
-// (pending-ledger.mjs, the other site here, was deleted by BLZ-254.)
+//   * (pending-ledger.mjs, the other site here, was deleted by BLZ-254.)
 //   * `scripts/model/setup-token.mjs` IS reachable PRE-AUTH, from `serve.mjs`'s `POST
 //     /setup` — the single highest-priority site here, because a hang on it is reachable by
 //     an unauthenticated caller and wedges the one route that makes the install usable.

@@ -853,7 +853,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // so importing it is the route ADR-0006 prescribes, not a bypass of it.
   ["model/storage.mjs", { writes: ["fsStorage"], sanctioned: [],
     inert: ["slugify", "ticketPath", "memStorage"] }],
-  // The allocator, deleted at Phase 2. `allocateId` and `writeClaim` put a claim file under a
+  // The fs allocator — kept, BLZ-254 D1. `allocateId` and `writeClaim` put a claim file under a
   // caller-supplied projects dir; `ensureCutover` writes the cutover marker.
   ["model/ids.mjs", { writes: ["allocateId"], sanctioned: [], inert: ["maxId", "nextId"] }],
   ["model/claims.mjs", { writes: ["writeClaim", "ensureCutover"], sanctioned: [],
@@ -1940,7 +1940,7 @@ function corpus() {
 // Every module permitted to reach node:fs's mutating surface directly, with the reason.
 const WRITE_ALLOWED = new Map([
   ["model/storage.mjs", "*"],                    // the write seam itself
-  ["model/ids.mjs", "*"], ["model/claims.mjs", "*"],   // the allocator, deleted at Phase 2
+  ["model/ids.mjs", "*"], ["model/claims.mjs", "*"],   // the fs allocator — kept, BLZ-254 D1
   ["model/transitions.mjs", "*"], ["model/sprints.mjs", "*"],  // caches and registries
   ["reindex.mjs", "*"],                          // derived, gitignored caches
   ["dir-lock.mjs", "*"],  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
@@ -2032,6 +2032,7 @@ const WRITE_ALLOWED = new Map([
   // every one of those names is still reached.
   //
   // BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
+  // BLZ-254: so four of round 5's seven remain below (serve.mjs, user-runner.mjs, new.mjs, sprint-runner.mjs).
   // First-run setup: the board server issues the setup-token CREDENTIAL, clears it when setup
   // completes, and keeps both it and the identity database out of git. `blaze user add` does
   // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
@@ -2044,7 +2045,7 @@ const WRITE_ALLOWED = new Map([
     // BLZ-684: `POST /api/new` runs `blaze new`'s own verb, on exactly new-runner.mjs's footing.
     "applyNew"]],
   ["user-runner.mjs", ["ensureIdentityIgnored", "addUser", "setUserPassword"]],
-  // `blaze new` allocates the id and writes its claim — the allocator, deleted at Phase 2,
+  // `blaze new` allocates the id and writes its claim — the fs allocator (kept, BLZ-254 D1),
   // and on exactly the footing of ids.mjs and claims.mjs above.
   ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
@@ -2078,7 +2079,7 @@ const WRITE_ALLOWED = new Map([
   // BLZ-629 / design §5.3-§5.5. `blaze import --apply` is `blaze new` done N
   // times from a file, and it takes exactly what `new.mjs` and the six
   // runners above take, for exactly their reasons: `allocateId` + `writeClaim`
-  // are the allocator (deleted at Phase 2, on the footing of ids.mjs and
+  // are the fs allocator (kept, BLZ-254 D1; on the footing of ids.mjs and
   // claims.mjs), `commitOrQueue` is the staging front door (removed by BLZ-254), `resolveWritePort`
   // is how the runner OBTAINS the driver. No ticket is written outside the
   // port — `applyImport` takes `writePort.write` and nothing else.
