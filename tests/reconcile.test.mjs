@@ -264,13 +264,16 @@ test("reconcile --apply commits only touched files, not an unrelated dirty file"
   writeFileSync(join(root, "UNRELATED.txt"), "not part of reconcile\n");
 
   try {
-    const applied = await reconcile({ dryRun: false, commit: true, root });
+    const headBefore = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const applied = await reconcile({ dryRun: false, root });
     assert.equal(applied.ok, true);
-    assert.equal(applied.committed, true);
-
-    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
-    assert.doesNotMatch(files, /UNRELATED\.txt/);
-    assert.match(files, /ZZZ-1-.*\.md/);
+    // BLZ-254 (spec §5.5): the board never commits. The move is in the working tree, HEAD is
+    // where it was, and the unrelated file is untouched beside it.
+    assert.equal(Object.hasOwn(applied, "committed"), false);
+    assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore,
+      "reconcile --apply must not commit");
+    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" });
+    assert.match(dirty, /ZZZ-1-.*\.md/, "the move itself is on disk");
 
     const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
     assert.match(status, /UNRELATED\.txt/);

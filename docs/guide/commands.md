@@ -149,10 +149,10 @@ what it would change and writes nothing.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--apply` | Commit the mirrored changes locally (or queue them, in batch mode — see [Commit modes](../../AGENTS.md#commit-modes)), through the same advisory-lock-serialised path every other mutating verb uses. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
+| `--apply` | `--apply` writes the moves: to the ticket files on a file board (`fs`, `dual`), or to the database under `BLAZE_WRITE_PORT=db`. **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where. Reconcile never pushes either — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
-| `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not author a commit moving fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile and commit the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
-| `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. A ticket-scoped `--apply` says so in the commit message (`… [--ticket BLZ-451]`), because that message is what a person reads months later asking why the pass moved three tickets and not thirty. | all tickets in scope |
+| `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not write moves to fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
+| `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. | all tickets in scope |
 | `--quiet` | *Print only on change.* It gates whole-run lines only — never per-ticket output. Suppressed on a pass that decided nothing: `reconcile: no code-bound change found — nothing to do.`, `reconcile: no projects configured — nothing to reconcile.`, and `reconcile: scanned project(s): …` (that last one is printed anyway whenever `--project` was given, because a filtered run must never read as a whole-board one). Per-ticket `moved` / `would move` lines, the dry-run tail, and every `WARNING` / `FORGE UNREADABLE` / `FORGE DATA` / `NEEDS ATTENTION` line on stderr are printed under `--quiet` exactly as without it. | off |
 
 PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub
@@ -162,35 +162,17 @@ reconcile prints a `FORGE UNREADABLE` line to stderr on every run (including und
 branch and merged-commit signals are unaffected. See
 [Forge support and status reachability](how-it-works.md#forge-support-and-status-reachability).
 
-Reconcile does **not** auto-recover an uncommitted prior pass, and it does
-**not** detect one either. If a previous `--apply` moved ticket files but
-failed to commit them (a held lock, a failing pre-commit hook), the board's
-ticket tree stays dirty until a person notices and clears it — the next run
-reports only what *it* found (no code-bound change, most likely, since the
-prior pass already wrote the files), never a claim about the state of the git
-tree. Telling a genuinely failed prior commit apart from a `commitMode:
-"batch"` board that queued by design, or from a human's own uncommitted edit
-under `projects/`, needs the pending ledger, not `git status`. That ledger read
-is now built: [`blaze commit --status`](#commit) reports the queued-by-design
-state. It cannot report the other two — neither leaves a ledger entry — and it
-says so in its own output (ADR-0032). If a run reports nothing to do but `git status`
-still shows changes under `projects/`, the remedy depends on which of those three
-states you are in, and **`blaze commit` only addresses one of them** (BLZ-434) —
-run [`blaze commit --status`](#commit) to see which of your queues, if any, still
-holds outstanding work. It
-flushes the pending queue, so it helps only on a `commitMode: "batch"` board that
-queued by design — on a `per-op` board there is no queue and it has nothing to
-flush, and it will not pick up a failed prior commit or your own in-flight edit
-either, because it stages only the files recorded against queued ops (never
-`git add -A`). Check `commitMode` first: on `batch`, run `blaze commit`; otherwise,
-or for anything it leaves behind, commit the tree by hand.
+**An applied run leaves the board's tree dirty, by design (BLZ-254).** Reconcile
+makes no git commit, so after an `--apply` on a file board the moved ticket files show
+in `git status` until you commit them. A later run reports only what *it* found, never
+a claim about the state of the git tree.
 
 **A change line only ever claims a move it can prove (BLZ-401).** A ticket can be
 written without its status changing — a blank `resolution` backfilled on an already-
 `done` ticket, a delivery record filled in for the first time, or cleared because no
 single PR delivered it (ADR-0023 §1) — and that entry stays on the report (dropping it
 would erase the only account of a record deletion) but is rendered as `updated <id>
-(still <status>): …`, never as a move. The `--apply` commit message and the dry-run tail
+(still <status>): …`, never as a move. The `--apply` applied line and the dry-run tail
 line both name two quantities for the same reason: how many tickets' status actually
 moved, and — only when it is non-zero — how many files were written without a status
 change.

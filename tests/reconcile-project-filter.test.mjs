@@ -130,6 +130,11 @@ const exceptUnscopeable = (out) => out.split("\n")
   .filter((l) => !PROJECT_MISMATCH_LINE.test(l) && !UNREADABLE_DIR_LINE.test(l))
   .join("\n");
 
+// BLZ-254: reconcile no longer commits, so the scope is read off the working tree under projects/.
+const dirtyPaths = (root) => execFileSync("git",
+  ["-C", root, "status", "--porcelain", "--untracked-files=all", "--", "projects"], { encoding: "utf8" })
+  .split("\n").filter(Boolean).map((l) => l.slice(3));
+
 /** The two kinds above, named once so the roster test and the suites agree by construction. */
 const UNSCOPEABLE_KINDS = new Set(["project-mismatch", "unreadable-ticket-directory"]);
 
@@ -323,7 +328,7 @@ describe("BLZ-394: --project restricts BOTH the scan and the write", () => {
     }
   });
 
-  test("AC-3: the --apply commit names only the tickets in scope", async () => {
+  test("AC-3: an --apply run scoped to INF writes only INF's tickets", async () => {
     const tmp = mkdtempSync(join(tmpdir(), "blz394-commit-"));
     const root = twoProjectBoard(tmp);
     for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
@@ -332,16 +337,16 @@ describe("BLZ-394: --project restricts BOTH the scan and the write", () => {
     }
     const restore = stubGh(tmp);
     try {
-      const r = await reconcile({ root, dryRun: false, commit: true, projects: ["INF"] });
-      assert.equal(r.committed, true, "the filtered run must still commit what it did move");
-      const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-        { encoding: "utf8" });
-      assert.match(files, /INF/);
-      assert.doesNotMatch(files, /OBA/,
-        "a session that owns INF must not author a commit touching OBA — the ticket in one line");
-      const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" });
-      assert.match(subject, /1 ticket/,
-        "and the count must be of the tickets in scope, not of the whole board");
+      const headBefore = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+      const r = await reconcile({ root, dryRun: false, projects: ["INF"] });
+      assert.equal(r.ok, true, r.error);
+      // BLZ-254: no commit any more; the scope is read off the working tree instead.
+      assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore,
+        "reconcile --apply must not commit");
+      const dirty = dirtyPaths(root).join("\n");
+      assert.match(dirty, /INF/, "the run in scope wrote INF's ticket");
+      assert.doesNotMatch(dirty, /OBA/,
+        "a session that owns INF must not write OBA — the ticket in one line");
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });
@@ -553,39 +558,21 @@ esac
     assert.ok(control.changes.some((c) => c.id === "INF-2"),
       "the misfiled ticket must be movable, or this test cannot see the filter at all");
 
-    const r = await reconcile({ root, dryRun: false, commit: true, projects: ["INF"] });
+    const r = await reconcile({ root, dryRun: false, projects: ["INF"] });
     assert.equal(r.ok, true);
     assert.deepEqual(r.changes.map((c) => c.id), ["INF-1"],
       "the misfiled ticket lives under OBA, so an INF-scoped run must leave it alone");
-    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-      { encoding: "utf8" });
-    assert.doesNotMatch(files, /projects\/OBA/,
-      "a commit scoped to INF must not touch projects/OBA, whatever the frontmatter says");
+    const files = dirtyPaths(root);
+    assert.ok(files.length > 0, "the INF move must be in the working tree");
+    assert.ok(!files.some((f) => f.startsWith("projects/OBA")),
+      `a run scoped to INF must not write projects/OBA, whatever the frontmatter says: ${files.join(", ")}`);
   } finally {
     restore();
     rmSync(tmp, { recursive: true, force: true });
   }
 });
 
-test("BLZ-394: the --apply commit subject carries the scope", async () => {
-  // Unpinned in the first cut: dropping the `(${keys})` suffix survived the suite.
-  const tmp = mkdtempSync(join(tmpdir(), "blz394-subject-"));
-  const root = twoProjectBoard(tmp);
-  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
-                   ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
-    execFileSync("git", ["-C", root, ...a]);
-  }
-  const restore = stubGh(tmp);
-  try {
-    await reconcile({ root, dryRun: false, commit: true, projects: ["INF"] });
-    const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" });
-    assert.match(subject, /\(INF\)/, "a scoped commit must say so in its subject");
-    assert.doesNotMatch(subject, /OBA/);
-  } finally {
-    restore();
-    rmSync(tmp, { recursive: true, force: true });
-  }
-});
+// BLZ-254: "the --apply commit subject carries the scope" is deleted — reconcile writes no commit, so there is no subject.
 
 test("BLZ-394: the CLI tests discriminate on SCOPE, not just on parsing", () => {
   // Four of the original CLI tests stayed green under a `no-filter` mutation: they matched
@@ -694,9 +681,8 @@ test("BLZ-436: a scoped run DOES name an out-of-scope directory in a project-mis
     // and the exception silently becomes an assertion.
     assert.ok(!exceptUnscopeable(res.stderr).includes("sits under projects/"),
       "exceptUnscopeable must actually remove the project-mismatch line it exists to except");
-    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-      { encoding: "utf8" });
-    assert.doesNotMatch(files, /projects\/OBA/);
+    const files = dirtyPaths(root);
+    assert.ok(!files.some((f) => f.startsWith("projects/OBA")), files.join(", "));
   } finally {
     restore();
     rmSync(tmp, { recursive: true, force: true });
@@ -844,10 +830,9 @@ describe("BLZ-451: --ticket scopes the run finer than --project", () => {
       execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed board"]);
       const res = runTicketCli(root, tmp, ["--ticket", "INF-1", "--apply"]);
       assert.equal(res.status, 0, res.stderr + res.stdout);
-      const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-        { encoding: "utf8" }).split("\n").filter(Boolean);
-      assert.ok(files.every((f) => f.includes("INF-1")),
-        `the commit filed something outside the scope: ${files.join(", ")}`);
+      const files = dirtyPaths(root);
+      assert.ok(files.length > 0 && files.every((f) => f.includes("INF-1")),
+        `the run wrote something outside the scope (or nothing): ${files.join(", ")}`);
       assert.ok(ticketAt(root, "INF", 2, "defined"));
     });
   });
@@ -1288,9 +1273,8 @@ describe("BLZ-495: an unreadable OUT-OF-SCOPE directory is named on purpose, not
         "a run that could not read a directory says so whatever it was scoped to — BLZ-470");
       assert.ok(at(root, "INF", "done"), "the project in scope still reconciles normally");
       assert.ok(at(root, "OBA", "defined"), "and the out-of-scope project is still not moved");
-      const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-        { encoding: "utf8" });
-      assert.doesNotMatch(files, /projects\/OBA/, "nor committed");
+      const dirty = dirtyPaths(root).join("\n");
+      assert.doesNotMatch(dirty, /projects\/OBA/, "nor written");   // BLZ-254: nothing is committed
     } finally {
       restore();
       rmSync(tmp, { recursive: true, force: true });

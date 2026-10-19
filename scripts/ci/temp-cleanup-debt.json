@@ -4,7 +4,7 @@
     "audit-duplicate-status.test.mjs": 6,
     "audit-project-mismatch.test.mjs": 5,
     "audit.test.mjs": 2,
-    "board-overstatement-oracle.test.mjs": 3,
+    "board-overstatement-oracle.test.mjs": 2,
     "ci-mutation-sandbox.test.mjs": 2,
     "claims-remote-all-refs.test.mjs": 10,
     "cli.test.mjs": 3,

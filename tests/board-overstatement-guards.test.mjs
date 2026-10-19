@@ -27,9 +27,7 @@ import { writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END } from "../s
 import { pageHtml } from "../scripts/views/page.mjs";
 import { commitFile } from "../scripts/serve-commit.mjs";
 import { commitOrQueue, commitSuffix } from "../scripts/commit-or-queue.mjs";
-import { commitOutcomeFrom, applySummary, COMMIT_OUTCOMES } from "../scripts/reconcile-commit-report.mjs";
-import { OP_LABEL, entryIds, summarizeEntries } from "../scripts/commit-summary.mjs";
-import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
+import { appliedLine } from "../scripts/reconcile-apply-report.mjs";
 
 /** Every scratch directory this file mints, removed once the file is done with them
  *  (BLZ-491). `tinyBoard()` had no teardown at all — four call sites, four
@@ -183,33 +181,15 @@ describe("BLZ-422: a no-op is never reported as a commit", () => {
     }
   });
 
-  test("reconcile's commit outcome distinguishes no-op from committed", () => {
-    assert.equal(commitOutcomeFrom({ ok: true, committed: true, status: 0 }).outcome, "committed");
-    assert.equal(commitOutcomeFrom({ ok: true, committed: false, noop: true, status: 0 }).outcome, "no-op");
-    assert.equal(commitOutcomeFrom({ ok: true, committed: false, queued: true }).outcome, "queued");
-    assert.equal(commitOutcomeFrom({ ok: false, committed: false, locked: true, status: -1 }).outcome, "locked");
-    assert.equal(commitOutcomeFrom({ ok: false, committed: false, status: 1 }).outcome, "failed");
-    assert.ok(COMMIT_OUTCOMES.includes("no-op"));
-  });
-
-  test("the no-op's rendered line does not claim a commit", () => {
-    const line = applySummary({ outcome: "no-op", error: null, movedCount: 3, nonMovedCount: 1 });
-    assert.doesNotMatch(line.text, /^reconcile: committed/);
-    assert.match(line.text, /NO COMMIT CREATED/);
-    assert.match(line.text, /git log/, "the line must say plainly that nothing was added to git log");
-    assert.equal(line.exit, 0, "a benign no-op must not fail the run");
-    // Every outcome that is not "committed" must be unable to produce the committed line.
-    for (const outcome of COMMIT_OUTCOMES.filter((o) => o !== "committed")) {
-      const l = applySummary({ outcome, error: "x", movedCount: 1, nonMovedCount: 0 });
-      if (l) assert.doesNotMatch(l.text, /^reconcile: committed/, `${outcome} claimed a commit`);
-    }
-  });
-
-  test("BLZ-670: a db-mode apply says the moves are in the database, never 'already matched HEAD'", () => {
-    const out = applySummary({ outcome: "db", error: null, movedCount: 2, nonMovedCount: 0 });
-    assert.match(out.text, /database/);
-    assert.doesNotMatch(out.text, /matched HEAD/);
-    assert.equal(out.exit, 0);
+  test("BLZ-254: an applied reconcile names its store and never claims a commit", () => {
+    const fs = appliedLine({ mode: "fs", movedCount: 3, nonMovedCount: 1 });
+    assert.match(fs, /^reconcile: 3 ticket\(s\) moved, 1 ticket\(s\) updated without a status change in the board's files/);
+    assert.match(fs, /makes no git commit/);
+    assert.doesNotMatch(fs, /\bcommitted\b|queued|HEAD/, "the board never commits — no line may say it did");
+    const db = appliedLine({ mode: "db", movedCount: 2, nonMovedCount: 0 });
+    assert.equal(db, "reconcile: 2 ticket(s) moved in the database.");
+    assert.equal(appliedLine({ mode: "dual", movedCount: 1, nonMovedCount: 0 }),
+      appliedLine({ mode: "fs", movedCount: 1, nonMovedCount: 0 }), "dual writes the files, so it reads as fs");
   });
 
   test("each per-ticket verb says so when no commit was created", () => {
@@ -222,155 +202,9 @@ describe("BLZ-422: a no-op is never reported as a commit", () => {
   });
 });
 
-describe("BLZ-427: `blaze commit`'s subject counts tickets and names every op", () => {
-  test("there is a label for every op that can be queued", () => {
-    // The production call sites, enumerated: every `op:` any caller passes to
-    // commitOrQueue. commit-or-queue.mjs refuses anything not in OP_LABEL, so this
-    // list and that guard together make a raw op name unprintable.
-    for (const op of ["new", "move", "edit", "log", "resolve", "link", "ac", "sprint", "reconcile"]) {
-      assert.ok(Object.hasOwn(OP_LABEL, op), `no subject-line word for the "${op}" op`);
-      assert.notEqual(OP_LABEL[op], undefined);
-    }
-    assert.equal(OP_LABEL.reconcile, "reconciled",
-      "a reconcile op printed its raw name — the defect BLZ-427 records");
-  });
-
-  test("commitOrQueue refuses an op it has no word for", () => {
-    const root = gitRepo();
-    try {
-      assert.throws(
-        () => commitOrQueue({ root, mode: "batch", op: "teleport", id: "T-1", message: "m", files: [join(root, "t.md")] }),
-        /unknown board op "teleport"/,
-        "an unlabelled op must be refused where it is queued, not papered over in the summary");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("one reconcile op covering N tickets is counted as N, not 1", () => {
-    const entries = [
-      { op: "reconcile", id: "reconcile:ZZZ", ids: ["Z-1", "Z-2", "Z-3", "Z-4"] },
-      { op: "move", id: "Z-9" },
-    ];
-    assert.deepEqual(entryIds(entries[0]), ["Z-1", "Z-2", "Z-3", "Z-4"]);
-    assert.deepEqual(entryIds(entries[1]), ["Z-9"]);
-    const s = summarizeEntries(entries);
-    assert.match(s, /\b4 reconciled\b/, `one op covering four tickets must read "4 reconciled", got ${s}`);
-    assert.doesNotMatch(s, /\b1 reconcile\b/, "the op count understates the pass");
-    assert.match(s, /\b1 moved\b/);
-  });
-
-  test("the count is tickets, not ops: two edits to one ticket are one ticket", () => {
-    assert.equal(summarizeEntries([{ op: "edit", id: "Z-1" }, { op: "edit", id: "Z-1" }]), "1 edited");
-    assert.equal(summarizeEntries([{ op: "edit", id: "Z-1" }, { op: "edit", id: "Z-2" }]), "2 edited");
-  });
-
-  test("an entry queued by a pre-BLZ-427 engine (no `ids`) still drains and counts as one", () => {
-    assert.equal(summarizeEntries([{ op: "reconcile", id: "reconcile:ZZZ" }]), "1 reconciled");
-    // …and an op no longer in the table (a ledger written by a future/older engine)
-    // falls back to its raw name rather than throwing: the queue must still flush.
-    assert.equal(summarizeEntries([{ op: "teleport", id: "Z-1" }]), "1 teleport");
-  });
-
-  // BLZ-442: RENAMED to say what it actually pins. It calls `commitOrQueue` with a
-  // hand-written `ids` array, so it pins the LEDGER'S SHAPE — dedup, and no `ids` field on
-  // a one-ticket op — and nothing at all about whether reconcile passes that array. It
-  // has no production hunk in reconcile.mjs to revert; the test below does.
-  test("commitOrQueue's ledger entry dedupes its ids, and a one-ticket op grows none", () => {
-    const root = gitRepo();
-    const prev = process.env.BLAZE_SESSION;
-    process.env.BLAZE_SESSION = "guards";
-    try {
-      commitOrQueue({
-        root, mode: "batch", op: "reconcile", id: "reconcile:ZZZ",
-        ids: ["Z-1", "Z-2", "Z-2", "Z-3"], message: "chore(board): reconcile", files: [join(root, "t.md")],
-      });
-      const [e] = readEntries(root, sessionId(process.env));
-      assert.deepEqual(e.ids, ["Z-1", "Z-2", "Z-3"], "duplicate ids must not inflate the count");
-      assert.equal(summarizeEntries([e]), "3 reconciled");
-      // Per-ticket verbs leave the ledger shape untouched.
-      commitOrQueue({ root, mode: "batch", op: "move", id: "Z-9", message: "m", files: [join(root, "t.md")] });
-      const entries = readEntries(root, sessionId(process.env));
-      assert.equal(Object.hasOwn(entries[1], "ids"), false,
-        "a one-ticket op must not grow an `ids` field it does not need");
-    } finally {
-      if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  // BLZ-442: the test the name above used to promise. It drives the REAL `reconcile()`
-  // over a real board on a `commitMode: "batch"` config, then reads the ledger FILE
-  // reconcile itself wrote and compares its `ids` to the tickets that really changed on
-  // disk. Ground truth is the filesystem, never `r.changes`. Measured: with the `ids:`
-  // hunk deleted from reconcile.mjs, the old test — and this whole file — stayed green.
-  test("reconcile's ledger entry really carries every ticket the pass wrote", async () => {
-    const { reconcile } = await import("../scripts/reconcile.mjs");
-    const root = mkdtempSync(join(tmpdir(), "blz442-reconcile-ledger-"));
-    const codeRepo = mkdtempSync(join(tmpdir(), "blz442-code-"));
-    const prev = process.env.BLAZE_SESSION;
-    process.env.BLAZE_SESSION = "guards442";
-    try {
-      for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
-                       ["config", "user.name", "t"]]) {
-        execFileSync("git", ["-C", codeRepo, ...a]);
-      }
-      writeFileSync(join(codeRepo, "README.md"), "x\n");
-      execFileSync("git", ["-C", codeRepo, "add", "-A"]);
-      execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
-      // BLZ-131's shipped-commit signal: three tickets that genuinely move defined -> done.
-      const moving = ["ZZZ-1", "ZZZ-2", "ZZZ-3"];
-      for (const id of moving) {
-        execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", `${id}: shipped work`]);
-      }
-
-      const projects = join(root, "projects");
-      mkdirSync(join(projects, "ZZZ", "defined"), { recursive: true });
-      writeFileSync(join(root, "blaze.config.json"),
-        JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], commitMode: "batch" }));
-      writeFileSync(join(projects, "ZZZ", "project.json"),
-        JSON.stringify({ key: "ZZZ", codeRepos: [codeRepo] }));
-      // A fourth ticket with no signal at all: it must NOT appear on the ledger, or the
-      // assertion below would pass for a reconcile that simply listed the whole board.
-      for (const id of [...moving, "ZZZ-4"]) {
-        writeFileSync(join(projects, "ZZZ", "defined", `${id}-t.md`),
-          `---\nid: ${id}\ntitle: t\ntype: task\nproject: ZZZ\nestimate: 30\n---\n\nbody\n`);
-      }
-      for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
-                       ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "seed board"]]) {
-        execFileSync("git", ["-C", root, ...a]);
-      }
-
-      const at = (id) => ["defined", "done", "in-progress", "in-review"]
-        .find((st) => existsSync(join(projects, "ZZZ", st, `${id}-t.md`)));
-      const before = Object.fromEntries([...moving, "ZZZ-4"].map((id) => [id, at(id)]));
-
-      await reconcile({ fetch: false, commit: true, dryRun: false, root });
-
-      // (1) the filesystem: which tickets really changed status.
-      const reallyMoved = [...moving, "ZZZ-4"].filter((id) => at(id) !== before[id]).sort();
-      assert.deepEqual(reallyMoved, moving,
-        `the fixture must move exactly ${moving.join(", ")} and leave ZZZ-4 alone, it moved ` +
-        `${JSON.stringify(reallyMoved)}`);
-
-      // (2) the ledger FILE reconcile wrote, read off disk.
-      const entries = readEntries(root, sessionId(process.env));
-      const reconcileOps = entries.filter((e) => e.op === "reconcile");
-      assert.equal(reconcileOps.length, 1,
-        `reconcile must queue exactly one op on a batch board, it queued ${reconcileOps.length}`);
-      assert.deepEqual([...(reconcileOps[0].ids || [])].sort(), reallyMoved,
-        "reconcile's queued ledger entry must name every ticket the pass really wrote — " +
-        "without the `ids:` hunk the entry carries none and `blaze commit` counts the whole " +
-        "pass as one ticket, which is exactly BLZ-427's defect");
-      assert.equal(summarizeEntries(reconcileOps), `${reallyMoved.length} reconciled`,
-        "the flush subject must count the tickets the filesystem says really moved");
-    } finally {
-      if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
-      rmSync(root, { recursive: true, force: true });
-      rmSync(codeRepo, { recursive: true, force: true });
-    }
-  });
-});
+// BLZ-254: BLZ-427's describe (`blaze commit`'s subject counts tickets and names every op) is
+// deleted — it pinned OP_LABEL, summarizeEntries and the pending-ledger entries of commitOrQueue
+// and reconcile, all of which are deleted with `blaze commit` (spec §5.5).
 
 describe("BLZ-450: an in-sync claim never sits beside a degraded check", () => {
   // Reproduced BEFORE it was changed, because the ticket was flagged UNPROVEN and
@@ -414,16 +248,16 @@ describe("BLZ-450: an in-sync claim never sits beside a degraded check", () => {
 
 describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-record line", () => {
   // The rule, decided rather than converged, and written down in both files it governs
-  // (scripts/views/reconcile-summary.mjs and scripts/reconcile-commit-report.mjs):
+  // (scripts/views/reconcile-summary.mjs and scripts/reconcile-apply-report.mjs):
   // PREVIEW surfaces say "other update(s)"; WRITE-RECORD surfaces say "N ticket(s)
   // updated without a status change". Measured: 4 sites, 2 vocabularies, and no site is
   // on the wrong side.
   //
-  // This file pins the TWO sites in the files it can reach. reconcile.mjs's other two —
-  // the dry-run tail and the commit subject — belong to a different owner and are pinned
-  // by name in tests/reconcile-change-report-oracle.test.mjs, by DRYRUN_TAIL_RE
-  // ("other update(s)"), COMMITTED_LINE_RE and QUEUED_LINE_RE ("updated without a status
-  // change"), against filesystem ground truth. Full convergence to ONE vocabulary would
+  // This file pins the TWO sites in the files it can reach. reconcile.mjs's other ones —
+  // the dry-run tail (DRYRUN_TAIL_RE) and the applied line (APPLIED_LINE_RE) — belong to a
+  // different owner and are pinned by name in tests/reconcile-change-report-oracle.test.mjs
+  // ("other update(s)" and "updated without a status change" respectively), against
+  // filesystem ground truth. Full convergence to ONE vocabulary would
   // require editing reconcile.mjs, so the ticket's second option was taken deliberately.
   test("the preview surface says 'other update(s)'", () => {
     const text = reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: false }] });
@@ -433,48 +267,24 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
   });
 
   test("the write-record surface says 'N ticket(s) updated without a status change'", () => {
-    // BLZ-481 added "locked" and "failed" to this loop. They are write-record surfaces by
-    // the same rule as the other three and they were the only arms stating neither
-    // quantity — see the named test below for why that mattered most on exactly them.
-    for (const outcome of ["committed", "queued", "no-op", "locked", "failed"]) {
-      const line = applySummary({ outcome, error: null, movedCount: 2, nonMovedCount: 3 });
-      assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
-        `${outcome}: got ${JSON.stringify(line.text)}`);
-      assert.doesNotMatch(line.text, /other update\(s\)/,
-        `${outcome}: a durable write record must not use the preview's shorthand — read alone, ` +
+    // BLZ-254: one applied line per store now (scripts/reconcile-apply-report.mjs), so the
+    // loop is over the stores rather than BLZ-481's five commit outcomes.
+    for (const mode of ["fs", "db"]) {
+      const line = appliedLine({ mode, movedCount: 2, nonMovedCount: 3 });
+      assert.match(line, /\b3 ticket\(s\) updated without a status change/,
+        `${mode}: got ${JSON.stringify(line)}`);
+      assert.doesNotMatch(line, /other update\(s\)/,
+        `${mode}: a durable write record must not use the preview's shorthand — read alone, ` +
         "with no move count beside it, 'other' names nothing");
     }
   });
 
-  // BLZ-481. `applySummary`'s locked and failed arms are the two outcomes where the ticket
-  // files ARE on disk and are NOT in `git log` — the one case a person has to go and clear
-  // by hand. They were also the only two arms that stated no quantity at all: "Ticket
-  // file(s) were already written to disk" told the operator to go and look at a dirty tree
-  // without telling them how big it is. Every other arm states `N ticket(s) moved` and, when
-  // it is non-zero, the non-moving count beside it.
-  test("BLZ-481: the locked and failed lines state the SAME two quantities every other arm does", () => {
-    for (const outcome of ["locked", "failed"]) {
-      const line = applySummary({ outcome, error: "the lock is held", movedCount: 2, nonMovedCount: 3 });
-      assert.match(line.text, /\b2 ticket\(s\) moved/,
-        `${outcome}: the line states no moved count — ${JSON.stringify(line.text)}`);
-      assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
-        `${outcome}: the line states no non-moving count — ${JSON.stringify(line.text)}`);
-      assert.match(line.text, /UNCOMMITTED/,
-        `${outcome}: the line must still say the tree is dirty, not merely un-applied`);
-      assert.equal(line.exit, 1, `${outcome}: an unlanded commit must still exit non-zero`);
-    }
-    // …and the zero case is suppressed here exactly as it is everywhere else, so the line
-    // never reads "0 ticket(s) updated without a status change".
-    assert.doesNotMatch(
-      applySummary({ outcome: "locked", error: "x", movedCount: 1, nonMovedCount: 0 }).text,
-      /updated without a status change/,
-      "a quantity that is zero must not be stated at all");
-  });
+  // BLZ-254: BLZ-481's locked/failed test is deleted — no locked or failed arm exists now.
 
   test("neither surface states the quantity at all when it is zero", () => {
     assert.doesNotMatch(reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: true }] }),
       /other update\(s\)/);
-    assert.doesNotMatch(applySummary({ outcome: "committed", error: null, movedCount: 2, nonMovedCount: 0 }).text,
+    assert.doesNotMatch(appliedLine({ mode: "fs", movedCount: 2, nonMovedCount: 0 }),
       /updated without a status change/);
   });
 });

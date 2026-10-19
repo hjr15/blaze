@@ -30,6 +30,8 @@
 //     reach a real commit and this PR's headline behaviour change (the loop COMMITS) had
 //     NO oracle coverage. Fixed by git-initing `root` too and adding a commit-existence
 //     clause whose ground truth is `git log`/`git show`, never `r.changes`.
+//     BLZ-254: reconcile no longer commits. `root` stays a git repo so that "no commit"
+//     can be checked against `git log`, and the working tree against the feed.
 //
 // Non-vacuity (D1/D2/D3, now also D4/D5 for the two fixes above) is proven by hand,
 // outside this file, by re-introducing each defect this oracle exists to catch and
@@ -138,8 +140,8 @@ function assertCrossProductSize(manifest, snapshot, label) {
 // tickets. Follows the `twoProjectBoard`/`stubGh` idiom in
 // tests/reconcile-project-filter.test.mjs (real `git init`, a stub `gh` on PATH) rather
 // than mocking reconcile's internals. BOTH `repo` (the code repo) and `root` (the board
-// itself) are real git repos — `root` was the gap review found: without it `commit: true`
-// never reaches a real commit and this PR's headline behaviour change has no coverage.
+// itself) are real git repos. `root` is one so that "the loop made no commit" (BLZ-254) can
+// be checked against `git log`; it used to be so that a commit could land.
 // =============================================================================
 function buildOracleBoard(tmp) {
   const repo = join(tmp, "repo");
@@ -250,9 +252,9 @@ function buildOracleBoard(tmp) {
   execFileSync("chmod", ["+x", join(bin, "gh")]);
 
   // BLZ-404 (review): `root` must ALSO be a real git repo, git-inited AFTER every ticket
-  // file above is written so the seed commit captures the whole starting fixture. Without
-  // this, `commit: true` never reaches a real `git commit` and the loop's headline
-  // behaviour change — it now COMMITS — had no oracle coverage at all.
+  // file above is written so the seed commit captures the whole starting fixture.
+  // BLZ-254: it is one now so that "no commit" can be checked against `git log`, and the
+  // working tree's changed tickets against the feed (it used to be so a commit could land).
   execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
@@ -465,75 +467,26 @@ describe("BLZ-404 + BLZ-405: the reconcile feed's account of a run matches the f
         "applied: the fixture must produce at least one REAL branch/pr clear on disk — 0 means " +
         "the added ambiguous-merged + pre-existing-record dimension is not actually exercised");
 
-      // BLZ-404 (review finding 3): a commit-existence clause, ground truth from
-      // `git log`/`git show` alone — never from `reconcile()`'s return value. This board's
-      // `commitMode` is the default ("per-op"), so a run with real moves must land exactly
-      // one new commit whose subject's own claimed ticket-count matches the count of
-      // DISTINCT tickets the commit's diff actually touches.
+      // BLZ-254 (spec §5.5): the loop applies and NEVER commits. Ground truth is `git` alone:
+      // the commit count did not move, and the working tree's changed tickets are exactly the
+      // ones the feed published — no move left out of the tree, no write the feed did not name.
       const commitCountAfter = Number(
         execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"], { encoding: "utf8" }).trim());
-      eq(commitCountAfter, commitCountBefore + 1,
-        "applied: a run with real moves, on a per-op-mode board, must create exactly one new commit");
-
-      const subject = execFileSync("git", ["-C", root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
-      const diffFiles = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-        { encoding: "utf8" }).trim().split("\n").filter(Boolean);
-      const diffIds = new Set(diffFiles.map((f) => (/(ORC-\d+)/.exec(f) || [])[1]).filter(Boolean));
-      // BLZ-401: the subject now states TWO quantities — tickets whose STATUS actually
-      // moved, and (only when non-zero) tickets whose file was written without a status
-      // change. A single "reconcile N ticket(s)" claim used to conflate the two, which is
-      // the exact defect BLZ-401 fixes (a `done -> done` resolution backfill inflating the
-      // count of tickets that "moved"). Ground truth for the first quantity is `movedIds`
-      // — real directory changes, already computed above from the filesystem, never from
-      // `reconcile()`'s own return value; ground truth for the second is the remainder of
-      // the diff's distinct ids that did NOT move.
-      const movedMatch = /reconcile (\d+) ticket\(s\) moved/.exec(subject);
-      ok(movedMatch, `applied: the commit subject must state its moved-ticket count, got: ${subject}`);
-      eq(Number(movedMatch[1]), movedIds.size,
-        "applied: the commit subject's claimed MOVED count must match the number of tickets whose " +
-        `directory really changed (ground truth: filesystem snapshot), got subject "${subject}" but ` +
-        `${movedIds.size} ticket(s) really moved: ${[...movedIds].join(", ")}`);
-      const nonMovedGroundTruth = diffIds.size - movedIds.size;
-      const updatedMatch = /(\d+) ticket\(s\) updated without a status change/.exec(subject);
-      if (nonMovedGroundTruth > 0) {
-        ok(updatedMatch,
-          `applied: the diff touches ${diffIds.size} distinct ticket(s) but only ${movedIds.size} moved — ` +
-          `the subject must name the remaining ${nonMovedGroundTruth} non-moving update(s), got: ${subject}`);
-        eq(Number(updatedMatch[1]), nonMovedGroundTruth,
-          "applied: the commit subject's non-moving-update count must match the diff's real remainder " +
-          `(${nonMovedGroundTruth}), got subject "${subject}"`);
-      } else {
-        eq(updatedMatch, null,
-          `applied: every ticket the diff touches really moved, so the subject must not claim a ` +
-          `non-moving update, got: ${subject}`);
-      }
-
-      // BLZ-404 round 2 (blocking 2 — adversarial re-review's M6 mutation): the two clauses
-      // above collapse a move to a SET of distinct ticket ids and survive a mutation that
-      // commits only the DESTINATION path of a move and drops the SOURCE from `touched`
-      // (`touched.push(dest)` alone, never `touched.push(t.file)`). Under that mutation the
-      // subject still reads "reconcile N ticket(s)" and `git show --name-only` still touches
-      // N distinct ids — the new path IS one of them — so both clauses above stay green while
-      // the product commits a ticket at its OLD status (still tracked, still on disk, now
-      // untracked-deleted) and its NEW status at once, and leaves the old path permanently
-      // unstaged. `git status --porcelain`, scoped to the board's own project tree, is ground
-      // truth no `git show`/subject-parsing clause can be fooled by: a real move's source
-      // deletion and destination creation must BOTH have landed in the commit, or the
-      // working tree is not clean. Verified by hand against the M6 mutation (see the PR
-      // body): with only this clause reverted, `node --test` on this file stays green under
-      // the mutation; with it in place, this exact assertion goes red.
-      const boardTreeDirty = execFileSync("git",
-        ["-C", root, "status", "--porcelain", "--", join(root, "projects", KEY)],
-        { encoding: "utf8" }).trim();
-      eq(boardTreeDirty, "",
-        "applied: the board's own project tree must be FULLY committed after an applied run — " +
-        `git status --porcelain reports uncommitted change(s) it must not:\n${boardTreeDirty}`);
+      eq(commitCountAfter, commitCountBefore, "applied: the reconcile loop must not commit");
+      const dirtyIds = new Set(execFileSync("git",
+        ["-C", root, "status", "--porcelain", "--untracked-files=all", "--", join(root, "projects", KEY)],
+        { encoding: "utf8" }).split("\n").map((l) => (/(ORC-\d+)/.exec(l) || [])[1]).filter(Boolean));
+      deepEq([...movedIds].filter((id) => !dirtyIds.has(id)), [],
+        "applied: every ticket the filesystem shows as moved must be a working-tree change");
+      const eventIds = new Set(reconcileEvents.map((e) => e.id));
+      deepEq([...dirtyIds].filter((id) => !eventIds.has(id)).sort(), [],
+        "applied: the working tree changed a ticket the feed never published a reconcile event for");
 
       // BLZ-465: this run's own budget. Everything above the per-ticket loop is a fixed
       // count for this run's coordinates; the loop's share is derived from the declared
-      // cross-product size and the filesystem measurement. `nonMovedGroundTruth` comes
-      // from `git show`, an independent source, not from anything the feed said.
-      const budget = groundTruthBudget(before, movedIds) + 7 + (nonMovedGroundTruth > 0 ? 2 : 1);
+      // cross-product size and the filesystem measurement: 3 non-vacuity + 1 no-commit +
+      // 2 tree/feed agreement (BLZ-254).
+      const budget = groundTruthBudget(before, movedIds) + 6;
       assert.equal(clauses - runStart, budget,
         `applied: this run executed ${clauses - runStart} clause(s); its declared cross-product ` +
         `and the filesystem budget ${budget}. A clause was added or removed — update ` +

@@ -2027,9 +2027,9 @@ const WRITE_ALLOWED = new Map([
   // claim on it, and it must be the FIFO-safe primitive precisely because the operator may
   // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
   // primitive, appearing in reconcile still reddens.
-  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts) and hands `stageFor(mode)`
-  // in as the stage; `commitOrQueue` stays as reconcile()'s default stage.
-  ["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage", "resolvePorts", "stageFor"]],
+  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts).
+  // BLZ-254: commitOrQueue/stageFor removed — reconcile no longer stages its writes (spec §5.5).
+  ["reconcile.mjs", ["appendRegularFileSync", "fsStorage", "resolvePorts"]],
   // BLZ-535 round 5, D3. The seven below take a WRITE PRIMITIVE off an allowlisted module —
   // `saveState`, `appendEntry`, `acquireLock` and their kin, each of which puts caller-chosen
   // bytes at a caller-chosen root. Round 4 could not see any of them, because it pinned one
@@ -2144,9 +2144,10 @@ const WRITE_ALLOWED = new Map([
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
-  // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts) and stages by mode (stageFor).
+  // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts).
   // BLZ-673: runGroomer grooms through the port under db (groomOnceDb), resolving ports per run.
-  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
+  // BLZ-254: stageFor removed — reconcile no longer stages (spec §5.5).
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.
