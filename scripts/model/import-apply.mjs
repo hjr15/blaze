@@ -55,7 +55,6 @@ import { loadSprints } from "./sprints.mjs";
 import { PRIORITIES, TYPES } from "./schema.mjs";
 import { RESOLUTIONS, statusesFor } from "./workflows.mjs";
 import { parseCanonicalCsv, planImport } from "./import-plan.mjs";
-import { commitOrQueue, commitSuffix } from "../commit-or-queue.mjs";
 
 /** Beside `import-mappings/` at the DATA ROOT, and deliberately not under
  *  `.blaze/`: that directory holds regenerable caches `reindex.mjs` calls safe
@@ -361,12 +360,10 @@ export async function loadBoard(projectsDir, { dataRoot, readStorage = fsReadSto
  *                           phase — `applyImport` does not decide exit 5.
  * @param ctx.onPair         §5.3 step 6, called BETWEEN the ticket write and
  *                           `done` so that `done` implies pair. C1's seam.
- * @param ctx.stage          §5.4, injected so a staging failure is testable
- *                           without a git tree. Defaults to `commitOrQueue`.
  * @param ctx.appendReceipt  the append primitive, injected for fault
  *                           injection only. Defaults to `appendRegularFileSync`.
  *
- * @returns { exitCode, written, notWritten, files, staged, commit, errors }
+ * @returns { exitCode, written, notWritten, files, errors } — BLZ-254: no staging (spec §5.5)
  */
 export async function applyImport(plan, ctx) {
   const {
@@ -374,19 +371,14 @@ export async function applyImport(plan, ctx) {
     writePort = fsWritePort(projectsDir, undefined, undefined,
                             fsAllocators(projectsDir, { dataRoot, remoteClaims: false })),
     onPair = null,
-    stage = commitOrQueue,
     appendReceipt = appendRegularFileSync,
-    commitMode = "per-op",
-    message = null,
   } = ctx;
 
   const append = (obj) => appendReceipt(receiptPath, `${JSON.stringify(obj)}\n`);
   const written = [];
   const notWritten = [];
   const files = [];
-  const ids = [];
   let boardChanged = false;
-  let commit = null;
 
   const pending = plan.rows.filter((r) => r.op === "create" || r.op === "update");
 
@@ -408,7 +400,6 @@ export async function applyImport(plan, ctx) {
         const { file } = await writePort.write({ ...ticket, currentFile: entry.currentFile });
         files.push(file);
         written.push(entry.id);
-        ids.push(entry.id);
         append({ seq, phase: "done", id: entry.id, file: relative(dataRoot, file), claim: false });
         continue;
       }
@@ -460,7 +451,6 @@ export async function applyImport(plan, ctx) {
       const { file } = await writePort.write({ ...ticket, frontmatter }, { create: true });
       files.push(file);
       written.push(id);
-      ids.push(id);
 
       // --- step 6: pair → map, BETWEEN the write and `done`, so `done`
       // implies pair. C1/BLZ-634 owns the map itself; the ordering is fixed
@@ -483,37 +473,20 @@ export async function applyImport(plan, ctx) {
     // exit 1's "data refused".
     return {
       exitCode: boardChanged ? 4 : 5,
-      written, notWritten, files, staged: false, commit: null,
+      written, notWritten, files,
       errors: [e.message],
     };
   }
 
   if (files.length === 0) {
-    return { exitCode: 0, written, notWritten, files, staged: false, commit: null, errors: [] };
+    return { exitCode: 0, written, notWritten, files, errors: [] };
   }
 
-  // --- staging (§5.4). Scoped to exactly the files it wrote, never
-  // `git add -A`. The receipt goes with them: it is a record, not a cache.
-  try {
-    commit = stage({
-      root: dataRoot,
-      mode: commitMode,
-      op: "import",
-      id: ids[0] ?? null,
-      ids,
-      message: message ?? `import: ${written.length} ticket(s) from CSV`,
-      files: [...files, receiptPath],
-    });
-  } catch (e) {
-    // Every write landed and staging failed — still 4. `commitOrQueue`
-    // throws on an op absent from OP_LABEL and via `assertWritable`, and an
-    // uncaught throw here would exit 1.
-    return { exitCode: 4, written, notWritten, files, staged: false, commit: null, errors: [e.message] };
-  }
-  if (commit && commit.ok === false) {
-    return { exitCode: 4, written, notWritten, files, staged: false, commit, errors: ["staging failed"] };
-  }
-  return { exitCode: 0, written, notWritten, files, staged: true, commit, errors: [] };
+  // BLZ-254 (spec §5.5): staging is gone. Until then the run ended by handing exactly the files it
+  // wrote (tickets, claims, receipt) to commitOrQueue under the `import` op, and a staging
+  // failure was a third route to exit 4. The board never commits now: the files are written,
+  // and in fs mode the operator versions them.
+  return { exitCode: 0, written, notWritten, files, errors: [] };
 }
 
 // --- the verb ----------------------------------------------------------------
@@ -551,9 +524,9 @@ export async function runImport(opts) {
     file, projectsDir, dataRoot,
     apply = false, update = false, allocateIds = false,
     name = CANONICAL_NAME, sourceIdColumn = null,
-    now = new Date(), commitMode = "per-op",
+    now = new Date(),
     writePort = undefined, readStorage = fsReadStorage,
-    stage = commitOrQueue, appendReceipt = appendRegularFileSync,
+    appendReceipt = appendRegularFileSync,
     onPair = null,
     // BLZ-633 / design §4.5: THE SECOND READER'S SEAM. "There is one
     // `planImport(rows, board, opts)` and two readers that produce `rows`" —
@@ -651,7 +624,7 @@ export async function runImport(opts) {
   }
 
   const r = await applyImport(plan, {
-    projectsDir, dataRoot, receiptPath, writePort, onPair, stage, appendReceipt, commitMode,
+    projectsDir, dataRoot, receiptPath, writePort, onPair, appendReceipt,
   });
 
   if (r.exitCode === 4) {
@@ -662,7 +635,7 @@ export async function runImport(opts) {
       + `record of what this run left behind. Nothing is rolled back.`);
     for (const e of r.errors) say(`  ${e}`);
   } else if (r.exitCode === 0) {
-    say("", `imported ${r.written.length} ticket(s)${r.commit ? commitSuffix(r.commit) : ""}`);
+    say("", `imported ${r.written.length} ticket(s)`);
     say(`  receipt: ${relative(dataRoot, receiptPath)}`);
   } else {
     for (const e of r.errors) say(`  ${e}`);

@@ -21,7 +21,6 @@ import {
   runMappedImport, runRepair, appendPair, openSourceIds,
 } from "../../scripts/model/import-mapping.mjs";
 import { RECEIPT_DIR, readReceipt } from "../../scripts/model/import-apply.mjs";
-import { OP_LABEL } from "../../scripts/commit-summary.mjs";
 
 const HEADER = ["Key", "Name", "Kind", "State"];
 const NAME = "acme";
@@ -81,7 +80,6 @@ const THREE = [
   ["ACME-3", "third", "Bug", "Open"],
 ];
 
-const noStage = () => ({ ok: true, committed: false, queued: true });
 
 function opts(root, extra = {}) {
   return {
@@ -91,7 +89,6 @@ function opts(root, extra = {}) {
     dataRoot: root,
     apply: true,
     allocateIds: true,
-    stage: noStage,
     ...extra,
   };
 }
@@ -240,7 +237,7 @@ describe("BLZ-634 / §4.2 test 2 — the map append fails at row N", () => {
     const { root } = await crashedAtRowTwo(t);
     const before = readFileSync(receiptPath(root), "utf8");
     const r = await runRepair({
-      receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root, stage: noStage,
+      receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
     });
     assert.equal(r.exitCode, 0, "§5.3: the dry run exits with the code the apply would — nothing "
       + "would remain unresolved, so 0");
@@ -255,7 +252,7 @@ describe("BLZ-634 / §4.2 test 2 — the map append fails at row N", () => {
     const { root } = await crashedAtRowTwo(t);
     const r = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
     assert.equal(r.exitCode, 0, r.report);
 
@@ -276,7 +273,7 @@ describe("BLZ-634 / §4.2 test 2 — the map append fails at row N", () => {
     // `resolved` that would lift the refusal.
     const killed = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
       append: () => { throw new Error("SIGKILL between the two appends"); },
     });
     assert.notEqual(killed.exitCode, 0);
@@ -297,7 +294,7 @@ describe("BLZ-634 / §4.2 test 2 — the map append fails at row N", () => {
     // re-examines as `nothing-to-repair`.
     const second = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
     assert.equal(second.exitCode, 0, second.report);
     assert.match(second.report, /NOTHING TO REPAIR/);
@@ -310,7 +307,7 @@ describe("BLZ-634 / §4.2 test 2 — the map append fails at row N", () => {
     const { root, o } = await crashedAtRowTwo(t);
     await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
 
     const again = await runMappedImport({ ...o, now: new Date(Date.now() + 1000) });
@@ -340,7 +337,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     const root = boardRoot(t);
     const r = await runRepair({
       receipt: join(root, RECEIPT_DIR, "2026-09-22T00-00-00.000Z-acme.jsonl"),
-      projectsDir: join(root, "projects"), dataRoot: root, apply: true, stage: noStage,
+      projectsDir: join(root, "projects"), dataRoot: root, apply: true,
     });
     assert.equal(r.exitCode, 2);
   });
@@ -351,7 +348,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     const before = readFileSync(receiptPath(root), "utf8");
     const r = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
     assert.equal(r.exitCode, 3,
       "§5.3: without the mapping `repair` cannot know whether `sourceIdColumn` was in force, so it "
@@ -366,7 +363,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     rmSync(sourceIdsPathFor(root, NAME));
     const r = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
     assert.equal(r.exitCode, 5);
     assert.match(r.report, /source-ids/);
@@ -384,7 +381,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     appendPair(sourceIdsPathFor(root, NAME), { source: "ACME-2", id, seq: 2 });
     const r = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
     assert.equal(r.exitCode, 5);
     assert.match(r.report, /NEEDS A PERSON/);
@@ -401,7 +398,7 @@ describe("`blaze import repair` refusals, before any write", () => {
 
     const r = await runRepair({
       receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: noStage,
+      apply: true,
     });
     assert.equal(r.exitCode, 0, r.report);
     const parked = readFileSync(`${mapPath}.corrupt`, "utf8");
@@ -420,7 +417,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     writeFileSync(rp, `${readFileSync(rp, "utf8")}{"seq":3,"phase":"inte`);
 
     const r = await runRepair({
-      receipt: rp, projectsDir: join(root, "projects"), dataRoot: root, apply: true, stage: noStage,
+      receipt: rp, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
     });
     assert.equal(r.exitCode, 0, r.report);
     assert.match(readFileSync(`${rp}.corrupt`, "utf8"), /\{"seq":3,"phase":"inte/);
@@ -439,7 +436,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     const rp = receiptPath(root);
     writeFileSync(rp, `${readFileSync(rp, "utf8")}{"seq":3,"phase":"inte`);
     const ctx = {
-      receipt: rp, projectsDir: join(root, "projects"), dataRoot: root, apply: true, stage: noStage,
+      receipt: rp, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
     };
     await runRepair(ctx);
     const after = readFileSync(rp, "utf8");
@@ -449,30 +446,15 @@ describe("`blaze import repair` refusals, before any write", () => {
     assert.ok(readFileSync(rp, "utf8").startsWith(after.slice(0, after.indexOf("torn-line-parked"))));
   });
 
-  test("staging goes through commitOrQueue under a NEW `import-repair` op", async (t) => {
-    assert.equal(Object.hasOwn(OP_LABEL, "import-repair"), true,
-      "§5.4: commitOrQueue THROWS on an op it has no word for, so a repair that reached staging "
-      + "without this line would exit 1 on its first successful apply");
-    const { root } = await crashedAtRowTwo(t);
-    const seen = [];
-    await runRepair({
-      receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: (a) => { seen.push(a); return { ok: true, queued: true }; },
-    });
-    assert.equal(seen.length, 1);
-    assert.equal(seen[0].op, "import-repair");
-    assert.equal(seen[0].files.every((f) => !f.includes(`${"projects"}/BLZ/defined`)), true,
-      "§4.3: `repair` never writes a ticket — its files are the map, the receipt and their sidecars");
-  });
-
-  test("every record written and staging failed is exit 4, not 0", async (t) => {
+  test("BLZ-254: repair --apply writes its records and stages nothing", async (t) => {
     const { root } = await crashedAtRowTwo(t);
     const r = await runRepair({
-      receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root,
-      apply: true, stage: () => { throw new Error("assertWritable: read-only"); },
+      receipt: receiptPath(root), projectsDir: join(root, "projects"), dataRoot: root, apply: true,
     });
-    assert.equal(r.exitCode, 4, "§5.2: the records are on disk and only the commit is missing");
+    assert.equal(r.exitCode, 0, r.report);
     assert.equal(mapLines(root).length, 2, "the writes landed");
+    assert.match(r.report, /^repaired \d+ row\(s\)$/m);
+    assert.doesNotMatch(r.report, /queued|commit|STAGING/i, "the trailer claims nothing about git");
   });
 
   test("a `canonical` receipt has no mapping BY DESIGN and repair does not ask for one", async (t) => {
@@ -481,7 +463,7 @@ describe("`blaze import repair` refusals, before any write", () => {
     const rp = join(root, RECEIPT_DIR, "2026-09-22T00-00-00.000Z-canonical.jsonl");
     writeFileSync(rp, `${JSON.stringify({ seq: 1, phase: "intent", row: 1, id: "BLZ-9", op: "create" })}\n`);
     const r = await runRepair({
-      receipt: rp, projectsDir: join(root, "projects"), dataRoot: root, apply: true, stage: noStage,
+      receipt: rp, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
     });
     assert.equal(r.exitCode, 0, r.report);
     assert.match(r.report, /ORPHAN RESERVATION/,

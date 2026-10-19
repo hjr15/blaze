@@ -499,8 +499,8 @@ this is the engine's long-standing behaviour, not something this design introduc
 `loadBoard`/`listTickets` call that decides create vs. update vs. skip per row — comes from the
 database itself, not the filesystem, per
 [ADR-0038](../decisions/0038-reads-resolve-from-the-write-mode-at-the-entry-point.md). What it
-commits to git is unchanged by that: only the receipt and the `source-ids/<name>.jsonl` map are
-real record files on disk, so those are what `stageFor(mode)` (ADR-0038) stages — the ticket
+writes as files is unchanged by that: only the receipt and the `source-ids/<name>.jsonl` map are
+real record files on disk (BLZ-254: written, never staged) — the ticket
 writes themselves are opaque id handles in `db` mode and are never passed to git.
 
 ### 2.7 The two fields that are outputs, not inputs
@@ -1190,7 +1190,7 @@ Aligned with the codes already in use: `0` clean, `1` a refusal or a hard findin
 | **1** | **Data refused.** One or more rows fail validation | **unchanged** — nothing written |
 | **2** | **Could not look.** The **input** could not be read as the format it claims. Only the input — an earlier draft widened this to the `source-ids` map and thereby violated the rule two rows down that each code exists because its remedy differs | unchanged |
 | **3** | **Mapping incomplete.** A source column has no confirmed mapping, or the mapping's `source.sha256` does not match the file; **or, for `repair`,** `import-mappings/<name>.json` — the mapping file `repair` needs to know whether `sourceIdColumn` was in force — is absent for a receipt whose `<name>` is not `canonical` (§5.2, §5.3) | unchanged |
-| **4** | **The board changed and the run did not finish cleanly.** A ticket, reservation or claim write failed part way (§5.3 steps 2, 4, 5), **or** a receipt or `source-ids` append failed after a ticket write, **or** every write landed and staging failed | **changed** — see §5.3 |
+| **4** | **The board changed and the run did not finish cleanly.** A ticket, reservation or claim write failed part way (§5.3 steps 2, 4, 5), **or** a receipt or `source-ids` append failed after a ticket write | **changed** — see §5.3 |
 | **5** | **The run's own records are not in a state it may start from.** Four cases: the receipt cannot be opened for append; the `source-ids` map cannot be opened for append; the map has a torn line; or — **under `sourceIdColumn` only** — the mapping's latest receipt carries an `intent` with neither a `done` nor a `resolved` entry (§5.3 defines both, `<name>`, and `blaze import repair`, the verb that appends `resolved`). Scoped that way because only the source-key lookup can be blind to a ticket that exists; an explicit-id import finds it on the board and compares. The run never starts | unchanged — nothing attempted |
 
 Four separations, each because the remedy differs:
@@ -1293,12 +1293,7 @@ The repo has already settled the general form of this. ADR-0035's consequences: 
 needs to know whether HEAD moved must read the stdout line or git, not the exit code."* The same
 rule applies here — the exit code is a summary, and the receipt is the record.
 
-**Exit 0 does not mean "committed".** On a `commitMode: "batch"` board `commitOrQueue` **queues**
-rather than commits (`scripts/commit-or-queue.mjs:28-31`), so a fully successful import exits 0
-with the files written, staged into a pending ledger, and **uncommitted until the next flush**.
-That is correct and is how every other verb behaves — but it is named in the run's trailer rather
-than left to be discovered, because the flush path it hands off to is the one BLZ-531 found a
-data-loss defect in.
+**Exit 0 means the writes finished.** Since BLZ-254 no import commits, on any board. The trailer names the receipt (and the map), which are the run's record.
 
 ### 5.2 The named failure modes
 
@@ -1326,21 +1321,8 @@ data-loss defect in.
 | **`repair`: the receipt argument is unreadable** — missing, a directory, a FIFO, a socket | Same rule, same primitive: the receipt is `repair`'s input. Nothing written | **2** |
 | **`repair`: `import-mappings/<name>.json` is absent** for a receipt whose `<name>` is not `canonical` | Refuse before any write, naming the file. Without the mapping `repair` cannot know whether `sourceIdColumn` was in force, so it cannot tell row 1 from row 4 (§5.3). A `canonical` receipt has no mapping by design and is not this case | **3** |
 | **`repair`: a row remains unresolved when it exits** — a pair-without-ticket row left for a person, `source-ids/<name>.jsonl` missing though the mapping declares `sourceIdColumn`, or a write that failed before that row's `resolved` | The next `blaze import` under this mapping refuses with 5 **only if** the receipt still carries an `intent` with neither a `done` nor a `resolved` (§5.3's exit-5 check is stated over `intent`, not over "a row remains unresolved" in general) — a receipt that is intent-less, or one in which every `intent` is already `done`, does not trigger that refusal even though the map is absent or a row still awaits a person. `repair` itself reports the case regardless, with the same code, **dry run and `--apply` alike** — the dry run exits with the code the apply would. Rows already resolved stay resolved (§5.3: `resolved` is written last, so a failed row never lifts its own refusal) | **5** |
-| **`repair --apply`: every write landed and staging failed** | Same as the importer's third exit-4 case (§5.4): the records are on disk and the refusal is lifted; only the commit is missing, and the trailer says so | **4** |
 
-**Precedence when one `repair --apply` run hits both of the two rows above.** A run can leave a
-`NEEDS A PERSON` row (this section's exit-5 row) **and** have its staging call fail (the exit-4
-row directly above) in the same invocation — the writes are independent of the commit, so nothing
-prevents both. **Staging failure wins: the run exits 4.** Reasoning: exit 4 means *"the board
-changed and the run did not finish cleanly — the records are on disk and only the commit is
-missing"*, which is the harder, more-blocking failure — nothing durable reached git, and every
-other writer touching this data root needs to know that before anything else. A `NEEDS A PERSON`
-row, by contrast, is durably recorded the moment `repair` names it (or leaves it unresolved on the
-receipt); it does not get lost by being reported under the "wrong" code, and the next `repair` run
-finds it again regardless of which code this run exited with. So the run's trailer names **both**
-conditions — the unresolved row and the staging failure — but the process **exits 4**, consistent
-with §5.1's rule that once any ticket-adjacent record has been written, no later failure may exit
-anything but 4.
+(The staging-failure precedence rule that stood here was removed with staging, BLZ-254.)
 
 **The no-echo rule is scoped, because stated as a blanket principle it contradicts this very
 table.** An earlier draft declared that a refusal never echoes the offending cell, and then
@@ -1758,6 +1740,8 @@ git in `db` mode is unchanged too: only its receipt and the source-id map, never
 writes themselves — see §5.4.
 
 ### 5.4 Staging
+
+> **Amended 2026-10-13 (BLZ-254, spec §5.5): there is no staging.** The board never commits. An import writes its tickets (or, under db, rows), claims, receipt and map, and stops. In fs mode the operator versions them. The rest of this section is the historical design.
 
 The importer stages **exactly the files it wrote**, through `commitOrQueue`
 (`scripts/commit-or-queue.mjs:11`), which is *"scoped to exactly the touched files (never `git add

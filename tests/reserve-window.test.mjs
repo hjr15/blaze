@@ -40,7 +40,7 @@ test("import: a ticket created AFTER reserve, before the write — exit 4, the o
                    description: "body", estimate: "30", id: "ENG-50", title: "from the csv" };
     writeFileSync(csv, writeCsv([COLUMN_NAMES.slice(), COLUMN_NAMES.map((n) => base[n] ?? "")]));
     const r = await runImport({ projectsDir: roots.projectsDir, dataRoot: roots.dataRoot, apply: true,
-      writePort: racing, readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }), file: csv });
+      writePort: racing, readStorage: ports.readStorage, file: csv });
     assert.equal(r.exitCode, 4, r.report);
     assert.match(r.report, /ENG-50 already exists in the database/);
     assert.match(r.report, /NOT written/);

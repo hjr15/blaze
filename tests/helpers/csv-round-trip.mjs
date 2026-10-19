@@ -52,7 +52,6 @@ export async function importInto({ csvPath, B }) {
     apply: true,
     // Staging is §5.4's concern and is tested in tests/model/import-apply.test.mjs;
     // a git tree here would only add a failure mode to a gate about data.
-    stage: () => ({ ok: true, committed: false, queued: true }),
   });
 }
 

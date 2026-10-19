@@ -2091,7 +2091,7 @@ const WRITE_ALLOWED = new Map([
   // times from a file, and it takes exactly what `new.mjs` and the six
   // runners above take, for exactly their reasons: `allocateId` + `writeClaim`
   // are the allocator (deleted at Phase 2, on the footing of ids.mjs and
-  // claims.mjs), `commitOrQueue` is the staging front door, `resolveWritePort`
+  // claims.mjs), `commitOrQueue` is the staging front door (removed by BLZ-254), `resolveWritePort`
   // is how the runner OBTAINS the driver. No ticket is written outside the
   // port — `applyImport` takes `writePort.write` and nothing else.
   //
@@ -2105,7 +2105,7 @@ const WRITE_ALLOWED = new Map([
   // BLZ-671: `allocateId` + `writeClaim` → `fsAllocators`. Import now takes its ids from the
   // PORT (allocate / reserve), and its fs default is handed write-port-resolve's allocators
   // rather than calling the allocator itself — so a db-mode import allocates from the counter.
-  ["model/import-apply.mjs", ["fsAllocators", "commitOrQueue",
+  ["model/import-apply.mjs", ["fsAllocators",   // BLZ-254: commitOrQueue removed — no staging
     "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
   // BLZ-634 / design §4.2, §5.3, §5.4. The same footing, for the same two
   // records: `appendRegularFileSync` writes the map's pairs, the parked
@@ -2114,13 +2114,13 @@ const WRITE_ALLOWED = new Map([
   // not there when the process dies), `mkdirSync` creates `source-ids/`, and
   // `truncateSync` is the ONE non-append write on the map: `repair --apply`
   // truncating a torn last line back to its last complete one, after parking
-  // its bytes (§4.2 — park before you clear). `commitOrQueue` is the staging
-  // front door under the `import-repair` op, and `applyImport`/`runImport`
+  // its bytes (§4.2 — park before you clear). `commitOrQueue` (removed by BLZ-254) was the
+  // staging front door under the `import-repair` op, and `applyImport`/`runImport`
   // are BLZ-629's verbs this one composes rather than reimplements. No
   // ticket is written here at all: `repair` writes records only, and the
   // mapped import walks the same injected write port the canonical one does.
   ["model/import-mapping.mjs", ["appendRegularFileSync", "mkdirSync", "truncateSync",
-    "commitOrQueue", "applyImport", "pruneReceipts"]],
+    "applyImport", "pruneReceipts"]],   // BLZ-254: commitOrQueue removed — no staging
   // BLZ-635. Two members, one file: `mkdirSync` creates `import-mappings/`
   // and `writeRegularFileSync` puts the accepted mapping in it. There is no
   // third, and a ticket write appearing here reddens — which is the whole of
@@ -2140,8 +2140,9 @@ const WRITE_ALLOWED = new Map([
   // under `--apply` — the seam design §8 item 8 puts the lock at.
   // BLZ-670: the apply path resolves both ports (resolvePorts) and hands `stageFor(mode)` in as
   // the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.
+  // BLZ-254: stageFor removed — import stages nothing (spec §5.5).
   ["import-runner.mjs",
-    ["resolvePorts", "stageFor", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
+    ["resolvePorts", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.

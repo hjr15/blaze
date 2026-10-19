@@ -273,8 +273,10 @@ test("groomOnceDb: a concurrent db-mode import during the agent → store-change
   assert.ok(groom.outOfBounds.some((p) => p.startsWith("import-receipts/")), JSON.stringify(groom.outOfBounds));
   assert.equal(readdirSync(join(roots.dataRoot, "import-receipts")).filter((f) => f.endsWith(".jsonl")).length, 1,
     "the receipt is not deleted");
-  assert.notEqual(execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
-    headBefore, "the import's commit is not rewound");
+  // BLZ-254: the import makes no commit, so HEAD stays put — and the groomer moved it neither way.
+  // The receipt clause above still guards "not rewound".
+  assert.equal(execFileSync("git", ["-C", roots.dataRoot, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(),
+    headBefore, "neither the import nor the groomer commits or rewinds");
   assert.equal((await readBack(roots, "ENG-2")).frontmatter.title, "imported concurrently");
   assert.doesNotMatch((await readBack(roots)).body, /Groomed\./);
 });

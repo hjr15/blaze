@@ -19,6 +19,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`link`](#link) | Add/remove a typed link between tickets | yes |
 | [`resolve`](#resolve) | Set/override resolution without moving the file | yes |
 | [`log`](#log) | Append a worklog entry | yes |
+| [`import`](#import) | Create or update tickets from a canonical CSV or a Markdown tree | with `--apply` |
 | [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
@@ -502,6 +503,21 @@ Appends a worklog entry to a ticket.
 | `<minutes>` | Time spent, rounded to the nearest 1 minute. | — |
 | `--date YYYY-MM-DD` | Date of the entry. | today |
 | `--note "..."` | Free-text note on the entry. | none |
+
+## import
+
+```
+blaze import [--apply] [--update] [--allocate-ids] [--mapping <m.json>] <file.csv>
+blaze import --format markdown [--apply] [--update] <dir-or-glob>
+blaze import repair [--apply] <receipt>
+```
+
+Creates, updates or skips tickets from a canonical CSV, a mapped CSV or a tree of Markdown tickets
+(design: [csv-import-and-export](../design/csv-import-and-export.md)). A dry run unless `--apply`
+is given. `--apply` writes and makes no commit (BLZ-254). It writes the tickets (rows under
+`BLAZE_WRITE_PORT=db`), their claims, and a receipt under `import-receipts/` (plus the
+`source-ids/` map for a mapped import); on a file board you version those yourself. Exit 4 means
+the board changed and the run did not finish cleanly.
 
 ## commit
 
