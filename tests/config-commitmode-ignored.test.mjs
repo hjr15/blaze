@@ -2,7 +2,7 @@
 //
 // `commitMode` chose how the board committed; the board no longer commits. A config that still
 // carries it (the deployed ConfigMap, blaze-pm's own config, any older board) must keep LOADING —
-// a refusal there crash-loops the pod — so the key is ignored with ONE warning per process.
+// a refusal there crash-loops the pod — so the key is ignored with one warning per command (a process and its children).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

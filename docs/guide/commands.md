@@ -819,7 +819,7 @@ Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
 
 ## commitMode (ignored)
 
-`commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits.
+`commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits. `BLAZE_COMMIT_MODE_WARNED` is set after the first warning, and everything the process spawns inherits it, including the server's agents, so those children do not repeat the warning.
 
 ## Types, workflows, priorities, resolutions
 

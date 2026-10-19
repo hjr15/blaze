@@ -330,8 +330,8 @@ function buildShapeFixture(tmp, shape) {
   return { codeRepo, tickets, bin };
 }
 
-/** A fresh board on disk, git-inited and seeded. `cfgExtra` carries commitMode. */
-function materializeBoard(root, fixture, cfgExtra = {}) {
+/** A fresh board on disk, git-inited and seeded. */
+function materializeBoard(root, fixture) {
   const projectsDir = join(root, "projects");
   for (const t of fixture.tickets) {
     const dir = join(projectsDir, t.dirProject, t.status);
@@ -349,7 +349,7 @@ function materializeBoard(root, fixture, cfgExtra = {}) {
       JSON.stringify({ key, codeRepos: key === "ZZZ" ? [fixture.codeRepo] : [] }));
   }
   writeFileSync(join(root, "blaze.config.json"),
-    JSON.stringify({ key: "ZZZ", projects: ["ZZZ", "YYY"], ...cfgExtra }));
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ", "YYY"] }));
   for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
                    ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
     git(root, ...a);
