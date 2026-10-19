@@ -23,7 +23,6 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "../scripts/views/reconcile-summary.mjs";
-import { writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END } from "../scripts/views/write-outcome.mjs";
 import { pageHtml } from "../scripts/views/page.mjs";
 import { commitFile } from "../scripts/serve-commit.mjs";
 import { commitOrQueue, commitSuffix } from "../scripts/commit-or-queue.mjs";
@@ -289,94 +288,15 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
   });
 });
 
-describe("BLZ-449: the dashboard surfaces the git outcome of a write", () => {
-  test("an idempotent re-write is not reported as a commit", () => {
-    const note = writeOutcome({ ok: true, committed: false, queued: false });
-    assert.match(note, /no commit created/i,
-      `a POST whose commit was an empty-diff no-op must say so, got ${JSON.stringify(note)}`);
-    assert.match(note, /git log/,
-      "and must say plainly that nothing was added to git log");
-  });
-
-  test("a queued write is named as queued, not as an idempotent no-op", () => {
-    // `committed: false` is true of BOTH, and testing it first would report a real
-    // pending write as "the file already matched HEAD".
-    const note = writeOutcome({ ok: true, committed: false, queued: true });
-    assert.match(note, /queued for blaze commit/, `got ${JSON.stringify(note)}`);
-    assert.doesNotMatch(note, /already matched HEAD/,
-      "a deferred commit is not an absent one");
-  });
-
-  // BLZ-670 (final review): under BLAZE_WRITE_PORT=db `stageFor("db")` answers
-  // {committed:false, queued:false} for EVERY write — there is no file to commit — so the
-  // committed===false arm told the operator "the file already matched HEAD" on every click.
-  // A db write is the database's ordinary case, like a real commit: it says nothing.
-  test("a database-mode write is not reported as an idempotent no-op", () => {
-    const note = writeOutcome({ ok: true, committed: false, queued: false, db: true });
-    assert.doesNotMatch(note, /already matched HEAD/, `got ${JSON.stringify(note)}`);
-    assert.doesNotMatch(note, /no commit created/, `got ${JSON.stringify(note)}`);
-    assert.equal(note, "");
-  });
-
-  test("a real commit says nothing — one op, one commit is the board's ordinary case", () => {
-    assert.equal(writeOutcome({ ok: true, committed: true, queued: false }), "");
-    assert.equal(writeOutcome({ ok: false, errors: ["nope"] }), "");
-    assert.equal(writeOutcome(null), "");
-  });
-
-  test("the dashboard's words for a git outcome are the CLI's words", () => {
-    // The binding BLZ-447 is about, applied to BLZ-449's own sentence: the two doors
-    // onto the same fact must not grow two vocabularies. `commitSuffix` is what every
-    // per-ticket CLI verb appends; each of its phrases must appear verbatim in the
-    // dashboard's sentence for the same outcome.
-    for (const [c, body] of [
-      [{ ok: true, committed: false, queued: true }, { ok: true, committed: false, queued: true }],
-      [{ ok: true, committed: false, noop: true }, { ok: true, committed: false, queued: false }],
-    ]) {
-      const cli = commitSuffix(c).trim();
-      assert.notEqual(cli, "", "fixture check: this outcome must have a CLI suffix at all");
-      assert.ok(writeOutcome(body).includes(cli),
-        `the dashboard says ${JSON.stringify(writeOutcome(body))} where the CLI says ` +
-        `${JSON.stringify(cli)} — two doors onto one fact must not word it differently`);
-    }
-  });
-
-  test("the served page runs THIS definition, and calls it exactly once", () => {
-    // The same two proofs BLZ-426 established for reconcileSummary: the page carries this
-    // module's own source text, and the one call site is the page's own wiring. Without
-    // the call site the fields are back to having no consumer, which is the whole ticket.
+// BLZ-254 (spec §5.5): BLZ-449 gave the page a sentence for the server's `committed`/`queued`
+// fields. The server no longer commits and no longer sends them, so the sentence and its
+// module (scripts/views/write-outcome.mjs) are deleted — and the page must not keep any of
+// its git vocabulary, which would now describe nothing.
+describe("BLZ-254: the dashboard says nothing about git after a write", () => {
+  test("the served page carries no write-outcome function and no git-outcome sentence", () => {
     const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
-    assert.ok(html.includes(String(writeOutcome)),
-      "the served page does not contain write-outcome.mjs's own source — the dashboard is " +
-      "running a DUPLICATE, or nothing at all");
-    const begin = html.indexOf(WRITE_OUTCOME_FN_BEGIN);
-    const end = html.indexOf(WRITE_OUTCOME_FN_END);
-    assert.ok(begin !== -1 && end > begin, "the injected definition is not delimited");
-    const wiring = html.slice(0, begin) + html.slice(end + WRITE_OUTCOME_FN_END.length);
-    assert.equal((wiring.match(/writeOutcome\(/g) || []).length, 1,
-      "writeOutcome must be called exactly once outside its own definition — blazePost, and " +
-      "nowhere else");
-    assert.match(html.slice(end), /const note = writeOutcome\(j\);\s*\n\s*if \(note\) toast\(note\);/,
-      "blazePost must pass the 200 body through the INJECTED writeOutcome and toast the " +
-      "result — a success path that discards the body is exactly BLZ-449's defect");
-  });
-
-  test("the extracted browser copy behaves like the module's", () => {
-    // Evaluated from the page's own text, not from the import — a stale injected copy
-    // fails here rather than passing quietly.
-    const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
-    const i = html.indexOf(WRITE_OUTCOME_FN_BEGIN);
-    const j = html.indexOf(WRITE_OUTCOME_FN_END);
-    // eslint-disable-next-line no-new-func -- compiling the page's own text is the point
-    const fn = new Function(`${html.slice(i + WRITE_OUTCOME_FN_BEGIN.length, j)}; return writeOutcome;`)();
-    for (const body of [
-      { ok: true, committed: false, queued: false },
-      { ok: true, committed: false, queued: true },
-      { ok: true, committed: true, queued: false },
-      { ok: false, errors: ["nope"] },
-    ]) {
-      assert.equal(fn(body), writeOutcome(body),
-        `the page's copy disagrees with the module for ${JSON.stringify(body)}`);
-    }
+    assert.doesNotMatch(html, /BLAZE_WRITE_OUTCOME/, "the injected write-outcome function is gone");
+    assert.doesNotMatch(html, /queued for blaze commit|already matched HEAD|nothing was added to git log/,
+      "no sentence about a commit the board no longer makes");
   });
 });

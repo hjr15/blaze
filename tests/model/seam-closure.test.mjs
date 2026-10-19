@@ -2048,9 +2048,10 @@ const WRITE_ALLOWED = new Map([
   // completes, and keeps both it and the identity database out of git. `blaze user add` does
   // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
   // themselves, which are allowlisted for the same files.
-  // BLZ-670: the mutating block resolves both ports per request (resolvePorts) and stages by mode (stageFor).
+  // BLZ-670: the mutating block resolves both ports per request (resolvePorts).
+  // BLZ-254: stageFor removed — the server stages nothing (spec §5.5).
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
-    "ensureIdentityIgnored", "addUser", "stageFor", "loadIdentity", "reconcile",
+    "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile",
     "resolvePorts", "pageHtml", "viewEnvelope",
     // BLZ-684: `POST /api/new` runs `blaze new`'s own verb, on exactly new-runner.mjs's footing.
     "applyNew"]],

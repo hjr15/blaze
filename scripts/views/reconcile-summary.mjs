@@ -84,24 +84,22 @@ export function reconcileSummary(j) {
   var parts = [];
   if (moved) parts.push(moved + " code-bound move(s) — apply via 'blaze reconcile --apply'");
   // BLZ-447: "other update(s)" here, "N ticket(s) updated without a status change"
-  // in reconcile-commit-report.mjs, for the same quantity. The split is DELIBERATE
-  // and it is the preview/write-record line, not an accident: the two PREVIEW
+  // in reconcile-apply-report.mjs's `appliedLine`, for the same quantity. The split is
+  // DELIBERATE and it is the preview/write-record line, not an accident: the two PREVIEW
   // surfaces (this toast, and reconcile.mjs's `(dry-run: N move(s), M other
-  // update(s); …)` tail) both say "other update(s)"; the two WRITE-RECORD surfaces
-  // (`applySummary`'s post-apply line, and the commit subject reconcile.mjs writes)
-  // both say "N ticket(s) updated without a status change". A preview is a short
-  // parenthetical about what WOULD happen and is read next to its own move count; a
-  // write record is a durable sentence about what DID happen, read later and alone,
-  // where "other" names nothing. The ruling is ADR-0029 (BLZ-482).
+  // update(s); …)` tail) both say "other update(s)"; the WRITE-RECORD surface
+  // (`appliedLine`, the line `blaze reconcile --apply` prints) says "N ticket(s)
+  // updated without a status change". A preview is a short parenthetical about what
+  // WOULD happen and is read next to its own move count; a write record is a durable
+  // sentence about what DID happen, read later and alone, where "other" names nothing.
+  // The ruling is ADR-0029 (BLZ-482). BLZ-254: the second write-record site, the commit
+  // subject reconcile.mjs used to write, went with the commit path.
   //
-  // All four sites are pinned, so the rule cannot lapse on one side without a named
-  // failure — but BLZ-477 corrects WHICH test pins which, because this sentence named
-  // the wrong constants. This toast and `applySummary` are pinned by
+  // All three sites are pinned, so the rule cannot lapse on one side without a named
+  // failure. This toast and `appliedLine` are pinned by
   // tests/board-overstatement-guards.test.mjs. reconcile.mjs's dry-run tail is pinned by
-  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, and its commit
-  // subject by that file's COMMIT_SUBJECT_MOVED_RE / COMMIT_SUBJECT_NONMOVED_RE.
-  // COMMITTED_LINE_RE and QUEUED_LINE_RE pin NEITHER reconcile.mjs site: both match
-  // `res.stdout`, which is `applySummary`'s line driven through the CLI.
+  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, and `appliedLine`,
+  // driven through the CLI, by that file's APPLIED_LINE_RE.
   if (other) parts.push(other + " other update(s)");
   if (!moved && !other) {
     // BLZ-450: "no code-bound changes" is an IN-SYNC CLAIM, and it used to sit

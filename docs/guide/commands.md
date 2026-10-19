@@ -56,6 +56,10 @@ Serves the read/write dashboard at `/` plus the `/api/*` endpoints (move,
 edit, resolve, log, acceptance-criteria toggle, and — for the remote CLI, BLZ-684 — new and
 link). Parses no CLI args.
 
+A write from the page (or `POST /api/*`) changes the ticket file (`fs`, `dual`) or row (`db`)
+and **makes no commit** (BLZ-254). The 200 body is `{ ok: true, db }` plus the route's own
+fields.
+
 **Access depends on whether the board has any users** (ADR-0013, and ADR-0034 for the
 browser half). See [HTTP surface](../architecture.md#http-surface) for which route needs
 which scope.

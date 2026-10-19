@@ -535,49 +535,13 @@
       el.textContent = msg; el.classList.add("show");
       clearTimeout(el._t); el._t = setTimeout(() => el.classList.remove("show"), 4000);
     }
-    // BLZ-449: the sentence a WRITE gets. Not written here either — its one definition
-    // lives in scripts/views/write-outcome.mjs and its source is injected verbatim
-    // between the two marker comments below, exactly as reconcileSummary is, so the
-    // served page and the tested function are the same text by construction.
-    /* BLAZE_WRITE_OUTCOME_BEGIN */
-function writeOutcome(j) {
-  var body = j || {};
-  // Only a 200 reaches here; a non-ok body is already toasted as an error by the
-  // caller. `ok !== true` is still checked rather than assumed, for the same reason
-  // reconcileSummary checks it (BLZ-446): a body this consumer does not understand
-  // must produce no sentence at all rather than a confident one.
-  if (body.ok !== true) return "";
-  // BLZ-670: under BLAZE_WRITE_PORT=db the database is the store and there is no file to
-  // commit, so the git fields are false on EVERY write. Checked before the
-  // `committed === false` arm, which would otherwise say "the file already matched HEAD"
-  // on every click (spec §4.4a). A db write is the ordinary case, like a real commit, and
-  // says nothing.
-  if (body.db === true) return "";
-  // ORDER MATTERS. A queued write is `committed: false` too, and it is not a no-op —
-  // the commit is deferred to `blaze commit`, not absent because there was nothing to
-  // commit. Testing `committed` first would report a real pending write as an
-  // idempotent one.
-  if (body.queued === true) return "saved (queued for blaze commit) — nothing is in git log yet";
-  if (body.committed === false) {
-    return "saved (no commit created — the file already matched HEAD) — nothing was added to git log";
-  }
-  // A real commit needs no sentence: the board's model is one op, one commit, and
-  // saying so on every click is noise the operator learns to ignore.
-  return "";
-}
-/* BLAZE_WRITE_OUTCOME_END */
     async function blazePost(path, body) {
       try {
         const res = await fetch(path, { method: "POST",
           headers: { "content-type": "application/json", "x-blaze-csrf": CSRF }, body: JSON.stringify(body) });
         if (res.ok) {
-          // BLZ-449: the 200 body carries committed/queued (serve.mjs's gitOutcome,
-          // added by BLZ-422) and this consumer used to discard it. A queued write and an
-          // idempotent re-write that git had nothing to commit both looked identical to a
-          // real commit from here — on a board whose model is one op, one commit.
-          const j = await res.json().catch(() => null);
-          const note = writeOutcome(j);
-          if (note) toast(note);
+          // BLZ-254: a successful write says nothing — the board no longer commits, so there
+          // is no git outcome to report (BLZ-449's sentence is deleted with the commit path).
           window.blazeSwapView(document.documentElement.dataset.view);
           return true;
         }
@@ -710,24 +674,22 @@ function reconcileSummary(j) {
   var parts = [];
   if (moved) parts.push(moved + " code-bound move(s) — apply via 'blaze reconcile --apply'");
   // BLZ-447: "other update(s)" here, "N ticket(s) updated without a status change"
-  // in reconcile-commit-report.mjs, for the same quantity. The split is DELIBERATE
-  // and it is the preview/write-record line, not an accident: the two PREVIEW
+  // in reconcile-apply-report.mjs's `appliedLine`, for the same quantity. The split is
+  // DELIBERATE and it is the preview/write-record line, not an accident: the two PREVIEW
   // surfaces (this toast, and reconcile.mjs's `(dry-run: N move(s), M other
-  // update(s); …)` tail) both say "other update(s)"; the two WRITE-RECORD surfaces
-  // (`applySummary`'s post-apply line, and the commit subject reconcile.mjs writes)
-  // both say "N ticket(s) updated without a status change". A preview is a short
-  // parenthetical about what WOULD happen and is read next to its own move count; a
-  // write record is a durable sentence about what DID happen, read later and alone,
-  // where "other" names nothing. The ruling is ADR-0029 (BLZ-482).
+  // update(s); …)` tail) both say "other update(s)"; the WRITE-RECORD surface
+  // (`appliedLine`, the line `blaze reconcile --apply` prints) says "N ticket(s)
+  // updated without a status change". A preview is a short parenthetical about what
+  // WOULD happen and is read next to its own move count; a write record is a durable
+  // sentence about what DID happen, read later and alone, where "other" names nothing.
+  // The ruling is ADR-0029 (BLZ-482). BLZ-254: the second write-record site, the commit
+  // subject reconcile.mjs used to write, went with the commit path.
   //
-  // All four sites are pinned, so the rule cannot lapse on one side without a named
-  // failure — but BLZ-477 corrects WHICH test pins which, because this sentence named
-  // the wrong constants. This toast and `applySummary` are pinned by
+  // All three sites are pinned, so the rule cannot lapse on one side without a named
+  // failure. This toast and `appliedLine` are pinned by
   // tests/board-overstatement-guards.test.mjs. reconcile.mjs's dry-run tail is pinned by
-  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, and its commit
-  // subject by that file's COMMIT_SUBJECT_MOVED_RE / COMMIT_SUBJECT_NONMOVED_RE.
-  // COMMITTED_LINE_RE and QUEUED_LINE_RE pin NEITHER reconcile.mjs site: both match
-  // `res.stdout`, which is `applySummary`'s line driven through the CLI.
+  // tests/reconcile-change-report-oracle.test.mjs's DRYRUN_TAIL_RE, and `appliedLine`,
+  // driven through the CLI, by that file's APPLIED_LINE_RE.
   if (other) parts.push(other + " other update(s)");
   if (!moved && !other) {
     // BLZ-450: "no code-bound changes" is an IN-SYNC CLAIM, and it used to sit

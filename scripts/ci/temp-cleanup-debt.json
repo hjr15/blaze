@@ -58,8 +58,6 @@
     "runner-schema-guard.test.mjs": 6,
     "schema-guard-cycle-regression.test.mjs": 1,
     "schema-override-integration.test.mjs": 3,
-    "serve-batch-per-op.test.mjs": 2,
-    "serve-batch.test.mjs": 5,
     "serve-commit.test.mjs": 2,
     "serve-endpoints.test.mjs": 18,
     "serve.test.mjs": 5,
