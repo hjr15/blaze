@@ -102,9 +102,10 @@ Multiple agents can share one board without corrupting it:
 For several agents, point each at a db-mode board:
 
 ```bash
-export BLAZE_REMOTE_URL="https://blaze.example.com" BLAZE_TOKEN="<your member token>"
-blaze new --project ENG --type task "..." --estimate 20   # runs on the server
-blaze move ENG-7 in-progress                               # runs on the server
+BLAZE_REMOTE_URL="https://blaze.example.com" BLAZE_TOKEN="<your member token>" \
+  blaze new --project ENG --type task "..." --estimate 20   # runs on the server
+BLAZE_REMOTE_URL="https://blaze.example.com" BLAZE_TOKEN="<your member token>" \
+  blaze move ENG-7 in-progress                               # runs on the server
 ```
 
 ## Why this is safe to hand an agent

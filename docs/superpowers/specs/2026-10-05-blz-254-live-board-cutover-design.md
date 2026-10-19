@@ -256,7 +256,7 @@ runs.
 1. **§5.1, backups.** "a scheduled `Backup` (daily, retained 14 days)" was replaced by an operator
    decision on 2026-10-11: a daily `pg_dump --format=custom` CronJob (`blaze-pg-backup`) into the
    host directory `~/cluster-data/blaze-pg-backups`, verified with `pg_restore --list`, 14 days
-   kept, never pruned behind a dump under half the size of the largest kept, failing into the
+   kept, pruned only after a verified dump and never behind a dump under half the size of the largest kept, failing into the
    existing `CronJobLastRunFailed`/`CronJobStale` alerts. PGDATA is on a host PV adopted across
    cluster resets. Recorded in hjr15/service-platform ADR-0024
    (`docs/decisions/0024-cnpg-operator-and-blaze-pg-host-pv-backups.md`, merged in #112). The CNPG

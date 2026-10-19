@@ -8,8 +8,9 @@
   field in the frontmatter, so status cannot drift out of sync with reality —
   the file's location *is* the fact.
 - **Git is the history.** Every mutation — create, move, edit, resolve, log —
-  is a small, revertable commit. `git log --follow` on a ticket file is its
-  full audit trail.
+  is a plain file change. The board never commits (since 0.9.0); you commit
+  the changes when you choose, and `git log --follow` on a ticket file is then
+  its full audit trail.
 - **The board is a rendering, never a second source of truth.** `blaze board`
   reads the same files you'd `ls`, `grep`, or `git mv` by hand. Delete the
   board process and the tickets are still there, still correct.
@@ -58,8 +59,8 @@ or drag-and-drop on the web board. Nothing outside the data repo is consulted.
 **Mirror mode.** Set `codeRepos` on a project in its `project.json` and
 `blaze reconcile` drives delivery-workflow ticket status from that repo's
 branch and PR state, joining on the `<KEY>-<n>` ticket id found in branch
-names. Reconcile is dry-run by default; `--apply` commits the resulting moves
-locally. It never pushes — pushing is not something reconcile does, under any
+names. Reconcile is dry-run by default; `--apply` moves the files and leaves
+them uncommitted in the working tree. It never pushes — pushing is not something reconcile does, under any
 flag.
 
 **Scoping a run.** `--project <KEY>` restricts both the scan and the write to the
@@ -385,7 +386,7 @@ reachable from the default branch, so an open PR strands nothing.
   agent renames the file or edits `status`/`resolution` directly, the groomer
   refuses the change and rolls it back.
 
-Both loops write through the same git-commit path every other verb uses.
+Only the fs groomer commits (its own grooms); reconcile writes the files and leaves them uncommitted.
 See [`commands.md`](commands.md) for the verbs themselves.
 
 **A persistent failure is stated once, not once per tick (BLZ-425).** The reconcile loop's
@@ -395,7 +396,7 @@ the default 60-second interval that would be 1,440 identical error events a day 
 that is the operator's whole account of the run. A run failure is remembered only until a
 healthy pass, so a condition that returns after you fix it is reported again.
 
-## Commit model
+## Versioning the board
 
 No verb commits (BLZ-254); version the board's files yourself.
 

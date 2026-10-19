@@ -19,7 +19,7 @@ Blaze removes the layer. The board **is** files in a git repo:
 - **A ticket's status is the directory it sits in.** There is no `status:`
   field, so status cannot drift out of sync with where the file actually lives.
 - **Git is the history.** `git log --follow` on a ticket file is its full audit
-  trail; every change is a small, revertable commit.
+  trail; every change is a plain file change you commit when you choose (the board itself does not commit since 0.9.0; 0.8.0 did).
 - **The board is a rendering, never a second source of truth.** `blaze board`
   reads the same files you would `ls`, `grep`, or `git mv` by hand.
 

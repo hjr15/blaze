@@ -3,7 +3,7 @@
 Every `blaze` invocation is `blaze <subcommand> [args] [flags]`. The table below covers the
 subcommands documented on this page; `blaze --help` lists every one. Verbs that write change
 the board's files (or its database rows) and never commit (BLZ-254); on a file board you
-version the changes yourself. See [Commit modes](#commit-modes) and
+version the changes yourself. See [commitMode (ignored)](#commitmode-ignored) and
 [Removed commands](#removed-commands) below.
 
 | Subcommand | Purpose | Mutates? |
@@ -817,7 +817,7 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
 `blaze.config.json`, then 4321.
 
-## Commit modes
+## commitMode (ignored)
 
 `commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits.
 

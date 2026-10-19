@@ -289,8 +289,8 @@ also stored on the index (`idx.warnings`) for any consumer that wants them.
 
 Since 0.9.0 (BLZ-254) no `blaze` verb, no `/api/*` write and no `reconcile --apply` commits,
 stages or queues anything. On a file board the verbs change `projects/` and stop; commit the
-changes yourself, scoped as you like. `blaze commit`, `blaze publish` and the `commitMode`
-key are gone. The verbs are refused by name, the key is ignored with a one-time warning, and the last release
+changes yourself, scoped as you like. `blaze commit` and `blaze publish` are gone and
+refused by name; the `commitMode` key is inert (ignored with a one-time warning). The last release
 that has them is `@hjr15/blaze-board@0.8.0`. The fs groomer loop (`blaze start`) still commits
 its own grooms, and `blaze migrate` its one-shot import.
 

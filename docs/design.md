@@ -155,7 +155,7 @@ and the agent prompt share a source):
    (`git revert` of that commit).
 
 **Autonomy & safety:** auto-commit, review via git — the same posture reconcile
-already uses for moves. Each change is its own small revertable commit, and config
+already uses for moves. Each groomer change is its own small revertable commit (the fs groomer still commits; reconcile no longer does since BLZ-254), and config
 scopes which columns it grooms and how often.
 
 The guard is **advisory, not a boundary** — say it that way, because earlier wording here
@@ -321,7 +321,7 @@ hash so a filtered board is a shareable link — search and chips compose in one
 `scripts/views/panel-content.mjs` → rendered description, full frontmatter table,
 parent/children from the derived index, links; 404 for an unknown id). The panel is the
 shared `window.blazePanel.open(id)` seam the map node-click and field-editing views
-reuse; AC checkboxes toggle through the existing commit-on-edit `/api/ac` path.
+reuse; AC checkboxes toggle through the existing `/api/ac` path.
 
 ### `bin` / scripts
 `blaze` (bin) boots the supervisor (web app + loops) — the "launch like an app" entry.

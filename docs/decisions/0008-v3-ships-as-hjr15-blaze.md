@@ -89,4 +89,6 @@ published as `@hjr15/blaze-board`**: the freeze at 0.8.0 above stands, and 0.8.0
 PR D merged) is the last release with the git-commit workflow. 0.9.0 names the engine tree and
 the image built from it; the next npm publish is the `@hjr15/blaze` rename this ADR decides.
 The bump exists so that a publish from `main` can never ship the breaking tree under the frozen
-version's number.
+version's number. The guard is a `prepublishOnly` script that refuses only under the
+name `@hjr15/blaze-board`, so the rename is not blocked; `npm publish --ignore-scripts`
+bypasses it. It is a speed bump, not a lock.

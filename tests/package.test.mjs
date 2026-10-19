@@ -1,9 +1,13 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
+import { readFileSync, writeFileSync, mkdtempSync } from "node:fs";
+import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { execFileSync } from "node:child_process";
+import { execFileSync, spawnSync } from "node:child_process";
+import { scratchRegistry } from "./helpers/scratch.mjs";
+
+const scratch = scratchRegistry();
 
 const REPO = join(dirname(fileURLToPath(import.meta.url)), "..");
 const pkg = JSON.parse(readFileSync(join(REPO, "package.json"), "utf8"));
@@ -27,7 +31,6 @@ test("BLZ-687: this tree is 0.9.0 — the git ceremony is gone, and 0.8.0 stays 
   assert.equal(lock.version, "0.9.0", "package-lock.json's top-level version must move with it");
   assert.equal(lock.packages[""].version, "0.9.0", "…and its root package entry");
   assert.equal(pkg.scripts.commit, undefined, "the `npm run commit` script ran the deleted commit-runner");
-  assert.match(pkg.scripts.prepublishOnly, /not published/);
   const { idsFromCommitMessage } = await import("../scripts/reconcile.mjs");
   assert.deepEqual(idsFromCommitMessage("BLZ-675: x (#9)\n\n* BLZ-674: y\n* BLZ-678: z", "BLZ"),
     ["BLZ-675", "BLZ-674", "BLZ-678"], "a bundled squash still recovers every child");
@@ -77,4 +80,19 @@ test("discovery metadata is set — a published package with blank fields is unf
   assert.ok(pkg.bugs?.url, "bugs.url must give a route to report a defect");
   assert.ok(Array.isArray(pkg.keywords) && pkg.keywords.length >= 3, "keywords must support search");
   assert.match(pkg.repository.url, /github\.com\/hjr15\/blaze/, "repository must resolve to the source");
+});
+
+// BLZ-687: the prepublishOnly guard is a RUNNING command, so run it — against the real package.json
+// (the frozen name: exit 1 + the message) and a copy renamed to the future package (exit 0).
+test("BLZ-687: prepublishOnly refuses under @hjr15/blaze-board and passes under a renamed package", () => {
+  const guard = (manifest) => {
+    const dir = scratch(mkdtempSync(join(tmpdir(), "blz687-prepublish-")));
+    writeFileSync(join(dir, "package.json"), JSON.stringify(manifest));
+    return spawnSync("sh", ["-c", pkg.scripts.prepublishOnly], { cwd: dir, encoding: "utf8" });
+  };
+  const frozen = guard(pkg);
+  assert.equal(frozen.status, 1);
+  assert.match(frozen.stderr, /not published as @hjr15\/blaze-board/);
+  const renamed = guard({ ...pkg, name: "@hjr15/blaze" });
+  assert.equal(renamed.status, 0, renamed.stderr);
 });
