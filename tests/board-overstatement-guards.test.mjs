@@ -1,4 +1,4 @@
-// tests/board-overstatement-guards.test.mjs — BLZ-426 + BLZ-422 + BLZ-427.
+// tests/board-overstatement-guards.test.mjs — BLZ-426 + BLZ-450 + BLZ-447 + BLZ-254.
 //
 // The cross-product oracle (tests/board-overstatement-oracle.test.mjs) proves these
 // three surfaces agree with the filesystem and `git log` over 160 generated cells.
@@ -6,37 +6,26 @@
 // re-introducing the defect turns a test red whose name says what broke, rather than
 // a cell coordinate. Each is proven by reverting its production hunk on a committed
 // tree and watching exactly the named test below fail (recorded in the PR body).
+// Where a guard pins a seam rather than a production hunk, it says so in its own name.
 //
-// BLZ-442 corrected that claim, which was not true of every guard here. The test named
-// for reconcile's ledger ids never invoked `reconcile` — it called `commitOrQueue` with a
-// hand-written `ids` array — so deleting the `ids:` hunk from reconcile.mjs left this
-// whole file 14/14 GREEN and only the oracle noticed, at a cell coordinate. That test is
-// now two: one that says plainly it pins `commitOrQueue`'s ledger SHAPE and reverts
-// nothing in reconcile, and one that drives the real `reconcile()` and reads the ledger
-// file it actually wrote. Where a guard pins a seam rather than a production hunk, it
-// says so in its own name.
+// BLZ-254 (spec §5.5): BLZ-422's and BLZ-427's describes are deleted. They pinned
+// `commitFile`'s no-op and `commitOrQueue`'s ledger (both deleted by BLZ-254), and
+// `blaze commit`'s subject — all gone with the commit ceremony.
 import { test, describe, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, rmSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { execFileSync } from "node:child_process";
 
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "../scripts/views/reconcile-summary.mjs";
-import { writeOutcome, WRITE_OUTCOME_FN_BEGIN, WRITE_OUTCOME_FN_END } from "../scripts/views/write-outcome.mjs";
 import { pageHtml } from "../scripts/views/page.mjs";
-import { commitFile } from "../scripts/serve-commit.mjs";
-import { commitOrQueue, commitSuffix } from "../scripts/commit-or-queue.mjs";
-import { commitOutcomeFrom, applySummary, COMMIT_OUTCOMES } from "../scripts/reconcile-commit-report.mjs";
-import { OP_LABEL, entryIds, summarizeEntries } from "../scripts/commit-summary.mjs";
-import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
+import { appliedLine } from "../scripts/reconcile-apply-report.mjs";
 
 /** Every scratch directory this file mints, removed once the file is done with them
  *  (BLZ-491). `tinyBoard()` had no teardown at all — four call sites, four
  *  `/tmp/blz-guards-board-*` directories per run, 356 of them on the machine where this was
- *  written — and `gitRepo()`'s callers each clean up in their own `finally`, which is one
- *  forgotten `finally` away from the same leak. Registering here means the teardown belongs
- *  to the helper rather than to every caller of it.
+ *  written. Registering here means the teardown belongs to the helper rather than to every
+ *  caller of it.
  *
  *  The litter was harmless on its own. What it cost is that `/tmp` noise could not be told
  *  from a real leak, and BLZ-485's mutation runner now asserts ZERO leftover
@@ -46,18 +35,6 @@ import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
 const SCRATCH = [];
 after(() => { for (const dir of SCRATCH) rmSync(dir, { recursive: true, force: true }); });
 const scratch = (dir) => { SCRATCH.push(dir); return dir; };
-
-function gitRepo() {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blz-guards-")));
-  execFileSync("git", ["-C", root, "init", "-q", "-b", "main"]);
-  execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
-  execFileSync("git", ["-C", root, "config", "user.name", "t"]);
-  writeFileSync(join(root, "t.md"), "one\n");
-  execFileSync("git", ["-C", root, "add", "-A"]);
-  execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
-  return root;
-}
-const head = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
 function tinyBoard() {
   const dir = scratch(mkdtempSync(join(tmpdir(), "blz-guards-board-")));
@@ -159,218 +136,9 @@ describe("BLZ-426: the dashboard never renders a refusal as an in-sync board", (
   });
 });
 
-describe("BLZ-422: a no-op is never reported as a commit", () => {
-  test("commitFile's empty-diff no-op is not reported as a commit", () => {
-    const root = gitRepo();
-    try {
-      const f = join(root, "t.md");
-      const before = head(root);
-      writeFileSync(f, "one\n"); // byte-identical: the idempotent re-write
-      const c = commitFile(root, f, "T-1: edit");
-      assert.equal(head(root), before, "fixture check: git really had nothing to commit");
-      assert.equal(c.ok, true, "a benign no-op must stay benign — an idempotent re-write is not an error");
-      assert.equal(c.committed, false,
-        "commitFile reported a commit that is not in `git log` — BLZ-422's own defect");
-      assert.equal(c.noop, true, "the no-op must be nameable, not merely inferable");
-
-      writeFileSync(f, "two\n");
-      const c2 = commitFile(root, f, "T-1: edit");
-      assert.notEqual(head(root), before, "fixture check: a real commit really happened");
-      assert.equal(c2.committed, true, "a real commit must say so");
-      assert.notDeepEqual(c, c2, "a no-op and a real commit must not return the same shape");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("reconcile's commit outcome distinguishes no-op from committed", () => {
-    assert.equal(commitOutcomeFrom({ ok: true, committed: true, status: 0 }).outcome, "committed");
-    assert.equal(commitOutcomeFrom({ ok: true, committed: false, noop: true, status: 0 }).outcome, "no-op");
-    assert.equal(commitOutcomeFrom({ ok: true, committed: false, queued: true }).outcome, "queued");
-    assert.equal(commitOutcomeFrom({ ok: false, committed: false, locked: true, status: -1 }).outcome, "locked");
-    assert.equal(commitOutcomeFrom({ ok: false, committed: false, status: 1 }).outcome, "failed");
-    assert.ok(COMMIT_OUTCOMES.includes("no-op"));
-  });
-
-  test("the no-op's rendered line does not claim a commit", () => {
-    const line = applySummary({ outcome: "no-op", error: null, movedCount: 3, nonMovedCount: 1 });
-    assert.doesNotMatch(line.text, /^reconcile: committed/);
-    assert.match(line.text, /NO COMMIT CREATED/);
-    assert.match(line.text, /git log/, "the line must say plainly that nothing was added to git log");
-    assert.equal(line.exit, 0, "a benign no-op must not fail the run");
-    // Every outcome that is not "committed" must be unable to produce the committed line.
-    for (const outcome of COMMIT_OUTCOMES.filter((o) => o !== "committed")) {
-      const l = applySummary({ outcome, error: "x", movedCount: 1, nonMovedCount: 0 });
-      if (l) assert.doesNotMatch(l.text, /^reconcile: committed/, `${outcome} claimed a commit`);
-    }
-  });
-
-  test("BLZ-670: a db-mode apply says the moves are in the database, never 'already matched HEAD'", () => {
-    const out = applySummary({ outcome: "db", error: null, movedCount: 2, nonMovedCount: 0 });
-    assert.match(out.text, /database/);
-    assert.doesNotMatch(out.text, /matched HEAD/);
-    assert.equal(out.exit, 0);
-  });
-
-  test("each per-ticket verb says so when no commit was created", () => {
-    assert.equal(commitSuffix({ ok: true, committed: true }), "");
-    assert.equal(commitSuffix({ ok: true, committed: false, queued: true }), " (queued for blaze commit)");
-    assert.match(commitSuffix({ ok: true, committed: false, noop: true }), /no commit created/i);
-    assert.notEqual(commitSuffix({ ok: true, committed: false, noop: true }),
-      commitSuffix({ ok: true, committed: true }),
-      "an idempotent re-write and a real commit must not print the same line");
-  });
-});
-
-describe("BLZ-427: `blaze commit`'s subject counts tickets and names every op", () => {
-  test("there is a label for every op that can be queued", () => {
-    // The production call sites, enumerated: every `op:` any caller passes to
-    // commitOrQueue. commit-or-queue.mjs refuses anything not in OP_LABEL, so this
-    // list and that guard together make a raw op name unprintable.
-    for (const op of ["new", "move", "edit", "log", "resolve", "link", "ac", "sprint", "reconcile"]) {
-      assert.ok(Object.hasOwn(OP_LABEL, op), `no subject-line word for the "${op}" op`);
-      assert.notEqual(OP_LABEL[op], undefined);
-    }
-    assert.equal(OP_LABEL.reconcile, "reconciled",
-      "a reconcile op printed its raw name — the defect BLZ-427 records");
-  });
-
-  test("commitOrQueue refuses an op it has no word for", () => {
-    const root = gitRepo();
-    try {
-      assert.throws(
-        () => commitOrQueue({ root, mode: "batch", op: "teleport", id: "T-1", message: "m", files: [join(root, "t.md")] }),
-        /unknown board op "teleport"/,
-        "an unlabelled op must be refused where it is queued, not papered over in the summary");
-    } finally {
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  test("one reconcile op covering N tickets is counted as N, not 1", () => {
-    const entries = [
-      { op: "reconcile", id: "reconcile:ZZZ", ids: ["Z-1", "Z-2", "Z-3", "Z-4"] },
-      { op: "move", id: "Z-9" },
-    ];
-    assert.deepEqual(entryIds(entries[0]), ["Z-1", "Z-2", "Z-3", "Z-4"]);
-    assert.deepEqual(entryIds(entries[1]), ["Z-9"]);
-    const s = summarizeEntries(entries);
-    assert.match(s, /\b4 reconciled\b/, `one op covering four tickets must read "4 reconciled", got ${s}`);
-    assert.doesNotMatch(s, /\b1 reconcile\b/, "the op count understates the pass");
-    assert.match(s, /\b1 moved\b/);
-  });
-
-  test("the count is tickets, not ops: two edits to one ticket are one ticket", () => {
-    assert.equal(summarizeEntries([{ op: "edit", id: "Z-1" }, { op: "edit", id: "Z-1" }]), "1 edited");
-    assert.equal(summarizeEntries([{ op: "edit", id: "Z-1" }, { op: "edit", id: "Z-2" }]), "2 edited");
-  });
-
-  test("an entry queued by a pre-BLZ-427 engine (no `ids`) still drains and counts as one", () => {
-    assert.equal(summarizeEntries([{ op: "reconcile", id: "reconcile:ZZZ" }]), "1 reconciled");
-    // …and an op no longer in the table (a ledger written by a future/older engine)
-    // falls back to its raw name rather than throwing: the queue must still flush.
-    assert.equal(summarizeEntries([{ op: "teleport", id: "Z-1" }]), "1 teleport");
-  });
-
-  // BLZ-442: RENAMED to say what it actually pins. It calls `commitOrQueue` with a
-  // hand-written `ids` array, so it pins the LEDGER'S SHAPE — dedup, and no `ids` field on
-  // a one-ticket op — and nothing at all about whether reconcile passes that array. It
-  // has no production hunk in reconcile.mjs to revert; the test below does.
-  test("commitOrQueue's ledger entry dedupes its ids, and a one-ticket op grows none", () => {
-    const root = gitRepo();
-    const prev = process.env.BLAZE_SESSION;
-    process.env.BLAZE_SESSION = "guards";
-    try {
-      commitOrQueue({
-        root, mode: "batch", op: "reconcile", id: "reconcile:ZZZ",
-        ids: ["Z-1", "Z-2", "Z-2", "Z-3"], message: "chore(board): reconcile", files: [join(root, "t.md")],
-      });
-      const [e] = readEntries(root, sessionId(process.env));
-      assert.deepEqual(e.ids, ["Z-1", "Z-2", "Z-3"], "duplicate ids must not inflate the count");
-      assert.equal(summarizeEntries([e]), "3 reconciled");
-      // Per-ticket verbs leave the ledger shape untouched.
-      commitOrQueue({ root, mode: "batch", op: "move", id: "Z-9", message: "m", files: [join(root, "t.md")] });
-      const entries = readEntries(root, sessionId(process.env));
-      assert.equal(Object.hasOwn(entries[1], "ids"), false,
-        "a one-ticket op must not grow an `ids` field it does not need");
-    } finally {
-      if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
-      rmSync(root, { recursive: true, force: true });
-    }
-  });
-
-  // BLZ-442: the test the name above used to promise. It drives the REAL `reconcile()`
-  // over a real board on a `commitMode: "batch"` config, then reads the ledger FILE
-  // reconcile itself wrote and compares its `ids` to the tickets that really changed on
-  // disk. Ground truth is the filesystem, never `r.changes`. Measured: with the `ids:`
-  // hunk deleted from reconcile.mjs, the old test — and this whole file — stayed green.
-  test("reconcile's ledger entry really carries every ticket the pass wrote", async () => {
-    const { reconcile } = await import("../scripts/reconcile.mjs");
-    const root = mkdtempSync(join(tmpdir(), "blz442-reconcile-ledger-"));
-    const codeRepo = mkdtempSync(join(tmpdir(), "blz442-code-"));
-    const prev = process.env.BLAZE_SESSION;
-    process.env.BLAZE_SESSION = "guards442";
-    try {
-      for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
-                       ["config", "user.name", "t"]]) {
-        execFileSync("git", ["-C", codeRepo, ...a]);
-      }
-      writeFileSync(join(codeRepo, "README.md"), "x\n");
-      execFileSync("git", ["-C", codeRepo, "add", "-A"]);
-      execFileSync("git", ["-C", codeRepo, "commit", "-q", "-m", "seed"]);
-      // BLZ-131's shipped-commit signal: three tickets that genuinely move defined -> done.
-      const moving = ["ZZZ-1", "ZZZ-2", "ZZZ-3"];
-      for (const id of moving) {
-        execFileSync("git", ["-C", codeRepo, "commit", "-q", "--allow-empty", "-m", `${id}: shipped work`]);
-      }
-
-      const projects = join(root, "projects");
-      mkdirSync(join(projects, "ZZZ", "defined"), { recursive: true });
-      writeFileSync(join(root, "blaze.config.json"),
-        JSON.stringify({ key: "ZZZ", projects: ["ZZZ"], commitMode: "batch" }));
-      writeFileSync(join(projects, "ZZZ", "project.json"),
-        JSON.stringify({ key: "ZZZ", codeRepos: [codeRepo] }));
-      // A fourth ticket with no signal at all: it must NOT appear on the ledger, or the
-      // assertion below would pass for a reconcile that simply listed the whole board.
-      for (const id of [...moving, "ZZZ-4"]) {
-        writeFileSync(join(projects, "ZZZ", "defined", `${id}-t.md`),
-          `---\nid: ${id}\ntitle: t\ntype: task\nproject: ZZZ\nestimate: 30\n---\n\nbody\n`);
-      }
-      for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
-                       ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "seed board"]]) {
-        execFileSync("git", ["-C", root, ...a]);
-      }
-
-      const at = (id) => ["defined", "done", "in-progress", "in-review"]
-        .find((st) => existsSync(join(projects, "ZZZ", st, `${id}-t.md`)));
-      const before = Object.fromEntries([...moving, "ZZZ-4"].map((id) => [id, at(id)]));
-
-      await reconcile({ fetch: false, commit: true, dryRun: false, root });
-
-      // (1) the filesystem: which tickets really changed status.
-      const reallyMoved = [...moving, "ZZZ-4"].filter((id) => at(id) !== before[id]).sort();
-      assert.deepEqual(reallyMoved, moving,
-        `the fixture must move exactly ${moving.join(", ")} and leave ZZZ-4 alone, it moved ` +
-        `${JSON.stringify(reallyMoved)}`);
-
-      // (2) the ledger FILE reconcile wrote, read off disk.
-      const entries = readEntries(root, sessionId(process.env));
-      const reconcileOps = entries.filter((e) => e.op === "reconcile");
-      assert.equal(reconcileOps.length, 1,
-        `reconcile must queue exactly one op on a batch board, it queued ${reconcileOps.length}`);
-      assert.deepEqual([...(reconcileOps[0].ids || [])].sort(), reallyMoved,
-        "reconcile's queued ledger entry must name every ticket the pass really wrote — " +
-        "without the `ids:` hunk the entry carries none and `blaze commit` counts the whole " +
-        "pass as one ticket, which is exactly BLZ-427's defect");
-      assert.equal(summarizeEntries(reconcileOps), `${reallyMoved.length} reconciled`,
-        "the flush subject must count the tickets the filesystem says really moved");
-    } finally {
-      if (prev === undefined) delete process.env.BLAZE_SESSION; else process.env.BLAZE_SESSION = prev;
-      rmSync(root, { recursive: true, force: true });
-      rmSync(codeRepo, { recursive: true, force: true });
-    }
-  });
-});
+// BLZ-254: BLZ-427's describe (`blaze commit`'s subject counts tickets and names every op) is
+// deleted — it pinned OP_LABEL, summarizeEntries and the pending-ledger entries of commitOrQueue
+// and reconcile, all of which are deleted with `blaze commit` (spec §5.5).
 
 describe("BLZ-450: an in-sync claim never sits beside a degraded check", () => {
   // Reproduced BEFORE it was changed, because the ticket was flagged UNPROVEN and
@@ -414,16 +182,16 @@ describe("BLZ-450: an in-sync claim never sits beside a degraded check", () => {
 
 describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-record line", () => {
   // The rule, decided rather than converged, and written down in both files it governs
-  // (scripts/views/reconcile-summary.mjs and scripts/reconcile-commit-report.mjs):
+  // (scripts/views/reconcile-summary.mjs and scripts/reconcile-apply-report.mjs):
   // PREVIEW surfaces say "other update(s)"; WRITE-RECORD surfaces say "N ticket(s)
-  // updated without a status change". Measured: 4 sites, 2 vocabularies, and no site is
-  // on the wrong side.
+  // updated without a status change". Measured: 3 sites, 2 vocabularies, and no site is
+  // on the wrong side (BLZ-254 left one applied line, scripts/reconcile-apply-report.mjs).
   //
-  // This file pins the TWO sites in the files it can reach. reconcile.mjs's other two —
-  // the dry-run tail and the commit subject — belong to a different owner and are pinned
-  // by name in tests/reconcile-change-report-oracle.test.mjs, by DRYRUN_TAIL_RE
-  // ("other update(s)"), COMMITTED_LINE_RE and QUEUED_LINE_RE ("updated without a status
-  // change"), against filesystem ground truth. Full convergence to ONE vocabulary would
+  // This file pins the TWO sites in the files it can reach (the preview summary and the
+  // applied line). reconcile.mjs's other one — the dry-run tail (DRYRUN_TAIL_RE) — belongs
+  // to a different owner and is pinned by name in tests/reconcile-change-report-oracle.test.mjs
+  // ("other update(s)"), against filesystem ground truth, as is the applied line it prints
+  // (APPLIED_LINE_RE, "updated without a status change"). Full convergence to ONE vocabulary would
   // require editing reconcile.mjs, so the ticket's second option was taken deliberately.
   test("the preview surface says 'other update(s)'", () => {
     const text = reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: false }] });
@@ -433,140 +201,48 @@ describe("BLZ-447: one quantity, two vocabularies, split on the preview/write-re
   });
 
   test("the write-record surface says 'N ticket(s) updated without a status change'", () => {
-    // BLZ-481 added "locked" and "failed" to this loop. They are write-record surfaces by
-    // the same rule as the other three and they were the only arms stating neither
-    // quantity — see the named test below for why that mattered most on exactly them.
-    for (const outcome of ["committed", "queued", "no-op", "locked", "failed"]) {
-      const line = applySummary({ outcome, error: null, movedCount: 2, nonMovedCount: 3 });
-      assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
-        `${outcome}: got ${JSON.stringify(line.text)}`);
-      assert.doesNotMatch(line.text, /other update\(s\)/,
-        `${outcome}: a durable write record must not use the preview's shorthand — read alone, ` +
+    // BLZ-254: one applied line per store now (scripts/reconcile-apply-report.mjs), so the
+    // loop is over the stores rather than BLZ-481's five commit outcomes.
+    for (const mode of ["fs", "db"]) {
+      const line = appliedLine({ mode, movedCount: 2, nonMovedCount: 3 });
+      assert.match(line, /\b3 ticket\(s\) updated without a status change/,
+        `${mode}: got ${JSON.stringify(line)}`);
+      assert.doesNotMatch(line, /other update\(s\)/,
+        `${mode}: a durable write record must not use the preview's shorthand — read alone, ` +
         "with no move count beside it, 'other' names nothing");
     }
   });
 
-  // BLZ-481. `applySummary`'s locked and failed arms are the two outcomes where the ticket
-  // files ARE on disk and are NOT in `git log` — the one case a person has to go and clear
-  // by hand. They were also the only two arms that stated no quantity at all: "Ticket
-  // file(s) were already written to disk" told the operator to go and look at a dirty tree
-  // without telling them how big it is. Every other arm states `N ticket(s) moved` and, when
-  // it is non-zero, the non-moving count beside it.
-  test("BLZ-481: the locked and failed lines state the SAME two quantities every other arm does", () => {
-    for (const outcome of ["locked", "failed"]) {
-      const line = applySummary({ outcome, error: "the lock is held", movedCount: 2, nonMovedCount: 3 });
-      assert.match(line.text, /\b2 ticket\(s\) moved/,
-        `${outcome}: the line states no moved count — ${JSON.stringify(line.text)}`);
-      assert.match(line.text, /\b3 ticket\(s\) updated without a status change/,
-        `${outcome}: the line states no non-moving count — ${JSON.stringify(line.text)}`);
-      assert.match(line.text, /UNCOMMITTED/,
-        `${outcome}: the line must still say the tree is dirty, not merely un-applied`);
-      assert.equal(line.exit, 1, `${outcome}: an unlanded commit must still exit non-zero`);
-    }
-    // …and the zero case is suppressed here exactly as it is everywhere else, so the line
-    // never reads "0 ticket(s) updated without a status change".
-    assert.doesNotMatch(
-      applySummary({ outcome: "locked", error: "x", movedCount: 1, nonMovedCount: 0 }).text,
-      /updated without a status change/,
-      "a quantity that is zero must not be stated at all");
+  // BLZ-254: BLZ-481's locked/failed test is deleted — no locked or failed arm exists now.
+
+  test("BLZ-254: an applied reconcile names its store and never claims a commit", () => {
+    const fs = appliedLine({ mode: "fs", movedCount: 3, nonMovedCount: 1 });
+    assert.match(fs, /^reconcile: 3 ticket\(s\) moved, 1 ticket\(s\) updated without a status change in the board's files/);
+    assert.match(fs, /makes no git commit/);
+    assert.doesNotMatch(fs, /\bcommitted\b|queued|HEAD/, "the board never commits — no line may say it did");
+    const db = appliedLine({ mode: "db", movedCount: 2, nonMovedCount: 0 });
+    assert.equal(db, "reconcile: 2 ticket(s) moved in the database.");
+    assert.equal(appliedLine({ mode: "dual", movedCount: 1, nonMovedCount: 0 }),
+      appliedLine({ mode: "fs", movedCount: 1, nonMovedCount: 0 }), "dual writes the files, so it reads as fs");
   });
 
   test("neither surface states the quantity at all when it is zero", () => {
     assert.doesNotMatch(reconcileSummary({ ok: true, changes: [{ id: "T-1", moved: true }] }),
       /other update\(s\)/);
-    assert.doesNotMatch(applySummary({ outcome: "committed", error: null, movedCount: 2, nonMovedCount: 0 }).text,
+    assert.doesNotMatch(appliedLine({ mode: "fs", movedCount: 2, nonMovedCount: 0 }),
       /updated without a status change/);
   });
 });
 
-describe("BLZ-449: the dashboard surfaces the git outcome of a write", () => {
-  test("an idempotent re-write is not reported as a commit", () => {
-    const note = writeOutcome({ ok: true, committed: false, queued: false });
-    assert.match(note, /no commit created/i,
-      `a POST whose commit was an empty-diff no-op must say so, got ${JSON.stringify(note)}`);
-    assert.match(note, /git log/,
-      "and must say plainly that nothing was added to git log");
-  });
-
-  test("a queued write is named as queued, not as an idempotent no-op", () => {
-    // `committed: false` is true of BOTH, and testing it first would report a real
-    // pending write as "the file already matched HEAD".
-    const note = writeOutcome({ ok: true, committed: false, queued: true });
-    assert.match(note, /queued for blaze commit/, `got ${JSON.stringify(note)}`);
-    assert.doesNotMatch(note, /already matched HEAD/,
-      "a deferred commit is not an absent one");
-  });
-
-  // BLZ-670 (final review): under BLAZE_WRITE_PORT=db `stageFor("db")` answers
-  // {committed:false, queued:false} for EVERY write — there is no file to commit — so the
-  // committed===false arm told the operator "the file already matched HEAD" on every click.
-  // A db write is the database's ordinary case, like a real commit: it says nothing.
-  test("a database-mode write is not reported as an idempotent no-op", () => {
-    const note = writeOutcome({ ok: true, committed: false, queued: false, db: true });
-    assert.doesNotMatch(note, /already matched HEAD/, `got ${JSON.stringify(note)}`);
-    assert.doesNotMatch(note, /no commit created/, `got ${JSON.stringify(note)}`);
-    assert.equal(note, "");
-  });
-
-  test("a real commit says nothing — one op, one commit is the board's ordinary case", () => {
-    assert.equal(writeOutcome({ ok: true, committed: true, queued: false }), "");
-    assert.equal(writeOutcome({ ok: false, errors: ["nope"] }), "");
-    assert.equal(writeOutcome(null), "");
-  });
-
-  test("the dashboard's words for a git outcome are the CLI's words", () => {
-    // The binding BLZ-447 is about, applied to BLZ-449's own sentence: the two doors
-    // onto the same fact must not grow two vocabularies. `commitSuffix` is what every
-    // per-ticket CLI verb appends; each of its phrases must appear verbatim in the
-    // dashboard's sentence for the same outcome.
-    for (const [c, body] of [
-      [{ ok: true, committed: false, queued: true }, { ok: true, committed: false, queued: true }],
-      [{ ok: true, committed: false, noop: true }, { ok: true, committed: false, queued: false }],
-    ]) {
-      const cli = commitSuffix(c).trim();
-      assert.notEqual(cli, "", "fixture check: this outcome must have a CLI suffix at all");
-      assert.ok(writeOutcome(body).includes(cli),
-        `the dashboard says ${JSON.stringify(writeOutcome(body))} where the CLI says ` +
-        `${JSON.stringify(cli)} — two doors onto one fact must not word it differently`);
-    }
-  });
-
-  test("the served page runs THIS definition, and calls it exactly once", () => {
-    // The same two proofs BLZ-426 established for reconcileSummary: the page carries this
-    // module's own source text, and the one call site is the page's own wiring. Without
-    // the call site the fields are back to having no consumer, which is the whole ticket.
+// BLZ-254 (spec §5.5): BLZ-449 gave the page a sentence for the server's `committed`/`queued`
+// fields. The server no longer commits and no longer sends them, so the sentence and its
+// module (scripts/views/write-outcome.mjs) are deleted — and the page must not keep any of
+// its git vocabulary, which would now describe nothing.
+describe("BLZ-254: the dashboard says nothing about git after a write", () => {
+  test("the served page carries no write-outcome function and no git-outcome sentence", () => {
     const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
-    assert.ok(html.includes(String(writeOutcome)),
-      "the served page does not contain write-outcome.mjs's own source — the dashboard is " +
-      "running a DUPLICATE, or nothing at all");
-    const begin = html.indexOf(WRITE_OUTCOME_FN_BEGIN);
-    const end = html.indexOf(WRITE_OUTCOME_FN_END);
-    assert.ok(begin !== -1 && end > begin, "the injected definition is not delimited");
-    const wiring = html.slice(0, begin) + html.slice(end + WRITE_OUTCOME_FN_END.length);
-    assert.equal((wiring.match(/writeOutcome\(/g) || []).length, 1,
-      "writeOutcome must be called exactly once outside its own definition — blazePost, and " +
-      "nowhere else");
-    assert.match(html.slice(end), /const note = writeOutcome\(j\);\s*\n\s*if \(note\) toast\(note\);/,
-      "blazePost must pass the 200 body through the INJECTED writeOutcome and toast the " +
-      "result — a success path that discards the body is exactly BLZ-449's defect");
-  });
-
-  test("the extracted browser copy behaves like the module's", () => {
-    // Evaluated from the page's own text, not from the import — a stale injected copy
-    // fails here rather than passing quietly.
-    const html = pageHtml({ project: "all", projectsDir: tinyBoard(), now: 1751932800000, transitions: [] });
-    const i = html.indexOf(WRITE_OUTCOME_FN_BEGIN);
-    const j = html.indexOf(WRITE_OUTCOME_FN_END);
-    // eslint-disable-next-line no-new-func -- compiling the page's own text is the point
-    const fn = new Function(`${html.slice(i + WRITE_OUTCOME_FN_BEGIN.length, j)}; return writeOutcome;`)();
-    for (const body of [
-      { ok: true, committed: false, queued: false },
-      { ok: true, committed: false, queued: true },
-      { ok: true, committed: true, queued: false },
-      { ok: false, errors: ["nope"] },
-    ]) {
-      assert.equal(fn(body), writeOutcome(body),
-        `the page's copy disagrees with the module for ${JSON.stringify(body)}`);
-    }
+    assert.doesNotMatch(html, /BLAZE_WRITE_OUTCOME/, "the injected write-outcome function is gone");
+    assert.doesNotMatch(html, /queued for blaze commit|already matched HEAD|nothing was added to git log/,
+      "no sentence about a commit the board no longer makes");
   });
 });

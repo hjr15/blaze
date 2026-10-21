@@ -229,8 +229,8 @@ test("reconcile dry-run detects the move but suppresses the write; apply perform
 // (other in-flight board ops, editor swap files, etc.). This fixture mirrors
 // the real-branch apply setup above, but git-inits `root` itself (the prior
 // fixtures never did — they only asserted file moves, never inspected git
-// history on dataRoot) and passes commit:true so reconcile actually commits.
-test("reconcile --apply commits only touched files, not an unrelated dirty file", async () => {
+// history on dataRoot). BLZ-254: reconcile no longer commits, so HEAD must not move.
+test("reconcile --apply writes only its own tickets and leaves an unrelated dirty file alone", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-reconcile-scoped-commit-code-"));
 
@@ -264,13 +264,16 @@ test("reconcile --apply commits only touched files, not an unrelated dirty file"
   writeFileSync(join(root, "UNRELATED.txt"), "not part of reconcile\n");
 
   try {
-    const applied = await reconcile({ dryRun: false, commit: true, root });
+    const headBefore = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+    const applied = await reconcile({ dryRun: false, root });
     assert.equal(applied.ok, true);
-    assert.equal(applied.committed, true);
-
-    const files = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"], { encoding: "utf8" });
-    assert.doesNotMatch(files, /UNRELATED\.txt/);
-    assert.match(files, /ZZZ-1-.*\.md/);
+    // BLZ-254 (spec §5.5): the board never commits. The move is in the working tree, HEAD is
+    // where it was, and the unrelated file is untouched beside it.
+    assert.equal(Object.hasOwn(applied, "committed"), false);
+    assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), headBefore,
+      "reconcile --apply must not commit");
+    const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"], { encoding: "utf8" });
+    assert.match(dirty, /ZZZ-1-.*\.md/, "the move itself is on disk");
 
     const status = execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" });
     assert.match(status, /UNRELATED\.txt/);

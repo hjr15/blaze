@@ -7,7 +7,7 @@
 // ADR-0037 §4, which is the rule the whole import surface rests on.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { spawnSync } from "node:child_process";
+import { spawnSync, execFileSync } from "node:child_process";
 import {
   mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, readdirSync, rmSync,
 } from "node:fs";
@@ -139,13 +139,24 @@ test("BLAZE_READONLY refuses `blaze import` at the CLI gate — before the runne
   assert.equal(ticketExists(root), false);
 });
 
-test("staging goes through commitOrQueue under the `import` op — scoped to what it wrote, never git add -A", (t) => {
+test("BLZ-254: import --apply writes tickets, claims and its receipt, stages nothing and makes no commit", (t) => {
   const root = board(t);
-  const r = run(root, ["--apply", csvAt(root, row())], { BLAZE_COMMIT_MODE: "batch" });
+  // `board(t)` creates only empty directories, so the seed commit must be --allow-empty (review C3).
+  for (const a of [["init", "-q"], ["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                   ["commit", "-q", "--allow-empty", "-m", "seed"]]) {
+    execFileSync("git", ["-C", root, ...a]);
+  }
+  const before = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+  const r = run(root, ["--apply", csvAt(root, row())]);
   assert.equal(r.status, 0, r.stderr);
-  // In batch mode commitOrQueue appends to the pending ledger rather than
-  // committing — so exit 0 does NOT mean "committed", and the trailer says so.
-  assert.match(r.stdout, /queued/i);
+  assert.equal(ticketExists(root), true, "the ticket is written");
+  assert.equal(execFileSync("git", ["-C", root, "diff", "--cached", "--name-only"], { encoding: "utf8" }).trim(), "",
+    "an import stages nothing (spec §5.5)");
+  assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), before,
+    "an import makes no commit");
+  assert.match(r.stdout, /^imported 1 ticket\(s\)$/m);
+  assert.match(r.stdout, /receipt: import-receipts\//, "the receipt is still the run's record");
+  assert.doesNotMatch(r.stdout + r.stderr, /queued|commit/i, "the trailer claims nothing about git");
 });
 
 // =============================================================================

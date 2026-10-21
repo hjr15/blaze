@@ -13,7 +13,7 @@ Blaze is plain files, all the way down:
 - **A ticket's status is the directory it sits in.** There is no `status:` field, so
   it cannot drift out of sync with reality.
 - **Git is the history.** `git log --follow` on a ticket file is its full audit trail;
-  every mutation is a small, revertable commit.
+  every mutation is a plain file change you can review and commit with git (or, for many writers, a row in Postgres).
 - **The board is a rendering, never a second source of truth** — `blaze board` reads
   the same files you'd `ls` / `grep` / `git mv` by hand.
 
@@ -110,8 +110,7 @@ blaze new --project ENG --type task "Fix the export bug" --estimate 30
 blaze board   # → http://localhost:4321
 ```
 
-`blaze new` writes the ticket, validates it against the schema, and commits it — one
-small commit per ticket, scoped to the files it actually touched.
+`blaze new` writes the ticket and validates it against the schema.
 
 ## CLI verbs
 
@@ -126,7 +125,6 @@ small commit per ticket, scoped to the files it actually touched.
 | `blaze edit <id> ...` | Edit ticket fields |
 | `blaze link [--rm] <id> <TYPE> <target>` | Add (or `--rm` remove) a typed link on `<id>` — `TYPE` ∈ `Blocks`/`Relates`/`Duplicate`/`Cloners` |
 | `blaze reindex` | Rebuild/validate the on-disk index (warns on malformed or dangling `links` entries) |
-| `blaze commit` | Flush queued ops into one commit (`commitMode: batch`) |
 | `blaze migrate [--dry-run\|--live] [--project <KEY>]` | Import tickets from an external tracker via a reviewed disposition ledger (`--project` optional — falls back to `blaze.config.json`'s `projects` list) |
 | `blaze board` | Serve the read/write dashboard (kanban + `/api/*` write endpoints) |
 
@@ -144,7 +142,7 @@ key, and how an agent should drive the board.
 - **Board, List, Metrics and Live** views, switchable in the header.
 - A **detail panel** — click a ticket id for the rendered description, full
   frontmatter, parent/children and links; Acceptance-Criteria checkboxes toggle
-  in place and commit.
+  in place.
 
 ## Configuration
 

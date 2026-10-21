@@ -66,7 +66,7 @@ test("reconcile dry-run makes no file moves", async () => {
 // precondition rather than trusting the test's own prose. BLZ-423 then replaced THAT
 // assertion's source: it read `r.changes`/`r.committed`/`r.commitOutcome`, which is the
 // subject certifying itself, and now reads the filesystem and `git log`.
-test("pushed stays false on an applied, committing run — the contract push once contradicted", async () => {
+test("pushed stays false on an applied run", async () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-rec-push-"));
   const codeRepo = mkdtempSync(join(tmpdir(), "blaze-rec-push-code-"));
   execFileSync("git", ["-C", codeRepo, "init", "-q", "-b", "main"]);
@@ -89,7 +89,7 @@ test("pushed stays false on an applied, committing run — the contract push onc
   execFileSync("git", ["-C", root, "add", "-A"]);
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed board"]);
 
-  // BLZ-423. GROUND TRUTH FOR "this run really applied and really committed" IS THE
+  // BLZ-423. GROUND TRUTH FOR "this run really applied (and, since BLZ-254, made no commit)" IS THE
   // FILESYSTEM AND `git log`, NOT `reconcile()`'S OWN RETURN. The de-vacuity guard used
   // to read `r.changes.length`, `r.committed` and `r.commitOutcome` — three fields of
   // the very object under test — so the test trusted the subject to certify that the
@@ -102,7 +102,7 @@ test("pushed stays false on an applied, committing run — the contract push onc
   // contract statement under test. What has moved off the return is the PRECONDITION.
   const commitsBefore = Number(execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"],
     { encoding: "utf8" }).trim());
-  const r = await reconcile({ fetch: false, commit: true, dryRun: false, root });
+  const r = await reconcile({ fetch: false, dryRun: false, root });
 
   // (1) the filesystem: the ticket really left `defined/` and really arrived in `done/`.
   assert.equal(existsSync(join(projects, "OBA", "defined", "OBA-1.md")), false,
@@ -110,20 +110,17 @@ test("pushed stays false on an applied, committing run — the contract push onc
   assert.ok(existsSync(join(projects, "OBA", "done", "OBA-1.md")),
     "the fixture must produce a real move — OBA-1 never arrived in done/");
 
-  // (2) git log: a commit really exists, and its diff really carries the moved ticket.
+  // (2) git log: BLZ-254 (spec §5.5) — an applied run makes NO commit; the move is in the
+  // working tree for the operator to version.
   const commitsAfter = Number(execFileSync("git", ["-C", root, "rev-list", "--count", "HEAD"],
     { encoding: "utf8" }).trim());
-  assert.equal(commitsAfter, commitsBefore + 1,
-    "this must be a genuinely COMMITTING run: `git log` must hold exactly one new commit");
-  const diffFiles = execFileSync("git", ["-C", root, "show", "--name-only", "--format=", "HEAD"],
-    { encoding: "utf8" }).split("\n").filter(Boolean);
-  assert.ok(diffFiles.some((f) => f.includes("OBA-1")),
-    `the new commit's diff must carry the moved ticket, it carries ${JSON.stringify(diffFiles)}`);
-  assert.equal(execFileSync("git", ["-C", root, "status", "--porcelain"], { encoding: "utf8" }).trim(), "",
-    "the applied run must leave the board's tree fully committed");
+  assert.equal(commitsAfter, commitsBefore, "an applied run must not commit");
+  const dirty = execFileSync("git", ["-C", root, "status", "--porcelain", "--untracked-files=all"],
+    { encoding: "utf8" });
+  assert.match(dirty, /OBA-1/, `the move must be in the working tree, status was ${JSON.stringify(dirty)}`);
 
   // Only now is the contract statement itself worth reading off the return.
-  assert.equal(r.pushed, false, "an applied, committing run must still never report a push");
+  assert.equal(r.pushed, false, "an applied run must still never report a push");
   assert.equal(r.dryRun, false);
   rmSync(root, { recursive: true, force: true });
   rmSync(codeRepo, { recursive: true, force: true });

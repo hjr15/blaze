@@ -1,9 +1,10 @@
 // tests/model/import-lock.test.mjs — BLZ-640: the import-scoped lock.
 //
 // Design §7 states one-import-at-a-time as an OPERATOR CONSTRAINT and §8 item
-// 8 records why nothing enforced it: `acquireLock` is taken inside `commitFile`
-// AFTER every write has landed, and not taken at all on a `commitMode:
-// "batch"` board. It serialises the COMMIT, not the write phase.
+// 8 records why nothing enforced it: `acquireLock` (deleted by BLZ-254) was
+// taken inside `commitFile` (deleted by BLZ-254) AFTER every write had landed,
+// and not taken at all on a `commitMode: "batch"` board. It serialised the
+// COMMIT, not the write phase.
 //
 // This suite pins the lock itself. The concurrency PROPERTY it exists for —
 // two `--apply` runs over one file, one exiting 5 with nothing written and the
@@ -61,14 +62,15 @@ test("a lock held by a LIVE owner is contended immediately — no retry, no wait
   assert.equal(r.ok, false);
   assert.equal(r.owner.session, "holder");
   assert.equal(r.owner.pid, process.pid);
-  // `commit-lock.mjs` retries ten times at 200 ms because a commit is short.
+  // `dir-lock.mjs` defaults to ten retries at 200 ms, the policy of the commit
+  // lock (deleted by BLZ-254), because a commit was short.
   // An import is not: a second run waiting out a 2,850-ticket apply would look
   // hung. A contended import lock is exit 5 AT ONCE (§8 item 8).
   assert.ok(elapsed < 150, `contention must not sleep through a retry budget (took ${elapsed}ms)`);
   releaseImportLock(root);
 });
 
-test("a lock whose owner PID is dead is stolen — the same staleness rule commit-lock.mjs uses", (t) => {
+test("a lock whose owner PID is dead is stolen — the same staleness rule dir-lock.mjs uses", (t) => {
   const root = tmp(t);
   mkdirSync(importLockPath(root), { recursive: true });
   writeFileSync(join(importLockPath(root), "owner.json"),
@@ -80,9 +82,9 @@ test("a lock whose owner PID is dead is stolen — the same staleness rule commi
 
 test("a LIVE owner is never stolen from on age alone, however long the import runs", (t) => {
   const root = tmp(t);
-  // Deliberately DIFFERENT from `commit-lock.mjs`'s 60 s age-out, and the
-  // difference is the point: a commit takes milliseconds, so an hour-old
-  // commit lock is a bug. A 2,850-ticket import legitimately outlives any
+  // Deliberately DIFFERENT from `dir-lock.mjs`'s 60 s default age-out (the
+  // commit lock, deleted by BLZ-254), and the difference is the point: a commit
+  // took milliseconds, so an hour-old commit lock was a bug. A 2,850-ticket import legitimately outlives any
   // fixed window, and stealing from a live importer is the exact race this
   // ticket exists to close.
   const old = new Date(Date.now() - 6 * 60 * 60 * 1000).toISOString();
@@ -102,7 +104,7 @@ test("an ownerless lock directory is respected briefly and then stolen", (t) => 
   assert.equal(fresh.ok, false, "an acquirer between mkdir and write is respected");
   assert.equal(fresh.owner, null);
   // Backdated past the grace window, the dir is clearly abandoned and stolen —
-  // the same arm `tests/commit-lock.test.mjs` pins for the commit lock.
+  // the same arm `tests/dir-lock.test.mjs` pins for the mechanism.
   const old = Date.now() / 1000 - 60;
   utimesSync(importLockPath(root), old, old);
   assert.equal(acquireImportLock(root).ok, true);

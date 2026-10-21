@@ -1,7 +1,7 @@
 // tests/serve-endpoints.test.mjs
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, rmSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { execFileSync } from "node:child_process";
@@ -24,7 +24,6 @@ const EMPTY_BOARD = (() => {
   mkdirSync(join(d, "projects"), { recursive: true });
   return join(d, "projects");
 })();
-import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
 
 function repo() {
   const root = mkdtempSync(join(tmpdir(), "blaze-ep-"));
@@ -69,6 +68,18 @@ function repoTwoProjects() {
 const post = (base, path, body, headers = {}) =>
   fetch(base + path, { method: "POST", headers: { "content-type": "application/json", "x-blaze-csrf": CSRF, ...headers }, body: JSON.stringify(body) });
 
+const headOf = (root) => execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
+// BLZ-254 (spec §5.5): the board server never commits. A write changes the file and leaves
+// HEAD where it was; the body names the store and says nothing about git.
+async function assertWroteNoCommit(fx, res, extra = {}) {
+  const body = await res.json();
+  assert.equal(res.status, 200, JSON.stringify(body));
+  assert.deepEqual(body, { ok: true, db: false, ...extra }, "the 200 body is { ok, db, …extra } and nothing else");
+  assert.notEqual(execFileSync("git", ["-C", fx.root, "status", "--porcelain"], { encoding: "utf8" }).trim(), "",
+    "the write must be on disk");
+  return body;
+}
+
 test("GET /api/hash?project=T is scoped and differs from /api/hash?project=U after touching only U", async () => {
   const fx = repoTwoProjects();
   const { server, base } = await boot(fx);
@@ -98,17 +109,14 @@ test("POST without the CSRF header is rejected 403", async () => {
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("POST /api/move performs a valid transition and commits only that file", async () => {
+test("POST /api/move moves the file and creates no commit", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
-  const res = await post(base, "/api/move", { id: "OBA-1", to: "done" });
-  const body = await res.json();
-  assert.equal(res.status, 200, JSON.stringify(body));
-  assert.equal(body.resolution, "done");
-  const status = execFileSync("git", ["-C", fx.root, "status", "--porcelain"], { encoding: "utf8" });
-  assert.equal(status.trim(), "");                       // clean: the move was committed, nothing stray
-  const log = execFileSync("git", ["-C", fx.root, "log", "-1", "--name-only", "--format="], { encoding: "utf8" });
-  assert.match(log, /OBA\/done\/OBA-1\.md/);
+  const before = headOf(fx.root);
+  await assertWroteNoCommit(fx, await post(base, "/api/move", { id: "OBA-1", to: "done" }), { resolution: "done" });
+  assert.ok(existsSync(join(fx.projects, "OBA", "done", "OBA-1.md")), "the file moved to done/");
+  assert.equal(existsSync(join(fx.projects, "OBA", "in-review", "OBA-1.md")), false, "and left in-review/");
+  assert.equal(headOf(fx.root), before, "the board server must not commit");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
@@ -125,7 +133,7 @@ test("POST /api/move rejects an illegal skip 422 and writes nothing", async () =
 // BLZ-121: the board's own write API is a bypass of cli.mjs's primary gate
 // (a long-running `blaze board` process reads BLAZE_READONLY once at request
 // time, not at cli.mjs dispatch), so it needs its own check — placed before
-// applyMove runs (not just inside commitOrQueue), otherwise the ticket file
+// any verb runs (applyMove here), otherwise the ticket file
 // would relocate before the write was refused. See serve.mjs's POST handler.
 test("POST /api/move under BLAZE_READONLY is refused 403 and writes nothing", async () => {
   const fx = repo();
@@ -144,58 +152,43 @@ test("POST /api/move under BLAZE_READONLY is refused 403 and writes nothing", as
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("POST /api/edit patches a field and commits", async () => {
+test("POST /api/edit patches a field and creates no commit", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
-  const res = await post(base, "/api/edit", { id: "OBA-1", patch: { assignee: "ryan" } });
-  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
-  assert.match(execFileSync("git", ["-C", fx.root, "log", "-1", "--format=%s"], { encoding: "utf8" }), /OBA-1: edit/);
+  const before = headOf(fx.root);
+  await assertWroteNoCommit(fx, await post(base, "/api/edit", { id: "OBA-1", patch: { assignee: "ryan" } }));
+  assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /assignee: ryan/);
+  assert.equal(headOf(fx.root), before, "the board server must not commit");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("POST /api/ac toggles an AC checkbox and commits", async () => {
+test("POST /api/ac toggles an AC checkbox and creates no commit", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
-  const res = await post(base, "/api/ac", { id: "OBA-1", index: 0, checked: true });
-  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
-  const show = execFileSync("git", ["-C", fx.root, "show", "HEAD:projects/OBA/in-review/OBA-1.md"], { encoding: "utf8" });
-  assert.match(show, /- \[x\] one/);
+  const before = headOf(fx.root);
+  await assertWroteNoCommit(fx, await post(base, "/api/ac", { id: "OBA-1", index: 0, checked: true }));
+  assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /- \[x\] one/);
+  assert.equal(headOf(fx.root), before, "the board server must not commit");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("POST /api/log appends a worklog entry and commits", async () => {
+test("POST /api/log appends a worklog entry and creates no commit", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
-  const res = await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" });
-  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
-  const onDisk = execFileSync("git", ["-C", fx.root, "show", "HEAD:projects/OBA/in-review/OBA-1.md"], { encoding: "utf8" });
-  assert.match(onDisk, /minutes: 15/);            // new worklog entry landed on disk
-  const subject = execFileSync("git", ["-C", fx.root, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
-  assert.match(subject, /^OBA-1: log 15m$/);      // commit subject
+  const before = headOf(fx.root);
+  await assertWroteNoCommit(fx, await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" }));
+  assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /minutes: 15/);
+  assert.equal(headOf(fx.root), before, "the board server must not commit");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 
-test("POST /api/log responds 503 when the commit lock is held (not a generic 500)", async () => {
+test("POST /api/resolve overrides resolution and creates no commit", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
-  assert.equal(acquireLock(fx.root, { session: "other" }).ok, true);
-  try {
-    const res = await post(base, "/api/log", { id: "OBA-1", minutes: 15, note: "review" });
-    const body = await res.json();
-    assert.equal(res.status, 503, JSON.stringify(body));
-    assert.match(body.errors[0], /commit lock held/);
-  } finally {
-    releaseLock(fx.root);
-    server.close(); rmSync(fx.root, { recursive: true, force: true });
-  }
-});
-
-test("POST /api/resolve overrides resolution and commits", async () => {
-  const fx = repo();
-  const { server, base } = await boot(fx);
-  const res = await post(base, "/api/resolve", { id: "OBA-1", resolution: "wont-do" });
-  assert.equal(res.status, 200, JSON.stringify(await res.clone().json()));
-  assert.match(execFileSync("git", ["-C", fx.root, "log", "-1", "--format=%s"], { encoding: "utf8" }), /OBA-1: resolve wont-do/);
+  const before = headOf(fx.root);
+  await assertWroteNoCommit(fx, await post(base, "/api/resolve", { id: "OBA-1", resolution: "wont-do" }));
+  assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /resolution: wont-do/);
+  assert.equal(headOf(fx.root), before, "the board server must not commit");
   server.close(); rmSync(fx.root, { recursive: true, force: true });
 });
 

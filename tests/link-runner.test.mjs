@@ -1,9 +1,6 @@
 // tests/link-runner.test.mjs — CLI spawn tests for `blaze link`.
-// Runner spawn-test isolation is mandatory: a spawned link-runner.mjs with no
-// BLAZE_PROJECTS_DIR writes into the REAL worktree and makes a REAL git
-// commit. dataRepo()/run() below git-init a throwaway data tree with
-// commitMode: "batch" (no commits) and point the runner at it, seeded with
-// OBA-1 + OBA-2 so the link's source + target both resolve.
+// Runner spawn-test isolation is mandatory: a spawned runner with no BLAZE_PROJECTS_DIR writes into the REAL worktree.
+// The data tree is seeded with OBA-1 + OBA-2 so the link's source + target both resolve.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
@@ -22,7 +19,7 @@ function dataRepo({ key = "OBA" } = {}) {
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
   execFileSync("git", ["-C", root, "config", "user.name", "t"]);
   writeFileSync(join(root, "blaze.config.json"),
-    JSON.stringify({ key, projects: [key], commitMode: "batch" }));
+    JSON.stringify({ key, projects: [key] }));
   const dir = join(root, "projects", key, "defined");
   mkdirSync(dir, { recursive: true });
   const tk = (id) => `---\nid: ${id}\ntype: task\nproject: ${key}\ntitle: ${id}\npriority: medium\nestimate: 30\n---\n\nbody\n`;

@@ -45,7 +45,6 @@ import {
   loadBoard, pruneReceipts, readReceipt, receiptPathFor, unresolvedIntents,
 } from "./import-apply.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
-import { commitOrQueue, commitSuffix } from "../commit-or-queue.mjs";
 
 /** At the DATA ROOT beside `sprints.json`, committed and diffable — a mapping
  *  is SOURCE, not a regenerable cache, which is the line BLZ-110 drew for the
@@ -533,9 +532,9 @@ export async function runMappedImport(opts) {
   const {
     file, mappingPath, projectsDir, dataRoot,
     apply = false, update = false, allocateIds = false,
-    now = new Date(), commitMode = "per-op",
+    now = new Date(),
     writePort = undefined, readStorage = fsReadStorage,
-    stage = commitOrQueue, appendReceipt = appendRegularFileSync,
+    appendReceipt = appendRegularFileSync,
     appendMapLine = appendPair, openMap = openSourceIds,
   } = opts;
 
@@ -709,17 +708,12 @@ export async function runMappedImport(opts) {
   }
 
   const r = await applyImport(plan, {
-    projectsDir, dataRoot, receiptPath, writePort, appendReceipt, commitMode,
+    projectsDir, dataRoot, receiptPath, writePort, appendReceipt,
     // §5.3 step 6, BETWEEN the ticket write and `done`. The placement is
     // BLZ-629's and is not re-chosen here.
     onPair: mapping.sourceIdColumn
       ? ({ source, id, seq }) => appendMapLine(mapPath, { source, id, seq })
       : null,
-    // The map is a committed record (§6), so it is staged with the tickets
-    // and the receipt rather than left for the operator to notice.
-    stage: mapping.sourceIdColumn
-      ? (args) => stage({ ...args, files: [...args.files, mapPath] })
-      : stage,
   });
 
   if (r.exitCode === 4) {
@@ -733,7 +727,7 @@ export async function runMappedImport(opts) {
     }
     for (const e of r.errors) say(`  ${e}`);
   } else if (r.exitCode === 0) {
-    say("", `imported ${r.written.length} ticket(s)${r.commit ? commitSuffix(r.commit) : ""}`);
+    say("", `imported ${r.written.length} ticket(s)`);
     say(`  receipt: ${rel(receiptPath)}`);
     if (mapping.sourceIdColumn) say(`  map: ${rel(mapPath)}`);
   } else {
@@ -747,7 +741,7 @@ export async function runMappedImport(opts) {
 /** Park raw BYTES, never a re-encoded string: `toString("utf8")` maps an
  *  incomplete trailing multibyte sequence to U+FFFD, which re-encodes as
  *  different bytes — and a torn line is exactly where that happens. The
- *  buffer-in/bytes-out discipline is `pending-ledger.mjs`'s
+ *  buffer-in/bytes-out discipline was `pending-ledger.mjs`'s (deleted by BLZ-254)
  *  `quarantineDropped`, followed here rather than reinvented. */
 function parkBytes(path, bytes, append) {
   const stamp = Buffer.from(`${new Date().toISOString()}\t`, "utf8");
@@ -784,8 +778,8 @@ function tornReceiptBytes(path) {
  *
  * It reads no CSV, builds no plan, RUNS NO MODEL and writes no ticket. Its
  * files are at most four — `<receipt>.corrupt`, `<map>.corrupt`, the map, the
- * receipt — and every one of them is a committed record (§6), so they are
- * staged through `commitOrQueue` under the `import-repair` op (§5.4).
+ * receipt — and every one of them is a record (§6), written as a file and
+ * never staged (BLZ-254, spec §5.5).
  *
  * THE ORDER IS LOAD-BEARING AND IS NOT A STYLE CHOICE:
  *
@@ -803,8 +797,8 @@ function tornReceiptBytes(path) {
 export async function runRepair(opts) {
   const {
     receipt, projectsDir, dataRoot,
-    apply = false, commitMode = "per-op",
-    readStorage = fsReadStorage, stage = commitOrQueue,
+    apply = false,
+    readStorage = fsReadStorage,
     appendMapLine = appendPair,
   } = opts;
 
@@ -1001,36 +995,9 @@ export async function runRepair(opts) {
     return done(files.length ? 4 : 5);
   }
 
-  let commit = null;
-  let staged = false;
-  if (files.length) {
-    try {
-      commit = stage({
-        root: dataRoot, mode: commitMode, op: "import-repair",
-        id: null, ids: [],
-        message: `import repair: ${states.size} row(s) examined for ${name}`,
-        files: [...new Set(files)],
-      });
-      staged = !(commit && commit.ok === false);
-    } catch (e) {
-      // Every write landed and staging failed: the records are on disk and
-      // the refusal is lifted, only the commit is missing. Exit 4 — and it
-      // WINS over the exit-5 `NEEDS A PERSON` row, because nothing durable
-      // reached git and every other writer touching this data root needs to
-      // know that before anything else (§5.2's precedence rule). The trailer
-      // names both conditions regardless.
-      say("", `blaze import repair: every record was written and STAGING FAILED — ${e.message}`);
-      if (wouldRemain) say(`  ${people.length} row(s) still need a person, named above`);
-      return done(4);
-    }
-    if (!staged) {
-      say("", "blaze import repair: every record was written and STAGING FAILED");
-      if (wouldRemain) say(`  ${people.length} row(s) still need a person, named above`);
-      return done(4);
-    }
-  }
-
-  say("", `repaired ${states.size - people.length} row(s)${commit ? commitSuffix(commit) : ""}`);
+  // BLZ-254: the staging step that stood here, and the §5.2 rule that a staging failure (exit 4)
+  // outranked `NEEDS A PERSON` (exit 5), are gone. The records are written and nothing else happens.
+  say("", `repaired ${states.size - people.length} row(s)`);
   if (wouldRemain) {
     say(`  ${people.length} row(s) still need a person and were left unresolved — the exit-5 `
       + `refusal keeps firing on them until they have been examined again (design §5.2)`);

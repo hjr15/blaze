@@ -7,7 +7,6 @@ import { join } from "node:path";
 import { execFileSync } from "node:child_process";
 import { reconcile } from "../scripts/reconcile.mjs";
 import { memReadStorage } from "../scripts/model/read-storage.mjs";
-import { stageFor } from "../scripts/commit-or-queue.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
 
 const scratch = scratchRegistry();
@@ -67,8 +66,7 @@ test("db-mode --apply moves through writePort.move, leaves the file alone, and r
     async move(t) { calls.push(["move", t]); return { file: "OBA-1", fromFile: t.currentFile }; },
     async write(t) { calls.push(["write", t]); return { file: "OBA-1" }; },
   };
-  const r = await reconcile({ fetch: false, commit: true, dryRun: false, root: board,
-    writePort, stage: stageFor("db"), mode: "db" });
+  const r = await reconcile({ fetch: false, dryRun: false, root: board, writePort });
 
   assert.equal(r.ok, true, r.error);
   const moves = calls.filter(([k]) => k === "move");
@@ -77,5 +75,8 @@ test("db-mode --apply moves through writePort.move, leaves the file alone, and r
   assert.ok(existsSync(ticket), "db mode must not move the ticket file");
   assert.equal(existsSync(join(projects, "OBA", "done", "OBA-1.md")), false, "nothing may arrive in done/");
   assert.equal(git(board, "rev-list", "--count", "HEAD").trim(), commitsBefore, "db mode makes no git commit");
-  assert.equal(r.commitOutcome, "db");
+  // BLZ-254 (spec §5.5): reconcile never commits, so its result carries no commit outcome.
+  for (const k of ["committed", "commitOutcome", "commitError"]) {
+    assert.equal(Object.hasOwn(r, k), false, `reconcile's result still carries \`${k}\``);
+  }
 });

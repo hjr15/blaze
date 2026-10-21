@@ -43,10 +43,7 @@ runs before those commands touch a ticket file, not after — and separately in
 `blaze reindex` and `blaze rollup`, both of which resolve roots without
 loading config through the usual path but are schema-sensitive: `reindex`
 re-validates every ticket against the schema, and `rollup` builds the index
-(pulling in the type registry) to compute its roll-up totals. `blaze commit`
-is the one command that is genuinely schema-agnostic — it commits an explicit
-list of already-written files and never consults the schema — and stays
-uncovered by design.
+(pulling in the type registry) to compute its roll-up totals.
 
 `reindex` accepts an explicit `projects/`-dir argument (`blaze reindex <dir>`)
 to retarget which board's tickets get indexed. That argument re-resolves the
@@ -98,6 +95,7 @@ ambient data root.
   program*; the rule remains that the PR shipping a breaking change ships the
   path, whatever shape that path takes. (`blaze migrate` is unrelated — it is
   the external-tracker importer.)
+- **`commitMode` (BLZ-254, 0.9.0) is ignored, not removed.** The board no longer commits, but a config that still sets the key must keep loading (a refusal would crash-loop a deployed board), so `loadConfig` warns once and ignores it. `SCHEMA_VERSION` therefore stays 2: no config that loaded before fails to load now.
 - Decision record:
   [ADR-0002](decisions/0002-config-schema-versioning.md).
 

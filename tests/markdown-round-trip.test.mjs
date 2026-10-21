@@ -80,9 +80,7 @@ function importMarkdownInto(M, B) {
     dataRoot: B,
     apply: true,
     readRows: () => readMarkdownRows([M], { dataRoot: B }),
-    // Staging is §5.4's concern; a git tree here would only add a failure mode
-    // to a gate about data.
-    stage: () => ({ ok: true, committed: false, queued: true }),
+    // BLZ-254: an import stages nothing, so no git tree is needed here.
   });
 }
 

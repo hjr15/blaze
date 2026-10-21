@@ -128,29 +128,6 @@ test("throws a clear error on malformed JSON", () => {
   rmSync(dir, { recursive: true, force: true });
 });
 
-test("commitMode defaults to per-op", () => {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
-  const cfg = loadConfig({ root, env: {} });
-  assert.equal(cfg.commitMode, "per-op");
-  rmSync(root, { recursive: true, force: true });
-});
-
-test("commitMode is read from blaze.config.json", () => {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
-  const cfg = loadConfig({ root, env: {} });
-  assert.equal(cfg.commitMode, "batch");
-  rmSync(root, { recursive: true, force: true });
-});
-
-test("BLAZE_COMMIT_MODE env overrides the file", () => {
-  const root = scratch(mkdtempSync(join(tmpdir(), "blaze-cfg-")));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ commitMode: "batch" }));
-  const cfg = loadConfig({ root, env: { BLAZE_COMMIT_MODE: "per-op" } });
-  assert.equal(cfg.commitMode, "per-op");
-  rmSync(root, { recursive: true, force: true });
-});
-
 test("--get CLI reads the resolved data root's config, not the engine tree's own", () => {
   const data = mkdtempSync(join(tmpdir(), "blaze-get-"));
   const projectsDir = join(data, "projects");

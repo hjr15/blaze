@@ -1,33 +1,23 @@
-// scripts/commit-lock.mjs — advisory lock serializing board git writes.
-// Plain-file: an atomically-mkdir'ed .blaze/commit.lock/ directory holding
-// owner.json {pid, session, ts}. Bounded retry; stale locks (dead owner PID,
-// aged out, or long-ownerless) are stolen with a warning. Zero-dependency.
+// scripts/dir-lock.mjs — an advisory lock over a caller-supplied DIRECTORY: an atomically
+// mkdir'ed directory holding owner.json {pid, session, ts}, bounded retry, and theft of a lock
+// whose owner is dead, aged out, or long ownerless. Zero-dependency. (BLZ-640)
 //
-// BLZ-640 generalised the mechanism WITHOUT generalising the policy:
-// `acquireDirLock`/`releaseDirLock` take the lock DIRECTORY, and
-// `acquireLock`/`releaseLock` are the commit lock's `.blaze/commit.lock/`
-// bound to the board's retry-and-age-out policy. The import lock
-// (`scripts/model/import-lock.mjs`) is the same mkdir + owner.json + dead-PID
-// theft under a different directory and a different policy. Design §8 item 8
-// says so in as many words — "this reuses that mechanism rather than a second
-// one" — and a second copy of the staleness/theft logic is precisely the drift
-// that sentence forbids.
+// BLZ-254 (spec §5.5): this was scripts/commit-lock.mjs, which also bound the mechanism to the
+// board's commit lock (`acquireLock`/`releaseLock` over `.blaze/commit.lock/`). The board no
+// longer commits, so that policy is deleted. The mechanism stays because
+// `scripts/model/import-lock.mjs` (out of BLZ-254's scope, guarding `blaze import --apply` in
+// every mode) is built on it, and design §8 item 8 forbids a second copy of the staleness logic.
 import { mkdirSync, rmSync, writeFileSync, statSync } from "node:fs";
 import { join, dirname, basename } from "node:path";
 // BLZ-512 / ADR-0031. THE ELEVENTH SITE, and BLZ-493's inventory did not have it at all.
-// Reproduced at `44b797f`: a FIFO `owner.json` in a contended `.blaze/commit.lock/` makes
-// `acquireLock` never return — `EXIT=137` under a 6s cap — so every board write behind the
-// lock (the CLI's commit, `/api/*`'s commitOrQueue, the reconcile drain) stops with nothing
-// on stderr. That is worse than any wrong answer: nothing reports at all.
+// Reproduced at `44b797f`: a FIFO `owner.json` in a contended lock directory makes
+// `acquireDirLock` never return — `EXIT=137` under a 6s cap — so the write behind the
+// lock stops with nothing on stderr. That is worse than any wrong answer: nothing reports at all.
 import { readRegularFileSync, NotARegularFileError } from "./model/regular-file.mjs";
-
-export function lockPath(root) {
-  return join(root, ".blaze", "commit.lock");
-}
 
 /** REFUSE, never launder. `null` from here is read one line below as *"an acquirer between
  *  mkdir and write"* — a sentence about ANOTHER PROCESS — and after `OWNERLESS_GRACE_MS`
- *  that sentence STEALS the lock and lets two writers into the board's git tree at once.
+ *  that sentence STEALS the lock and lets two writers past the lock at once.
  *  A run that could not read `owner.json` has no business saying it. ENOENT, a truncated
  *  write and a malformed body keep the old `null`: those ARE the ownerless state, and Blaze
  *  looked to find them out. */
@@ -68,7 +58,7 @@ const OWNERLESS_GRACE_MS = 2_000;
  * `staleMs: Infinity` disables the AGE-OUT arm only — a dead owner is still
  * stolen from, and so is a live owner whose `ts` will not parse (see the
  * `!(age <= staleMs)` note below). That is the policy an import needs: a
- * commit takes milliseconds, so an hour-old commit lock is a bug, while a
+ * commit took milliseconds, so an hour-old commit lock (deleted by BLZ-254) was a bug, while a
  * 2,850-ticket import legitimately outlives any fixed window and stealing
  * from a live importer is the race BLZ-640 exists to close.
  */
@@ -129,15 +119,4 @@ export function acquireDirLock(dir, {
 
 export function releaseDirLock(dir) {
   rmSync(dir, { recursive: true, force: true });
-}
-
-/** The COMMIT lock: `.blaze/commit.lock/` under the board's retry-and-age-out
- *  policy. Taken inside `commitFile` (`serve-commit.mjs:9`), which is why it
- *  serialises the commit and not an importer's write phase — design §7. */
-export function acquireLock(root, opts = {}) {
-  return acquireDirLock(lockPath(root), opts);
-}
-
-export function releaseLock(root) {
-  releaseDirLock(lockPath(root));
 }

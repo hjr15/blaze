@@ -38,7 +38,7 @@ test("sqlite db mode: an imported row with no `created` lands with today's date;
     const d0 = isoToday();
     const r = await runImport({
       projectsDir: roots.projectsDir, dataRoot: roots.dataRoot, apply: true,
-      writePort: ports.writePort, readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }),
+      writePort: ports.writePort, readStorage: ports.readStorage,
       file: csvAt(roots.dataRoot, "dates",
         { id: "ENG-7", title: "no dates" },
         { id: "ENG-8", title: "dated", created: "2026-01-02", updated: "2026-01-03" }),
@@ -70,7 +70,7 @@ function gitDbBoard() {
 async function interleave(roots, ports) {
   const { projectsDir, dataRoot } = roots;
   const common = { projectsDir, dataRoot, apply: true, writePort: ports.writePort,
-                   readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }) };
+                   readStorage: ports.readStorage };
   const ids = [];
   const make = async (title) => {
     const n = await applyNew(projectsDir, { project: "ENG", type: "task", title, today: "2026-09-30",
@@ -139,7 +139,7 @@ test("sqlite db mode: an explicit id created by another writer between plan and 
       return ports.writePort.reserve(id, opts);
     } };
     const r = await runImport({ projectsDir: roots.projectsDir, dataRoot: roots.dataRoot, apply: true,
-      writePort: racing, readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }),
+      writePort: racing, readStorage: ports.readStorage,
       file: csvAt(roots.dataRoot, "race", { id: "ENG-50", title: "from the csv" }) });
     assert.equal(r.exitCode, 4, r.report);
     assert.match(r.report, /ENG-50 already exists in the database/);
@@ -160,7 +160,7 @@ async function staleCounterImport(roots, ports) {
                      estimate: 30, created: "2026-09-30", updated: "2026-09-30" } });
   }
   const r = await runImport({ projectsDir: roots.projectsDir, dataRoot: roots.dataRoot, apply: true,
-    writePort: ports.writePort, readStorage: ports.readStorage, stage: () => ({ ok: true, queued: true }),
+    writePort: ports.writePort, readStorage: ports.readStorage,
     allocateIds: true, file: csvAt(roots.dataRoot, "stale", { id: "", title: "allocated over a stale counter" }) });
   assert.equal(r.exitCode, 0, r.report);
   assert.deepEqual(r.result.written, ["ENG-4"]);

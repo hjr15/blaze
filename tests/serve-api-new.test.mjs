@@ -139,7 +139,8 @@ test("db mode: /api/new takes its id from the counter and /api/link writes the r
       const r = await post(base, "/api/new", { project: "ENG", type: "task", title: "from afar", estimate: 15 }, token.token);
       const body = await r.json();
       assert.equal(r.status, 200, JSON.stringify(body));
-      assert.deepEqual([body.id, body.db, body.committed], ["ENG-2", true, false]);
+      assert.deepEqual(body, { ok: true, id: "ENG-2", warnings: body.warnings, db: true },
+        "BLZ-254: no committed/queued — the server never commits");
       // A title whose file name would not fit is refused here too, and burns no number.
       const long = await post(base, "/api/new", { project: "ENG", type: "task", title: "x".repeat(300), estimate: 15 }, token.token);
       assert.equal(long.status, 422);

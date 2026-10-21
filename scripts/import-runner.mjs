@@ -29,7 +29,6 @@ import { resolve, join, dirname } from "node:path";
 import { spawnSync } from "node:child_process";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { resolvePorts, resolveReadStorage } from "./model/write-port-resolve.mjs";
-import { stageFor } from "./commit-or-queue.mjs";
 import { runImport } from "./model/import-apply.mjs";
 import { runMappedImport, runRepair } from "./model/import-mapping.mjs";
 import { withImportLock } from "./model/import-lock.mjs";
@@ -156,17 +155,18 @@ async function main() {
   }
 
   const { dataRoot, projectsDir } = resolveRoots();
-  let cfg;
-  try { cfg = loadConfig({ root: dataRoot }); }
+  // The call IS the config-schema guard (ADR-0002); its value was read only for the commit mode,
+  // which BLZ-254 removed.
+  try { loadConfig({ root: dataRoot }); }
   catch (e) {
     if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
     throw e;
   }
 
   // BLZ-121 defence-in-depth, hoisted before any write for the same reason
-  // new-runner.mjs hoists it: the apply writes claims and tickets before it
-  // ever reaches commitOrQueue's own guard, so gating only there would leave
-  // a written-but-uncommitted tree. Only for `--apply` — a dry run writes
+  // new-runner.mjs hoists it: the apply writes claims and tickets, so the refusal has to come
+  // before the first write. BLZ-254: this is now the runner's ONLY BLAZE_READONLY guard —
+  // commitOrQueue's own guard, which used to sit behind it, was removed by BLZ-254. Only for `--apply` — a dry run writes
   // nothing and is a legitimate thing to run under BLAZE_READONLY.
   if (opts.apply) {
     try {
@@ -181,7 +181,7 @@ async function main() {
   // taken around the CALL is a lock taken before all four, which is where §8
   // item 8 puts it ("before the prune and the exit-5 check, since those are
   // what a second run must not race past"). It is held until the verb returns,
-  // which is until staging has returned.
+  // which is until the last write has returned (staging, removed by BLZ-254, used to follow it).
   //
   // ONLY UNDER `--apply`: a dry run writes nothing, opens no record and is a
   // legitimate thing to run against a board mid-import. The lock guards the
@@ -195,7 +195,7 @@ async function main() {
   if (subcommand === "repair") {
     // BLZ-670: a READER only, never a write port — a `dual`-mode repair must not demand
     // the shadow. Under BLAZE_WRITE_PORT=db the board it checks tickets against is the
-    // database, and staging keeps only the record files that exist on disk.
+    // database. BLZ-254: nothing is staged.
     let rs;
     try { rs = await resolveReadStorage({ dataRoot, projectsDir }); }
     catch (e) { console.error(e.message); process.exit(1); }
@@ -205,8 +205,7 @@ async function main() {
         receipt: resolve(positional[0]),
         projectsDir, dataRoot,
         apply: opts.apply,
-        commitMode: cfg.commitMode,
-        readStorage: rs.readStorage, stage: stageFor(rs.mode),
+        readStorage: rs.readStorage,
       }));
     } finally {
       await rs.close();
@@ -219,7 +218,7 @@ async function main() {
   // ADR-0037 §1: the port is injected, never assumed, so the same importer
   // writes rows instead of files under BLAZE_WRITE_PORT=db.
   // BLZ-670: both ports at once, so the board the plan is built against is read from
-  // the same store the rows are written to; staging goes by mode.
+  // the same store the rows are written to. BLZ-254: nothing is staged.
   let wp;
   // BLZ-671: `remoteClaims: false` — ADR-0037 §3's no-network import. The fs/dual port's
   // allocate now IS import's allocator, so it must seed with the known-empty 0, never fetch.
@@ -232,9 +231,8 @@ async function main() {
       file: resolve(positional[0]),
       projectsDir, dataRoot,
       apply: opts.apply, update: opts.update, allocateIds: opts.allocateIds,
-      commitMode: cfg.commitMode,
       writePort: wp.writePort,
-      readStorage: wp.readStorage, stage: stageFor(wp.mode),
+      readStorage: wp.readStorage,
     };
     // One `planImport`, two readers (design §4.5). The mapped path adds the
     // mapping and the `source-ids` map and changes nothing else; the markdown

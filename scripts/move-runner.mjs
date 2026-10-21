@@ -1,9 +1,8 @@
 // scripts/move-runner.mjs — CLI entry for `blaze move <id> <status>`: applyMove
-// against the resolved data tree, then commit (or queue) the relocation.
+// against the resolved data tree and writes; it makes no commit (BLZ-254).
 import { applyMove } from "./move.mjs";
 import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { stageFor, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -13,18 +12,16 @@ const { dataRoot, projectsDir } = resolveRoots();
 // BLZ-402, on a malformed project key too (BLZ-402 review finding 3: `cli.mjs`'s
 // preflight already catches this for the normal `blaze move` path, but a direct
 // `node move-runner.mjs` bypasses it entirely).
-let cfg;
-try { cfg = loadConfig({ root: dataRoot }); }
+// The call IS the config-schema guard (ADR-0002); its value was read only for the commit mode,
+// which BLZ-254 removed.
+try { loadConfig({ root: dataRoot }); }
 catch (e) {
   if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
   throw e;
 }
-// BLZ-121 defence-in-depth, hoisted for the same reason as the guard above:
-// commitOrQueue's own BLAZE_READONLY guard fires too late here — applyMove
-// below writes/renames the ticket file via direct node:fs calls before
-// commitOrQueue is ever reached, so a guard only there would relocate the
-// file and merely decline the commit (the exact dirty-tree failure mode this
-// ticket exists to avoid). cli.mjs is still the primary gate for the normal
+// BLZ-121 defence-in-depth, hoisted for the same reason as the guard above.
+// `apply*` writes the ticket file via direct node:fs calls, so the guard must run before
+// it; cli.mjs is still the primary gate for the normal
 // `blaze move` path; this only matters for a direct `node move-runner.mjs`.
 // Caught locally so the refusal reads as a deliberate `blaze: …` line, not a
 // raw stack trace an agent may misread as a crash.
@@ -54,7 +51,7 @@ let __wp;
 // too, so the verb reads what the previous verb wrote. Other modes: unchanged.
 try { __wp = await resolvePorts({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
-const { writePort, readStorage, mode, close: closePorts } = __wp;
+const { writePort, readStorage, close: closePorts } = __wp;
 // BLZ-402 review finding 3, defence-in-depth: `applyMove`'s own `loadProject
 // (found.frontmatter.project, ...)` call (scripts/move.mjs) is already locally
 // try/caught there (falls back to `requireWorklogBeforeTerminal: false` on ANY
@@ -72,7 +69,5 @@ await closePorts();
 if (!r.ok) { console.error(`blaze move failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 for (const w of r.warnings) console.error(`warning: ${w}`);
 
-// BLZ-670: db mode stages only files that exist on disk — the ticket is a row, not a file.
-const c = stageFor(mode)({ root: dataRoot, mode: cfg.commitMode, op: "move", id, message: `${id}: ${r.from} → ${r.to}`, files: [r.fromFile, r.file] });
-if (!c.ok) { console.error(`blaze move: file relocated but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`${id}: ${r.from} → ${r.to}${r.resolution ? ` (resolution: ${r.resolution})` : ""}${commitSuffix(c)}`);
+// BLZ-254 (spec §5.5): the verb writes and stops — the board never commits.
+console.log(`${id}: ${r.from} → ${r.to}${r.resolution ? ` (resolution: ${r.resolution})` : ""}`);

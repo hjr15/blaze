@@ -360,10 +360,8 @@ What changed under BLZ-407 is only `ok`: a hard problem now fails the run throug
 into a soft one that could never flip it.
 
 Every other verb runs the check before it starts, in `scripts/cli.mjs`, which is the one
-place every verb dispatches through. There are two more exemptions — **three in all** —
-**`blaze init`**, which runs before a board exists, and **`blaze commit`**, a git flush of
-the pending ledger that imports nothing from the model: refusing it would strand ticket
-files other verbs have already relocated but not committed. That leaves **19 of the 22
+place every verb dispatches through. There is one more exemption — **two in all** —
+**`blaze init`**, which runs before a board exists. That leaves **20 of the 22
 subcommands** running the check.
 
 **The preflight judges the board the way `blaze audit` does**, and that is not a detail.

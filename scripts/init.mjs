@@ -13,7 +13,7 @@
 //      - the first project key → config.mjs:216-218 throws `unknown project` for every
 //                                verb except `blaze new`, and reconcile silently
 //                                no-ops on an empty `projects` array
-//    `agentCommand`, `commitMode`, `codeRepos`, `loops`, `port` and `boardTitle` have
+//    `agentCommand`, `codeRepos`, `loops`, `port` and `boardTitle` have
 //    defaults right for the overwhelming majority. `key`, `provider`, `columns`,
 //    `terminal`, `defaultLabels` and a base URL are NOT asked because nothing reads
 //    them (BLZ-298) — a question whose answer nothing reads is ceremony, not setup.

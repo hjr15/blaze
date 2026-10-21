@@ -23,7 +23,6 @@ import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
 import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
-import { stageFor } from "./commit-or-queue.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
@@ -45,7 +44,7 @@ export { boardModel, contentHash, liveModel, pageHtml, CSRF }; // back-compat fo
 // BLZ-133: config is read lazily, and from the board being SERVED rather than
 // the ambient engine tree. Import-time resolution broke merely importing this
 // module (several tests import it only for the boardModel/pageHtml re-exports)
-// now that resolveRoots() throws outside a board — and reading commitMode from
+// now that resolveRoots() throws outside a board — and reading config from
 // the engine root was already wrong for a server started against an explicit
 // --root. Memoised per data root.
 const _cfgCache = new Map();
@@ -81,8 +80,8 @@ function aheadCount(root) {
 export async function reconcilePreview({ root, projectsDir, projects = null } = {}) {
   const { reconcile } = await import("./reconcile.mjs");
   // BLZ-670: the preview reads the board the mode names (a db-mode board is rows, not files).
-  const r = await withReadStorage({ dataRoot: root, projectsDir }, (readStorage, mode) =>
-    reconcile({ fetch: false, commit: false, dryRun: true, root, projectsDir, projects, readStorage, mode }));
+  const r = await withReadStorage({ dataRoot: root, projectsDir }, (readStorage) =>
+    reconcile({ fetch: false, dryRun: true, root, projectsDir, projects, readStorage }));
   if (!r.ok) return { ok: false, error: r.error, changes: [] };
   // BLZ-395: findings travel with the preview. The preview is where a person looks before
   // believing the board, and a conflict reconcile refuses to act on is exactly what it
@@ -826,8 +825,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       if (csrfRequired({ headers: req.headers, store }) && req.headers["x-blaze-csrf"] !== CSRF) {
         return json(403, { errors: ["bad csrf token"] });
       }
-      // BLZ-121 defence-in-depth, checked here (before any apply* call below,
-      // not just inside commitOrQueue) and as a plain 403 rather than a thrown
+      // BLZ-121 defence-in-depth, checked here, before any apply* call below,
+      // and as a plain 403 rather than a thrown
       // assertWritable(): this handler has no wrapping try/catch, and an
       // uncaught throw inside an async request handler would crash the whole
       // board server for every connected session, not just refuse one write.
@@ -836,35 +835,16 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       let payload;
       try { payload = await readJson(req); } catch { return json(400, { errors: ["bad json body"] }); }
       const today = new Date().toISOString().slice(0, 10);
-      // in-place ops only — use the inline path for ops that rename (see /api/move)
-      // A lock-contended request stalls only for these bounded retries (~0.4s)
-      // rather than acquireLock's own default (~2s) — a board click should
-      // fail fast into a 503 rather than hang the request.
-      const LOCK_OPTS = { retries: 2 };
-      // Writes the error response for a failed commit and reports whether it
-      // did so (true = handled, caller must not also write a success response).
-      const commitFailed = (c) => {
-        if (c.ok) return false;
-        if (c.locked) json(503, { errors: ["written but not committed — commit lock held, retry shortly"] });
-        else json(500, { errors: [`written but commit failed (status ${c.status})`] });
-        return true;
-      };
-      // BLZ-422: `ok: true` answers "the request succeeded"; it never answered
-      // "a commit exists". `commitFile`'s benign empty-diff no-op (an idempotent
-      // re-write — `/api/edit` to the value already there, `/api/ac` re-checking a
-      // box) returned the same shape as a real commit, so this body said the same
-      // thing for both. `committed` and `queued` name the git outcome, alongside it.
-      // BLZ-670: `db` names the store, so the page's writeOutcome does not read db mode's
-      // always-false git fields as "the file already matched HEAD" (spec §4.4a).
-      const gitOutcome = (c) => ({ committed: Boolean(c.committed), queued: Boolean(c.queued), db: mode === "db" });
-      // BLZ-670: resolved below, inside the try, but declared here because `done` stages by
+      // BLZ-254 (spec §5.5): the board never commits. A 200 body names the STORE and nothing
+      // about git: `db` says whether the write landed in the database or in the files. The git
+      // fields (`committed`/`queued`, BLZ-422) went with the commit path, and so did the 503 a
+      // held commit lock used to earn — nothing on this path takes a lock any more.
+      // BLZ-670: resolved below, inside the try, but declared here because `done` reports by
       // the resolved mode.
       let writePort, readStorage, mode, closeWritePort;
-      const done = (r, msg, op, extra = {}) => {
+      const done = (r, extra = {}) => {
         if (!r.ok) return json(422, { errors: r.errors });
-        const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op, id: payload.id, message: msg, files: [r.file], lockOpts: LOCK_OPTS });
-        if (commitFailed(c)) return;
-        return json(200, { ok: true, ...gitOutcome(c), ...extra });
+        return json(200, { ok: true, db: mode === "db", ...extra });
       };
 
       // BLZ-301: the viewer's handlers wrote through the verbs' DEFAULT port, so a
@@ -888,28 +868,24 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       try {
       if (u.pathname === "/api/move") {
         const r = await applyMove(projectsDir, payload.id, payload.to, { today, writePort, readStorage, actor, source: "api" });
-        if (!r.ok) return json(422, { errors: r.errors });
-        const extraFiles = (r.fromFile && r.fromFile !== r.file) ? [r.fromFile] : [];
-        const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "move", id: payload.id, message: `${payload.id}: ${r.from ?? "?"} → ${payload.to}`, files: [r.file, ...extraFiles], lockOpts: LOCK_OPTS });
-        if (commitFailed(c)) return;
-        return json(200, { ok: true, ...gitOutcome(c), resolution: r.resolution });
+        return done(r, { resolution: r.resolution });
       }
       if (u.pathname === "/api/edit") {
         const r = await applyEdit(projectsDir, payload.id, payload.patch || {}, { today, writePort, readStorage, actor, source: "api" });
-        return done(r, `${payload.id}: edit ${Object.keys(payload.patch || {}).join(",")}`, "edit");
+        return done(r);
       }
       if (u.pathname === "/api/resolve") {
         const r = await applyResolve(projectsDir, payload.id, payload.resolution, { today, writePort, readStorage, actor, source: "api" });
-        return done(r, `${payload.id}: resolve ${payload.resolution}`, "resolve");
+        return done(r);
       }
       if (u.pathname === "/api/log") {
         // BLZ-684: `date` too, so the remote `blaze log --date` means what the local one does.
         const r = await applyLog(projectsDir, payload.id, payload.minutes, { note: payload.note ?? null, date: payload.date ?? null, today, writePort, readStorage, actor, source: "api" });
-        return done(r, `${payload.id}: log ${payload.minutes}m`, "log");
+        return done(r);
       }
       if (u.pathname === "/api/ac") {
         const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort, readStorage, actor, source: "api" });
-        return done(r, `${payload.id}: ac[${payload.index}]=${payload.checked ? "x" : " "}`, "ac");
+        return done(r);
       }
       if (u.pathname === "/api/new") {
         // BLZ-684 (final review): db mode only, refused BEFORE anything can allocate. A file
@@ -939,10 +915,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           throw e;
         }
         if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
-        const c = stageFor(mode)({ root, mode: cfgFor(root).commitMode, op: "new", id: r.id,
-          message: `${r.id}: create ${r.type}`, files: [r.file, r.claimFile].filter(Boolean), lockOpts: LOCK_OPTS });
-        if (commitFailed(c)) return;
-        return json(200, { ok: true, id: r.id, warnings: r.warnings, ...gitOutcome(c) });
+        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db" });
       }
       if (u.pathname === "/api/link") {
         // BLZ-684: classified `write` in ROUTE_SCOPES since BLZ-323, and answered by NO handler
@@ -955,7 +928,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         const r = await applyLink(projectsDir, p.id, { type: p.type, target: p.target, remove: p.remove === true },
           { today, writePort, readStorage, actor, source: "api" });
         if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
-        return done(r, `${p.id}: ${p.remove === true ? "unlink" : "link"} ${p.type} ${p.target}`, "link");
+        return done(r);
       }
       return json(404, { errors: ["not found"] });
       } finally { await closeWritePort(); }

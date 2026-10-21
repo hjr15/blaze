@@ -5,11 +5,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync, execFileSync } from "node:child_process";
-import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, readdirSync, existsSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
-import { appendEntry, ledgerPath } from "../scripts/pending-ledger.mjs";
 import { constants as osConstants } from "node:os";
 import { exitCodeForSpawn } from "../scripts/model/spawn-exit-code.mjs";
 
@@ -20,7 +19,7 @@ test("blaze --help prints the full usage listing (all subcommands) and exits 0",
   const r = spawnSync(process.execPath, [cli, "--help"], { encoding: "utf8" });
   assert.equal(r.status, 0);
   assert.match(r.stdout, /usage: blaze/);
-  for (const name of ["reconcile", "sprint", "commit", "migrate", "rollup"]) {
+  for (const name of ["reconcile", "sprint", "matrices", "migrate", "rollup"]) {
     assert.match(r.stdout, new RegExp(`\\b${name}\\b`));
   }
 });
@@ -31,7 +30,7 @@ test("blaze -h prints the full usage listing and exits 0", () => {
   assert.match(r.stdout, /usage: blaze/);
 });
 
-test("blaze commit --help prints subcommand help, exits 0, and never spawns the runner", () => {
+test("blaze move --help prints subcommand help, exits 0, and never spawns the runner", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cli-help-"));
   execFileSync("git", ["-C", root, "init", "-q"]);
   execFileSync("git", ["-C", root, "config", "user.email", "t@t.t"]);
@@ -41,25 +40,27 @@ test("blaze commit --help prints subcommand help, exits 0, and never spawns the 
   execFileSync("git", ["-C", root, "commit", "-q", "-m", "seed"]);
   mkdirSync(join(root, "projects", "OBA", "backlog"), { recursive: true });
   writeFileSync(join(root, "projects", "OBA", "backlog", "OBA-1.md"), "x");
-  appendEntry(root, { id: "OBA-1", op: "new", message: "OBA-1: x", files: ["projects/OBA/backlog/OBA-1.md"], ts: "t" });
-  const queue = ledgerPath(root);
-  const beforeBytes = readFileSync(queue);
+  // BLZ-254: the pending-ledger queue it also snapshotted is deleted; the ticket is the witness.
+  const ticket = join(root, "projects", "OBA", "backlog", "OBA-1.md");
+  const beforeBytes = readFileSync(ticket);
+  const beforeTree = readdirSync(join(root, "projects", "OBA", "backlog"));
   const beforeHead = execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim();
 
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
   delete env.BLAZE_SESSION;
-  const r = spawnSync(process.execPath, [cli, "commit", "--help"], { cwd: root, env, encoding: "utf8" });
+  const r = spawnSync(process.execPath, [cli, "move", "--help"], { cwd: root, env, encoding: "utf8" });
 
   assert.equal(r.status, 0);
-  assert.match(r.stdout, /commit/i);
-  assert.deepEqual(readFileSync(queue), beforeBytes, "runner must never have run — queue byte-identical");
+  assert.match(r.stdout, /move/i);
+  assert.deepEqual(readFileSync(ticket), beforeBytes, "runner must never have run — ticket byte-identical");
+  assert.deepEqual(readdirSync(join(root, "projects", "OBA", "backlog")), beforeTree, "runner must never have run — ticket tree unchanged");
   assert.equal(execFileSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).trim(), beforeHead, "HEAD must not move");
   rmSync(root, { recursive: true, force: true });
 });
 
 test("blaze new -h prints subcommand help and exits 0 without creating a ticket", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cli-help-new-"));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"], commitMode: "batch" }));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"] }));
   mkdirSync(join(root, "projects", "OBA"), { recursive: true });
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
   const r = spawnSync(process.execPath, [cli, "new", "-h"], { env, encoding: "utf8" });
@@ -71,7 +72,7 @@ test("blaze new -h prints subcommand help and exits 0 without creating a ticket"
 
 test("blaze sprint --help prints subcommand help, exits 0, and never spawns the runner", () => {
   const root = mkdtempSync(join(tmpdir(), "blaze-cli-help-sprint-"));
-  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"], commitMode: "batch" }));
+  writeFileSync(join(root, "blaze.config.json"), JSON.stringify({ projects: ["OBA"] }));
   mkdirSync(join(root, "projects", "OBA"), { recursive: true });
   const env = { ...process.env, BLAZE_PROJECTS_DIR: join(root, "projects") };
   const r = spawnSync(process.execPath, [cli, "sprint", "--help"], { env, encoding: "utf8" });

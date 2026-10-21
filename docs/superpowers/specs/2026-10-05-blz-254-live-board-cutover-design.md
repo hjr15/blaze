@@ -248,3 +248,38 @@ runs.
 - A db→git export.
 - Multi-instance Postgres.
 - Any change to fs or dual behaviour beyond §5.5's deletions.
+
+## 11. Amendments
+
+### 2026-10-13 (BLZ-687, PR D plan)
+
+1. **§5.1, backups.** "a scheduled `Backup` (daily, retained 14 days)" was replaced by an operator
+   decision on 2026-10-11: a daily `pg_dump --format=custom` CronJob (`blaze-pg-backup`) into the
+   host directory `~/cluster-data/blaze-pg-backups`, verified with `pg_restore --list`, 14 days
+   kept, pruned only after a verified dump and never behind a dump under half the size of the largest kept, failing into the
+   existing `CronJobLastRunFailed`/`CronJobStale` alerts. PGDATA is on a host PV adopted across
+   cluster resets. Recorded in hjr15/service-platform ADR-0024
+   (`docs/decisions/0024-cnpg-operator-and-blaze-pg-host-pv-backups.md`, merged in #112). The CNPG
+   scheduled `Backup` needs an object store or CSI snapshots, and k3d has neither.
+2. **§5.8 and §7's rollback follow from 1.** "CNPG backup and point-in-time restore" (§5.8, the
+   groom-undo row) and "restore from CNPG if needed" (§7, Rollback) now mean **restore the most
+   recent verified daily `pg_dump`** — there is no point-in-time recovery, so the recovery point
+   is up to one day old. `ticket_event` history is unchanged as the first resort.
+3. **§5.5, the deletion table, is completed by PR D's plan**
+   (`docs/superpowers/plans/2026-10-13-blz-254-pr-d-retire-git-ceremony-plan.md`, Findings 1–7):
+   - `commit-lock.mjs`'s policy is deleted but its mechanism is renamed `dir-lock.mjs`, because
+     `import-lock.mjs` (out of scope, kept) is built on it;
+   - `branch-guard.mjs`, `commit-summary.mjs`, `views/write-outcome.mjs` and the queue-store
+     migration procedure are deleted with their only callers, and `reconcile-commit-report.mjs`
+     shrinks to `reconcile-apply-report.mjs`;
+   - "the board never commits" covers reconcile's own commit, the supervisor's commit-outcome
+     feed, import's staging and `blaze sprint`;
+   - `commitMode` (and `BLAZE_COMMIT_MODE`) is ignored with a one-time warning rather than refused
+     (operator ruling 2026-10-18), so a config that still carries it keeps loading; `SCHEMA_VERSION`
+     stays 2;
+   - the fs groomer's and `blaze migrate`'s own commits are not in the table, stay in PR D, and are a
+     follow-up ticket under BLZ-254;
+   - the tree is 0.9.0, unpublished (ADR-0008's addendum).
+4. **§5.6, `build_matrices.py`.** Its retirement is a blaze-pm data-repo step, done by the board
+   operator after cutover (delete the script and its test, regenerate the matrices with
+   `blaze matrices`). The engine's "Regenerate with" header follows it (PR D, Task 10, conditional).

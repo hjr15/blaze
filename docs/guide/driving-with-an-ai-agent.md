@@ -77,7 +77,7 @@ and opens a PR gets the board updated for it:
 
 ```bash
 blaze reconcile            # dry-run: prints what it would move
-blaze reconcile --apply    # commit the moves locally (never pushes)
+blaze reconcile --apply    # apply the moves locally, leaving the tree dirty (never commits or pushes)
 ```
 
 This is the cleanest division of labour: the agent writes code and manages
@@ -87,35 +87,32 @@ branches; reconcile keeps the board truthful from git.
 
 Multiple agents can share one board without corrupting it:
 
-- **Batch mode.** Set `"commitMode": "batch"` (or `BLAZE_COMMIT_MODE=batch`). Each
-  mutating verb queues its op instead of committing; `blaze commit` folds your
-  queued ops into one commit.
-- **Session isolation.** Each session's ops queue to its own ledger, and
-  `blaze commit` flushes **only that** queue — a parallel agent's in-flight work
-  never rides your commit. The queue key is `BLAZE_SESSION`; leave it unset and the
-  id is derived from the agent harness session, so a session and the subagents it
-  spawns share one queue (the parent flushes for them). `blaze commit --all` sweeps
-  every session's queue (an end-of-run / bundler step).
+- **One machine, one writer.** A file board is single-machine (ADR-0006's BLZ-254
+  addendum). For parallel sessions or a second machine, run the board in db mode
+  (`BLAZE_WRITE_PORT=db`) and write to it over HTTP — see "Remote mode" in AGENTS.md.
+  Two sessions sharing one file board can still trample each other's working tree; use a
+  worktree per session, and expect to reconcile the files by hand.
 - **Read-only subagents.** Set `BLAZE_READONLY=1` for a subagent that should only
   inspect the board — `blaze` then refuses every mutating verb, so a reader can't
-  accidentally move or commit a ticket (`board` and `rollup` still work). An env
+  accidentally move a ticket (`board` and `rollup` still work). An env
   guard, not a sandbox — direct file writes bypass it.
-- Concurrent commits serialise on an advisory lock; the engine never pushes on its
-  own. Reads (grep the files, `blaze rollup`, `blaze board`) need no coordination
-  at all.
+- Nothing commits or pushes: the board changes files and stops. Reads (grep the files,
+  `blaze rollup`, `blaze board`) need no coordination at all.
+
+For several agents, point each at a db-mode board:
 
 ```bash
-export BLAZE_SESSION="agent-42"
-blaze new --project ENG --type task "..." --estimate 20   # queued
-blaze move ENG-7 in-progress                               # queued
-blaze commit                                               # one commit, your ops only
+BLAZE_REMOTE_URL="https://blaze.example.com" BLAZE_TOKEN="<your member token>" \
+  blaze new --project ENG --type task "..." --estimate 20   # runs on the server
+BLAZE_REMOTE_URL="https://blaze.example.com" BLAZE_TOKEN="<your member token>" \
+  blaze move ENG-7 in-progress                               # runs on the server
 ```
 
 ## Why this is safe to hand an agent
 
 - The surface is tiny: one rule (directory-is-status) and a handful of verbs.
-- Every mutation is a small, attributable, revertable commit — review and undo are
-  ordinary git.
+- Every mutation is a plain file change — review it with `git diff`, commit it
+  when you choose, and undo it with ordinary git.
 - The loops that run under `blaze start` only ever touch **ticket** files, never
   your code. Autonomy is bounded by construction.
 - Nothing is hidden behind a service you can't inspect: the board is the files.

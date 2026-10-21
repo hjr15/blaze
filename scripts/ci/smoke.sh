@@ -19,7 +19,7 @@ npm install --silent "$WORK/$TARBALL"
 
 # 3. a minimal fresh fixture data repo
 mkdir -p data/projects/OBA/defined
-printf '{"key":"OBA","projects":["OBA"],"commitMode":"batch"}\n' > data/blaze.config.json
+printf '{"key":"OBA","projects":["OBA"]}\n' > data/blaze.config.json
 printf -- '---\nid: OBA-1\ntitle: smoke\ntype: task\nproject: OBA\npriority: medium\nestimate: 30\n---\n\nbody\n' > data/projects/OBA/defined/OBA-1.md
 
 # 4. boot the INSTALLED bin against the fixture and assert a real success signal

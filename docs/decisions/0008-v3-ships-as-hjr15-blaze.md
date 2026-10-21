@@ -80,3 +80,28 @@ gets **one more release, 0.8.0** — a minor, because it also carries the databa
 (`blaze db load`/`verify`, `blaze matrices`, `blaze audit --fail-on`). The freeze moves to
 0.8.0 on the same terms: the rename decision above is unchanged, and so is the promise that an
 existing user is not upgraded by accident.
+
+## Addendum (2026-10-13, BLZ-687) — the tree moves to 0.9.0, unpublished
+
+BLZ-254's PR D removes `blaze commit` and `blaze publish` (and makes the configuration key `commitMode` inert) —
+a breaking change, which in 0.x moves the minor. The tree is therefore **0.9.0**. It is **not
+published as `@hjr15/blaze-board`**: the freeze at 0.8.0 above stands, and 0.8.0 (cut before
+PR D merged) is the last release with the git-commit workflow. 0.9.0 names the engine tree and
+the image built from it; the next npm publish is the `@hjr15/blaze` rename this ADR decides.
+The bump exists so that a publish from `main` can never ship the breaking tree under the frozen
+version's number. The guard is a `prepublishOnly` script that refuses only under the
+name `@hjr15/blaze-board`, so the rename is not blocked; `npm publish --ignore-scripts`
+bypasses it. It is a speed bump, not a lock.
+
+## Addendum (2026-10-21, BLZ-674) — 0.8.0 ships as a git tag, not on npm
+
+The 0.8.0 release above was cut, but `npm publish` was refused: the account's npm-side
+two-factor policy could not be satisfied from the operator's machine (no authenticator app;
+a granular bypass-2FA token was refused too). Operator decision: **0.8.0 is distributed as the
+hjr15/blaze tag and GitHub release `v0.8.0`** (main `925547d`), installed with
+`npm install github:hjr15/blaze#v0.8.0`; blaze-pm depends on that spec. npm's `latest` for
+`@hjr15/blaze-board` therefore stays **0.7.0**. Everything else here stands: the line is
+frozen at 0.8.0, the 0.9.0 tree is never published under this name (its `prepublishOnly`
+guard), and the next npm publish is the `@hjr15/blaze` rename — which first needs the npm
+two-factor setup fixed.
+

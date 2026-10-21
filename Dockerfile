@@ -1,5 +1,5 @@
 # blaze board — a Node app whose one runtime module is the optional pg driver (BLZ-692). Data (projects/ + .git) is bind-mounted
-# at runtime, NOT baked. git is required: commit-on-edit shells out to it.
+# at runtime, NOT baked. git is required: reconcile and the fs groomer shell out to git.
 FROM node:24-alpine@sha256:d32cdf619f63fe0471182d08996dd516c6275bb5fd31ae06e55a570bd9e1ad43
 RUN apk add --no-cache git
 WORKDIR /app

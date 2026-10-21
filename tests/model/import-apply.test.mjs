@@ -25,7 +25,6 @@ import { writeCsv } from "../../scripts/model/csv.mjs";
 import { fsWritePort } from "../../scripts/model/write-port.mjs";
 import { fsAllocators } from "../../scripts/model/write-port-resolve.mjs";
 import { claimPath, claimDir } from "../../scripts/model/claims.mjs";
-import { OP_LABEL } from "../../scripts/commit-summary.mjs";
 
 // --- fixtures ----------------------------------------------------------------
 
@@ -85,7 +84,6 @@ function ctxFor(root, extra = {}) {
     dataRoot: root,
     writePort: fsPort(projectsDir, root),
     receiptPath: receiptPathFor(root, { now: new Date("2026-09-21T00:00:00Z") }),
-    stage: () => ({ ok: true, committed: false, queued: true }),
     ...extra,
   };
 }
@@ -121,7 +119,7 @@ describe("BLZ-629: the claim is its own step, before the ticket write, on BOTH p
     const r = await applyImport(plan, ctxFor(root, { writePort: port }));
     assert.equal(r.exitCode, 0);
     assert.deepEqual(claimSeenAtWrite, [true],
-      "claim-before-write: the reverse order's residue is a missingClaimErrors ERROR on the operator's board");
+      "claim-before-write: the reverse order's residue is an unclaimed id on the operator's board");
   });
 
   test("an --allocate-ids create also gets a claim, and an `allocated` receipt entry the moment the id exists", async (t) => {
@@ -221,7 +219,6 @@ describe("BLZ-629: dry run by default", () => {
     const file = csvFile(root, cells({ id: "BLZ-1" }));
     const r = await runImport({
       file, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
-      stage: () => ({ ok: true, queued: true }),
     });
     assert.equal(r.exitCode, 0, r.report);
     assert.equal(existsSync(join(root, "projects", "BLZ", "defined", "BLZ-1-t.md")), true);
@@ -266,7 +263,6 @@ describe("BLZ-629: the exit codes", () => {
     const file = csvFile(root, cells({ id: "BLZ-1" }));
     const r = await runImport({
       file, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
-      stage: () => ({ ok: true, queued: true }),
     });
     assert.equal(r.exitCode, 5, "'I could not open my own log' is not 'the input is unreadable' (2)");
     assert.equal(existsSync(join(root, "projects", "BLZ", "defined", "BLZ-1-t.md")), false);
@@ -281,7 +277,6 @@ describe("BLZ-629: the exit codes", () => {
     const r = await runImport({
       file, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
       name: "acme", sourceIdColumn: "Issue key",
-      stage: () => ({ ok: true, queued: true }),
     });
     assert.equal(r.exitCode, 5);
     assert.match(r.report, /blaze import repair --apply/);
@@ -298,7 +293,6 @@ describe("BLZ-629: the exit codes", () => {
     const file = csvFile(root, cells({ id: "BLZ-1" }));
     const r = await runImport({
       file, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
-      stage: () => ({ ok: true, queued: true }),
     });
     assert.equal(r.exitCode, 0, "only the source-key lookup can be blind to a ticket that exists (§5.1)");
   });
@@ -312,7 +306,7 @@ describe("BLZ-629: the exit codes", () => {
     const file = csvFile(root, cells({ id: "BLZ-1" }));
     const r = await runImport({
       file, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
-      name: "acme", sourceIdColumn: "Issue key", stage: () => ({ ok: true, queued: true }),
+      name: "acme", sourceIdColumn: "Issue key",
     });
     assert.equal(r.exitCode, 0, r.report);
   });
@@ -344,17 +338,6 @@ describe("BLZ-629: the exit codes", () => {
       "row 3's intent is on the receipt with no done — that is what exit 4 points the operator at");
   });
 
-  test("exit 4 — every write landed and STAGING failed", async (t) => {
-    const root = boardRoot(t);
-    const plan = await planFor(root, cells({ id: "BLZ-1" }));
-    const r = await applyImport(plan, ctxFor(root, {
-      stage: () => { throw new Error("git add failed"); },
-    }));
-    assert.equal(r.exitCode, 4,
-      "once any ticket has been written, no later failure may exit anything but 4 (§5.1)");
-    assert.deepEqual(r.written, ["BLZ-1"]);
-  });
-
   test("exit 4 — a receipt append that fails AFTER a ticket write is under the same invariant", async (t) => {
     const root = boardRoot(t);
     const plan = await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
@@ -373,16 +356,16 @@ describe("BLZ-629: the exit codes", () => {
     assert.equal(r.exitCode, 4);
   });
 
-  test("exit 0 — a clean apply, with the trailer naming the port and whether the commit actually happened", async (t) => {
+  test("exit 0 — a clean apply, with a trailer that claims nothing about git", async (t) => {
     const root = boardRoot(t);
     const file = csvFile(root, cells({ id: "BLZ-1" }));
     const r = await runImport({
       file, projectsDir: join(root, "projects"), dataRoot: root, apply: true,
-      commitMode: "batch", stage: () => ({ ok: true, committed: false, queued: true }),
     });
     assert.equal(r.exitCode, 0, r.report);
-    assert.match(r.report, /queued/i,
-      "exit 0 does not mean 'committed' on a batch board — the trailer says so rather than leaving it to be discovered");
+    assert.match(r.report, /imported 1 ticket\(s\)/);
+    assert.doesNotMatch(r.report, /queued|commit/i,
+      "BLZ-254: the board never commits, so the trailer must not talk about a commit");
   });
 });
 
@@ -561,35 +544,34 @@ describe("BLZ-629: the pre-write, best-effort, exit-code-neutral prune (§5.3 it
   });
 });
 
-// --- staging (§5.4) ----------------------------------------------------------
-
-describe("BLZ-629: staging", () => {
-  test("`import` is in OP_LABEL — without it commitOrQueue throws on the first successful apply", () => {
-    assert.equal(Object.hasOwn(OP_LABEL, "import"), true,
-      "a runner that reaches commitOrQueue without this exits 1 on its first successful apply (§5.4)");
-  });
-
-  test("staging names exactly the files the run wrote — the tickets, the claims and the receipt", async (t) => {
+// BLZ-254 (spec §5.5): an import no longer stages. Its tickets (or rows), claims, receipt and
+// map are written as files; in fs mode the operator versions them, in db mode only the record
+// files are files at all. `applyImport` no longer takes a `stage` and no longer reports one.
+describe("BLZ-254: an import stages nothing", () => {
+  test("the result reports what was written and carries no staging fields", async (t) => {
     const root = boardRoot(t);
-    const staged = [];
     const plan = await planFor(root, cells({ id: "BLZ-1" }), cells({ id: "BLZ-2" }));
-    const ctx = ctxFor(root, { stage: (args) => { staged.push(args); return { ok: true, queued: true }; } });
-    await applyImport(plan, ctx);
-    assert.equal(staged.length, 1, "one commitOrQueue for the run, never git add -A");
-    assert.equal(staged[0].op, "import");
-    assert.deepEqual(staged[0].ids, ["BLZ-1", "BLZ-2"]);
-    const files = staged[0].files;
-    assert.equal(files.filter((f) => f.endsWith(".md")).length, 2);
-    assert.equal(files.includes(ctx.receiptPath), true,
-      "the receipt is a record, not a cache — it reaches the commit with the tickets");
-    assert.equal(files.some((f) => f.includes(".ids")), true, "and so do the claims");
+    const r = await applyImport(plan, ctxFor(root));
+    assert.equal(r.exitCode, 0, JSON.stringify(r.errors));
+    assert.deepEqual(r.written, ["BLZ-1", "BLZ-2"]);
+    assert.equal(r.files.filter((f) => f.endsWith(".md")).length, 2);
+    for (const k of ["staged", "commit"]) {
+      assert.equal(Object.hasOwn(r, k), false, `applyImport's result still carries \`${k}\``);
+    }
   });
 
-  test("a run that wrote nothing stages nothing", async (t) => {
-    const root = boardRoot(t);
-    let called = 0;
-    const ctx = ctxFor(root, { stage: () => { called++; return { ok: true }; } });
-    await applyImport(await planFor(root), ctx);
-    assert.equal(called, 0);
+  test("on a git board the run leaves HEAD and the index untouched", async (t) => {
+    const root = boardRoot(t, { git: true });
+    for (const a of [["config", "user.email", "t@t.t"], ["config", "user.name", "t"],
+                     ["commit", "-q", "--allow-empty", "-m", "seed"]]) {
+      spawnSync("git", ["-C", root, ...a], { encoding: "utf8" });
+    }
+    const head = () => spawnSync("git", ["-C", root, "rev-parse", "HEAD"], { encoding: "utf8" }).stdout.trim();
+    const before = head();
+    const r = await applyImport(await planFor(root, cells({ id: "BLZ-1" })), ctxFor(root));
+    assert.equal(r.exitCode, 0, JSON.stringify(r.errors));
+    assert.equal(head(), before, "no commit");
+    assert.equal(spawnSync("git", ["-C", root, "diff", "--cached", "--name-only"], { encoding: "utf8" }).stdout.trim(), "",
+      "nothing staged");
   });
 });

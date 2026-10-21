@@ -361,7 +361,8 @@ test("BLZ-347/B3: the gitignored .blaze/ tree is surveyed, refused and reverted"
   // path. The original fix applied a byte-for-byte snapshot to exactly ONE file
   // (blaze.config.json) rather than to the ignored surface as a class, so poisoning the
   // index, planting a database DSN pointing at an attacker host, and creating a
-  // commit.lock directory that wedges every other Blaze write all came back a clean groom.
+  // commit.lock directory that wedges every other Blaze write (it did, before BLZ-254) all
+  // came back a clean groom.
   const dir = gitBoard(
     'mkdir -p .blaze\n'
     + 'printf \'{"POISONED":true}\' > .blaze/index.json\n'

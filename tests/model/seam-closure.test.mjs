@@ -91,12 +91,12 @@ test("no module outside the seam stats or lists the projects tree directly", () 
   const ALLOWED = new Set([
     "model/index.mjs", "model/read-storage.mjs",
     "model/storage.mjs",        // the WRITE seam owns file creation
-    "model/ids.mjs", "model/claims.mjs",  // the allocator, deleted at Phase 2
+    "model/ids.mjs", "model/claims.mjs",  // the fs allocator — kept, BLZ-254 D1
     "model/transitions.mjs",    // git rename history, not the ticket store
     "model/sprints.mjs", "config.mjs",    // registries, not tickets
     "migrate/jira-import.mjs",  // a migration path, not a live verb
     "loops/groomer.mjs",        // hashes file text against git porcelain
-    "pending-ledger.mjs", "commit-lock.mjs", "reindex.mjs", "supervisor.mjs",
+    "dir-lock.mjs", "reindex.mjs", "supervisor.mjs",  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
     // BLZ-629: lists and stats `import-receipts/` — the run RECORDS, to find
     // the latest receipt for a mapping and to prune the ones past retention.
     // It never lists or stats the PROJECTS tree, which is what this guard is
@@ -853,7 +853,7 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // so importing it is the route ADR-0006 prescribes, not a bypass of it.
   ["model/storage.mjs", { writes: ["fsStorage"], sanctioned: [],
     inert: ["slugify", "ticketPath", "memStorage"] }],
-  // The allocator, deleted at Phase 2. `allocateId` and `writeClaim` put a claim file under a
+  // The fs allocator — kept, BLZ-254 D1. `allocateId` and `writeClaim` put a claim file under a
   // caller-supplied projects dir; `ensureCutover` writes the cutover marker.
   ["model/ids.mjs", { writes: ["allocateId"], sanctioned: [], inert: ["maxId", "nextId"] }],
   ["model/claims.mjs", { writes: ["writeClaim", "ensureCutover"], sanctioned: [],
@@ -872,19 +872,16 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["reindex.mjs", { writes: [], sanctioned: [], inert: [] }],       // derived caches, no exports
   ["migrate-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["cli.mjs", { writes: [], sanctioned: [], inert: [] }],
-  // The pending ledger: an op queue under a caller-supplied root, appended to and cleared.
-  ["pending-ledger.mjs", { writes: ["appendEntry", "clearLedger", "quarantineDropped"], sanctioned: [], inert: ["sessionId", "queueRoot", "ledgerPath", "readQueue", "readEntries",
-      "readForDrain", "quarantinePath", "listQueues", "listQueuesResult", "strandedQueues",
-      "worktreeBranchOwners", "belongsHere", "outstandingFiles",
-      "consumedPrefixIntact"] }],   // BLZ-608 (#175): a byte comparison, and the pin caught it
-  // The commit lock: a lockfile under a caller-supplied root, taken and released.
+  // BLZ-254: pending-ledger.mjs deleted (spec §5.5).
+  // The lock mechanism: a lock DIRECTORY under a caller-supplied path, taken and released.
   // BLZ-640 added `acquireDirLock`/`releaseDirLock` — the SAME mkdir +
   // owner.json + dead-PID-theft mechanism over a caller-supplied lock
   // DIRECTORY, which is what design §8 item 8's "this reuses that mechanism
   // rather than a second one" asks for. They create and remove a directory, so
-  // they are writes on exactly the footing `acquireLock`/`releaseLock` are.
-  ["commit-lock.mjs", { writes: ["acquireLock", "releaseLock", "acquireDirLock", "releaseDirLock"],
-    sanctioned: [], inert: ["lockPath"] }],
+  // they are writes.
+  // BLZ-254: commit-lock.mjs → dir-lock.mjs; the commit-lock policy (acquireLock, releaseLock, lockPath) is deleted.
+  ["dir-lock.mjs", { writes: ["acquireDirLock", "releaseDirLock"],
+    sanctioned: [], inert: [] }],
   ["migrate/jira-import.mjs", { writes: ["runLive"], sanctioned: [],
     inert: ["loadNormalized", "runDryRun"] }],
   ["migrate/jira-client.mjs", { writes: ["writeRawCache"], sanctioned: [],
@@ -953,14 +950,11 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // node:fs. They are pinned on the same terms as everything else it exempts — an exemption
   // whose own exports nobody has judged is how the primitive travels one module further.
   // Each of these exports a VERB: what it writes and where is its job, not its caller's.
-  ["commit-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // a CLI verb, no exports
+  // BLZ-254: commit-runner.mjs (blaze commit) deleted.
   ["user-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["sprint-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["matrices-runner.mjs", { writes: [], sanctioned: [], inert: [] }],   // BLZ-682: a CLI verb, no exports
-  // BLZ-670: `stageFor` returns commitOrQueue (or a filter that calls it) — a write, not inert.
-  ["commit-or-queue.mjs", { writes: ["commitOrQueue", "stageFor"], sanctioned: [],
-    inert: ["commitSuffix"] }],
-  ["serve-commit.mjs", { writes: ["commitFile"], sanctioned: [], inert: [] }],
+  // BLZ-254: commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
   ["serve.mjs", { writes: ["startServer"], sanctioned: [],
     inert: ["CSRF", "boardModel", "contentHash", "liveModel", "pageHtml",
       "reconcilePreview"] }],
@@ -1946,10 +1940,10 @@ function corpus() {
 // Every module permitted to reach node:fs's mutating surface directly, with the reason.
 const WRITE_ALLOWED = new Map([
   ["model/storage.mjs", "*"],                    // the write seam itself
-  ["model/ids.mjs", "*"], ["model/claims.mjs", "*"],   // the allocator, deleted at Phase 2
+  ["model/ids.mjs", "*"], ["model/claims.mjs", "*"],   // the fs allocator — kept, BLZ-254 D1
   ["model/transitions.mjs", "*"], ["model/sprints.mjs", "*"],  // caches and registries
   ["reindex.mjs", "*"],                          // derived, gitignored caches
-  ["pending-ledger.mjs", "*"], ["commit-lock.mjs", "*"],
+  ["dir-lock.mjs", "*"],  // BLZ-254: pending-ledger.mjs deleted; commit-lock.mjs → dir-lock.mjs
   ["migrate/jira-import.mjs", "*"], ["migrate-runner.mjs", "*"],
   ["migrate/jira-client.mjs", "*"], ["loops/groomer.mjs", "*"],
   // BLZ-285. `blaze init` writes blaze.config.json, project.json and .gitignore — config,
@@ -2027,9 +2021,9 @@ const WRITE_ALLOWED = new Map([
   // claim on it, and it must be the FIFO-safe primitive precisely because the operator may
   // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
   // primitive, appearing in reconcile still reddens.
-  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts) and hands `stageFor(mode)`
-  // in as the stage; `commitOrQueue` stays as reconcile()'s default stage.
-  ["reconcile.mjs", ["appendRegularFileSync", "commitOrQueue", "fsStorage", "resolvePorts", "stageFor"]],
+  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts).
+  // BLZ-254: commitOrQueue/stageFor removed — reconcile no longer stages its writes (spec §5.5).
+  ["reconcile.mjs", ["appendRegularFileSync", "fsStorage", "resolvePorts"]],
   // BLZ-535 round 5, D3. The seven below take a WRITE PRIMITIVE off an allowlisted module —
   // `saveState`, `appendEntry`, `acquireLock` and their kin, each of which puts caller-chosen
   // bytes at a caller-chosen root. Round 4 could not see any of them, because it pinned one
@@ -2037,29 +2031,25 @@ const WRITE_ALLOWED = new Map([
   // each is named to the members it actually takes, and the load-bearing test below checks
   // every one of those names is still reached.
   //
-  // `blaze commit` owns the commit lock and drains the ledger it has just committed; the
-  // quarantine sidecar is BLZ-531's. `commit-or-queue` is the other half: it records an op on
-  // the ledger when the lock is held elsewhere. `serve-commit` is the board server taking the
-  // same lock.
-  ["commit-runner.mjs", ["acquireLock", "releaseLock", "clearLedger", "quarantineDropped"]],
-  ["commit-or-queue.mjs", ["appendEntry", "commitFile"]],
-  ["serve-commit.mjs", ["acquireLock", "releaseLock"]],
+  // BLZ-254: commit-runner.mjs, commit-or-queue.mjs and serve-commit.mjs deleted (spec §5.5).
+  // BLZ-254: so four of round 5's seven remain below (serve.mjs, user-runner.mjs, new.mjs, sprint-runner.mjs).
   // First-run setup: the board server issues the setup-token CREDENTIAL, clears it when setup
   // completes, and keeps both it and the identity database out of git. `blaze user add` does
   // the .gitignore half from the CLI side. Same footing as setup-token.mjs and user-admin.mjs
   // themselves, which are allowlisted for the same files.
-  // BLZ-670: the mutating block resolves both ports per request (resolvePorts) and stages by mode (stageFor).
+  // BLZ-670: the mutating block resolves both ports per request (resolvePorts).
+  // BLZ-254: stageFor removed — the server stages nothing (spec §5.5).
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
-    "ensureIdentityIgnored", "addUser", "stageFor", "loadIdentity", "reconcile",
+    "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile",
     "resolvePorts", "pageHtml", "viewEnvelope",
     // BLZ-684: `POST /api/new` runs `blaze new`'s own verb, on exactly new-runner.mjs's footing.
     "applyNew"]],
   ["user-runner.mjs", ["ensureIdentityIgnored", "addUser", "setUserPassword"]],
-  // `blaze new` allocates the id and writes its claim — the allocator, deleted at Phase 2,
+  // `blaze new` allocates the id and writes its claim — the fs allocator (kept, BLZ-254 D1),
   // and on exactly the footing of ids.mjs and claims.mjs above.
   ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
-  ["sprint-runner.mjs", ["saveSprints", "commitOrQueue"]],
+  ["sprint-runner.mjs", ["saveSprints"]],   // BLZ-254: commitOrQueue removed — no commit
   // BLZ-682: `blaze matrices` writes the two derived matrix files per project into --out —
   // generated docs, never a ticket — through the FIFO-safe primitive, after creating the dir.
   ["matrices-runner.mjs", ["mkdirSync", "writeRegularFileSync"]],
@@ -2077,20 +2067,20 @@ const WRITE_ALLOWED = new Map([
   ["move.mjs", ["fsStorage"]],
   ["resolve.mjs", ["fsStorage"]],
   ["schedule-runner.mjs", ["fsStorage"]],
-  // ...their six CLI runners resolve the write port and hand the result to the commit queue.
-  // BLZ-670: each resolves BOTH ports once (resolvePorts) and stages by mode (stageFor), so a
-  // db-mode verb reads the database and never stages a ticket that is only a row.
-  ["edit-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["link-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["log-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["move-runner.mjs", ["stageFor", "resolvePorts"]],
-  ["new-runner.mjs", ["applyNew", "stageFor", "resolvePorts"]],
-  ["resolve-runner.mjs", ["stageFor", "resolvePorts"]],
+  // ...their six CLI runners resolve the write port.
+  // BLZ-670: each resolves BOTH ports once (resolvePorts), so a db-mode verb reads the database.
+  // BLZ-254: stageFor removed from all six — the verbs stage nothing (spec §5.5).
+  ["edit-runner.mjs", ["resolvePorts"]],
+  ["link-runner.mjs", ["resolvePorts"]],
+  ["log-runner.mjs", ["resolvePorts"]],
+  ["move-runner.mjs", ["resolvePorts"]],
+  ["new-runner.mjs", ["applyNew", "resolvePorts"]],
+  ["resolve-runner.mjs", ["resolvePorts"]],
   // BLZ-629 / design §5.3-§5.5. `blaze import --apply` is `blaze new` done N
   // times from a file, and it takes exactly what `new.mjs` and the six
   // runners above take, for exactly their reasons: `allocateId` + `writeClaim`
-  // are the allocator (deleted at Phase 2, on the footing of ids.mjs and
-  // claims.mjs), `commitOrQueue` is the staging front door, `resolveWritePort`
+  // are the fs allocator (kept, BLZ-254 D1; on the footing of ids.mjs and
+  // claims.mjs), `commitOrQueue` is the staging front door (removed by BLZ-254), `resolveWritePort`
   // is how the runner OBTAINS the driver. No ticket is written outside the
   // port — `applyImport` takes `writePort.write` and nothing else.
   //
@@ -2104,7 +2094,7 @@ const WRITE_ALLOWED = new Map([
   // BLZ-671: `allocateId` + `writeClaim` → `fsAllocators`. Import now takes its ids from the
   // PORT (allocate / reserve), and its fs default is handed write-port-resolve's allocators
   // rather than calling the allocator itself — so a db-mode import allocates from the counter.
-  ["model/import-apply.mjs", ["fsAllocators", "commitOrQueue",
+  ["model/import-apply.mjs", ["fsAllocators",   // BLZ-254: commitOrQueue removed — no staging
     "appendRegularFileSync", "mkdirSync", "unlinkSync"]],
   // BLZ-634 / design §4.2, §5.3, §5.4. The same footing, for the same two
   // records: `appendRegularFileSync` writes the map's pairs, the parked
@@ -2113,20 +2103,20 @@ const WRITE_ALLOWED = new Map([
   // not there when the process dies), `mkdirSync` creates `source-ids/`, and
   // `truncateSync` is the ONE non-append write on the map: `repair --apply`
   // truncating a torn last line back to its last complete one, after parking
-  // its bytes (§4.2 — park before you clear). `commitOrQueue` is the staging
-  // front door under the `import-repair` op, and `applyImport`/`runImport`
+  // its bytes (§4.2 — park before you clear). `commitOrQueue` (removed by BLZ-254) was the
+  // staging front door under the `import-repair` op, and `applyImport`/`runImport`
   // are BLZ-629's verbs this one composes rather than reimplements. No
   // ticket is written here at all: `repair` writes records only, and the
   // mapped import walks the same injected write port the canonical one does.
   ["model/import-mapping.mjs", ["appendRegularFileSync", "mkdirSync", "truncateSync",
-    "commitOrQueue", "applyImport", "pruneReceipts"]],
+    "applyImport", "pruneReceipts"]],   // BLZ-254: commitOrQueue removed — no staging
   // BLZ-635. Two members, one file: `mkdirSync` creates `import-mappings/`
   // and `writeRegularFileSync` puts the accepted mapping in it. There is no
   // third, and a ticket write appearing here reddens — which is the whole of
   // ADR-0037 §3 expressed as a guard rather than as a comment.
   ["model/import-mapping-propose.mjs", ["mkdirSync", "writeRegularFileSync"]],
   ["import-mapping-runner.mjs", ["runProposeMapping"]],
-  // BLZ-640. The import lock reaches node:fs through `commit-lock.mjs`'s
+  // BLZ-640. The import lock reaches node:fs through `dir-lock.mjs`'s   // BLZ-254: renamed from commit-lock.mjs
   // primitive and nowhere else: `acquireDirLock` does the atomic `mkdirSync`
   // and writes `owner.json`, `releaseDirLock` removes the directory. There is
   // no third member and no direct node:fs call in the module at all, which is
@@ -2137,16 +2127,17 @@ const WRITE_ALLOWED = new Map([
   // one `planImport`, two readers (§4.5), and `repair` writes records only.
   // BLZ-640 adds `withImportLock`, which the runner wraps all three verbs in
   // under `--apply` — the seam design §8 item 8 puts the lock at.
-  // BLZ-670: the apply path resolves both ports (resolvePorts) and hands `stageFor(mode)` in as
-  // the stage; repair resolves a reader only (resolveReadStorage, inert) and stages the same way.
+  // BLZ-670: the apply path resolves both ports (resolvePorts); repair resolves a reader only (resolveReadStorage, inert).
+  // BLZ-254: stageFor removed — import stages nothing (spec §5.5).
   ["import-runner.mjs",
-    ["resolvePorts", "stageFor", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
+    ["resolvePorts", "runImport", "runMappedImport", "runRepair", "withImportLock"]],
   // The ports wrap the driver: `fsWritePort` IS `fsStorage` with a soak counter around it.
   ["model/write-port.mjs", ["fsStorage"]],
   // The supervisor runs the groomer and reconcile on a timer, and reads the identity db.
-  // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts) and stages by mode (stageFor).
+  // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts).
   // BLZ-673: runGroomer grooms through the port under db (groomOnceDb), resolving ports per run.
-  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts", "stageFor"]],
+  // BLZ-254: stageFor removed — reconcile no longer stages (spec §5.5).
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.
@@ -2527,8 +2518,8 @@ test("a write primitive is a write wherever it is imported from", () => {
     ["model/transitions.mjs", "{ loadTransitions }", "loadTransitions"],
     ["model/identity-db.mjs", "{ loadIdentity }", "loadIdentity"],
     ["model/storage.mjs", "{ fsStorage }", "fsStorage"],
-    ["pending-ledger.mjs", "{ appendEntry }", "appendEntry"],
-    ["commit-lock.mjs", "{ acquireLock }", "acquireLock"],
+    // BLZ-254: pending-ledger.mjs deleted (its `{ appendEntry }` row).
+    ["dir-lock.mjs", "{ acquireDirLock }", "acquireDirLock"],  // BLZ-254: commit-lock.mjs → dir-lock.mjs
     ["model/setup-token.mjs", "{ issueSetupToken }", "issueSetupToken"],
     ["model/sprints.mjs", "{ saveSprints }", "saveSprints"],
     ["model/claims.mjs", "{ writeClaim as put }", "writeClaim"],
@@ -2564,7 +2555,7 @@ test("a write primitive is a write wherever it is imported from", () => {
     ["model/regular-file.mjs", "{ readRegularFileSync }"],
     // ...and inert exports, which reach nothing mutating at all
     ["model/sprints.mjs", "{ loadSprints, addSprint }"],
-    ["pending-ledger.mjs", "{ readForDrain, listQueues }"],
+    // BLZ-254: pending-ledger.mjs deleted (its `{ readForDrain, listQueues }` row).
     ["model/transitions.mjs", "{ parseTransitions, buildTransitions }"],
     ["model/storage.mjs", "{ slugify, ticketPath }"],
     ["model/write-port.mjs", "{ fsWritePort, dualWritePort }"],

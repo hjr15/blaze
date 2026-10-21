@@ -5,7 +5,7 @@
 // schema-guard error AND must NOT have mutated the board first (no file
 // relocated/edited/created). Mirrors link-runner.test.mjs's spawnSync +
 // BLAZE_PROJECTS_DIR isolation style — no git needed, the guard fires before
-// any commitOrQueue call is ever reached.
+// any write is reached (once: before any commitOrQueue call, removed by BLZ-254).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";

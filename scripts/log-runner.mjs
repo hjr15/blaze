@@ -1,11 +1,10 @@
 // scripts/log-runner.mjs — CLI entry for `blaze log`. Parses the positional
 // id + minutes and --date/--note flags, calls applyLog against the resolved
-// data tree, then commits (or queues). Mirrors new-runner.mjs's commit pattern.
+// data tree and writes; it makes no commit (BLZ-254).
 import { applyLog } from "./log.mjs";
 import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { formatMinutes } from "./model/time.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { stageFor, commitSuffix } from "./commit-or-queue.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
@@ -15,18 +14,16 @@ const { dataRoot, projectsDir } = resolveRoots();
 // BLZ-402, on a malformed project key too (BLZ-402 review finding 3: `cli.mjs`'s
 // preflight already catches this for the normal `blaze log` path, but a direct
 // `node log-runner.mjs` bypasses it entirely).
-let cfg;
-try { cfg = loadConfig({ root: dataRoot }); }
+// The call IS the config-schema guard (ADR-0002); its value was read only for the commit mode,
+// which BLZ-254 removed.
+try { loadConfig({ root: dataRoot }); }
 catch (e) {
   if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
   throw e;
 }
-// BLZ-121 defence-in-depth, hoisted before applyLog below for the same
-// reason as move-runner.mjs: commitOrQueue's own guard fires too late here —
-// applyLog writes the ticket file via direct node:fs calls before
-// commitOrQueue is ever reached, so a guard only there would log the time
-// and merely decline the commit (a dirty-tree failure, not a clean refusal).
-// cli.mjs is still the primary gate for the normal `blaze log` path; this
+// BLZ-121 defence-in-depth, hoisted before applyLog below.
+// `apply*` writes the ticket file via direct node:fs calls, so the guard must run before
+// it; cli.mjs is still the primary gate for the normal `blaze log` path; this
 // only matters for a direct `node log-runner.mjs`. Caught locally so a
 // direct invocation prints a clean `blaze: …` line, not a raw stack trace.
 try {
@@ -68,13 +65,11 @@ let __wp;
 // too, so the verb reads what the previous verb wrote. Other modes: unchanged.
 try { __wp = await resolvePorts({ dataRoot, projectsDir }); }
 catch (e) { console.error(e.message); process.exit(1); }
-const { writePort, readStorage, mode, close: closePorts } = __wp;
+const { writePort, readStorage, close: closePorts } = __wp;
 let r;
 try { r = await applyLog(projectsDir, id, Number(minutesRaw), { ...opts, writePort, readStorage }); }
 finally { await closePorts(); }
 if (!r.ok) { console.error(`blaze log failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
-// BLZ-670: db mode stages only files that exist on disk — the ticket is a row, not a file.
-const c = stageFor(mode)({ root: dataRoot, mode: cfg.commitMode, op: "log", id: r.id, message: `${r.id}: log ${r.minutes}m`, files: [r.file] });
-if (!c.ok) { console.error(`blaze log: file written but commit failed (status ${c.status}) — commit manually`); process.exit(1); }
-console.log(`logged ${r.minutes}m to ${r.id} (total ${formatMinutes(r.total_worklog_minutes)})${commitSuffix(c)}`);
+// BLZ-254 (spec §5.5): the verb writes and stops — the board never commits.
+console.log(`logged ${r.minutes}m to ${r.id} (total ${formatMinutes(r.total_worklog_minutes)})`);

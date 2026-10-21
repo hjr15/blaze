@@ -30,9 +30,8 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
       "the file never moves: the database is the store");
   });
 
-  // stageFor's POSITIVE half: in db mode the tickets are rows, but the import's own record
-  // files (the receipt) are real files and must still be committed.
-  test("import --apply writes through the db, commits its receipt, and a move can read the row", async () => {
+  // BLZ-254: the tickets are rows; the receipt is a real file, written and NOT committed (spec §5.5).
+  test("import --apply writes through the db, writes (and never commits) its receipt, and a move can read the row", async () => {
     const roots = dbBoard();
     const git = (...a) => execFileSync("git", ["-c", "user.name=t", "-c", "user.email=t@t", ...a],
       { cwd: roots.dataRoot, encoding: "utf8" });
@@ -49,10 +48,11 @@ describe("BLAZE_WRITE_PORT=db: every read comes from the database", () => {
     const imp = runner("import-runner.mjs", ["--apply", csv], roots,
       { GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" });
     ok(imp);
-    const committed = git("log", "-1", "--name-only", "--format=");
-    assert.match(committed, new RegExp(`^${RECEIPT_DIR}/\\S+\\.jsonl$`, "m"),
-      `the receipt is committed:\n${committed}`);
-    assert.doesNotMatch(committed, /\.md$/m, `no ticket file is committed in db mode:\n${committed}`);
+    assert.equal(git("rev-list", "--count", "HEAD").trim(), "1", "the import makes no commit");
+    const untracked = git("status", "--porcelain", "--untracked-files=all");
+    assert.match(untracked, new RegExp(`^\\?\\? ${RECEIPT_DIR}/\\S+\\.jsonl$`, "m"),
+      `the receipt is written, untracked:\n${untracked}`);
+    assert.doesNotMatch(untracked, /\.md$/m, `no ticket file exists in db mode:\n${untracked}`);
     ok(runner("move-runner.mjs", ["ENG-2", "in-progress"], roots));
   });
 

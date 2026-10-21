@@ -2,12 +2,9 @@
 // implementing design §8 item 8 (docs/design/csv-import-and-export.md).
 //
 // WHAT THIS CLOSES. §7 states one-import-at-a-time as an OPERATOR CONSTRAINT
-// and is explicit that nothing enforced it. The commit lock does not:
-// `acquireLock` is taken inside `commitFile` (`serve-commit.mjs:9`) at `git
-// add` time, AFTER every write has landed, and is not taken at all on a
-// `commitMode: "batch"` board, where `commitOrQueue` returns from the ledger
-// append before `commitFile` is ever called. It serialises the COMMIT, not the
-// write phase. Two `--apply` runs started together under `--allocate-ids` and
+// and is explicit that nothing enforced it. Since BLZ-254 there is no commit
+// lock to contrast it with; this is the only policy on dir-lock.mjs's
+// mechanism. Two `--apply` runs started together under `--allocate-ids` and
 // one `sourceIdColumn` mapping would each pass the exit-5 check — each sees the
 // other's receipt as empty — each allocate a number for the same source key,
 // and each append a pair; §4.2's first-occurrence lookup keeps one and the
@@ -15,9 +12,9 @@
 // exists to prevent.
 //
 // THE SAME MECHANISM, NOT A SECOND ONE. §8 item 8 requires "one
-// atomically-`mkdirSync`'ed lock directory (matching `scripts/commit-lock.mjs`,
+// atomically-`mkdirSync`'ed lock directory (matching `scripts/dir-lock.mjs`,
 // not a `wx` file)", and that is what this is: `acquireDirLock` IS
-// `commit-lock.mjs`'s primitive — the atomic `mkdirSync`, the `owner.json` of
+// `dir-lock.mjs`'s primitive — the atomic `mkdirSync`, the `owner.json` of
 // `{pid, session, ts}`, and theft of a lock whose owner PID fails
 // `process.kill(pid, 0)`. Nothing about the staleness or theft logic is
 // reimplemented here; only the directory and the POLICY differ, and both
@@ -35,7 +32,7 @@
 // takes no lock. The lock guards the WRITE phase, which is the only phase a
 // dry run does not have.
 import { join } from "node:path";
-import { acquireDirLock, releaseDirLock } from "../commit-lock.mjs";
+import { acquireDirLock, releaseDirLock } from "../dir-lock.mjs";
 import { RECEIPT_DIR } from "./import-apply.mjs";
 
 /** §8 item 8: "a lock directory under `import-receipts/`". Beside the receipts
@@ -50,17 +47,18 @@ export function importLockPath(dataRoot) {
 }
 
 /**
- * The POLICY, and both departures from the commit lock's are deliberate.
+ * The POLICY, and both departures from the commit lock's (deleted by BLZ-254, which
+ * kept dir-lock.mjs's defaults) are deliberate.
  *
  *   `retries: 0`   — a contended import lock is exit 5 AT ONCE. The commit
- *                    lock retries ten times at 200 ms because a commit takes
- *                    milliseconds; an import of the live corpus does not, and
+ *                    lock (deleted by BLZ-254) retried ten times at 200 ms
+ *                    because a commit took milliseconds; an import of the live corpus does not, and
  *                    a second run silently sleeping out a 2,850-ticket apply
  *                    would look hung rather than refused. §8 item 8 says "a
  *                    contended lock is exit 5", not "a contended lock waits".
  *   `staleMs: Infinity`
  *                  — never stolen from a LIVE owner on age. The commit lock's
- *                    60 s age-out is right for a commit and catastrophic here:
+ *                    60 s age-out was right for a commit and would be catastrophic here:
  *                    it would hand a second importer the lock in the middle of
  *                    a long apply, which is the very race being closed. The
  *                    DEAD-owner arm is untouched — `process.kill(pid, 0)`

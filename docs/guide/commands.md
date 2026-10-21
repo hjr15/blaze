@@ -1,9 +1,10 @@
 # Command reference
 
 Every `blaze` invocation is `blaze <subcommand> [args] [flags]`. The table below covers the
-subcommands documented on this page; `blaze --help` lists every one. Most that write commit immediately (`commitMode: per-op`,
-the default) or queue into a session ledger (`commitMode: batch`) — see
-[Commit modes](#commit-modes) below.
+subcommands documented on this page; `blaze --help` lists every one. Verbs that write change
+the board's files (or its database rows) and never commit (BLZ-254); on a file board you
+version the changes yourself. See [commitMode (ignored)](#commitmode-ignored) and
+[Removed commands](#removed-commands) below.
 
 | Subcommand | Purpose | Mutates? |
 |---|---|---|
@@ -19,7 +20,7 @@ the default) or queue into a session ledger (`commitMode: batch`) — see
 | [`link`](#link) | Add/remove a typed link between tickets | yes |
 | [`resolve`](#resolve) | Set/override resolution without moving the file | yes |
 | [`log`](#log) | Append a worklog entry | yes |
-| [`commit`](#commit) | Flush queued ops into one commit (batch mode) | yes |
+| [`import`](#import) | Create or update tickets from a canonical or mapped CSV or a Markdown tree | with `--apply` |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
 | [`migrate`](#migrate) | Import tickets from an external tracker | with `--live` |
@@ -55,6 +56,10 @@ blaze board
 Serves the read/write dashboard at `/` plus the `/api/*` endpoints (move,
 edit, resolve, log, acceptance-criteria toggle, and — for the remote CLI, BLZ-684 — new and
 link). Parses no CLI args.
+
+A write from the page (or `POST /api/*`) changes the ticket file (`fs`, `dual`) or row (`db`)
+and **makes no commit** (BLZ-254). The 200 body is `{ ok: true, db }` plus the route's own
+fields.
 
 **Access depends on whether the board has any users** (ADR-0013, and ADR-0034 for the
 browser half). See [HTTP surface](../architecture.md#http-surface) for which route needs
@@ -149,10 +154,10 @@ what it would change and writes nothing.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--apply` | Commit the mirrored changes locally (or queue them, in batch mode — see [Commit modes](../../AGENTS.md#commit-modes)), through the same advisory-lock-serialised path every other mutating verb uses. Reconcile never pushes — push is hardcoded off. | off (dry-run) |
+| `--apply` | `--apply` writes the moves: to the ticket files on a file board (`fs`, `dual`), or to the database under `BLAZE_WRITE_PORT=db`. **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where. Reconcile never pushes either — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
-| `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not author a commit moving fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile and commit the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
-| `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. A ticket-scoped `--apply` says so in the commit message (`… [--ticket BLZ-451]`), because that message is what a person reads months later asking why the pass moved three tickets and not thirty. | all tickets in scope |
+| `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not write moves to fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
+| `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. | all tickets in scope |
 | `--quiet` | *Print only on change.* It gates whole-run lines only — never per-ticket output. Suppressed on a pass that decided nothing: `reconcile: no code-bound change found — nothing to do.`, `reconcile: no projects configured — nothing to reconcile.`, and `reconcile: scanned project(s): …` (that last one is printed anyway whenever `--project` was given, because a filtered run must never read as a whole-board one). Per-ticket `moved` / `would move` lines, the dry-run tail, and every `WARNING` / `FORGE UNREADABLE` / `FORGE DATA` / `NEEDS ATTENTION` line on stderr are printed under `--quiet` exactly as without it. | off |
 
 PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub
@@ -162,35 +167,17 @@ reconcile prints a `FORGE UNREADABLE` line to stderr on every run (including und
 branch and merged-commit signals are unaffected. See
 [Forge support and status reachability](how-it-works.md#forge-support-and-status-reachability).
 
-Reconcile does **not** auto-recover an uncommitted prior pass, and it does
-**not** detect one either. If a previous `--apply` moved ticket files but
-failed to commit them (a held lock, a failing pre-commit hook), the board's
-ticket tree stays dirty until a person notices and clears it — the next run
-reports only what *it* found (no code-bound change, most likely, since the
-prior pass already wrote the files), never a claim about the state of the git
-tree. Telling a genuinely failed prior commit apart from a `commitMode:
-"batch"` board that queued by design, or from a human's own uncommitted edit
-under `projects/`, needs the pending ledger, not `git status`. That ledger read
-is now built: [`blaze commit --status`](#commit) reports the queued-by-design
-state. It cannot report the other two — neither leaves a ledger entry — and it
-says so in its own output (ADR-0032). If a run reports nothing to do but `git status`
-still shows changes under `projects/`, the remedy depends on which of those three
-states you are in, and **`blaze commit` only addresses one of them** (BLZ-434) —
-run [`blaze commit --status`](#commit) to see which of your queues, if any, still
-holds outstanding work. It
-flushes the pending queue, so it helps only on a `commitMode: "batch"` board that
-queued by design — on a `per-op` board there is no queue and it has nothing to
-flush, and it will not pick up a failed prior commit or your own in-flight edit
-either, because it stages only the files recorded against queued ops (never
-`git add -A`). Check `commitMode` first: on `batch`, run `blaze commit`; otherwise,
-or for anything it leaves behind, commit the tree by hand.
+**An applied run leaves the board's tree dirty, by design (BLZ-254).** Reconcile
+makes no git commit, so after an `--apply` on a file board the moved ticket files show
+in `git status` until you commit them. A later run reports only what *it* found, never
+a claim about the state of the git tree.
 
 **A change line only ever claims a move it can prove (BLZ-401).** A ticket can be
 written without its status changing — a blank `resolution` backfilled on an already-
 `done` ticket, a delivery record filled in for the first time, or cleared because no
 single PR delivered it (ADR-0023 §1) — and that entry stays on the report (dropping it
 would erase the only account of a record deletion) but is rendered as `updated <id>
-(still <status>): …`, never as a move. The `--apply` commit message and the dry-run tail
+(still <status>): …`, never as a move. The `--apply` applied line and the dry-run tail
 line both name two quantities for the same reason: how many tickets' status actually
 moved, and — only when it is non-zero — how many files were written without a status
 change.
@@ -264,7 +251,7 @@ blaze new --project <KEY> --type <type> "<title>" [flags]
 ```
 
 Creates a ticket in its type's initial status: allocates the next id,
-writes a schema-valid file, and commits it (or queues it, in batch mode).
+writes a schema-valid file, and stops: it makes no commit (BLZ-254).
 `--project`, `--type`, and the title are required. Unknown flags are
 rejected.
 
@@ -445,7 +432,7 @@ blaze move <id> <status>
 
 Validates the transition against the ticket type's workflow, sets
 `resolution` if the target status is terminal, and relocates the ticket
-file into the target status directory. Commits (or queues, in batch mode).
+file into the target status directory. It makes no commit (BLZ-254).
 
 | Arg | Meaning |
 |---|---|
@@ -517,196 +504,30 @@ Appends a worklog entry to a ticket.
 | `--date YYYY-MM-DD` | Date of the entry. | today |
 | `--note "..."` | Free-text note on the entry. | none |
 
-## commit
+## import
 
 ```
-blaze commit [--all] [--shared] [--branch-ok] [--status]
+blaze import [--apply] [--update] [--allocate-ids] [--mapping <m.json>] <file.csv>
+blaze import --format markdown [--apply] [--update] <dir-or-glob>
+blaze import repair [--apply] <receipt>
+blaze import propose-mapping <file.csv>
 ```
 
-Flushes queued ops into one git commit. Only meaningful when
-`commitMode: batch` — see [Commit modes](#commit-modes). Stages only the
-files recorded against the flushed ops, never `git add -A`. By default it drains
-**only the caller's own queue** — keyed by `BLAZE_SESSION`, or an id auto-derived
-from the agent harness session when that's unset. If there is no session identity
-at all and you pass neither flag, `commit` refuses to drain the shared fallback
-queue rather than risk taking another session's work.
+Creates, updates or skips tickets from a canonical CSV, a mapped CSV or a tree of Markdown tickets
+(design: [csv-import-and-export](../design/csv-import-and-export.md)). A dry run unless `--apply`
+is given. `--apply` writes and makes no commit (BLZ-254). It writes the tickets (rows under
+`BLAZE_WRITE_PORT=db`), their claims (fs/dual only; under db the ids are reserved in the database), and a receipt under `import-receipts/` (plus the
+`source-ids/` map for a mapped import); on a file board you version those yourself. Exit 4 means
+the board changed and the run did not finish cleanly.
 
-The queue store is **one per repository** — `.blaze/` beside the shared `.git`, so
-every worktree of the board reads and writes the same queues (BLZ-556, ADR-0033).
-Seeing another worktree's ops is not permission to commit them: their files exist
-only in the checkout that queued them, so `commit` drains just its own working
-tree's ops, leaves the rest untouched, names where they belong, and **exits 3**.
-Exit 3 means "flushed what this working tree could reach; ops remain that it
-cannot" — 1 is a refusal (nothing happened), 2 is `--status` reporting
-incompletely. Ops left in a pre-BLZ-556 per-working-copy store are reported the
-same way; migrate them with
-[queue-store-migration](../operations/queue-store-migration.md).
+## Removed commands
 
-| Flag | Meaning | Default |
+| Command | Removed in | Instead |
 |---|---|---|
-| `--all` | Sweep every session's queue plus the legacy shared fallback (the bundler / end-of-run path). | off (drains only the caller's own queue) |
-| `--shared` | Drain **only** the shared fallback queue (the no-session-identity queue), never the caller's own. | off |
-| `--branch-ok` | Override the INF-673 refusal to flush onto a branch the ops were not queued on. | off |
-| `--status` | **Report every queue and flush nothing.** Read-only: names the resolved queue store on its first line, then prints each queue's op count, its age in days, whether it is `(yours)`, and how many of its recorded files still differ from `HEAD` (*outstanding*) versus already match it (*orphaned* — filed by something else, so the entry is a leftover). A queue it could not read is named as such; a queue only **partially** read — some of its lines would not parse — is marked `PARTIALLY READ` with the count. Neither is included in the op count, the file totals or the readable-queue count, which is what the disclaimer under them says (BLZ-531), and the run then exits **2**. Runs under `BLAZE_READONLY=1`. | off |
+| `blaze commit` | 0.9.0 (BLZ-254) | Nothing to flush: no verb queues or commits any more. On a file board, commit the changed files yourself. |
+| `blaze publish` | 0.9.0 (BLZ-254) | Nothing to sweep and no flush Job to trigger. For more than one writer, run the board in db mode (`BLAZE_WRITE_PORT=db`) and write to it over HTTP ([Remote mode](#remote-mode)). |
 
-### Nothing to commit is not a failed commit
-
-A drain in which **every op's recorded file already matches HEAD** — the ops were filed by
-something else, so they are *orphaned* in `--status`'s vocabulary — **clears the queue,
-says so, and exits 0**. It is not a failure: there is nothing to resolve, and nothing
-failed. Before BLZ-590 it was reported as `git commit failed (status 1) — ledger kept,
-resolve manually`, and because the ledger was kept, every later run hit the same wall: a
-board whose recorded work was entirely settled could never drain. Hit live on 2026-08-31
-draining the 210 ops [ADR-0033](../decisions/0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md)
-had just consolidated.
-
-A **genuine** commit failure — a pre-commit hook refusing, a bad signature, a lock — still
-**keeps the queue** and exits **1**, and says nothing about the work having been filed.
-Collapsing the two would be worse than the bug it replaced: it would clear a queue whose
-ops never landed.
-
-A drain that is **partly** settled commits the real part, clears the settled part, and
-reports both counts, so no op is silently dropped and none is committed twice. The commit's
-subject and body describe **only the ops that entered it** — a drain of one outstanding op
-beside two already-filed ones writes `(1 new)`, not `(3 new)`.
-
-**Absent is a third outcome, reported separately from settled.** *Absent* means every path
-the op records is in **none of the three trees** — not in the working tree (`existsSync`),
-not in the index (`git ls-files`), and not in HEAD (`git cat-file -e HEAD:`). All three are
-read, so the sentence never attests a comparison that was not made. A `git rm`'d board file
-is therefore **not** absent: it is in HEAD with a staged deletion, and the deletion is
-committed like any other change.
-
-**An absent op is cleared only in the checkout that queued it**, which the op's own record
-says (`worktree` when stamped, else `branch`) — never the local filesystem. An absent op
-whose provenance is another checkout, or which records none, is **put back in the queue,
-reported, and the run exits 3**: its files may exist in a checkout that simply is not
-present right now, and `commit` does not judge what it cannot read. Reasoning in
-[ADR-0035](../decisions/0035-nothing-to-commit-is-a-settled-drain-not-a-failed-one.md).
-
-The two are told apart by **asking the index** — `git diff --cached --quiet -- <the op's
-own recorded paths>`, per op, with the same pathspec `git add` was given — and never by
-matching git's `nothing to commit, working tree clean`, which is a message: localisable,
-version-dependent, and not a contract. Per [ADR-0030](../decisions/0030-a-run-that-could-not-look-does-not-report-what-a-run-that-looked-reports.md)
-the probe is two-valued; a third answer is not evidence of a settled op, so that op is
-committed with the rest and never reported as already filed.
-
-Exit codes for `blaze commit`: **0** the queue is drained (by a commit, by finding its ops
-already filed, or by both); **1** the verb refused or the commit genuinely failed, and the
-queue is kept; **2** `--status` reported incompletely — a queue it could not read, or one it
-could read only in part; **3** what this working tree could reach is flushed and ops remain
-that it cannot, which since BLZ-531 includes a queue kept because a line it could not parse
-could not be parked either.
-
-### A line the ledger cannot parse is quarantined, never erased
-
-`blaze commit` skips a ledger line it cannot parse — a partial final line from a process
-killed mid-append, or a corrupt one — so that one bad line cannot hold a good queue hostage.
-Until BLZ-531 it then **destroyed** it: the drain measures the bytes it consumed over the
-**whole file**, unparseable lines included, so clearing the queue erased a line that was
-never parsed, never committed, and named in no report. Nothing anywhere could re-derive it.
-Verified by construction: three recorded ops with a truncated middle line drained to a
-commit carrying two, and the third was then present nowhere on disk.
-
-Such a line is now appended to a sidecar beside its queue — `<store>/.blaze/pending/<session>.corrupt`,
-or `<store>/.blaze/pending-commit.corrupt` for the shared fallback — as one record per line,
-`<ISO timestamp>` then a TAB then **the raw bytes, verbatim**. Split at the first tab to
-recover a record; the bytes may contain tabs of their own. The extension is deliberately not
-`.jsonl`, so a sidecar can never be picked up as a queue — its contents are by definition
-unparseable, which would make the condition self-perpetuating.
-
-Three properties, each of which the drain path depends on:
-
-- **The park happens before the clear.** A crash between the two leaves the record in *both*
-  places and the next run parks it again — duplicated evidence, which is recoverable, rather
-  than none, which is not.
-- **It fails closed.** If the sidecar cannot be written — a directory or a FIFO in its place,
-  a read-only store — the queue is **kept**, the run says which path it could not write, and
-  it exits **3**. The ops that were committed are in git; re-running once the path is
-  writable clears them (they come back as already filed) and parks the line. A queue is never
-  cleared over bytes this engine could not preserve.
-- **The lock is released regardless.** All of this happens after `git commit` has returned 0
-  with both commit locks held, so the loop runs under `try`/`finally`. A failure there used to
-  walk out of the process leaving `.blaze/commit.lock/` behind — and per
-  [ADR-0033](../decisions/0033-the-queue-store-is-one-per-repository-not-one-per-working-copy.md)
-  the store lock sits behind *every* worktree of the repo and the unattended flush.
-
-The sidecar write goes through the same regular-file guard as every other ledger write
-([ADR-0031](../decisions/0031-what-a-read-that-refused-to-open-reports-per-site.md)): a FIFO
-at that path is refused immediately rather than blocking in `open(2)` forever with the commit
-already made and the store lock held.
-
-### The divergence warning names the ref it compared against
-
-`blaze commit` prints `warning — N commit(s) behind <ref> (no fetch run); rebase before
-publishing` from **already-fetched** refs, running no network. `<ref>` is the branch's own
-upstream when it has one — the ref a push would write to — and otherwise the remote default
-branch, read from the repo (`origin/HEAD`, else whichever of `origin/main` / `origin/master`
-exists).
-
-**It used to be the hardcoded literal `origin/main`** (BLZ-590), which was wrong in both
-directions: a board whose default branch is `master` never got the warning at all, and a
-feature branch with its own upstream was measured against a ref it does not publish to —
-the operator saw `1 commit(s) behind origin/main` on a branch `git` calls up to date with
-its upstream, a true sentence about the wrong ref.
-
-### `--status`, and the one question the ledger can answer
-
-A queue is abandoned the moment its session ends: `blaze commit` drains only the
-caller's own queue, and a new agent session gets a new auto-derived id, so the
-previous queue becomes invisible to it. Measured on this project's own board at
-`70197405`, **185 ops were stranded across 8 sessions for up to five days** while
-every file they named had already been filed by hand-written commits. `--status`
-is the surface that makes that visible on the day it happens; `blaze commit --all`
-is the remedy.
-
-It answers exactly **one** of the three states described under
-[reconcile](#reconcile) above — a write blaze queued by design. It cannot see a
-failed prior commit or your own in-flight edit, because neither leaves a ledger
-entry, and it says so in its own output rather than letting a clean report be read
-as a clean tree. See `docs/decisions/0032-a-queued-write-is-a-fact-blaze-recorded-not-a-shape-git-reports.md`.
-
-**A queue that could not be read is reported, not fatal** (BLZ-518). A ledger entry
-with no `files` list, a queue path that is a directory, and a recorded path outside
-the board each used to throw and abort the *whole* report — on the live board, eight
-healthy queues' worth of state lost to one bad line, in exactly the situation where
-an old malformed entry is most likely. Each is now contained to its own queue, which
-is printed as `could not be read: <reason>` with `state UNKNOWN`, carries no
-outstanding/orphaned buckets, and is excluded from the totals with an explicit
-disclaimer. A path outside the board is still **refused**, never reported on — only
-the blast radius of the refusal changed. Exit codes: **0** every queue was read,
-**2** the report is incomplete, **1** the verb refused to run at all (unknown flag,
-`BLAZE_READONLY`, no session identity, lock held, foreign branch).
-
-**A queue that is fully drained is deleted, not emptied** (BLZ-498). Before this,
-`blaze commit` truncated a drained queue to a zero-byte file and left it, so
-`.blaze/pending/` grew by one entry for every session that had ever run and never
-shrank — 28 queues in one checkout of this project's own board, 14 in another. A
-queue with nothing left in it is not evidence of anything, and keeping it inflates
-every count taken over the queue list. A queue only *partially* drained (an op
-arrived from another session mid-commit) keeps both its file and those bytes.
-
-### The subject line counts TICKETS, and used to count ops
-
-`blaze commit` writes one commit whose subject reads
-`blaze: <date> board update (2 new, 3 logged, 1 moved)` — one clause per op kind, in
-first-seen order.
-
-**Each number is a count of distinct tickets, not of operations** — so "3 logged"
-means three *tickets* had time logged against them, and two `blaze edit` calls
-against one ticket render as `1 edited`, not `2 edited`. The full per-op detail is
-still in the commit body, which lists every queued entry's message.
-
-**This is a change of meaning, and the words did not change with it** (BLZ-448).
-Before BLZ-427 the same clauses counted queued ops. For every per-ticket verb
-(`new`, `move`, `log`, `resolve`, `edit`, `link`, `ac`, `sprint`) one op is one
-ticket and the two readings coincide, so those subjects mean what they always did.
-`reconcile` is what broke the identity: one queued reconcile op covers every ticket
-that pass wrote, and under the old rule a pass that moved a dozen tickets rendered
-as `1 reconcile`. Counting tickets is the safe direction — it can only understate
-op volume, never overstate ticket impact — but a reader who learned the old
-vocabulary should know the unit moved under it. Commits written before BLZ-427 are
-in the old units and are not restated.
+Both are refused by name, on stderr, with exit 1 (non-zero, so a script or a Job that still calls them fails loudly), whatever flags follow. The last release that has them is `@hjr15/blaze-board@0.8.0`.
 
 ## rollup
 
@@ -908,8 +729,8 @@ never exceed its owner's role, at issue time or at use time.
 `blaze --help` (or `-h`) prints a usage line plus the full command list with
 one-line descriptions; `blaze <command> --help` prints that command's one-line
 usage. `--help`/`-h` is intercepted at dispatch **before** any runner executes,
-so asking for help can never trigger a mutation — `blaze commit --help` describes
-`commit`, it does not flush. An unknown command prints the same usage list and
+so asking for help can never trigger a mutation — `blaze move --help` describes
+`move`, it does not move anything. An unknown command prints the same usage list and
 exits non-zero. For anything past the one-liners — flags, defaults, behaviour —
 this page is the reference.
 
@@ -982,14 +803,12 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | Variable | Controls | Default |
 |---|---|---|
 | `BLAZE_PROJECTS_DIR` | Explicit path to the data repo's `projects/` directory. Lets the engine run from anywhere. | none — falls back to a `projects/` dir under the current working directory |
-| `BLAZE_KEY` | Ticket id prefix override. Same shape rule as `key` in `blaze.config.json` (BLZ-402): upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — refused, not silently accepted, otherwise, and never auto-corrected ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)). Setting it to the **empty string** is a caller error and is refused (BLZ-410) — it used to be discarded, so `blaze.config.json`'s key silently won with no message on any stream. Only an *unset* `BLAZE_KEY` means "no override". The refusal is **defensive** (BLZ-461): `blaze move` reads only `commitMode` from the config and `blaze new`'s prefix comes from `--project`, so neither changes behaviour on `BLAZE_KEY` at all, and `key`'s derived matchers have exactly one consumer — the groomer's legacy flat-layout branch, which is reached by any board that has a status directory at the repo root, including a hybrid board that also has a `projects/` tree (BLZ-483: `statusDirs` is additive, not a choice). It buys that an empty override cannot silently become the file key for a consumer added later. | the `key` in `blaze.config.json` |
+| `BLAZE_KEY` | Ticket id prefix override. Same shape rule as `key` in `blaze.config.json` (BLZ-402): upper-case letters and digits, starting with a letter (e.g. `ENG`, `OBA`, `BLZ2`) — refused, not silently accepted, otherwise, and never auto-corrected ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)). Setting it to the **empty string** is a caller error and is refused (BLZ-410) — it used to be discarded, so `blaze.config.json`'s key silently won with no message on any stream. Only an *unset* `BLAZE_KEY` means "no override". The refusal is **defensive** (BLZ-461): `blaze move` reads no value from the config (its one use, `commitMode`, was removed by BLZ-254) and `blaze new`'s prefix comes from `--project`, so neither changes behaviour on `BLAZE_KEY` at all, and `key`'s derived matchers have exactly one consumer — the groomer's legacy flat-layout branch, which is reached by any board that has a status directory at the repo root, including a hybrid board that also has a `projects/` tree (BLZ-483: `statusDirs` is additive, not a choice). It buys that an empty override cannot silently become the file key for a consumer added later. | the `key` in `blaze.config.json` |
 | `BLAZE_PORT` | Board port. | 4321, unless overridden (see below) |
 | `PORT` | Board port; takes precedence over `BLAZE_PORT` and config. | — |
 | `HOST` | Bind host for `blaze board`. `blaze start` / bare `blaze` always binds `127.0.0.1`. **A non-loopback value on a board with no users refuses to start** — see [`board`](#board) and [`user`](#user). | `127.0.0.1` |
 | `BLAZE_AGENT_COMMAND` | The command `groom` spawns to act on a ticket. | `agentCommand` in `blaze.config.json` |
-| `BLAZE_COMMIT_MODE` | `per-op` or `batch`. | `per-op` |
 | `BLAZE_CODE_REPO` | Code repo `reconcile` mirrors against, when not set per-project. | none |
-| `BLAZE_SESSION` | Key for the batch-mode op queue, so parallel sessions isolate. | unset → an id auto-derived from the agent harness session (`auto-<id>`), so a session and its subagents share one queue; only with no harness id either does it fall back to the shared queue |
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
 | `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
@@ -998,17 +817,9 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
 `blaze.config.json`, then 4321.
 
-## Commit modes
+## commitMode (ignored)
 
-Default `commitMode` is `per-op`: every mutating verb commits immediately,
-scoped to the files it touched. Set `commitMode: batch` in
-`blaze.config.json` (or `BLAZE_COMMIT_MODE=batch`) to instead queue each op
-into a per-session ledger and flush it later with `blaze commit`.
-`BLAZE_SESSION` keys that ledger, so parallel sessions queue independently
-without stepping on each other; when it's unset the id is auto-derived from the
-agent harness session, so a session and the subagents it spawns share one queue.
-See [Driving Blaze with an AI agent](driving-with-an-ai-agent.md) for when to
-choose which mode.
+`commitMode` and `BLAZE_COMMIT_MODE` are ignored since 0.9.0 (a one-time warning); the board never commits. `BLAZE_COMMIT_MODE_WARNED` is set after the first warning, and everything the process spawns inherits it, including the server's agents, so those children do not repeat the warning.
 
 ## Types, workflows, priorities, resolutions
 

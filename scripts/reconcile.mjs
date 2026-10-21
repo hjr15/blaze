@@ -26,9 +26,8 @@ import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
-import { commitOrQueue, stageFor } from "./commit-or-queue.mjs";
 import { resolvePorts, resolveReadStorage, resolveWriteMode } from "./model/write-port-resolve.mjs";
-import { commitOutcomeFrom, applySummary } from "./reconcile-commit-report.mjs";
+import { appliedLine } from "./reconcile-apply-report.mjs";
 import { assertWritable } from "./readonly.mjs";
 
 // BLZ-130: SELECTION precedence — deliberately NOT "how far along the PR is".
@@ -362,8 +361,9 @@ export function idFromSubject(subject, key) {
 // over-claiming is the anchor and the colon, never which separators are listed.
 //
 // Condition 2 exists because the first cut, which honoured any `[*+-]` bullet under any
-// subject, turned the board's own ledger into a delivery signal. `commit-runner.mjs`
-// writes every batch board commit's body as `- <KEY>-<n>: <board op> [session]`, and
+// subject, turned the board's own ledger into a delivery signal.
+// `commit-runner.mjs` (deleted by BLZ-254) wrote every batch board commit's body as
+// `- <KEY>-<n>: <board op> [session]` — those commits stay in every board's history — and
 // the board repo is itself a configured codeRepo for its own project — the hazard
 // INF-735's comment already names. Measured on the board repo at blaze-pm ff5f36c2
 // (its origin/main, 156 commits) for the INF key alone: 426 ids harvested beyond the
@@ -1850,16 +1850,11 @@ function fileAmbiguousDeliverer(t, refs, findings, { vetoed = false } = {}) {
 const TICKET_ID_RE = /^[A-Za-z][A-Za-z0-9]*-\d+$/;
 
 export async function reconcile({
-  fetch = false, commit = false, dryRun = true, root, projectsDir,
+  fetch = false, dryRun = true, root, projectsDir,
   readStorage = fsReadStorage, storage = fsStorage, writePort = null, projects = null,
   tickets = null,
-  // BLZ-670: `stage` is how this pass files its writes (stageFor(mode) from the CLI and the
-  // supervisor), and `mode` is the write mode it runs under. A db-mode pass writes rows, so
-  // its outcome is "db", never a git no-op dressed up as "already matched HEAD". `mode` has no
-  // literal default: a bare `"fs"` in a default-parameter position is an fs specifier to the
-  // seam guard (tests/model/seam-closure.test.mjs), and only `mode === "db"` is ever asked, so
-  // an omitted mode already behaves as fs.
-  stage = commitOrQueue, mode,
+  // BLZ-254 (spec §5.5): `commit`, `stage` and `mode` are gone. They existed only to file this
+  // pass's writes into git (BLZ-404, BLZ-670), and the board never commits now.
 } = {}) {
   // root left unset → honour BOTH resolved values (dataRoot + projectsDir, even
   // when custom-named via BLAZE_PROJECTS_DIR). An explicit root (existing
@@ -1907,14 +1902,12 @@ export async function reconcile({
     // BLZ-404: `dryRun` on every return site, refusals included — `changes` is a PROPOSAL
     // list on a dry run and a RECORD of writes on an applied run, and a caller reading a
     // refusal's (empty) `changes` could not previously tell which sense it would have been.
-    return { ok: false, error: "--project was given no project key", changes: [], committed: false,
-      commitOutcome: "none", commitError: null,
+    return { ok: false, error: "--project was given no project key", changes: [],
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
       forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
   }
   if (wantedTickets && !wantedTickets.length) {
-    return { ok: false, error: "--ticket was given no ticket id", changes: [], committed: false,
-      commitOutcome: "none", commitError: null,
+    return { ok: false, error: "--ticket was given no ticket id", changes: [],
       pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
       forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
   }
@@ -1928,8 +1921,7 @@ export async function reconcile({
       // says so in words.
       error: `unknown project key(s): ${unknown.join(", ")}. This board configures: ` +
         (configured.length ? configured.join(", ") : "no projects at all"),
-      changes: [], committed: false, commitOutcome: "none", commitError: null,
-      pushed: false, missingRepos: [], scannedRepos: 0,
+      changes: [], pushed: false, missingRepos: [], scannedRepos: 0,
       configuredRepos: 0, forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [],
       scopedTickets: null, dryRun };
   }
@@ -1962,8 +1954,7 @@ export async function reconcile({
       return { ok: false,
         error: `--ticket was given ${malformed.length} value(s) that are not ticket ids: ` +
           `${malformed.join(", ")}. A ticket id is <KEY>-<number>, e.g. --ticket INF-1.`,
-        changes: [], committed: false, commitOutcome: "none", commitError: null,
-        pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+        changes: [], pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
         forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
     // An id whose project the run does not cover is REFUSED, not silently dropped. Both
@@ -1976,13 +1967,11 @@ export async function reconcile({
         error: `--ticket names ticket(s) outside this run's projects: ${outside.join(", ")}. ` +
           `This run covers: ${keys.length ? keys.join(", ") : "no projects at all"}` +
           (wanted ? " (narrowed by --project)." : "."),
-        changes: [], committed: false, commitOutcome: "none", commitError: null,
-        pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+        changes: [], pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
         forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
   }
-  if (!configured.length) return { ok: true, standalone: true, changes: [], committed: false,
-    commitOutcome: "none", commitError: null,
+  if (!configured.length) return { ok: true, standalone: true, changes: [],
     pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0, forgeErrors: [], gitErrors: [],
     findings: [], scannedProjects: [], scopedTickets: null, dryRun };
 
@@ -2002,8 +1991,7 @@ export async function reconcile({
     try {
       assertWritable("reconcile: apply board state");
     } catch (e) {
-      return { ok: false, error: e.message, changes: [], committed: false,
-        commitOutcome: "none", commitError: null, pushed: false, missingRepos: [],
+      return { ok: false, error: e.message, changes: [], pushed: false, missingRepos: [],
         scannedRepos: 0, configuredRepos: 0, forgeErrors: [], gitErrors: [], findings: [],
         scannedProjects: [], scopedTickets: null, dryRun };
     }
@@ -2024,8 +2012,7 @@ export async function reconcile({
     if (missing.length) {
       return { ok: false,
         error: `--ticket names ticket(s) that do not exist on this board: ${missing.join(", ")}.`,
-        changes: [], committed: false, commitOutcome: "none", commitError: null,
-        pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
+        changes: [], pushed: false, missingRepos: [], scannedRepos: 0, configuredRepos: 0,
         forgeErrors: [], gitErrors: [], findings: [], scannedProjects: [], scopedTickets: null, dryRun };
     }
   }
@@ -2034,7 +2021,6 @@ export async function reconcile({
   for (const key of keys) sig.set(key, gatherProject(loadProject(key, { root, projectsDir }), { fetch }));
 
   const changes = [];
-  const touched = [];
   // BLZ-395: what reconcile can SEE but must not ACT on. `changes` says what moved;
   // this says what a person needs to look at. It is deliberately not an error — the
   // run is healthy, the board is not — and it is emitted on dry runs too, because a
@@ -2411,14 +2397,9 @@ export async function reconcile({
       // DESTINATION and a crash cannot leave the old body at the new path.
       const target = { project: t.project, status: d.moved ? d.target : t.status,
                        frontmatter: fm, body: t.body, currentFile: t.file };
-      if (d.moved) {
-        const { file: dest } = await port.move(target);
-        touched.push(t.file);
-        if (dest !== t.file) touched.push(dest);
-      } else {
-        const { file } = await port.write(target);
-        touched.push(file);
-      }
+      // BLZ-254: nothing collects the written paths any more — they were the commit's pathspec.
+      if (d.moved) await port.move(target);
+      else await port.write(target);
     }
   }
 
@@ -2453,73 +2434,10 @@ export async function reconcile({
     });
   }
 
-  let committed = false;
-  // BLZ-404 (review finding 1 + 2): reconcile used to shell straight to `git add`/`git
-  // commit`, the one board git writer answering to neither the advisory commit lock nor
-  // `commitMode`. It could commit THROUGH a held lock, and on a `commitMode: "batch"`
-  // board it committed ticket moves out from under a pending `blaze commit` batch instead
-  // of queueing them. Routed through the same single decision point every other verb uses
-  // (move/edit/log/resolve/new/link/sprint-runner): `acquireLock` in `per-op` mode, the
-  // pending ledger (with its branch record, INF-673) in `batch` mode.
-  //
-  // `commitFile` returns `{ ok, locked, status }` and treats "nothing to commit" as a
-  // benign no-op (`ok: true`) — that shape is carried out here as `commitOutcome`, not
-  // flattened into a bare boolean, so a caller (the CLI, the supervisor) can tell
-  // "committed" apart from "queued" apart from "locked" apart from "failed" rather than
-  // reading every non-commit as an indistinguishable `committed: false`.
-  //
-  // `id` names the WHOLE op, not a single ticket: reconcile can touch many tickets in one
-  // pass, and a null-ish id would make an unreadable pending-ledger entry (and a
-  // meaningless name in `checkBranch`'s refusal message, which lists ids by this field).
-  // BLZ-422: "no-op" joined this list — see reconcile-commit-report.mjs, which owns
-  // both the classification and the wording. Reconcile itself cannot REACH "no-op": a
-  // change entry requires either a byte difference or a rename, so the staged tree is
-  // never clean by the time `commitFile` runs. It is carried here as a contract, the
-  // same way BLZ-405 carried `reconcilePreview`'s unreachable refusals, and it is
-  // pinned where it IS reachable — `commitFile`'s other callers.
-  let commitOutcome = "none"; // one of COMMIT_OUTCOMES (reconcile-commit-report.mjs)
-  let commitError = null;
-  // BLZ-404 round 5: this commit block only ever files THIS PASS's own decisions
-  // (`touched`) — it makes no attempt to recover a previous pass's uncommitted ticket
-  // writes, and reconcile makes no attempt to DETECT that condition either (round 2's
-  // recovery write and round 3/4's detect-and-report boolean were both tried and both
-  // deleted — see the PR body for why). Whether the board's ticket tree also carries
-  // leftover uncommitted dirt from an earlier pass is invisible to this function; a
-  // person notices it the same way they always have, via `git status`.
-  if (commit && !dryRun && touched.length) {
-    // BLZ-401: the message counts TICKETS WHOSE STATUS ACTUALLY MOVED, not
-    // `changes.length` — `changes` also carries entries where a resolution was
-    // backfilled or a record cleared/filled with `from === to`, and a commit touching
-    // three files that says "1 ticket" replaces one understatement with another. Both
-    // quantities are named: a run that also wrote non-moving updates says so rather
-    // than folding them into (or hiding them from) the moved count.
-    const movedCount = changes.filter((c) => c.moved).length;
-    const nonMovedCount = changes.length - movedCount;
-    const c = stage({
-      root, mode: cfg.commitMode, op: "reconcile",
-      id: `reconcile:${keys.join(",")}` + (wantedTickets ? `:${wantedTickets.join(",")}` : ""),
-      // BLZ-427: one reconcile op covers EVERY ticket this pass wrote. `id` names the
-      // op (it has to — a pass has no single ticket), so without this list `blaze
-      // commit` counted the whole pass as one and a flush of twelve moved tickets read
-      // "1 reconcile". Every other verb queues one ticket per op and passes none.
-      ids: changes.map((ch) => ch.id),
-      message: `chore(board): reconcile ${movedCount} ticket(s) moved to git state` +
-        (nonMovedCount ? `, ${nonMovedCount} ticket(s) updated without a status change` : "") +
-        (wanted ? ` (${keys.join(", ")})` : "") +
-        // BLZ-451: a ticket-scoped commit says so. The message is what a person reads
-        // months later when asking why this pass moved three tickets and not thirty.
-        (wantedTickets ? ` [--ticket ${wantedTickets.join(", ")}]` : ""),
-      files: touched,
-    });
-    // BLZ-422: the classification lives in reconcile-commit-report.mjs so it can be
-    // driven directly — see that file for why `ok: true` alone was not enough.
-    ({ outcome: commitOutcome, error: commitError } = commitOutcomeFrom(c));
-    // BLZ-670: in db mode the moves ARE the database write; stageFor("db") stages only files
-    // that exist on disk, so git answering "nothing to commit" (or committing a stray real
-    // file) is not this pass's outcome. An error outcome (locked/failed/queued) is kept as-is.
-    if (mode === "db" && (commitOutcome === "no-op" || commitOutcome === "committed")) commitOutcome = "db";
-    committed = commitOutcome === "committed";
-  }
+  // BLZ-254 (spec §5.5): the commit block that stood here is deleted. Since BLZ-404 it routed
+  // this pass's writes through commitOrQueue, removed by BLZ-254 (a per-op commit, a batch-queue entry, or a lock
+  // refusal) and reported which as `commitOutcome`. The board never commits now: in fs mode the
+  // files changed and the operator versions them; in db mode the rows did.
   // BLZ-404 AC-4: `push` is answered by DELETING it, not by refusing it. `reconcile()`
   // never reads a `push` option and `pushed: false` is unconditional below — accepting a
   // `push` PARAMETER that nothing reads told every caller a run might push when it never
@@ -2549,7 +2467,7 @@ export async function reconcile({
   // one — never `[]`, because a consumer must be able to tell "looked at everything" from
   // "looked at these" from the field alone. That is BLZ-394 AC-5's rule, extended to the
   // second filter rather than restated for it.
-  return { ok: true, changes, committed, commitOutcome, commitError, pushed,
+  return { ok: true, changes, pushed,
            missingRepos, scannedRepos, configuredRepos, forgeErrors, gitErrors, findings,
            scannedProjects: keys, scopedTickets: wantedTickets, dryRun };
 }
@@ -2626,13 +2544,13 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   }
   catch (e) { console.error(e.message); process.exit(1); }
   try {
-    r = await reconcile({ fetch: fetchFlag, commit: apply, dryRun: !apply,
+    r = await reconcile({ fetch: fetchFlag, dryRun: !apply,
       projects: sawProject ? projectKeys : null,
       tickets: sawTicket ? ticketIds : null,
       // DUAL UNCHANGED: reconcile has always ignored BLAZE_WRITE_PORT and built fsWritePort
       // itself. Only `db` hands it the database port; fs and dual keep null.
       readStorage: ports.readStorage, writePort: ports.mode === "db" ? ports.writePort : null,
-      stage: stageFor(ports.mode), mode: ports.mode });
+      });
   } catch (e) {
     await ports.close();
     if (e instanceof InvalidProjectKeyError) { console.error(e.message); process.exit(1); }
@@ -2738,7 +2656,8 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // alone — telling those apart needs the pending ledger, not `git status` — so nothing
   // here attempts it any more. Reconcile knows exactly one thing: whether THIS pass found
   // any code-bound change to make. It says exactly that, and nothing about the state of
-  // the git tree, which may be dirty for reasons this pass neither caused nor can see.
+  // the git tree, which may be dirty for reasons this pass neither caused nor can see — and,
+  // since BLZ-254, is dirty after every applied pass, because reconcile no longer commits.
   if (!r.changes.length) {
     if (!quiet) console.log("reconcile: no code-bound change found — nothing to do.");
     process.exit(0);
@@ -2777,24 +2696,7 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
       (nonMovedCount ? `, ${nonMovedCount} other update(s)` : "") +
       "; rerun with --apply to write locally — reconcile never pushes)");
   }
-  // BLZ-404 (review finding 1): the CLI's own commit block is the same code path the
-  // supervisor loop now uses, and its output must stay truthful about queued-vs-committed
-  // rather than reusing "moved" wording (which only ever described the file, never the
-  // commit) for every outcome alike.
-  if (apply) {
-    // BLZ-401: named the same way the commit message itself now is — a moved count and,
-    // only when it is non-zero, a second quantity for the writes that did not move a
-    // ticket. `r.changes.length` alone repeats the same overstatement the commit
-    // message used to make, one line lower.
-    // BLZ-422: the wording (and the exit code each outcome demands) lives in
-    // reconcile-commit-report.mjs beside the classifier that produced the outcome, so
-    // a new outcome cannot be added to one without the other.
-    const line = applySummary({
-      outcome: r.commitOutcome, error: r.commitError, movedCount, nonMovedCount,
-    });
-    if (line) {
-      if (line.stream === "err") console.error(line.text); else console.log(line.text);
-      if (line.exit) process.exit(line.exit);
-    }
-  }
+  // BLZ-254: an applied run says what it wrote and where, in the write-record vocabulary
+  // (BLZ-447). There is no commit outcome to report and so no non-zero exit for one.
+  if (apply) console.log(appliedLine({ mode: ports.mode, movedCount, nonMovedCount }));
 }

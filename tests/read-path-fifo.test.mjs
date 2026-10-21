@@ -473,7 +473,7 @@ describe("BLZ-493 site 3: liveModel REPORTS an unreadable feed rather than rende
 describe("BLZ-493 sites 4-5: the two buildIndex/reindex reads REFUSE", () => {
   test("readCutover refuses a FIFO `.cutover` instead of returning null", () => {
     // Decision (ADR-0031): REFUSE. `null` means "this project has never allocated through
-    // the ledger", and `missingClaimErrors` answers it by STAYING SILENT — so a `.cutover`
+    // the ledger", and `missingClaimErrors` (deleted by BLZ-254) answered it by staying silent — so a `.cutover`
     // that could not be read forgives every genuinely missing claim on the board. The
     // laundering is total: the check exists to prove ids are unique, and this makes it
     // report that they are.

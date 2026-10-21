@@ -107,7 +107,7 @@ The real, consumed keys:
 | `defaultLabels` | The label set fed to the groomer's prompt — the labels it may apply when triaging. It is **not** a fallback taxonomy: `blaze new`/`edit` don't enforce it, and a project with no `labels` of its own stays unconstrained. |
 | `port` | Board port (see [`getting-started.md`](getting-started.md) for the full override order). |
 | `agentCommand` | Command the groomer loop spawns per ticket. |
-| `commitMode` | `"per-op"` (default) or `"batch"`. |
+| `commitMode` | **Ignored since 0.9.0** (BLZ-254): the board never commits. Loading warns once; remove it. |
 | `loops.reconcile`, `loops.groomer` | Enable/cadence/columns for each background loop. |
 | `views` | Toggles Board / List / Live / Metrics / Map / Gantt. `board` can't be disabled. |
 | `schemaVersion` | Compat stamp — see below. |
@@ -127,7 +127,6 @@ A bit richer:
   "projects": ["ENG"],
   "boardTitle": "Engineering",
   "defaultLabels": ["needs-triage"],
-  "commitMode": "batch",
   "views": { "map": false }
 }
 ```

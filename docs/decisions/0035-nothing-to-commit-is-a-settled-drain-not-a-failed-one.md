@@ -1,6 +1,6 @@
 # ADR-0035 — "nothing to commit" is a settled drain, not a failed one
 
-- **Status:** Accepted
+- **Status:** Superseded (2026-10-13, BLZ-254): the pending ledger, `blaze commit` and the commit path this decides are deleted — see ADR-0006's BLZ-254 addendum
 - **Date:** 2026-08-31
 - **Deciders:** Ryan Howman
 - **Ticket:** BLZ-590 (the drain), BLZ-502 and BLZ-422 (the same shape, one layer up)

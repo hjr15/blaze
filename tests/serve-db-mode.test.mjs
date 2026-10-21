@@ -44,9 +44,8 @@ describe("blaze board under BLAZE_WRITE_PORT=db", () => {
       const r = await move(base, "ENG-1", "in-progress");
       const body = await r.json().catch(() => ({}));
       assert.equal(r.status, 200, JSON.stringify(body));
-      // Final review: the body names the store, so the page does not read the git fields
-      // (always false in db mode) as "the file already matched HEAD".
-      assert.deepEqual(body, { ok: true, committed: false, queued: false, db: true, resolution: body.resolution });
+      // BLZ-254: the body names the store and nothing about git — the commit path is gone.
+      assert.deepEqual(body, { ok: true, db: true, resolution: body.resolution });
       assert.equal(body.db, true);
     });
   });

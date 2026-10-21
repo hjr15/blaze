@@ -1,29 +1,34 @@
-// tests/board-overstatement-oracle.test.mjs — BLZ-426 + BLZ-422 + BLZ-427.
+// tests/board-overstatement-oracle.test.mjs — BLZ-426 + BLZ-422 (+ BLZ-427, retired by BLZ-254).
 //
-// THE ASSERTION: every sentence the board says about a reconcile pass and its commit
-// is true of the filesystem and of `git log`. Three surfaces say those sentences and
-// all three could overstate:
+// THE ASSERTION: every sentence the board says about a reconcile pass is true of the
+// filesystem and of `git log`. Two surfaces say those sentences and both could overstate:
 //
 //   BLZ-426  the dashboard's reconcile button rendered a REFUSED preview as
 //            "no code-bound changes" — an in-sync board that is not in sync, it
 //            just never ran.
-//   BLZ-422  `commitFile`'s benign empty-diff no-op returned `{ok:true,status:0}`,
-//            byte-identical to a real commit, so reconcile reported
-//            `commitOutcome: "committed"` with nothing in `git log`.
-//   BLZ-427  `blaze commit`'s subject counted OPS, and had no label for `reconcile`
-//            — so one queued reconcile op covering twelve tickets read "1 reconcile".
+//   BLZ-422  the `reconcile --apply` CLI claimed a commit that `git log` did not hold
+//            (`commitFile`'s benign empty-diff no-op, deleted by BLZ-254, read as "committed"). Since BLZ-254
+//            the claim it must not make is ANY commit: the CLI's applied line and HEAD
+//            are checked against each other on every cell.
+//
+// BLZ-254 (spec §5.5): reconcile stopped committing, and `blaze commit` was deleted. The
+// commit-outcome dimension (committed / no-op / queued / locked / failed) went with them,
+// and so did consumers 3 (`commitOutcomeFrom` + `applySummary`, deleted by BLZ-254) and 4 (`blaze commit`'s
+// subject, BLZ-427), whose modules no longer exist. What is left to vary is whether the
+// board has already been applied once (first-apply / second-apply).
 //
 // GROUND TRUTH IS NEVER THE SUBJECT UNDER TEST. Every number this file checks comes
-// from one of exactly four independent sources, and none of them is a return value
+// from one of exactly three independent sources, and none of them is a return value
 // of the thing being asserted about:
 //   (1) the FILESYSTEM — a before/after snapshot of the ticket tree, where the
 //       status IS the directory, taken around a real `--apply` pass on a pristine
 //       copy of the same fixture;
-//   (2) `git log` / `git rev-parse HEAD` — whether a commit actually exists;
-//   (3) the pending-ledger FILE on disk, read before it is drained;
+//   (2) `git log` / `git rev-parse HEAD` — that no commit exists (BLZ-254);
 //   (4) the FIXTURE SPEC — which conditions this board was built to contain (a
 //       misfiled ticket, a failing `gh`). Presence/absence only, never a count, so
 //       the oracle cannot bless the subject's own arithmetic.
+//   (Source (3), the pending-ledger file, was deleted with the ledger — BLZ-254. The
+//   numbering is kept so the "(4) fixture spec" references below still resolve.)
 // BLZ-423 and BLZ-431 are open tickets for oracles that read their subject for
 // ground truth. This is not a third.
 //
@@ -31,10 +36,9 @@
 //   preview shape ∈ refused-unknown-project / refused-no-key / clean / moves-only /
 //                   cleared / findings / forge-error / forge-error-clean /
 //                   non-moving-update                                         (9)
-//   commit outcome ∈ committed / no-op / queued / locked / failed             (5)
-//   consumer ∈ dashboard-toast / reconcile-cli / commit-outcome-report /
-//              blaze-commit-subject                                           (4)
-// = 9 × 5 × 4 = 180 cells. The size is ASSERTED, not merely printed: deleting a
+//   run ∈ first-apply / second-apply                                          (2)
+//   consumer ∈ dashboard-toast / reconcile-cli                                (2)
+// = 9 × 2 × 2 = 36 cells. The size is ASSERTED, not merely printed: deleting a
 // dimension must fail this file rather than silently shrink it. So is the CLAUSE count,
 // and as of BLZ-444/BLZ-452 it is DERIVED from the cross-product's own shape and checked
 // PER CELL — see `budgetFor`. (The same hole in three sibling oracles was BLZ-415,
@@ -60,27 +64,17 @@
 //     so `moves` was 0 and the toast read "no code-bound changes" ON AN AUTH FAILURE.
 //     That was a live production bug, not a contract gap. The named test at the foot of
 //     this file drives the REAL server and proves those bodies reach the REAL toast.
-//   - reconcile can never reach `commitFile`'s empty-diff no-op: a change entry
-//     requires a byte difference or a rename, so the staged tree is never clean.
-//     The `"no-op"` arm of `commitOutcomeFrom` is therefore UNREACHABLE THROUGH
-//     `reconcile()` and no mutation of reconcile.mjs can kill it. It IS reachable
-//     through `commitFile`'s other callers — `blaze edit` / `blaze resolve` /
-//     `blaze link` / `POST /api/ac` all write an idempotent, byte-identical file —
-//     and it is pinned there, by a real `git commit` that really has nothing to
-//     commit, in the commit-outcome-report consumer below.
+//   - BLZ-254: the bullet that stood here explained why `commitFile`'s empty-diff no-op
+//     was unreachable through reconcile and pinned at consumer 3. Both are deleted.
 //   - BLZ-468: FOUR SHAPES CARRY THEIR WHOLE DELIVERY SIGNAL IN THE `gh` STUB —
 //     `moves-only`, `cleared`, `findings`, `non-moving-update` all plant merged PRs and
 //     nothing else, so a single transient failure of that spawned process makes the pass
-//     legitimately decide nothing, exit ZERO, and queue nothing. That is the mechanism
+//     legitimately decide nothing and exit ZERO. That is the mechanism
 //     behind this file's recorded `executed 678 clauses, expected 682` flake, reproduced
-//     deterministically; it is checked in the reconcile-cli consumer, where the full
-//     working is written out beside the clause.
-//     BLZ-445: because of that, the `no-op` COLUMN means something different at the
-//     reconcile-cli consumer, and it now says so and has its own arm. There it is a
-//     SECOND apply pass with nothing left to decide — it used to fall through to the
-//     same "nothing changed" arm as several other cells, reading as coverage it did
-//     not provide. The genuine empty-diff no-op remains consumer 3's, and only
-//     consumer 3's.
+//     deterministically; it is checked in the reconcile-cli consumer, beside the clause.
+//     BLZ-445: because of that, the `second-apply` run (the `no-op` column before
+//     BLZ-254) has its own arm at the reconcile-cli consumer: a SECOND apply pass with
+//     nothing left to decide.
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
@@ -93,11 +87,7 @@ import { execFileSync, spawnSync } from "node:child_process";
 import { reconcilePreview } from "../scripts/serve.mjs";
 import { pageHtml } from "../scripts/views/page.mjs";
 import { reconcileSummary, SUMMARY_FN_BEGIN, SUMMARY_FN_END } from "../scripts/views/reconcile-summary.mjs";
-import { commitOutcomeFrom, applySummary } from "../scripts/reconcile-commit-report.mjs";
-import { commitFile } from "../scripts/serve-commit.mjs";
-import { commitOrQueue } from "../scripts/commit-or-queue.mjs";
-import { acquireLock, releaseLock } from "../scripts/commit-lock.mjs";
-import { readEntries, sessionId } from "../scripts/pending-ledger.mjs";
+import { isDeepStrictEqual } from "node:util";
 
 // =============================================================================
 // BLZ-414 round 2: THE COUNTER IS THE ASSERTION, not a line written beside it.
@@ -143,7 +133,6 @@ const notMatches = (s, re, msg) => { clauses += 1; assert.doesNotMatch(s, re, ms
 const deepEq = (a, b, msg) => { clauses += 1; assert.deepEqual(a, b, msg); };
 
 const RECONCILE_BIN = join(import.meta.dirname, "..", "scripts", "reconcile.mjs");
-const COMMIT_BIN = join(import.meta.dirname, "..", "scripts", "commit-runner.mjs");
 
 // =============================================================================
 // The three dimensions
@@ -191,9 +180,16 @@ const SHAPES = [
 /** Does an apply pass change ANYTHING on this board? Declared, not measured. */
 const shapeChanges = (shape) => Boolean(shape.moves || shape.other);
 
-const OUTCOMES = ["committed", "no-op", "queued", "locked", "failed"];
+// BLZ-254 (spec §5.5): reconcile no longer commits, so the five commit outcomes this
+// dimension used to range over (committed / no-op / queued / locked / failed) are gone.
+// What still distinguishes two runs of `--apply` is whether the board has ALREADY been
+// applied: a first pass writes what it decides, a second pass on the same tree has
+// nothing left to decide (BLZ-445's reachable "nothing happened", kept).
+const RUNS = ["first-apply", "second-apply"];
 
-const CONSUMERS = ["dashboard-toast", "reconcile-cli", "commit-outcome-report", "blaze-commit-subject"];
+// BLZ-254: consumers 3 (commitOutcomeFrom + applySummary) and 4 (`blaze commit`'s subject) are
+// deleted with the modules they pinned.
+const CONSUMERS = ["dashboard-toast", "reconcile-cli"];
 
 // =============================================================================
 // THE CLAUSE BUDGET — DERIVED, NOT OBSERVED (BLZ-444), AND PER-CELL (BLZ-452)
@@ -231,8 +227,7 @@ const CONSUMERS = ["dashboard-toast", "reconcile-cli", "commit-outcome-report", 
 // (see `assertShapeSpecMatchesGroundTruth`) — so a shape that stopped moving anything
 // fails as a shape, not as an arithmetic mismatch 700 clauses later.
 // =============================================================================
-function budgetFor(shape, outcome, consumer) {
-  const changes = shapeChanges(shape);
+function budgetFor(shape, run, consumer) {
   if (consumer === "dashboard-toast") {
     let n = 1;                                    // (2) git log: a preview never commits
     if (shape.refused) {
@@ -240,39 +235,19 @@ function budgetFor(shape, outcome, consumer) {
     } else {
       n += shape.moves ? 2 : 1;                   // the move count is right, or absent
       n += shape.other ? 2 : 1;                   // ditto the non-moving count
-      // BLZ-450: the in-sync claim is now TWO clauses, not one — which wording was used,
-      // and whether it was qualified — because "no code-bound changes" is an assertion
-      // about the board and a degraded forge is not entitled to make it.
-      if (!shape.moves && !shape.other) n += 2;
+      if (!shape.moves && !shape.other) n += 2;   // BLZ-450: which in-sync wording, and qualified?
       n += 3;                                     // CLEARED count, findings presence, forge presence
     }
-    // The wording-invariant clause compares against the FIRST outcome's text, so it does
-    // not run on that first outcome.
-    if (outcome !== OUTCOMES[0]) n += 1;
+    // The wording-invariant clause compares against the FIRST run's text, so it does not
+    // run on that first run.
+    if (run !== RUNS[0]) n += 1;
     return n;
   }
-  if (consumer === "reconcile-cli") {
-    if (shape.refused) return 4;                  // biconditional + exit 1 + reason + no commit
-    // BLZ-468: +1 on every non-refused cell for the run's own SIGNAL INTEGRITY — see the
-    // clause itself for the mechanism it exists to catch.
-    let n = 3;                                    // BLZ-422 biconditional + exit code + forge integrity
-    if (outcome === "queued") return n + 3;       // no commit + ledger-vs-stdout + BLZ-468 ledger-vs-shape
-    if (outcome === "no-op") return n + 3;        // BLZ-445's own arm, below
-    if (changes && (outcome === "locked" || outcome === "failed")) return n + 2;
-    if (changes && outcome === "committed") return n + 2;
-    return n + 1;                                 // nothing changed, so nothing may commit
-  }
-  if (consumer === "commit-outcome-report") {
-    // Driven by a purpose-built repo of its own, so this consumer's arm is fixed by the
-    // OUTCOME alone — the shape does not reach it.
-    if (outcome === "committed") return 4;
-    if (outcome === "no-op") return 2;
-    if (outcome === "queued") return 5;
-    return 4;                                     // locked / failed
-  }
-  // blaze-commit-subject: the ledger carries a reconcile op exactly when this board both
-  // queued and had something to queue.
-  return outcome === "queued" && changes ? 6 : 2;
+  // reconcile-cli. 1: HEAD never moves (BLZ-254) — on every cell, refused or not.
+  if (shape.refused) return 1 + 3;              // + exit 1 + reason + no applied line
+  let n = 1 + 2;                                // + exit 0 + BLZ-468 forge integrity
+  if (run === "second-apply") return n + 2;     // the first pass wrote iff the shape changes; nothing left
+  return n + (shapeChanges(shape) ? 2 : 1);     // applied line + its moved count, or "nothing to do"
 }
 
 /** Two clauses the extractor runs once per SHAPE, plus the shape-spec agreement clauses. */
@@ -285,10 +260,10 @@ const perShapeBudget = (shape) => 2 + (shape.refused ? 1 : 3);
 /** BLZ-452: one cell's executed clause count against the budget its coordinates imply.
  *  A deleted assertion now fails HERE, naming the cell, rather than surfacing as a wrong
  *  grand total with no indication of where the evidence went. */
-function assertCellBudget(executed, shape, outcome, consumer) {
-  assert.equal(executed, budgetFor(shape, outcome, consumer),
-    `${shape.name}/${outcome}/${consumer}: this cell executed ${executed} clause(s); its ` +
-    `coordinates budget ${budgetFor(shape, outcome, consumer)}. A clause was added or removed ` +
+function assertCellBudget(executed, shape, run, consumer) {
+  assert.equal(executed, budgetFor(shape, run, consumer),
+    `${shape.name}/${run}/${consumer}: this cell executed ${executed} clause(s); its ` +
+    `coordinates budget ${budgetFor(shape, run, consumer)}. A clause was added or removed ` +
     "in this arm — update budgetFor to match the code, deliberately");
 }
 
@@ -355,8 +330,8 @@ function buildShapeFixture(tmp, shape) {
   return { codeRepo, tickets, bin };
 }
 
-/** A fresh board on disk, git-inited and seeded. `cfgExtra` carries commitMode. */
-function materializeBoard(root, fixture, cfgExtra = {}) {
+/** A fresh board on disk, git-inited and seeded. */
+function materializeBoard(root, fixture) {
   const projectsDir = join(root, "projects");
   for (const t of fixture.tickets) {
     const dir = join(projectsDir, t.dirProject, t.status);
@@ -374,7 +349,7 @@ function materializeBoard(root, fixture, cfgExtra = {}) {
       JSON.stringify({ key, codeRepos: key === "ZZZ" ? [fixture.codeRepo] : [] }));
   }
   writeFileSync(join(root, "blaze.config.json"),
-    JSON.stringify({ key: "ZZZ", projects: ["ZZZ", "YYY"], ...cfgExtra }));
+    JSON.stringify({ key: "ZZZ", projects: ["ZZZ", "YYY"] }));
   for (const a of [["init", "-q", "-b", "main"], ["config", "user.email", "t@t.t"],
                    ["config", "user.name", "t"], ["add", "-A"], ["commit", "-q", "-m", "seed"]]) {
     git(root, ...a);
@@ -428,31 +403,6 @@ function measureShape(tmp, shape, fixture, env) {
   return { moved, other, changedIds, refused: false };
 }
 
-// ---- the commit environment each outcome needs -----------------------------
-
-/** Puts a board into the state the named commit outcome requires. Returns a
- *  teardown. `committed` and `no-op` need nothing here: `no-op` is realised at the
- *  `commitFile` layer (see the reachability note in the header). */
-function applyOutcomeEnv(root, outcome) {
-  if (outcome === "queued") {
-    const p = join(root, "blaze.config.json");
-    writeFileSync(p, JSON.stringify({ ...JSON.parse(readFileSync(p, "utf8")), commitMode: "batch" }));
-    return () => {};
-  }
-  if (outcome === "locked") {
-    assert.equal(acquireLock(root, { session: "oracle-other-writer" }).ok, true);
-    return () => releaseLock(root);
-  }
-  if (outcome === "failed") {
-    const hook = join(root, ".git", "hooks", "pre-commit");
-    mkdirSync(join(root, ".git", "hooks"), { recursive: true });
-    writeFileSync(hook, "#!/bin/sh\necho 'oracle: pre-commit refuses' >&2\nexit 1\n");
-    execFileSync("chmod", ["+x", hook]);
-    return () => rmSync(hook, { force: true });
-  }
-  return () => {};
-}
-
 // =============================================================================
 // Consumer 1 — the dashboard toast (BLZ-426)
 // =============================================================================
@@ -485,23 +435,23 @@ const CLEARED_RE = /(\d+) would have their branch\/pr CLEARED/;
 // The oracle
 // =============================================================================
 
-test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross-product", async (t) => {
+test("BLZ-426 + BLZ-422: no board surface overstates, across the cross-product", async (t) => {
   // --- the cross-product's own size, ASSERTED (BLZ-415/420/437) -------------
   assert.equal(SHAPES.length, 9, "preview-shape dimension changed size");
-  assert.equal(OUTCOMES.length, 5, "commit-outcome dimension changed size");
-  assert.equal(CONSUMERS.length, 4, "consumer dimension changed size");
+  assert.equal(RUNS.length, 2, "run dimension changed size");
+  assert.equal(CONSUMERS.length, 2, "consumer dimension changed size");
   const CELLS = [];
-  for (const shape of SHAPES) for (const outcome of OUTCOMES) for (const consumer of CONSUMERS) {
-    CELLS.push({ shape, outcome, consumer });
+  for (const shape of SHAPES) for (const run of RUNS) for (const consumer of CONSUMERS) {
+    CELLS.push({ shape, run, consumer });
   }
-  assert.equal(CELLS.length, 180,
-    `the cross-product must be 9 × 5 × 4 = 180 cells, got ${CELLS.length} — a dimension was deleted`);
+  assert.equal(CELLS.length, 36,
+    `the cross-product must be 9 × 2 × 2 = 36 cells, got ${CELLS.length} — a dimension was deleted`);
 
   // BLZ-444: the total is the SUM OF THE CROSS-PRODUCT'S OWN BUDGET, not a number read
   // off a run. Nothing below may adjust it.
   const EXPECTED_CLAUSES =
     SHAPES.reduce((n, shape) => n + perShapeBudget(shape), 0)
-    + CELLS.reduce((n, c) => n + budgetFor(c.shape, c.outcome, c.consumer), 0)
+    + CELLS.reduce((n, c) => n + budgetFor(c.shape, c.run, c.consumer), 0)
     + 1;   // the clause-kinds non-vacuity check at the very end
 
   const tmp = mkdtempSync(join(tmpdir(), "blz426-oracle-"));
@@ -543,16 +493,15 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
 
       let invariantText = null;
 
-      for (const outcome of OUTCOMES) {
-        await t.test(`${shape.name} × ${outcome}`, async () => {
+      for (const run of RUNS) {
+        await t.test(`${shape.name} × ${run}`, async () => {
           // ---------------------------------------------------------------
           // CONSUMER 1: dashboard-toast
           // ---------------------------------------------------------------
           {
             const cellStart = clauses;   // BLZ-452: this cell's own budget
-            const root = mkdtempSync(join(tmp, `dash-${shape.name}-${outcome}-`));
+            const root = mkdtempSync(join(tmp, `dash-${shape.name}-${run}-`));
             const projectsDir = materializeBoard(root, fixture);
-            const teardown = applyOutcomeEnv(root, outcome);
             const headBefore = head(root);
             const prevPath = process.env.PATH;
             process.env.PATH = env.PATH;
@@ -561,7 +510,6 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
               body = await reconcilePreview({ root, projectsDir, projects: shape.projects });
             } finally {
               process.env.PATH = prevPath;
-              teardown();
             }
             const text = summaryFn(body);
             if (/REFUSED/.test(text)) clauseKindsSeen.add("refused");
@@ -575,38 +523,38 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
             if (/need attention/.test(text)) clauseKindsSeen.add("findings");
             if (/forge problem/.test(text)) clauseKindsSeen.add("forge");
 
-            // (2) git log: a PREVIEW never commits, whatever the commit environment.
+            // (2) git log: a PREVIEW never commits, whatever the run.
             eq(head(root), headBefore,
-              `${shape.name}/${outcome}: the preview moved HEAD — a dry run must never commit`);
+              `${shape.name}/${run}: the preview moved HEAD — a dry run must never commit`);
 
             if (shape.refused) {
               matches(text, /REFUSED/,
-                `${shape.name}/${outcome}: a refused preview must say so; it said ${JSON.stringify(text)}`);
+                `${shape.name}/${run}: a refused preview must say so; it said ${JSON.stringify(text)}`);
               notMatches(text, /no code-bound changes/,
-                `${shape.name}/${outcome}: a refusal was rendered as an in-sync board — BLZ-426's own defect`);
+                `${shape.name}/${run}: a refusal was rendered as an in-sync board — BLZ-426's own defect`);
               notMatches(text, MOVES_RE,
-                `${shape.name}/${outcome}: a refused run reported a move count it never computed`);
+                `${shape.name}/${run}: a refused run reported a move count it never computed`);
             } else {
               // (1) filesystem: the counts a real apply pass produces on this fixture.
               const m = MOVES_RE.exec(text);
               if (gt.moved > 0) {
-                ok(m, `${shape.name}/${outcome}: ${gt.moved} ticket(s) really move but the toast says ` +
+                ok(m, `${shape.name}/${run}: ${gt.moved} ticket(s) really move but the toast says ` +
                   `${JSON.stringify(text)}`);
                 eq(Number(m[1]), gt.moved,
-                  `${shape.name}/${outcome}: the toast's move count must equal the real directory-change count`);
+                  `${shape.name}/${run}: the toast's move count must equal the real directory-change count`);
               } else {
                 eq(m, null,
-                  `${shape.name}/${outcome}: the toast claims moves that no apply pass makes`);
+                  `${shape.name}/${run}: the toast claims moves that no apply pass makes`);
               }
               const o = OTHER_RE.exec(text);
               if (gt.other > 0) {
-                ok(o, `${shape.name}/${outcome}: ${gt.other} non-moving write(s) really happen but the ` +
+                ok(o, `${shape.name}/${run}: ${gt.other} non-moving write(s) really happen but the ` +
                   `toast folds them into (or hides them from) the move count: ${JSON.stringify(text)}`);
                 eq(Number(o[1]), gt.other,
-                  `${shape.name}/${outcome}: the toast's non-moving count must equal the real content-change count`);
+                  `${shape.name}/${run}: the toast's non-moving count must equal the real content-change count`);
               } else {
                 eq(o, null,
-                  `${shape.name}/${outcome}: the toast claims non-moving updates that never happen`);
+                  `${shape.name}/${run}: the toast claims non-moving updates that never happen`);
               }
               if (gt.moved === 0 && gt.other === 0) {
                 // BLZ-450. "no code-bound changes" is an IN-SYNC CLAIM about the board,
@@ -617,11 +565,11 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
                 // (source (4), presence only) — never anything the toast said.
                 matches(text,
                   shape.expectForge ? /no code-bound change was DECIDABLE/ : /no code-bound changes/,
-                  `${shape.name}/${outcome}: a board with nothing to do and a ` +
+                  `${shape.name}/${run}: a board with nothing to do and a ` +
                   `${shape.expectForge ? "DEGRADED" : "healthy"} forge check must say so in ` +
                   `those terms; it said ${JSON.stringify(text)}`);
                 eq(/says nothing about whether the board is in sync/.test(text), shape.expectForge,
-                  `${shape.name}/${outcome}: the in-sync claim must be QUALIFIED exactly when ` +
+                  `${shape.name}/${run}: the in-sync claim must be QUALIFIED exactly when ` +
                   "the forge could not be read — an unqualified 'no code-bound changes' beside " +
                   `'N forge problem(s)' is BLZ-450's own defect. Got ${JSON.stringify(text)}`);
               }
@@ -629,24 +577,22 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
               const clearedGT = gt.changedIds.length === 0 ? 0 : countCleared(tmp, shape, fixture, env);
               const cl = CLEARED_RE.exec(text);
               eq(cl ? Number(cl[1]) : 0, clearedGT,
-                `${shape.name}/${outcome}: the toast's CLEARED count must equal the number of tickets whose ` +
+                `${shape.name}/${run}: the toast's CLEARED count must equal the number of tickets whose ` +
                 `branch/pr really disappeared from disk (${clearedGT})`);
               // (4) fixture spec: presence only.
               eq(/need attention/.test(text), shape.expectFindings,
-                `${shape.name}/${outcome}: findings clause presence disagrees with what this board was built to contain`);
+                `${shape.name}/${run}: findings clause presence disagrees with what this board was built to contain`);
               eq(/forge problem\(s\)/.test(text), shape.expectForge,
-                `${shape.name}/${outcome}: forge clause presence disagrees with what this board was built to contain`);
+                `${shape.name}/${run}: forge clause presence disagrees with what this board was built to contain`);
             }
-            // A preview never commits, so the commit environment must not change one
-            // word of what it says. This is the outcome dimension's own assertion for
-            // this consumer.
+            // A preview writes nothing, so two fresh boards must read identically. This is
+            // the run dimension's own assertion for this consumer.
             if (invariantText === null) invariantText = text;
             else {
               eq(text, invariantText,
-                `${shape.name}/${outcome}: the toast changed wording with the COMMIT environment — ` +
-                "a preview commits nothing and must read identically");
+                `${shape.name}/${run}: the toast changed wording between two fresh boards — a preview must read identically`);
             }
-            assertCellBudget(clauses - cellStart, shape, outcome, "dashboard-toast");
+            assertCellBudget(clauses - cellStart, shape, run, "dashboard-toast");
             cellsEvaluated += 1;
             rmSync(root, { recursive: true, force: true });
           }
@@ -654,259 +600,60 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
           // ---------------------------------------------------------------
           // CONSUMER 2: the `reconcile --apply` CLI
           // ---------------------------------------------------------------
-          const cliRoot = mkdtempSync(join(tmp, `cli-${shape.name}-${outcome}-`));
-          materializeBoard(cliRoot, fixture);
-          const cliTeardown = applyOutcomeEnv(cliRoot, outcome);
+          const cliRoot = mkdtempSync(join(tmp, `cli-${shape.name}-${run}-`));
+          const cliProjects = materializeBoard(cliRoot, fixture);
           const cliCellStart = clauses;   // BLZ-452: this cell's own budget
-          let res;
-          try {
-            const headBefore = head(cliRoot);
-            if (outcome === "no-op") {
-              // reconcile cannot reach commitFile's empty-diff no-op (header note);
-              // the reachable "nothing entered git log" shape for THIS consumer is a
-              // second pass with nothing left to decide.
-              spawnSync(process.execPath, [RECONCILE_BIN, "--apply", ...shape.cliArgs],
-                { cwd: cliRoot, encoding: "utf8", env });
-            }
-            const headBefore2 = outcome === "no-op" ? head(cliRoot) : headBefore;
-            res = spawnSync(process.execPath, [RECONCILE_BIN, "--apply", ...shape.cliArgs],
+          const headBefore = head(cliRoot);
+          let firstWrote = null;
+          if (run === "second-apply") {
+            const snapBefore = snapshotBoard(cliProjects);
+            spawnSync(process.execPath, [RECONCILE_BIN, "--apply", ...shape.cliArgs],
               { cwd: cliRoot, encoding: "utf8", env });
-            const headAfter = head(cliRoot);
-            const headMoved = headAfter !== headBefore2;
-            const out = `${res.stdout}\n${res.stderr}`;
+            firstWrote = !isDeepStrictEqual(snapshotBoard(cliProjects), snapBefore);
+          }
+          const res = spawnSync(process.execPath, [RECONCILE_BIN, "--apply", ...shape.cliArgs],
+            { cwd: cliRoot, encoding: "utf8", env });
+          const out = `${res.stdout}\n${res.stderr}`;
 
-            // THE BLZ-422 BICONDITIONAL, against `git log` and nothing else.
-            eq(/reconcile: committed /.test(res.stdout), headMoved,
-              `${shape.name}/${outcome}: the CLI ${/reconcile: committed /.test(res.stdout) ? "claimed a commit" : "did not claim a commit"} ` +
-              `but HEAD ${headMoved ? "moved" : "did not move"} — output was ${JSON.stringify(out)}`);
+          // BLZ-254 (spec §5.5): reconcile never commits — not on a first pass, not on a second,
+          // not on a refusal. `git log` is the ground truth, never the CLI's own words.
+          eq(head(cliRoot), headBefore,
+            `${shape.name}/${run}: reconcile moved HEAD — the board never commits; output was ${JSON.stringify(out)}`);
 
-            if (!shape.refused) {
-              // BLZ-452: THE EXIT CODE, asserted on every non-refused cell. Its absence is
-              // how a cell could degrade in silence: a `queued` run that died before
-              // queueing anything left `/reconcile: queued /` false AND the ledger empty,
-              // so the biconditional below held, `blaze commit` said "nothing to flush",
-              // and the ONLY trace was the grand clause total coming up short. That is the
-              // 678-vs-682 signature this file was flaky with. An exit code is a fact
-              // about the run, independent of everything it printed.
-              const expectExit = shapeChanges(shape) && (outcome === "locked" || outcome === "failed")
-                ? 1 : 0;
-              eq(res.status, expectExit,
-                `${shape.name}/${outcome}: expected exit ${expectExit}, got ${res.status} — ` +
-                `output was ${JSON.stringify(out)}`);
-
-              // BLZ-468: THE RUN'S OWN SIGNAL, checked against what this fixture declared.
-              //
-              // BLZ-452 made the recorded flake legible and this is the mechanism underneath
-              // it, reproduced deterministically rather than waited for. Four of the nine
-              // shapes — `moves-only`, `cleared`, `findings`, `non-moving-update` — plant
-              // their entire delivery signal in the `gh` stub's payload: no branch, no
-              // commit naming the id. So ONE transient failure of that spawned process (the
-              // shape `execFileSync` reports when a fork fails under load: `ok:false`,
-              // `status:null`) empties the PR map, reconcile legitimately decides nothing,
-              // and the run prints `no code-bound change found — nothing to do.` and exits
-              // ZERO with an empty ledger.
-              //
-              // Demonstrated on the `moves-only` fixture: with a healthy stub, exit 0,
-              // `reconcile: queued …`, 1 ledger entry; with a stub that exits 1, exit 0,
-              // no queued line, 0 ledger entries. Every clause in this cell still PASSED —
-              // the committed biconditional is false/false, the exit code is 0, nothing was
-              // committed, and the ledger biconditional is false/false. The cell that
-              // degraded was `blaze-commit-subject`, which took its empty-ledger arm and
-              // executed 2 clauses instead of 6: MINUS FOUR, which is exactly the
-              // `executed 678 clauses, expected 682` this file flaked with.
-              //
-              // So BLZ-452's stated signature is wrong and this corrects it: the run does
-              // not exit 1, it exits 0, and no exit-code assertion can see this. What can
-              // is the run's own account of its forge, which reconcile already prints on
-              // stderr on every run regardless of --quiet — checked here against the
-              // fixture's declaration (ground-truth source (4), presence only).
-              eq(/^reconcile: FORGE (UNREADABLE|DATA) —/m.test(res.stderr), Boolean(shape.expectForge),
-                `${shape.name}/${outcome}: this fixture declares expectForge=${Boolean(shape.expectForge)} ` +
-                `but the run ${/^reconcile: FORGE /m.test(res.stderr) ? "reported" : "reported no"} forge ` +
-                "problem. A transient failure of the spawned `gh` empties this shape's only delivery " +
-                `signal and the pass silently decides nothing — output was ${JSON.stringify(out)}`);
-            }
-
-            if (shape.refused) {
-              eq(res.status, 1, `${shape.name}/${outcome}: a refused run must exit non-zero`);
-              matches(res.stderr, /^reconcile: /m,
-                `${shape.name}/${outcome}: a refused run must say why`);
-              eq(headMoved, false,
-                `${shape.name}/${outcome}: a refused run committed something`);
-            } else if (outcome === "no-op") {
-              // BLZ-445. This column used to fall through to the generic "nothing changed,
-              // so nothing may be committed" arm, indistinguishable from several other
-              // cells — a column that read as coverage it did not provide. `commitFile`'s
-              // genuine empty-diff no-op is UNREACHABLE through reconcile (header note) and
-              // is pinned at consumer 3; what IS reachable here, and what this column is
-              // renamed to mean, is a SECOND apply pass with nothing left to decide. Its
-              // own arm, with the two facts that make it a second pass rather than a first:
-              // the first pass really did (or really did not) commit, exactly as the shape
-              // declares, and the second one finds nothing at all.
-              eq(headMoved, false,
-                `${shape.name}/${outcome}: a second pass with nothing left to decide must not commit`);
-              eq(headBefore2 !== headBefore, shapeChanges(shape),
-                `${shape.name}/${outcome}: the FIRST pass must commit exactly when this board has ` +
-                "something to change — otherwise the second pass is not a second pass at all");
-              matches(out, /no code-bound change found — nothing to do\./,
-                `${shape.name}/${outcome}: a second pass must report an empty pass, not a commit — ` +
-                `output was ${JSON.stringify(out)}`);
-            } else if (outcome === "queued") {
-              eq(headMoved, false,
-                `${shape.name}/${outcome}: a batch-mode run must not commit`);
-              const ledger = readEntries(cliRoot, "oracle");
-              eq(/reconcile: queued /.test(res.stdout), ledger.length > 0,
-                `${shape.name}/${outcome}: the CLI's "queued" claim must match the ledger file on disk`);
-              // BLZ-468: …and the ledger against the SHAPE, not only against stdout. The
-              // biconditional above is satisfied by a run that said nothing and queued
-              // nothing, which is precisely the degraded run. This is the clause that fails
-              // when the signal collapses for a reason the forge line above does not name —
-              // a git probe, whose failure `sh()` deliberately launders into "no signal".
-              eq(ledger.length > 0, shapeChanges(shape),
-                `${shape.name}/${outcome}: the ledger holds ${ledger.length} op(s) but this board ` +
-                `${shapeChanges(shape) ? "has" : "has no"} change to queue. A batch-mode pass that ` +
-                "decided nothing on a board that changes means the run's delivery signal was empty " +
-                `— output was ${JSON.stringify(out)}`);
-            } else if ((outcome === "locked" || outcome === "failed") && shapeChanges(shape)) {
-              eq(headMoved, false,
-                `${shape.name}/${outcome}: nothing may be committed when the commit could not run`);
-              matches(res.stderr, /FAILED TO COMMIT/,
-                `${shape.name}/${outcome}: a commit that did not land must be reported, not swallowed`);
-              // The exit code is asserted once, above, for every non-refused cell.
-            } else if (outcome === "committed" && shapeChanges(shape)) {
-              eq(headMoved, true,
-                `${shape.name}/${outcome}: ${gt.changedIds.length} ticket(s) changed but nothing was committed`);
-              const subject = execFileSync("git", ["-C", cliRoot, "log", "-1", "--format=%s"], { encoding: "utf8" });
-              matches(subject, new RegExp(`\\b${gt.moved} ticket\\(s\\) moved`),
-                `${shape.name}/${outcome}: the commit subject's moved count must equal the real one (${gt.moved})`);
-            } else {
-              eq(headMoved, false,
-                `${shape.name}/${outcome}: nothing changed on disk, so nothing may be committed`);
-            }
-            assertCellBudget(clauses - cliCellStart, shape, outcome, "reconcile-cli");
-            cellsEvaluated += 1;
-          } finally {
-            cliTeardown();
+          if (!shape.refused) {
+            eq(res.status, 0, `${shape.name}/${run}: expected exit 0, got ${res.status} — output was ${JSON.stringify(out)}`);
+            // BLZ-468: the run's own forge account against the fixture's declaration — the clause
+            // that catches a transient `gh` failure emptying this shape's only delivery signal.
+            eq(/^reconcile: FORGE (UNREADABLE|DATA) —/m.test(res.stderr), Boolean(shape.expectForge),
+              `${shape.name}/${run}: this fixture declares expectForge=${Boolean(shape.expectForge)} but the run ` +
+              `${/^reconcile: FORGE /m.test(res.stderr) ? "reported" : "reported no"} forge problem — output was ${JSON.stringify(out)}`);
           }
 
-          // ---------------------------------------------------------------
-          // CONSUMER 3: commitOutcomeFrom + applySummary, driven by a REAL
-          // `commitFile` / `commitOrQueue` result against a real git repo.
-          // ---------------------------------------------------------------
-          {
-            const cellStart = clauses;   // BLZ-452: this cell's own budget
-            const repo = mkdtempSync(join(tmp, `cor-${shape.name}-${outcome}-`));
-            git(repo, "init", "-q", "-b", "main");
-            git(repo, "config", "user.email", "t@t.t");
-            git(repo, "config", "user.name", "t");
-            const f = join(repo, "t.md");
-            writeFileSync(f, "one\n");
-            git(repo, "add", "-A");
-            git(repo, "commit", "-q", "-m", "seed");
-
-            let c;
-            const headBefore = head(repo);
-            if (outcome === "queued") {
-              c = commitOrQueue({ root: repo, mode: "batch", op: "reconcile", id: "reconcile:ZZZ",
-                message: "chore(board): reconcile", files: [f] });
-            } else if (outcome === "no-op") {
-              // The real thing: a byte-identical idempotent re-write. `git commit`
-              // exits non-zero with "nothing to commit" and the staged tree is clean.
-              writeFileSync(f, "one\n");
-              c = commitFile(repo, f, "chore(board): reconcile");
-            } else if (outcome === "locked") {
-              assert.equal(acquireLock(repo, { session: "other" }).ok, true);
-              writeFileSync(f, "two\n");
-              c = commitFile(repo, f, "chore(board): reconcile", [], { retries: 0, delayMs: 1 });
-              releaseLock(repo);
-            } else if (outcome === "failed") {
-              const hook = join(repo, ".git", "hooks", "pre-commit");
-              writeFileSync(hook, "#!/bin/sh\nexit 1\n");
-              execFileSync("chmod", ["+x", hook]);
-              writeFileSync(f, "two\n");
-              c = commitFile(repo, f, "chore(board): reconcile");
-            } else {
-              writeFileSync(f, "two\n");
-              c = commitFile(repo, f, "chore(board): reconcile");
-            }
-            const headMoved = head(repo) !== headBefore;
-            const { outcome: got, error } = commitOutcomeFrom(c);
-            const line = applySummary({
-              outcome: got, error, movedCount: gt.moved ?? 0, nonMovedCount: gt.other ?? 0,
-            });
-
-            // (2) git log is the whole ground truth here.
-            eq(got === "committed", headMoved,
-              `${shape.name}/${outcome}: commitOutcomeFrom said ${JSON.stringify(got)} but HEAD ` +
-              `${headMoved ? "moved" : "did not move"} — a no-op must never be reported as a commit`);
-            eq(Boolean(line && /^reconcile: committed /.test(line.text)), headMoved,
-              `${shape.name}/${outcome}: the rendered line ${line ? JSON.stringify(line.text) : "(none)"} ` +
-              `disagrees with git log about whether a commit exists`);
-            if (got === "queued") {
-              // (3) the ledger file, on disk.
-              // commitOrQueue ran IN-PROCESS here, so its queue is whatever this
-              // process's own sessionId() resolves to — computed the same way rather
-              // than hard-coded.
-              ok(readEntries(repo, sessionId(process.env)).length > 0,
-                `${shape.name}/${outcome}: "queued" was reported with an empty ledger file`);
-            }
-            if (line && (got === "committed" || got === "queued")) {
-              const m = /(\d+) ticket\(s\) moved/.exec(line.text);
-              ok(m, `${shape.name}/${outcome}: the summary line states no moved count`);
-              eq(Number(m[1]), gt.moved ?? 0,
-                `${shape.name}/${outcome}: the summary line's moved count must equal the filesystem's`);
-            }
-            if (got === "locked" || got === "failed") {
-              eq(line.exit, 1, `${shape.name}/${outcome}: an unlanded commit must exit non-zero`);
-              eq(line.stream, "err", `${shape.name}/${outcome}: an unlanded commit must go to stderr`);
-            }
-            assertCellBudget(clauses - cellStart, shape, outcome, "commit-outcome-report");
-            cellsEvaluated += 1;
-            rmSync(repo, { recursive: true, force: true });
+          if (shape.refused) {
+            eq(res.status, 1, `${shape.name}/${run}: a refused run must exit non-zero`);
+            matches(res.stderr, /^reconcile: /m, `${shape.name}/${run}: a refused run must say why`);
+            notMatches(res.stdout, /ticket\(s\) moved/,
+              `${shape.name}/${run}: a refused run claimed writes it never made`);
+          } else if (run === "second-apply") {
+            // BLZ-445, kept: the first pass wrote exactly when this board has something to change,
+            // and the second finds nothing at all.
+            eq(firstWrote, shapeChanges(shape),
+              `${shape.name}/${run}: the FIRST pass must write exactly when this board has something ` +
+              "to change — otherwise the second pass is not a second pass at all");
+            matches(out, /no code-bound change found — nothing to do\./,
+              `${shape.name}/${run}: a second pass must report an empty pass — output was ${JSON.stringify(out)}`);
+          } else if (shapeChanges(shape)) {
+            const m = /reconcile: (\d+) ticket\(s\) moved/.exec(res.stdout);
+            ok(m, `${shape.name}/${run}: ${gt.changedIds.length} ticket(s) changed but the CLI printed no applied line — ` +
+              `output was ${JSON.stringify(out)}`);
+            eq(Number(m[1]), gt.moved,
+              `${shape.name}/${run}: the applied line's moved count must equal the real one (${gt.moved})`);
+          } else {
+            matches(out, /no code-bound change found — nothing to do\./,
+              `${shape.name}/${run}: nothing changes on this board, so the run must say so — output was ${JSON.stringify(out)}`);
           }
-
-          // ---------------------------------------------------------------
-          // CONSUMER 4: `blaze commit`'s subject line (BLZ-427)
-          // ---------------------------------------------------------------
-          {
-            const cellStart = clauses;   // BLZ-452: this cell's own budget
-            // (3) the ledger FILE, read before it is drained.
-            const queued = readEntries(cliRoot, "oracle");
-            const headBefore = head(cliRoot);
-            const flush = spawnSync(process.execPath, [COMMIT_BIN],
-              { cwd: cliRoot, encoding: "utf8", env });
-            const headAfter = head(cliRoot);
-            const headMoved = headAfter !== headBefore;
-
-            eq(headMoved, queued.length > 0,
-              `${shape.name}/${outcome}: \`blaze commit\` ${headMoved ? "committed" : "committed nothing"} ` +
-              `with ${queued.length} op(s) on the ledger — ${flush.stdout}${flush.stderr}`);
-
-            if (queued.length === 0) {
-              matches(`${flush.stdout}${flush.stderr}`, /nothing to flush/,
-                `${shape.name}/${outcome}: an empty ledger must say so`);
-            } else {
-              const subject = execFileSync("git", ["-C", cliRoot, "log", "-1", "--format=%s"], { encoding: "utf8" }).trim();
-              matches(subject, /^blaze: \d{4}-\d{2}-\d{2} board update \(.+\)$/,
-                `${shape.name}/${outcome}: unexpected subject shape: ${JSON.stringify(subject)}`);
-              // (4)+(1): the reconcile op covers gt.changedIds.length TICKETS — the
-              // count comes from the filesystem measurement, not from the ledger's own
-              // arithmetic and not from anything reconcile returned.
-              const reconcileOps = queued.filter((e) => e.op === "reconcile");
-              eq(reconcileOps.length, 1,
-                `${shape.name}/${outcome}: expected exactly one queued reconcile op, got ${reconcileOps.length}`);
-              notMatches(subject, /\b\d+ reconcile\b/,
-                `${shape.name}/${outcome}: the subject printed the raw op name — BLZ-427's missing label`);
-              const n = /(\d+) reconciled/.exec(subject);
-              ok(n, `${shape.name}/${outcome}: the subject does not state a reconciled ticket count: ` +
-                JSON.stringify(subject));
-              eq(Number(n[1]), gt.changedIds.length,
-                `${shape.name}/${outcome}: the subject says ${n[1]} but ${gt.changedIds.length} ticket(s) ` +
-                "really changed — one reconcile OP is not one ticket");
-            }
-            assertCellBudget(clauses - cellStart, shape, outcome, "blaze-commit-subject");
-            cellsEvaluated += 1;
-          }
+          assertCellBudget(clauses - cliCellStart, shape, run, "reconcile-cli");
+          cellsEvaluated += 1;
           rmSync(cliRoot, { recursive: true, force: true });
         });
       }
@@ -918,15 +665,15 @@ test("BLZ-426 + BLZ-422 + BLZ-427: no board surface overstates, across the cross
       ["clean", "clean-degraded", "cleared", "findings", "forge", "moves", "other", "refused"],
       "the cross-product did not exercise every clause the toast can render — " +
       `saw ${JSON.stringify([...clauseKindsSeen].sort())}`);
-    assert.equal(cellsEvaluated, 180,
-      `every one of the 180 cells must be evaluated; ${cellsEvaluated} were`);
+    assert.equal(cellsEvaluated, 36,
+      `every one of the 36 cells must be evaluated; ${cellsEvaluated} were`);
     assert.equal(clauses, EXPECTED_CLAUSES,
       `the oracle executed ${clauses} clauses; the cross-product's own budget is ` +
       `${EXPECTED_CLAUSES}. Every cell already checked its own share, so a mismatch HERE ` +
       "means a clause was added or removed outside a cell — update budgetFor/perShapeBudget "
       + "deliberately rather than letting the oracle shrink");
   } finally {
-    console.log(`BLZ-426 + BLZ-422 + BLZ-427 oracle: ${CELLS.length} cells, ${clauses} clauses executed ` +
+    console.log(`BLZ-426 + BLZ-422 oracle: ${CELLS.length} cells, ${clauses} clauses executed ` +
       "(budget derived from the cross-product's shape, per cell — BLZ-444/BLZ-452).");
     console.log(`  filesystem ground truth per shape — ${shapeGroundTruth.join("; ")}`);
     rmSync(tmp, { recursive: true, force: true });

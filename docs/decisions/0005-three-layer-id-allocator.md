@@ -286,3 +286,12 @@ lands and green after:
 2. Commit a ticket with its claim withheld → **index must error** on ticket-without-claim.
 3. Point `BLAZE_PROJECTS_DIR` at a non-repo dir nested under an unrelated repo → allocation
    must **fail loud**, not reserve into the ancestor's `.git`.
+
+## Addendum (2026-10-13, BLZ-254) — fs is single-machine; the read-side claim check is gone
+
+BLZ-254 (D1) keeps this allocator as fs mode's, and fs mode is now a single-machine mode: a board
+with more than one writer runs in db mode, where `project_counter`'s row lock allocates. The
+read-side backstop BLZ-136 added — `blaze reindex` refusing an id above the cutover with no claim
+(`missingClaimErrors`) — is deleted, because on one machine there is no second writer whose claim
+could be missing. Layers 1 and 2 (the scan and the `O_EXCL` reservation plus the claim ledger) are
+unchanged; layer 2b's remote sweep (`remoteMaxClaim`) still runs, and is harmless with no remote.
