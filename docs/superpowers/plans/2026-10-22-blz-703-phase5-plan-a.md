@@ -26,7 +26,7 @@
 | **E1** | hjr15/blaze | `BLZ-703-e1-db-completeness`, worktree `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-703-e1-db-completeness` off `origin/main` | 1–7 | **Second.** It auto-deploys to the live board (service-platform's `bump` job), and it is inert on v5. Gate: CI green, including the Postgres job; Task 7's v5-compatibility rehearsal is recorded in the PR body; the opus whole-branch review is upheld. |
 | **E2** | hjr15/blaze | `BLZ-703-e2-remote-agent-surface`, worktree `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-703-e2-remote-agent-surface`, **cut from `origin/main` after E1 merges** | 8–12 | **Third.** Gate: as for E1. |
 
-**Writer's call: E2 is built after E1 merges, not beside it** (the spec allows parallel). Both PRs edit `scripts/serve.mjs`, `scripts/cli.mjs`, `tests/model/seam-closure.test.mjs`, `AGENTS.md` and `docs/guide/commands.md`. Building them in parallel buys a rebase across the seam-closure ledger and nothing else, because nothing in the cutover needs E2 before §5 step 8.
+**E2 is built after E1 merges, not beside it** (controller ruling, 2026-10-22; the spec allows parallel). Both PRs edit `scripts/serve.mjs`, `scripts/cli.mjs`, `tests/model/seam-closure.test.mjs`, `AGENTS.md` and `docs/guide/commands.md`. Building them in parallel buys a rebase across the seam-closure ledger and nothing else, because nothing in the cutover needs E2 before §5 step 8.
 
 Each PR's title is `BLZ-703: <G0|E1|E2> — <summary>`. Each commit inside it is `<child key>: <description>`. The PR body lists every child ticket it carries and ends with the attribution line `🤖 Generated with [Claude Code](https://claude.com/claude-code)`.
 
@@ -95,15 +95,15 @@ Each PR's title is `BLZ-703: <G0|E1|E2> — <summary>`. Each commit inside it is
    - Copies and migrations still use one client, because they need one transaction.
 6. **The TLS hint covers four codes, not two.** Measured on 2026-10-22: `fetch` to a self-signed leaf fails with `cause.code === "DEPTH_ZERO_SELF_SIGNED_CERT"`, which is neither of the spec's two codes. A private CA whose chain the server does not send gives `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`. The set is `SELF_SIGNED_CERT_IN_CHAIN`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `DEPTH_ZERO_SELF_SIGNED_CERT` and `UNABLE_TO_GET_ISSUER_CERT_LOCALLY`.
 7. **"Value-shaped like `ticketValue`" means the same top-level keys, not `ticketValue` itself.** `ticketValue` (`write-port.mjs:50`) is a *comparison key*: it stringifies numbers, canonicalises arrays to strings and turns links into sorted strings. **Ruling:** the API returns `ticketJson(rec) = { id, project, status, frontmatter, body }`, where `frontmatter` is the record's own object (numbers stay numbers, `links` stays `[{type,target}]`). The record's `file` (a server path) is never included.
-8. **`GET /api/matrix` has no handler.** It is classified `read` in `ROUTE_SCOPES` (`serve-auth.mjs:54`), and the handler exists in `model/artifact-api.mjs:610`, but `serve.mjs` never wires it, so the route 404s. Spec §8 relies on "The board serves `GET /api/matrix`". **Not fixed in Plan A.** It is recorded for Plan B: §8's matrices row uses `blaze matrices --out` in the pod, which does not need the route. Wiring the route is a separate ticket (open question 4).
+8. **`GET /api/matrix` has no handler.** It is classified `read` in `ROUTE_SCOPES` (`serve-auth.mjs:54`), and the handler exists in `model/artifact-api.mjs:610`, but `serve.mjs` never wires it, so the route 404s. Spec §8 relies on "The board serves `GET /api/matrix`". **Controller ruling (2026-10-22):** no `/api/matrix` route is added. §8's governance verify uses `blaze matrices --out <dir>` run in the pod (`pod-blaze matrices --out`), diffed against the script's 22 files, and the spec's "the board serves `GET /api/matrix`" is read that way. No Plan A step relies on the route.
 9. **"Byte-equal" round-trip of a sprint registry means canonical equality.** JSON key order is not data, and the database cannot return the file's key order. `canonicalStrict` (`write-port.mjs:41`) sorts keys and compares strictly. The verify and the test use it.
 10. **Where the sprint prefetch goes.** The four async consumers already receive the reader the entry point resolved. They are `applyNew`, `applyEdit`, groomer `validateGroomed` and import `loadBoard`. Each reads `await readStorage.sprintRegistry(root)`. Only the sync render paths (`pageHtml`, `viewEnvelope`, `renderView`, `boardModel` → `buildIndex`) take a prefetched `sprints` argument, which `serve.mjs` awaits per request. `loadSprints` and the other sync callers are unchanged (D3).
-11. **`blaze start` (the supervisor) still loads identity from SQLite** (`supervisor.mjs:232`). The live board's pod runs `serve.mjs`, not the supervisor, so G1 holds without it. **Out of scope** (open question 3). Task 10 does make the supervisor's reconcile loop refuse on a db board, because D6 says "on any db board, `blaze reconcile` … refuse".
+11. **`blaze start` (the supervisor) still loads identity from SQLite** (`supervisor.mjs:232`). The live board's pod runs `serve.mjs`, not the supervisor, so G1 holds without it. **Controller ruling (2026-10-22):** it keeps SQLite identity for now. A follow-up ticket, "supervisor (`blaze start`) identity on Postgres", is for the controller to file. Task 10 does make the supervisor's reconcile loop refuse on a db board, because D6 says "on any db board, `blaze reconcile` … refuse".
 12. **The authoritative `older` message cannot be reached today.** An authoritative row is written only at v6, and MIN is 5. Task 1 pins it through `judgeDbSchema` with an injected `min`.
 13. **`absent` for pg identity** (no `app_user` table) can occur at v6 only on a damaged schema. It keeps `loadIdentity`'s meaning (loopback serves unauthenticated, and any other host gets the setup flow) for parity with D2's four states.
 14. **Remote `list --projects`.** Spec §6 regenerates `scripts/project_keys.txt` with `blaze-live list --projects`, and D7 names `GET /api/projects`. So remote `list` gains `--projects` (Task 8).
 15. **`show` and `list` exist only in remote mode.** `cli.mjs` refuses an unknown command before the remote block (`cli.mjs:143`). Both are added to `SUBCOMMANDS` with `remoteOnly: true`, and run locally they print a one-line refusal instead of the usage dump.
-16. **Version: 0.9.0 → 0.10.0 in E1 (Task 6). E2 adds no bump.** 0.9.0 is untagged, and the image already serving the live board reports it. E1 introduces DB schema v6, which a 0.9.0 engine refuses as `newer` (§5 step 4's rollback note), so an operator must be able to tell the two apart. E2 is additive on the same unreleased line. Tagging `v0.10.0` is a Plan B decision.
+16. **Version: 0.9.0 → 0.10.0 in E1 (Task 6). E2 adds no bump.** 0.9.0 is untagged, and the image already serving the live board reports it. E1 introduces DB schema v6, which a 0.9.0 engine refuses as `newer` (§5 step 4's rollback note), so an operator must be able to tell the two apart. E2 is additive on the same unreleased line. **Controller ruling (2026-10-22):** `v0.10.0` is tagged at the cutover, as a Plan B step.
 
 ## Review Focus
 
@@ -1068,11 +1068,13 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - §5 steps 1–10: the three-way config diff, the governance verifies against `blaze_rehearsal`, the freeze, the `pg_dump`, the migrate, the restart, the watch, and the day-14 delete. Finding 4 is an input to this.
 - **G:** the `blaze-live` wrapper, the `blaze-live-board` skill, and the agent/skill/hook/script/settings repoint, including deleting `blaze-activity.sh` (BLZ-725) and **removing Task 0's hook** in the archive PR.
 - H1–H3, the blaze-pm archive (D9), and the board operations on BLZ-206/210 and BLZ-202…218.
-- Wiring `GET /api/matrix` (Finding 8), and the supervisor's identity source (Finding 11).
+- **Tag `v0.10.0`** as a cutover step (controller ruling; Finding 16).
+- §8's matrices verify uses `blaze matrices --out` in the pod, with no `/api/matrix` route (controller ruling; Finding 8).
+- **Follow-up for the controller to file:** "supervisor (`blaze start`) identity on Postgres" (Finding 11).
 
-## Open questions for the operator
+## Operator questions — ruled 2026-10-22
 
-1. **E2 after E1, not in parallel?** This plan builds E2 off `main` once E1 has merged, to avoid a seam-closure and `serve.mjs` rebase. Say if you want them in parallel.
-2. **0.10.0 now, tag later?** E1 moves the tree to 0.10.0 untagged (Finding 16). Tagging `v0.10.0` is left to the cutover.
-3. **Supervisor identity** (Finding 11). `blaze start` keeps SQLite identity, because the live pod does not run it. Is that acceptable, or should a follow-up ticket move it too?
-4. **`GET /api/matrix`** (Finding 8). It is classified but not served. Should a ticket be filed so that §8's "the board serves `/api/matrix`" becomes true, or should §8's wording be changed to `blaze matrices --out`?
+1. E2 after E1, sequentially: kept as written.
+2. `v0.10.0` is tagged at the cutover (Plan B).
+3. `blaze start` keeps SQLite identity; the follow-up is for the controller to file.
+4. No `/api/matrix` route; §8 uses `blaze matrices --out` (Finding 8).
