@@ -1,4 +1,4 @@
-// scripts/db-runner.mjs — `blaze db init|seed-counter|load|verify|status` (BLZ-299).
+// scripts/db-runner.mjs — `blaze db init|seed-counter|load|verify|migrate|status` (BLZ-299).
 //
 // ADR-0012 makes schema creation an EXPLICIT, named operation: runtime `open()` reads
 // and refuses rather than writing DDL behind your back (BLZ-297). This is that named
@@ -21,6 +21,7 @@ import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
+import { migrateDb } from "./model/db-migrate.mjs";
 import { assertWritable, subVerbOf } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
@@ -35,10 +36,11 @@ export const USAGE = `usage: blaze db <command>
                 holds tickets unless --replace
   verify        Postgres only: compare the database with this board's files — the
                 migration gate. Exit 0 pass, 1 differences found, 2 could not run
+  migrate       Postgres only: bring the schema forward to v6 in one transaction and mark the database authoritative. With --identity-from <identity.db> and --sprints-from <sprints.json>, copy those in the same transaction, verified row for row
   status        what the database holds, and what the dual-write soak has found
 
   --force       with init, SQLite only: replace an existing shadow database
-  --replace     with load: empty the ticket tables first, in the same transaction
+  --replace     with load: empty the ticket tables first, in the same transaction (refused on an authoritative database — restore a pg_dump instead)
 `;
 
 /** The resolved `database` block, or a printed refusal (null). Resolved BEFORE anything is
@@ -228,6 +230,17 @@ async function loadCmd(ctx) {
     // BLZ-690: the git-era history is read BEFORE the transaction opens. Walking git's rename
     // log is the slowest step of the load and touches no database; inside BEGIN it held the
     // transaction (and every lock the TRUNCATE took) open for the whole walk.
+    // BLZ-705: an AUTHORITATIVE database is the board, not a copy of the files — --replace would
+    // erase it with nothing to reload it from. Refused before the git walk and before BEGIN.
+    if (replace) {
+      const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = 'authoritative'", []);
+      if (rows[0]?.value === "true") {
+        err(`blaze db load: ${where} is authoritative — it IS the board, not a copy loaded from files.`);
+        err("--replace would erase its tickets and their history, and there is no file corpus to reload them from.");
+        err("Nothing was loaded. To roll the database back, restore a pg_dump with pg_restore.");
+        return 1;
+      }
+    }
     let built;
     try { built = ctx.buildTransitions({ root: dataRoot }); }
     catch (e) {
@@ -354,6 +367,51 @@ async function verifyCmd(ctx) {
   if (verdict.ok) { log("verify: PASS"); return 0; }
   log(`verify: FAIL — ${verdict.failures.join("; ")}`);
   return 1;
+}
+
+/**
+ * BLZ-705: `blaze db migrate` — bring a Postgres database forward to DB_SCHEMA_VERSION in one
+ * transaction and mark it authoritative (`migrateDb`). Connects with `openPgClient` directly,
+ * NOT `openCheckedPg`: that refuses the very states (older, empty, unstamped) migrate must name
+ * itself.
+ */
+async function migrateCmd(ctx) {
+  const { log, err, openPgClient } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig || !writableOr(ctx, "migrate")) return 1;
+  // (BLZ-706 / BLZ-707: the stranded-file refusals go here, before any connect — review I5.)
+  if (dbConfig.driver !== "postgres") {
+    err("blaze db migrate: migrates a Postgres database. The SQLite shadow is derived — rebuild it with 'blaze db init --force'.");
+    return 1;
+  }
+  const where = describePgTarget(dbConfig.connection);
+  let client;
+  try { client = await openPgClient(dbConfig.connection); }
+  catch (e) { err(`blaze db migrate: cannot connect to ${where} — ${e.message}`); return 1; }
+  try {
+    let r;
+    try { r = await migrateDb(pgExec(client)); }
+    catch (e) {
+      // review M6: one `blaze: ` prefix at most, never `blaze db migrate: … — blaze: …`.
+      err(`blaze db migrate: ${where} — ${String(e.message).replace(/^blaze: /, "")}`);
+      err("Nothing was migrated: the migration runs in one transaction.");
+      return 1;
+    }
+    log(`blaze db migrate — ${where}`);
+    log(`  schema         ${r.steps.length ? `v${r.from} → v${r.to}` : `v${r.to}, already current`}`);
+    log(`  authoritative  ${r.authoritative === "written" ? "yes (written now)" : "yes (already)"}`);
+    log("migrate: DONE — one transaction, committed.");
+    return 0;
+  } finally {
+    try { await client.end(); } catch { /* already closed */ }
+  }
+}
+
+/** BLZ-705: the path after `flag`, or null with the refusal printed. */
+function flagPath(argv, flag, err) {
+  const v = argv[argv.indexOf(flag) + 1];
+  if (v === undefined || v.startsWith("-")) { err(`blaze db migrate: ${flag} needs a path`); return null; }
+  return v;
 }
 
 async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransitions: buildHistory }) {
@@ -608,6 +666,16 @@ export async function runDb(argv, io = {}) {
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
   if (cmd === "load") return loadCmd(ctx);
   if (cmd === "verify") return verifyCmd(ctx);
+  if (cmd === "migrate") {
+    // BLZ-706 / BLZ-707 give these meaning; parsed (and refused when empty) from the start.
+    for (const [flag, key] of [["--identity-from", "identityFrom"], ["--sprints-from", "sprintsFrom"]]) {
+      if (!argv.includes(flag)) continue;
+      const path = flagPath(argv, flag, err);
+      if (path === null) return 1;
+      ctx[key] = path;
+    }
+    return migrateCmd(ctx);
+  }
   if (cmd === "status") return status(ctx);
   err(`blaze db: unknown command ${JSON.stringify(cmd)}\n`);
   err(USAGE);

@@ -34,6 +34,7 @@ import { fileURLToPath } from "node:url";
 import { configDdl } from "../scripts/model/config-schema.mjs";
 import { projectionDdl } from "../scripts/model/projection-schema.mjs";
 import { writeRulesDdl } from "../scripts/model/write-rules.mjs";
+import { sprintDdl } from "../scripts/model/sprint-store.mjs";
 import { deriveBoards } from "../scripts/model/boards.mjs";
 import { DEFAULT_TYPES } from "../scripts/model/schema.mjs";
 import { DEFAULT_WORKFLOWS } from "../scripts/model/workflows.mjs";
@@ -44,8 +45,9 @@ const ADR = join(ROOT, "docs", "decisions", "0014-tenancy-is-deferred-and-row-le
 /** A singleton is `id integer PRIMARY KEY CHECK (id = 1)` — ADR-0014's own definition. */
 const SINGLETON = /CHECK\s*\(\s*id\s*=\s*1\s*\)/;
 
-/** The three modules that emit DDL containing a singleton. Asserted complete below. */
-const DDL = { "config-schema.mjs": configDdl, "projection-schema.mjs": projectionDdl, "write-rules.mjs": writeRulesDdl };
+/** The four modules that emit DDL containing a singleton. Asserted complete below. */
+const DDL = { "config-schema.mjs": configDdl, "projection-schema.mjs": projectionDdl, "write-rules.mjs": writeRulesDdl,
+              "sprint-store.mjs": sprintDdl };   // BLZ-705: sprint_registry (spec D3).
 
 /**
  * Strip `--` line comments and single-quoted literals, so a `CREATE TABLE` mentioned in a
@@ -190,7 +192,7 @@ test("BLZ-362: every file:line ADR-0014 cites lands on the singleton CHECK", () 
 });
 
 test("BLZ-362: no module anywhere under scripts/ declares a singleton the inventory misses", () => {
-  // The inventory is only complete if the three modules it executes are the only ones that
+  // The inventory is only complete if the four modules it executes are the only ones that
   // can produce a singleton. A fourth grows one, this goes red, and the test is extended
   // rather than the ADR quietly understating itself again.
   //

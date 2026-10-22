@@ -33,3 +33,35 @@ export async function pgClient(url) {
   await c.connect();
   return c;
 }
+
+/**
+ * BLZ-705: shape `url`'s (empty) database exactly as a 0.9.0 engine created it — schema v5, with
+ * no identity or sprint tables. A v6 create, minus what v6 added, restamped 5.
+ */
+export async function makeV5(url) {
+  const { createDbSchema } = await import("../../scripts/model/db-schema-version.mjs");
+  const { pgExec } = await import("../../scripts/model/write-port-resolve.mjs");
+  const c = await pgClient(url);
+  try {
+    await createDbSchema(pgExec(c), { dialect: "postgres" });
+    await c.query("DROP TABLE user_session, local_password, api_token, membership, user_identity, "
+      + "app_user, sprint, sprint_registry");
+    await c.query("UPDATE blaze_meta SET value = '5' WHERE key = 'schema_version'");
+  } finally { await c.end(); }
+}
+
+/**
+ * BLZ-705: the `BLAZE_DB_*` env a spawned engine resolves `url` from. The password travels in
+ * BLAZE_TEST_PG_PASSWORD, named by BLAZE_DB_PASSWORD_ENV — never in a URL on a command line.
+ */
+export function pgEnvFor(url) {
+  const u = new URL(url);
+  return {
+    BLAZE_DB_HOST: u.hostname,
+    BLAZE_DB_PORT: u.port || "5432",
+    BLAZE_DB_NAME: decodeURIComponent(u.pathname.replace(/^\//, "")),
+    BLAZE_DB_USER: decodeURIComponent(u.username),
+    BLAZE_DB_PASSWORD_ENV: "BLAZE_TEST_PG_PASSWORD",
+    BLAZE_TEST_PG_PASSWORD: decodeURIComponent(u.password),
+  };
+}

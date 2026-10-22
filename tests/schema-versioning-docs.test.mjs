@@ -60,16 +60,15 @@ test("BLZ-356: the doc does not claim there is nothing to migrate once past vers
 // document, and it went stale the moment this ticket bumped the number. An operator reads
 // this section after a refusal, which is exactly when it has to be right.
 
-test("BLZ-377: the doc's DB schema version matches the constant", () => {
+test("BLZ-705: the doc's DB schema version and floor match the constants", () => {
   const text = readFileSync(DOC, "utf8");
-  const m = /\*\*Both are (\d+) as of ([A-Z]+-\d+)\.\*\*/.exec(text);
+  const m = /\*\*The version is (\d+) and the floor is (\d+), as of ([A-Z]+-\d+)\.\*\*/.exec(text);
   assert.notEqual(m, null,
-    'the DB-schema section must carry a "**Both are N as of TICKET.**" sentence');
+    'the DB-schema section must carry a "**The version is N and the floor is M, as of TICKET.**" sentence');
   assert.equal(Number(m[1]), DB_SCHEMA_VERSION,
     `docs/schema-versioning.md says the DB schema version is ${m[1]}, the code says ${DB_SCHEMA_VERSION}`);
-  assert.equal(DB_SCHEMA_VERSION, MIN_DB_SCHEMA_VERSION,
-    'the doc says "both are N", so this claim only holds while the two constants agree — '
-    + `they are ${DB_SCHEMA_VERSION} and ${MIN_DB_SCHEMA_VERSION}`);
+  assert.equal(Number(m[2]), MIN_DB_SCHEMA_VERSION,
+    `docs/schema-versioning.md says the DB schema floor is ${m[2]}, the code says ${MIN_DB_SCHEMA_VERSION}`);
 });
 
 /** The "The DATABASE schema is a different number" section alone. Everything above it is the

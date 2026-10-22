@@ -21,6 +21,7 @@ Blaze v3 has **no tenant dimension**. Four tables are `id integer PRIMARY KEY CH
 | `blaze_config.config_version` | `scripts/model/config-schema.mjs:114` |
 | `projection_meta` | `scripts/model/projection-schema.mjs:28` |
 | `migration_mode` | `scripts/model/write-rules.mjs:69` (SQLite), `scripts/model/write-rules.mjs:119` (Postgres) |
+| `sprint_registry` | `scripts/model/sprint-store.mjs:36` |
 
 `migration_mode` is **one** table declared once per dialect, not two. `blaze_config.board`
 is the table ADR-0021 renames to `blaze_config.installation`; that rename is not yet in the
@@ -166,3 +167,13 @@ it deliberately. The honest limit: a paraphrase ADDED beside the true sentence, 
 replacing it, still passes. No text check bounds paraphrase, and claiming otherwise would be the
 same kind of overstatement this amendment exists to correct. ADR-0021 carries the same correction forward
 in prose and is the record of the `board` → `installation` rename.
+
+## Amendment — 2026-10-22 (BLZ-705)
+
+Schema v6 adds `sprint_registry` (spec D3), a singleton by this ADR's own definition, and the
+inventory above now lists it. Its singleton is **declared in both dialects and installed on
+Postgres only**. `sprintDdl(dialect)` emits the same two tables for SQLite and Postgres, so the
+inventory and the driver-agreement test still read one set, with no exemption clause. But only
+Postgres installs it: the SQLite shadow is derived, and a sprint written there would be lost on
+the next rebuild. The SQLite form is an inert twin. The tenancy reasoning is unchanged, since
+one board is one registry.

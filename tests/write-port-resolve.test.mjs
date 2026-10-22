@@ -222,7 +222,7 @@ describe("resolveWritePort opens real Postgres when database.driver is postgres"
   const stampedCurrentClient = () => ({
     async query(sql) {
       if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
-      if (sql.includes("blaze_meta")) return { rows: [{ value: "5" }] };
+      if (sql.includes("blaze_meta")) return { rows: [{ key: "schema_version", value: "5" }] };   // BLZ-705: the facts read is one keyed query
       return { rows: [] };
     },
     async end() {},
@@ -268,7 +268,7 @@ describe("resolveWritePort opens real Postgres when database.driver is postgres"
     const client = {
       async query(sql) {
         if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
-        if (sql.includes("blaze_meta")) return { rows: [{ value: "4" }] }; // below MIN_DB_SCHEMA_VERSION
+        if (sql.includes("blaze_meta")) return { rows: [{ key: "schema_version", value: "4" }] }; // below MIN_DB_SCHEMA_VERSION — BLZ-705: keyed row
         return { rows: [] };
       },
       async end() { ended.push(true); },

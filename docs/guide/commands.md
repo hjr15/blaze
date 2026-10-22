@@ -598,6 +598,7 @@ blaze db init [--force]
 blaze db seed-counter
 blaze db load [--replace]
 blaze db verify
+blaze db migrate
 blaze db status
 ```
 
@@ -608,14 +609,34 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 | Subcommand | SQLite | Postgres |
 |---|---|---|
 | `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
-| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. Rows it deliberately drops or collapses — a dangling parent or link, a repeated link, label or component, a worklog entry under half a minute — are counted, and the load says that `blaze db verify` will report each as a value difference. The git history is read before the transaction opens. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter, the identity tables or the sprint tables) in the same transaction. **`--replace` is refused on an authoritative database** (one `blaze db migrate` has marked), naming `pg_restore`: that database is the board, with no file corpus to reload it from. `acceptance_criterion` stays empty — db mode reads criteria from the body. Rows it deliberately drops or collapses — a dangling parent or link, a repeated link, label or component, a worklog entry under half a minute — are counted, and the load says that `blaze db verify` will report each as a value difference. The git history is read before the transaction opens. |
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
 | `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value (unknown frontmatter keys included), the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
+| `migrate` | — (refused: the shadow is derived — rebuild it with `blaze db init --force`) | Brings the schema forward to v6 in **one transaction** and marks the database **authoritative**. See below. |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 
-`verify` and `status` only read, so both run under `BLAZE_READONLY=1`; `init`, `seed-counter` and
-`load` are refused. The exemption is decided by the subcommand itself — `blaze db load verify` is
+`verify` and `status` only read, so both run under `BLAZE_READONLY=1`; `init`, `seed-counter`,
+`load` and `migrate` are refused. The exemption is decided by the subcommand itself — `blaze db load verify` is
 still a load, and still refused.
+
+**`blaze db migrate`** (Postgres only) brings a database forward to the engine's schema version —
+v5 to v6 adds the identity tables and `sprint`/`sprint_registry` — and writes the `blaze_meta` row
+`('authoritative', 'true')`, all in one transaction. It prints the transition and whether the mark
+was written now or already present:
+
+```
+blaze db migrate — <host>/<database>
+  schema         v5 → v6
+  authoritative  yes (written now)
+migrate: DONE — one transaction, committed.
+```
+
+A re-run is a no-op (`v6, already current`, `yes (already)`). A database newer than the engine,
+one with tables but no stamp, an empty one (run `blaze db init`), or one stamped below 5 is
+refused by name, and on any failure nothing is migrated. **Take a `pg_dump` first**: an
+authoritative database is the board, so from then on `load --replace` refuses it and a too-old
+stamp names `blaze db migrate`, never a rebuild — see
+[schema versioning](../schema-versioning.md#authoritative-databases-migrate-derived-ones-rebuild).
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 
