@@ -350,7 +350,12 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `tests/model/db-schema-version.test.mjs:175-185` and `:238-250`;
   - `tests/model/config-install.test.mjs:50-60` **and `:208-211`**. The second is a Postgres-only `assert.equal(Number(v), 5)` inside the PG-gated `BLZ-377: Postgres installs the same namespace…` block, and it fails only when `BLAZE_TEST_PG_URL` is set (review I2);
   - `tests/schema-versioning-docs.test.mjs:62-73`;
-  - `tests/adr-0014-singletons.test.mjs` (the `DDL` map at `:47-48`; review I3).
+  - `tests/adr-0014-singletons.test.mjs` (the `DDL` map at `:47-48`; review I3);
+  - the fake pg clients that answer the schema-facts read (review round 2, N1). The facts now come from one query, `SELECT key, value FROM blaze_meta WHERE key IN ('schema_version', 'authoritative')` (M15), which reads rows by their `key` column. A fake that answers `{ value }` alone would read as unstamped. The exact edits:
+    - `tests/write-port-resolve.test.mjs:224` (`stampedCurrentClient`): `if (sql.includes("blaze_meta")) return { rows: [{ value: "5" }] };` → `if (sql.includes("blaze_meta")) return { rows: [{ key: "schema_version", value: "5" }] };   // BLZ-705: the facts read is one keyed query`
+    - `tests/write-port-resolve.test.mjs:271` (the below-floor client): `return { rows: [{ value: "4" }] }; // below MIN_DB_SCHEMA_VERSION` → `return { rows: [{ key: "schema_version", value: "4" }] }; // below MIN_DB_SCHEMA_VERSION — BLZ-705: keyed row`
+    - `tests/read-storage-resolve.test.mjs:27` (`stampedClient`): `if (sql.includes("blaze_meta")) return { rows: [{ value: "5" }] };` → `if (sql.includes("blaze_meta")) return { rows: [{ key: "schema_version", value: "5" }] };   // BLZ-705: the facts read is one keyed query`
+    - The returned row deliberately carries no `authoritative` row, so these fakes stay non-authoritative. `postgresReader`'s memoised `SELECT value … WHERE key = 'schema_version'` (Task 4) reads the same row's `value`, so it needs no separate answer.
 - Create test: `tests/db-migrate.test.mjs`
 - Docs:
   - `docs/schema-versioning.md` (the DATABASE section);
@@ -479,7 +484,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - [ ] **Step 5: Run them and watch them pass.** Run the Step 2 command, then `npm test` with `BLAZE_TEST_PG_URL` set. Expected: all green. The seam-closure guard must stay green without a new row, because `db-migrate.mjs` and `sprint-store.mjs` import nothing allowlisted yet. If it reddens, the ledger's Task-1 conditional row applies.
 - [ ] **Step 6: Run THE DEBT STEP, then commit.**
   ```bash
-  git add scripts/model/db-schema-version.mjs scripts/model/db-migrate.mjs scripts/model/sprint-store.mjs scripts/db-runner.mjs tests/helpers/pg-scratch.mjs tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs tests/adr-0014-singletons.test.mjs tests/db-migrate.test.mjs docs/schema-versioning.md docs/guide/commands.md docs/decisions/0014-tenancy-is-deferred-and-row-level-is-ruled-out.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
+  git add scripts/model/db-schema-version.mjs scripts/model/db-migrate.mjs scripts/model/sprint-store.mjs scripts/db-runner.mjs tests/helpers/pg-scratch.mjs tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs tests/adr-0014-singletons.test.mjs tests/write-port-resolve.test.mjs tests/read-storage-resolve.test.mjs tests/db-migrate.test.mjs docs/schema-versioning.md docs/guide/commands.md docs/decisions/0014-tenancy-is-deferred-and-row-level-is-ruled-out.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
   git commit -m "BLZ-705: schema v6 and a forward-only blaze db migrate; an authoritative database refuses load --replace"
   ```
 
@@ -792,9 +797,9 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `"BLZ-707: at v6 the gantt renders the database's sprints"`:
     - a v6 Postgres board, `writeSprintRegistry(REG)`, and **no** `sprints.json`;
     - a ticket ENG-1 with `sprint: S2`, `start`/`due` inside S2, loaded with `blaze db load`;
-    - `startServer({ root, projectsDir, port: 0 })` with `process.env` holding `BLAZE_WRITE_PORT=db` and every key of `pgEnvFor(url)` for the run, set and restored in `finally` as `serve-db-mode.test.mjs:17-31` does. The server resolves the database through `resolveDatabaseConfig`'s env layer, so nothing is injected.
+    - `startServer({ root, projectsDir, port: 0, identity: await resolveIdentity({ dataRoot: root }) })` — an explicit identity, because I4's `loadIdentityDefault` refuses a db-mode Postgres board started without one (review round 2, N2). Close it in `finally` with `await identity.close?.()`. Run it with `process.env` holding `BLAZE_WRITE_PORT=db` and every key of `pgEnvFor(url)` for the run, set and restored in `finally` as `serve-db-mode.test.mjs:17-31` does. The server resolves the database through `resolveDatabaseConfig`'s env layer, so nothing is injected.
     - `GET /view/gantt?sprint=S2` → 200, and `JSON.parse(body).html` includes `ENG-1` and `Two`.
-  - `"BLZ-707: --sprint validates against the database registry at v6"`: `applyNew(projectsDir, { project: "ENG", type: "task", title: "t", extra: { estimate: 30, sprint: "S2" }, readStorage: postgresReader(c), writePort: dbWritePort(pgExec(c), { dialect: "postgres" }) })` → `ok: true`. With `sprint: "S9"` → `ok: false`, and errors match `/sprint 'S9' is not in the registry/`.
+  - `"BLZ-707: --sprint validates against the database registry at v6"`: `applyNew(projectsDir, { project: "ENG", type: "task", title: "t", extra: { estimate: 30, sprint: "S2" }, readStorage: postgresReader(c), writePort: dbWritePort(pgExec(c), { dialect: "postgres" }) })` → `ok: true`. With `sprint: "S9"` → `ok: false`, and errors match `/sprint 'S9' is not in the sprint registry/`, the M5 source-neutral wording (review round 2, N3).
   - `"BLZ-707: blaze sprint new and active write the database at v6, and write no sprints.json"`:
     - spawn `node scripts/sprint-runner.mjs new "Three" --start 2026-08-10 --end 2026-08-23` with `BLAZE_WRITE_PORT=db` and `pgEnvFor(url)` → exit 0, and stdout matches `/^created S3 \(database: /`;
     - then `active S3` → exit 0;
@@ -1222,6 +1227,16 @@ The review is `docs/superpowers/plans/2026-10-22-blz-703-phase5-plan-a-review.md
 | M16 | PG run required for Task 5 (Global Constraints) |
 
 **Declined:** none.
+
+**Round 2 (2026-10-23)** found three test-text defects, all fixed:
+
+| Finding | Fix |
+|---|---|
+| N1 | keyed fake pg clients (Task 1) |
+| N2 | the gantt test passes a resolved identity (Task 4) |
+| N3 | the `--sprint` regex uses the M5 wording (Task 4) |
+
+The reviewer verified that the suite is green with these fixes: 5,250 tests, 0 failures, without PG, and 5,325, 0 failures, with PG.
 
 ## Out of scope / Plan B
 
