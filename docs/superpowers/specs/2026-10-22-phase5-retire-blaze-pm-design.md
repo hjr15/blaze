@@ -281,17 +281,20 @@ How (b) works:
 | `new`, `move`, `edit`, `resolve`, `log`, `link` | Remote mode, which exists today (BLZ-684) |
 | `show`, `list` (new) | New `GET /api/ticket?id=` and `GET /api/tickets?project=&status=&type=` (scope `read`, JSON, value-shaped like `ticketValue`). New remote verbs `show` and `list` (`--json`). |
 | Project and taxonomy lookup | New `GET /api/projects` (scope `read`) |
-| `sprint`, `user`, `audit`, `matrices`, `db`, `import` | `kubectl exec -n blaze deploy/blaze -- blaze <verb>` (the pod has the db env). It is an operator or board-operator action. `user token issue` is **operator-only** (A3). |
+| `sprint`, `user`, `audit`, `matrices`, `db`, `import` | `kubectl exec -n blaze deploy/blaze -- blaze <verb>` (the pod has the db env). It is an operator or board-operator action. `user add` prints a token, so it is **operator-only** (A3). |
 
-**Getting a token, without it ever being visible (A3).** The operator runs this once per
-machine, in their own terminal:
+**Getting a token, without it ever being visible (A3).** The engine has no
+`user token issue` verb: `blaze user add` issues a user's first token and prints it once. So
+each machine gets its **own `member` user**, for example `agent+<host>@…`. That costs no
+engine work, and revoking one machine never touches another. **Writer's call.** The operator
+runs this once per machine, in their own terminal:
 
 ```
-kubectl exec -n blaze deploy/blaze -- blaze user token issue --email <e> --scope write
+kubectl exec -n blaze deploy/blaze -- blaze user add --email <agent+host> --role member
 ```
 
-The operator writes the result straight to `~/.config/blaze/token` (mode 0600). An agent
-never runs this command.
+The operator writes the token straight to `~/.config/blaze/token` (mode 0600). An agent never
+runs this command.
 
 - **`BLAZE_TOKEN_FILE`** (new, engine). It is read only when `BLAZE_TOKEN` is unset, so the
   token never sits in an environment that `env` or a child process can print.
