@@ -621,6 +621,8 @@ Children (type `task`, estimates in minutes):
 | 22 | Remove the `blaze-activity.sh` hook and its settings registration (D10) | G | 30 |
 | | **Total** | | **3,585** |
 
+**Filed 2026-10-22 on the live board:** parent **BLZ-703** (under BLZ-2; Relates BLZ-254, BLZ-195); children #1–#22 are **BLZ-704 … BLZ-725** in table order.
+
 BLZ-702 (smoke users) and BLZ-697 (basic-auth) stay under BLZ-254, where they were filed.
 Child 10 carries BLZ-697's change, and BLZ-702 runs at §5 step 10. BLZ-689 and BLZ-696 are
 not part of Phase 5.
