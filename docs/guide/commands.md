@@ -598,7 +598,7 @@ blaze db init [--force]
 blaze db seed-counter
 blaze db load [--replace]
 blaze db verify
-blaze db migrate
+blaze db migrate [--identity-from <identity.db> | --no-identity-import]
 blaze db status
 ```
 
@@ -637,6 +637,24 @@ refused by name, and on any failure nothing is migrated. **Take a `pg_dump` firs
 authoritative database is the board, so from then on `load --replace` refuses it and a too-old
 stamp names `blaze db migrate`, never a rebuild — see
 [schema versioning](../schema-versioning.md#authoritative-databases-migrate-derived-ones-rebuild).
+
+**`--identity-from <path>`** copies all six identity tables (`app_user`, `user_identity`,
+`membership`, `api_token`, `local_password`, `user_session`) from that `identity.db` **verbatim**
+— token hashes, password verifiers and live sessions included — so no token is reissued and every
+existing login keeps working. The copy runs inside the migrate transaction and is verified **row
+for row** (paired by primary key, timestamps compared as instants) before the commit; any
+difference rolls the whole migration back, naming the table, row key and column, never a value.
+It refuses identity tables that already hold users. The source is opened read-only, and a table a
+pre-password roster lacks is copied as empty and marked `(absent in source)`:
+
+```
+  identity       app_user 3 · user_identity 3 · membership 3 · api_token 3 · local_password 1 · user_session 2  (row-for-row verified)
+```
+
+`migrate` **refuses while `<board>/.blaze/identity.db` exists** unless `--identity-from` or
+`--no-identity-import` says what to do with it: after the migrate the board reads its users from
+Postgres only, so a roster left behind would lock every user out. `--no-identity-import` (the file
+is not this board's roster) proceeds and copies nothing; the two flags together are refused.
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 

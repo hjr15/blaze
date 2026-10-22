@@ -22,6 +22,8 @@ import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
 import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
 import { migrateDb } from "./model/db-migrate.mjs";
+import { readIdentityRows, IDENTITY_TABLES } from "./model/identity-copy.mjs";
+import { identityDbPath } from "./model/identity-db.mjs";
 import { assertWritable, subVerbOf } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
@@ -41,6 +43,8 @@ export const USAGE = `usage: blaze db <command>
 
   --force       with init, SQLite only: replace an existing shadow database
   --replace     with load: empty the ticket tables first, in the same transaction (refused on an authoritative database — restore a pg_dump instead)
+  --identity-from <path>  with migrate: copy that identity.db (users, tokens, sessions) verbatim
+  --no-identity-import    with migrate: proceed although .blaze/identity.db exists, copying nothing
 `;
 
 /** The resolved `database` block, or a printed refusal (null). Resolved BEFORE anything is
@@ -376,13 +380,39 @@ async function verifyCmd(ctx) {
  * itself.
  */
 async function migrateCmd(ctx) {
-  const { log, err, openPgClient } = ctx;
+  const { log, err, openPgClient, dataRoot, identityFrom, noIdentityImport } = ctx;
   const dbConfig = dbConfigOr(ctx);
   if (!dbConfig || !writableOr(ctx, "migrate")) return 1;
-  // (BLZ-706 / BLZ-707: the stranded-file refusals go here, before any connect — review I5.)
   if (dbConfig.driver !== "postgres") {
     err("blaze db migrate: migrates a Postgres database. The SQLite shadow is derived — rebuild it with 'blaze db init --force'.");
     return 1;
+  }
+  // Everything below up to the connect decides what to copy, and opens nothing in Postgres.
+  // BLZ-707: the stranded sprints.json refusal joins these.
+  if (identityFrom && noIdentityImport) {
+    err("blaze db migrate: --identity-from and --no-identity-import contradict each other");
+    return 1;
+  }
+  // BLZ-706 (review I5): after the migrate the board reads its users from Postgres only. A roster
+  // left behind in .blaze/identity.db would silently lock every user out, so the operator says
+  // what to do with it.
+  const roster = identityDbPath(dataRoot);
+  if (!identityFrom && !noIdentityImport && existsSync(roster)) {
+    err(`blaze db migrate: ${roster} holds this board's users, tokens and sessions, and this migrate would not copy them.`);
+    err("After a restart the board would read users from Postgres only, so every one of them would stop working.");
+    err(`Copy them in the same transaction:   blaze db migrate --identity-from ${roster}`);
+    err("Or, if that file is not this board's roster, say so explicitly:   blaze db migrate --no-identity-import");
+    err("Nothing was migrated.");
+    return 1;
+  }
+  let identityRows = null;
+  if (identityFrom) {
+    try { identityRows = await readIdentityRows(identityFrom); }
+    catch (e) {
+      err(`blaze db migrate: ${String(e.message).replace(/^blaze: /, "")}`);
+      err("Nothing was migrated.");
+      return 1;
+    }
   }
   const where = describePgTarget(dbConfig.connection);
   let client;
@@ -390,7 +420,7 @@ async function migrateCmd(ctx) {
   catch (e) { err(`blaze db migrate: cannot connect to ${where} — ${e.message}`); return 1; }
   try {
     let r;
-    try { r = await migrateDb(pgExec(client)); }
+    try { r = await migrateDb(pgExec(client), { identityRows }); }
     catch (e) {
       // review M6: one `blaze: ` prefix at most, never `blaze db migrate: … — blaze: …`.
       err(`blaze db migrate: ${where} — ${String(e.message).replace(/^blaze: /, "")}`);
@@ -400,6 +430,11 @@ async function migrateCmd(ctx) {
     log(`blaze db migrate — ${where}`);
     log(`  schema         ${r.steps.length ? `v${r.from} → v${r.to}` : `v${r.to}, already current`}`);
     log(`  authoritative  ${r.authoritative === "written" ? "yes (written now)" : "yes (already)"}`);
+    if (r.identity) {
+      const per = IDENTITY_TABLES.map((t) =>
+        `${t.name} ${r.identity[t.name]}${identityRows[t.name].absent ? " (absent in source)" : ""}`);
+      log(`  identity       ${per.join(" · ")}  (row-for-row verified)`);
+    }
     log("migrate: DONE — one transaction, committed.");
     return 0;
   } finally {
@@ -674,6 +709,7 @@ export async function runDb(argv, io = {}) {
       if (path === null) return 1;
       ctx[key] = path;
     }
+    ctx.noIdentityImport = argv.includes("--no-identity-import");
     return migrateCmd(ctx);
   }
   if (cmd === "status") return status(ctx);

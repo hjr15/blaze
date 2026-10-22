@@ -12,6 +12,7 @@
 import { checkDbSchema, DB_SCHEMA_VERSION, MIGRATE_FROM } from "./db-schema-version.mjs";
 import { identityDdl } from "./identity-schema.mjs";
 import { sprintDdl } from "./sprint-store.mjs";
+import { copyIdentity, verifyIdentity } from "./identity-copy.mjs";
 
 /** v5 → v6: the six identity tables, then sprint/sprint_registry. Additive only. */
 async function v5ToV6(exec) {
@@ -27,8 +28,8 @@ export const MIGRATIONS = new Map([[5, v5ToV6]]);
  * transaction. `exec` is `pgExec(client)` over ONE client; this function owns BEGIN, COMMIT and
  * ROLLBACK, and on any failure rolls back and rethrows, so nothing is half-migrated.
  *
- * `identityRows` and `sprintRegistry` are accepted and not yet used (BLZ-706 and BLZ-707 copy
- * them in the same transaction). `beforeVerify(exec)` is a TEST SEAM: it runs after every write
+ * `identityRows` is `readIdentityRows`'s result (BLZ-706): copied into the identity tables and
+ * verified row for row before the commit. `sprintRegistry` is accepted and not yet used (BLZ-707). `beforeVerify(exec)` is a TEST SEAM: it runs after every write
  * and before the verifies, so a test can disturb what the verifies read.
  *
  * @returns {{ from, to, steps: number[], authoritative: "written"|"already",
@@ -36,7 +37,7 @@ export const MIGRATIONS = new Map([[5, v5ToV6]]);
  */
 export async function migrateDb(exec, { identityRows = null, sprintRegistry = null,
                                         migrations = MIGRATIONS, beforeVerify = null } = {}) {
-  void identityRows; void sprintRegistry;   // BLZ-706 / BLZ-707 give these meaning.
+  void sprintRegistry;   // BLZ-707 gives this meaning.
   await exec.run("BEGIN", []);
   try {
     // Read BEFORE locking (review I1): an empty or unstamped database may have no blaze_meta to
@@ -81,14 +82,16 @@ export async function migrateDb(exec, { identityRows = null, sprintRegistry = nu
       + "ON CONFLICT (key) DO NOTHING RETURNING key", []);
     const authoritative = inserted.length ? "written" : "already";
 
-    // ── copy slot: BLZ-706 (identity) and BLZ-707 (sprints) insert their copies here. ──
+    // ── copy slot: BLZ-706 (identity); BLZ-707 (sprints) inserts its copy here. ──
+    const identity = identityRows ? await copyIdentity(exec, identityRows) : null;
 
     await beforeVerify?.(exec);
 
-    // ── verify slot: BLZ-706 and BLZ-707 insert their row-for-row verifies here. ──
+    // ── verify slot: BLZ-706 (identity); BLZ-707 inserts its row-for-row verify here. ──
+    if (identityRows) await verifyIdentity(exec, identityRows);
 
     await exec.run("COMMIT", []);
-    return { from, to: DB_SCHEMA_VERSION, steps, authoritative, identity: null, sprints: null };
+    return { from, to: DB_SCHEMA_VERSION, steps, authoritative, identity, sprints: null };
   } catch (e) {
     try { await exec.run("ROLLBACK", []); } catch { /* the original error is what matters */ }
     throw e;
