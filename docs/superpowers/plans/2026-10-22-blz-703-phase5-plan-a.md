@@ -22,7 +22,7 @@
 
 | PR | Repo | Branch / worktree | Tasks | Merge order and gate |
 |---|---|---|---|---|
-| **G0** | claude-config | `BLZ-704-blaze-pm-write-guard`, worktree `/home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-guard` off `origin/main` | 0 | **First.** It closes today's split-brain window. Gate: the claude-kit CI is green. |
+| **G0** | claude-config | `BLZ-704-blaze-pm-write-guard`, worktree `/home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-guard` off `origin/main` | 0 | **First.** It closes today's split-brain window. Gate: the claude-kit CI is green. It is **live** only after Task 0 Step 8 runs `scripts/install.sh` and proves the deny (review I6). |
 | **E1** | hjr15/blaze | `BLZ-703-e1-db-completeness`, worktree `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-703-e1-db-completeness` off `origin/main` | 1–7 | **Second.** It auto-deploys to the live board (service-platform's `bump` job), and it is inert on v5. Gate: CI green, including the Postgres job; Task 7's v5-compatibility rehearsal is recorded in the PR body; the opus whole-branch review is upheld. |
 | **E2** | hjr15/blaze | `BLZ-703-e2-remote-agent-surface`, worktree `/home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-703-e2-remote-agent-surface`, **cut from `origin/main` after E1 merges** | 8–12 | **Third.** Gate: as for E1. |
 
@@ -67,13 +67,13 @@ Each PR's title is `BLZ-703: <G0|E1|E2> — <summary>`. Each commit inside it is
 - **Ticket bookkeeping is the orchestrator's,** not a task step: `in-progress` at start, `in-review` at PR open, a worklog, and `done` at merge, through whatever live-board access the session has. No step runs a `blaze` write inside a blaze-pm checkout (after Task 0 merges, the hook refuses one).
 - **Every task ends with all of these true:**
   - its named tests pass;
-  - `npm test` is green (fail 0), and the Postgres-gated tests are green when `BLAZE_TEST_PG_URL` is set (Tasks 1–4 and 7 must run them);
+  - `npm test` is green (fail 0), and the Postgres-gated tests are green when `BLAZE_TEST_PG_URL` is set (Tasks 1–5 and 7 must run them; review M16 adds Task 5, because G-engine touches `resolveWritePort`, which the PG suites exercise);
   - `git status --short` prints nothing.
 - **Environment for every engine command** (run `npm ci --ignore-scripts` once if `node_modules/` is absent):
   ```bash
   cd /home/rnamwoh/Documents/Code/blaze-worktrees/BLZ-703-e1-db-completeness   # E2: …/BLZ-703-e2-remote-agent-surface
   export PATH=/home/rnamwoh/.local/node24/bin:$PATH
-  # Postgres-gated tests (Tasks 1–4, 7): a throwaway server, stopped when the task ends.
+  # Postgres-gated tests (Tasks 1–5, 7): a throwaway server, stopped when the task ends.
   docker run -d --rm --name blz703-pg -e POSTGRES_PASSWORD=postgres -p 127.0.0.1:5544:5432 postgres:17-alpine
   until docker exec blz703-pg pg_isready -U postgres >/dev/null 2>&1; do sleep 1; done
   docker exec blz703-pg psql -U postgres -c 'CREATE DATABASE blaze_test'
@@ -98,7 +98,13 @@ Each PR's title is `BLZ-703: <G0|E1|E2> — <summary>`. Each commit inside it is
 8. **`GET /api/matrix` has no handler.** It is classified `read` in `ROUTE_SCOPES` (`serve-auth.mjs:54`), and the handler exists in `model/artifact-api.mjs:610`, but `serve.mjs` never wires it, so the route 404s. Spec §8 relies on "The board serves `GET /api/matrix`". **Controller ruling (2026-10-22):** no `/api/matrix` route is added. §8's governance verify uses `blaze matrices --out <dir>` run in the pod (`pod-blaze matrices --out`), diffed against the script's 22 files, and the spec's "the board serves `GET /api/matrix`" is read that way. No Plan A step relies on the route.
 9. **"Byte-equal" round-trip of a sprint registry means canonical equality.** JSON key order is not data, and the database cannot return the file's key order. `canonicalStrict` (`write-port.mjs:41`) sorts keys and compares strictly. The verify and the test use it.
 10. **Where the sprint prefetch goes.** The four async consumers already receive the reader the entry point resolved. They are `applyNew`, `applyEdit`, groomer `validateGroomed` and import `loadBoard`. Each reads `await readStorage.sprintRegistry(root)`. Only the sync render paths (`pageHtml`, `viewEnvelope`, `renderView`, `boardModel` → `buildIndex`) take a prefetched `sprints` argument, which `serve.mjs` awaits per request. `loadSprints` and the other sync callers are unchanged (D3).
-11. **`blaze start` (the supervisor) still loads identity from SQLite** (`supervisor.mjs:232`). The live board's pod runs `serve.mjs`, not the supervisor, so G1 holds without it. **Controller ruling (2026-10-22):** it keeps SQLite identity for now. A follow-up ticket, "supervisor (`blaze start`) identity on Postgres", is for the controller to file. Task 10 does make the supervisor's reconcile loop refuse on a db board, because D6 says "on any db board, `blaze reconcile` … refuse".
+11. **One identity resolver for every server** (review I4; controller ruling 2026-10-22, which supersedes the earlier "keeps SQLite" ruling and absorbs the security part of BLZ-726).
+    - **The defect.** Once `blaze user add` writes Postgres at v6, any server that still reads `identity.db` on that board sees no users, and so serves **unauthenticated on loopback**. The operator believes auth is on. That applies to `startServer`'s sync default and to `blaze start`'s `createApp` default.
+    - **The fix, in Task 3:**
+      1. `blaze start`'s entry block awaits `resolveIdentity` exactly as `serve.mjs`'s does.
+      2. The sync defaults of `startServer` and `createApp` become `loadIdentityDefault(root)`. On a db-mode board whose config names the `postgres` driver, it returns a `broken` state with a named message, so the server **refuses to start** rather than reading SQLite. Elsewhere it is `loadIdentity(root)`, unchanged.
+    - This is fail-closed by construction, at any stamp. A db-mode Postgres caller must pass a resolved identity, and the two shipped entry points do.
+    - Task 10 also makes the supervisor's reconcile loop refuse on a db board, because D6 says "on any db board, `blaze reconcile` … refuse".
 12. **The authoritative `older` message cannot be reached today.** An authoritative row is written only at v6, and MIN is 5. Task 1 pins it through `judgeDbSchema` with an injected `min`.
 13. **`absent` for pg identity** (no `app_user` table) can occur at v6 only on a damaged schema. It keeps `loadIdentity`'s meaning (loopback serves unauthenticated, and any other host gets the setup flow) for parity with D2's four states.
 14. **Remote `list --projects`.** Spec §6 regenerates `scripts/project_keys.txt` with `blaze-live list --projects`, and D7 names `GET /api/projects`. So remote `list` gains `--projects` (Task 8).
@@ -114,8 +120,8 @@ Each PR's title is `BLZ-703: <G0|E1|E2> — <summary>`. Each commit inside it is
 
    Pinned in Task 1 (injected step failure), Task 2 (one-byte hash change; missing source) and Task 4 (malformed `sprints.json`).
 3. **An agent in a blaze-pm checkout runs `blaze new`.**
-   - Through any engine ≥ 0.10.0 on a postgres-driver config: refused, no file written (Task 5).
-   - Through the old pinned engine: denied by G0's hook before it runs (Task 0).
+   - **Until the archive, only G0 protects blaze-pm** (review M13). Its `blaze.config.json` has no `database` block until G-data's tombstone commit (D9), so G-engine cannot trip there. G0's hook denies the call, through any engine version and any spelling (Task 0).
+   - G-engine (Task 5) is the product guard for any board whose config names the postgres driver: refused, no file written, on engines ≥ 0.10.0.
    - `blaze-live …`, a remote-mode call, `grep "blaze new"` and every read verb are all allowed.
 4. **Remote `show` and `list`:**
    - with a `viewer` token: 200 and the ticket;
@@ -178,10 +184,11 @@ The only new **write** seam is `model/sprint-store.mjs`, whose `openSprintSource
 |---|---|---|---|
 | 868-871 (`SEAM_WRITE_PROVIDERS`, `model/sprints.mjs`) | `inert: ["SPRINT_REGISTRY_VERSION", "loadSprints", …, "formatSprintList"]` | the same list plus `"normaliseRegistry", "stampedRegistry"`, with `// BLZ-707: the loader's and saver's pure halves, extracted so the Postgres registry normalises and stamps by the same rule.` | 4 |
 | new row after 871 (`SEAM_WRITE_PROVIDERS`) | — | `// BLZ-707: the sprint registry's Postgres mapping. Only openSprintSource reaches node:fs, through saveSprints, when the source is the file.` then `["model/sprint-store.mjs", { writes: ["openSprintSource"], sanctioned: [], inert: ["sprintDdl", "parseSprintRegistry", "readSprintRegistry", "writeSprintRegistry"] }],` | 4 (the row is born in Task 1 as `{ writes: [], sanctioned: [], inert: ["sprintDdl"] }` **only if** Task 1's run of the guard demands it. A module that imports nothing allowlisted needs no row, so Task 1 normally adds none.) |
-| 921-922 (`model/identity-db.mjs`) | `writes: ["openIdentityDb", "loadIdentity"]` | `writes: ["openIdentityDb", "loadIdentity", "resolveIdentity"]` with `// BLZ-706: resolveIdentity falls back to loadIdentity below v6, so it is a write like the loader it wraps.` | 3 |
+| 921-922 (`model/identity-db.mjs`) | `writes: ["openIdentityDb", "loadIdentity"]` | `writes: ["openIdentityDb", "loadIdentity", "resolveIdentity", "loadIdentityDefault"]` with `// BLZ-706: resolveIdentity and loadIdentityDefault fall back to loadIdentity, so they are writes like the loader they wrap.` | 3 |
 | 1038-1042 (`reconcile.mjs`) | `inert: ["PR_RANK", …, "recordablePr"]` | the same list plus `"DB_BOARD_RECONCILE_REFUSAL"`, with `// BLZ-723: a sentence.` | 10 |
 | new row in `WRITE_ALLOWED`, after the `model/user-admin.mjs` row (1995) | — | `// BLZ-707: the sprint registry's source picker saves through saveSprints when the source is the file (fs, dual, SQLite db, or a Postgres board below v6).` then `["model/sprint-store.mjs", ["saveSprints"]],` | 4 |
-| 2042-2047 (`WRITE_ALLOWED`, `serve.mjs`) | `["serve.mjs", ["issueSetupToken", …, "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile", "resolvePorts", "pageHtml", "viewEnvelope", "applyNew"]]` | `"resolveIdentity"` added after `"loadIdentity"`, with `// BLZ-706: the standalone entry resolves identity (Postgres at v6) before bind.` | 3 |
+| 2042-2047 (`WRITE_ALLOWED`, `serve.mjs`) | `["serve.mjs", ["issueSetupToken", …, "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile", "resolvePorts", "pageHtml", "viewEnvelope", "applyNew"]]` | `"loadIdentityDefault", "resolveIdentity"` added after `"loadIdentity"`. `"loadIdentity"` stays, for the adoption fallback. The comment is `// BLZ-706: the standalone entry resolves identity (Postgres at v6) before bind; the sync default refuses a db-mode Postgres board.` | 3 |
+| 2140 (`WRITE_ALLOWED`, `supervisor.mjs`) | `["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts"]]` | `"loadIdentity"` replaced by `"loadIdentityDefault", "resolveIdentity"`, with `// BLZ-706 (review I4): blaze start resolves identity like serve.mjs, and its sync default fails closed on a db-mode Postgres board.` | 3 |
 | 2052 (`sprint-runner.mjs`) | `["sprint-runner.mjs", ["saveSprints"]],   // BLZ-254: …` | `["sprint-runner.mjs", ["openSprintSource"]],   // BLZ-707: the runner saves through the source picker, never saveSprints directly` | 4 |
 
 `FS_READER_ALLOWED` (`:3164`) is unchanged: no new module names `fsReadStorage`. `model/user-admin.mjs`'s rows are unchanged. Its exports and the primitives it takes stay the same, because the Postgres target is reached through `openCheckedPg` (inert) and `identityStore`.
@@ -231,25 +238,39 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - Output:
   - **deny:** `{"hookSpecificOutput":{"hookEventName":"PreToolUse","permissionDecision":"deny","permissionDecisionReason":<REASON>}}` on stdout, exit 0;
   - **allow:** nothing on stdout, exit 0.
-  - It never exits non-zero. If `jq` is missing it fails open. That is stated in the header comment as the hook's one known gap.
+  - It never exits non-zero.
+- **Shape (review I7: argv tokens, not a regex).** The `.sh` file holds the logic as an embedded Python 3 program: a quoted heredoc assigned to a variable, then `exec python3 -c "$PROG"`, with stdin passed through. It is stdlib only (`json`, `shlex`, `os`, `subprocess`).
+  - It is embedded because `scripts/install.sh` deploys only `hooks/*.sh` (`install.sh:578`), so a sibling `.py` would never reach `~/.claude/hooks`.
+  - **It fails open.** A missing `python3` or any exception means exit 0 and no output.
+  - The header comment states the purpose (spec D5 "Interim"), that the archive PR removes it, and three known gaps:
+    1. it fails open;
+    2. a command hidden inside a string (`bash -c "blaze new"`, `eval`) is not parsed;
+    3. it also denies the read-only sub-verbs `blaze db status`/`verify` and `blaze matrices --check` (review M14). That is acceptable for an interim guard, and remote mode or another cwd is the way round it.
 
-**The decision, in order.** Each step can only return *allow*. Only reaching the end denies.
-
-1. **A write verb in command position.** Allow unless the command matches (bash ERE):
-   `(^|[;&|(]|\$\()[[:space:]]*([A-Za-z_][A-Za-z0-9_]*=[^[:space:]]*[[:space:]]+)*((npx[[:space:]]+)?blaze|node[[:space:]]+[^[:space:]]*cli\.mjs)[[:space:]]+(new|move|edit|link|resolve|log|sprint|reindex|reconcile|groom|import|schedule|matrices|migrate|user|start|init|db)([[:space:]]|$)`
-   That is the mutating set of `cli.mjs`'s `SUBCOMMANDS` at engine 0.8.0 and 0.9.0, plus `db`. A bare `blaze` (which runs `start`) is matched too: `(^|[;&|(])[[:space:]]*blaze[[:space:]]*($|[;&|)])`.
-2. **Remote mode.** Allow if `BLAZE_REMOTE_URL` is non-empty in the hook's own environment, or if the command carries `BLAZE_REMOTE_URL=[^[:space:]]` (a per-command prefix).
-3. **The target directory.** The candidates are:
-   - the payload `cwd`;
-   - every `cd <target>` in the command, where `~` expands to `$HOME` and a relative target is resolved against `cwd`;
-   - the parent of every `BLAZE_PROJECTS_DIR=<path>`.
-
-   A candidate is a blaze-pm checkout when either of these holds:
-   - `git -C <cand> rev-parse --show-toplevel` succeeds, and that toplevel's `git remote get-url origin` matches `[/:]hjr15/blaze-pm(\.git)?$`. This covers every worktree, because worktrees share the origin.
+**The decision procedure** (the tests determine everything except the order):
+1. **Tokenise.** Take `cmd = .tool_input.command`. Replace every newline and backtick with ` ; `.
+   - Run `shlex.shlex(cmd, posix=True, punctuation_chars=True)` with `whitespace_split = True` to get `tokens`.
+   - On `ValueError` (unbalanced quotes), fall back to `cmd.split()`.
+   - Split `tokens` into **segments** at every token made only of the characters `;&|()`. A quoted argument such as `"blaze new"` stays one token, so `grep "blaze new"` never matches.
+2. **Read each segment.**
+   1. Drop its leading `NAME=value` tokens. Record a `BLAZE_PROJECTS_DIR` value and a non-empty `BLAZE_REMOTE_URL` value.
+   2. Repeatedly drop a leading wrapper:
+      - `env` together with its `-*` flags and `NAME=value` tokens, which are recorded as above;
+      - `time` together with `-p`;
+      - `exec`, `nohup`, `command`, `builtin`.
+   3. Let `head` be the first remaining token, and `base = os.path.basename(head)`. So `./node_modules/.bin/blaze` and `/usr/local/bin/blaze` are `blaze`.
+      - `base == "npx"`: drop the npx flags. These are tokens starting with `-`, and `-p`/`--package` take the next token too. Then re-read `head`/`base`.
+      - `base in ("node", "nodejs")`: drop node's flags. `-r`, `--require`, `--import`, `--loader`, `--experimental-loader`, `--env-file`, `-C` and `--conditions` take the next token too. The next token is the script. If `basename(script) == "cli.mjs"`, the **verb** is the token after it.
+      - `base == "blaze"`: the **verb** is the next token, or `None` for a bare `blaze`, which runs `start`.
+      - `head == "cd"`: record its target (`~` expands to `$HOME`, and a relative target is resolved against the payload `cwd`).
+   4. The segment is a **write** if its verb is `None` or is in `VERBS = {new, move, edit, link, resolve, log, sprint, reindex, reconcile, groom, import, schedule, matrices, migrate, user, start, init, db}`. That is `cli.mjs`'s mutating set at 0.8.0 and 0.9.0, plus `db`. A verb starting with `-` (for example `--help`) is not a write.
+3. **Allow** if no segment is a write. Also allow when `BLAZE_REMOTE_URL` is non-empty in the hook's own environment, or was recorded from the command.
+4. **Find the target directory.** The candidates are the payload `cwd`, every recorded `cd` target, and the parent of every recorded `BLAZE_PROJECTS_DIR`. A candidate is a blaze-pm checkout when either of these holds:
+   - `git -C <cand> rev-parse --show-toplevel` succeeds, and that toplevel's `git remote get-url origin` ends in `hjr15/blaze-pm` or `hjr15/blaze-pm.git` after `/` or `:`. This covers every worktree, because worktrees share the origin.
    - The candidate's absolute path has a component that is exactly `blaze-pm` or `blaze-pm-worktrees`, or that starts with `blaze-pm-`.
 
-   If no candidate is a blaze-pm checkout, allow.
-4. **Deny** with `<REASON>`, exactly:
+   If no candidate is one, allow.
+5. **Deny** with `<REASON>`, exactly:
    `blaze-pm is retired as a writable board (BLZ-703). A \`blaze <verb>\` run here writes ticket files that never reach the live board — INF-928, INF-930 and INF-931 had to be replayed by hand. Write to the live board in remote mode instead (BLAZE_REMOTE_URL with BLAZE_TOKEN), or read it there. This guard is removed when blaze-pm is archived.`
 
 - [ ] **Step 1: Write the failing test** `scripts/test_blaze_pm_write_guard.py`.
@@ -259,46 +280,58 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     - `make_other(tmp)`: origin `https://github.com/hjr15/blaze.git`.
   - Every run passes an env with `BLAZE_REMOTE_URL` removed.
   - A helper `decision(proc)` returns `"deny"` when stdout parses to `permissionDecision == "deny"`, and `"allow"` when stdout is empty. It asserts `returncode == 0` in both cases.
-  - Tests. Each has one assertion on `decision(...)` and, for denies, `"BLZ-703" in reason and "remote mode" in reason`:
-    - `test_denies_new_in_blaze_pm_by_origin`: cwd=`make_bp`, `blaze new --project INF --type task "x" --estimate 30` → deny
-    - `test_denies_each_mutating_verb`: a loop over the 18 verbs in rule 1, `blaze <verb>` → deny for each (`subTest(verb=…)`)
-    - `test_denies_bare_blaze`: `blaze` → deny
-    - `test_denies_npx_and_node_cli`: `npx blaze move INF-1 done` and `node node_modules/@hjr15/blaze-board/scripts/cli.mjs edit INF-1 title x` → deny
-    - `test_denies_cd_into_blaze_pm`: cwd=`make_other`, `cd <bp> && blaze log INF-1 30` → deny
-    - `test_denies_relative_cd`: cwd=`<tmp>/work`, `cd board && blaze new …` → deny
-    - `test_denies_projects_dir_prefix`: cwd=`make_other`, `BLAZE_PROJECTS_DIR=<bp>/projects blaze new …` → deny
-    - `test_denies_in_a_worktree`: `git -C <bp> commit --allow-empty -qm init` (with `-c user.email=t@t -c user.name=t`), then `git -C <bp> worktree add -q <tmp>/wt`, cwd=`<tmp>/wt` → deny
-    - `test_denies_by_directory_name_without_origin`: `<tmp>/blaze-pm` with no git → deny
-    - `test_allows_read_verbs`: `blaze board`, `blaze audit`, `blaze rollup`, `blaze export --format csv` in `make_bp` → allow
-    - `test_allows_blaze_live`: `blaze-live new --project INF …` in `make_bp` → allow
-    - `test_allows_remote_env`: env `BLAZE_REMOTE_URL=https://board.example` → allow
-    - `test_allows_remote_prefix`: `BLAZE_REMOTE_URL=https://board.example BLAZE_TOKEN=t blaze new …` → allow
-    - `test_allows_other_repos`: cwd=`make_other`, `blaze new …` → allow
-    - `test_allows_mentions_that_are_not_commands`: `grep -rn "blaze new" .`, `echo blaze move`, `git log --grep "blaze edit"` in `make_bp` → allow
-    - `test_allows_non_blaze_commands`: `git status` in `make_bp` → allow
+  - Deny tests. Each asserts `decision(...) == "deny"` and `"BLZ-703" in reason and "remote mode" in reason`:
+    - `test_denies_new_in_blaze_pm_by_origin`: cwd=`make_bp`, `blaze new --project INF --type task "x" --estimate 30`
+    - `test_denies_each_mutating_verb`: a loop over the 18 `VERBS`, `blaze <verb>`, with `subTest(verb=…)`
+    - `test_denies_bare_blaze`: `blaze`
+    - `test_denies_npx_and_node_cli`: `npx blaze move INF-1 done` and `node node_modules/@hjr15/blaze-board/scripts/cli.mjs edit INF-1 title x`
+    - `test_denies_cd_into_blaze_pm`: cwd=`make_other`, `cd <bp> && blaze log INF-1 30`
+    - `test_denies_relative_cd`: cwd=`<tmp>/work`, `cd board && blaze new …`
+    - `test_denies_projects_dir_prefix`: cwd=`make_other`, `BLAZE_PROJECTS_DIR=<bp>/projects blaze new …`
+    - `test_denies_in_a_worktree`: `git -C <bp> -c user.email=t@t -c user.name=t commit --allow-empty -qm init`, then `git -C <bp> worktree add -q <tmp>/wt`, cwd=`<tmp>/wt`
+    - `test_denies_by_directory_name_without_origin`: `<tmp>/blaze-pm` with no git
+    - **review I7, one test per spelling:**
+      - `test_denies_newline_separated`: cwd=`make_other`, `"cd <bp>\nblaze new --project INF --type task x"`;
+      - `test_denies_path_prefixed_binary`: `./node_modules/.bin/blaze new …` and `/usr/local/bin/blaze move INF-1 done`;
+      - `test_denies_env_prefix`: `env X=1 blaze new …` and `env -i PATH=/usr/bin blaze edit INF-1 title x`;
+      - `test_denies_time_prefix`: `time blaze new …` and `time -p blaze log INF-1 5`;
+      - `test_denies_npx_flags`: `npx --yes blaze new …`, `npx -y blaze new …` and `npx -p @hjr15/blaze-board blaze move INF-1 done`;
+      - `test_denies_node_flags`: `node --no-warnings x/cli.mjs new …` and `node --import ./hook.mjs x/cli.mjs move INF-1 done`;
+      - `test_denies_after_pipe_and_subshell`: `true | blaze new …`, `(blaze new …)` and `x=$(blaze new …)`.
+  - Allow tests. Each asserts `decision(...) == "allow"`:
+    - `test_allows_read_verbs`: `blaze board`, `blaze audit`, `blaze rollup`, `blaze export --format csv` and `blaze --help` in `make_bp`
+    - `test_allows_blaze_live`: `blaze-live new --project INF …` in `make_bp`
+    - `test_allows_remote_env`: env `BLAZE_REMOTE_URL=https://board.example`
+    - `test_allows_remote_prefix`: `BLAZE_REMOTE_URL=https://board.example BLAZE_TOKEN=t blaze new …`, and the `env BLAZE_REMOTE_URL=https://board.example blaze new …` spelling
+    - `test_allows_other_repos`: cwd=`make_other`, `blaze new …`
+    - `test_allows_mentions_that_are_not_commands`: `grep -rn "blaze new" .`, `echo blaze move`, `git log --grep "blaze edit"` and `"echo hi\ngrep 'blaze new' x"` in `make_bp`
+    - `test_allows_non_blaze_commands`: `git status` in `make_bp`
+    - `test_fails_open_on_garbage`: stdin `not json` → allow
 - [ ] **Step 2: Run it and watch it fail.** Run `python3 scripts/test_blaze_pm_write_guard.py`. Expected: ERROR or FAIL on every test, because the hook file does not exist.
-- [ ] **Step 3: Implement `hooks/blaze-pm-write-guard.sh`.**
-  - `set -uo pipefail`.
-  - Read stdin once. Then apply rules 1–4 in order, each one an early `exit 0`.
-  - Emit the deny JSON with `jq -n --arg r "$REASON" '{hookSpecificOutput:{hookEventName:"PreToolUse",permissionDecision:"deny",permissionDecisionReason:$r}}'`.
-  - The header comment states:
-    - the purpose (spec D5 "Interim");
-    - that it is removed in the PR that archives blaze-pm;
-    - that it fails open without `jq`.
-  - `chmod +x`.
-- [ ] **Step 4: Run it and watch it pass.** Run `python3 scripts/test_blaze_pm_write_guard.py`. Expected: `OK`, 16 tests.
+- [ ] **Step 3: Implement `hooks/blaze-pm-write-guard.sh`** per Interfaces and the decision procedure. `chmod +x`.
+- [ ] **Step 4: Run it and watch it pass.** Run `python3 scripts/test_blaze_pm_write_guard.py`. Expected: `OK`, 24 tests.
 - [ ] **Step 5: Register the hook and gate it in CI.**
   - Apply the `global/settings.json` and `claude-kit-ci.yml` edits from Files.
   - Check: `jq -e '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[] | select(.command|endswith("blaze-pm-write-guard.sh"))' global/settings.json` prints the entry.
   - Run every unit suite the workflow lists. Each must end `OK`.
   - Run `bash scripts/export-public.sh --dry-run`. It must exit 0.
-- [ ] **Step 6: Write the docs** (the changelog entry and the architecture sentence). The changelog entry names spec D5 and BLZ-703, and says the hook is deleted in the blaze-pm archive PR.
+- [ ] **Step 6: Write the docs** (the changelog entry and the architecture sentence). The changelog entry names spec D5 and BLZ-703, the known gaps, and that the hook is deleted in the blaze-pm archive PR.
 - [ ] **Step 7: Commit.**
   ```bash
   git add hooks/blaze-pm-write-guard.sh scripts/test_blaze_pm_write_guard.py global/settings.json .github/workflows/claude-kit-ci.yml docs/changelog.md docs/architecture.md
   git commit -m "BLZ-704: interim hook refuses blaze writes from a blaze-pm checkout without remote mode"
   ```
-  The PR (`BLZ-703: G0 — interim blaze-pm write guard`) is opened by the orchestrator. After it merges, the operator's machine picks up the hook on the next `install.sh` run (the PostToolUse auto-deploy).
+  The orchestrator opens the PR, `BLZ-703: G0 — interim blaze-pm write guard`, and merges it when claude-kit CI is green.
+- [ ] **Step 8: Deploy and prove the hook live (review I6, orchestrator, after merge).** A GitHub merge does not run `scripts/install.sh`. The PostToolUse auto-deploy fires only when a local session edits `global/settings.json`. So, on this machine:
+  ```bash
+  git -C /home/rnamwoh/Documents/Code/claude-config pull --ff-only
+  (cd /home/rnamwoh/Documents/Code/claude-config && bash scripts/install.sh && bash scripts/install.sh --check)   # --check exits 0
+  ls -l ~/.claude/hooks/blaze-pm-write-guard.sh          # a symlink into ~/.local/share/claude-config/hooks/
+  jq -e '.hooks.PreToolUse[] | select(.matcher=="Bash") | .hooks[] | select(.command|endswith("blaze-pm-write-guard.sh"))' ~/.claude/settings.json
+  printf '%s' '{"tool_input":{"command":"blaze new --project INF --type task probe"},"cwd":"/home/rnamwoh/Documents/Code/blaze-pm"}' | ~/.claude/hooks/blaze-pm-write-guard.sh   # prints permissionDecision "deny"
+  ```
+  - **The live probe:** in a fresh Claude Code session, ask for `blaze sprint list` with cwd `/home/rnamwoh/Documents/Code/blaze-pm`. The tool call is denied with the BLZ-703 reason. `sprint list` is chosen because it is in `VERBS` and harmless if the hook were somehow absent.
+  - Record all four outputs in the PR as a comment. **The second machine has no blaze-pm clone (OD4), so it needs no deploy.** G0 counts as live only after this step.
 
 ---
 
@@ -310,21 +343,39 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 
 **Files:**
 - Modify: `scripts/model/db-schema-version.mjs`
-- Create: `scripts/model/db-migrate.mjs`, `scripts/model/sprint-store.mjs` (`sprintDdl` only in this task)
+- Create: `scripts/model/db-migrate.mjs`, `scripts/model/sprint-store.mjs` (`sprintDdl(dialect)` only in this task)
 - Modify: `scripts/db-runner.mjs` (`USAGE`, `migrate`, the `load --replace` refusal)
 - Modify: `tests/helpers/pg-scratch.mjs` (`makeV5`, `pgEnvFor`)
-- Modify tests: `tests/model/db-schema-version.test.mjs:175-185` and `:238-250`, `tests/model/config-install.test.mjs:50-60`, `tests/schema-versioning-docs.test.mjs:62-73`
+- Modify tests:
+  - `tests/model/db-schema-version.test.mjs:175-185` and `:238-250`;
+  - `tests/model/config-install.test.mjs:50-60` **and `:208-211`**. The second is a Postgres-only `assert.equal(Number(v), 5)` inside the PG-gated `BLZ-377: Postgres installs the same namespace…` block, and it fails only when `BLAZE_TEST_PG_URL` is set (review I2);
+  - `tests/schema-versioning-docs.test.mjs:62-73`;
+  - `tests/adr-0014-singletons.test.mjs` (the `DDL` map at `:47-48`; review I3).
 - Create test: `tests/db-migrate.test.mjs`
-- Docs: `docs/schema-versioning.md` (the DATABASE section), and `docs/guide/commands.md` `## db` (`migrate` and the `--replace` refusal)
+- Docs:
+  - `docs/schema-versioning.md` (the DATABASE section);
+  - `docs/guide/commands.md` `## db` (`migrate` and the `--replace` refusal);
+  - `docs/decisions/0014-tenancy-is-deferred-and-row-level-is-ruled-out.md`: a `sprint_registry` row in the singleton inventory, and an amendment (review I3).
+
+**I3: the `sprint_registry` singleton is declared in both dialects. Ruling, with the reason.**
+- `sprint_registry (id integer PRIMARY KEY CHECK (id = 1), …)` is a singleton in ADR-0014's own definition. `tests/adr-0014-singletons.test.mjs` requires two things:
+  - every module that declares one is in its `DDL` map;
+  - the SQLite and Postgres dialects declare the **same** singleton set.
+- **Chosen:** `sprintDdl(dialect)` emits the two tables for **both** dialects, through `sql-dialect.mjs`'s `tbl` token, so SQLite gets ` STRICT`. The SQLite form is an inert twin. It is declared, so the inventory and the driver-agreement test read one set, but it is **not installed** on the SQLite shadow (Finding 3 stands: a sprint in a derived file is a sprint lost on rebuild). `applyCreate` and `v5ToV6` install it on Postgres only.
+- **Why not the alternative.** The other option was a pg-only exemption in the guard. That would weaken a guard that exists because the inventory was once wrong by counting dialects (ADR-0014's BLZ-362 amendment). It would also be a precedent for "this driver differs" that ADR-0011's swappable-driver premise argues against. The twin costs one function parameter, and it keeps the guard's two invariants intact without an exception clause.
+- **The guard and the ADR:**
+  - `tests/adr-0014-singletons.test.mjs:47-48`: `DDL` gains `"sprint-store.mjs": sprintDdl`, and the comment says "four modules", with `// BLZ-705: sprint_registry (spec D3).`
+  - ADR-0014's inventory gains the row ``| `sprint_registry` | `scripts/model/sprint-store.mjs:<line of the CHECK>` |``. The line is the one the CHECK lands on, and the guard's `file:line` test prints it if it is wrong.
+  - An `## Amendment — 2026-10-22 (BLZ-705)` paragraph: the registry's singleton is declared in both dialects and installed on Postgres only, because the SQLite shadow is derived (plan Finding 3). The tenancy reasoning is unchanged, since one board is one registry.
 
 **Interfaces:**
 - Produces, from `db-schema-version.mjs`:
   - `DB_SCHEMA_VERSION = 6`; `MIN_DB_SCHEMA_VERSION = 5` (unchanged); `V6_FEATURES_FROM = 6`; `MIGRATE_FROM = 5`.
   - `judgeDbSchema({ hasTicket, hasMeta, version, authoritative = false, current, min })`.
-  - `readSchemaFactsSync(exec)` and `checkDbSchema(exec, opts)`'s facts carry `authoritative: boolean` (row `('authoritative','true')`).
-- Produces, from `sprint-store.mjs`: `sprintDdl() → string`. This is Postgres DDL for `sprint` and `sprint_registry`, exactly D3's columns, each `CREATE TABLE IF NOT EXISTS`.
+  - `readSchemaFactsSync(exec)` and `checkDbSchema(exec, opts)`'s facts carry `authoritative: boolean` (row `('authoritative','true')`). **Review M15:** both rows are read in **one** query, `SELECT key, value FROM blaze_meta WHERE key IN ('schema_version', 'authoritative')`, so the per-request Postgres open costs no extra round trip.
+- Produces, from `sprint-store.mjs`: `sprintDdl(dialect) → string`, for `"sqlite"` or `"postgres"` (I3). It is the DDL for `sprint` and `sprint_registry`, exactly D3's columns, each `CREATE TABLE IF NOT EXISTS`. Dates are `date` on Postgres and `TEXT` on SQLite, through the dialect's tokens.
 - Produces, from `db-migrate.mjs`:
-  - `MIGRATIONS: Map<number, (exec) => Promise<void>>`, holding `5 → v5ToV6`. `v5ToV6` runs `identityDdl("postgres")`, then `sprintDdl()`.
+  - `MIGRATIONS: Map<number, (exec) => Promise<void>>`, holding `5 → v5ToV6`. `v5ToV6` runs `identityDdl("postgres")`, then `sprintDdl("postgres")`.
   - `migrateDb(exec, { identityRows = null, sprintRegistry = null, migrations = MIGRATIONS, beforeVerify = null } = {}) → Promise<{ from, to, steps: number[], authoritative: "written"|"already", identity: object|null, sprints: object|null }>`.
   - `exec` is `pgExec(client)` over **one** client. `migrateDb` owns `BEGIN` / `COMMIT` / `ROLLBACK`.
   - `identityRows` and `sprintRegistry` are accepted and ignored in this task. Tasks 2 and 4 give them meaning. `beforeVerify(exec)` is a test seam, documented as such.
@@ -333,17 +384,20 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `pgEnvFor(url) → { BLAZE_DB_HOST, BLAZE_DB_PORT, BLAZE_DB_NAME, BLAZE_DB_USER, BLAZE_DB_PASSWORD_ENV: "BLAZE_TEST_PG_PASSWORD", BLAZE_TEST_PG_PASSWORD }`, parsed from the URL.
 
 **`migrateDb`'s algorithm**, which the tests determine except for the order:
-1. `BEGIN`, then `LOCK TABLE blaze_meta IN EXCLUSIVE MODE`, so two migrates serialise while plain reads continue.
-2. Read the facts in the transaction. The outcome depends on the state:
+1. `BEGIN`.
+2. **Read the facts before locking** (review I1, controller ruling): `checkDbSchema(exec, { dialect: "postgres", min: 1 })`.
+   - `min: 1` is deliberate (review M1). It makes a below-MIN stamp come back as `current` with its version, so step 4's `MIGRATE_FROM` branch judges it. Without it, a stamp below MIN would produce the authoritative `older` message, which says "run blaze db migrate", and that is circular here.
+   - `empty` or `unstamped`: throw, quoting `judgeDbSchema`'s error, and naming `blaze db init` for `empty`. There may be no `blaze_meta` to lock, so this must run before step 3, or the error would be the raw `relation "blaze_meta" does not exist`.
+3. `LOCK TABLE blaze_meta IN EXCLUSIVE MODE`, so two migrates serialise while plain reads continue.
+4. **Re-read the facts under the lock** (the same call). A concurrent migrate that committed first is now seen as v6. Then:
    - `newer`: throw `database schema version N is newer than this engine (DB_SCHEMA_VERSION); upgrade the engine`.
-   - `empty` or `unstamped`: throw, quoting `judgeDbSchema`'s error, and naming `blaze db init` for `empty`.
    - `version < MIGRATE_FROM`: throw `no migration path from version N — the oldest this engine migrates from is 5`.
-3. For `v` from `version` to `DB_SCHEMA_VERSION - 1`, run `migrations.get(v)(exec)`, then `UPDATE blaze_meta SET value = $1 WHERE key = 'schema_version'` with `v+1`.
-4. `INSERT INTO blaze_meta (key, value) VALUES ('authoritative', 'true') ON CONFLICT (key) DO NOTHING`. Report `"written"` or `"already"` from whether a row existed before.
-5. (Tasks 2 and 4 insert their copies here.)
-6. `await beforeVerify?.(exec)`.
-7. (Tasks 2 and 4 insert their verifies here.)
-8. `COMMIT`. On any throw: `ROLLBACK` (swallowing a rollback error), then rethrow the original.
+5. For `v` from `version` to `DB_SCHEMA_VERSION - 1`, run `migrations.get(v)(exec)`, then `UPDATE blaze_meta SET value = $1 WHERE key = 'schema_version'` with `v+1`.
+6. `INSERT INTO blaze_meta (key, value) VALUES ('authoritative', 'true') ON CONFLICT (key) DO NOTHING`. Report `"written"` or `"already"` from whether a row existed before.
+7. (Tasks 2 and 4 insert their copies here: the "copy slot".)
+8. `await beforeVerify?.(exec)`.
+9. (Tasks 2 and 4 insert their verifies here: the "verify slot".)
+10. `COMMIT`. On any throw: `ROLLBACK` (swallowing a rollback error), then rethrow the original.
 
 **`db-runner.mjs`:**
 - `USAGE` gains:
@@ -351,7 +405,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `  --replace` gains `(refused on an authoritative database — restore a pg_dump instead)`.
 - `runDb` dispatches `migrate` to `migrateCmd(ctx)`. It reads `--identity-from` and `--sprints-from` as `argv[argv.indexOf(flag) + 1]`. A flag with no value, or a value starting with `-`, prints `blaze db migrate: <flag> needs a path` and exits 1.
 - `migrateCmd`:
-  1. `dbConfigOr` and `writableOr(ctx, "migrate")`.
+  1. `dbConfigOr` and `writableOr(ctx, "migrate")`. (Tasks 2 and 4 add the stranded-file refusals here, before any connect: review I5.)
   2. SQLite → `blaze db migrate: migrates a Postgres database. The SQLite shadow is derived — rebuild it with 'blaze db init --force'.` → 1.
   3. Connect with `ctx.openPgClient` directly. Not `openCheckedPg`, which refuses states migrate must name itself.
   4. `migrateDb`.
@@ -363,7 +417,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
      migrate: DONE — one transaction, committed.
      ```
      Exit 0.
-  6. On a throw, print `blaze db migrate: <where> — <message>` and then `Nothing was migrated: the migration runs in one transaction.` Exit 1.
+  6. On a throw, print `blaze db migrate: <where> — <message>`, stripping one leading `blaze: ` from `<message>` so the prefix is never doubled (review M6), and then `Nothing was migrated: the migration runs in one transaction.` Exit 1.
   7. Always `client.end()`.
 - `loadCmd`: before `buildTransitions`, if `replace`, read `SELECT value FROM blaze_meta WHERE key = 'authoritative'`. If it is `'true'`, print, and exit 1 without opening a transaction:
   ```
@@ -375,7 +429,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 **`judgeDbSchema`'s `older` branch** keeps today's text when `!authoritative`. When `authoritative`, it is:
 `database schema version ${version} is older than this engine supports (supported: ${min}..${current}). This database is AUTHORITATIVE — it is the board itself, not a copy derived from files — so it is migrated, never rebuilt: take a pg_dump, then run 'blaze db migrate'. Never 'blaze db init --force' or 'blaze db load --replace', which would erase it — see ${DOCS}`
 
-**`applyCreate`** adds two steps after `viewDdl`, for `dialect === "postgres"` only: `() => exec.run(identityDdl("postgres"), [])` and `() => exec.run(sprintDdl(), [])`. The `DB_SCHEMA_VERSION` comment block gains:
+**`applyCreate`** adds two steps after `viewDdl`, for `dialect === "postgres"` only: `() => exec.run(identityDdl("postgres"), [])` and `() => exec.run(sprintDdl("postgres"), [])`. The `DB_SCHEMA_VERSION` comment block gains:
 `// 6 under BLZ-705 (Phase 5, spec D1(b)): the six identity tables and sprint/sprint_registry, Postgres only — the SQLite shadow is derived and holds neither credentials nor sprints. MIN stays 5: a v5 database serves exactly as before, its v6 features falling back to their files, until 'blaze db migrate' runs.`
 
 - [ ] **Step 1: Write the failing tests.**
@@ -385,12 +439,15 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     - Add `test("BLZ-705: the older refusal on an AUTHORITATIVE database says migrate, never rebuild", …)`: `judgeDbSchema({ hasTicket: true, hasMeta: true, version: 5, authoritative: true, min: 6, current: 6 })` → `ok: false`, `state: "older"`, `error` matches `/blaze db migrate/` and `/pg_dump/`, and `doesNotMatch(/run 'blaze db init --force'/)`. The same call with `authoritative: false` still matches `/'blaze db init --force'/`.
     - Add `test("BLZ-705: facts carry the authoritative row", …)`: a SQLite exec with `blaze_meta` holding `('authoritative','true')` → `readSchemaFactsSync(exec).authoritative === true`. Without the row → `false`.
   - In `tests/model/config-install.test.mjs:57-58`: `assert.equal(DB_SCHEMA_VERSION, 6); assert.equal(MIN_DB_SCHEMA_VERSION, 5);`, retitled `"the version is 6 and the floor stays 5 (BLZ-705)"`.
+  - In `tests/model/config-install.test.mjs:210-211` (PG-only, review I2): `assert.equal(Number(v), DB_SCHEMA_VERSION)`. The comment above it reads "stamped N without the tables version N is defined by" instead of "5".
+  - In `tests/adr-0014-singletons.test.mjs:47-48`: the `DDL` map entry from the I3 ruling. Before the implementation it fails on the import of `sprintDdl`.
   - In `tests/schema-versioning-docs.test.mjs:62-73`: the test is retitled `"BLZ-705: the doc's DB schema version and floor match the constants"`. The regex becomes `/\*\*The version is (\d+) and the floor is (\d+), as of ([A-Z]+-\d+)\.\*\*/`. It asserts `Number(m[1]) === DB_SCHEMA_VERSION` and `Number(m[2]) === MIN_DB_SCHEMA_VERSION`, and the old equality assertion is deleted.
   - Create `tests/db-migrate.test.mjs`. Every test in it is `PG_SKIP` and gets its own `scratchPgDb`. Name and assertions:
     - `"BLZ-705: a v5 database migrates to v6 in one transaction"`: `makeV5`, then `migrateDb(pgExec(c))` → `{ from: 5, to: 6, steps: [5], authoritative: "written" }`. After it, `schema_version = '6'`, `authoritative = 'true'`, and `to_regclass` is non-null for each of `app_user, user_identity, membership, api_token, local_password, user_session, sprint, sprint_registry`.
     - `"BLZ-705: a second run is a no-op"`: run it twice → the second returns `{ from: 6, to: 6, steps: [], authoritative: "already" }`.
     - `"BLZ-705: a failure mid-step leaves v5 intact"`: `migrations: new Map([[5, async (e) => { await e.run(identityDdl("postgres")); throw new Error("injected"); }]])` → rejects `/injected/`. Afterwards `schema_version = '5'`, `to_regclass('app_user') IS NULL`, and there is no `authoritative` row.
-    - `"BLZ-705: newer, unstamped and empty databases are refused by name"`: three databases, three `/newer/`, `/no Blaze schema stamp/`, `/blaze db init/` rejections.
+    - `"BLZ-705: newer, unstamped and empty databases are refused by name"`: three databases, three `/newer/`, `/no Blaze schema stamp/`, `/blaze db init/` rejections. The `empty` one must not match `/does not exist/` (review I1).
+    - `"BLZ-705: two concurrent migrates serialise — one migrates, the other sees v6"` (review I1): `makeV5`, two clients, `Promise.all` of two `migrateDb` calls. Both resolve, `steps` is `[5]` for exactly one and `[]` for the other, and the stamp is `'6'`.
     - `"BLZ-705: a fresh v6 create holds the v6 tables and is not authoritative"`: `createDbSchema(…, { dialect: "postgres" })` → the 8 tables exist, and there is no `authoritative` row.
     - `"BLZ-705: blaze db migrate prints the transition and exits 0"`: `runDb(["migrate"], { …QUIET-with-capture, roots: dbBoard(), resolveDbConfig: () => ({ driver: "postgres", connection: url }), openPostgresClient: pgClient })` → returns 0, and the captured log includes `"schema         v5 → v6"` and `"migrate: DONE"`.
     - `"BLZ-705: blaze db migrate refuses the SQLite shadow"`: a `dbBoard()` with the default SQLite driver → returns 1, and err matches `/blaze db init --force/`.
@@ -403,11 +460,11 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
       - both loads return 0;
       - `app_user` and `sprint` each still hold 1 row. That proves `LOAD_TABLES` does not reach them (D2, §9).
   - The existing `init --force` Postgres refusal test stays as it is (grep `refused on Postgres` in `tests/`). It must still pass.
-- [ ] **Step 2: Run them and watch them fail.** Run `node --test tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs tests/db-migrate.test.mjs`. Expected:
+- [ ] **Step 2: Run them and watch them fail.** Run `node --test tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs tests/adr-0014-singletons.test.mjs tests/db-migrate.test.mjs` with `BLAZE_TEST_PG_URL` set. Expected:
   - the version assertions fail (`5 !== 6`);
   - `tests/db-migrate.test.mjs` fails to import `../scripts/model/db-migrate.mjs` (ERR_MODULE_NOT_FOUND);
   - the docs test fails on the regex.
-- [ ] **Step 3: Implement.** Change `db-schema-version.mjs`, create `sprint-store.mjs` (`sprintDdl`) and `db-migrate.mjs` with the signatures above, then make the `db-runner.mjs` changes and the helper additions.
+- [ ] **Step 3: Implement.** Change `db-schema-version.mjs`, create `sprint-store.mjs` (`sprintDdl(dialect)`) and `db-migrate.mjs` with the signatures above, then make the `db-runner.mjs` changes, the helper additions, and the ADR-0014 row and amendment.
 - [ ] **Step 4: Write the docs.**
   - `docs/schema-versioning.md`'s DATABASE section:
     - Replace `**Both are 5 as of BLZ-667.**` with `**The version is 6 and the floor is 5, as of BLZ-705.**`.
@@ -422,7 +479,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - [ ] **Step 5: Run them and watch them pass.** Run the Step 2 command, then `npm test` with `BLAZE_TEST_PG_URL` set. Expected: all green. The seam-closure guard must stay green without a new row, because `db-migrate.mjs` and `sprint-store.mjs` import nothing allowlisted yet. If it reddens, the ledger's Task-1 conditional row applies.
 - [ ] **Step 6: Run THE DEBT STEP, then commit.**
   ```bash
-  git add scripts/model/db-schema-version.mjs scripts/model/db-migrate.mjs scripts/model/sprint-store.mjs scripts/db-runner.mjs tests/helpers/pg-scratch.mjs tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs tests/db-migrate.test.mjs docs/schema-versioning.md docs/guide/commands.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
+  git add scripts/model/db-schema-version.mjs scripts/model/db-migrate.mjs scripts/model/sprint-store.mjs scripts/db-runner.mjs tests/helpers/pg-scratch.mjs tests/model/db-schema-version.test.mjs tests/model/config-install.test.mjs tests/schema-versioning-docs.test.mjs tests/adr-0014-singletons.test.mjs tests/db-migrate.test.mjs docs/schema-versioning.md docs/guide/commands.md docs/decisions/0014-tenancy-is-deferred-and-row-level-is-ruled-out.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
   git commit -m "BLZ-705: schema v6 and a forward-only blaze db migrate; an authoritative database refuses load --replace"
   ```
 
@@ -447,20 +504,30 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     - It opens with `new (await import("node:sqlite")).DatabaseSync(path, { readOnly: true })`.
     - A missing file throws `blaze: no identity database at ${path}` (checked with `existsSync` first).
     - A table missing from the source is `{ rows: [], absent: true }`, because a pre-BLZ-566 roster has no `local_password` or `user_session`.
-    - Rows are `SELECT * FROM t ORDER BY <pk>`.
+    - Rows are `SELECT * FROM t` (order irrelevant, see the verify).
   - `copyIdentity(exec, source) → Promise<{ [table]: number }>`:
     - It first refuses if `SELECT count(*) FROM app_user` is non-zero: `identity copy refused: app_user already holds N row(s) in Postgres — the copy must land in empty tables for its verify to be exact`.
     - Then, per table in order, it inserts each row with its own column list (`$n` placeholders).
   - `verifyIdentity(exec, source) → Promise<void>`:
-    - It re-reads every table from Postgres (`ORDER BY <pk>`) and compares with `canonicalIdentityRow`.
+    - It re-reads every table from Postgres and compares with `canonicalIdentityRow`.
+    - **The comparison is keyed by primary key, not by position** (review M8). Each side is put in a `Map` keyed by `JSON.stringify(pk values)`, and the keys and rows are compared through the maps. Postgres sorts by the database collation and SQLite sorts bytewise, so `ORDER BY` on `user_identity.subject` (an email) could pair the wrong rows on a non-`C` collation.
     - It throws on the first difference, naming table, primary key and column, **never a value**:
       - a count: `identity verify: <table> has <a> row(s) in Postgres, <b> in the source`;
       - columns: `identity verify: <table> columns differ (source: a,b,…; Postgres: a,b,…)`;
       - a value: `identity verify: <table> row <pk joined "/"> differs in <column>`.
   - `canonicalIdentityRow(row, ts) → object`: keys sorted. Each `ts` column becomes `null` (null/undefined/`""`) or epoch milliseconds (a `Date` gives `getTime()`, a string gives `Date.parse`). An unparseable timestamp throws `identity verify: unreadable timestamp in <column>`. Every other column is kept as is.
-- Consumes: Task 1's `migrateDb`. Its `identityRows` option is now the `readIdentityRows` result. The copy runs at slot 5 and the verify at slot 7. The return carries `identity: { app_user: n, … }`.
+- Consumes: Task 1's `migrateDb`. Its `identityRows` option is now the `readIdentityRows` result. The copy runs in the copy slot and the verify in the verify slot. The return carries `identity: { app_user: n, … }`.
 - `db-runner.mjs migrateCmd`:
-  - It reads the source with `readIdentityRows` **before connecting**. A read failure prints `blaze db migrate: <message>` and `Nothing was migrated.`, then exits 1.
+  - **A stranded identity file is refused** (review I5, controller ruling). Before connecting: if `identityDbPath(dataRoot)` exists, and neither `--identity-from` nor `--no-identity-import` was given, it prints the lines below and exits 1. Nothing is opened.
+    ```
+    blaze db migrate: <identityDbPath> holds this board's users, tokens and sessions, and this migrate would not copy them.
+    After a restart the board would read users from Postgres only, so every one of them would stop working.
+    Copy them in the same transaction:   blaze db migrate --identity-from <identityDbPath>
+    Or, if that file is not this board's roster, say so explicitly:   blaze db migrate --no-identity-import
+    Nothing was migrated.
+    ```
+  - `--no-identity-import` together with `--identity-from` → `blaze db migrate: --identity-from and --no-identity-import contradict each other` → 1.
+  - It reads the source with `readIdentityRows` **before connecting**. A read failure prints `blaze db migrate: <message>` (one `blaze: ` stripped, M6) and `Nothing was migrated.`, then exits 1.
   - On success it prints `  identity       app_user N · user_identity N · membership N · api_token N · local_password N · user_session N  (row-for-row verified)`, adding ` (absent in source)` after a table's count where `absent`.
 
 - [ ] **Step 1: Write the failing tests** in `tests/identity-copy.test.mjs`. Every test is `PG_SKIP` except the pure ones.
@@ -491,6 +558,10 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     - afterwards the stamp is `'5'` and `to_regclass('app_user')` is null.
   - `"BLZ-706: the copy refuses tables that already hold users"`: `createDbSchema` (v6), then insert one `app_user`, then `migrateDb` with `identityRows` → rejects `/already holds 1 row/`.
   - `"BLZ-706: a missing source is refused before anything connects"`: `runDb(["migrate", "--identity-from", "/nonexistent/identity.db"], { …, openPostgresClient: () => { throw new Error("must not connect"); } })` → 1, err matches `/no identity database at/` and `/Nothing was migrated/`.
+  - `"BLZ-706 (I5): migrate refuses while .blaze/identity.db exists and nothing says what to do with it"`: a `dbBoard()` whose `<dataRoot>/.blaze/identity.db` holds one user, against a v5 database. `runDb(["migrate"], …)` → 1, err matches `/would not copy them/` and `/--identity-from/`, and the stamp is still `'5'`.
+  - `"BLZ-706 (I5): --no-identity-import proceeds and copies nothing"`: same board, `runDb(["migrate", "--no-identity-import"], …)` → 0, stamp `'6'`, and `SELECT count(*) FROM app_user` = 0.
+  - `"BLZ-706 (I5): --identity-from with --no-identity-import is refused"` → 1, err matches `/contradict/`.
+  - `"BLZ-706 (M8): the verify pairs rows by key, not position"`: `verifyIdentity` against a source whose `user_identity` rows are given in reversed order passes.
   - `"BLZ-706: the CLI prints per-table counts and never a credential"`:
     - `runDb(["migrate", "--identity-from", path], …)` → 0;
     - the captured log matches `/app_user 3 · user_identity 3 · membership 3 · api_token 3 · local_password 1 · user_session 2/`;
@@ -502,7 +573,8 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `--identity-from <path>` copies all six identity tables verbatim (hashes, verifiers and live sessions), so no token is reissued;
   - the copy runs in the migrate transaction with a row-for-row verify;
   - it refuses non-empty tables;
-  - the source is opened read-only.
+  - the source is opened read-only;
+  - `migrate` refuses while `<board>/.blaze/identity.db` exists unless `--identity-from` or `--no-identity-import` says what to do with it.
 - [ ] **Step 6: Commit** (no existing test file was edited, so there is no debt step).
   ```bash
   git add scripts/model/identity-copy.mjs scripts/model/db-migrate.mjs scripts/db-runner.mjs tests/identity-copy.test.mjs docs/guide/commands.md
@@ -513,8 +585,9 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 
 **Files:**
 - Create: `scripts/model/identity-pg.mjs`
-- Modify: `scripts/model/identity-db.mjs` (`resolveIdentity`), `scripts/init-pg.mjs` (`openPostgresPool`), `scripts/serve.mjs` (`:277` param, `:348`, `:558`, `:957-971`), `scripts/model/user-admin.mjs`, `scripts/user-runner.mjs`
-- Modify: `tests/model/seam-closure.test.mjs` (ledger rows 921-922 and 2042-2047)
+- Modify: `scripts/model/identity-db.mjs` (`resolveIdentity`, `loadIdentityDefault`), `scripts/init-pg.mjs` (`openPostgresPool`), `scripts/serve.mjs` (`:277` param, `:348`, `:558`, `:957-971`), `scripts/supervisor.mjs` (`createApp`'s default at `:232`, the entry block after `:736`), `scripts/model/user-admin.mjs`, `scripts/user-runner.mjs`
+- Modify test: `tests/concurrency-proof.test.mjs` (its `serve()` at `:34-38`; review I4)
+- Modify: `tests/model/seam-closure.test.mjs` (ledger rows 921-922, 2042-2047 and 2140)
 - Create test: `tests/identity-pg.test.mjs`
 - Docs: `docs/guide/commands.md` `## user` (where identities live in db mode); `docs/architecture.md`'s identity-states table (a "Postgres, v6" row); `AGENTS.md` nothing
 
@@ -536,8 +609,17 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     2. `!state.ok` or `empty`: `await pool.end()`, then throw `blaze: ${state.error ?? "the Postgres database has no Blaze schema — run 'blaze db init'"}`.
     3. `state.version < V6_FEATURES_FROM`: `await pool.end()`, then the SQLite result above.
     4. Otherwise `{ ...(await loadIdentityPg(poolExec(pool))), source: "postgres", reload: () => loadIdentityPg(poolExec(pool)), close: () => pool.end() }`.
+- Produces, from `identity-db.mjs` (review I4): `loadIdentityDefault(dataRoot, env = process.env) → loadIdentity-shaped result`.
+  - It is sync, and opens no database.
+  - When `resolveWriteMode(env) === "db"` and `loadConfig({ root: dataRoot }).database?.driver === "postgres"`, it returns `{ state: "broken", store: null, hasIdentity: false, close() {}, error }`, where `error` is exactly:
+    `blaze: refusing to serve — this board runs on Postgres in db mode (BLAZE_WRITE_PORT=db, database.driver "postgres"), where its users may live in the database. Its identity must be resolved before the server starts: run it with \`blaze board\` or \`blaze start\`, or pass identity: await resolveIdentity({ dataRoot }) to startServer / createApp.`
+  - Otherwise it returns `loadIdentity(dataRoot)`.
+  - A config that fails to load also gives `loadIdentity(dataRoot)`, because the server's own config load reports that.
+- `supervisor.mjs`:
+  - `createApp`'s default becomes `identity = loadIdentityDefault(root)`. It already throws on `broken` (`:242`), so a db-mode Postgres `blaze start` given no identity fails closed with the message above.
+  - The entry block (`:736-753`) resolves first: `const identity = await resolveIdentity({ dataRoot: root });`, inside the existing try, then `startSupervisor({ root, cfg, port, identity, onListening })`.
 - `serve.mjs`:
-  - `startServer` keeps `identity = loadIdentity(root)` as its default.
+  - `startServer`'s default becomes `identity = loadIdentityDefault(root)`.
   - At `:348`, `ensureIdentityIgnored(root)` runs only when `identity?.source !== "postgres"`.
   - At `:558`, `const adopted = await (identity?.reload ?? (() => loadIdentity(root)))();`.
   - The standalone block (`:957-971`) becomes `server = startServer({ root, identity: await resolveIdentity({ dataRoot: root }) })`, inside the existing try. A throw prints its message and exits 1, as today.
@@ -596,24 +678,44 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     - `Promise.all` of two `postSetup` calls with the right token → the statuses sorted are `[200, 409]`;
     - `SELECT count(*) FROM app_user` = 1.
     - This makes `setupInFlight` (`serve.mjs:327`) proven against a store that really yields. Update its comment at `:316-326`: replace the "no store that ships today yields there" paragraph with `// BLZ-706: the Postgres store yields here, and tests/identity-pg.test.mjs proves the guard against it.`
-- [ ] **Step 2: Run them and watch them fail.** Run `node --test tests/identity-pg.test.mjs` with PG. Expected: ERR_MODULE_NOT_FOUND for `identity-pg.mjs`, or `resolveIdentity is not a function`.
-- [ ] **Step 3: Implement** `identity-pg.mjs`, `openPostgresPool`, `resolveIdentity`, the four `serve.mjs` edits, and the `user-admin.mjs` / `user-runner.mjs` changes, as in Interfaces.
-- [ ] **Step 4: Apply the ledger rows 921-922 and 2042-2047.** Run `node --test tests/model/seam-closure.test.mjs`. Expected: green. If the walk classifies `resolveIdentity` differently, see Global Constraints.
-- [ ] **Step 5: Run the tests and watch them pass.** Run `node --test tests/identity-pg.test.mjs tests/setup-flow.test.mjs tests/serve-identity.test.mjs tests/identity-resilience.test.mjs`, then `npm test` with and without PG. Expected: green.
+  - **Review I4, the single resolver:**
+    - `"BLZ-706 (I4): startServer and createApp with no identity refuse a db-mode Postgres board"`. It is **not** PG-gated, because no database is opened:
+      - setup: a board whose config names `database.driver: "postgres"`, and `process.env.BLAZE_WRITE_PORT = "db"` (restored in `finally`);
+      - `assert.throws(() => startServer({ root, projectsDir, port: 0 }), /must be resolved before the server starts/)`;
+      - the same for `createApp(loadConfig({ root }), { root })`;
+      - with `BLAZE_WRITE_PORT` deleted, both start, because the fs board default is unchanged.
+    - `"BLZ-706 (I4): blaze start on a v6 Postgres board authenticates from Postgres"` (PG):
+      - setup: the standalone-serve test's v6 board, admin and token, with the **0-byte `.blaze/identity.db`**;
+      - pick a free port (listen on 0, read it, close it);
+      - spawn `node scripts/supervisor.mjs` with that `PORT`, `BLAZE_PROJECTS_DIR`, `BLAZE_WRITE_PORT=db` and `pgEnvFor(url)`, and wait for its `app → http://localhost:` line;
+      - `GET /api/hash`: no token → 401, the token → 200;
+      - kill the child in `finally`.
+      - A supervisor still on SQLite would have exited 1 on the 0-byte roster.
+  - **`tests/concurrency-proof.test.mjs`** (review I4): its `serve(root)` becomes `async function serve(root) { const identity = await resolveIdentity({ dataRoot: root }); const server = startServer({ port: 0, root, projectsDir: join(root, "projects"), identity }); … return { server, url, identity }; }`, and each caller's teardown adds `await identity.close?.()`. Its Postgres variant's `addUser` writes Postgres at v6, and this makes the server read the same store, so its `403 bad csrf token` goes away.
+- [ ] **Step 2: Run them and watch them fail.** Run `node --test tests/identity-pg.test.mjs tests/concurrency-proof.test.mjs` with PG. Expected: ERR_MODULE_NOT_FOUND for `identity-pg.mjs`, or `resolveIdentity is not a function`.
+- [ ] **Step 3: Implement** `identity-pg.mjs`, `openPostgresPool`, `resolveIdentity`, `loadIdentityDefault`, the four `serve.mjs` edits, the two `supervisor.mjs` edits, and the `user-admin.mjs` / `user-runner.mjs` changes, as in Interfaces.
+- [ ] **Step 4: Apply the ledger rows 921-922, 2042-2047 and 2140.** Run `node --test tests/model/seam-closure.test.mjs`. Expected: green. If the walk classifies `resolveIdentity` differently, see Global Constraints.
+- [ ] **Step 5: Run the tests and watch them pass.** Run `node --test tests/identity-pg.test.mjs tests/concurrency-proof.test.mjs tests/setup-flow.test.mjs tests/serve-identity.test.mjs tests/identity-resilience.test.mjs tests/serve-db-mode.test.mjs`, then `npm test` with and without PG. Expected: green.
+  - Any other test that starts a server with no `identity` on a db-mode board whose config names `postgres` now meets the I4 refusal. Pass it `identity: await resolveIdentity({ dataRoot })` and list it in the commit body. Never weaken `loadIdentityDefault` to make such a test pass.
 - [ ] **Step 6: Write the docs.**
   - `commands.md` `## user`: on a db-mode Postgres board at schema v6, users live in the database. Nothing is written under the board directory, and the output names the database.
-  - `docs/architecture.md`'s identity-states table: one row, "Postgres (db mode, schema ≥ 6): `app_user` etc.; the same four states; read at start through a small connection pool; a v5 database keeps `identity.db`".
+  - `docs/architecture.md`: say that `blaze board` and `blaze start` both resolve identity before bind, and that a db-mode Postgres server started without a resolved identity refuses (I4). Then the identity-states table gets one row, "Postgres (db mode, schema ≥ 6): `app_user` etc.; the same four states; read at start through a small connection pool; a v5 database keeps `identity.db`".
 - [ ] **Step 7: Run THE DEBT STEP, then commit.**
   ```bash
-  git add scripts/model/identity-pg.mjs scripts/model/identity-db.mjs scripts/init-pg.mjs scripts/serve.mjs scripts/model/user-admin.mjs scripts/user-runner.mjs tests/model/seam-closure.test.mjs tests/identity-pg.test.mjs docs/guide/commands.md docs/architecture.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
-  git commit -m "BLZ-706: a db-mode Postgres board at v6 loads identity from Postgres before bind; user add and passwd write it there (absorbs BLZ-701)"
+  git add scripts/model/identity-pg.mjs scripts/model/identity-db.mjs scripts/init-pg.mjs scripts/serve.mjs scripts/supervisor.mjs scripts/model/user-admin.mjs scripts/user-runner.mjs tests/model/seam-closure.test.mjs tests/identity-pg.test.mjs tests/concurrency-proof.test.mjs <Step 5's files> docs/guide/commands.md docs/architecture.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
+  git commit -m "BLZ-706: every server resolves identity from Postgres at v6 and fails closed without it; user add and passwd write it there (absorbs BLZ-701)"
   ```
 
 ### Task 4: Sprints in Postgres — tables, readers, prefetch, `blaze sprint`, `--sprints-from` (BLZ-707)
 
 **Files:**
 - Modify: `scripts/model/sprint-store.mjs`, `scripts/model/sprints.mjs`, `scripts/model/read-storage.mjs` (`fsReadStorage`, `memReadStorage`), `scripts/model/sqlite-storage.mjs` (its reader), `scripts/model/pg-storage.mjs` (`postgresReader`)
-- Modify consumers: `scripts/new.mjs:107`, `scripts/edit.mjs:83`, `scripts/loops/groomer.mjs:824`, `scripts/model/import-apply.mjs:343`, `scripts/views/page.mjs` (`renderView` gantt `:82`, `pageHtml`, `viewEnvelope`), `scripts/views/data.mjs:37` (`boardModel` → `buildIndex`), `scripts/serve.mjs` (`/` and `/view/<name>`)
+- Modify consumers:
+  - `scripts/new.mjs:107`, `scripts/edit.mjs:83`, `scripts/loops/groomer.mjs:824` and `scripts/model/import-apply.mjs:343`. Each one's now-unused `loadSprints` import is removed (review M10).
+  - `scripts/views/page.mjs` (`renderView` gantt `:82`, `pageHtml`, `viewEnvelope`), `scripts/views/data.mjs:37` (`boardModel` → `buildIndex`), and `scripts/serve.mjs` (`/` and `/view/<name>`).
+  - `scripts/reindex.mjs:68-71` and `scripts/rollup-runner.mjs:61-64` (review M5). Each already resolves a reader, and now also passes `sprints: (await rs.readStorage.sprintRegistry(dataRoot)).sprints` into `buildIndex` before closing it. Otherwise `blaze reindex` on a v6 db board warns `sprint 'S2' not in registry` for every sprint-tagged ticket, because `sprints.json` is absent.
+  - `scripts/model/sprints.mjs:123` and `:174`: the two messages become source-neutral, `sprint '<id>' is not in the sprint registry` (review M5). Any test pinning the old `(sprints.json)` suffix is updated in this task.
+- Modify test: `tests/model/driver-conformance.test.mjs` (a `sprintRegistry` case per driver; review M9)
 - Modify: `scripts/sprint-runner.mjs`, `scripts/model/db-migrate.mjs`, `scripts/db-runner.mjs` (`--sprints-from`)
 - Modify: `tests/model/seam-closure.test.mjs` (ledger rows 868-871, the new `sprint-store` rows, and 2052)
 - Create test: `tests/sprints-pg.test.mjs`
@@ -652,11 +754,20 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `renderView`'s gantt uses `sprints ?? loadSprints({ root: dirname(pDir) })`.
   - `serve.mjs`'s `/` and `/view/<name>` pass `sprints: await rs.sprintRegistry(root)` inside `reading(...)`.
 - `migrateDb`'s `sprintRegistry` option:
-  - At slot 5 it refuses if `SELECT count(*) FROM sprint` > 0 or a `sprint_registry` row exists (`sprint copy refused: the sprint tables already hold a registry`), then `writeSprintRegistry`.
-  - At slot 7 it compares `canonicalStrict(await readSprintRegistry(exec))` with `canonicalStrict(source)`. On a mismatch it throws `sprint verify: the registry read back from Postgres differs from <source>`, and names the first differing sprint id when one differs.
+  - In the copy slot it refuses if `SELECT count(*) FROM sprint` > 0 or a `sprint_registry` row exists (`sprint copy refused: the sprint tables already hold a registry`), then `writeSprintRegistry`.
+  - In the verify slot it compares `canonicalStrict(await readSprintRegistry(exec))` with `canonicalStrict(source)`. On a mismatch it throws `sprint verify: the registry read back from Postgres differs from <source>`, and names the first differing sprint id when one differs.
   - It returns `sprints: { count, active }`.
 - `db-runner.mjs`:
-  - `--sprints-from <path>` is read through `readRegularFileSync` and `parseSprintRegistry(text, path)` before connecting. A failure prints `blaze db migrate: <message>` and `Nothing was migrated.`, then exits 1.
+  - **A stranded `sprints.json` is refused** (review I5, controller ruling). Before connecting: if `<dataRoot>/sprints.json` exists, and neither `--sprints-from` nor `--no-sprints-import` was given, it prints the lines below and exits 1.
+    ```
+    blaze db migrate: <dataRoot>/sprints.json holds this board's sprints, and this migrate would not copy them.
+    At v6 the board reads sprints from Postgres only, so the gantt would go empty and every --sprint would be refused.
+    Copy them in the same transaction:   blaze db migrate --sprints-from <dataRoot>/sprints.json
+    Or, if that file is not this board's registry, say so explicitly:   blaze db migrate --no-sprints-import
+    Nothing was migrated.
+    ```
+    `--sprints-from` together with `--no-sprints-import` is refused as contradictory.
+  - `--sprints-from <path>` is read through `readRegularFileSync` and `parseSprintRegistry(text, path)` before connecting. A failure prints `blaze db migrate: <message>` (one `blaze: ` stripped, M6) and `Nothing was migrated.`, then exits 1.
   - Output: `  sprints        N sprint(s), active <id|none>  (verified)`.
 - `sprint-runner.mjs`:
   - `const source = await openSprintSource({ dataRoot })` after the config guard. Every `loadSprints`/`saveSprints` becomes `await source.load()`/`await source.save(registry)`. `source.close()` runs in a `finally`.
@@ -671,6 +782,11 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `"BLZ-707: migrate --sprints-from imports and verifies; a tampered row aborts"`:
     - `makeV5`, `migrateDb(exec, { sprintRegistry: REG })` → `sprints: { count: 2, active: "S2" }`;
     - on a second `makeV5` database, `beforeVerify: (e) => e.run("UPDATE sprint SET name = 'tampered' WHERE id = 'S1'")` → rejects `/sprint verify: .*S1/`, and the stamp is still `'5'`.
+  - `"BLZ-707 (I5): migrate refuses while sprints.json exists and nothing says what to do with it"`: a board with `sprints.json` (S1) against a v5 database. `runDb(["migrate"], …)` → 1, err matches `/would not copy them/` and `/--sprints-from/`, and the stamp is still `'5'`.
+  - `"BLZ-707 (I5): --no-sprints-import proceeds and imports nothing"` → 0, stamp `'6'`, and `readSprintRegistry` returns `{ active: null, sprints: [] }`.
+  - `"BLZ-707 (I5): --sprints-from with --no-sprints-import is refused"` → 1, err matches `/contradict/`.
+  - `"BLZ-707 (M5): blaze reindex on a v6 db board does not warn about registered sprints"`: a v6 board with REG in Postgres, no `sprints.json`, and ENG-1 tagged `S2`. Spawn `scripts/reindex.mjs` with `BLAZE_WRITE_PORT=db` and `pgEnvFor` → exit 0, and stderr `doesNotMatch(/not in registry/)`.
+  - In `tests/model/driver-conformance.test.mjs` (review M9): `"sprintRegistry answers the same shape on every driver"`. For each driver the file already builds: no registry gives `{ active: null, sprints: [] }`. The pg driver gets the same answer at v6 (PG-gated, as that file gates its pg case).
   - `"BLZ-707: a malformed sprints.json is refused before anything connects"`: `runDb(["migrate", "--sprints-from", <file holding "{\"sprints\": 3}">], { …, openPostgresClient: () => { throw new Error("must not connect"); } })` → 1, and err matches `/sprints is not an array/` and `/Nothing was migrated/`.
   - `"BLZ-707: a v5 database: sprints stay on the file"` (Review Focus 1): `makeV5`, then a `sprints.json` with S1 in `dataRoot` → `postgresReader(c).sprintRegistry(dataRoot)` names S1.
   - `"BLZ-707: at v6 the gantt renders the database's sprints"`:
@@ -687,13 +803,13 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - [ ] **Step 2: Run them and watch them fail.** Run `node --test tests/sprints-pg.test.mjs` with PG. Expected: `parseSprintRegistry is not a function` (or ERR_MODULE_NOT_FOUND on its import), and `sprintRegistry is not a function`.
 - [ ] **Step 3: Implement** the Interfaces block. Then grep the five test files that pass hand-built readers into these verbs: `tests/db-runner-pg.test.mjs`, `tests/db-mode-reads-pg.test.mjs`, `tests/verbs-read-through-seam.test.mjs`, `tests/reserve-window.test.mjs` and `tests/import-db-mode.test.mjs`. Grep the groomer tests too (`rg -n "listTickets\s*[:(]" tests | rg -v "memReadStorage|fsReadStorage|postgresReader"`). Add `sprintRegistry() { return { active: null, sprints: [] }; }` to every literal reader the run reports missing it, with `// BLZ-707: every reader answers sprintRegistry`. There is **no** fallback in production code (ADR-0009: the names are the contract).
 - [ ] **Step 4: Apply the ledger rows 868-871, the two `sprint-store` rows and 2052.** Run `node --test tests/model/seam-closure.test.mjs`. Expected: green.
-- [ ] **Step 5: Run the tests and watch them pass.** Run `node --test tests/sprints-pg.test.mjs tests/model/sprints*.test.mjs tests/views/*.test.mjs tests/serve-db-mode.test.mjs`, then `npm test` with and without PG. Expected: green, and the page golden (`tests/views/page-golden.html`) unchanged.
+- [ ] **Step 5: Run the tests and watch them pass.** Run `node --test tests/sprints-pg.test.mjs tests/model/driver-conformance.test.mjs tests/model/sprints*.test.mjs tests/views/*.test.mjs tests/serve-db-mode.test.mjs`, then `npm test` with and without PG. Expected: green, and the page golden (`tests/views/page-golden.html`) unchanged.
 - [ ] **Step 6: Write the docs.**
   - `AGENTS.md` `## Sprints`: "On a db-mode Postgres board at schema v6, the registry lives in the database (`sprint`, `sprint_registry`); `blaze sprint` writes there and `sprints.json` is not read. `blaze db migrate --sprints-from` imports an existing file once."
   - `commands.md` `## sprint` and `## db`: the same, plus the `--sprints-from` flag.
 - [ ] **Step 7: Run THE DEBT STEP, then commit.**
   ```bash
-  git add scripts/model/sprint-store.mjs scripts/model/sprints.mjs scripts/model/read-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/pg-storage.mjs scripts/new.mjs scripts/edit.mjs scripts/loops/groomer.mjs scripts/model/import-apply.mjs scripts/views/page.mjs scripts/views/data.mjs scripts/serve.mjs scripts/sprint-runner.mjs scripts/model/db-migrate.mjs scripts/db-runner.mjs tests/model/seam-closure.test.mjs tests/sprints-pg.test.mjs <each test file Step 3 touched> AGENTS.md docs/guide/commands.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
+  git add scripts/model/sprint-store.mjs scripts/model/sprints.mjs scripts/model/read-storage.mjs scripts/model/sqlite-storage.mjs scripts/model/pg-storage.mjs scripts/new.mjs scripts/edit.mjs scripts/loops/groomer.mjs scripts/model/import-apply.mjs scripts/views/page.mjs scripts/views/data.mjs scripts/serve.mjs scripts/reindex.mjs scripts/rollup-runner.mjs scripts/sprint-runner.mjs scripts/model/db-migrate.mjs scripts/db-runner.mjs tests/model/seam-closure.test.mjs tests/model/driver-conformance.test.mjs tests/sprints-pg.test.mjs <each test file Step 3 or the M5 message change touched> AGENTS.md docs/guide/commands.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
   git commit -m "BLZ-707: sprints live in Postgres at v6 — readers, prefetch, blaze sprint and migrate --sprints-from"
   ```
 
@@ -701,7 +817,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 
 **Files:**
 - Create: `scripts/model/fs-write-guard.mjs`
-- Modify: `scripts/cli.mjs` (after the remote-mode block, before the schema preflight), `scripts/model/write-port-resolve.mjs` (`resolveWritePort`'s fs branch), `scripts/sprint-runner.mjs`, `scripts/model/user-admin.mjs` (`identityTarget`'s non-db branch)
+- Modify: `scripts/cli.mjs` (after the remote-mode block, before the schema preflight), `scripts/model/write-port-resolve.mjs` (`resolveWritePort`'s fs branch), `scripts/sprint-runner.mjs`, `scripts/model/user-admin.mjs` (`identityTarget`'s non-db branch), and `scripts/schedule-runner.mjs` and `scripts/migrate-runner.mjs` (review M4)
 - Create test: `tests/fs-write-guard.test.mjs`
 - Docs: `AGENTS.md` (a new section `## A Postgres board refuses file writes`, after `## Read-only mode`), `docs/guide/commands.md` `## Environment variables` (the `BLAZE_WRITE_PORT` row: unset vs `fs`)
 
@@ -715,11 +831,13 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - `cli.mjs`: `if (sub.mutates && !readOnlyInvocation && key !== "db") { try { await assertFsWriteAllowed(\`run blaze ${key}\`); } catch (e) { console.error(e.message); process.exit(1); } }`. It sits after the remote block (so remote mode never reaches it) and before the preflight. `blaze db *` is exempt (D5).
 - `resolveWritePort`: in the `mode === "fs"` branch, before building the port, `if (dataRoot) await assertFsWriteAllowed("write to this board", { dataRoot, env })`. This also covers `resolvePorts` (the six runners, import, reconcile `--apply`) and `serve.mjs`'s mutating block, which already turns a resolver throw into a 503.
 - `sprint-runner.mjs`: for `new` and `active`, `await assertFsWriteAllowed("create/activate a sprint", { dataRoot })` before `source.save`, when `source.kind === "file"`.
+- `schedule-runner.mjs`: under `migrate-dates --write`, before the first write, `await assertFsWriteAllowed("rewrite ticket dates", { dataRoot })`. `migrate-runner.mjs`: before `runLive`, `await assertFsWriteAllowed("import from Jira", { dataRoot })`. Review M4: these are the two direct runners that write tickets outside `resolvePorts`.
+- **Known gap, stated in `AGENTS.md`:** a direct `node scripts/reindex.mjs` or `node scripts/matrices-runner.mjs` on such a board is not guarded beyond `cli.mjs`. Both write derived files only (`.blaze/index.json`, generated matrices), never a ticket.
 - `user-admin.mjs`: in `identityTarget`'s non-db branch, `await assertFsWriteAllowed("run blaze user", { dataRoot, env: deps.env })` before any open.
 
 - [ ] **Step 1: Write the failing tests** in `tests/fs-write-guard.test.mjs`.
-  - Fixture `pgDriverBoard()`: the `dbBoard()` shape plus `"database": { "driver": "postgres" }` in `blaze.config.json`. No database is needed.
-  - `run(args, env)` spawns `scripts/cli.mjs` with `BLAZE_PROJECTS_DIR`, and with the five env variables deleted unless `env` sets them.
+  - Fixture `pgDriverBoard()`: the `dbBoard()` shape plus `"database": { "driver": "postgres" }` in `blaze.config.json`. No database is needed. **Plus `git init -q <dataRoot>` and one seed commit** (review M2): an fs-mode `blaze new` refuses outside a git work tree (`not inside a git worktree — cannot reserve ticket ids safely`).
+  - `run(args, env)` spawns `scripts/cli.mjs` with `BLAZE_PROJECTS_DIR`, with the five env variables deleted unless `env` sets them, and with **`timeout: 30000`** (review M3). Under Step 5's regression injection, `run(["start"])` would otherwise run the supervisor until the 120 s test timeout.
   - `snapshot(projectsDir)` is a sorted recursive file listing with sizes.
   - `"BLZ-708: fsWriteRefusal — only the implicit default is refused"` (pure): `{}` → string; `{ BLAZE_WRITE_PORT: "fs" }`, `"dual"`, `"db"` → null; a config with driver `sqlite`, and one without `database` → null.
   - `"BLZ-708: every mutating verb refuses on a postgres-driver board when BLAZE_WRITE_PORT is unset"`:
@@ -734,7 +852,9 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `"BLZ-708: direct runners refuse too"`:
     - `node scripts/move-runner.mjs ENG-1 in-progress` → 1, the guard sentence, and the file still under `defined/`;
     - `node scripts/sprint-runner.mjs new "S" --start 2026-07-13 --end 2026-07-26` → 1, and no `sprints.json`;
-    - `node scripts/user-runner.mjs add --email a@b.c` → 1, and no `.blaze/identity.db`.
+    - `node scripts/user-runner.mjs add --email a@b.c` → 1, and no `.blaze/identity.db`;
+    - `node scripts/schedule-runner.mjs migrate-dates --write` → 1, with the guard sentence (review M4);
+    - `node scripts/migrate-runner.mjs --live --project ENG` → 1, with the guard sentence, and no new ticket file. The guard runs right after argument parsing when the mode is `live`, before any input is read.
   - `"BLZ-708: the board server's write API refuses"`:
     - `startServer({ root, projectsDir, port: 0 })` with `process.env.BLAZE_WRITE_PORT` deleted (restored in `finally`);
     - `POST /api/move {id:"ENG-1", to:"in-progress"}` with the CSRF header → 503, and the body's `errors[0]` includes `BLAZE_WRITE_PORT is unset`;
@@ -749,7 +869,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - The `commands.md` env row.
 - [ ] **Step 7: Run THE DEBT STEP (if Step 4 edited tests), then commit.**
   ```bash
-  git add scripts/model/fs-write-guard.mjs scripts/cli.mjs scripts/model/write-port-resolve.mjs scripts/sprint-runner.mjs scripts/model/user-admin.mjs tests/fs-write-guard.test.mjs <Step 4's files> AGENTS.md docs/guide/commands.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
+  git add scripts/model/fs-write-guard.mjs scripts/cli.mjs scripts/model/write-port-resolve.mjs scripts/sprint-runner.mjs scripts/model/user-admin.mjs scripts/schedule-runner.mjs scripts/migrate-runner.mjs tests/fs-write-guard.test.mjs <Step 4's files> AGENTS.md docs/guide/commands.md scripts/ci/temp-cleanup-debt.json scripts/ci/quoted-sources.mjs docs/ci.md
   git commit -m "BLZ-708: a board whose config names the postgres driver refuses file writes unless BLAZE_WRITE_PORT says otherwise"
   ```
 
@@ -809,10 +929,12 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   1. Make a scratch board with `blaze.config.json` `{ "projects": ["ENG"], "schemaVersion": 2, "database": { "driver": "postgres" } }`, one ENG ticket, a `sprints.json` with S1–S2 (`active: "S2"`), and the env from `pgEnvFor` pointing at a fresh `blaze_rehearsal` database.
   2. With the **old** engine (`node $OLD/scripts/cli.mjs`): `db init`, `db load`, and `BLAZE_WRITE_PORT=db … user add --email r@example.com --role admin`. That writes `.blaze/identity.db`, because v5 has no pg identity. Record the stamp (`5`).
   3. With the **new** engine, `BLAZE_WRITE_PORT=db`:
-     - `blaze db migrate` alone with a deliberately malformed `--sprints-from` → exit 1, stamp still `5`;
+     - `blaze db migrate` with no flags → exit 1, naming `.blaze/identity.db` and `--identity-from`, stamp still `5` (review I5);
+     - `blaze db migrate --identity-from <board>/.blaze/identity.db` with no sprint flag → exit 1, naming `sprints.json` and `--sprints-from`, stamp still `5` (review I5);
+     - `blaze db migrate --identity-from … --sprints-from <a deliberately malformed copy>` → exit 1, stamp still `5`;
      - then `blaze db migrate --identity-from <board>/.blaze/identity.db --sprints-from <board>/sprints.json` → exit 0, printing the per-table counts. Those counts must equal `sqlite3 <identity.db> 'select count(*) from <t>'` for each table (use `node -e` with `node:sqlite` if `sqlite3` is absent);
      - then start `node scripts/serve.mjs` with `PORT=0` and the printed token → `GET /api/hash` 200, no token 401, and `GET /view/gantt?sprint=S2` contains S2.
-  4. With the **old** engine against the now-v6 database: `blaze db status`/any read → refused as `newer` (the §5 rollback note, observed).
+  4. With the **old** engine against the now-v6 database: `BLAZE_WRITE_PORT=db node $OLD/scripts/cli.mjs rollup` → refused as `database schema version 6 is newer …` (the §5 rollback note, observed). Not `blaze db status`, which reads only the SQLite shadow and never meets the Postgres stamp (review M7).
   5. Remove the old worktree with `git -C /home/rnamwoh/Documents/Code/blaze worktree remove "$OLD"`, and `docker stop blz703-pg`.
 
   Paste the commands and outputs into the PR body under "v5-compatibility rehearsal".
@@ -906,7 +1028,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 ### Task 9: `BLAZE_TOKEN_FILE`, a TLS-failure hint, and `docs/operations/live-board.md` (BLZ-710)
 
 **Files:**
-- Modify: `scripts/remote-client.mjs` (`remoteFrom`, `failureLine`), `scripts/cli.mjs` (the remote gate condition, `:172`), `tests/setup/no-remote.mjs`
+- Modify: `scripts/remote-client.mjs` (`remoteFrom`, `failureLine`), `scripts/cli.mjs` (the remote gate: the line `if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {` — found by that text, not a line number, because E1 moves it; review M12), `tests/setup/no-remote.mjs`, `tests/remote-env-guard.test.mjs` (review M11)
 - Create test: `tests/remote-token-file.test.mjs`
 - Create: `docs/operations/live-board.md`
 - Docs: `docs/guide/commands.md` `## Remote mode` and `## Environment variables`; `AGENTS.md` `## Remote mode`
@@ -923,8 +1045,9 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - `failureLine(prefix, origin, e)`: when `e?.cause?.code` is in `TLS_TRUST_CODES = new Set(["SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE", "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"])` (Finding 6), it returns:
   `${prefix}: ${origin}'s TLS certificate is not trusted on this machine (${code}). Point NODE_EXTRA_CA_CERTS at the CA certificate that signed it — e.g. NODE_EXTRA_CA_CERTS=/path/to/ca.crt — and run again.`
   Every other cause keeps today's line.
-- `cli.mjs:172`: `if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN || process.env.BLAZE_TOKEN_FILE)`.
+- `cli.mjs`, the remote gate line named above: `if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN || process.env.BLAZE_TOKEN_FILE)`.
 - `tests/setup/no-remote.mjs`: add `delete process.env.BLAZE_TOKEN_FILE;`.
+- `tests/remote-env-guard.test.mjs` (review M11): its assertions that the preload removed `BLAZE_REMOTE_URL`/`BLAZE_TOKEN` (`:23` and the spawned-child check at `:39-44`) gain `BLAZE_TOKEN_FILE`. An operator's exported token file must never reach a test either.
 
 - [ ] **Step 1: Write the failing tests** in `tests/remote-token-file.test.mjs`. `SECRET = "blz_" + "S3CRETVALUE"` is built at run time, so no literal token sits in the source.
   - `"BLZ-710: the token is read from BLAZE_TOKEN_FILE when BLAZE_TOKEN is unset"`: `remoteFrom({ BLAZE_REMOTE_URL: "https://b.example", BLAZE_TOKEN_FILE: f })` with `f` holding `SECRET + "\n"` → `{ remote: true, token: SECRET }`.
@@ -956,9 +1079,9 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   8. **Backups:** a `pg_dump` now holds password and token hashes, so its directory must be mode 0700. Restore with `pg_restore`, and never `db init --force` or `load --replace` (ADR-0039).
 
   Link it from `docs/guide/commands.md` `## Remote mode`.
-- [ ] **Step 6: Commit** (no existing test edited other than `no-remote.mjs`, which is setup, not a scanned test. Run the debt step anyway and stage it if it changed).
+- [ ] **Step 6: Run THE DEBT STEP** (`tests/remote-env-guard.test.mjs` was edited), **then commit**, staging the three debt files if they changed.
   ```bash
-  git add scripts/remote-client.mjs scripts/cli.mjs tests/setup/no-remote.mjs tests/remote-token-file.test.mjs docs/operations/live-board.md docs/guide/commands.md AGENTS.md
+  git add scripts/remote-client.mjs scripts/cli.mjs tests/setup/no-remote.mjs tests/remote-env-guard.test.mjs tests/remote-token-file.test.mjs docs/operations/live-board.md docs/guide/commands.md AGENTS.md
   git commit -m "BLZ-710: BLAZE_TOKEN_FILE, a NODE_EXTRA_CA_CERTS hint on TLS trust failures, and docs/operations/live-board.md"
   ```
 
@@ -1061,6 +1184,45 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 4. **Review Focus.** Each of the five lines names its pinning test and its owning task.
 5. **Proportion.** Bodies are given only for messages and algorithms the tests do not determine: `migrateDb`'s order, the hook's decision chain, and the registry ↔ table mapping. Everything else is a signature plus a test.
 
+## Adversarial review round 1 (2026-10-22), applied
+
+The review is `docs/superpowers/plans/2026-10-22-blz-703-phase5-plan-a-review.md`, verdict NEEDS-FIXES: 0 Critical, 7 Important, 16 Minor.
+
+**Important findings, all fixed:**
+
+| Finding | Fix |
+|---|---|
+| I1 | Facts are read before the lock, then re-read under it (Task 1). |
+| I2 | The PG-only `config-install.test.mjs:210-211` is in Task 1. |
+| I3 | The `sprint_registry` singleton is declared in both dialects with an inert SQLite twin, plus an ADR-0014 row and amendment. The ruling and its reason are in Task 1. |
+| I4 | One identity resolver for every server, failing closed (Finding 11, Task 3, `concurrency-proof`). |
+| I5 | Migrate refuses stranded `identity.db` / `sprints.json` without a flag (Tasks 2, 4 and 7). |
+| I6 | G0 Step 8 deploys and proves the hook live. |
+| I7 | G0 matches on argv tokens, with one test per spelling (Task 0). |
+
+**Minor findings fixed:**
+
+| Finding | Fix |
+|---|---|
+| M1 | `min: 1` (Task 1) |
+| M2 | git-backed fixture (Task 5) |
+| M3 | spawn timeout (Task 5) |
+| M4 | guard in `schedule-runner` and `migrate-runner`, and the derived-file gap stated (Task 5) |
+| M5 | `reindex`/`rollup` prefetch and the source-neutral message (Task 4) |
+| M6 | one `blaze:` prefix (Tasks 1, 2 and 4) |
+| M7 | `rollup` instead of `db status` (Task 7) |
+| M8 | primary-key-keyed verify (Task 2) |
+| M9 | conformance case (Task 4) |
+| M10 | unused imports removed (Task 4) |
+| M11 | `remote-env-guard` covers `BLAZE_TOKEN_FILE` (Task 9) |
+| M12 | anchor text, not a line number (Task 9) |
+| M13 | Review Focus 3 reworded |
+| M14 | G0 header states that it also denies read sub-verbs |
+| M15 | one query for both meta rows (Task 1) |
+| M16 | PG run required for Task 5 (Global Constraints) |
+
+**Declined:** none.
+
 ## Out of scope / Plan B
 
 - **F1:** the chart holds `blaze.config.json` and 11 `project.json`, without `codeRepos` or `loops.reconcile` (INF-932).
@@ -1070,11 +1232,11 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 - H1–H3, the blaze-pm archive (D9), and the board operations on BLZ-206/210 and BLZ-202…218.
 - **Tag `v0.10.0`** as a cutover step (controller ruling; Finding 16).
 - §8's matrices verify uses `blaze matrices --out` in the pod, with no `/api/matrix` route (controller ruling; Finding 8).
-- **Follow-up for the controller to file:** "supervisor (`blaze start`) identity on Postgres" (Finding 11).
+- **Follow-up for the controller to file:** "supervisor (`blaze start`) identity on Postgres" (Finding 11). Its security half is now **in Plan A** (Task 3, review I4): `blaze start` resolves identity like `serve.mjs`, and fails closed without it. What remains for the follow-up is anything beyond that, such as long-running loop behaviour on a db board.
 
 ## Operator questions — ruled 2026-10-22
 
 1. E2 after E1, sequentially: kept as written.
 2. `v0.10.0` is tagged at the cutover (Plan B).
-3. `blaze start` keeps SQLite identity; the follow-up is for the controller to file.
+3. `blaze start` keeps SQLite identity; the follow-up is for the controller to file. *Superseded by the review-round-1 ruling on I4:* `blaze start` and `startServer`'s default go through the same resolver at v6, and fail closed (Finding 11, Task 3).
 4. No `/api/matrix` route; §8 uses `blaze matrices --out` (Finding 8).
