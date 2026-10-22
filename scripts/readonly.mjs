@@ -23,6 +23,13 @@ export function assertWritable(what, env = process.env) {
 // BLZ-690: the sub-verb of a verb that has them (`blaze db <verb>`) — the first argument that is
 // not a flag. ONE rule, shared by cli.mjs's read-only exemption and db-runner.mjs's dispatch, so
 // the verb the gate lets through is always the verb the runner runs.
+// BLZ-705: the flags that take a separate value. The word after one is its value, never the verb
+// (`--sprints-from x migrate` is a migrate); the `--flag=value` spelling is skipped as a flag.
+export const VALUE_FLAGS = ["--identity-from", "--sprints-from"];
 export function subVerbOf(argv) {
-  return argv.find((a) => !a.startsWith("-"));
+  for (let i = 0; i < argv.length; i++) {
+    if (VALUE_FLAGS.includes(argv[i])) { i++; continue; }
+    if (!argv[i].startsWith("-")) return argv[i];
+  }
+  return undefined;
 }

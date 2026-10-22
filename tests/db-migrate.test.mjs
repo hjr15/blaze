@@ -7,6 +7,8 @@
 // OWN scratch database (tests/helpers/pg-scratch.mjs). Run with --test-concurrency=1.
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { spawnSync } from "node:child_process";
+import { fileURLToPath } from "node:url";
 import { migrateDb } from "../scripts/model/db-migrate.mjs";
 import { createDbSchema } from "../scripts/model/db-schema-version.mjs";
 import { identityDdl } from "../scripts/model/identity-schema.mjs";
@@ -15,6 +17,7 @@ import { runDb } from "../scripts/db-runner.mjs";
 import { dbBoard } from "./helpers/db-board.mjs";
 import { PG_SKIP, scratchPgDb, pgClient, makeV5 } from "./helpers/pg-scratch.mjs";
 
+const REPO = fileURLToPath(new URL("..", import.meta.url));
 const V6_TABLES = ["app_user", "user_identity", "membership", "api_token", "local_password",
                    "user_session", "sprint", "sprint_registry"];
 
@@ -182,4 +185,76 @@ test("BLZ-705: load --replace on a NON-authoritative database still works, and l
       assert.equal(await n("sprint"), 1, "load --replace reached sprint");
     });
   } finally { await db.drop(); }
+});
+
+// ── BLZ-705: Task 1 review minors ──────────────────────────────────────────────────────────
+
+test("BLZ-705: migrateDb opens its transaction READ COMMITTED, whatever the server default", async () => {
+  const sql = [];
+  const exec = { run: async (s) => { sql.push(s); }, all: async () => { throw new Error("stop here"); } };
+  await assert.rejects(migrateDb(exec));
+  assert.equal(sql[0], "BEGIN ISOLATION LEVEL READ COMMITTED");
+});
+
+test("BLZ-705: a non-'true' authoritative row is set true, and reported as written", PG_SKIP, async () => {
+  const db = await scratchPgDb("mig_authfalse");
+  try {
+    await withClient(db.url, async (c) => {
+      await createDbSchema(pgExec(c), { dialect: "postgres" });
+      await c.query("INSERT INTO blaze_meta (key, value) VALUES ('authoritative', 'false')");
+      assert.equal((await migrateDb(pgExec(c))).authoritative, "written");
+      assert.equal(await meta(c, "authoritative"), "true");
+      assert.equal((await migrateDb(pgExec(c))).authoritative, "already");
+    });
+  } finally { await db.drop(); }
+});
+
+test("BLZ-705: load --replace re-checks the authoritative flag inside its transaction", PG_SKIP, async () => {
+  const db = await scratchPgDb("mig_toctou");
+  try {
+    const roots = dbBoard();
+    await withClient(db.url, (c) => createDbSchema(pgExec(c), { dialect: "postgres" }));
+    assert.equal(await runDb(["load"], { ...capture().io, roots, ...pgIo(db.url) }), 0);
+    const { buildTransitions } = await import("../scripts/model/transitions.mjs");
+    // Between the early check and BEGIN, another session marks the database authoritative.
+    // The git walk is the injectable step in that window, and it is synchronous, so the flip
+    // runs in a child process that has committed before the walk returns.
+    const flip = () => {
+      const r = spawnSync(process.execPath, ["--input-type=module", "-e",
+        "import pg from 'pg'; const c = new pg.Client(process.env.U); await c.connect();"
+        + " await c.query(\"INSERT INTO blaze_meta (key, value) VALUES ('authoritative', 'true')\"); await c.end();"],
+        { cwd: REPO, env: { ...process.env, U: db.url }, encoding: "utf8" });
+      assert.equal(r.status, 0, "the flip did not commit");
+    };
+    const c = capture();
+    const code = await runDb(["load", "--replace"], { ...c.io, roots, ...pgIo(db.url),
+      buildTransitions: (o) => { flip(); return buildTransitions(o); } });
+    assert.equal(code, 1, "load --replace truncated a database that became authoritative");
+    assert.match(c.err(), /is authoritative/);
+    await withClient(db.url, async (k) =>
+      assert.equal(Number((await k.query("SELECT count(*) AS n FROM ticket")).rows[0].n), 1));
+  } finally { await db.drop(); }
+});
+
+test("BLZ-705: --identity-from=path is the same flag, and a path is required", async () => {
+  const noPg = { resolveDbConfig: () => ({ driver: "postgres", connection: "postgres://u@127.0.0.1:1/x" }),
+                 openPostgresClient: () => { throw new Error("must not connect"); } };
+  const a = capture();
+  assert.equal(await runDb(["migrate", "--identity-from=/nonexistent/identity.db"], { ...a.io, roots: dbBoard(), ...noPg }), 1);
+  assert.match(a.err(), /no identity database at \/nonexistent\/identity\.db/);
+  for (const argv of [["migrate", "--identity-from"], ["migrate", "--identity-from="],
+                      ["migrate", "--sprints-from", "--no-identity-import"], ["migrate", "--sprints-from="]]) {
+    const b = capture();
+    assert.equal(await runDb(argv, { ...b.io, roots: dbBoard(), ...noPg }), 1, argv.join(" "));
+    assert.match(b.err(), /--(identity|sprints)-from needs a path/, argv.join(" "));
+  }
+});
+
+test("BLZ-705: --identity-from and --sprints-from are refused on any verb but migrate", async () => {
+  for (const argv of [["load", "--identity-from", "x"], ["verify", "--sprints-from=x"],
+                      ["seed-counter", "--identity-from=x"]]) {
+    const c = capture();
+    assert.equal(await runDb(argv, { ...c.io, roots: dbBoard() }), 1, argv.join(" "));
+    assert.match(c.err(), /applies to 'blaze db migrate' only/, argv.join(" "));
+  }
 });

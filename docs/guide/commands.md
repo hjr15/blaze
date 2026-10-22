@@ -654,7 +654,9 @@ pre-password roster lacks is copied as empty and marked `(absent in source)`:
 `migrate` **refuses while `<board>/.blaze/identity.db` exists** unless `--identity-from` or
 `--no-identity-import` says what to do with it: after the migrate the board reads its users from
 Postgres only, so a roster left behind would lock every user out. `--no-identity-import` (the file
-is not this board's roster) proceeds and copies nothing; the two flags together are refused.
+is not this board's roster) proceeds and copies nothing; the two flags together are refused. Both
+`--identity-from <path>` and `--identity-from=<path>` are accepted, and the migrate flags are refused
+on every other `db` verb.
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 

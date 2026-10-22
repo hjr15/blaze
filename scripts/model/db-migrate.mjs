@@ -38,7 +38,10 @@ export const MIGRATIONS = new Map([[5, v5ToV6]]);
 export async function migrateDb(exec, { identityRows = null, sprintRegistry = null,
                                         migrations = MIGRATIONS, beforeVerify = null } = {}) {
   void sprintRegistry;   // BLZ-707 gives this meaning.
-  await exec.run("BEGIN", []);
+  // READ COMMITTED explicitly: the lock-then-re-read below sees a concurrent migrate's commit
+  // only because each statement takes a fresh snapshot. Under a server default of REPEATABLE
+  // READ the re-read would see the pre-lock snapshot and migrate twice.
+  await exec.run("BEGIN ISOLATION LEVEL READ COMMITTED", []);
   try {
     // Read BEFORE locking (review I1): an empty or unstamped database may have no blaze_meta to
     // lock, and the raw `relation "blaze_meta" does not exist` would then be the message.
@@ -77,9 +80,11 @@ export async function migrateDb(exec, { identityRows = null, sprintRegistry = nu
       steps.push(v);
     }
 
+    // True by construction: any other value is overwritten. A row comes back only when this
+    // statement inserted or changed it, which is what "written" means.
     const inserted = await exec.all(
       "INSERT INTO blaze_meta (key, value) VALUES ('authoritative', 'true') "
-      + "ON CONFLICT (key) DO NOTHING RETURNING key", []);
+      + "ON CONFLICT (key) DO UPDATE SET value = 'true' WHERE blaze_meta.value <> 'true' RETURNING key", []);
     const authoritative = inserted.length ? "written" : "already";
 
     // ── copy slot: BLZ-706 (identity); BLZ-707 (sprints) inserts its copy here. ──

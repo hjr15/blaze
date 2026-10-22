@@ -248,6 +248,10 @@ test("db status reads through a live writer: no error, and each run's counts are
 test("cli.mjs and runDb pick the db sub-verb by ONE rule (subVerbOf)", () => {
   assert.equal(subVerbOf(["--replace", "load", "verify"]), "load");
   assert.equal(subVerbOf(["--force"]), undefined);
+  // BLZ-705 (review minor): a value flag's path is not the verb, in either spelling.
+  assert.equal(subVerbOf(["--sprints-from", "x", "migrate"]), "migrate");
+  assert.equal(subVerbOf(["--identity-from", "load", "migrate"]), "migrate");
+  assert.equal(subVerbOf(["--identity-from=x", "migrate"]), "migrate");
   const here = (f) => readFileSync(fileURLToPath(new URL(`../scripts/${f}`, import.meta.url)), "utf8");
   for (const f of ["cli.mjs", "db-runner.mjs"]) {
     assert.match(here(f), /subVerbOf\((rest|argv)\)/, `${f} must use subVerbOf`);

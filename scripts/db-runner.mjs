@@ -24,7 +24,7 @@ import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs
 import { migrateDb } from "./model/db-migrate.mjs";
 import { readIdentityRows, IDENTITY_TABLES } from "./model/identity-copy.mjs";
 import { identityDbPath } from "./model/identity-db.mjs";
-import { assertWritable, subVerbOf } from "./readonly.mjs";
+import { assertWritable, subVerbOf, VALUE_FLAGS } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
 
@@ -216,6 +216,17 @@ const LOAD_TABLES = ["ticket_link", "ticket_label", "ticket_component", "worklog
  * database IS the board, and `--replace` erases its tickets and their event history — which is
  * why it is never the default.
  */
+/** BLZ-705: true (with the refusal printed) when `where` is authoritative — load --replace's guard. */
+async function refuseAuthoritative(exec, where, err, { lock = false } = {}) {
+  const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = 'authoritative'"
+    + (lock ? " FOR SHARE" : ""), []);
+  if (rows[0]?.value !== "true") return false;
+  err(`blaze db load: ${where} is authoritative — it IS the board, not a copy loaded from files.`);
+  err("--replace would erase its tickets and their history, and there is no file corpus to reload them from.");
+  err("Nothing was loaded. To roll the database back, restore a pg_dump with pg_restore.");
+  return true;
+}
+
 async function loadCmd(ctx) {
   const { dataRoot, projectsDir, log, err, openPgClient, replace } = ctx;
   const dbConfig = dbConfigOr(ctx);
@@ -236,15 +247,7 @@ async function loadCmd(ctx) {
     // transaction (and every lock the TRUNCATE took) open for the whole walk.
     // BLZ-705: an AUTHORITATIVE database is the board, not a copy of the files — --replace would
     // erase it with nothing to reload it from. Refused before the git walk and before BEGIN.
-    if (replace) {
-      const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = 'authoritative'", []);
-      if (rows[0]?.value === "true") {
-        err(`blaze db load: ${where} is authoritative — it IS the board, not a copy loaded from files.`);
-        err("--replace would erase its tickets and their history, and there is no file corpus to reload them from.");
-        err("Nothing was loaded. To roll the database back, restore a pg_dump with pg_restore.");
-        return 1;
-      }
-    }
+    if (replace && await refuseAuthoritative(exec, where, err)) return 1;
     let built;
     try { built = ctx.buildTransitions({ root: dataRoot }); }
     catch (e) {
@@ -255,6 +258,14 @@ async function loadCmd(ctx) {
     await exec.run("BEGIN", []);
     let tally, seeded, history, held;
     try {
+      // BLZ-705 (review minor): re-checked INSIDE the transaction, before the TRUNCATE. The check
+      // above ran before the git walk, and a migrate may have committed since. FOR SHARE takes
+      // ROW SHARE on blaze_meta, which a migrate's EXCLUSIVE lock waits for (and vice versa), so
+      // from here to COMMIT no migrate can mark the database under this load.
+      if (replace && await refuseAuthoritative(exec, where, err, { lock: true })) {
+        await exec.run("ROLLBACK", []);
+        return 1;
+      }
       held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
       if (held > 0 && !replace) {
         await exec.run("ROLLBACK", []);
@@ -442,10 +453,16 @@ async function migrateCmd(ctx) {
   }
 }
 
-/** BLZ-705: the path after `flag`, or null with the refusal printed. */
+/**
+ * BLZ-705: `flag`'s path — `--flag <path>` or `--flag=<path>` — `undefined` when the flag is
+ * absent, or null with the refusal printed when it has no path.
+ */
 function flagPath(argv, flag, err) {
-  const v = argv[argv.indexOf(flag) + 1];
-  if (v === undefined || v.startsWith("-")) { err(`blaze db migrate: ${flag} needs a path`); return null; }
+  const eq = argv.find((a) => a.startsWith(`${flag}=`));
+  const i = argv.indexOf(flag);
+  if (eq === undefined && i < 0) return undefined;
+  const v = eq !== undefined ? eq.slice(flag.length + 1) : argv[i + 1];
+  if (!v || v.startsWith("-")) { err(`blaze db migrate: ${flag} needs a path`); return null; }
   return v;
 }
 
@@ -680,6 +697,8 @@ async function status({ dataRoot, log }) {
   return 0;
 }
 
+const MIGRATE_ONLY_FLAGS = [...VALUE_FLAGS, "--no-identity-import", "--no-sprints-import"];
+
 export async function runDb(argv, io = {}) {
   const { log = console.log, err = console.error } = io;
   // BLZ-690: the same rule cli.mjs's read-only exemption uses, so the two can never disagree.
@@ -697,17 +716,21 @@ export async function runDb(argv, io = {}) {
                 // Injectable so a test can see WHEN the git walk runs, and make it fail.
                 buildTransitions: io.buildTransitions ?? buildTransitions,
                 env: io.env ?? process.env };
+  // BLZ-705: the migrate-only flags, in either spelling, are refused on every other verb rather
+  // than silently ignored.
+  if (cmd !== "migrate") {
+    const stray = MIGRATE_ONLY_FLAGS.find((f) => argv.some((a) => a === f || a.startsWith(`${f}=`)));
+    if (stray) { err(`blaze db ${cmd}: ${stray} applies to 'blaze db migrate' only`); return 1; }
+  }
   if (cmd === "init") return init(ctx);
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
   if (cmd === "load") return loadCmd(ctx);
   if (cmd === "verify") return verifyCmd(ctx);
   if (cmd === "migrate") {
-    // BLZ-706 / BLZ-707 give these meaning; parsed (and refused when empty) from the start.
     for (const [flag, key] of [["--identity-from", "identityFrom"], ["--sprints-from", "sprintsFrom"]]) {
-      if (!argv.includes(flag)) continue;
       const path = flagPath(argv, flag, err);
       if (path === null) return 1;
-      ctx[key] = path;
+      if (path !== undefined) ctx[key] = path;
     }
     ctx.noIdentityImport = argv.includes("--no-identity-import");
     return migrateCmd(ctx);
