@@ -523,7 +523,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
   - `canonicalIdentityRow(row, ts) → object`: keys sorted. Each `ts` column becomes `null` (null/undefined/`""`) or epoch milliseconds (a `Date` gives `getTime()`, a string gives `Date.parse`). An unparseable timestamp throws `identity verify: unreadable timestamp in <column>`. Every other column is kept as is.
 - Consumes: Task 1's `migrateDb`. Its `identityRows` option is now the `readIdentityRows` result. The copy runs in the copy slot and the verify in the verify slot. The return carries `identity: { app_user: n, … }`.
 - `db-runner.mjs migrateCmd`:
-  - **A stranded identity file is refused** (review I5, controller ruling). Before connecting: if `identityDbPath(dataRoot)` exists, and neither `--identity-from` nor `--no-identity-import` was given, it prints the lines below and exits 1. Nothing is opened.
+  - **A stranded identity file is refused** (review I5, controller ruling). Before connecting: if `identityDbPath(dataRoot)` exists, and neither `--identity-from` nor `--no-identity-import` was given, it prints the lines below and exits 1. No write and no transaction happens. One read-only connection runs `to_regclass` plus `count(*)` on `users`, to tell a first run from a re-run after an import. A re-run gets the "already imported" wording (review fix 62dbf59).
     ```
     blaze db migrate: <identityDbPath> holds this board's users, tokens and sessions, and this migrate would not copy them.
     After a restart the board would read users from Postgres only, so every one of them would stop working.
