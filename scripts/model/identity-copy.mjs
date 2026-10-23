@@ -37,6 +37,9 @@ export async function readIdentityRows(path) {
   const { DatabaseSync } = await import("node:sqlite");
   const db = new DatabaseSync(path, { readOnly: true });
   try {
+    // One read transaction, so the six tables are one snapshot: a `blaze user` write landing
+    // between two SELECTs cannot leave a token whose user the copy never saw.
+    db.exec("BEGIN");
     const present = new Set(db.prepare("SELECT name FROM sqlite_master WHERE type = 'table'").all()
       .map((r) => r.name));
     const out = {};
@@ -45,6 +48,7 @@ export async function readIdentityRows(path) {
         ? { rows: db.prepare(`SELECT * FROM ${t.name}`).all().map((r) => ({ ...r })), absent: false }
         : { rows: [], absent: true };
     }
+    db.exec("COMMIT");
     return out;
   } finally { db.close(); }
 }

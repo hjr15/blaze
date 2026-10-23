@@ -398,24 +398,18 @@ async function migrateCmd(ctx) {
     err("blaze db migrate: migrates a Postgres database. The SQLite shadow is derived — rebuild it with 'blaze db init --force'.");
     return 1;
   }
-  // Everything below up to the connect decides what to copy, and opens nothing in Postgres.
-  // BLZ-707: the stranded sprints.json refusal joins these.
+  // Everything below up to the connect decides what to copy. BLZ-707: the stranded sprints.json
+  // refusal joins these.
   if (identityFrom && noIdentityImport) {
     err("blaze db migrate: --identity-from and --no-identity-import contradict each other");
     return 1;
   }
   // BLZ-706 (review I5): after the migrate the board reads its users from Postgres only. A roster
   // left behind in .blaze/identity.db would silently lock every user out, so the operator says
-  // what to do with it.
+  // what to do with it. Decided after the connect (fix round 1): on a re-run after a successful
+  // copy the file is still there, and the database's own users say which refusal is true.
   const roster = identityDbPath(dataRoot);
-  if (!identityFrom && !noIdentityImport && existsSync(roster)) {
-    err(`blaze db migrate: ${roster} holds this board's users, tokens and sessions, and this migrate would not copy them.`);
-    err("After a restart the board would read users from Postgres only, so every one of them would stop working.");
-    err(`Copy them in the same transaction:   blaze db migrate --identity-from ${roster}`);
-    err("Or, if that file is not this board's roster, say so explicitly:   blaze db migrate --no-identity-import");
-    err("Nothing was migrated.");
-    return 1;
-  }
+  const stranded = !identityFrom && !noIdentityImport && existsSync(roster);
   let identityRows = null;
   if (identityFrom) {
     try { identityRows = await readIdentityRows(identityFrom); }
@@ -430,6 +424,23 @@ async function migrateCmd(ctx) {
   try { client = await openPgClient(dbConfig.connection); }
   catch (e) { err(`blaze db migrate: cannot connect to ${where} — ${e.message}`); return 1; }
   try {
+    if (stranded) {
+      let held;
+      try { held = await identityUsersHeld(pgExec(client)); }
+      catch (e) { err(`blaze db migrate: ${where} — ${e.message}`); err("Nothing was migrated."); return 1; }
+      if (held > 0) {
+        err(`blaze db migrate: ${where} already holds ${held} user(s), so ${roster} looks already imported.`);
+        err("A second copy would be refused (the identity tables are not empty), and the board already reads these users from Postgres.");
+        err("To migrate without copying it again:   blaze db migrate --no-identity-import");
+      } else {
+        err(`blaze db migrate: ${roster} holds this board's users, tokens and sessions, and this migrate would not copy them.`);
+        err("After a restart the board would read users from Postgres only, so every one of them would stop working.");
+        err(`Copy them in the same transaction:   blaze db migrate --identity-from ${roster}`);
+        err("Or, if that file is not this board's roster, say so explicitly:   blaze db migrate --no-identity-import");
+      }
+      err("Nothing was migrated.");
+      return 1;
+    }
     let r;
     try { r = await migrateDb(pgExec(client), { identityRows }); }
     catch (e) {
@@ -453,14 +464,23 @@ async function migrateCmd(ctx) {
   }
 }
 
+/** BLZ-706: users the database already holds — 0 below v6, where app_user does not exist yet. */
+async function identityUsersHeld(exec) {
+  const [{ t }] = await exec.all("SELECT to_regclass('app_user') IS NOT NULL AS t", []);
+  if (!t) return 0;
+  return Number((await exec.all("SELECT count(*) AS n FROM app_user", []))[0].n);
+}
+
 /**
  * BLZ-705: `flag`'s path — `--flag <path>` or `--flag=<path>` — `undefined` when the flag is
  * absent, or null with the refusal printed when it has no path.
  */
 function flagPath(argv, flag, err) {
+  const uses = argv.filter((a) => a === flag || a.startsWith(`${flag}=`));
+  if (!uses.length) return undefined;
+  if (uses.length > 1) { err(`blaze db migrate: ${flag} is given more than once`); return null; }
   const eq = argv.find((a) => a.startsWith(`${flag}=`));
   const i = argv.indexOf(flag);
-  if (eq === undefined && i < 0) return undefined;
   const v = eq !== undefined ? eq.slice(flag.length + 1) : argv[i + 1];
   if (!v || v.startsWith("-")) { err(`blaze db migrate: ${flag} needs a path`); return null; }
   return v;

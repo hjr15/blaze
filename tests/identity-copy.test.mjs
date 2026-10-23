@@ -82,6 +82,24 @@ async function sqliteSide(path) {
     return out;
   } finally { db.close(); }
 }
+/**
+ * A3: rows compared column by column, failing with ONLY table, primary key and column. A whole-row
+ * deepStrictEqual would print actual/expected — token hashes, verifiers — on failure. `assert.ok`
+ * with a message carries actual `false` / expected `true` and nothing else.
+ */
+function sameRows(t, left, right) {
+  assert.ok(left.length === right.length, `${t.name}: ${right.length} row(s) in Postgres, ${left.length} in the source`);
+  const key = (r) => JSON.stringify(t.pk.map((k) => r[k]));
+  const byKey = new Map(right.map((r) => [key(r), r]));
+  for (const want of left) {
+    const pk = t.pk.map((k) => want[k]).join("/");
+    const got = byKey.get(key(want));
+    assert.ok(got !== undefined, `${t.name} ${pk}: missing in Postgres`);
+    assert.ok(Object.keys(want).join(",") === Object.keys(got).join(","), `${t.name} ${pk}: columns differ`);
+    for (const col of Object.keys(want)) assert.ok(Object.is(want[col], got[col]), `${t.name} ${pk} ${col}`);
+  }
+}
+
 async function pgSide(c) {
   const out = {};
   for (const t of IDENTITY_TABLES) {
@@ -132,8 +150,10 @@ test("BLZ-706: a pre-BLZ-566 roster reads its missing tables as absent", async (
   db.exec("DROP TABLE user_session; DROP TABLE local_password;");
   db.close();
   const rows = await readIdentityRows(path);
-  assert.deepEqual(rows.local_password, { rows: [], absent: true });
-  assert.deepEqual(rows.user_session, { rows: [], absent: true });
+  for (const t of ["local_password", "user_session"]) {
+    assert.equal(rows[t].absent, true, `${t} is not marked absent`);
+    assert.equal(rows[t].rows.length, 0, `${t} carries rows`);
+  }
   assert.equal(rows.app_user.absent, false);
   assert.equal(rows.app_user.rows.length, 3);
 });
@@ -154,7 +174,7 @@ test("BLZ-706: every table copies with zero row diffs", PG_SKIP, async () => {
     for (const t of IDENTITY_TABLES) assert.ok(want[t.name] >= 1, `${t.name} holds no row in the fixture`);
     const left = await sqliteSide(path);
     const right = await withClient(db.url, (c) => pgSide(c));
-    for (const t of IDENTITY_TABLES) assert.deepStrictEqual(right[t.name], left[t.name], `${t.name} differs`);
+    for (const t of IDENTITY_TABLES) sameRows(t, left[t.name], right[t.name]);
   } finally { await db.drop(); }
 });
 
@@ -250,8 +270,7 @@ test("BLZ-706 (I5): migrate refuses while .blaze/identity.db exists and nothing 
     const roots = await boardWithRoster();
     await makeV5(db.url);
     const c = capture();
-    assert.equal(await runDb(["migrate"], { ...c.io, roots, ...pgIo(db.url),
-      openPostgresClient: () => { throw new Error("must not connect"); } }), 1);
+    assert.equal(await runDb(["migrate"], { ...c.io, roots, ...pgIo(db.url) }), 1);
     assert.match(c.err(), /would not copy them/);
     assert.match(c.err(), /--identity-from/);
     assert.ok(c.err().includes(identityDbPath(roots.dataRoot)), "the file is named");
@@ -309,7 +328,8 @@ test("BLZ-706: the CLI prints per-table counts and never a credential", PG_SKIP,
     assert.match(c.out(), /app_user 3 · user_identity 3 · membership 3 · api_token 3 · local_password 1 · user_session 2/);
     assert.match(c.out(), /\(row-for-row verified\)/);
     const all = `${c.out()}\n${c.err()}`;
-    assert.ok(!new RegExp(`${seed.adminToken}|blz_`).test(all), "a credential reached the output");
+    assert.ok(!all.includes(seed.adminToken), "the admin token reached the output");
+    assert.ok(!all.includes("blz_"), "a token prefix reached the output");
   } finally { await db.drop(); }
 });
 
@@ -326,4 +346,39 @@ test("BLZ-706: the CLI marks a table the source does not have", PG_SKIP, async (
     assert.equal(await runDb(["migrate", "--identity-from", path], { ...c.io, roots: dbBoard(), ...pgIo(db.url) }), 0);
     assert.match(c.out(), /local_password 0 \(absent in source\) · user_session 0 \(absent in source\)/);
   } finally { await db.drop(); }
+});
+
+// ── BLZ-706 review fix round 1 ─────────────────────────────────────────────────────────────
+
+test("BLZ-706: a re-run after the copy names the roster as already imported, not as stranded", PG_SKIP, async () => {
+  const db = await scratchPgDb("idc_rerun");
+  try {
+    const roots = dbBoard();
+    const { path } = await seedIdentityDb(roots.dataRoot);
+    await makeV5(db.url);
+    const first = capture();
+    assert.equal(await runDb(["migrate", "--identity-from", path], { ...first.io, roots, ...pgIo(db.url) }), 0,
+      "the first migrate failed");
+    const again = capture();
+    assert.equal(await runDb(["migrate"], { ...again.io, roots, ...pgIo(db.url) }), 1);
+    assert.match(again.err(), /already holds 3 user\(s\)/);
+    assert.match(again.err(), /already imported/);
+    assert.match(again.err(), /--no-identity-import/);
+    assert.doesNotMatch(again.err(), /would stop working/, "the stranded-roster warning is false here");
+    const ok = capture();
+    assert.equal(await runDb(["migrate", "--no-identity-import"], { ...ok.io, roots, ...pgIo(db.url) }), 0);
+    assert.match(ok.out(), /already current/);
+  } finally { await db.drop(); }
+});
+
+test("BLZ-706: a repeated --identity-from or --sprints-from is refused", async () => {
+  const noPg = { resolveDbConfig: () => ({ driver: "postgres", connection: "postgres://u@127.0.0.1:1/x" }),
+                 openPostgresClient: () => { throw new Error("must not connect"); } };
+  for (const argv of [["migrate", "--identity-from", "/a", "--identity-from=/b"],
+                      ["migrate", "--identity-from", "/a", "--identity-from", "/b"],
+                      ["migrate", "--sprints-from=/a", "--sprints-from=/b"]]) {
+    const c = capture();
+    assert.equal(await runDb(argv, { ...c.io, roots: dbBoard(), ...noPg }), 1, argv.join(" "));
+    assert.match(c.err(), /--(identity|sprints)-from is given more than once/, argv.join(" "));
+  }
 });
