@@ -15,6 +15,9 @@ import { identityDdl } from "../scripts/model/identity-schema.mjs";
 import { pgExec } from "../scripts/model/write-port-resolve.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { dbBoard } from "./helpers/db-board.mjs";
+import { openIdentityDb } from "../scripts/model/identity-db.mjs";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
 import { PG_SKIP, scratchPgDb, pgClient, makeV5 } from "./helpers/pg-scratch.mjs";
 
 const REPO = fileURLToPath(new URL("..", import.meta.url));
@@ -257,4 +260,43 @@ test("BLZ-705: --identity-from and --sprints-from are refused on any verb but mi
     assert.equal(await runDb(argv, { ...c.io, roots: dbBoard() }), 1, argv.join(" "));
     assert.match(c.err(), /applies to 'blaze db migrate' only/, argv.join(" "));
   }
+});
+
+// ── E1 final review M8: the schema is judged before the stranded-file refusals ──────────────
+
+/** A db board with BOTH stranded files: a populated identity.db and a sprints.json. */
+async function strandedBoard() {
+  const roots = dbBoard();
+  const opened = openIdentityDb(roots.dataRoot, { create: true });
+  try { await opened.store.createUser({ email: "only@example.com", role: "admin" }); }
+  finally { opened.db.close(); }
+  writeFileSync(join(roots.dataRoot, "sprints.json"), JSON.stringify({ active: null, sprints: [] }));
+  return roots;
+}
+
+test("BLZ-705 (final M8): a newer, too-old or empty database is refused before the stranded-file refusals",
+     PG_SKIP, async () => {
+  const newer = await scratchPgDb("mig_m8_newer");
+  const old = await scratchPgDb("mig_m8_old");
+  const empty = await scratchPgDb("mig_m8_empty");
+  try {
+    const roots = await strandedBoard();
+    await withClient(newer.url, async (c) => {
+      await createDbSchema(pgExec(c), { dialect: "postgres" });
+      await c.query("UPDATE blaze_meta SET value = '99' WHERE key = 'schema_version'");
+    });
+    await makeV5(old.url);
+    await withClient(old.url, (c) => c.query("UPDATE blaze_meta SET value = '4' WHERE key = 'schema_version'"));
+    for (const [db, want] of [[newer, /newer than this engine/], [old, /no migration path from version 4/],
+                              [empty, /holds no Blaze schema/]]) {
+      const c = capture();
+      assert.equal(await runDb(["migrate"], { ...c.io, roots, ...pgIo(db.url) }), 1);
+      assert.ok(want.test(c.err()), `${want}: the schema refusal is not first`);
+      assert.ok(!/would not copy them|already imported|--identity-from|--sprints-from/.test(c.err()),
+        `${want}: a stranded-file refusal was printed for a database migrate cannot take`);
+      assert.ok(/Nothing was migrated/.test(c.err()), `${want}: nothing-migrated is not stated`);
+    }
+    await withClient(newer.url, async (c) => assert.equal(await meta(c, "schema_version"), "99"));
+    await withClient(old.url, async (c) => assert.equal(await meta(c, "schema_version"), "4"));
+  } finally { await newer.drop(); await old.drop(); await empty.drop(); }
 });

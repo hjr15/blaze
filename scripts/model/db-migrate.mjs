@@ -25,6 +25,30 @@ async function v5ToV6(exec) {
 export const MIGRATIONS = new Map([[5, v5ToV6]]);
 
 /**
+ * The refusal (a `blaze: …` message) for a `checkDbSchema(…, { min: 1 })` state migrate cannot
+ * take — empty, unstamped, newer, or older than MIGRATE_FROM — or null when it can.
+ * `blaze db migrate` judges this once before its stranded-file refusals (E1 final review M8), so
+ * a database it would refuse anyway is named first; `migrateDb` judges it again under its lock.
+ */
+export function migrateRefusal(state) {
+  if (state.state === "empty") {
+    return "blaze: this database holds no Blaze schema, so there is nothing to migrate. "
+      + "Create it with 'blaze db init'.";
+  }
+  if (state.state === "unstamped") return `blaze: ${state.error}`;
+  if (state.state === "newer") {
+    return `blaze: database schema version ${state.version} is newer than this engine `
+      + `(${DB_SCHEMA_VERSION}); upgrade the engine`;
+  }
+  if (!state.ok) return `blaze: ${state.error}`;
+  if (state.version < MIGRATE_FROM) {
+    return `blaze: no migration path from version ${state.version} — the oldest this engine `
+      + `migrates from is ${MIGRATE_FROM}`;
+  }
+  return null;
+}
+
+/**
  * Bring a Postgres database forward to DB_SCHEMA_VERSION and mark it authoritative, in one
  * transaction. `exec` is `pgExec(client)` over ONE client; this function owns BEGIN, COMMIT and
  * ROLLBACK, and on any failure rolls back and rethrows, so nothing is half-migrated.
@@ -53,27 +77,16 @@ export async function migrateDb(exec, { identityRows = null, sprintRegistry = nu
     // MIGRATE_FROM check below judges it — the `older` message would say "run blaze db migrate",
     // which is circular here.
     const first = await checkDbSchema(exec, { dialect: "postgres", min: 1 });
-    if (first.state === "empty") {
-      throw new Error("blaze: this database holds no Blaze schema, so there is nothing to migrate. "
-        + "Create it with 'blaze db init'.");
-    }
-    if (first.state === "unstamped") throw new Error(`blaze: ${first.error}`);
+    if (first.state === "empty" || first.state === "unstamped") throw new Error(migrateRefusal(first));
 
     // Two migrates serialise here; plain reads (ACCESS SHARE) carry on.
     await exec.run("LOCK TABLE blaze_meta IN EXCLUSIVE MODE", []);
 
     // Re-read under the lock: a concurrent migrate that committed first is now seen as v6.
     const state = await checkDbSchema(exec, { dialect: "postgres", min: 1 });
-    if (state.state === "newer") {
-      throw new Error(`blaze: database schema version ${state.version} is newer than this engine `
-        + `(${DB_SCHEMA_VERSION}); upgrade the engine`);
-    }
-    if (!state.ok) throw new Error(`blaze: ${state.error}`);
+    const refusal = migrateRefusal(state);
+    if (refusal) throw new Error(refusal);
     const from = state.version;
-    if (from < MIGRATE_FROM) {
-      throw new Error(`blaze: no migration path from version ${from} — the oldest this engine `
-        + `migrates from is ${MIGRATE_FROM}`);
-    }
 
     const steps = [];
     for (let v = from; v < DB_SCHEMA_VERSION; v++) {

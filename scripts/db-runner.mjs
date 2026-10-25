@@ -21,8 +21,8 @@ import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
 import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
-import { migrateDb } from "./model/db-migrate.mjs";
+import { DB_SCHEMA_VERSION, createDbSchema, checkDbSchema } from "./model/db-schema-version.mjs";
+import { migrateDb, migrateRefusal } from "./model/db-migrate.mjs";
 import { readIdentityRows, IDENTITY_TABLES } from "./model/identity-copy.mjs";
 import { identityDbPath } from "./model/identity-db.mjs";
 import { parseSprintRegistry } from "./model/sprint-store.mjs";
@@ -207,6 +207,17 @@ function transitionsLine(h, dataRoot) {
 const LOAD_TABLES = ["ticket_link", "ticket_label", "ticket_component", "worklog_entry",
                      "acceptance_criterion", "ticket_event", "ticket"];
 
+/** BLZ-705: true (with the refusal printed) when `where` is authoritative — load --replace's guard. */
+async function refuseAuthoritative(exec, where, err, { lock = false } = {}) {
+  const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = 'authoritative'"
+    + (lock ? " FOR SHARE" : ""), []);
+  if (rows[0]?.value !== "true") return false;
+  err(`blaze db load: ${where} is authoritative — it IS the board, not a copy loaded from files.`);
+  err("--replace would erase its tickets and their history, and there is no file corpus to reload them from.");
+  err("Nothing was loaded. To roll the database back, restore a pg_dump with pg_restore.");
+  return true;
+}
+
 /**
  * BLZ-678: `blaze db load [--replace]` — the board's tickets into Postgres (spec §5.2).
  *
@@ -220,17 +231,6 @@ const LOAD_TABLES = ["ticket_link", "ticket_label", "ticket_component", "worklog
  * database IS the board, and `--replace` erases its tickets and their event history — which is
  * why it is never the default.
  */
-/** BLZ-705: true (with the refusal printed) when `where` is authoritative — load --replace's guard. */
-async function refuseAuthoritative(exec, where, err, { lock = false } = {}) {
-  const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = 'authoritative'"
-    + (lock ? " FOR SHARE" : ""), []);
-  if (rows[0]?.value !== "true") return false;
-  err(`blaze db load: ${where} is authoritative — it IS the board, not a copy loaded from files.`);
-  err("--replace would erase its tickets and their history, and there is no file corpus to reload them from.");
-  err("Nothing was loaded. To roll the database back, restore a pg_dump with pg_restore.");
-  return true;
-}
-
 async function loadCmd(ctx) {
   const { dataRoot, projectsDir, log, err, openPgClient, replace } = ctx;
   const dbConfig = dbConfigOr(ctx);
@@ -452,6 +452,17 @@ async function migrateCmd(ctx) {
   try { client = await openPgClient(dbConfig.connection); }
   catch (e) { err(`blaze db migrate: cannot connect to ${where} — ${e.message}`); return 1; }
   try {
+    // E1 final review M8: judge the schema first. A database migrate refuses anyway (newer, too
+    // old, empty, unstamped) is named before the stranded-file refusals, not on the next run.
+    // Read-only, outside migrateDb's transaction; migrateDb judges it again under its lock.
+    let pre;
+    try { pre = migrateRefusal(await checkDbSchema(pgExec(client), { dialect: "postgres", min: 1 })); }
+    catch (e) { err(`blaze db migrate: ${where} — ${e.message}`); err("Nothing was migrated."); return 1; }
+    if (pre) {
+      err(`blaze db migrate: ${where} — ${pre.replace(/^blaze: /, "")}`);
+      err("Nothing was migrated.");
+      return 1;
+    }
     // Both stranded files are reported in one pass, so fixing one does not reveal the other.
     let refused = false;
     if (stranded) {
