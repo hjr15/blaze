@@ -282,6 +282,15 @@ The sprint registry. `sprint new` creates a sprint with a start and end
 date. `sprint list` lists all sprints. `sprint active <id>` marks a sprint
 active by id.
 
+The registry is `sprints.json` at the data root — except on a db-mode
+(`BLAZE_WRITE_PORT=db`) Postgres board at schema v6, where it lives in the database's
+`sprint` and `sprint_registry` tables: `blaze sprint` reads and writes there, each save
+in one transaction, and `sprints.json` is not read. The board, the gantt, `blaze reindex`
+and `--sprint` validation read the same source. There, `new` and `active` name the
+database (`created S3 (database: <host>/<database>)`); everywhere else the output is
+unchanged. Import an existing `sprints.json` once with `blaze db migrate --sprints-from`
+(see [db](#db)).
+
 ## reindex
 
 ```
@@ -598,7 +607,7 @@ blaze db init [--force]
 blaze db seed-counter
 blaze db load [--replace]
 blaze db verify
-blaze db migrate [--identity-from <identity.db> | --no-identity-import]
+blaze db migrate [--identity-from <identity.db> | --no-identity-import] [--sprints-from <sprints.json> | --no-sprints-import]
 blaze db status
 ```
 
@@ -658,9 +667,31 @@ is not this board's roster) proceeds and copies nothing; the two flags together 
 On a **re-run after a successful copy** the file is still there; when the database already holds
 users the refusal says the roster looks already imported, and `--no-identity-import` is the way on
 (a second `--identity-from` is refused, because the tables are no longer empty).
+
+**`--sprints-from <path>`** copies that `sprints.json` into `sprint` and `sprint_registry`, inside
+the migrate transaction. The file is read once and parsed **strictly** before anything connects: a
+file that is not JSON, a `sprints` that is not an array, a sprint with no id, a repeated id, a
+non-string name, a `start`/`end` that is not a `YYYY-MM-DD` date, or a `registryVersion` that is not
+an integer from 1 is refused by name (`sprints[i] (<id>) …`), and nothing is migrated. Every key
+Blaze does not understand is kept, at both levels. The registry is then read back whole and must
+equal the file, key for key and type for type, before the commit; a difference rolls the whole
+migration back, naming the first differing sprint. It refuses sprint tables that already hold a
+registry.
+
+```
+  sprints        2 sprint(s), active S2  (verified)
+```
+
+`migrate` **refuses while `<board>/sprints.json` exists** unless `--sprints-from` or
+`--no-sprints-import` says what to do with it: at v6 the board reads sprints from Postgres only, so
+a registry left behind would empty the gantt and refuse every `--sprint`. `--no-sprints-import`
+proceeds and copies nothing; the two flags together are refused. As with the roster, a **re-run
+after a successful copy** names the file as already imported (the database already holds a
+registry) and points to `--no-sprints-import`. When both files are stranded, one run names both.
+
 Each of `--identity-from` and `--sprints-from` may be given once. Both
-`--identity-from <path>` and `--identity-from=<path>` are accepted, and the migrate flags are refused
-on every other `db` verb.
+`--identity-from <path>` and `--identity-from=<path>` (likewise `--sprints-from`) are accepted, and
+the migrate flags are refused on every other `db` verb.
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 

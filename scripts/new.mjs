@@ -14,7 +14,7 @@ import { loadProjectSchema } from "./model/schema-config.mjs";
 import { roundEstimate } from "./model/time.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
-import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
+import { validateSprintFields } from "./model/sprints.mjs";
 
 export async function applyNew(projectsDir, opts = {}) {
   const { project, type, title, priority = "medium", labels = [], today = null, extra = {},
@@ -104,7 +104,8 @@ export async function applyNew(projectsDir, opts = {}) {
     source: "a --project argument",
   });
   errors.push(...validateTaxonomy(frontmatter, project_cfg));
-  const { sprints } = loadSprints({ root: dirname(projectsDir) });
+  // BLZ-707: through the reader — the sprint tables on a Postgres board at v6, else sprints.json.
+  const { sprints } = await readStorage.sprintRegistry(dirname(projectsDir));
   errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
   // Return BEFORE allocating: a rejected create must not consume an id. It used
   // to, which is how CRP-111 was lost, and it meant a gap in the id sequence was

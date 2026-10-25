@@ -54,7 +54,7 @@ function reconcileSummarySource() {
 // How to render each view's fragment. metrics/map compute their models
 // lazily — only when that view is actually requested — so GET / (which
 // always renders "board") never pays for the metrics/graph walk.
-export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false, sprint = null, tickets = null }) {
+export function renderView(name, { m, pDir, project, now, transitions, focus = null, flat = false, sprint = null, tickets = null, sprints = null }) {
   switch (name) {
     case "board": return board.render(m);
     case "list": return list.render(m);
@@ -79,8 +79,9 @@ export function renderView(name, { m, pDir, project, now, transitions, focus = n
       // Sprints share the index's data root (dirname of projectsDir), so the
       // sprint ids on rows and in the registry always agree — never resolveRoots()
       // (which points at the ENGINE's root, not the served board).
-      const sprints = loadSprints({ root: dirname(pDir) });
-      return `<div class="ganttview">${gantt.render(ganttModel({ index: m.index, sprints, sprint, project, now }))}</div>`;
+      // BLZ-707: a server passes the registry it read through the seam (Postgres at v6).
+      const registry = sprints ?? loadSprints({ root: dirname(pDir) });
+      return `<div class="ganttview">${gantt.render(ganttModel({ index: m.index, sprints: registry, sprint, project, now }))}</div>`;
     }
     default: return null;
   }
@@ -135,16 +136,16 @@ export function viewEnabled(view, views, pDir) {
   return VIEW_NAMES.includes(view) && Boolean(V[view]);
 }
 
-export function viewEnvelope({ project = "all", focus = null, flat = false, sprint = null, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views, tickets = null } = {}) {
+export function viewEnvelope({ project = "all", focus = null, flat = false, sprint = null, view = "board", projectsDir: _pDir, now = Date.now(), transitions, views, tickets = null, sprints = null } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   // Clamp: board must always be enabled regardless of what the caller passes
   // (config.mjs already forces this for cfg.views, but a direct caller — e.g.
   // a future supervisor — could pass { board: false } and strand every view).
   if (!viewEnabled(view, views, pDir)) return null;
-  const m = boardModel(pDir, { project, focus, flat, tickets });
+  const m = boardModel(pDir, { project, focus, flat, tickets, sprints });
   return {
     view,
-    html: renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint, tickets }),
+    html: renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint, tickets, sprints }),
     chipbar: chipbarHtml(m),
     crumbs: crumbsHtml(m, project, flat),
     total: m.total,
@@ -168,6 +169,7 @@ export function pageHtml({
   transitions,
   views,
   tickets = null,
+  sprints = null,
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const cfg = cfgFor(pDir);
@@ -188,7 +190,7 @@ export function pageHtml({
   // model compute happens, exactly what a disabled view is meant to avoid).
   // board is guaranteed on above, so falling back to it is always safe.
   if (!V[view]) view = "board";
-  const m = boardModel(pDir, { project, focus, flat, tickets });
+  const m = boardModel(pDir, { project, focus, flat, tickets, sprints });
   const { columns: cols, projects, selected } = m;
   const boards = m.boards || [];
   const boardToggle = boards.length > 1
@@ -338,7 +340,7 @@ export function pageHtml({
   ${chipbar}
   ${crumbs}
   ${afterHeader}
-  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint, tickets })}</div>
+  <div id="viewhost" data-rendered="${esc(view)}">${renderView(view, { m, pDir, project, now, transitions, focus, flat, sprint, tickets, sprints })}</div>
   <script${nonceAttr}>
     // View toggle (Board / List), persisted to localStorage. Synchronous only —
     // flips data-view + pill state + localStorage. Fetching/swapping the actual

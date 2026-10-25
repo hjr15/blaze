@@ -11,8 +11,9 @@
 // Re-running it is a no-op. Two concurrent runs serialise on a lock on `blaze_meta`.
 import { checkDbSchema, DB_SCHEMA_VERSION, MIGRATE_FROM } from "./db-schema-version.mjs";
 import { identityDdl } from "./identity-schema.mjs";
-import { sprintDdl } from "./sprint-store.mjs";
+import { sprintDdl, writeSprintRegistry, readSprintRegistry } from "./sprint-store.mjs";
 import { copyIdentity, verifyIdentity } from "./identity-copy.mjs";
+import { canonicalStrict } from "./write-port.mjs";
 
 /** v5 → v6: the six identity tables, then sprint/sprint_registry. Additive only. */
 async function v5ToV6(exec) {
@@ -29,15 +30,18 @@ export const MIGRATIONS = new Map([[5, v5ToV6]]);
  * ROLLBACK, and on any failure rolls back and rethrows, so nothing is half-migrated.
  *
  * `identityRows` is `readIdentityRows`'s result (BLZ-706): copied into the identity tables and
- * verified row for row before the commit. `sprintRegistry` is accepted and not yet used (BLZ-707). `beforeVerify(exec)` is a TEST SEAM: it runs after every write
- * and before the verifies, so a test can disturb what the verifies read.
+ * verified row for row before the commit. `sprintRegistry` is `parseSprintRegistry`'s result
+ * (BLZ-707): written to the sprint tables and read back whole, compared by `canonicalStrict`,
+ * before the commit; `sprintSource` names it (a path) in a verify failure. `beforeVerify(exec)`
+ * is a TEST SEAM: it runs after every write and before the verifies, so a test can disturb what
+ * the verifies read.
  *
  * @returns {{ from, to, steps: number[], authoritative: "written"|"already",
  *             identity: object|null, sprints: object|null }}
  */
 export async function migrateDb(exec, { identityRows = null, sprintRegistry = null,
+                                        sprintSource = "the source registry",
                                         migrations = MIGRATIONS, beforeVerify = null } = {}) {
-  void sprintRegistry;   // BLZ-707 gives this meaning.
   // READ COMMITTED explicitly: the lock-then-re-read below sees a concurrent migrate's commit
   // only because each statement takes a fresh snapshot. Under a server default of REPEATABLE
   // READ the re-read would see the pre-lock snapshot and migrate twice.
@@ -87,18 +91,43 @@ export async function migrateDb(exec, { identityRows = null, sprintRegistry = nu
       + "ON CONFLICT (key) DO UPDATE SET value = 'true' WHERE blaze_meta.value <> 'true' RETURNING key", []);
     const authoritative = inserted.length ? "written" : "already";
 
-    // ── copy slot: BLZ-706 (identity); BLZ-707 (sprints) inserts its copy here. ──
+    // ── copy slot: BLZ-706 (identity); BLZ-707 (sprints). ──
     const identity = identityRows ? await copyIdentity(exec, identityRows) : null;
+    const sprints = sprintRegistry ? await copySprints(exec, sprintRegistry) : null;
 
     await beforeVerify?.(exec);
 
-    // ── verify slot: BLZ-706 (identity); BLZ-707 inserts its row-for-row verify here. ──
+    // ── verify slot: BLZ-706 (identity); BLZ-707 (sprints). ──
     if (identityRows) await verifyIdentity(exec, identityRows);
+    if (sprintRegistry) await verifySprints(exec, sprintRegistry, sprintSource);
 
     await exec.run("COMMIT", []);
-    return { from, to: DB_SCHEMA_VERSION, steps, authoritative, identity, sprints: null };
+    return { from, to: DB_SCHEMA_VERSION, steps, authoritative, identity, sprints };
   } catch (e) {
     try { await exec.run("ROLLBACK", []); } catch { /* the original error is what matters */ }
     throw e;
   }
+}
+
+/** BLZ-707: the registry into EMPTY sprint tables — a second import is refused, never merged. */
+async function copySprints(exec, registry) {
+  const [{ n }] = await exec.all("SELECT count(*) AS n FROM sprint", []);
+  const held = await exec.all("SELECT 1 FROM sprint_registry", []);
+  if (Number(n) > 0 || held.length) {
+    throw new Error("sprint copy refused: the sprint tables already hold a registry");
+  }
+  await writeSprintRegistry(exec, registry);
+  return { count: registry.sprints.length, active: registry.active ?? null };
+}
+
+/** BLZ-707: the registry read back whole must equal the source, key for key, type for type. */
+async function verifySprints(exec, source, sourceName) {
+  const got = await readSprintRegistry(exec);
+  if (canonicalStrict(got) === canonicalStrict(source)) return;
+  const byId = new Map(got.sprints.map((s) => [s.id, s]));
+  const wantIds = new Set(source.sprints.map((s) => s.id));
+  const first = source.sprints.find((s) => canonicalStrict(s) !== canonicalStrict(byId.get(s.id)))?.id
+    ?? got.sprints.find((s) => !wantIds.has(s.id))?.id;
+  throw new Error(`sprint verify: the registry read back from Postgres differs from ${sourceName}`
+    + (first !== undefined ? ` (first difference: sprint ${first})` : ""));
 }

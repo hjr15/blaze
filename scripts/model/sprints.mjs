@@ -52,14 +52,26 @@ export function loadSprints({ root }) {
     const raw = readRegularFileSync(join(root, "sprints.json"));
     const parsed = JSON.parse(raw);
     if (!parsed || typeof parsed !== "object" || !Array.isArray(parsed.sprints)) return { ...EMPTY };
-    return { ...parsed, active: parsed.active ?? null, sprints: parsed.sprints };
+    return normaliseRegistry(parsed);
   } catch (e) {
     if (e && e.code === "ERR_BLAZE_NOT_A_REGULAR_FILE") throw e;
     return { ...EMPTY };
   }
 }
 
-export function saveSprints({ root }, registry) {
+/**
+ * BLZ-707: the loader's pure half — every key kept, `active` defaulted to null. Shared with the
+ * Postgres registry (`sprint-store.mjs`) so both sources normalise by the same rule.
+ */
+export function normaliseRegistry(parsed) {
+  return { ...parsed, active: parsed.active ?? null, sprints: parsed.sprints };
+}
+
+/**
+ * BLZ-707: the saver's pure half — the registry with its version stamp, by the rule below.
+ * Shared with the Postgres registry so a database save stamps exactly as a file save does.
+ */
+export function stampedRegistry(registry) {
   // NEVER DOWNGRADE THE STAMP. Writing our own version unconditionally would turn a
   // `registryVersion: 2` file into a `1` while faithfully preserving the v2 keys beside it — the
   // file would then under-claim its own shape, which is a worse lie than no stamp at all and
@@ -69,8 +81,11 @@ export function saveSprints({ root }, registry) {
   const version = isRegistryVersion(existing) && existing > SPRINT_REGISTRY_VERSION
     ? existing
     : SPRINT_REGISTRY_VERSION;
-  writeFileSync(join(root, "sprints.json"),
-    JSON.stringify({ ...registry, registryVersion: version }, null, 2) + "\n");
+  return { ...registry, registryVersion: version };
+}
+
+export function saveSprints({ root }, registry) {
+  writeFileSync(join(root, "sprints.json"), JSON.stringify(stampedRegistry(registry), null, 2) + "\n");
 }
 
 /**
@@ -120,7 +135,8 @@ export function isIsoDate(s) {
 export function validateSprintFields(fm, { sprintIds }) {
   const errors = [];
   if (fm.sprint != null && fm.sprint !== "" && !sprintIds.has(fm.sprint)) {
-    errors.push(`sprint '${fm.sprint}' is not in the registry (sprints.json)`);
+    // BLZ-707 (review M5): source-neutral — at v6 the registry is the database, not a file.
+    errors.push(`sprint '${fm.sprint}' is not in the sprint registry`);
   }
   for (const f of ["start", "due"]) {
     if (fm[f] != null && fm[f] !== "" && !isIsoDate(fm[f])) {
@@ -171,7 +187,7 @@ export function addSprint(registry, { name, start, end }) {
 
 export function setActive(registry, id) {
   if (!(registry.sprints ?? []).some((s) => s.id === id)) {
-    throw new Error(`blaze: sprint '${id}' is not in the registry (sprints.json)`);
+    throw new Error(`blaze: sprint '${id}' is not in the sprint registry`);
   }
   return { ...registry, active: id };
 }

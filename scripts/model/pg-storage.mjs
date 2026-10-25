@@ -12,8 +12,10 @@
 //
 // `pg` is an optionalDependency loaded through a dynamic import (design C2), so the
 // npx + SQLite path installs nothing.
-import { checkDbSchema, createDbSchema } from "./db-schema-version.mjs";
+import { checkDbSchema, createDbSchema, V6_FEATURES_FROM } from "./db-schema-version.mjs";
 import { readActivityFeed } from "./read-storage.mjs";
+import { loadSprints } from "./sprints.mjs";
+import { readSprintRegistry } from "./sprint-store.mjs";
 import { safeJson } from "./safe-json.mjs";
 
 // BLZ-391 — kept identical to sqlite-storage.mjs's `toRecord` on purpose. A projection fixed in
@@ -185,6 +187,21 @@ export function postgresReader(client) {
     const [labels, components, worklog] = await childrenFor(row.id);
     return toRecord(row, links, labels, components, worklog);
   };
+  // BLZ-707: the stamp decides where the registry lives, read once per reader. A v5 database has
+  // no sprint tables, so its board keeps sprints.json exactly as before.
+  const exec = {
+    run: async (sql, params = []) => { await client.query(sql, params); },
+    all: async (sql, params = []) => (await client.query(sql, params)).rows,
+  };
+  let stamp;
+  const schemaVersion = async () => {
+    if (stamp === undefined) {
+      const { rows } = await client.query("SELECT value FROM blaze_meta WHERE key = 'schema_version'");
+      stamp = Number(rows[0]?.value ?? 0);
+    }
+    return stamp;
+  };
+
   const hydrateAll = async (rows) => {
     const out = [];
     for (const row of rows) out.push(await hydrate(row));
@@ -296,5 +313,11 @@ export function postgresReader(client) {
     // so the database driver answers it with the same filesystem read, not from a table.
     async activityFeed(dataRoot) { return readActivityFeed(dataRoot); },
     async unreadableTicketDirs(_root) { return []; },
+
+    async sprintRegistry(dataRoot) {
+      return (await schemaVersion()) >= V6_FEATURES_FROM
+        ? readSprintRegistry(exec)
+        : loadSprints({ root: dataRoot });
+    },
   };
 }

@@ -21,7 +21,8 @@ const title = (s) => s.replace(/-/g, " ").replace(/\b\w/g, (c) => c.toUpperCase(
 // Pure board model: read every ticket under projectsDir, optionally filter to one
 // project, and group into status columns. Read-only (the editable board is Phase 6).
 export function boardModel(projectsDir, { project = "all", focus = null, flat = false, index = null,
-                                          tickets = null, readStorage = fsReadStorage } = {}) {
+                                          tickets = null, readStorage = fsReadStorage,
+                                          sprints = null } = {}) {
   // BLZ-670: db mode's server has already awaited the read and hands the records straight in —
   // `tickets` skips the filesystem walk entirely rather than re-reading through readStorage.
   const walked = tickets ? [...tickets] : [...readStorage.listTickets(projectsDir)];
@@ -34,7 +35,9 @@ export function boardModel(projectsDir, { project = "all", focus = null, flat = 
   }, {});
   const rows = project === "all" ? all : all.filter((t) => t.project === project);
 
-  const idx = index ?? buildIndex(projectsDir, { tickets: walked });
+  // BLZ-707: `sprints` is a registry the caller already read through the seam; without one,
+  // buildIndex falls back to sprints.json as it always has.
+  const idx = index ?? buildIndex(projectsDir, { tickets: walked, sprints: sprints?.sprints });
   // The shared drill-scope rule (scopedRows, BLZ-89) — board/list/map must
   // agree on what a level contains, so the rule lives in one place.
   const { focused, crumbs, rows: inScope } = scopedRows(idx, { focus, flat });

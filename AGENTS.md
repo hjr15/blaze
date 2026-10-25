@@ -149,6 +149,12 @@ the dangling-link lint. Sprints are additive and do **not** bump
 `SCHEMA_VERSION` — see
 [ADR-0004](https://github.com/hjr15/blaze/blob/main/docs/decisions/0004-sprints-are-additive-not-a-schema-bump.md).
 
+On a db-mode Postgres board at schema v6, the registry lives in the database
+(`sprint`, `sprint_registry`); `blaze sprint` writes there and `sprints.json` is
+not read. `blaze db migrate --sprints-from` imports an existing file once. Every
+other board — fs, dual, SQLite, or a Postgres database still at v5 — keeps
+`sprints.json` exactly as above.
+
 ## The join key
 
 The only coupling between the tracker and code is the branch name: it must embed

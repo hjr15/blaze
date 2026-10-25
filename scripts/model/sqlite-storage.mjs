@@ -19,6 +19,7 @@ import { judgeDbSchema, readSchemaFactsSync, createDbSchemaSync } from "./db-sch
 import { sqliteAttachConfig, configDbPathFor } from "./config-schema.mjs";
 import { assertConfigNamespace } from "./write-port-resolve.mjs";
 import { readActivityFeed } from "./read-storage.mjs";
+import { loadSprints } from "./sprints.mjs";
 import { safeJson } from "./safe-json.mjs";
 
 /** Rebuild the record shape the seam's consumers expect from a ticket row. */
@@ -237,6 +238,8 @@ export function openSqliteRead(path = ":memory:", { create = false } = {}) {
 
     activityFeed(dataRoot) { return readActivityFeed(dataRoot); },
     unreadableTicketDirs(_root) { return []; },
+    // BLZ-707: the SQLite shadow is derived and holds no sprints, so the file stays the registry.
+    sprintRegistry(dataRoot) { return loadSprints({ root: dataRoot }); },
     close() { try { db.close(); } catch { /* already closed */ } },
   };
 }

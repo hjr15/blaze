@@ -769,6 +769,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           projectsDir,
           views,
           tickets: await allTickets(rs),
+          // BLZ-707: the registry through the seam — the sprint tables on a Postgres board at v6.
+          sprints: await rs.sprintRegistry(root),
         });
         if (!envelope) return json(404, { errors: ["unknown view"] });
         return send(req, res, 200, "application/json", JSON.stringify(envelope));
@@ -799,6 +801,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       try {
         html = await reading(async (rs, mode) => pageHtml({ project, focus, flat, sprint, view, views,
           projectsDir, nonce, tickets: await allTickets(rs),
+          sprints: await rs.sprintRegistry(root),   // BLZ-707
           transitions: await dbTransitions(rs, mode, view, projectsDir,
                                            { enabled: viewEnabled(view, views, projectsDir) }) }));
       } catch (e) {

@@ -51,7 +51,6 @@ import { fsAllocators } from "./write-port-resolve.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
 import { loadConfig, loadProject } from "../config.mjs";
 import { loadProjectSchema } from "./schema-config.mjs";
-import { loadSprints } from "./sprints.mjs";
 import { PRIORITIES, TYPES } from "./schema.mjs";
 import { RESOLUTIONS, statusesFor } from "./workflows.mjs";
 import { parseCanonicalCsv, planImport } from "./import-plan.mjs";
@@ -340,7 +339,9 @@ export async function loadBoard(projectsDir, { dataRoot, readStorage = fsReadSto
   };
 
   let sprintIds = new Set();
-  try { sprintIds = new Set(loadSprints({ root }).sprints.map((s) => s.id)); } catch { /* no registry */ }
+  // BLZ-707: through the reader — the sprint tables on a Postgres board at v6, else sprints.json.
+  try { sprintIds = new Set((await readStorage.sprintRegistry(root)).sprints.map((s) => s.id)); }
+  catch { /* no registry */ }
 
   return {
     byId, typesFor, types: TYPES, statusesFor,

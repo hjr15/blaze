@@ -579,6 +579,8 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
           sprint: u.searchParams.get("sprint") || null,
           projectsDir,
           tickets: await allTickets(rs),
+          // BLZ-707: serve.mjs's rule — the registry through the seam (Postgres at v6).
+          sprints: await rs.sprintRegistry(root),
         });
         if (!envelope) {
           res.writeHead(404, { "content-type": "application/json" });
@@ -617,6 +619,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
           view: u.searchParams.get("view") || "board",
           afterHeader: controlsHtml(nonce),
           beforeBodyEnd: activityScript(nonce),
+          sprints: await rs.sprintRegistry(root),   // BLZ-707
           projectsDir,
           nonce,
           tickets: await allTickets(rs),

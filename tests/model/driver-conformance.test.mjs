@@ -89,6 +89,8 @@ async function seedPg(release) {
   // a `node --test` child holding one cannot exit.
   release(async () => { await s.close?.(); });
   await s.client.query("TRUNCATE ticket_event, ticket_link, acceptance_criterion, worklog_entry, ticket CASCADE");
+  // BLZ-707: the shared database is v6, so its sprint tables are part of what a seed resets.
+  await s.client.query("TRUNCATE sprint, sprint_registry");
   for (const t of CORPUS)
     await s.client.query(
       `INSERT INTO ticket (id,project_key,num,type,status,title,parent_id,parent_type,body,created_on,updated_on)
@@ -188,6 +190,15 @@ async function conformance(make, name) {
   await test(`${name}: unreadableTicketDirs is a seam operation`, async (t) => {
     const { s, root } = await openDriver(make, t);
     assert.deepEqual(await s.unreadableTicketDirs(root), []);
+  });
+
+  // BLZ-707 (review M9): the registry is a named question every driver answers. With no
+  // registry anywhere — no sprints.json, and on Postgres (v6) empty sprint tables — it is the
+  // same empty registry on every driver.
+  await test(`${name}: sprintRegistry answers the same shape on every driver`, async (t) => {
+    const { s } = await openDriver(make, t);
+    const dataRoot = scratch(mkdtempSync(join(tmpdir(), "blaze-conf-sprints-")));
+    assert.deepEqual(await s.sprintRegistry(dataRoot), { active: null, sprints: [] });
   });
 
   await test(`${name}: close() exists`, async (t) => {

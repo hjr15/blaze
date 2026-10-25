@@ -21,7 +21,7 @@ Blaze v3 has **no tenant dimension**. Four tables are `id integer PRIMARY KEY CH
 | `blaze_config.config_version` | `scripts/model/config-schema.mjs:114` |
 | `projection_meta` | `scripts/model/projection-schema.mjs:28` |
 | `migration_mode` | `scripts/model/write-rules.mjs:69` (SQLite), `scripts/model/write-rules.mjs:119` (Postgres) |
-| `sprint_registry` | `scripts/model/sprint-store.mjs:36` |
+| `sprint_registry` | `scripts/model/sprint-store.mjs:48` |
 
 `migration_mode` is **one** table declared once per dialect, not two. `blaze_config.board`
 is the table ADR-0021 renames to `blaze_config.installation`; that rename is not yet in the

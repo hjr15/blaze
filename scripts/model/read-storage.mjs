@@ -19,6 +19,8 @@
 //   changeToken(root, {project})  opaque "has anything changed?", for the poll
 //   listTickets(root)            everything, for the index and audit
 //   activityFeed(dataRoot)        the Live view's feed, and whether it could be read
+//   sprintRegistry(dataRoot)      the sprint registry (BLZ-707) — sprints.json here; the
+//                                 sprint tables on a Postgres board at schema v6
 //
 // `listTickets` survives deliberately: `buildIndex` and `auditCorpus` genuinely do
 // need every ticket, and pretending otherwise would push a fake filter into them.
@@ -27,6 +29,7 @@ import { readdirSync, statSync } from "node:fs";
 import { join } from "node:path";
 import { walkTickets, unreadableTicketDirs as walkUnreadable } from "./index.mjs";
 import { readRegularFileSync, NotARegularFileError } from "./regular-file.mjs";
+import { loadSprints } from "./sprints.mjs";
 
 /**
  * The board's live-activity feed, and whether it could be READ. Extracted so every
@@ -202,6 +205,9 @@ export const fsReadStorage = {
   // question the driver answers. The walk stays in index.mjs; database drivers answer [].
   unreadableTicketDirs(root) { return walkUnreadable(root); },
 
+  // BLZ-707: the registry is a named question too. A file board's answer is its sprints.json.
+  sprintRegistry(dataRoot) { return loadSprints({ root: dataRoot }); },
+
   close() {},
 };
 
@@ -245,6 +251,8 @@ export function memReadStorage(records = []) {
       return { text: "", unreadable: null };
     },
     unreadableTicketDirs(_root) { return []; },
+    // BLZ-707: an in-memory corpus has no registry, so it answers what a board without one does.
+    sprintRegistry(_dataRoot) { return { active: null, sprints: [] }; },
     close() {},
   };
 }

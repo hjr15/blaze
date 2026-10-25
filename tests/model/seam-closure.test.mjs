@@ -865,10 +865,13 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["model/transitions.mjs", { writes: ["loadTransitions"], sanctioned: [],
     inert: ["parseTransitions", "buildTransitions"] }],
   // The sprint registry: `saveSprints({ root }, registry)` is caller's root, caller's bytes.
+  // BLZ-707: the loader's and saver's pure halves, extracted so the Postgres registry normalises and stamps by the same rule.
   ["model/sprints.mjs", { writes: ["saveSprints"], sanctioned: [],
     inert: ["SPRINT_REGISTRY_VERSION", "loadSprints", "unstampedRegistryWarning",
       "nextSprintId", "isIsoDate", "validateSprintFields", "addSprint", "setActive",
-      "formatSprintList"] }],
+      "formatSprintList", "normaliseRegistry", "stampedRegistry"] }],
+  // BLZ-707: the sprint registry's Postgres mapping. Only openSprintSource reaches node:fs, through saveSprints, when the source is the file.
+  ["model/sprint-store.mjs", { writes: ["openSprintSource"], sanctioned: [], inert: ["sprintDdl", "parseSprintRegistry", "readSprintRegistry", "writeSprintRegistry"] }],
   ["reindex.mjs", { writes: [], sanctioned: [], inert: [] }],       // derived caches, no exports
   ["migrate-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["cli.mjs", { writes: [], sanctioned: [], inert: [] }],
@@ -1994,6 +1997,8 @@ const WRITE_ALLOWED = new Map([
   // credential store cannot be committed. A .gitignore line, not a ticket.
   // ...and it opens the identity database, whose directory the primitive creates at 0700.
   ["model/user-admin.mjs", ["appendFileSync", "openIdentityDb"]],
+  // BLZ-707: the sprint registry's source picker saves through saveSprints when the source is the file (fs, dual, SQLite db, or a Postgres board below v6).
+  ["model/sprint-store.mjs", ["saveSprints"]],
   // The dual-write soak's divergence log and its counter, both under gitignored .blaze/.
   // BLZ-535 round 5, D1. The third member is not an fs call: `const port = dualWritePort(...)`
   // is a call this reader cannot fold, and `port.write(op)` reaches a member NAME that
@@ -2051,7 +2056,7 @@ const WRITE_ALLOWED = new Map([
   // and on exactly the footing of ids.mjs and claims.mjs above.
   ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
-  ["sprint-runner.mjs", ["saveSprints"]],   // BLZ-254: commitOrQueue removed — no commit
+  ["sprint-runner.mjs", ["openSprintSource"]],   // BLZ-707: the runner saves through the source picker, never saveSprints directly
   // BLZ-682: `blaze matrices` writes the two derived matrix files per project into --out —
   // generated docs, never a ticket — through the FIFO-safe primitive, after creating the dir.
   ["matrices-runner.mjs", ["mkdirSync", "writeRegularFileSync"]],
