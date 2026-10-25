@@ -642,7 +642,7 @@ migrate: DONE — one transaction, committed.
 
 A re-run is a no-op (`v6, already current`, `yes (already)`). A database newer than the engine,
 one with tables but no stamp, an empty one (run `blaze db init`), or one stamped below 5 is
-refused by name, and on any failure nothing is migrated. **Take a `pg_dump` first**: an
+refused by name, before the stranded-file refusals below, and on any failure nothing is migrated. **Take a `pg_dump` first**: an
 authoritative database is the board, so from then on `load --replace` refuses it and a too-old
 stamp names `blaze db migrate`, never a rebuild — see
 [schema versioning](../schema-versioning.md#authoritative-databases-migrate-derived-ones-rebuild).
@@ -814,6 +814,21 @@ identities: Postgres db.example.internal/blaze
 A v5 database has no identity tables, so its board keeps `identity.db` exactly as above
 until `blaze db migrate --identity-from` copies the roster across (see [`db`](#db)).
 
+**db mode on a Postgres board needs the database reachable, even at v5.** The board servers,
+`blaze user add|passwd` and `blaze sprint` connect when they start, to read the schema stamp that
+decides whether identity and sprints come from Postgres or from the files. A database that is down
+or has no schema is a refusal (exit 1), not a fallback to the files. For a deployed server this
+means a restart during a database outage exits and crash-loops until the database is back, where an
+engine before 0.10.0 started and answered `503` per request. `BLAZE_WRITE_PORT=db blaze user add`
+against a database with no schema is refused, where an engine before 0.10.0 wrote `identity.db`.
+
+**An empty Postgres roster beside a populated `identity.db` refuses to serve.** At v6, when the
+identity tables hold no users but `<board>/.blaze/identity.db` holds some (a database made by
+`blaze db init`, or migrated with `--no-identity-import`), both servers refuse to start and name
+`blaze db migrate --identity-from <path>`. Serving it as "no users" would leave the board
+unauthenticated on loopback while the roster the operator relies on is never read. Move the file
+aside if it is not this board's roster.
+
 ## Help
 
 `blaze --help` (or `-h`) prints a usage line plus the full command list with
@@ -900,7 +915,7 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | `BLAZE_AGENT_COMMAND` | The command `groom` spawns to act on a ticket. | `agentCommand` in `blaze.config.json` |
 | `BLAZE_CODE_REPO` | Code repo `reconcile` mirrors against, when not set per-project. | none |
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
-| `BLAZE_WRITE_PORT` | Where a write goes: `fs`, `dual` or `db`. **Unset is not the same as `fs`** (BLZ-708): on a board whose `blaze.config.json` names `database.driver: "postgres"`, an unset value makes every file write refuse, naming this variable; an explicit `fs` states that a file write is deliberate. Remote mode and `blaze db *` are never refused. On any other board, unset behaves as `fs`. See [A Postgres board refuses file writes](../../AGENTS.md#a-postgres-board-refuses-file-writes). | unset |
+| `BLAZE_WRITE_PORT` | Where a write goes: `fs`, `dual` or `db`. **Unset is not the same as `fs`** (BLZ-708): on a board whose `blaze.config.json` names `database.driver: "postgres"`, an unset value makes every file write refuse, naming this variable; an explicit `fs` states that a file write is deliberate. An empty or whitespace value counts as unset. Remote mode, `blaze db *` and `blaze init` are never refused. On any other board, unset behaves as `fs`. See [A Postgres board refuses file writes](../../AGENTS.md#a-postgres-board-refuses-file-writes). | unset |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
 | `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
 | `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the two is an error for every command. | unset |

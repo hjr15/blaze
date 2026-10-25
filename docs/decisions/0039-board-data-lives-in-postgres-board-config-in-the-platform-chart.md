@@ -19,8 +19,10 @@ The design and its decisions D1 to D10 are in
 
 ## Decision
 
-1. **Board data lives in the board's Postgres database, and nowhere else,** once `blaze db migrate`
-   has marked it authoritative. Board data is tickets, events, users, tokens, sessions and sprints.
+1. **Board data lives in the board's Postgres database, and nowhere else,** once the database is at
+   schema v6, which `blaze db migrate` brings it to and marks authoritative. The v6 features key on
+   the schema stamp, not on the authoritative flag: a database `blaze db init` creates at v6 already
+   reads identity and sprints from Postgres. Board data is tickets, events, users, tokens, sessions and sprints.
    Identity is six tables (`app_user`, `user_identity`, `membership`, `api_token`, `local_password`,
    `user_session`) and sprints are two (`sprint`, `sprint_registry`). `blaze db migrate
    --identity-from` and `--sprints-from` copy an existing `identity.db` and `sprints.json` in once,
@@ -55,8 +57,19 @@ The design and its decisions D1 to D10 are in
   shadow is derived and `blaze db init --force` rebuilds it.
 - The guard has known gaps, listed in AGENTS.md under
   [A Postgres board refuses file writes](https://github.com/hjr15/blaze/blob/main/AGENTS.md#a-postgres-board-refuses-file-writes):
-  the board server's first-user setup writes `identity.db`, and a direct `reindex.mjs` or
-  `matrices-runner.mjs` writes derived files only.
+  the board server's first-user setup writes the setup-token file and its `.gitignore` line (its
+  `identity.db` write goes through `addUser` and is refused), the supervisor's `/control/revert` runs
+  `git revert` in the data root, and a direct `reindex.mjs` or `matrices-runner.mjs` writes derived
+  files only.
+- An empty v6 roster beside a `.blaze/identity.db` that holds users is refused, not served as "no
+  users": both servers fail closed and name `blaze db migrate --identity-from`.
+- db mode on a Postgres board needs the database reachable at start, even at v5, because the stamp
+  decides where identity and sprints are read. The board servers, `blaze user` and `blaze sprint`
+  refuse when it is down. A deployed server restarted during a database outage crash-loops until the
+  database returns, rather than answering `503` per request as before 0.10.0.
+- `dual` and `fs` read `identity.db` even on a v6 database. A server started with
+  `BLAZE_WRITE_PORT=dual` after a migrate authenticates from that stale file until it is removed, so
+  a token revoked in Postgres since the migrate still works there.
 - The Live view reads local files only, so it shows nothing for a Postgres-only board (D10).
 - A concurrent pair of `blaze sprint` saves on one board can lose an update, because the registry is
   read, changed and written without a table lock. BLZ-727 tracks it.

@@ -119,7 +119,8 @@ machine, on a git working tree, with one writer, and nothing here changes it.
 
 A deployed db board's data is now Postgres-only
 ([ADR-0039](0039-board-data-lives-in-postgres-board-config-in-the-platform-chart.md)): tickets, events,
-users, tokens, sessions and sprints live in the database once `blaze db migrate` has marked it
-authoritative. A checkout of a migrated board must not be written, and the engine enforces that for
+users, tokens, sessions and sprints live in the database once it is at schema v6, which `blaze db
+migrate` brings it to and marks authoritative. The v6 features key on the schema stamp, not on the
+authoritative flag. A checkout of a migrated board must not be written, and the engine enforces that for
 engines 0.10.0 and newer: a board whose config names the postgres driver refuses a file write unless
 `BLAZE_WRITE_PORT` is set explicitly (`blaze db *`, `blaze init` and remote mode are not subject to it).

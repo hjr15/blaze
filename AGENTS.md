@@ -352,12 +352,21 @@ Where the guard runs: `cli.mjs` (every mutating verb), `resolveWritePort` (the r
 through `resolvePorts`, `import`, and the board server's write API, which answers `503`), and the
 direct entries that bypass the resolver: `sprint new|active`, `schedule migrate-dates --write`,
 `migrate --live`, `user`, `reconcile --apply`, the fs `groom` pass, and the supervisor's fs
-reconcile and groom loops (published as error events). Reads are never refused. It refuses rather
+reconcile and groom loops (published as error events). Read-only verbs (`board`, `audit`, `export`,
+`rollup`, `matrices --check`) are never refused, and `blaze db *` is exempt. The read-shaped forms
+of mutating verbs are refused, as under `BLAZE_READONLY` (spec D5): `blaze sprint list`, the dry
+runs of `reconcile`, `import` and `schedule`, and `blaze start` as a whole. An empty or whitespace
+`BLAZE_WRITE_PORT` counts as unset. It refuses rather
 than warns because a warning scrolls past after the write has already diverged the board from what
 everyone reads.
 
 It cannot protect an engine older than 0.10.0, which has no guard. **Known gaps:**
-- The board server's first-user setup path writes `identity.db` and is not guarded.
+- The board server's first-user setup path writes the setup-token file and its `.gitignore` line
+  unguarded. Its `identity.db` write goes through `addUser` and is refused, so setup cannot complete
+  on such a board until `BLAZE_WRITE_PORT` is set.
+- The supervisor's `/control/revert` runs `git revert` in the data root and is not guarded. `blaze
+  start` is refused by `cli.mjs` on such a board, so only a direct `node scripts/supervisor.mjs`
+  reaches it.
 - A direct `node scripts/reindex.mjs` or `node scripts/matrices-runner.mjs` is not guarded beyond
   `cli.mjs`. Both write derived files only (`.blaze/index.json`, generated matrices), never a
   ticket.
