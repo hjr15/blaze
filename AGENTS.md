@@ -181,7 +181,7 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
   against it (see below); `defaultLabels` in `blaze.config.json` is the
   tracker-wide fallback for projects with no taxonomy of their own.
 - `estimate` — minutes, rounded to the nearest 5 (`blaze new --estimate`).
-- `sprint` — a sprint id from the `sprints.json` registry (e.g. `S1`); the ticket
+- `sprint` — a sprint id from the sprint registry (`sprints.json`, or the database's `sprint` tables on a migrated Postgres board) (e.g. `S1`); the ticket
   opts into that sprint. Validated against the registry on `new`/`edit`; an unknown
   id is a hard reject, an empty value clears membership. All three of these fields
   are optional and absent (no line written) when unset. See "Sprints" below.

@@ -126,6 +126,11 @@ on **Postgres only**: the SQLite shadow is derived and holds neither credentials
 The floor **stays 5**: v6 is additive, so a v5 database serves exactly as before, its v6
 features falling back to their files, until `blaze db migrate` runs.
 
+A fresh SQLite shadow is stamped 6 as well, even though it holds none of the v6 tables, so an
+engine older than 0.10.0 refuses it as newer. That costs nothing: the shadow is derived, and
+`blaze db init --force` rebuilds it. An authoritative Postgres database is different, and the
+engine's guard cannot protect it from an engine older than 0.10.0 (see ADR-0039).
+
 The floor rises with each of these, which is why **a version-1, -2, -3 or -4 shadow is all
 refused**. A version-3 shadow has no `blaze_config` at all, so a version-4 engine that
 accepted one would fail later on `no such table: blaze_config.view` — the raw SQL error

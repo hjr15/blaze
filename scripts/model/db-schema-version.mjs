@@ -43,7 +43,12 @@ import { sprintDdl } from "./sprint-store.mjs";
 // `openShadow` creates schema only on an EMPTY database, so an existing v4 shadow would never
 // gain the table, and a v4 shadow and a v5 one would otherwise carry the same stamp.
 //
-// 6 under BLZ-705 (Phase 5, spec D1(b)): the six identity tables and sprint/sprint_registry, Postgres only — the SQLite shadow is derived and holds neither credentials nor sprints. MIN stays 5: a v5 database serves exactly as before, its v6 features falling back to their files, until 'blaze db migrate' runs.
+// 6 under BLZ-705 (Phase 5, spec D1(b)): the six identity tables and sprint/sprint_registry,
+// Postgres only — the SQLite shadow is derived and holds neither credentials nor sprints. MIN
+// stays 5: a v5 database serves exactly as before, its v6 features falling back to their
+// files, until 'blaze db migrate' runs. A fresh SQLite shadow is still stamped 6, so an engine
+// older than 0.10.0 refuses it as newer; that is harmless because the shadow is derived
+// ('blaze db init --force' rebuilds it).
 export const DB_SCHEMA_VERSION = 6;
 /**
  * The oldest stamp this engine can still read.
