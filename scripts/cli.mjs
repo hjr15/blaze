@@ -190,7 +190,7 @@ if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
 // BLZ-708 (G-engine): a board whose config names the postgres driver refuses a file write while
 // BLAZE_WRITE_PORT is unset. After the remote block (remote mode never reaches it) and before the
 // preflight. `blaze db *` is exempt: it is how such a board is migrated and inspected (D5).
-if (sub.mutates && !readOnlyInvocation && key !== "db") {
+if (sub.mutates && !readOnlyInvocation && key !== "db" && key !== "init") {
   try {
     const { assertFsWriteAllowed } = await import("./model/fs-write-guard.mjs");
     await assertFsWriteAllowed(`run blaze ${key}`);

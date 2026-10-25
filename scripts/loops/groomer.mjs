@@ -1078,6 +1078,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
                                 readStorage: ports.readStorage, writePort: ports.writePort });
     } finally { await ports.close(); }
   } else {
+    // BLZ-708: the fs groom edits and commits ticket files.
+    const { assertFsWriteAllowed } = await import("../model/fs-write-guard.mjs");
+    try { await assertFsWriteAllowed("run blaze groom", { dataRoot: root }); }
+    catch (e) { console.error(e.message); process.exit(1); }
     evt = groomOnce({ root, cfg, agentsMd, today });
   }
   console.log(evt ? JSON.stringify(evt) : "groomer: nothing to groom.");

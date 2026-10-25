@@ -19,6 +19,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { assertFsWriteAllowed } from "./model/fs-write-guard.mjs";
 import { loadConfig, listProjects, loadProject, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { appendRegularFileSync } from "./model/regular-file.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
@@ -2538,6 +2539,12 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // resolve a reader alone (dual unchanged).
   const roots = resolveRoots();
   let ports;
+  // BLZ-708: --apply writes through fsWritePort when the mode is not db, never reaching
+  // resolveWritePort, so the guard is asserted here.
+  if (apply) {
+    try { await assertFsWriteAllowed("reconcile", { dataRoot: roots.dataRoot }); }
+    catch (e) { console.error(e.message); process.exit(1); }
+  }
   try {
     ports = await (apply && resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)(
       { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir });

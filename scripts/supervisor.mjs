@@ -20,6 +20,7 @@ import { AttemptLimiter } from "./model/rate-limit.mjs";
 import { boardHeaders, cspNonce as boardNonce } from "./model/board-csp.mjs";
 import { loadIdentityDefault, resolveIdentity } from "./model/identity-db.mjs";
 import { execFileSync } from "node:child_process";
+import { fsWriteRefusal } from "./model/fs-write-guard.mjs";
 
 const today = () => new Date().toISOString().slice(0, 10);
 
@@ -292,6 +293,12 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
     loops.reconcile.busy = true;
     let ports = null;
     try {
+      // BLZ-708: an applying pass on a postgres-driver board with the port unset is refused;
+      // the refusal lands in the catch below like any resolver refusal.
+      if (!dryRun) {
+        const refusal = fsWriteRefusal({ config: cfg, what: "reconcile" });
+        if (refusal) throw new Error(refusal);
+      }
       // BLZ-670: the same rule as reconcile's CLI — only db mode opens a database port, fs and
       // dual resolve a reader alone (dual unchanged). A resolver refusal lands in the catch.
       ports = await (resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)({ dataRoot: root, projectsDir });
@@ -370,6 +377,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       // it (reproduced at `44b797f`, `EXIT=137` under a 6s cap).
       try { agentsMd = readRegularFileSync(join(root, "AGENTS.md"), "utf8"); }
       catch (e) { if (e instanceof NotARegularFileError) throw e; }
+      // BLZ-708: the fs groom edits and commits ticket files; refused as a groomer error event.
+      const refusal = fsWriteRefusal({ config: cfg, what: "groom" });
+      if (refusal) throw new Error(refusal);
       const evt = groomOnce({ root, cfg, agentsMd, today: today() });
       if (evt) bus.publish(evt);
     } catch (e) {

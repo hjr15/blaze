@@ -35,7 +35,7 @@ function pgDriverBoard() {
     { encoding: "utf8" });
   git("init", "-q");
   git("add", "-A");
-  git("commit", "-q", "-m", "seed");
+  assert.equal(git("commit", "-q", "-m", "seed").status, 0, "seed commit failed");
   return { dataRoot, projectsDir };
 }
 
@@ -87,7 +87,7 @@ test("BLZ-708: every mutating verb refuses on a postgres-driver board when BLAZE
   const help = run(board, ["--help"]).stdout;
   const names = [...help.matchAll(/^\s{2}([a-z][a-z-]*)\s{2,}/gm)].map((m) => m[1]);
   const READ_ONLY = ["board", "audit", "export", "rollup"];
-  const verbs = names.filter((n) => !READ_ONLY.includes(n) && n !== "db");
+  const verbs = names.filter((n) => !READ_ONLY.includes(n) && n !== "db" && n !== "init");
   for (const must of ["new", "move", "edit", "link", "resolve", "log", "sprint", "user", "reindex", "import", "matrices"]) {
     assert.ok(verbs.includes(must), `derived verb list lacks ${must}: ${names.join(",")}`);
   }
@@ -210,4 +210,69 @@ test("BLZ-708: the board server's write API refuses", async () => {
     await new Promise((r) => server.close(r));
     if (before === undefined) delete process.env.BLAZE_WRITE_PORT; else process.env.BLAZE_WRITE_PORT = before;
   }
+});
+
+// --- fix round 1 (review I1, I2, M2) ----------------------------------------------------
+
+/** pgDriverBoard plus a stub groom agent that leaves a marker OUTSIDE the board when it runs. */
+function groomBoard() {
+  const board = pgDriverBoard();
+  const mark = join(scratch(mkdtempSync(join(tmpdir(), "blz708-mark-"))), "ran");
+  const stub = join(board.dataRoot, "stub-agent.sh");
+  writeFileSync(stub, `#!/usr/bin/env bash\ntouch ${JSON.stringify(mark)}\n`);
+  const cfgPath = join(board.dataRoot, "blaze.config.json");
+  writeFileSync(cfgPath, JSON.stringify({ projects: ["ENG"], schemaVersion: 2,
+    database: { driver: "postgres" }, agentCommand: `bash ${stub}`,
+    loops: { groomer: { columns: ["defined"] } } }));
+  return { ...board, mark };
+}
+
+test("BLZ-708: a direct reconcile --apply refuses; a dry run does not", () => {
+  const board = pgDriverBoard();
+  const r = runner(board, "reconcile.mjs", ["--apply"]);
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(SENTENCE.test(r.stderr), "reconcile --apply: no guard sentence");
+  const d = runner(board, "reconcile.mjs", []);
+  assert.ok(!SENTENCE.test(d.stderr), "reconcile dry run hit the guard");
+});
+
+test("BLZ-708: a direct groomer refuses before the agent runs", () => {
+  const board = groomBoard();
+  const r = runner(board, join("loops", "groomer.mjs"), []);
+  assert.equal(r.status, 1, r.stderr);
+  assert.ok(SENTENCE.test(r.stderr), "groomer: no guard sentence");
+  assert.ok(!existsSync(board.mark), "the groom agent ran");
+});
+
+test("BLZ-708: the supervisor's fs groomer and applying reconcile refuse as error events", async () => {
+  const { createApp } = await import("../scripts/supervisor.mjs");
+  const { loadConfig } = await import("../scripts/config.mjs");
+  const board = groomBoard();
+  const saved = { ...process.env };
+  for (const k of FIVE) delete process.env[k];
+  process.env.BLAZE_PROJECTS_DIR = board.projectsDir;
+  try {
+    const app = createApp(loadConfig({ root: board.dataRoot, env: {} }), { root: board.dataRoot, projectsDir: board.projectsDir });
+    const events = [];
+    app.bus.subscribe((e) => events.push(e));
+    await app.runGroomer();
+    assert.ok(events.some((e) => e.type === "error" && e.loop === "groomer" && SENTENCE.test(e.message)),
+      "no groomer error event naming the guard");
+    assert.ok(!existsSync(board.mark), "the groom agent ran");
+    const before = snapshot(board.projectsDir);
+    await app.runReconcile();
+    assert.ok(events.some((e) => e.loop === "reconcile" && SENTENCE.test(JSON.stringify(e))),
+      `no reconcile event naming the guard: ${JSON.stringify(events)}`);
+    assert.deepEqual(snapshot(board.projectsDir), before);
+  } finally {
+    for (const k of Object.keys(process.env)) if (!(k in saved)) delete process.env[k];
+    Object.assign(process.env, saved);
+  }
+});
+
+test("BLZ-708: blaze init is exempt (it creates a board, it does not write the ambient one)", () => {
+  const board = pgDriverBoard();
+  const r = run(board, ["init"]);
+  assert.ok(!SENTENCE.test(r.stderr), "init hit the guard");
+  assert.ok(/blaze init: cannot proceed/.test(r.stderr), "init did not reach its own argument check");
 });
