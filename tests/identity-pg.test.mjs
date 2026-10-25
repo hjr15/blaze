@@ -498,3 +498,28 @@ test("BLZ-706 (final I1): an empty v6 roster with no identity.db, or an empty on
     try { assert.equal(empty.state, "empty"); } finally { await empty.close(); }
   } finally { await db.drop(); }
 });
+
+test("BLZ-706 (final I1): an empty v6 roster beside a non-empty unreadable identity.db is broken; 0 bytes stays empty",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("idpg_corrupt");
+  try {
+    const { dataRoot } = await pgBoard(db.url);
+    const args = { dataRoot, env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres", connection: db.url }), openPgPool: poolFor(db.url) };
+    zeroByteRoster(dataRoot);
+    const zero = await resolveIdentity(args);
+    try { assert.equal(zero.state, "empty", "a 0-byte identity.db is no users"); } finally { await zero.close(); }
+    const SECRET = "not-a-database-blz_secretcontent";
+    writeFileSync(identityDbPath(dataRoot), SECRET);
+    const bad = await resolveIdentity(args);
+    try {
+      assert.equal(bad.state, "broken");
+      assert.equal(bad.store, null);
+      assert.ok(bad.error.includes(identityDbPath(dataRoot)), "the file is named");
+      assert.ok(bad.error.includes("blaze db migrate --identity-from"), "the migrate remedy is named");
+      assert.ok(/move it aside/.test(bad.error), "the move-aside remedy is named");
+      assert.ok(!bad.error.includes(SECRET), "the file content reached the message");
+      assert.ok(!/file is not a database|SQLITE/i.test(bad.error), "the SQLite error detail reached the message");
+    } finally { await bad.close(); }
+  } finally { await db.drop(); }
+});

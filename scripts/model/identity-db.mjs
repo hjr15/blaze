@@ -255,16 +255,38 @@ const strandedRosterError = (path) => "blaze: refusing to serve — this Postgre
   + `Copy it into Postgres:   blaze db migrate --identity-from ${path}   `
   + "— or, if that file is not this board's roster, move it aside.\n";
 
+/** The same, for a non-empty roster that will not open: it may hold users, so it fails closed.
+ *  Names the path only — never the file's content or the SQLite error (A3). */
+const unreadableRosterError = (path) => "blaze: refusing to serve — this Postgres database is at "
+  + `schema v${V6_FEATURES_FROM} or later and its roster is empty, but ${path} is not empty and cannot `
+  + "be read, so it may hold this board's users. This is a refusal, not \"no users\". "
+  + "If it is not this board's roster, move it aside; if it is, repair it and copy it into Postgres:   "
+  + `blaze db migrate --identity-from ${path}\n`;
+
+/** True unless the roster is an EMPTY SQLite file (0 pages — a 0-byte file reads so). Asked of SQLite
+ *  itself, read-only, so nothing is created or written; a file it cannot open counts as non-empty. */
+function nonEmptyFile(path) {
+  let db;
+  try {
+    db = new (DatabaseSync())(path, { readOnly: true });
+    return Number(db.prepare("PRAGMA page_count").get()?.page_count ?? 1) > 0;
+  } catch { return true; }
+  finally { try { db?.close(); } catch { /* already closed */ } }
+}
+
 async function loadIdentityPgAtV6(exec, dataRoot) {
   const r = await loadIdentityPg(exec);
   if (r.state === "empty") {
     const local = loadIdentity(dataRoot);
     local.close();
-    // Only a roster that READS as holding users. An unreadable (e.g. 0-byte) file is left to
-    // the empty-roster rules, as before: the adoption path depends on it (identity-pg tests).
+    const path = identityDbPath(dataRoot);
     if (local.state === "healthy") {
-      return { state: "broken", store: null, hasIdentity: false,
-               error: strandedRosterError(identityDbPath(dataRoot)), close() {} };
+      return { state: "broken", store: null, hasIdentity: false, error: strandedRosterError(path), close() {} };
+    }
+    // A non-empty file that will not open may hold users: fail closed. A 0-BYTE file stays "no
+    // users", as before — the post-setup adoption path depends on it (identity-pg tests).
+    if (local.state === "broken" && nonEmptyFile(path)) {
+      return { state: "broken", store: null, hasIdentity: false, error: unreadableRosterError(path), close() {} };
     }
     return r;
   }
