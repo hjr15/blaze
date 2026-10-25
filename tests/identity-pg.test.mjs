@@ -451,3 +451,50 @@ test("BLZ-706 (I4): blaze start on a v6 Postgres board authenticates from Postgr
     assert.equal(statSync(identityDbPath(dataRoot)).size, 0, "the SQLite roster was never opened");
   } finally { child?.kill(); await db.drop(); }
 });
+
+// ── E1 final review I1 ─────────────────────────────────────────────────────────────────────
+
+test("BLZ-706 (final I1): an empty v6 roster beside a populated identity.db is broken — both servers refuse",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("idpg_stranded");
+  try {
+    const { dataRoot, projectsDir } = await pgBoard(db.url);
+    const opened = openIdentityDb(dataRoot, { create: true });
+    try { await opened.store.createUser({ email: "only@example.com", role: "admin" }); }
+    finally { opened.db.close(); }
+    const identity = await resolveIdentity({ dataRoot, env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres", connection: db.url }), openPgPool: poolFor(db.url) });
+    try {
+      assert.equal(identity.source, "postgres");
+      assert.equal(identity.state, "broken");
+      assert.equal(identity.hasIdentity, false);
+      assert.equal(identity.store, null);
+      assert.ok(identity.error.includes(identityDbPath(dataRoot)), "the stranded file is named");
+      assert.ok(identity.error.includes("blaze db migrate --identity-from"), "the remedy is named");
+      assert.throws(() => {
+        const leaked = startServer({ root: dataRoot, projectsDir, port: 0, host: "127.0.0.1", identity });
+        leaked.close();
+      }, /blaze db migrate --identity-from/);
+      assert.throws(() => createApp(loadConfig({ root: dataRoot }), { root: dataRoot, identity }),
+        /blaze db migrate --identity-from/);
+    } finally { await identity.close(); }
+  } finally { await db.drop(); }
+});
+
+test("BLZ-706 (final I1): an empty v6 roster with no identity.db, or an empty one, stays empty", PG_SKIP, async () => {
+  const db = await scratchPgDb("idpg_emptyok");
+  try {
+    const { dataRoot } = await pgBoard(db.url);
+    const args = { dataRoot, env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres", connection: db.url }), openPgPool: poolFor(db.url) };
+    const none = await resolveIdentity(args);
+    try {
+      assert.equal(none.source, "postgres");
+      assert.equal(none.state, "empty");
+    } finally { await none.close(); }
+    openIdentityDb(dataRoot, { create: true }).db.close();
+    assert.ok(existsSync(identityDbPath(dataRoot)), "the fixture has an empty identity.db");
+    const empty = await resolveIdentity(args);
+    try { assert.equal(empty.state, "empty"); } finally { await empty.close(); }
+  } finally { await db.drop(); }
+});

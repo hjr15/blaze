@@ -243,8 +243,31 @@ const MISSING_PG_ROSTER = "blaze: refusing to serve — this Postgres database i
   + "This is a refusal, not \"no users\": a damaged roster must never disarm authentication. "
   + "Restore the database from a pg_dump.\n";
 
-async function loadIdentityPgAtV6(exec) {
+/**
+ * E1 final review I1 (BLZ-706): an EMPTY Postgres roster beside a `.blaze/identity.db` that holds
+ * users. `blaze db init` creates v6 with empty identity tables, and so does
+ * `blaze db migrate --no-identity-import`; serving "no users" there would bind a loopback board
+ * unauthenticated while the roster the operator believes protects it is never consulted.
+ */
+const strandedRosterError = (path) => "blaze: refusing to serve — this Postgres database is at schema "
+  + `v${V6_FEATURES_FROM} or later and its roster is empty, but ${path} holds this board's users. `
+  + "This is a refusal, not \"no users\": a roster left behind must never disarm authentication. "
+  + `Copy it into Postgres:   blaze db migrate --identity-from ${path}   `
+  + "— or, if that file is not this board's roster, move it aside.\n";
+
+async function loadIdentityPgAtV6(exec, dataRoot) {
   const r = await loadIdentityPg(exec);
+  if (r.state === "empty") {
+    const local = loadIdentity(dataRoot);
+    local.close();
+    // Only a roster that READS as holding users. An unreadable (e.g. 0-byte) file is left to
+    // the empty-roster rules, as before: the adoption path depends on it (identity-pg tests).
+    if (local.state === "healthy") {
+      return { state: "broken", store: null, hasIdentity: false,
+               error: strandedRosterError(identityDbPath(dataRoot)), close() {} };
+    }
+    return r;
+  }
   if (r.state !== "absent") return r;
   return { state: "broken", store: null, hasIdentity: false, error: MISSING_PG_ROSTER, close() {} };
 }
@@ -286,6 +309,6 @@ export async function resolveIdentity({ dataRoot, env = process.env,
     return sqlite();
   }
   const exec = poolExec(pool);
-  return { ...(await loadIdentityPgAtV6(exec)), source: "postgres",
-           reload: () => loadIdentityPgAtV6(exec), close: end };
+  return { ...(await loadIdentityPgAtV6(exec, dataRoot)), source: "postgres",
+           reload: () => loadIdentityPgAtV6(exec, dataRoot), close: end };
 }
