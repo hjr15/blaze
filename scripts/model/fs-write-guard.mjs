@@ -10,7 +10,9 @@ import { WRITE_PORT_ENV } from "./write-port.mjs";
 /** The refusal sentence, or null when the write is allowed. Pure. */
 export function fsWriteRefusal({ env = process.env, config, what }) {
   if (config?.database?.driver !== "postgres") return null;
-  if (env[WRITE_PORT_ENV] !== undefined) return null;
+  // E1 final review M1: an empty or whitespace value is UNSET, not an explicit intent —
+  // resolveWriteMode trims it to "" and falls back to fs, so it must meet the guard.
+  if ((env[WRITE_PORT_ENV] ?? "").trim() !== "") return null;
   return `blaze: refusing to ${what} — this board's blaze.config.json names database.driver "postgres", `
     + "but BLAZE_WRITE_PORT is unset, so the write would land in this checkout's files and never reach "
     + "the database the board serves. Write to the live board in remote mode (BLAZE_REMOTE_URL and "

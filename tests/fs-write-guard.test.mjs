@@ -82,6 +82,16 @@ test("BLZ-708: fsWriteRefusal — only the implicit default is refused", () => {
   assert.equal(fsWriteRefusal({ env: {}, config: { projects: ["ENG"] }, what: "x" }), null);
 });
 
+test("BLZ-708 (final M1): an empty or whitespace BLAZE_WRITE_PORT is unset, so it is refused", () => {
+  const pg = { database: { driver: "postgres" } };
+  for (const v of ["", "  ", "\t"]) {
+    const r = fsWriteRefusal({ env: { BLAZE_WRITE_PORT: v }, config: pg, what: "x" });
+    assert.ok(typeof r === "string" && r.includes("BLAZE_WRITE_PORT is unset"), JSON.stringify(v));
+  }
+  assert.equal(fsWriteRefusal({ env: { BLAZE_WRITE_PORT: " fs " }, config: pg, what: "x" }), null,
+    "a padded explicit value is still explicit");
+});
+
 test("BLZ-708: every mutating verb refuses on a postgres-driver board when BLAZE_WRITE_PORT is unset", async (t) => {
   const board = pgDriverBoard();
   const help = run(board, ["--help"]).stdout;
