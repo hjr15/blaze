@@ -30,6 +30,13 @@ import { join } from "node:path";
 import { spawnSync } from "node:child_process";
 import { ROLES, ROLE_SCOPES } from "./identity-schema.mjs";
 import { openIdentityDb, identityDbPath } from "./identity-db.mjs";
+// BLZ-706: the Postgres roster, on a db-mode Postgres board at schema v6.
+import { identityStore } from "./identity-store.mjs";
+import { resolveWriteMode, openCheckedPg, pgExec, describePgTarget } from "./write-port-resolve.mjs";
+import { resolveDatabaseConfig } from "./database-config.mjs";
+import { checkDbSchema, V6_FEATURES_FROM } from "./db-schema-version.mjs";
+import { openPostgresClient } from "../init-pg.mjs";
+import { loadConfig } from "../config.mjs";
 
 /**
  * Parse `user <verb> [flags]`. Returns errors rather than throwing or exiting: the
@@ -155,6 +162,43 @@ export function parseUserArgv(argv) {
 }
 
 /**
+ * BLZ-706: WHERE this board's roster lives, opened for one command.
+ *
+ * Postgres when all three hold — `BLAZE_WRITE_PORT=db`, `database.driver` postgres, and a stamp
+ * of at least V6_FEATURES_FROM — and the SQLite `identity.db` otherwise, exactly as before. The
+ * Postgres target touches nothing under the board directory: no `.blaze/`, no `.gitignore` line
+ * (BLZ-701 — the pod's `blaze user add` died with EACCES creating `.blaze/` it never needed).
+ *
+ * @returns { store, source, where, close } — or null for a SQLite roster that does not exist and
+ *   `create` is false. `where` names the roster: a path, or `host/database` (never a password).
+ */
+async function identityTarget(dataRoot, { create }, { env = process.env,
+                                                      resolveDbConfig = resolveDatabaseConfig,
+                                                      openPgClient = openPostgresClient } = {}) {
+  if (resolveWriteMode(env) === "db") {
+    const dbConfig = resolveDbConfig({ dataRoot, config: loadConfig({ root: dataRoot }), env });
+    if (dbConfig.driver === "postgres") {
+      // openCheckedPg refuses a database with no schema, or one this engine cannot read.
+      const client = await openCheckedPg(dbConfig.connection, openPgClient);
+      const end = async () => { try { await client.end(); } catch { /* already closed */ } };
+      let version;
+      try { ({ version } = await checkDbSchema(pgExec(client), { dialect: "postgres" })); }
+      catch (e) { await end(); throw e; }
+      if (version >= V6_FEATURES_FROM) {
+        return { store: identityStore(pgExec(client), { dialect: "postgres" }), source: "postgres",
+                 where: describePgTarget(dbConfig.connection), close: end };
+      }
+      // Below v6 the identity tables do not exist: the roster is still identity.db.
+      await end();
+    }
+  }
+  const opened = openIdentityDb(dataRoot, { create });
+  if (!opened) return null;
+  return { store: opened.store, source: "sqlite", where: opened.path,
+           close: () => { try { opened.db.close(); } catch { /* already closed */ } } };
+}
+
+/**
  * Create a user and issue its first token.
  *
  * The token's scopes are the role's OWN scopes, not a widening of them — and they are
@@ -164,21 +208,21 @@ export function parseUserArgv(argv) {
  * @returns { user, token } — `token.token` is the plaintext, which exists exactly once,
  *   here, and is never stored. A caller that drops it has to issue another.
  */
-export async function addUser(dataRoot, { email, role = "member", displayName = null } = {}) {
+export async function addUser(dataRoot, { email, role = "member", displayName = null } = {}, deps = {}) {
   if (!ROLES.includes(role)) {
     throw new Error(`unknown role ${JSON.stringify(role)} — expected ${ROLES.join(", ")}`);
   }
   if (!String(email ?? "").trim()) throw new Error("a user needs an email address");
 
-  const opened = openIdentityDb(dataRoot, { create: true });
+  const target = await identityTarget(dataRoot, { create: true }, deps);
   try {
-    const user = await opened.store.createUser({ email, displayName, role });
-    const token = await opened.store.issueToken({
+    const user = await target.store.createUser({ email, displayName, role });
+    const token = await target.store.issueToken({
       userId: user.id, name: `${user.email} initial token`, scopes: ROLE_SCOPES[role],
     });
-    return { user, token };
+    return { user, token, source: target.source, where: target.where };
   } finally {
-    try { opened.db.close(); } catch { /* already closed */ }
+    await target.close();
   }
 }
 
@@ -198,19 +242,21 @@ export async function addUser(dataRoot, { email, role = "member", displayName = 
  *
  * The password itself is never logged, never returned, and never put in an error message.
  */
-export async function setUserPassword(dataRoot, { email, password } = {}) {
-  const opened = openIdentityDb(dataRoot);
-  if (!opened) {
+export async function setUserPassword(dataRoot, { email, password } = {}, deps = {}) {
+  // The "no users are configured" refusal is the SQLite roster's only: a Postgres roster at v6
+  // always exists, and an unknown address there is the store's own "no such user".
+  const target = await identityTarget(dataRoot, { create: false }, deps);
+  if (!target) {
     throw new Error(`no users are configured for this board (${identityDbPath(dataRoot)} does not `
       + "exist) — create one first with: blaze user add --email <address> --role admin");
   }
   try {
     // The policy check and the "no such user" refusal both live in the store, where the
     // HTTP setup path reaches them too. One floor, three call sites.
-    await opened.store.setPassword({ email, password });
-    return { email: String(email).trim().toLowerCase() };
+    await target.store.setPassword({ email, password });
+    return { email: String(email).trim().toLowerCase(), source: target.source, where: target.where };
   } finally {
-    try { opened.db.close(); } catch { /* already closed */ }
+    await target.close();
   }
 }
 

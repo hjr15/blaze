@@ -140,6 +140,7 @@ both servers, because the page is rendered server-side and carries every ticket.
 | none | anything else | **`blaze board` serves the first-run setup flow, and nothing else** (BLZ-358). Every other route answers `503` — the board is never served unauthenticated on an interface something else can reach, which is what the earlier refusal bought. `blaze start` still refuses, because it binds loopback by construction and has no setup flow of its own |
 | one or more | any | Every `/api/*` and `/control/*` call needs `Authorization: Bearer blz_…`; the token's scopes are re-intersected with its owner's current role on every request |
 | **unreadable** — `.blaze/identity.db` exists but will not open or has no schema | any | **Both servers refuse to start**, naming the file. Never read as "no identities": a stray file on an unprotected board and a truncated roster on a protected one are indistinguishable on disk, so treating the second as the first would silently remove authentication |
+| **Postgres** (db mode, schema ≥ 6): `app_user` and the other identity tables | any | The same four states — absent, unreadable, empty, one or more — with the same behaviour as the rows above. Read at start through a small connection pool (`max: 4`) held for the life of the server, and re-read through it when first-run setup adopts the new admin. A v6 database with no `app_user` table is **unreadable**, not "none". A v5 database keeps `identity.db` |
 
 ### First-run setup (BLZ-358)
 
@@ -249,8 +250,17 @@ Create the first identity — which turns authentication on — with
 [`blaze user add`](guide/commands.md#user), with `blaze init --admin-email=…`, or through
 the setup flow above. All three go through `addUser`.
 
+**Both servers resolve identity before they bind** (BLZ-706). `blaze board`
+(`serve.mjs`'s entry) and `blaze start` (`supervisor.mjs`'s) each await
+`resolveIdentity()` first — Postgres on a db-mode Postgres board at schema v6, the
+`identity.db` roster otherwise — and pass the result in, so the bind check itself stays
+synchronous. **A db-mode Postgres server started without a resolved identity refuses**
+(review I4): `startServer()` and `createApp()` default to `loadIdentityDefault()`, which
+opens nothing and answers such a board `broken`, so a caller that skipped the resolver
+fails closed rather than reading the wrong roster or none.
+
 **Both servers read the roster once, at boot.** `startServer()` and `createApp()` each
-resolve `loadIdentity()` a single time, so adding the first user to a board that is
+resolve their identity a single time, so adding the first user to a board that is
 ALREADY SERVING does not turn authentication on for that process — it keeps serving
 unauthenticated until it is restarted. That is the same on both, and `blaze user add`
 says so in its output. Re-reading the roster per request would fix it for real and is

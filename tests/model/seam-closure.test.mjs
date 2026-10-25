@@ -918,7 +918,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["db-runner.mjs", { writes: ["runDb", "discardCreated"], sanctioned: [], inert: ["USAGE"] }],
   // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
   // the loader that goes through it.
-  ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity"], sanctioned: [],
+  // BLZ-706: resolveIdentity and loadIdentityDefault fall back to loadIdentity, so they are writes like the loader they wrap.
+  ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity", "resolveIdentity", "loadIdentityDefault"], sanctioned: [],
     inert: ["identityDbPath", "identityExec"] }],
   // `addUser` and `setUserPassword` write to the identity DATABASE, which is node:sqlite and
   // not this guard's surface at all. `ensureIdentityIgnored` appends the .gitignore line.
@@ -2039,8 +2040,9 @@ const WRITE_ALLOWED = new Map([
   // themselves, which are allowlisted for the same files.
   // BLZ-670: the mutating block resolves both ports per request (resolvePorts).
   // BLZ-254: stageFor removed — the server stages nothing (spec §5.5).
+  // BLZ-706: the standalone entry resolves identity (Postgres at v6) before bind; the sync default refuses a db-mode Postgres board.
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
-    "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile",
+    "ensureIdentityIgnored", "addUser", "loadIdentity", "loadIdentityDefault", "resolveIdentity", "reconcile",
     "resolvePorts", "pageHtml", "viewEnvelope",
     // BLZ-684: `POST /api/new` runs `blaze new`'s own verb, on exactly new-runner.mjs's footing.
     "applyNew"]],
@@ -2137,7 +2139,8 @@ const WRITE_ALLOWED = new Map([
   // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts).
   // BLZ-673: runGroomer grooms through the port under db (groomOnceDb), resolving ports per run.
   // BLZ-254: stageFor removed — reconcile no longer stages (spec §5.5).
-  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts"]],
+  // BLZ-706 (review I4): blaze start resolves identity like serve.mjs, and its sync default fails closed on a db-mode Postgres board.
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentityDefault", "resolveIdentity", "reconcile", "viewEnvelope", "resolvePorts"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.

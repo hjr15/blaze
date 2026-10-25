@@ -769,6 +769,20 @@ add` **adds `.blaze/` to the board's `.gitignore` if no rule already covers it**
 says so; if the board is not a git work tree it warns instead. A token's scopes can
 never exceed its owner's role, at issue time or at use time.
 
+**On a Postgres board, users live in the database** (BLZ-706). When all three hold —
+`BLAZE_WRITE_PORT=db`, `database.driver` is `postgres`, and the database is at schema
+**v6** or later — `blaze user add` and `blaze user passwd` write the identity tables in
+Postgres, and **nothing is written under the board directory**: no `.blaze/`, no
+`identity.db`, no `.gitignore` line (BLZ-701). The output names the database, never its
+password:
+
+```
+identities: Postgres db.example.internal/blaze
+```
+
+A v5 database has no identity tables, so its board keeps `identity.db` exactly as above
+until `blaze db migrate --identity-from` copies the roster across (see [`db`](#db)).
+
 ## Help
 
 `blaze --help` (or `-h`) prints a usage line plus the full command list with

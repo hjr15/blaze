@@ -18,7 +18,7 @@ import { checkBindSafety, gate, pageScopeFor } from "./model/serve-auth.mjs";
 import { handleSigninRoutes, SIGNIN_PATH } from "./model/signin.mjs";
 import { AttemptLimiter } from "./model/rate-limit.mjs";
 import { boardHeaders, cspNonce as boardNonce } from "./model/board-csp.mjs";
-import { loadIdentity } from "./model/identity-db.mjs";
+import { loadIdentityDefault, resolveIdentity } from "./model/identity-db.mjs";
 import { execFileSync } from "node:child_process";
 
 const today = () => new Date().toISOString().slice(0, 10);
@@ -229,7 +229,9 @@ export function newRunErrorEvent(message, state) {
   return { type: "error", loop: "reconcile", message };
 }
 
-export function createApp(cfg, { root = resolveRoots().dataRoot, identity = loadIdentity(root) } = {}) {
+// BLZ-706 (review I4): the default is the SYNC resolver, which refuses a db-mode Postgres board —
+// its identity is read by `resolveIdentity`, awaited by the entry block below before bind.
+export function createApp(cfg, { root = resolveRoots().dataRoot, identity = loadIdentityDefault(root) } = {}) {
   // BLZ-359. A DAMAGED ROSTER IS A REFUSAL, NOT "NOBODY IS CONFIGURED". Reading only
   // `hasIdentity` here would reintroduce, in this server, the exact bug BLZ-348 shipped
   // and then fixed in serve.mjs: truncating a protected board's identity.db read as "no
@@ -739,9 +741,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   const port = Number(process.env.PORT) || cfg.port;
   // Loud and fatal, not a stack trace: a broken roster is an operator problem with a
   // named fix, and the message says which file to deal with.
+  //
+  // BLZ-706 (review I4): identity is resolved HERE, before bind, exactly as serve.mjs's entry does
+  // it — Postgres on a db-mode Postgres board at schema v6, the SQLite roster otherwise.
   let app;
   try {
-    app = startSupervisor({ root, cfg, port, onListening: () => {
+    const identity = await resolveIdentity({ dataRoot: root });
+    app = startSupervisor({ root, cfg, port, identity, onListening: () => {
       console.log(`${cfg.boardTitle} app → http://localhost:${port}`);
       if (cfg.loops.reconcile.enabled && listProjects(cfg).length) app.startLoop("reconcile");
       if (cfg.loops.groomer.enabled) app.startLoop("groomer");

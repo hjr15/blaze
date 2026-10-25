@@ -29,7 +29,7 @@ import { panelHtml } from "./views/panel-content.mjs";
 import { pageHtml, viewEnvelope, viewEnabled, CSRF } from "./views/page.mjs";
 import { dbTransitions } from "./model/transitions-db.mjs";
 import { checkBindSafety, gate, pageScopeFor, csrfRequired } from "./model/serve-auth.mjs";
-import { loadIdentity } from "./model/identity-db.mjs";
+import { loadIdentity, loadIdentityDefault, resolveIdentity } from "./model/identity-db.mjs";
 import { addUser as addUserImpl, ensureIdentityIgnored } from "./model/user-admin.mjs";
 import { issueSetupToken, readSetupToken, clearSetupToken, setupTokenMatches, setupTokenPath,
          ensureSetupTokenIgnored } from "./model/setup-token.mjs";
@@ -274,7 +274,11 @@ function envPort() {
   return Number.isInteger(n) && n >= 0 && n <= 65535 ? n : null;
 }
 
-export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views, identity = loadIdentity(root),
+export function startServer({ projectsDir = resolveRoots().projectsDir, root = resolveRoots().dataRoot, port = envPort() ?? cfgFor(root).port, host = process.env.HOST || "127.0.0.1", views,
+                             // BLZ-706 (review I4): the SYNC default refuses a db-mode Postgres
+                             // board, whose identity only `resolveIdentity` can read — the
+                             // standalone entry below awaits it before bind and passes it in.
+                             identity = loadIdentityDefault(root),
                              // INJECTABLE FOR THE SAME REASON `identity` IS. The in-flight guard
                              // below is only observable when `addUser` actually yields, and the
                              // SQLite store does not — so with the real one, ten concurrent
@@ -315,15 +319,8 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
   let adoptionFailed = false;
   // One attempt at a time. `setupPending` is only cleared AFTER `addUser` awaits, so with
   // an identity store that yields to the event loop two concurrent correct-token requests
-  // could both pass the check and both create an admin. This guard is DEFENCE IN DEPTH,
-  // stated plainly: no store that ships today yields there. `identity-db.mjs` constructs
-  // exactly one store, `identityStore(exec, { dialect: "sqlite" })`, and nothing anywhere
-  // constructs the `postgres` dialect `identity-store.mjs` also supports — so the guard
-  // does not fire in any configuration an operator can currently select. Its LOGIC is
-  // proven by an injected yielding `addUser` in tests/setup-flow.test.mjs; what is not
-  // proven, because it cannot be, is that a shipped board ever reaches it. It stays
-  // because the day a yielding store is wired up, this is the line between one admin and
-  // two — and that is not a thing to discover afterwards.
+  // could both pass the check and both create an admin.
+  // BLZ-706: the Postgres store yields here, and tests/identity-pg.test.mjs proves the guard against it.
   let setupInFlight = false;
   if (!bind.ok) {
     let issued;
@@ -345,7 +342,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     // BOTH, and not one on the assumption that it covers the other: a .gitignore naming
     // exactly `.blaze/identity.db` satisfies the first check while leaving the token
     // file committable.
-    try { ensureIdentityIgnored(root); } catch { /* not a repo, or not ours to edit */ }
+    // BLZ-706: NOT for a Postgres roster — there is no identity.db to hide, and the rule would
+    // be a .gitignore edit made for a file this board never writes.
+    if (identity?.source !== "postgres") {
+      try { ensureIdentityIgnored(root); } catch { /* not a repo, or not ours to edit */ }
+    }
     try {
       const tokenIgnore = ensureSetupTokenIgnored(root);
       // A path git already had in its index before this rule existed is a token that was
@@ -555,7 +556,13 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         // process, `blaze user add`, the supervisor's loops), EMFILE, EIO, the mount going
         // read-only. Narrow window, maximum-severity outcome, so it is handled rather than
         // assumed away.
-        const adopted = loadIdentity(root);
+        //
+        // BLZ-706: re-read from WHERE THE IDENTITY CAME FROM — Postgres when it was resolved
+        // there (`reload`), the SQLite roster otherwise. A reload that throws is a failed
+        // adoption, handled below exactly like a non-healthy one.
+        let adopted;
+        try { adopted = await (identity?.reload ?? (() => loadIdentity(root)))(); }
+        catch { adopted = null; }
         if (adopted?.state !== "healthy") {
           // The token is consumed either way: the administrator WAS created, so leaving it
           // live would let a second caller create a second admin. `setupPending` stays
@@ -966,9 +973,13 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
   // container netns is unreachable through a published -p port, which is correct and
   // is exactly the configuration checkBindSafety was written for. A container with no
   // identities now exits 1 with the two fixes named, instead of serving an open board.
+  //
+  // BLZ-706: identity is RESOLVED HERE, before bind — from Postgres on a db-mode Postgres board at
+  // schema v6, from the SQLite roster otherwise. A resolution that throws (no schema, a refused
+  // stamp, no connection) is the same loud exit 1, never an open board.
   let server;
   try {
-    server = startServer({ root });
+    server = startServer({ root, identity: await resolveIdentity({ dataRoot: root }) });
   } catch (e) {
     console.error(e.message);
     process.exit(1);
