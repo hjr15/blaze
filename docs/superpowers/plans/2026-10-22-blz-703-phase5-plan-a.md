@@ -822,7 +822,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
 
 **Files:**
 - Create: `scripts/model/fs-write-guard.mjs`
-- Modify: `scripts/cli.mjs` (after the remote-mode block, before the schema preflight), `scripts/model/write-port-resolve.mjs` (`resolveWritePort`'s fs branch), `scripts/sprint-runner.mjs`, `scripts/model/user-admin.mjs` (`identityTarget`'s non-db branch), and `scripts/schedule-runner.mjs` and `scripts/migrate-runner.mjs` (review M4)
+- Modify: `scripts/cli.mjs` (after the remote-mode block, before the schema preflight), `scripts/model/write-port-resolve.mjs` (`resolveWritePort`'s fs branch), `scripts/sprint-runner.mjs`, `scripts/model/user-admin.mjs` (`identityTarget`'s non-db branch), `scripts/schedule-runner.mjs` and `scripts/migrate-runner.mjs` (review M4), and `scripts/reconcile.mjs` (`--apply`), `scripts/loops/groomer.mjs` (fs `groomOnce` branch), and `scripts/supervisor.mjs` (fs `runReconcile`/`runGroomer`). These are direct ticket writers outside `resolvePorts`, found in the review of 68202bc. `blaze init` is exempt from the cli guard.
 - Create test: `tests/fs-write-guard.test.mjs`
 - Docs: `AGENTS.md` (a new section `## A Postgres board refuses file writes`, after `## Read-only mode`), `docs/guide/commands.md` `## Environment variables` (the `BLAZE_WRITE_PORT` row: unset vs `fs`)
 
