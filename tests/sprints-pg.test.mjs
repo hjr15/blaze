@@ -38,7 +38,8 @@ import { graphModel } from "../scripts/model/graph.mjs";
 import { startServer } from "../scripts/serve.mjs";
 import { createApp } from "../scripts/supervisor.mjs";
 import { loadConfig } from "../scripts/config.mjs";
-import { resolveIdentity } from "../scripts/model/identity-db.mjs";
+import { resolveIdentity, openIdentityDb, identityDbPath } from "../scripts/model/identity-db.mjs";
+import { readIdentityRows } from "../scripts/model/identity-copy.mjs";
 
 const scratch = scratchRegistry();
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
@@ -460,5 +461,114 @@ test("BLZ-707: blaze sprint new and active write the database at v6, and write n
     assert.equal(reg.registryVersion, 1);
     assert.equal(reg.activeByProject?.BLZ, "S2", "an unknown key survived the save");
     assert.ok(!existsSync(join(roots.dataRoot, "sprints.json")), "a sprints.json was written");
+  } finally { await db.drop(); }
+});
+
+// ── E1 final review I2: identity and sprints through ONE migrate (spec §5 step 4) ──────────
+
+/** A sprint board (sprints.json = REG) whose own `.blaze/identity.db` holds an admin and a token. */
+async function combinedBoard() {
+  const roots = sprintBoard({ sprintsJson: REG });
+  const opened = openIdentityDb(roots.dataRoot, { create: true });
+  let token;
+  try {
+    const user = await opened.store.createUser({ email: "only@example.com", role: "admin" });
+    ({ token } = await opened.store.issueToken({ userId: user.id, name: "ci", scopes: ["read", "write"] }));
+  } finally { opened.db.close(); }
+  const roster = identityDbPath(roots.dataRoot);
+  const hashes = (await readIdentityRows(roster)).api_token.rows.map((r) => r.token_hash);
+  return { roots, roster, sprints: join(roots.dataRoot, "sprints.json"), token, hashes };
+}
+const TAMPER = "UPDATE sprint SET name = 'tampered' WHERE id = 'S1'";
+/** Nothing of the failed migrate survived: stamp 5, no authoritative row, no v6 tables. */
+async function assertRolledBack(url) {
+  await withClient(url, async (c) => {
+    const meta = async (k) => (await c.query("SELECT value FROM blaze_meta WHERE key = $1", [k])).rows[0]?.value ?? null;
+    assert.equal(await meta("schema_version"), "5", "the stamp moved");
+    assert.equal(await meta("authoritative"), null, "an authoritative row survived");
+    const reg = async (t) => (await c.query("SELECT to_regclass($1) AS r", [t])).rows[0].r;
+    assert.equal(await reg("app_user"), null, "app_user survived the rollback");
+    assert.equal(await reg("sprint"), null, "sprint survived the rollback");
+  });
+}
+
+test("BLZ-707 (final I2): identity + sprints in one migrateDb — a tampered sprint verify rolls back both",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("spr_comb_api");
+  try {
+    const { roster, token, hashes } = await combinedBoard();
+    await makeV5(db.url);
+    const identityRows = await readIdentityRows(roster);
+    let message = null;
+    await withClient(db.url, async (c) => {
+      try {
+        await migrateDb(pgExec(c), { identityRows, sprintRegistry: REG, beforeVerify: (e) => e.run(TAMPER) });
+      } catch (e) { message = String(e.message); }
+    });
+    assert.ok(message !== null, "the tampered migrate did not throw");
+    assert.ok(/sprint verify: .*S1/.test(message), "the failure is not the sprint verify");
+    assert.ok(!hashes.some((h) => message.includes(h)), "the message names a hash value");
+    assert.ok(!message.includes(token), "the message names the token");
+    await assertRolledBack(db.url);
+  } finally { await db.drop(); }
+});
+
+test("BLZ-707 (final I2): the live command — --identity-from and --sprints-from — rolls back both on a tampered sprint verify",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("spr_comb_cli");
+  try {
+    const { roots, roster, sprints, token, hashes } = await combinedBoard();
+    await makeV5(db.url);
+    // The CLI has no beforeVerify seam: tamper over the same client, just before the sprint
+    // verify's first read — after every write and after the identity verify.
+    let tampered = false;
+    const openPostgresClient = async (conn) => {
+      const client = await pgClient(conn);
+      const query = client.query.bind(client);
+      client.query = async (sql, params) => {
+        if (!tampered && typeof sql === "string" && sql.startsWith("SELECT active, registry_version")) {
+          tampered = true;
+          await query(TAMPER);
+        }
+        return query(sql, params);
+      };
+      return client;
+    };
+    const c = capture();
+    const code = await runDb(["migrate", "--identity-from", roster, "--sprints-from", sprints],
+      { ...c.io, roots, resolveDbConfig: () => ({ driver: "postgres", connection: db.url }), openPostgresClient });
+    const all = `${c.out()}\n${c.err()}`;
+    assert.equal(code, 1, "the tampered migrate exited 0");
+    assert.ok(tampered, "the tamper never ran");
+    assert.ok(/sprint verify: .*S1/.test(c.err()), "the failure is not the sprint verify");
+    assert.ok(/Nothing was migrated/.test(c.err()), "the rollback is not stated");
+    assert.ok(!/DONE/.test(all), "a DONE line was printed");
+    assert.ok(!hashes.some((h) => all.includes(h)), "the output names a hash value");
+    assert.ok(!all.includes(token), "the output names the token");
+    await assertRolledBack(db.url);
+  } finally { await db.drop(); }
+});
+
+test("BLZ-707 (final I2): the live command copies identity and sprints in one run and prints both lines",
+     PG_SKIP, async () => {
+  const db = await scratchPgDb("spr_comb_ok");
+  try {
+    const { roots, roster, sprints, token, hashes } = await combinedBoard();
+    await makeV5(db.url);
+    const c = capture();
+    assert.equal(await runDb(["migrate", "--identity-from", roster, "--sprints-from", sprints],
+      { ...c.io, roots, ...pgIo(db.url) }), 0, "the combined migrate exited non-zero");
+    assert.ok(/identity {7}app_user 1 · user_identity 1 · membership 1 · api_token 1 .*\(row-for-row verified\)/
+      .test(c.out()), "the identity line is missing");
+    assert.ok(/sprints {8}2 sprint\(s\), active S2 {2}\(verified\)/.test(c.out()), "the sprints line is missing");
+    assert.ok(/migrate: DONE — one transaction, committed\./.test(c.out()), "no DONE line");
+    const all = `${c.out()}\n${c.err()}`;
+    assert.ok(!hashes.some((h) => all.includes(h)) && !all.includes(token), "a credential reached the output");
+    assert.equal(await stamp(db.url), "6");
+    await withClient(db.url, async (k) => {
+      assert.equal((await k.query("SELECT value FROM blaze_meta WHERE key = 'authoritative'")).rows[0]?.value, "true");
+      assert.equal(Number((await k.query("SELECT count(*) AS n FROM app_user")).rows[0].n), 1);
+    });
+    same(await readBack(db.url), REG, "the imported registry differs from the source");
   } finally { await db.drop(); }
 });
