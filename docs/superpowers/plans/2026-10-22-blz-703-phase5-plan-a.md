@@ -606,7 +606,7 @@ cd /home/rnamwoh/Documents/Code/claude-config-worktrees/BLZ-704-blaze-pm-write-g
     - `healthy`: otherwise, with `store: identityStore(exec, { dialect: "postgres" })`.
 
     `close` is a no-op: the caller owns the pool.
-- Produces, from `init-pg.mjs`: `openPostgresPool({ host, port, database, user, password }, { Pool } = {}) → pg.Pool`. It sets `max: 4`, attaches a `pool.on("error", (e) => console.error("blaze: identity connection pool:", e.message))`, and gives the same missing-`pg` message as `openPostgresClient`.
+- Produces, from `init-pg.mjs`: `async openPostgresPool({ host, port, database, user, password }, { Pool } = {}) → Promise<pg.Pool>`. It is async because the missing-`pg` message needs a dynamic import. A v6 database with no `app_user` table resolves as `broken`, not as no users, and a `reload` that throws during adoption counts as a failed adoption (review of 0d035a2). It sets `max: 4`, attaches a `pool.on("error", (e) => console.error("blaze: identity connection pool:", e.message))`, and gives the same missing-`pg` message as `openPostgresClient`.
 - Produces, from `identity-db.mjs`: `resolveIdentity({ dataRoot, env = process.env, resolveDbConfig = resolveDatabaseConfig, openPgPool = openPostgresPool } = {}) → Promise<loadIdentity-shaped result & { source: "sqlite"|"postgres", reload: () => Promise<result>|result }>`:
   - `resolveWriteMode(env) !== "db"`, or the driver is `sqlite`, gives `{ ...loadIdentity(dataRoot), source: "sqlite", reload: () => loadIdentity(dataRoot) }`.
   - Postgres:
