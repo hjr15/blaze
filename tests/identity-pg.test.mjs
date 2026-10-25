@@ -30,7 +30,7 @@ import { loadIdentityPg, poolExec } from "../scripts/model/identity-pg.mjs";
 import { identityStore } from "../scripts/model/identity-store.mjs";
 import { createDbSchema } from "../scripts/model/db-schema-version.mjs";
 import { pgExec } from "../scripts/model/write-port-resolve.mjs";
-import { readSetupToken } from "../scripts/model/setup-token.mjs";
+import { readSetupToken, setupTokenPath } from "../scripts/model/setup-token.mjs";
 import { openPostgresPool } from "../scripts/init-pg.mjs";
 
 const SCRIPTS = join(dirname(fileURLToPath(import.meta.url)), "..", "scripts");
@@ -89,15 +89,16 @@ function childEnv(extra) {
 /** Spawn a server script and resolve with its port once `pattern` appears on stdout. */
 function spawnServer(script, env, pattern) {
   const child = spawn(process.execPath, [join(SCRIPTS, script)], { env });
-  let out = "", err = "";
+  let out = "";
   const ready = new Promise((resolve, reject) => {
     child.stdout.on("data", (d) => {
       out += d;
       const m = out.match(pattern);
       if (m) resolve(Number(m[1]));
     });
-    child.stderr.on("data", (d) => (err += d));
-    child.on("exit", (code) => reject(new Error(`${script} exited ${code} before listening: ${err.slice(0, 400)}`)));
+    child.stderr.resume();
+    // The exit code only: the child's own output is never quoted into a failure message (A3).
+    child.on("exit", (code) => reject(new Error(`${script} exited ${code} before listening`)));
   });
   return { child, ready };
 }
@@ -257,8 +258,10 @@ test("BLZ-706 / BLZ-701: user add on a v6 Postgres board writes Postgres and cre
       { encoding: "utf8", env: childEnv({ BLAZE_PROJECTS_DIR: projectsDir, BLAZE_WRITE_PORT: "db",
                                           ...pgEnvFor(db.url) }) });
     assert.equal(run.status, 0, `user-runner exited ${run.status}`);
-    assert.match(run.stdout, /^identities: Postgres \S+\/\S+$/m);
-    assert.doesNotMatch(run.stdout, /identity\.db/);
+    // assert.ok over a boolean, NEVER assert.match on run.stdout: that stdout carries the new
+    // user's plaintext token, and match/doesNotMatch print the whole string on failure (A3).
+    assert.ok(/^identities: Postgres \S+\/\S+$/m.test(run.stdout), "runner did not name the Postgres roster");
+    assert.ok(!/identity\.db/.test(run.stdout), "runner named identity.db for a Postgres roster");
     assert.equal(await userCount(db.url), 2);
     assert.equal(existsSync(join(dataRoot, ".blaze")), false, "the runner created no .blaze/");
     assert.equal(existsSync(join(dataRoot, ".gitignore")), false, "the runner wrote no .gitignore");
@@ -346,6 +349,59 @@ test("BLZ-706: two concurrent setup completions against Postgres create exactly 
   } finally {
     await new Promise((r) => (server ? server.close(r) : r()));
     await identity?.close?.();
+    await db.drop();
+  }
+});
+
+test("BLZ-706: a v6 database with no app_user table is broken, not absent — and both servers refuse it", PG_SKIP, async () => {
+  const db = await scratchPgDb("idpg_noroster");
+  try {
+    const { dataRoot, projectsDir } = await pgBoard(db.url);
+    await withClient(db.url, (c) => c.query("DROP TABLE app_user CASCADE"));
+    const identity = await resolveIdentity({ dataRoot, env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres", connection: db.url }), openPgPool: poolFor(db.url) });
+    try {
+      assert.equal(identity.source, "postgres");
+      assert.equal(identity.state, "broken");
+      assert.equal(identity.hasIdentity, false);
+      assert.match(identity.error, /no app_user table/);
+      assert.equal((await identity.reload()).state, "broken", "the adoption reload refuses it too");
+      assert.throws(() => {
+        const leaked = startServer({ root: dataRoot, projectsDir, port: 0, host: "127.0.0.1", identity });
+        leaked.close();
+      }, /no app_user table/);
+      assert.throws(() => createApp(loadConfig({ root: dataRoot }), { root: dataRoot, identity }),
+        /no app_user table/);
+    } finally { await identity.close(); }
+  } finally { await db.drop(); }
+});
+
+test("BLZ-706: an adoption whose reload throws fails closed — 500, token cleared, the board stays 503", PG_SKIP, async () => {
+  const db = await scratchPgDb("idpg_reloadthrow");
+  let server, resolved;
+  try {
+    const { dataRoot, projectsDir } = await pgBoard(db.url);
+    resolved = await resolveIdentity({ dataRoot, env: { BLAZE_WRITE_PORT: "db" },
+      resolveDbConfig: () => ({ driver: "postgres", connection: db.url }), openPgPool: poolFor(db.url) });
+    assert.equal(resolved.state, "empty");
+    const identity = { ...resolved, reload: async () => { throw new Error("connection terminated"); } };
+    server = startServer({ root: dataRoot, projectsDir, port: 0, host: "0.0.0.0", identity,
+      addUser: (r, o) => addUser(r, o, deps(db.url)) });
+    await new Promise((res) => server.once("listening", res));
+    const base = `http://127.0.0.1:${server.address().port}`;
+    const saved = console.error;
+    console.error = () => {};
+    let res;
+    try {
+      res = await postSetup(base, { token: readSetupToken(dataRoot), email: "admin@example.com",
+                                    password: "correct horse battery" });
+    } finally { console.error = saved; }
+    assert.equal(res.status, 500);
+    assert.equal(existsSync(setupTokenPath(dataRoot)), false, "the setup token is consumed");
+    assert.equal((await fetch(`${base}/api/hash`)).status, 503, "nothing is served after a failed adoption");
+  } finally {
+    await new Promise((r) => (server ? server.close(r) : r()));
+    await resolved?.close?.();
     await db.drop();
   }
 });
