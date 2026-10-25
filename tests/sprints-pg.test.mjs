@@ -12,7 +12,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { mkdtempSync, writeFileSync, readFileSync, existsSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, readFileSync, existsSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -30,6 +30,11 @@ import { postgresReader } from "../scripts/model/pg-storage.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { applyNew } from "../scripts/new.mjs";
 import { applyEdit } from "../scripts/edit.mjs";
+import { loadBoard } from "../scripts/model/import-apply.mjs";
+import { memReadStorage } from "../scripts/model/read-storage.mjs";
+import { liveModel } from "../scripts/views/data.mjs";
+import { panelHtml } from "../scripts/views/panel-content.mjs";
+import { graphModel } from "../scripts/model/graph.mjs";
 import { startServer } from "../scripts/serve.mjs";
 import { createApp } from "../scripts/supervisor.mjs";
 import { loadConfig } from "../scripts/config.mjs";
@@ -190,6 +195,35 @@ test("BLZ-707: openSprintSource is the file off db mode", async () => {
     assert.equal(src.where, join(roots.dataRoot, "sprints.json"));
     same(await src.load(), { active: null, sprints: [] }, "no file reads as no sprints");
   } finally { await src.close(); }
+});
+
+// ── review fix round 1 ──────────────────────────────────────────────────────────────────────
+
+test("BLZ-707 (I1): the import board refuses when the sprint registry cannot be read", async () => {
+  const roots = dbBoard();
+  const failing = { ...memReadStorage([]), sprintRegistry() { throw new Error("blaze: the sprint tables could not be read"); } };
+  await assert.rejects(loadBoard(roots.projectsDir, { dataRoot: roots.dataRoot, readStorage: failing }),
+    /the sprint tables could not be read/);
+});
+
+test("BLZ-707 (I1): on a file board a missing or malformed sprints.json is still no sprints", async () => {
+  const roots = dbBoard();
+  assert.equal((await loadBoard(roots.projectsDir, { dataRoot: roots.dataRoot })).sprintIds.size, 0, "missing file");
+  writeFileSync(join(roots.dataRoot, "sprints.json"), "{not json");
+  assert.equal((await loadBoard(roots.projectsDir, { dataRoot: roots.dataRoot })).sprintIds.size, 0, "malformed file");
+  writeFileSync(join(roots.dataRoot, "sprints.json"), JSON.stringify(REG));
+  assert.deepEqual([...(await loadBoard(roots.projectsDir, { dataRoot: roots.dataRoot })).sprintIds], ["S1", "S2"]);
+});
+
+test("BLZ-707 (M4): the panel, live and map models never read sprints.json", () => {
+  const roots = sprintBoard();
+  // A sprints.json that is a DIRECTORY makes loadSprints throw (not a regular file, BLZ-493), so
+  // any of these models that still fell back to the file would throw here. They use only the
+  // index's rows, so they pass no registry and read none.
+  mkdirSync(join(roots.dataRoot, "sprints.json"));
+  assert.ok(panelHtml(roots.projectsDir, "ENG-1") !== null, "the panel renders ENG-1");
+  assert.ok(Array.isArray(liveModel(roots.dataRoot, roots.projectsDir).groups), "live renders");
+  assert.ok(graphModel({ projectsDir: roots.projectsDir }), "the map renders");
 });
 
 // ── Postgres ───────────────────────────────────────────────────────────────────────────────
@@ -405,8 +439,14 @@ test("BLZ-707: blaze sprint new and active write the database at v6, and write n
   try {
     const roots = await v6Board(db.url);
     const env = childEnv({ BLAZE_PROJECTS_DIR: roots.projectsDir, BLAZE_WRITE_PORT: "db", ...pgEnvFor(db.url) });
+    // An unstamped registry in the tables: the file-rewrite warning does not apply (review M2).
+    const { registryVersion: _v, ...unstamped } = REG;
+    await withClient(db.url, async (c) => {
+      await c.query("BEGIN"); await writeSprintRegistry(pgExec(c), unstamped); await c.query("COMMIT");
+    });
     const made = run("sprint-runner.mjs", ["new", "Three", "--start", "2026-08-10", "--end", "2026-08-23"], env);
     assert.equal(made.status, 0, "sprint new exited non-zero");
+    assert.ok(!/version stamp/.test(made.stderr), "the sprints.json warning fired on a database source");
     assert.ok(/^created S3 \(database: /.test(made.stdout), "sprint new names the database");
     const act = run("sprint-runner.mjs", ["active", "S3"], env);
     assert.equal(act.status, 0, "sprint active exited non-zero");

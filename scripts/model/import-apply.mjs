@@ -338,10 +338,11 @@ export async function loadBoard(projectsDir, { dataRoot, readStorage = fsReadSto
     return projectCache.get(key);
   };
 
-  let sprintIds = new Set();
   // BLZ-707: through the reader — the sprint tables on a Postgres board at v6, else sprints.json.
-  try { sprintIds = new Set((await readStorage.sprintRegistry(root)).sprints.map((s) => s.id)); }
-  catch { /* no registry */ }
+  // No catch (review I1): `loadSprints` already answers a missing or malformed file with no
+  // sprints, so what reaches here is a registry that could NOT be read — a database error, or a
+  // sprints.json that is not a regular file — and an import must not plan against "no sprints".
+  const sprintIds = new Set((await readStorage.sprintRegistry(root)).sprints.map((s) => s.id));
 
   return {
     byId, typesFor, types: TYPES, statusesFor,

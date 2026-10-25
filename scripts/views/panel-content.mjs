@@ -78,7 +78,8 @@ export function panelContentHtml(model) {
 // IO wrapper for the /api/panel route: resolve the ticket file, parse it, and
 // render. Returns null (→ 404) for an unknown id.
 export function panelHtml(projectsDir, id, { tickets = null } = {}) {
-  const index = buildIndex(projectsDir, tickets ? { tickets } : {});
+  // BLZ-707 (review M4): rows only — no registry is read, so a v6 db board never reads sprints.json.
+  const index = buildIndex(projectsDir, { ...(tickets ? { tickets } : {}), sprints: [] });
   const row = index.get(id);
   if (!row) return null;
   // BLZ-670: a database record already carries frontmatter and body, and its `file` is an id,

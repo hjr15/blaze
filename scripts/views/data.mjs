@@ -150,6 +150,10 @@ export function liveModel(dataRoot, projectsDir,
   const { text, unreadable } = feed ?? readStorage.activityFeed(dataRoot);
   const events = parseActivity(text);
   const statusByKey = {};
-  for (const r of buildIndex(projectsDir, tickets ? { tickets } : {}).rows) if (r.id) statusByKey[r.id] = r.status;
+  // BLZ-707 (review M4): only rows are read, so no registry is needed — and none is read, which
+  // keeps a v6 db board off sprints.json entirely.
+  for (const r of buildIndex(projectsDir, { ...(tickets ? { tickets } : {}), sprints: [] }).rows) {
+    if (r.id) statusByKey[r.id] = r.status;
+  }
   return { groups: groupByTicket(events, { now, statusByKey }), unreadable };
 }

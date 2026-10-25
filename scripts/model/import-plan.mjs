@@ -498,7 +498,7 @@ export function planImport(rows, board, opts = {}) {
           // set is named and the cell is not.
           errors.push(
             `${at}: \`sprint\` is not in the registry. Registered sprint ids: `
-            + `${[...board.sprintIds].join(", ") || "(none)"} (sprints.json). The cell is not `
+            + `${[...board.sprintIds].join(", ") || "(none)"}. The cell is not `
             + `echoed (design §5.2)`);
           continue;
         }

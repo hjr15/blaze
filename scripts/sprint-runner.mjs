@@ -9,8 +9,11 @@ import { addSprint, setActive, formatSprintList, unstampedRegistryWarning } from
 import { openSprintSource } from "./model/sprint-store.mjs";
 
 /** BLZ-369: surfaced on the WRITE paths, because that is where the loss would occur — a read
- *  that never saves cannot destroy anything, and warning there would be noise on every render. */
-function warnIfUnstamped(registry) {
+ *  that never saves cannot destroy anything, and warning there would be noise on every render.
+ *  BLZ-707: file sources only. The warning is about an older engine rewriting sprints.json, which
+ *  no engine does to the sprint tables, and its text names the file. */
+function warnIfUnstamped(registry, source) {
+  if (source.kind !== "file") return;
   const w = unstampedRegistryWarning(registry);
   if (w) console.error(`blaze sprint: ${w}`);
 }
@@ -64,7 +67,7 @@ try {
       process.exit(1);
     }
     const before = await source.load();
-    warnIfUnstamped(before);
+    warnIfUnstamped(before, source);
     const { registry, id } = addSprint(before, { name: opts.name, start: opts.start, end: opts.end });
     await source.save(registry);
     console.log(`created ${id}${at}`);   // BLZ-254: no commit
@@ -83,7 +86,7 @@ try {
     const [id] = positional;
     if (!id) { console.error("usage: blaze sprint active <id>"); process.exit(1); }
     const before = await source.load();
-    warnIfUnstamped(before);
+    warnIfUnstamped(before, source);
     const registry = setActive(before, id);
     await source.save(registry);
     console.log(`active sprint: ${id}${at}`);   // BLZ-254: no commit
