@@ -121,4 +121,5 @@ A deployed db board's data is now Postgres-only
 ([ADR-0039](0039-board-data-lives-in-postgres-board-config-in-the-platform-chart.md)): tickets, events,
 users, tokens, sessions and sprints live in the database once `blaze db migrate` has marked it
 authoritative. A checkout of a migrated board must not be written, and the engine enforces that for
-engines 0.10.0 and newer: a board whose config names the postgres driver refuses an implicit file write.
+engines 0.10.0 and newer: a board whose config names the postgres driver refuses a file write unless
+`BLAZE_WRITE_PORT` is set explicitly (`blaze db *`, `blaze init` and remote mode are not subject to it).

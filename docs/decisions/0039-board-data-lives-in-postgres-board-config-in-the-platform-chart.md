@@ -32,16 +32,18 @@ The design and its decisions D1 to D10 are in
 3. **The schema moves forward only, in one transaction** (D1). `DB_SCHEMA_VERSION` becomes 6 and
    `MIN_DB_SCHEMA_VERSION` stays 5, so a v5 database serves exactly as before until it is migrated.
 4. **A postgres-driver config refuses implicit file writes** (D5). A board whose config names
-   `database.driver: "postgres"` refuses a verb or runner that would write files unless
-   `BLAZE_WRITE_PORT` says where the write goes. `blaze init` is exempt, because it only creates a
-   new board directory.
+   `database.driver: "postgres"` refuses a verb or runner that would write files while
+   `BLAZE_WRITE_PORT` is unset. An explicit `BLAZE_WRITE_PORT` (`fs`, `dual` or `db`) is allowed,
+   because it states where the write goes. `blaze db *` and `blaze init` are exempt (`blaze init`
+   only creates a new board directory), and remote mode never reaches the guard.
 5. **Remote mode is the agent surface, and admin verbs run inside the deployment** (D7). An agent
    reaches the board over its HTTP API with a bearer token; `blaze user`, `blaze sprint` and the
    migration run where the database credentials already are.
 
 ## Consequences
 
-- `blaze init --force` and `blaze db load --replace` are refused on an authoritative database. The
+- `blaze db init --force` is refused on every Postgres database already; the authoritative flag
+  newly guards `blaze db load --replace`, which is refused on an authoritative database. The
   `older` schema refusal on it names `blaze db migrate`, never a rebuild.
 - A `pg_dump` is the backup, and it now holds credential hashes (password verifiers and token
   hashes). Treat a dump as a secret and take one before every migrate.
@@ -51,9 +53,13 @@ The design and its decisions D1 to D10 are in
   still writable by it.
 - A fresh SQLite shadow is stamped 6 and an older engine refuses it as newer. That is harmless: the
   shadow is derived and `blaze db init --force` rebuilds it.
+- The guard has known gaps, listed in AGENTS.md under
+  [A Postgres board refuses file writes](https://github.com/hjr15/blaze/blob/main/AGENTS.md#a-postgres-board-refuses-file-writes):
+  the board server's first-user setup writes `identity.db`, and a direct `reindex.mjs` or
+  `matrices-runner.mjs` writes derived files only.
 - The Live view reads local files only, so it shows nothing for a Postgres-only board (D10).
 - A concurrent pair of `blaze sprint` saves on one board can lose an update, because the registry is
-  read, changed and written without a table lock. A follow-up ticket tracks it.
+  read, changed and written without a table lock. BLZ-727 tracks it.
 
 ## Alternatives rejected
 
