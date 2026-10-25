@@ -12,6 +12,7 @@ import { spawnSync } from "node:child_process";
 import { runDryRun, runLive } from "./migrate/jira-import.mjs";
 import { resolveRoots, loadConfig, InvalidProjectKeyError } from "./config.mjs";
 import { assertWritable } from "./readonly.mjs";
+import { assertFsWriteAllowed } from "./model/fs-write-guard.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 const CACHE = join(dataRoot, ".migration-cache");
@@ -58,6 +59,11 @@ if (keys.length === 0) {
 // before either, after the arguments and the project keys are judged.
 try { assertWritable("run blaze migrate"); }
 catch (e) { console.error(e.message); process.exit(1); }
+// BLZ-708 (review M4): `--live` writes tickets outside resolvePorts. Before anything is read.
+if (mode === "live") {
+  try { await assertFsWriteAllowed("import from Jira", { dataRoot }); }
+  catch (e) { console.error(e.message); process.exit(1); }
+}
 
 if (mode === "dry-run") {
   const { auditMd, ledger, stats } = runDryRun({ cacheDir: CACHE, keys, detectMerges: enableMerges });

@@ -332,6 +332,31 @@ It's an env guard against an agent *reaching* for a mutating verb through the
 normal CLI/API surfaces (including a running `blaze board`'s write API) — not
 a sandbox. Code that calls `node:fs` directly still bypasses it.
 
+## A Postgres board refuses file writes
+
+A board whose `blaze.config.json` names `database.driver: "postgres"` is served from that
+database. With `BLAZE_WRITE_PORT` **unset**, every file write on such a board is refused
+(BLZ-708), because it would land in this checkout and never reach the database the board
+serves. The refusal names the cause and exits 1. Three spellings are allowed:
+
+- `BLAZE_WRITE_PORT=db` writes to the database.
+- Remote mode (`BLAZE_REMOTE_URL` and `BLAZE_TOKEN`) writes to the live board over HTTP and never
+  reaches the guard.
+- `BLAZE_WRITE_PORT=fs` (or `dual`) states that a file write is deliberate, for example during a
+  migration.
+
+`blaze db *` is exempt: it is how such a board is migrated and inspected. The guard runs in
+`cli.mjs`, in `resolveWritePort` (so the runners that go through `resolvePorts`, `import`,
+`reconcile --apply` and the board server's write API are covered; the server answers `503`), in
+`sprint new|active`, `schedule migrate-dates --write`, `migrate --live` and `user`. Reads are
+never refused. It refuses rather than warns because a warning scrolls past after the write has
+already diverged the board from what everyone reads.
+
+It cannot protect an engine older than 0.10.0, which has no guard. **Known gap:** a direct
+`node scripts/reindex.mjs` or `node scripts/matrices-runner.mjs` on such a board is not guarded
+beyond `cli.mjs`. Both write derived files only (`.blaze/index.json`, generated matrices), never
+a ticket.
+
 ## Remote mode (writing from another machine)
 
 When the board lives on a server — a deployed `blaze board`, typically on Postgres — set

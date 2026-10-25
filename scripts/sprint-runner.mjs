@@ -19,6 +19,7 @@ function warnIfUnstamped(registry, source) {
 }
 
 import { assertWritable } from "./readonly.mjs";
+import { assertFsWriteAllowed } from "./model/fs-write-guard.mjs";
 
 const { dataRoot } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below —
@@ -46,6 +47,11 @@ try {
   assertWritable("create/activate a sprint");
   // After the guard, so a refused run opens no connection.
   source = await openSprintSource({ dataRoot });
+  // BLZ-708: a file source on a postgres-driver board with BLAZE_WRITE_PORT unset would write
+  // sprints.json where the database never sees it. Reads (list) are not refused.
+  if (source.kind === "file" && (sub === "new" || sub === "active")) {
+    await assertFsWriteAllowed("create/activate a sprint", { dataRoot });
+  }
   // File-mode output is byte-identical; the database names itself.
   const at = source.kind === "postgres" ? ` (database: ${source.where})` : "";
   if (sub === "new") {

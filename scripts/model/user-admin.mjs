@@ -37,6 +37,7 @@ import { resolveDatabaseConfig } from "./database-config.mjs";
 import { checkDbSchema, V6_FEATURES_FROM } from "./db-schema-version.mjs";
 import { openPostgresClient } from "../init-pg.mjs";
 import { loadConfig } from "../config.mjs";
+import { assertFsWriteAllowed } from "./fs-write-guard.mjs";
 
 /**
  * Parse `user <verb> [flags]`. Returns errors rather than throwing or exiting: the
@@ -192,6 +193,8 @@ async function identityTarget(dataRoot, { create }, { env = process.env,
       await end();
     }
   }
+  // BLZ-708: the file roster on a postgres-driver board with BLAZE_WRITE_PORT unset.
+  await assertFsWriteAllowed("run blaze user", { dataRoot, env });
   const opened = openIdentityDb(dataRoot, { create });
   if (!opened) return null;
   return { store: opened.store, source: "sqlite", where: opened.path,
