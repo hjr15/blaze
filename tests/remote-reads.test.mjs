@@ -18,7 +18,7 @@ import { startServer } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { loadIdentity } from "../scripts/model/identity-db.mjs";
 import { ROUTE_SCOPES } from "../scripts/model/serve-auth.mjs";
-import { requestFor } from "../scripts/remote-client.mjs";
+import { requestFor, runRemote } from "../scripts/remote-client.mjs";
 import { ticketJson } from "../scripts/model/ticket-json.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
@@ -279,4 +279,35 @@ test("BLZ-709: requestFor builds GETs and refuses unknown flags", () => {
   assert.match(requestFor("list", ["--projects", "--status", "done"]).error, /--projects/);
   assert.equal(requestFor("move", ["ENG-1", "done"]).method, "POST");
   assert.equal(requestFor("move", ["ENG-1", "done"]).read, false);
+});
+
+test("BLZ-709 review: a filter flag never takes the next flag as its value", () => {
+  for (const f of ["--project", "--status", "--type"]) {
+    assert.deepEqual(requestFor("list", [f, "--json"]), { error: `blaze list: ${f} needs a value` });
+    assert.deepEqual(requestFor("list", [f]), { error: `blaze list: ${f} needs a value` });
+  }
+});
+
+test("BLZ-709 review: a 200 ok answer without its payload is a failure, never 'undefined' or a throw", async () => {
+  const env = { BLAZE_REMOTE_URL: "http://127.0.0.1:1", BLAZE_TOKEN: "blz_t" };
+  const answering = (body) => async () => new Response(JSON.stringify(body),
+    { status: 200, headers: { "content-type": "application/json" } });
+  for (const [verb, argv, body] of [
+    ["show", ["ENG-1"], { ok: true }],
+    ["show", ["ENG-1"], { ok: true, ticket: "x" }],
+    ["show", ["ENG-1", "--json"], { ok: true }],
+    ["list", [], { ok: true }],
+    ["list", [], { ok: true, tickets: {} }],
+    ["list", ["--json"], { ok: true, tickets: null }],
+    ["list", ["--projects"], { ok: true, projects: "x" }],
+    ["list", ["--projects", "--json"], { ok: true }],
+  ]) {
+    const out = [], err = [];
+    const code = await runRemote(verb, argv, { env, fetch: answering(body),
+      out: (x) => out.push(String(x)), err: (x) => err.push(String(x)) });
+    const what = `${verb} ${argv.join(" ")} ${JSON.stringify(body)}`;
+    assert.equal(code, 1, what);
+    assert.deepEqual(out, [], what);
+    assert.deepEqual(err, [`blaze ${verb} failed: malformed answer`], what);
+  }
 });

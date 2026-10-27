@@ -776,7 +776,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       try {
         return await reading(async (rs) => {
           const tickets = (await allTickets(rs))
-            .filter((r) => (!want.project || r.frontmatter?.project === want.project)
+            .filter((r) => (!want.project || proj(r) === want.project)
               && (!want.status || r.status === want.status)
               && (!want.type || r.frontmatter?.type === want.type))
             .sort((a, b) => proj(a).localeCompare(proj(b)) || num(a) - num(b));

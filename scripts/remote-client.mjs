@@ -116,7 +116,8 @@ function readRequestFor(verb, argv) {
     if (a === "--json") { json = true; continue; }
     if (a === "--projects") { projects = true; continue; }
     if (LIST_FILTERS[a]) {
-      if (argv[i + 1] === undefined) return { error: `blaze list: ${a} needs a value` };
+      // A value that is itself a flag (`--status --json`) is a missing value, not a status.
+      if (argv[i + 1] === undefined || argv[i + 1].startsWith("--")) return { error: `blaze list: ${a} needs a value` };
       query.set(LIST_FILTERS[a], argv[++i]); continue;
     }
     if (a.startsWith("--")) return { error: `unknown flag: ${a}` };
@@ -306,7 +307,13 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
   }
   for (const w of Array.isArray(answer.warnings) ? answer.warnings : []) err(`warning: ${w}`);
   if (!req.read) { out(successLine(verb, req.body, answer, cfg.origin)); return 0; }
-  // BLZ-709: a read. The rendering on stdout, the count on stderr.
+  // BLZ-709: a read. A 200 that lacks the payload its route promises is a failure, never
+  // "undefined" on stdout or a throw. Then the rendering on stdout, the count on stderr.
+  const payload = { ticket: answer.ticket, tickets: answer.tickets, projects: answer.projects }[req.read];
+  const wellFormed = req.read === "ticket"
+    ? payload !== null && typeof payload === "object" && !Array.isArray(payload)
+    : Array.isArray(payload);
+  if (!wellFormed) { err(`blaze ${verb} failed: malformed answer`); return 1; }
   const text = renderRead(req, answer, cfg.origin);
   if (text !== "") out(text);
   if (req.read === "tickets") err(`${answer.tickets.length} ticket(s) (remote: ${cfg.origin})`);

@@ -382,17 +382,18 @@ manage, and two agents on two machines creating tickets at once get distinct ids
 `blaze new` needs a **db-mode** board (`BLAZE_WRITE_PORT=db` on the server): on a file board
 the server refuses it `409`, because file ids come from git and are single-machine.
 
-`blaze show <id>` and `blaze list [--project K] [--status S] [--type T]` (or `list
---projects`, for each project's labels and components) read the live board the same way, with
-any `read` token; `--json` prints parseable JSON on stdout, and the count goes to stderr. Both
-run in remote mode only. Every other command is refused in remote mode (it needs the board's
-data on this machine); read it with `blaze show <id>` and `blaze list` (remote mode), or the page. Setting only ONE of the two variables is an
-error for every command — never a silent local write. The token is only ever sent to
-`BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for a
-loopback host only (`127.x.x.x`, `[::1]` or `localhost`; with `NODE_USE_ENV_PROXY=1` set, keep
-loopback in `NO_PROXY` or the token goes to the proxy in clear). Set the two **per command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`)
-or in a shell used only for that — never as a global `export`, which would send every `blaze`
-write on the machine to the server. See
+`blaze show <id>` and `blaze list [--project K] [--status S] [--type T]` (or `list --projects`,
+for each project's labels and components) read the live board the same way, with any `read`
+token; `--json` prints parseable JSON on stdout, and the count goes to stderr. Both run in
+remote mode only. Every other command is refused in remote mode (it needs the board's data on
+this machine); read the board with these two, or the page. Setting only ONE of the two
+variables is an error for every command — never a silent local write. The token is only ever
+sent to `BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for
+a loopback host only (`127.x.x.x`, `[::1]` or `localhost`; with `NODE_USE_ENV_PROXY=1` set,
+keep loopback in `NO_PROXY` or the token goes to the proxy in clear). Set the two **per
+command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`) or in a shell used only for that —
+never as a global `export`, which would send every `blaze` write on the machine to the server.
+See
 [the command reference](https://github.com/hjr15/blaze/blob/main/docs/guide/commands.md#remote-mode).
 
 ## Querying the board
