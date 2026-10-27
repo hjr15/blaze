@@ -104,15 +104,18 @@ if (parsed.verb === "passwd") {
 }
 
 try {
-  const { user, token } = await addUser(dataRoot, {
+  const { user, token, source, where } = await addUser(dataRoot, {
     email: parsed.email, role: parsed.role, displayName: parsed.displayName,
   });
   console.log(`user ${user.email} created with role ${user.role}`);
-  console.log(`identities: ${identityDbPath(dataRoot)}`);
+  // BLZ-706 / BLZ-701: a Postgres roster is named by host/database, and nothing is written under
+  // the board directory for it — no .blaze/, no .gitignore line — because there is no file here
+  // to hide.
+  console.log(source === "postgres" ? `identities: Postgres ${where}` : `identities: ${identityDbPath(dataRoot)}`);
   // The identity database must never be committable. Reported, never silent — this
   // writes to the operator's .gitignore, and a change to their repo they did not ask
   // for is a change they have to be told about.
-  const ignored = ensureIdentityIgnored(dataRoot);
+  const ignored = source === "postgres" ? { state: "not-needed" } : ensureIdentityIgnored(dataRoot);
   if (ignored.state === "added") {
     console.log(`note: added '.blaze/' to ${ignored.path} so this is never committed`);
   } else if (ignored.state === "not-a-repo" || ignored.state === "unavailable") {

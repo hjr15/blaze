@@ -23,6 +23,8 @@ import { linkDdl } from "./link-schema.mjs";
 import { hierarchyDdl } from "./hierarchy-schema.mjs";
 import { configDdl, seedConfigSync, seedConfigInTransaction } from "./config-schema.mjs";
 import { viewDdl, viewTypeSeedSql } from "./view-schema.mjs";
+import { identityDdl } from "./identity-schema.mjs";
+import { sprintDdl } from "./sprint-store.mjs";
 
 /** Bump when a change makes an OLDER engine unable to read a database this one writes. */
 // 3 under BLZ-390: the seven v3 SQLite tables gained ` STRICT`, which changes their definitions.
@@ -40,7 +42,14 @@ import { viewDdl, viewTypeSeedSql } from "./view-schema.mjs";
 // 5 under BLZ-667, which adds `project_counter`, the db-mode id allocator. Same rule as 4:
 // `openShadow` creates schema only on an EMPTY database, so an existing v4 shadow would never
 // gain the table, and a v4 shadow and a v5 one would otherwise carry the same stamp.
-export const DB_SCHEMA_VERSION = 5;
+//
+// 6 under BLZ-705 (Phase 5, spec D1(b)): the six identity tables and sprint/sprint_registry,
+// Postgres only — the SQLite shadow is derived and holds neither credentials nor sprints. MIN
+// stays 5: a v5 database serves exactly as before, its v6 features falling back to their
+// files, until 'blaze db migrate' runs. A fresh SQLite shadow is still stamped 6, so an engine
+// older than 0.10.0 refuses it as newer; that is harmless because the shadow is derived
+// ('blaze db init --force' rebuilds it).
+export const DB_SCHEMA_VERSION = 6;
 /**
  * The oldest stamp this engine can still read.
  *
@@ -64,7 +73,16 @@ export const DB_SCHEMA_VERSION = 5;
 // engine that accepted one would fail later with a raw "no such table" error instead of
 // this module's own named refusal — the same failure class every prior version bump
 // here exists to replace.
+// BLZ-705 does NOT raise it: v6 is additive (D1(b)). Raising it would take a live v5 board down
+// the moment an engine carrying v6 deployed, before anyone had run 'blaze db migrate'.
 export const MIN_DB_SCHEMA_VERSION = 5;
+
+/** The stamp from which the v6 features (identity and sprints in Postgres) turn on — and only
+ *  with BLAZE_WRITE_PORT=db and database.driver postgres as well. Below it, their files serve. */
+export const V6_FEATURES_FROM = 6;
+
+/** The oldest stamp `blaze db migrate` has a step chain from (`db-migrate.mjs`'s MIGRATIONS). */
+export const MIGRATE_FROM = 5;
 
 const DOCS = "https://github.com/hjr15/blaze/blob/main/docs/schema-versioning.md";
 
@@ -108,8 +126,11 @@ const ph = (dialect, i) => (dialect === "postgres" ? `$${i + 1}` : "?");
  *                defect happened
  *   older      — stamped below this engine's floor
  *   newer      — stamped above this engine's ceiling
+ *
+ * `authoritative` (BLZ-705) changes only the `older` message: an authoritative database is the
+ * board itself, so it is migrated, never rebuilt from a corpus it does not have.
  */
-export function judgeDbSchema({ hasTicket, hasMeta, version,
+export function judgeDbSchema({ hasTicket, hasMeta, version, authoritative = false,
                                 current = DB_SCHEMA_VERSION,
                                 min = MIN_DB_SCHEMA_VERSION }) {
   if (!hasTicket && !hasMeta) {
@@ -131,13 +152,24 @@ export function judgeDbSchema({ hasTicket, hasMeta, version,
            + `(supported: ${min}..${current}); upgrade the engine — see ${DOCS}`,
     };
   }
+  if (version < min && authoritative) {
+    return {
+      ok: false, state: "older", version,
+      // BLZ-705: the derived-database advice below would ERASE this one. There is no corpus to
+      // rebuild it from, so the instruction is migrate, with a dump taken first.
+      error: `database schema version ${version} is older than this engine supports `
+           + `(supported: ${min}..${current}). This database is AUTHORITATIVE — it is the board `
+           + `itself, not a copy derived from files — so it is migrated, never rebuilt: take a `
+           + `pg_dump, then run 'blaze db migrate'. Never 'blaze db init --force' or `
+           + `'blaze db load --replace', which would erase it — see ${DOCS}`,
+    };
+  }
   if (version < min) {
     return {
       ok: false, state: "older", version,
-      // There is NO migrate command and version 2 adds none — `blaze db migrate` does not
-      // exist (`db-runner.mjs` declares only init and status). The shadow database is
-      // DERIVED: `blaze db init --force` rebuilds it from the corpus, which is the real
-      // instruction. This branch was structurally unreachable while MIN was 1, so the wrong
+      // A DERIVED database is rebuilt, not migrated: `blaze db init --force` rebuilds it from
+      // the corpus, which is the real instruction. (`blaze db migrate` exists since BLZ-705, and
+      // is named only for an AUTHORITATIVE database, above.) This branch was structurally unreachable while MIN was 1, so the wrong
       // message shipped harmlessly; BLZ-374 made it reachable for every existing v1 shadow.
       error: `database schema version ${version} is older than this engine supports `
            + `(supported: ${min}..${current}). The shadow database is derived from the `
@@ -148,17 +180,28 @@ export function judgeDbSchema({ hasTicket, hasMeta, version,
   return { ok: true, error: null, state: "current", version };
 }
 
-/** The three facts the judgement needs, read the SYNC way. For node:sqlite. */
+/**
+ * BLZ-705 (review M15): the stamp and the authoritative mark in ONE query, so the per-request
+ * Postgres open costs no extra round trip. Rows are read by their `key` column.
+ */
+const META_FACTS_SQL = "SELECT key, value FROM blaze_meta WHERE key IN ('schema_version', 'authoritative')";
+
+function metaFacts(rows) {
+  let version = null, authoritative = false;
+  for (const r of rows ?? []) {
+    if (r.key === "schema_version") version = Number(r.value);
+    else if (r.key === "authoritative") authoritative = r.value === "true";
+  }
+  return { version, authoritative };
+}
+
+/** The facts the judgement needs, read the SYNC way. For node:sqlite. */
 export function readSchemaFactsSync(exec) {
   const has = (name) => Boolean(exec.all(
     "SELECT 1 AS hit FROM sqlite_master WHERE type = 'table' AND name = ?", [name])?.length);
   const hasMeta = has("blaze_meta");
-  let version = null;
-  if (hasMeta) {
-    const rows = exec.all("SELECT value FROM blaze_meta WHERE key = ?", ["schema_version"]);
-    if (rows?.length) version = Number(rows[0].value);
-  }
-  return { hasTicket: has("ticket"), hasMeta, version };
+  const meta = hasMeta ? metaFacts(exec.all(META_FACTS_SQL, [])) : { version: null, authoritative: false };
+  return { hasTicket: has("ticket"), hasMeta, ...meta };
 }
 
 /** Async wrapper, for drivers whose I/O is async. Same judgement, different fetch. */
@@ -174,12 +217,8 @@ async function readSchemaFactsAsync(exec) {
     `SELECT 1 AS hit FROM information_schema.tables
       WHERE table_name = $1 AND table_schema = ANY (current_schemas(false))`, [name]))?.length);
   const hasMeta = await has("blaze_meta");
-  let version = null;
-  if (hasMeta) {
-    const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = $1", ["schema_version"]);
-    if (rows?.length) version = Number(rows[0].value);
-  }
-  return { hasTicket: await has("ticket"), hasMeta, version };
+  const meta = hasMeta ? metaFacts(await exec.all(META_FACTS_SQL, [])) : { version: null, authoritative: false };
+  return { hasTicket: await has("ticket"), hasMeta, ...meta };
 }
 
 /**
@@ -252,6 +291,12 @@ function applyCreate(exec, dialect, state) {
     // SQLite an FK cannot cross a database file — which is why `view` lives here at all.
     () => exec.run(configDdl(dialect), []),
     () => exec.run(viewDdl(dialect), []),
+    // BLZ-705 (v6): identity and sprints, POSTGRES ONLY. The SQLite shadow is derived — a
+    // credential or a sprint written there is lost on the next rebuild (plan Finding 3).
+    ...(dialect === "postgres" ? [
+      () => exec.run(identityDdl("postgres"), []),
+      () => exec.run(sprintDdl("postgres"), []),
+    ] : []),
     ...viewTypeSeedSql(dialect).map(({ sql, params }) => () => exec.run(sql, params)),
     () => exec.run(
       `INSERT INTO blaze_meta (key, value) VALUES (${ph(dialect, 0)}, ${ph(dialect, 1)})`,

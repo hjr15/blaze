@@ -107,7 +107,7 @@ guarded by `judgeDbSchema`, and the two move independently — a config bump is
 not an engine-schema bump. `DB_SCHEMA_VERSION` and `MIN_DB_SCHEMA_VERSION` both
 live in `scripts/model/db-schema-version.mjs`.
 
-**Both are 5 as of BLZ-667.** Version 2 (BLZ-370) installed the v4 `link`/`link_type`
+**The version is 6 and the floor is 5, as of BLZ-705.** Version 2 (BLZ-370) installed the v4 `link`/`link_type`
 and `hierarchy`/`hierarchy_membership` tables and five new `ticket` columns.
 Version 3 (BLZ-390) puts `STRICT` on the seven `SQLITE_DDL` tables and on `blaze_meta`:
 that changes their definitions, and an existing version-2 shadow's tables are NOT
@@ -120,13 +120,23 @@ Version 5 (BLZ-667) adds `project_counter`, the per-project counter db-mode id
 allocation advances; `blaze db init` seeds it from the highest number already taken per
 project — ticket files and `.ids/` claims, plus the database's own rows — on both drivers,
 and `blaze db seed-counter` re-seeds it the same way (BLZ-668, BLZ-669). A seed never lowers
-a counter.
+a counter. Version 6 (BLZ-705) adds the six identity tables (`app_user`, `user_identity`,
+`membership`, `api_token`, `local_password`, `user_session`) and `sprint`/`sprint_registry`,
+on **Postgres only**: the SQLite shadow is derived and holds neither credentials nor sprints.
+The floor **stays 5**: v6 is additive, so a v5 database serves exactly as before, its v6
+features falling back to their files, until `blaze db migrate` runs.
+
+A fresh SQLite shadow is stamped 6 as well, even though it holds none of the v6 tables, so an
+engine older than 0.10.0 refuses it as newer. That costs nothing: the shadow is derived, and
+`blaze db init --force` rebuilds it. An authoritative Postgres database is different, and the
+engine's guard cannot protect it from an engine older than 0.10.0 (see ADR-0039).
 
 The floor rises with each of these, which is why **a version-1, -2, -3 or -4 shadow is all
 refused**. A version-3 shadow has no `blaze_config` at all, so a version-4 engine that
 accepted one would fail later on `no such table: blaze_config.view` — the raw SQL error
 this guard exists to replace with a named refusal. A version-4 shadow has no
-`project_counter`, and the same reasoning applies at version 5.
+`project_counter`, and the same reasoning applies at version 5. Version 6 did **not** raise
+it (spec D1(b)).
 
 `blaze db init --force` removes **both** files. The config namespace is as derived as the
 shadow is, and a fresh `blaze.db` beside a stale `config.db` is a half-replaced pair —
@@ -147,3 +157,23 @@ which is what `--force` exists to avoid.
 - **"this database holds tables but no Blaze schema stamp"** — it predates
   database-schema versioning entirely, or is not a Blaze database. Same remedy,
   and the same reason it is safe.
+
+### Authoritative databases migrate, derived ones rebuild
+
+Every remedy above assumes the database is **derived** — a copy of the file corpus. That holds
+for the SQLite shadow and for a Postgres database freshly filled by `blaze db load`:
+`blaze db init --force` (SQLite) or `blaze db load --replace` (Postgres) rebuilds it from the
+corpus, and nothing is lost.
+
+A Postgres database that `blaze db migrate` has marked with the `blaze_meta` row
+`('authoritative', 'true')` is **the board itself**. It has no corpus to rebuild from, so:
+
+- `blaze db load --replace` refuses it, naming `pg_restore`: it would erase the tickets and
+  their history with nothing to reload them from. (`blaze db init --force` is refused on every
+  Postgres database already.)
+- The `older` refusal on it names `blaze db migrate`, never a rebuild.
+
+`blaze db migrate` runs forward only, in one transaction: each step is additive DDL, and the
+stamp moves with it. A re-run is a no-op, and a failed step rolls back to the version it started
+from. `MIGRATE_FROM` (5) is the oldest stamp it has a step chain from; an older stamp is refused
+by name. **Take a `pg_dump` before any migrate** — it is the only way back.

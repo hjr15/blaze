@@ -865,10 +865,13 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["model/transitions.mjs", { writes: ["loadTransitions"], sanctioned: [],
     inert: ["parseTransitions", "buildTransitions"] }],
   // The sprint registry: `saveSprints({ root }, registry)` is caller's root, caller's bytes.
+  // BLZ-707: the loader's and saver's pure halves, extracted so the Postgres registry normalises and stamps by the same rule.
   ["model/sprints.mjs", { writes: ["saveSprints"], sanctioned: [],
     inert: ["SPRINT_REGISTRY_VERSION", "loadSprints", "unstampedRegistryWarning",
       "nextSprintId", "isIsoDate", "validateSprintFields", "addSprint", "setActive",
-      "formatSprintList"] }],
+      "formatSprintList", "normaliseRegistry", "stampedRegistry"] }],
+  // BLZ-707: the sprint registry's Postgres mapping. Only openSprintSource reaches node:fs, through saveSprints, when the source is the file.
+  ["model/sprint-store.mjs", { writes: ["openSprintSource"], sanctioned: [], inert: ["sprintDdl", "parseSprintRegistry", "readSprintRegistry", "writeSprintRegistry"] }],
   ["reindex.mjs", { writes: [], sanctioned: [], inert: [] }],       // derived caches, no exports
   ["migrate-runner.mjs", { writes: [], sanctioned: [], inert: [] }],
   ["cli.mjs", { writes: [], sanctioned: [], inert: [] }],
@@ -918,7 +921,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
   ["db-runner.mjs", { writes: ["runDb", "discardCreated"], sanctioned: [], inert: ["USAGE"] }],
   // `openIdentityDb` creates .blaze/ at 0700 under a caller-supplied root; `loadIdentity` is
   // the loader that goes through it.
-  ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity"], sanctioned: [],
+  // BLZ-706: resolveIdentity and loadIdentityDefault fall back to loadIdentity, so they are writes like the loader they wrap.
+  ["model/identity-db.mjs", { writes: ["openIdentityDb", "loadIdentity", "resolveIdentity", "loadIdentityDefault"], sanctioned: [],
     inert: ["identityDbPath", "identityExec"] }],
   // `addUser` and `setUserPassword` write to the identity DATABASE, which is node:sqlite and
   // not this guard's surface at all. `ensureIdentityIgnored` appends the .gitignore line.
@@ -1993,6 +1997,8 @@ const WRITE_ALLOWED = new Map([
   // credential store cannot be committed. A .gitignore line, not a ticket.
   // ...and it opens the identity database, whose directory the primitive creates at 0700.
   ["model/user-admin.mjs", ["appendFileSync", "openIdentityDb"]],
+  // BLZ-707: the sprint registry's source picker saves through saveSprints when the source is the file (fs, dual, SQLite db, or a Postgres board below v6).
+  ["model/sprint-store.mjs", ["saveSprints"]],
   // The dual-write soak's divergence log and its counter, both under gitignored .blaze/.
   // BLZ-535 round 5, D1. The third member is not an fs call: `const port = dualWritePort(...)`
   // is a call this reader cannot fold, and `port.write(op)` reaches a member NAME that
@@ -2039,8 +2045,9 @@ const WRITE_ALLOWED = new Map([
   // themselves, which are allowlisted for the same files.
   // BLZ-670: the mutating block resolves both ports per request (resolvePorts).
   // BLZ-254: stageFor removed — the server stages nothing (spec §5.5).
+  // BLZ-706: the standalone entry resolves identity (Postgres at v6) before bind; the sync default refuses a db-mode Postgres board.
   ["serve.mjs", ["issueSetupToken", "clearSetupToken", "ensureSetupTokenIgnored",
-    "ensureIdentityIgnored", "addUser", "loadIdentity", "reconcile",
+    "ensureIdentityIgnored", "addUser", "loadIdentity", "loadIdentityDefault", "resolveIdentity", "reconcile",
     "resolvePorts", "pageHtml", "viewEnvelope",
     // BLZ-684: `POST /api/new` runs `blaze new`'s own verb, on exactly new-runner.mjs's footing.
     "applyNew"]],
@@ -2049,7 +2056,7 @@ const WRITE_ALLOWED = new Map([
   // and on exactly the footing of ids.mjs and claims.mjs above.
   ["new.mjs", ["allocateId", "writeClaim", "fsStorage"]],
   // `blaze sprint` saves the sprint registry. A registry, not a ticket.
-  ["sprint-runner.mjs", ["saveSprints"]],   // BLZ-254: commitOrQueue removed — no commit
+  ["sprint-runner.mjs", ["openSprintSource"]],   // BLZ-707: the runner saves through the source picker, never saveSprints directly
   // BLZ-682: `blaze matrices` writes the two derived matrix files per project into --out —
   // generated docs, never a ticket — through the FIFO-safe primitive, after creating the dir.
   ["matrices-runner.mjs", ["mkdirSync", "writeRegularFileSync"]],
@@ -2137,7 +2144,8 @@ const WRITE_ALLOWED = new Map([
   // BLZ-670: runReconcile resolves both ports in db mode (resolvePorts).
   // BLZ-673: runGroomer grooms through the port under db (groomOnceDb), resolving ports per run.
   // BLZ-254: stageFor removed — reconcile no longer stages (spec §5.5).
-  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentity", "reconcile", "viewEnvelope", "resolvePorts"]],
+  // BLZ-706 (review I4): blaze start resolves identity like serve.mjs, and its sync default fails closed on a db-mode Postgres board.
+  ["supervisor.mjs", ["groomOnce", "groomOnceDb", "loadIdentityDefault", "resolveIdentity", "reconcile", "viewEnvelope", "resolvePorts"]],
   // A VIEW that writes, which is worth saying out loud: rendering the board refreshes the
   // git-derived transitions cache under the board root. It is the read path touching disk —
   // the same class of defect as contentHash, now named instead of invisible.

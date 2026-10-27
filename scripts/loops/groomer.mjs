@@ -14,7 +14,7 @@ import { EDITABLE_FIELDS } from "../model/fields.mjs";
 import { validateTicket } from "../model/rules.mjs";
 import { loadProjectSchema } from "../model/schema-config.mjs";
 import { validateTaxonomy } from "../model/taxonomy.mjs";
-import { loadSprints, validateSprintFields } from "../model/sprints.mjs";
+import { validateSprintFields } from "../model/sprints.mjs";
 import { loadProject } from "../config.mjs";
 import { passwordEnvName } from "../model/database-config.mjs";
 // BLZ-512 / ADR-0031. Seven `readFileSync` sites lived here, every one of them off the
@@ -821,7 +821,8 @@ async function validateGroomed({ root, projectsDir, cfg, readStorage, id, frontm
   errors.push(...validateTaxonomy(frontmatter, loadProject(project, {
     root, projectsDir, source: `ticket ${id}'s 'project' field`,
   })));
-  const { sprints } = loadSprints({ root });
+  // BLZ-707: through the reader, as edit.mjs reads it.
+  const { sprints } = await readStorage.sprintRegistry(root);
   errors.push(...validateSprintFields(frontmatter, { sprintIds: new Set(sprints.map((s) => s.id)) }));
   return errors;
 }
@@ -1077,6 +1078,10 @@ if (process.argv[1] === fileURLToPath(import.meta.url)) {
                                 readStorage: ports.readStorage, writePort: ports.writePort });
     } finally { await ports.close(); }
   } else {
+    // BLZ-708: the fs groom edits and commits ticket files.
+    const { assertFsWriteAllowed } = await import("../model/fs-write-guard.mjs");
+    try { await assertFsWriteAllowed("run blaze groom", { dataRoot: root }); }
+    catch (e) { console.error(e.message); process.exit(1); }
     evt = groomOnce({ root, cfg, agentsMd, today });
   }
   console.log(evt ? JSON.stringify(evt) : "groomer: nothing to groom.");

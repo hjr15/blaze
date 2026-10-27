@@ -327,7 +327,7 @@ preprocessing, which is the point of choosing CSV.
 | 12 | `labels` | list | ○ | `;`-separated |
 | 13 | `components` | list | ○ | `;`-separated |
 | 14 | `estimate` | integer | ○ | Minutes, multiple of 5 |
-| 15 | `sprint` | text | ○ | Must resolve in `sprints.json` |
+| 15 | `sprint` | text | ○ | Must resolve in the sprint registry (`sprints.json`; the `sprint` tables on a migrated Postgres board) |
 | 16 | `not_before` | date | ○ | Constraint (ADR-0022) |
 | 17 | `deadline` | date | ○ | Constraint (ADR-0022) |
 | 18 | `start` | date | ○ | **Scheduler output**, see §2.7 |
@@ -1319,7 +1319,7 @@ rule applies here — the exit code is a summary, and the receipt is the record.
 | **A link entry with a `type` and no `target`** — on **export** | Refuse the export, naming the ticket. An exporter that dropped it would launder corruption into a clean-looking CSV, and per §3.1 the X-vs-Y diff cannot see that. **Zero instances exist on the live board** (§1.6 fact 7, retracted), so this guard ships unexercised by real data and is driven by a constructed fixture row instead | **1** |
 | **A partially applied import** | See §5.3 | **4** |
 | **An `estimate` that is not a multiple of 5** | Refuse, naming the row and the nearest legal values. Not rounded — rounding is `blaze new`'s input policy and it invents (`scripts/model/time.mjs:19-21`); an import mirrors | **1** |
-| **A `sprint` not in `sprints.json`** | Refuse, naming the **column and the registered sprint ids** — not the offending value, which has no shape constraint (echo rule below the table). `validateSprintFields` supplies the check | **1** |
+| **A `sprint` not in the registry** (`sprints.json`, or the database's `sprint` tables on a migrated Postgres board) | Refuse, naming the **column and the registered sprint ids** — not the offending value, which has no shape constraint (echo rule below the table). `validateSprintFields` supplies the check | **1** |
 | **An off-taxonomy `label` or `component`** | Refuse, naming the column and the declared set and pointing at the same `projects/<KEY>/project.json`. **Not** `validateTaxonomy`'s own message — it interpolates the cell (`scripts/model/taxonomy.mjs:14`), which is right for a CLI and wrong for an import (echo rule below the table) | **1** |
 | **A torn line in the `source-ids` map** | Refuse before any write, naming the map and the line number. Read-only — the importer does not park; `blaze import repair --apply` does (§4.2, §5.3). The receipt is the recovery source | **5** |
 | **An unresolved prior partial apply** — under `sourceIdColumn`, the mapping's latest receipt has an `intent` with neither a `done` nor a `resolved` (§5.3) | Refuse before any write, naming the receipt, every unresolved row, and the verb that lifts it — `blaze import repair --apply <receipt>`. A re-import that proceeded would recreate any row whose ticket landed but whose pair did not (§4.2 test 2) | **5** |

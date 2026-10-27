@@ -16,12 +16,20 @@
 //
 // Everything here is SYNCHRONOUS. `startServer()` must decide whether it may bind at all
 // before it calls `.listen()`, and a bind check that resolves a microtask later is a bind
-// check that runs after the socket is open.
+// check that runs after the socket is open. The one exception, `resolveIdentity` (BLZ-706), is
+// async because Postgres is — and it is awaited by the ENTRY points, before `startServer()` or
+// `createApp()` is called, so the bind check itself stays synchronous.
 import { existsSync, mkdirSync, chmodSync } from "node:fs";
 import { join, dirname } from "node:path";
 import { createRequire } from "node:module";
 import { identityDdl } from "./identity-schema.mjs";
 import { identityStore } from "./identity-store.mjs";
+import { loadIdentityPg, poolExec } from "./identity-pg.mjs";
+import { resolveWriteMode } from "./write-port-resolve.mjs";
+import { resolveDatabaseConfig } from "./database-config.mjs";
+import { checkDbSchema, V6_FEATURES_FROM } from "./db-schema-version.mjs";
+import { openPostgresPool } from "../init-pg.mjs";
+import { loadConfig } from "../config.mjs";
 
 /** The one location. Exported so tests and docs cannot drift from it. */
 export const identityDbPath = (dataRoot) => join(dataRoot, ".blaze", "identity.db");
@@ -196,4 +204,133 @@ export function loadIdentity(dataRoot) {
   // the credential that mount was deployed with.
   try { opened.db.exec(identityDdl("sqlite")); } catch { /* read-only: sign-in unavailable */ }
   return { state: "healthy", store: opened.store, hasIdentity: true, error: null, close };
+}
+
+/**
+ * BLZ-706 (review I4): the message a server gets when it is started on a db-mode Postgres board
+ * with no identity resolved for it. Its users may live in Postgres (schema v6), which only an
+ * async read can tell — so the SYNC default cannot answer, and it refuses rather than guess.
+ * Guessing SQLite would serve the wrong roster; guessing "nobody" would serve an open board.
+ */
+const UNRESOLVED_PG_IDENTITY = "blaze: refusing to serve — this board runs on Postgres in db mode "
+  + "(BLAZE_WRITE_PORT=db, database.driver \"postgres\"), where its users may live in the database. "
+  + "Its identity must be resolved before the server starts: run it with `blaze board` or "
+  + "`blaze start`, or pass identity: await resolveIdentity({ dataRoot }) to startServer / createApp.";
+
+/**
+ * The identity a server takes when its caller passed none — `startServer`'s and `createApp`'s
+ * default (review I4). SYNCHRONOUS and opens no database, so it can sit in a parameter default.
+ *
+ * On a db-mode board whose config names Postgres it returns `broken`, which both servers already
+ * throw on before they bind: the one resolver is `resolveIdentity`, and a server that skipped it
+ * fails CLOSED. Everywhere else it is `loadIdentity(dataRoot)`, unchanged. A config that will not
+ * load also falls through to `loadIdentity`: the server's own config load reports that failure.
+ */
+export function loadIdentityDefault(dataRoot, env = process.env) {
+  if (resolveWriteMode(env) === "db") {
+    let driver;
+    try { driver = loadConfig({ root: dataRoot }).database?.driver; } catch { driver = undefined; }
+    if (driver === "postgres") {
+      return { state: "broken", store: null, hasIdentity: false, close() {}, error: UNRESOLVED_PG_IDENTITY };
+    }
+  }
+  return loadIdentity(dataRoot);
+}
+
+/** A v6 database is CREATED with `app_user`, so its absence there is damage, not "no users". */
+const MISSING_PG_ROSTER = "blaze: refusing to serve — this Postgres database is stamped at schema "
+  + `v${V6_FEATURES_FROM} or later, which carries the identity tables, but it has no app_user table. `
+  + "This is a refusal, not \"no users\": a damaged roster must never disarm authentication. "
+  + "Restore the database from a pg_dump.\n";
+
+/**
+ * E1 final review I1 (BLZ-706): an EMPTY Postgres roster beside a `.blaze/identity.db` that holds
+ * users. `blaze db init` creates v6 with empty identity tables, and so does
+ * `blaze db migrate --no-identity-import`; serving "no users" there would bind a loopback board
+ * unauthenticated while the roster the operator believes protects it is never consulted.
+ */
+const strandedRosterError = (path) => "blaze: refusing to serve — this Postgres database is at schema "
+  + `v${V6_FEATURES_FROM} or later and its roster is empty, but ${path} holds this board's users. `
+  + "This is a refusal, not \"no users\": a roster left behind must never disarm authentication. "
+  + `Copy it into Postgres:   blaze db migrate --identity-from ${path}   `
+  + "— or, if that file is not this board's roster, move it aside.\n";
+
+/** The same, for a non-empty roster that will not open: it may hold users, so it fails closed.
+ *  Names the path only — never the file's content or the SQLite error (A3). */
+const unreadableRosterError = (path) => "blaze: refusing to serve — this Postgres database is at "
+  + `schema v${V6_FEATURES_FROM} or later and its roster is empty, but ${path} is not empty and cannot `
+  + "be read, so it may hold this board's users. This is a refusal, not \"no users\". "
+  + "If it is not this board's roster, move it aside; if it is, repair it and copy it into Postgres:   "
+  + `blaze db migrate --identity-from ${path}\n`;
+
+/** True unless the roster is an EMPTY SQLite file (0 pages — a 0-byte file reads so). Asked of SQLite
+ *  itself, read-only, so nothing is created or written; a file it cannot open counts as non-empty. */
+function nonEmptyFile(path) {
+  let db;
+  try {
+    db = new (DatabaseSync())(path, { readOnly: true });
+    return Number(db.prepare("PRAGMA page_count").get()?.page_count ?? 1) > 0;
+  } catch { return true; }
+  finally { try { db?.close(); } catch { /* already closed */ } }
+}
+
+async function loadIdentityPgAtV6(exec, dataRoot) {
+  const r = await loadIdentityPg(exec);
+  if (r.state === "empty") {
+    const local = loadIdentity(dataRoot);
+    local.close();
+    const path = identityDbPath(dataRoot);
+    if (local.state === "healthy") {
+      return { state: "broken", store: null, hasIdentity: false, error: strandedRosterError(path), close() {} };
+    }
+    // A non-empty file that will not open may hold users: fail closed. A 0-BYTE file stays "no
+    // users", as before — the post-setup adoption path depends on it (identity-pg tests).
+    if (local.state === "broken" && nonEmptyFile(path)) {
+      return { state: "broken", store: null, hasIdentity: false, error: unreadableRosterError(path), close() {} };
+    }
+    return r;
+  }
+  if (r.state !== "absent") return r;
+  return { state: "broken", store: null, hasIdentity: false, error: MISSING_PG_ROSTER, close() {} };
+}
+
+/**
+ * BLZ-706, spec D2: where THIS board's identities live, resolved BEFORE the server binds.
+ *
+ * Postgres only when all three hold — `BLAZE_WRITE_PORT=db`, `database.driver` postgres, and a
+ * stamp of at least V6_FEATURES_FROM. Otherwise the SQLite roster, exactly as `loadIdentity`
+ * reads it. A Postgres result holds a small pool for the life of the server (`close` ends it)
+ * and `reload` re-reads over the SAME pool, for the post-setup adoption.
+ *
+ * Throws when db mode names a Postgres database it cannot use (no schema, a stamp this engine
+ * refuses, or no connection): the entry points print the message and exit 1. Never "no users".
+ */
+export async function resolveIdentity({ dataRoot, env = process.env,
+                                        resolveDbConfig = resolveDatabaseConfig,
+                                        openPgPool = openPostgresPool } = {}) {
+  const sqlite = () => ({ ...loadIdentity(dataRoot), source: "sqlite", reload: () => loadIdentity(dataRoot) });
+  if (resolveWriteMode(env) !== "db") return sqlite();
+  const dbConfig = resolveDbConfig({ dataRoot, config: loadConfig({ root: dataRoot }), env });
+  if (dbConfig.driver !== "postgres") return sqlite();
+
+  const pool = await openPgPool(dbConfig.connection);
+  const end = async () => { try { await pool.end(); } catch { /* already ended */ } };
+  let state;
+  try {
+    state = await checkDbSchema(poolExec(pool), { dialect: "postgres" });
+  } catch (e) {
+    await end();
+    throw e;
+  }
+  if (!state.ok || state.state === "empty") {
+    await end();
+    throw new Error(`blaze: ${state.error ?? "the Postgres database has no Blaze schema — run 'blaze db init'"}`);
+  }
+  if (state.version < V6_FEATURES_FROM) {
+    await end();
+    return sqlite();
+  }
+  const exec = poolExec(pool);
+  return { ...(await loadIdentityPgAtV6(exec, dataRoot)), source: "postgres",
+           reload: () => loadIdentityPgAtV6(exec, dataRoot), close: end };
 }

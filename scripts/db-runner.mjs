@@ -1,9 +1,10 @@
-// scripts/db-runner.mjs — `blaze db init|seed-counter|load|verify|status` (BLZ-299).
+// scripts/db-runner.mjs — `blaze db init|seed-counter|load|verify|migrate|status` (BLZ-299).
 //
 // ADR-0012 makes schema creation an EXPLICIT, named operation: runtime `open()` reads
 // and refuses rather than writing DDL behind your back (BLZ-297). This is that named
 // operation, plus the command that reads back what a dual-write soak has found.
 import { existsSync, rmSync } from "node:fs";
+import { join } from "node:path";
 // BLZ-512 / ADR-0031. `existsSync` is not a guard — a FIFO satisfies it — and the
 // divergence log is read with nothing between the check and the open.
 import { readRegularFileSync } from "./model/regular-file.mjs";
@@ -20,8 +21,12 @@ import { verifyLoad, VERIFY_TABLES } from "./migrate/verify-load.mjs";
 import { postgresReader } from "./model/pg-storage.mjs";
 import { WRITE_PORT_ENV } from "./model/write-port.mjs";
 import { fsReadStorage } from "./model/read-storage.mjs";
-import { DB_SCHEMA_VERSION, createDbSchema } from "./model/db-schema-version.mjs";
-import { assertWritable, subVerbOf } from "./readonly.mjs";
+import { DB_SCHEMA_VERSION, createDbSchema, checkDbSchema } from "./model/db-schema-version.mjs";
+import { migrateDb, migrateRefusal } from "./model/db-migrate.mjs";
+import { readIdentityRows, IDENTITY_TABLES } from "./model/identity-copy.mjs";
+import { identityDbPath } from "./model/identity-db.mjs";
+import { parseSprintRegistry } from "./model/sprint-store.mjs";
+import { assertWritable, subVerbOf, VALUE_FLAGS } from "./readonly.mjs";
 
 export const USAGE = `usage: blaze db <command>
 
@@ -35,10 +40,15 @@ export const USAGE = `usage: blaze db <command>
                 holds tickets unless --replace
   verify        Postgres only: compare the database with this board's files — the
                 migration gate. Exit 0 pass, 1 differences found, 2 could not run
+  migrate       Postgres only: bring the schema forward to v6 in one transaction and mark the database authoritative. With --identity-from <identity.db> and --sprints-from <sprints.json>, copy those in the same transaction, verified row for row
   status        what the database holds, and what the dual-write soak has found
 
   --force       with init, SQLite only: replace an existing shadow database
-  --replace     with load: empty the ticket tables first, in the same transaction
+  --replace     with load: empty the ticket tables first, in the same transaction (refused on an authoritative database — restore a pg_dump instead)
+  --identity-from <path>  with migrate: copy that identity.db (users, tokens, sessions) verbatim
+  --no-identity-import    with migrate: proceed although .blaze/identity.db exists, copying nothing
+  --sprints-from <path>   with migrate: copy that sprints.json (the sprint registry) into the sprint tables
+  --no-sprints-import     with migrate: proceed although sprints.json exists, copying nothing
 `;
 
 /** The resolved `database` block, or a printed refusal (null). Resolved BEFORE anything is
@@ -197,6 +207,17 @@ function transitionsLine(h, dataRoot) {
 const LOAD_TABLES = ["ticket_link", "ticket_label", "ticket_component", "worklog_entry",
                      "acceptance_criterion", "ticket_event", "ticket"];
 
+/** BLZ-705: true (with the refusal printed) when `where` is authoritative — load --replace's guard. */
+async function refuseAuthoritative(exec, where, err, { lock = false } = {}) {
+  const rows = await exec.all("SELECT value FROM blaze_meta WHERE key = 'authoritative'"
+    + (lock ? " FOR SHARE" : ""), []);
+  if (rows[0]?.value !== "true") return false;
+  err(`blaze db load: ${where} is authoritative — it IS the board, not a copy loaded from files.`);
+  err("--replace would erase its tickets and their history, and there is no file corpus to reload them from.");
+  err("Nothing was loaded. To roll the database back, restore a pg_dump with pg_restore.");
+  return true;
+}
+
 /**
  * BLZ-678: `blaze db load [--replace]` — the board's tickets into Postgres (spec §5.2).
  *
@@ -228,6 +249,9 @@ async function loadCmd(ctx) {
     // BLZ-690: the git-era history is read BEFORE the transaction opens. Walking git's rename
     // log is the slowest step of the load and touches no database; inside BEGIN it held the
     // transaction (and every lock the TRUNCATE took) open for the whole walk.
+    // BLZ-705: an AUTHORITATIVE database is the board, not a copy of the files — --replace would
+    // erase it with nothing to reload it from. Refused before the git walk and before BEGIN.
+    if (replace && await refuseAuthoritative(exec, where, err)) return 1;
     let built;
     try { built = ctx.buildTransitions({ root: dataRoot }); }
     catch (e) {
@@ -238,6 +262,14 @@ async function loadCmd(ctx) {
     await exec.run("BEGIN", []);
     let tally, seeded, history, held;
     try {
+      // BLZ-705 (review minor): re-checked INSIDE the transaction, before the TRUNCATE. The check
+      // above ran before the git walk, and a migrate may have committed since. FOR SHARE takes
+      // ROW SHARE on blaze_meta, which a migrate's EXCLUSIVE lock waits for (and vice versa), so
+      // from here to COMMIT no migrate can mark the database under this load.
+      if (replace && await refuseAuthoritative(exec, where, err, { lock: true })) {
+        await exec.run("ROLLBACK", []);
+        return 1;
+      }
       held = Number((await exec.all("SELECT count(*) AS n FROM ticket", []))[0].n);
       if (held > 0 && !replace) {
         await exec.run("ROLLBACK", []);
@@ -354,6 +386,176 @@ async function verifyCmd(ctx) {
   if (verdict.ok) { log("verify: PASS"); return 0; }
   log(`verify: FAIL — ${verdict.failures.join("; ")}`);
   return 1;
+}
+
+/**
+ * BLZ-705: `blaze db migrate` — bring a Postgres database forward to DB_SCHEMA_VERSION in one
+ * transaction and mark it authoritative (`migrateDb`). Connects with `openPgClient` directly,
+ * NOT `openCheckedPg`: that refuses the very states (older, empty, unstamped) migrate must name
+ * itself.
+ */
+async function migrateCmd(ctx) {
+  const { log, err, openPgClient, dataRoot, identityFrom, noIdentityImport, sprintsFrom, noSprintsImport } = ctx;
+  const dbConfig = dbConfigOr(ctx);
+  if (!dbConfig || !writableOr(ctx, "migrate")) return 1;
+  if (dbConfig.driver !== "postgres") {
+    err("blaze db migrate: migrates a Postgres database. The SQLite shadow is derived — rebuild it with 'blaze db init --force'.");
+    return 1;
+  }
+  // Everything below up to the connect decides what to copy.
+  if (identityFrom && noIdentityImport) {
+    err("blaze db migrate: --identity-from and --no-identity-import contradict each other");
+    return 1;
+  }
+  if (sprintsFrom && noSprintsImport) {
+    err("blaze db migrate: --sprints-from and --no-sprints-import contradict each other");
+    return 1;
+  }
+  // BLZ-706 (review I5): after the migrate the board reads its users from Postgres only. A roster
+  // left behind in .blaze/identity.db would silently lock every user out, so the operator says
+  // what to do with it. Decided after the connect (fix round 1): on a re-run after a successful
+  // copy the file is still there, and the database's own users say which refusal is true.
+  const roster = identityDbPath(dataRoot);
+  const stranded = !identityFrom && !noIdentityImport && existsSync(roster);
+  // BLZ-707 (review I5): the same for sprints.json — at v6 the board reads its sprints from
+  // Postgres only, so a registry left behind would empty the gantt and refuse every --sprint.
+  const sprintsFile = join(dataRoot, "sprints.json");
+  const sprintsStranded = !sprintsFrom && !noSprintsImport && existsSync(sprintsFile);
+  let identityRows = null;
+  if (identityFrom) {
+    try { identityRows = await readIdentityRows(identityFrom); }
+    catch (e) {
+      err(`blaze db migrate: ${String(e.message).replace(/^blaze: /, "")}`);
+      err("Nothing was migrated.");
+      return 1;
+    }
+  }
+  // One read of the file, parsed strictly, before anything connects.
+  let sprintRegistry = null;
+  if (sprintsFrom) {
+    try {
+      let text;
+      try { text = readRegularFileSync(sprintsFrom); }
+      catch (e) {
+        if (e?.code === "ENOENT") throw new Error(`blaze: no sprint registry at ${sprintsFrom}`);
+        throw e;
+      }
+      sprintRegistry = parseSprintRegistry(text, sprintsFrom);
+    } catch (e) {
+      err(`blaze db migrate: ${String(e.message).replace(/^blaze: /, "")}`);
+      err("Nothing was migrated.");
+      return 1;
+    }
+  }
+  const where = describePgTarget(dbConfig.connection);
+  let client;
+  try { client = await openPgClient(dbConfig.connection); }
+  catch (e) { err(`blaze db migrate: cannot connect to ${where} — ${e.message}`); return 1; }
+  try {
+    // E1 final review M8: judge the schema first. A database migrate refuses anyway (newer, too
+    // old, empty, unstamped) is named before the stranded-file refusals, not on the next run.
+    // Read-only, outside migrateDb's transaction; migrateDb judges it again under its lock.
+    let pre;
+    try { pre = migrateRefusal(await checkDbSchema(pgExec(client), { dialect: "postgres", min: 1 })); }
+    catch (e) { err(`blaze db migrate: ${where} — ${e.message}`); err("Nothing was migrated."); return 1; }
+    if (pre) {
+      err(`blaze db migrate: ${where} — ${pre.replace(/^blaze: /, "")}`);
+      err("Nothing was migrated.");
+      return 1;
+    }
+    // Both stranded files are reported in one pass, so fixing one does not reveal the other.
+    let refused = false;
+    if (stranded) {
+      refused = true;
+      let held;
+      try { held = await identityUsersHeld(pgExec(client)); }
+      catch (e) { err(`blaze db migrate: ${where} — ${e.message}`); err("Nothing was migrated."); return 1; }
+      if (held > 0) {
+        err(`blaze db migrate: ${where} already holds ${held} user(s), so ${roster} looks already imported.`);
+        err("A second copy would be refused (the identity tables are not empty), and the board already reads these users from Postgres.");
+        err("To migrate without copying it again:   blaze db migrate --no-identity-import");
+      } else {
+        err(`blaze db migrate: ${roster} holds this board's users, tokens and sessions, and this migrate would not copy them.`);
+        err("After a restart the board would read users from Postgres only, so every one of them would stop working.");
+        err(`Copy them in the same transaction:   blaze db migrate --identity-from ${roster}`);
+        err("Or, if that file is not this board's roster, say so explicitly:   blaze db migrate --no-identity-import");
+      }
+    }
+    if (sprintsStranded) {
+      refused = true;
+      let held;
+      try { held = await sprintsHeld(pgExec(client)); }
+      catch (e) { err(`blaze db migrate: ${where} — ${e.message}`); err("Nothing was migrated."); return 1; }
+      if (held !== null) {
+        err(`blaze db migrate: ${where} already holds ${held} sprint(s), so ${sprintsFile} looks already imported.`);
+        err("A second copy would be refused (the sprint tables already hold a registry), and the board already reads its sprints from Postgres.");
+        err("To migrate without copying it again:   blaze db migrate --no-sprints-import");
+      } else {
+        err(`blaze db migrate: ${sprintsFile} holds this board's sprints, and this migrate would not copy them.`);
+        err("At v6 the board reads sprints from Postgres only, so the gantt would go empty and every --sprint would be refused.");
+        err(`Copy them in the same transaction:   blaze db migrate --sprints-from ${sprintsFile}`);
+        err("Or, if that file is not this board's registry, say so explicitly:   blaze db migrate --no-sprints-import");
+      }
+    }
+    if (refused) { err("Nothing was migrated."); return 1; }
+    let r;
+    try { r = await migrateDb(pgExec(client), { identityRows, sprintRegistry, sprintSource: sprintsFrom }); }
+    catch (e) {
+      // review M6: one `blaze: ` prefix at most, never `blaze db migrate: … — blaze: …`.
+      err(`blaze db migrate: ${where} — ${String(e.message).replace(/^blaze: /, "")}`);
+      err("Nothing was migrated: the migration runs in one transaction.");
+      return 1;
+    }
+    log(`blaze db migrate — ${where}`);
+    log(`  schema         ${r.steps.length ? `v${r.from} → v${r.to}` : `v${r.to}, already current`}`);
+    log(`  authoritative  ${r.authoritative === "written" ? "yes (written now)" : "yes (already)"}`);
+    if (r.identity) {
+      const per = IDENTITY_TABLES.map((t) =>
+        `${t.name} ${r.identity[t.name]}${identityRows[t.name].absent ? " (absent in source)" : ""}`);
+      log(`  identity       ${per.join(" · ")}  (row-for-row verified)`);
+    }
+    if (r.sprints) {
+      log(`  sprints        ${r.sprints.count} sprint(s), active ${r.sprints.active ?? "none"}  (verified)`);
+    }
+    log("migrate: DONE — one transaction, committed.");
+    return 0;
+  } finally {
+    try { await client.end(); } catch { /* already closed */ }
+  }
+}
+
+/** BLZ-706: users the database already holds — 0 below v6, where app_user does not exist yet. */
+async function identityUsersHeld(exec) {
+  const [{ t }] = await exec.all("SELECT to_regclass('app_user') IS NOT NULL AS t", []);
+  if (!t) return 0;
+  return Number((await exec.all("SELECT count(*) AS n FROM app_user", []))[0].n);
+}
+
+/**
+ * BLZ-707: the sprints the database already holds, or null when it holds no registry — below v6
+ * the tables do not exist yet. Two SELECTs on the open connection, no transaction.
+ */
+async function sprintsHeld(exec) {
+  const [{ t }] = await exec.all("SELECT to_regclass('sprint_registry') IS NOT NULL AS t", []);
+  if (!t) return null;
+  const [{ n, r }] = await exec.all(
+    "SELECT (SELECT count(*) FROM sprint) AS n, (SELECT count(*) FROM sprint_registry) AS r", []);
+  return Number(n) > 0 || Number(r) > 0 ? Number(n) : null;
+}
+
+/**
+ * BLZ-705: `flag`'s path — `--flag <path>` or `--flag=<path>` — `undefined` when the flag is
+ * absent, or null with the refusal printed when it has no path.
+ */
+function flagPath(argv, flag, err) {
+  const uses = argv.filter((a) => a === flag || a.startsWith(`${flag}=`));
+  if (!uses.length) return undefined;
+  if (uses.length > 1) { err(`blaze db migrate: ${flag} is given more than once`); return null; }
+  const eq = argv.find((a) => a.startsWith(`${flag}=`));
+  const i = argv.indexOf(flag);
+  const v = eq !== undefined ? eq.slice(flag.length + 1) : argv[i + 1];
+  if (!v || v.startsWith("-")) { err(`blaze db migrate: ${flag} needs a path`); return null; }
+  return v;
 }
 
 async function initSqlite({ dataRoot, projectsDir, force, log, err, buildTransitions: buildHistory }) {
@@ -587,6 +789,8 @@ async function status({ dataRoot, log }) {
   return 0;
 }
 
+const MIGRATE_ONLY_FLAGS = [...VALUE_FLAGS, "--no-identity-import", "--no-sprints-import"];
+
 export async function runDb(argv, io = {}) {
   const { log = console.log, err = console.error } = io;
   // BLZ-690: the same rule cli.mjs's read-only exemption uses, so the two can never disagree.
@@ -604,10 +808,26 @@ export async function runDb(argv, io = {}) {
                 // Injectable so a test can see WHEN the git walk runs, and make it fail.
                 buildTransitions: io.buildTransitions ?? buildTransitions,
                 env: io.env ?? process.env };
+  // BLZ-705: the migrate-only flags, in either spelling, are refused on every other verb rather
+  // than silently ignored.
+  if (cmd !== "migrate") {
+    const stray = MIGRATE_ONLY_FLAGS.find((f) => argv.some((a) => a === f || a.startsWith(`${f}=`)));
+    if (stray) { err(`blaze db ${cmd}: ${stray} applies to 'blaze db migrate' only`); return 1; }
+  }
   if (cmd === "init") return init(ctx);
   if (cmd === "seed-counter") return seedCounterCmd(ctx);
   if (cmd === "load") return loadCmd(ctx);
   if (cmd === "verify") return verifyCmd(ctx);
+  if (cmd === "migrate") {
+    for (const [flag, key] of [["--identity-from", "identityFrom"], ["--sprints-from", "sprintsFrom"]]) {
+      const path = flagPath(argv, flag, err);
+      if (path === null) return 1;
+      if (path !== undefined) ctx[key] = path;
+    }
+    ctx.noIdentityImport = argv.includes("--no-identity-import");
+    ctx.noSprintsImport = argv.includes("--no-sprints-import");
+    return migrateCmd(ctx);
+  }
   if (cmd === "status") return status(ctx);
   err(`blaze db: unknown command ${JSON.stringify(cmd)}\n`);
   err(USAGE);

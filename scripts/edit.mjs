@@ -12,7 +12,7 @@ import { roundEstimate } from "./model/time.mjs";
 import { EDITABLE_FIELDS, derivedFieldRefusal } from "./model/fields.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
-import { loadSprints, validateSprintFields } from "./model/sprints.mjs";
+import { validateSprintFields } from "./model/sprints.mjs";
 
 function asArray(v) {
   if (Array.isArray(v)) return v;
@@ -80,7 +80,8 @@ export async function applyEdit(projectsDir, id, patch, opts = {}) {
     });
     errors.push(...validateTaxonomy(fm, project_cfg));
   }
-  const { sprints } = loadSprints({ root: dirname(projectsDir) });
+  // BLZ-707: through the reader — the sprint tables on a Postgres board at v6, else sprints.json.
+  const { sprints } = await readStorage.sprintRegistry(dirname(projectsDir));
   errors.push(...validateSprintFields(fm, { sprintIds: new Set(sprints.map((s) => s.id)) }));
   if (errors.length) return { ok: false, errors };
 

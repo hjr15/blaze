@@ -149,6 +149,12 @@ the dangling-link lint. Sprints are additive and do **not** bump
 `SCHEMA_VERSION` — see
 [ADR-0004](https://github.com/hjr15/blaze/blob/main/docs/decisions/0004-sprints-are-additive-not-a-schema-bump.md).
 
+On a db-mode Postgres board at schema v6, the registry lives in the database
+(`sprint`, `sprint_registry`); `blaze sprint` writes there and `sprints.json` is
+not read. `blaze db migrate --sprints-from` imports an existing file once. Every
+other board — fs, dual, SQLite, or a Postgres database still at v5 — keeps
+`sprints.json` exactly as above.
+
 ## The join key
 
 The only coupling between the tracker and code is the branch name: it must embed
@@ -175,7 +181,7 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
   against it (see below); `defaultLabels` in `blaze.config.json` is the
   tracker-wide fallback for projects with no taxonomy of their own.
 - `estimate` — minutes, rounded to the nearest 5 (`blaze new --estimate`).
-- `sprint` — a sprint id from the `sprints.json` registry (e.g. `S1`); the ticket
+- `sprint` — a sprint id from the sprint registry (`sprints.json`, or the database's `sprint` tables on a migrated Postgres board) (e.g. `S1`); the ticket
   opts into that sprint. Validated against the registry on `new`/`edit`; an unknown
   id is a hard reject, an empty value clears membership. All three of these fields
   are optional and absent (no line written) when unset. See "Sprints" below.
@@ -325,6 +331,45 @@ not just when you remember to.
 It's an env guard against an agent *reaching* for a mutating verb through the
 normal CLI/API surfaces (including a running `blaze board`'s write API) — not
 a sandbox. Code that calls `node:fs` directly still bypasses it.
+
+## A Postgres board refuses file writes
+
+A board whose `blaze.config.json` names `database.driver: "postgres"` is served from that
+database. With `BLAZE_WRITE_PORT` **unset**, every ticket, sprint and roster write from the verbs
+below is refused (BLZ-708), because it would land in this checkout and never reach the database
+the board serves. The refusal names the cause and exits 1. Three spellings are allowed:
+
+- `BLAZE_WRITE_PORT=db` writes to the database.
+- Remote mode (`BLAZE_REMOTE_URL` and `BLAZE_TOKEN`) writes to the live board over HTTP and never
+  reaches the guard.
+- `BLAZE_WRITE_PORT=fs` (or `dual`) states that a file write is deliberate, for example during a
+  migration.
+
+`blaze db *` is exempt: it is how such a board is migrated and inspected. `blaze init` is exempt
+too: it creates a new board and does not write the ambient one.
+
+Where the guard runs: `cli.mjs` (every mutating verb), `resolveWritePort` (the runners that go
+through `resolvePorts`, `import`, and the board server's write API, which answers `503`), and the
+direct entries that bypass the resolver: `sprint new|active`, `schedule migrate-dates --write`,
+`migrate --live`, `user`, `reconcile --apply`, the fs `groom` pass, and the supervisor's fs
+reconcile and groom loops (published as error events). Read-only verbs (`board`, `audit`, `export`,
+`rollup`, `matrices --check`) are never refused, and `blaze db *` is exempt. The read-shaped forms
+of mutating verbs are refused, as under `BLAZE_READONLY` (spec D5): `blaze sprint list`, the dry
+runs of `reconcile`, `import` and `schedule`, and `blaze start` as a whole. An empty or whitespace
+`BLAZE_WRITE_PORT` counts as unset. It refuses rather
+than warns because a warning scrolls past after the write has already diverged the board from what
+everyone reads.
+
+It cannot protect an engine older than 0.10.0, which has no guard. **Known gaps:**
+- The board server's first-user setup path writes the setup-token file and its `.gitignore` line
+  unguarded. Its `identity.db` write goes through `addUser` and is refused, so setup cannot complete
+  on such a board until `BLAZE_WRITE_PORT` is set.
+- The supervisor's `/control/revert` runs `git revert` in the data root and is not guarded. `blaze
+  start` is refused by `cli.mjs` on such a board, so only a direct `node scripts/supervisor.mjs`
+  reaches it.
+- A direct `node scripts/reindex.mjs` or `node scripts/matrices-runner.mjs` is not guarded beyond
+  `cli.mjs`. Both write derived files only (`.blaze/index.json`, generated matrices), never a
+  ticket.
 
 ## Remote mode (writing from another machine)
 

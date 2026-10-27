@@ -31,6 +31,7 @@ import { closeOnSetupFailure, postgresReader } from "./pg-storage.mjs";
 // the evaluation order does not change.
 import { openSqliteRead as defaultOpenSqliteRead } from "./sqlite-storage.mjs";
 import { fsReadStorage } from "./read-storage.mjs";
+import { assertFsWriteAllowed } from "./fs-write-guard.mjs";
 
 /** Where the shadow database and the divergence log live. Both under .blaze/, which is
  *  gitignored — `blaze init` writes that rule, and this board has carried it for years. */
@@ -282,6 +283,9 @@ export async function resolveWritePort({ dataRoot, projectsDir, storage = fsStor
                                          openPostgresClient: openPgClient = openPostgresClient } = {}) {
   const mode = resolveWriteMode(env);
   if (mode === "fs") {
+    // BLZ-708: reached with BLAZE_WRITE_PORT unset or an explicit fs; the guard refuses only the
+    // unset case on a board whose config names the postgres driver.
+    if (dataRoot) await assertFsWriteAllowed("write to this board", { dataRoot, env });
     return { port: fsWritePort(projectsDir, storage, undefined,
                                fsAllocators(projectsDir, { remoteClaims })), mode, close() {} };
   }

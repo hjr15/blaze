@@ -111,3 +111,16 @@ Running an fs board with more than one concurrent writer is unsupported. The fai
 motivated this ADR — a ticket in two status directories, one id minted twice in two trees — are
 exactly what such a board can still produce, and nothing in the engine now tries to paper over
 them with a queue or a lock.
+
+## Addendum (2026-10-22, BLZ-711) — a deployed db board is the only writable store
+
+The single-machine rule from the BLZ-254 addendum still holds: an fs board is a supported mode on one
+machine, on a git working tree, with one writer, and nothing here changes it.
+
+A deployed db board's data is now Postgres-only
+([ADR-0039](0039-board-data-lives-in-postgres-board-config-in-the-platform-chart.md)): tickets, events,
+users, tokens, sessions and sprints live in the database once it is at schema v6, which `blaze db
+migrate` brings it to and marks authoritative. The v6 features key on the schema stamp, not on the
+authoritative flag. A checkout of a migrated board must not be written, and the engine enforces that for
+engines 0.10.0 and newer: a board whose config names the postgres driver refuses a file write unless
+`BLAZE_WRITE_PORT` is set explicitly (`blaze db *`, `blaze init` and remote mode are not subject to it).

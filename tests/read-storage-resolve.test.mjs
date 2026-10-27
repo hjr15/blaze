@@ -24,7 +24,7 @@ const stampedClient = (log = []) => ({
   async query(sql) {
     log.push(sql);
     if (sql.includes("information_schema.tables")) return { rows: [{ hit: 1 }] };
-    if (sql.includes("blaze_meta")) return { rows: [{ value: "5" }] };
+    if (sql.includes("blaze_meta")) return { rows: [{ key: "schema_version", value: "5" }] };   // BLZ-705: the facts read is one keyed query
     return { rows: [] };
   },
   async end() { log.push("END"); },

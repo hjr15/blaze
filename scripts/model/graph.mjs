@@ -136,6 +136,7 @@ export function layoutNeighbourhood(nb, opts = {}) {
 // — page.mjs passes the board's own m.index. No focus → empty-shaped result;
 // the view renders a "pick a ticket" prompt.
 export function graphModel({ projectsDir, index = null, focus = null } = {}) {
-  const idx = index ?? buildIndex(projectsDir);
+  // BLZ-707 (review M4): rows and links only — no registry is read.
+  const idx = index ?? buildIndex(projectsDir, { sprints: [] });
   return layoutNeighbourhood(neighbourhood(idx, focus));
 }

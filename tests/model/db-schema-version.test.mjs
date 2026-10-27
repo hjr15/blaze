@@ -172,15 +172,16 @@ describe("DB schema version 2", () => {
   const tables = (db) =>
     db.prepare("SELECT name FROM sqlite_master WHERE type='table'").all().map((r) => r.name);
 
-  test("the stamp is 5", () => {
+  test("the stamp is 6", () => {
     // 2 -> 3 under BLZ-390, when the seven v3 tables gained STRICT.
     // 3 -> 4 under BLZ-377, which installs the blaze_config namespace and view/view_type in it.
     // BLZ-377's own AC said "probably wants version 3"; 3 had already shipped, and adding
     // tables to a shipped version retroactively is the silent change the stamp exists to stop.
     // 4 -> 5 under BLZ-667, which adds project_counter — the same rule, applied again.
-    assert.equal(DB_SCHEMA_VERSION, 5);
+    // 5 -> 6 under BLZ-705: identity and sprint tables, Postgres only.
+    assert.equal(DB_SCHEMA_VERSION, 6);
     const v = fresh().prepare("SELECT value FROM blaze_meta WHERE key='schema_version'").get().value;
-    assert.equal(v, "5");
+    assert.equal(v, "6");
   });
 
   test("a fresh create installs the v4 link tables — this is what Precedes needs", () => {
@@ -235,7 +236,7 @@ describe("DB schema version 2", () => {
   // version. That is safe because the shadow database is DERIVED: it lives under .blaze/,
   // `blaze db init` rebuilds it from the filesystem corpus, and the fs write port is the
   // default, so a stranded v1 shadow is deleted and recreated rather than migrated.
-  test("the floor rises to 5 — an older database is refused, not half-opened", () => {
+  test("the floor stays 5 — v6 is additive and a v5 database still serves (BLZ-705, D1(b))", () => {
     // 2 -> 3 under BLZ-390. A v2 shadow's tables are NOT STRICT, so accepting one would silently
     // drop the guarantee the version exists to add.
     // 3 -> 4 under BLZ-377. A v3 shadow has no `blaze_config` at all, so a v4 engine that
@@ -252,10 +253,31 @@ describe("DB schema version 2", () => {
     const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 1 });
     assert.equal(st.ok, false);
     assert.equal(st.state, "older");
-    // Names the command that EXISTS. `blaze db migrate` does not — db-runner declares only
-    // init and status — and this branch was unreachable while MIN was 1, so nothing caught it.
+    // A NON-authoritative database is derived, so it is rebuilt, never migrated: the message
+    // names init --force and not migrate. BLZ-705's `blaze db migrate` is named only on an
+    // AUTHORITATIVE database — the test below.
     assert.match(st.error, /blaze db init --force/);
     assert.doesNotMatch(st.error, /blaze db migrate/);
+  });
+
+  test("BLZ-705: the older refusal on an AUTHORITATIVE database says migrate, never rebuild", () => {
+    const st = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 5, authoritative: true, min: 6, current: 6 });
+    assert.equal(st.ok, false);
+    assert.equal(st.state, "older");
+    assert.match(st.error, /blaze db migrate/);
+    assert.match(st.error, /pg_dump/);
+    assert.doesNotMatch(st.error, /run 'blaze db init --force'/);
+    const derived = judgeDbSchema({ hasTicket: true, hasMeta: true, version: 5, authoritative: false, min: 6, current: 6 });
+    assert.match(derived.error, /'blaze db init --force'/);
+  });
+
+  test("BLZ-705: facts carry the authoritative row", () => {
+    const db = fresh();
+    assert.equal(readSchemaFactsSync(execFor(db)).authoritative, false);
+    db.prepare("INSERT INTO blaze_meta (key, value) VALUES ('authoritative', 'true')").run();
+    const facts = readSchemaFactsSync(execFor(db));
+    assert.equal(facts.authoritative, true);
+    assert.equal(facts.version, DB_SCHEMA_VERSION, "the stamp is still read from the same query");
   });
 
   test("a version-1 ENGINE opening this database still gets the upgrade refusal", () => {

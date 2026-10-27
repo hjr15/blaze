@@ -110,7 +110,9 @@ Four things this design deliberately does not touch, so they are not mistaken fo
   `db`. In `db` mode that history stops growing once moves stop touching files. Deriving it from
   `ticket_event` instead is BLZ-254's scope.
 - **`sprints.json`** has no database table in any mode; it stays a plain-text registry read from
-  the data root. Its fate is BLZ-254's to decide.
+  the data root. Its fate is BLZ-254's to decide. (Superseded for a migrated Postgres board by
+  [ADR-0039](0039-board-data-lives-in-postgres-board-config-in-the-platform-chart.md): at schema v6
+  the registry is a database table.)
 - **The groomer loop** (`scripts/loops/groomer.mjs`, run by `supervisor.mjs`'s `runGroomer`)
   picks a ticket by reading `projects/<KEY>/<col>/*.md`, has an agent edit that file, and commits
   it. It never reads or writes through the port. In `db` mode it is therefore **refused**: each

@@ -16,6 +16,7 @@ import { resolveRoots, loadConfig } from "./config.mjs";
 import { resolveSchema } from "./model/schema-config.mjs";
 import { resolveReadStorage } from "./model/write-port-resolve.mjs";
 import { assertWritable } from "./readonly.mjs";
+import { assertFsWriteAllowed } from "./model/fs-write-guard.mjs";
 
 const argv = process.argv.slice(2);
 const sub = argv[0];
@@ -57,6 +58,12 @@ const sameLines = (a, b) =>
   a.length === b.length && [...a].sort().join("\u0000") === [...b].sort().join("\u0000");
 
 const { projectsDir, dataRoot } = resolveRoots();
+// BLZ-708 (review M4): `--write` rewrites ticket files directly, outside resolvePorts, so the
+// guard is asserted here, before the first write.
+if (write) {
+  try { await assertFsWriteAllowed("rewrite ticket dates", { dataRoot }); }
+  catch (e) { console.error(e.message); process.exit(1); }
+}
 // BLZ-670: reads go through the resolver — `fs`/`dual` read the filesystem, `db` reads the
 // database the writes go to.
 const rs = await resolveReadStorage({ dataRoot, projectsDir }).catch((e) => {

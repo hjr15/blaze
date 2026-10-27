@@ -66,9 +66,14 @@ try {
   assertWritable("rebuild the index/transitions cache");
   mkdirSync(dbDir, { recursive: true });
   const rs = await resolveReadStorage({ dataRoot, projectsDir });
-  let tickets;
-  try { tickets = [...(await rs.readStorage.listTickets(projectsDir))]; } finally { await rs.close(); }
-  const idx = buildIndex(projectsDir, { tickets });
+  let tickets, sprints;
+  try {
+    tickets = [...(await rs.readStorage.listTickets(projectsDir))];
+    // BLZ-707 (review M5): the registry through the same reader. A v6 db board has no sprints.json,
+    // so the file fallback would warn "not in registry" for every sprint-tagged ticket.
+    sprints = (await rs.readStorage.sprintRegistry(dataRoot)).sprints;
+  } finally { await rs.close(); }
+  const idx = buildIndex(projectsDir, { tickets, sprints });
   // BLZ-254 (spec §5.5): the missing-claim check (BLZ-136) is deleted; only duplicate ids block.
   // BLZ-134: refuse to write an index built over colliding ids. Writing it would
   // bake the collision into every consumer while looking like a clean rebuild —

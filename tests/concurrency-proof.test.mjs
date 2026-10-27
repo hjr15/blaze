@@ -13,6 +13,7 @@ import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
 import { startServer } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
+import { resolveIdentity } from "../scripts/model/identity-db.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
 import { remoteFrom, requestRemote } from "../scripts/remote-client.mjs";
 import { createMany, verifyLists, main } from "../scripts/ops/concurrency-proof.mjs";
@@ -31,11 +32,18 @@ async function dbRoot() {
   assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
   return roots.dataRoot;
 }
+// BLZ-706 (review I4): identity is resolved before bind, exactly as the shipped entries do it.
+// On the Postgres board below, `addUser` writes Postgres at v6, so the server must read it there.
 async function serve(root) {
-  const server = startServer({ port: 0, root, projectsDir: join(root, "projects") });
+  const identity = await resolveIdentity({ dataRoot: root });
+  const server = startServer({ port: 0, root, projectsDir: join(root, "projects"), identity });
   await new Promise((res) => server.once("listening", res));
-  return { server, url: `http://127.0.0.1:${server.address().port}` };
+  return { server, url: `http://127.0.0.1:${server.address().port}`, identity };
 }
+const stop = async ({ server, identity }) => {
+  await new Promise((r) => server.close(r));
+  await identity.close?.();
+};
 const capture = () => {
   const out = [], err = [];
   return { out, err, io: { out: (s) => out.push(String(s)), err: (s) => err.push(String(s)) } };
@@ -58,7 +66,8 @@ describe("the harness, against a db-mode board", () => {
   test("createMany creates distinct tickets in parallel; verifyLists passes them", async () => {
     const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
-    const { server, url } = await serve(root);
+    const served = await serve(root);
+    const { url } = served;
     try {
       const cfg = remoteFrom({ BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token.token });
       const r = await createMany(cfg, { project: "ENG", count: 4, parallel: 2, label: "t" });
@@ -66,25 +75,27 @@ describe("the harness, against a db-mode board", () => {
       assert.deepEqual(r.ids.map(num).sort((a, b) => a - b), [2, 3, 4, 5]);
       assert.deepEqual(await verifyLists(cfg, [r.ids.slice(0, 2), r.ids.slice(2)]),
         { ok: true, total: 4, distinct: 4, duplicates: [], missing: [] });
-    } finally { server.close(); }
+    } finally { await stop(served); }
   });
 
   test("verifyLists FAILS a duplicate across lists, an id the server lacks, and an empty set", async () => {
     const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
-    const { server, url } = await serve(root);
+    const served = await serve(root);
+    const { url } = served;
     try {
       const cfg = remoteFrom({ BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token.token });
       assert.deepEqual(await verifyLists(cfg, [["ENG-1"], ["ENG-1", "ENG-99"]]),
         { ok: false, total: 3, distinct: 2, duplicates: ["ENG-1"], missing: ["ENG-99"] });
       assert.equal((await verifyLists(cfg, [[], []])).ok, false, "a proof that created nothing proves nothing");
-    } finally { server.close(); }
+    } finally { await stop(served); }
   });
 
   test("a refused create is counted as a failure, not an id; the run exits 1", async () => {
     const root = await dbRoot();
     const { token } = await addUser(root, { email: "v@example.com", role: "viewer" });
-    const { server, url } = await serve(root);
+    const served = await serve(root);
+    const { url } = served;
     try {
       const c = capture();
       const code = await main(["create", "--project", "ENG", "--count", "2"],
@@ -94,13 +105,14 @@ describe("the harness, against a db-mode board", () => {
       assert.deepEqual(printed.ids, []);
       assert.equal(printed.failures.length, 2);
       assert.match(c.err.join("\n"), /failed \(403\): this token does not carry the 'write' scope/);
-    } finally { server.close(); }
+    } finally { await stop(served); }
   });
 
   test("main: create prints JSON a later verify reads; bad arguments print the usage", async () => {
     const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
-    const { server, url } = await serve(root);
+    const served = await serve(root);
+    const { url } = served;
     try {
       const env = { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token.token };
       const made = capture();
@@ -126,13 +138,14 @@ describe("the harness, against a db-mode board", () => {
       const local = capture();
       assert.equal(await main(["verify", file], { env: {}, ...local.io }), 1);
       assert.match(local.err.join("\n"), /remote mode is not configured/);
-    } finally { server.close(); }
+    } finally { await stop(served); }
   });
 
   test("verify FAILS a file that records failed creates, or does not say whether any failed", async () => {
     const root = await dbRoot();
     const { token } = await addUser(root, { email: "m@example.com", role: "member" });
-    const { server, url } = await serve(root);
+    const served = await serve(root);
+    const { url } = served;
     try {
       const env = { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: token.token };
       writeFileSync(join(root, "failed.json"), JSON.stringify({ ids: ["ENG-1"], failures: [{}] }));
@@ -144,7 +157,7 @@ describe("the harness, against a db-mode board", () => {
       const n = capture();
       assert.equal(await main(["verify", join(root, "nokey.json")], { env, ...n.io }), 1);
       assert.match(n.err.join("\n"), /nokey.json holds no "failures" list/);
-    } finally { server.close(); }
+    } finally { await stop(served); }
   });
 
   test("BLZ-691: verify with no answer from the server prints one line and exits 1 — no stack", async () => {
@@ -195,13 +208,13 @@ test("spec §6: 2 processes × 50 parallel POST /api/new on Postgres → 100 dis
     const saved = Object.fromEntries(Object.keys(dbEnv).map((k) => [k, process.env[k]]));
     Object.assign(process.env, dbEnv);
     const roots = { dataRoot: root, projectsDir: join(root, "projects") };
-    let server;
+    let served;
     try {
       assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
       assert.equal(await runDb(["load"], { ...QUIET, roots }), 0);
       const { token } = await addUser(root, { email: "m@example.com", role: "member" });
-      ({ server } = await serve(root));
-      const remote = { BLAZE_REMOTE_URL: `http://127.0.0.1:${server.address().port}`, BLAZE_TOKEN: token.token };
+      served = await serve(root);
+      const remote = { BLAZE_REMOTE_URL: served.url, BLAZE_TOKEN: token.token };
       const [a, b] = await Promise.all(["a", "b"].map((label) =>
         proof(["create", "--project", "ENG", "--count", "50", "--parallel", "5", "--label", label], remote)));
       assert.equal(a.status, 0, a.stderr);
@@ -223,7 +236,7 @@ test("spec §6: 2 processes × 50 parallel POST /api/new on Postgres → 100 dis
       assert.equal(v.status, 0, v.stdout + v.stderr);
       assert.match(v.stdout, /100 ids from 2 list\(s\): 100 distinct[\s\S]*PROOF: PASS/);
     } finally {
-      server?.close();
+      if (served) await stop(served);
       for (const [k, v] of Object.entries(saved)) { if (v === undefined) delete process.env[k]; else process.env[k] = v; }
       await db.drop();
     }

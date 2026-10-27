@@ -282,6 +282,15 @@ The sprint registry. `sprint new` creates a sprint with a start and end
 date. `sprint list` lists all sprints. `sprint active <id>` marks a sprint
 active by id.
 
+The registry is `sprints.json` at the data root — except on a db-mode
+(`BLAZE_WRITE_PORT=db`) Postgres board at schema v6, where it lives in the database's
+`sprint` and `sprint_registry` tables: `blaze sprint` reads and writes there, each save
+in one transaction, and `sprints.json` is not read. The board, the gantt, `blaze reindex`
+and `--sprint` validation read the same source. There, `new` and `active` name the
+database (`created S3 (database: <host>/<database>)`); everywhere else the output is
+unchanged. Import an existing `sprints.json` once with `blaze db migrate --sprints-from`
+(see [db](#db)).
+
 ## reindex
 
 ```
@@ -598,6 +607,7 @@ blaze db init [--force]
 blaze db seed-counter
 blaze db load [--replace]
 blaze db verify
+blaze db migrate [--identity-from <identity.db> | --no-identity-import] [--sprints-from <sprints.json> | --no-sprints-import]
 blaze db status
 ```
 
@@ -608,14 +618,80 @@ picks SQLite (the default — the shadow at `.blaze/blaze.db`) or Postgres
 | Subcommand | SQLite | Postgres |
 |---|---|---|
 | `init` | Creates the shadow, loads the board into it, and seeds the id counter. Refuses an existing shadow unless `--force`, which rebuilds both `.blaze/blaze.db` and `.blaze/config.db`. | Creates the schema and seeds the id counter — **the board's tickets are not loaded**; `blaze db load` does that. Refuses a database that already holds a Blaze schema, naming `blaze db seed-counter`. **`--force` is refused**: Blaze never drops a real database's tables from a CLI flag. |
-| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter) in the same transaction. `acceptance_criterion` stays empty — db mode reads criteria from the body. Rows it deliberately drops or collapses — a dangling parent or link, a repeated link, label or component, a worklog entry under half a minute — are counted, and the load says that `blaze db verify` will report each as a value difference. The git history is read before the transaction opens. |
+| `load` | — (refused: `init` loads the shadow) | Loads this board's tickets — with their labels, components, worklog, parents and links, and the git history of their status moves as `transition` events — in **one transaction**, then raises the id counter from what it loaded, the files and the `.ids/` claims. **All or nothing**: a row the database refuses is named, every one of them, and nothing is loaded. Refuses a database that already holds tickets unless `--replace`, which empties the ticket tables (their event history included, never the id counter, the identity tables or the sprint tables) in the same transaction. **`--replace` is refused on an authoritative database** (one `blaze db migrate` has marked), naming `pg_restore`: that database is the board, with no file corpus to reload it from. `acceptance_criterion` stays empty — db mode reads criteria from the body. Rows it deliberately drops or collapses — a dangling parent or link, a repeated link, label or component, a worklog entry under half a minute — are counted, and the load says that `blaze db verify` will report each as a value difference. The git history is read before the transaction opens. |
 | `seed-counter` | Raises each project's id counter to the highest number already taken — by a ticket file, an `.ids/` claim, or a database row — and prints `project  before → after`. Never lowers a counter; a second run prints `before → after` with the two equal. Refuses a database with no schema, naming `blaze db init`. | Same. |
 | `verify` | — (refused, exit 2) | **The migration gate.** Compares the database with this board's files: every field value (unknown frontmatter keys included), the id sets, each table's row count against what the loader builds for these files, and every ticket's acceptance criteria (read by an independent matcher). Prints each difference; byte-order noise is shown but never gates. Exit `0` pass, `1` a difference, `2` could not run (no schema, no connection, a ticket file that will not parse). |
+| `migrate` | — (refused: the shadow is derived — rebuild it with `blaze db init --force`) | Brings the schema forward to v6 in **one transaction** and marks the database **authoritative**. See below. |
 | `status` | What the shadow holds, and what the dual-write soak has found. | — |
 
-`verify` and `status` only read, so both run under `BLAZE_READONLY=1`; `init`, `seed-counter` and
-`load` are refused. The exemption is decided by the subcommand itself — `blaze db load verify` is
+`verify` and `status` only read, so both run under `BLAZE_READONLY=1`; `init`, `seed-counter`,
+`load` and `migrate` are refused. The exemption is decided by the subcommand itself — `blaze db load verify` is
 still a load, and still refused.
+
+**`blaze db migrate`** (Postgres only) brings a database forward to the engine's schema version —
+v5 to v6 adds the identity tables and `sprint`/`sprint_registry` — and writes the `blaze_meta` row
+`('authoritative', 'true')`, all in one transaction. It prints the transition and whether the mark
+was written now or already present:
+
+```
+blaze db migrate — <host>/<database>
+  schema         v5 → v6
+  authoritative  yes (written now)
+migrate: DONE — one transaction, committed.
+```
+
+A re-run is a no-op (`v6, already current`, `yes (already)`). A database newer than the engine,
+one with tables but no stamp, an empty one (run `blaze db init`), or one stamped below 5 is
+refused by name, before the stranded-file refusals below, and on any failure nothing is migrated. **Take a `pg_dump` first**: an
+authoritative database is the board, so from then on `load --replace` refuses it and a too-old
+stamp names `blaze db migrate`, never a rebuild — see
+[schema versioning](../schema-versioning.md#authoritative-databases-migrate-derived-ones-rebuild).
+
+**`--identity-from <path>`** copies all six identity tables (`app_user`, `user_identity`,
+`membership`, `api_token`, `local_password`, `user_session`) from that `identity.db` **verbatim**
+— token hashes, password verifiers and live sessions included — so no token is reissued and every
+existing login keeps working. The copy runs inside the migrate transaction and is verified **row
+for row** (paired by primary key, timestamps compared as instants) before the commit; any
+difference rolls the whole migration back, naming the table, row key and column, never a value.
+It refuses identity tables that already hold users. The source is opened read-only, and a table a
+pre-password roster lacks is copied as empty and marked `(absent in source)`:
+
+```
+  identity       app_user 3 · user_identity 3 · membership 3 · api_token 3 · local_password 1 · user_session 2  (row-for-row verified)
+```
+
+`migrate` **refuses while `<board>/.blaze/identity.db` exists** unless `--identity-from` or
+`--no-identity-import` says what to do with it: after the migrate the board reads its users from
+Postgres only, so a roster left behind would lock every user out. `--no-identity-import` (the file
+is not this board's roster) proceeds and copies nothing; the two flags together are refused.
+On a **re-run after a successful copy** the file is still there; when the database already holds
+users the refusal says the roster looks already imported, and `--no-identity-import` is the way on
+(a second `--identity-from` is refused, because the tables are no longer empty).
+
+**`--sprints-from <path>`** copies that `sprints.json` into `sprint` and `sprint_registry`, inside
+the migrate transaction. The file is read once and parsed **strictly** before anything connects: a
+file that is not JSON, a `sprints` that is not an array, a sprint with no id, a repeated id, a
+non-string name, a `start`/`end` that is not a `YYYY-MM-DD` date, or a `registryVersion` that is not
+an integer from 1 is refused by name (`sprints[i] (<id>) …`), and nothing is migrated. Every key
+Blaze does not understand is kept, at both levels. The registry is then read back whole and must
+equal the file, key for key and type for type, before the commit; a difference rolls the whole
+migration back, naming the first differing sprint. It refuses sprint tables that already hold a
+registry.
+
+```
+  sprints        2 sprint(s), active S2  (verified)
+```
+
+`migrate` **refuses while `<board>/sprints.json` exists** unless `--sprints-from` or
+`--no-sprints-import` says what to do with it: at v6 the board reads sprints from Postgres only, so
+a registry left behind would empty the gantt and refuse every `--sprint`. `--no-sprints-import`
+proceeds and copies nothing; the two flags together are refused. As with the roster, a **re-run
+after a successful copy** names the file as already imported (the database already holds a
+registry) and points to `--no-sprints-import`. When both files are stranded, one run names both.
+
+Each of `--identity-from` and `--sprints-from` may be given once. Both
+`--identity-from <path>` and `--identity-from=<path>` (likewise `--sprints-from`) are accepted, and
+the migrate flags are refused on every other `db` verb.
 
 **Cutover to `BLAZE_WRITE_PORT=db` — do these in order:**
 
@@ -724,6 +800,35 @@ add` **adds `.blaze/` to the board's `.gitignore` if no rule already covers it**
 says so; if the board is not a git work tree it warns instead. A token's scopes can
 never exceed its owner's role, at issue time or at use time.
 
+**On a Postgres board, users live in the database** (BLZ-706). When all three hold —
+`BLAZE_WRITE_PORT=db`, `database.driver` is `postgres`, and the database is at schema
+**v6** or later — `blaze user add` and `blaze user passwd` write the identity tables in
+Postgres, and **nothing is written under the board directory**: no `.blaze/`, no
+`identity.db`, no `.gitignore` line (BLZ-701). The output names the database, never its
+password:
+
+```
+identities: Postgres db.example.internal/blaze
+```
+
+A v5 database has no identity tables, so its board keeps `identity.db` exactly as above
+until `blaze db migrate --identity-from` copies the roster across (see [`db`](#db)).
+
+**db mode on a Postgres board needs the database reachable, even at v5.** The board servers,
+`blaze user add|passwd` and `blaze sprint` connect when they start, to read the schema stamp that
+decides whether identity and sprints come from Postgres or from the files. A database that is down
+or has no schema is a refusal (exit 1), not a fallback to the files. For a deployed server this
+means a restart during a database outage exits and crash-loops until the database is back, where an
+engine before 0.10.0 started and answered `503` per request. `BLAZE_WRITE_PORT=db blaze user add`
+against a database with no schema is refused, where an engine before 0.10.0 wrote `identity.db`.
+
+**An empty Postgres roster beside a populated `identity.db` refuses to serve.** At v6, when the
+identity tables hold no users but `<board>/.blaze/identity.db` holds some (a database made by
+`blaze db init`, or migrated with `--no-identity-import`), both servers refuse to start and name
+`blaze db migrate --identity-from <path>`. Serving it as "no users" would leave the board
+unauthenticated on loopback while the roster the operator relies on is never read. Move the file
+aside if it is not this board's roster.
+
 ## Help
 
 `blaze --help` (or `-h`) prints a usage line plus the full command list with
@@ -810,6 +915,7 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | `BLAZE_AGENT_COMMAND` | The command `groom` spawns to act on a ticket. | `agentCommand` in `blaze.config.json` |
 | `BLAZE_CODE_REPO` | Code repo `reconcile` mirrors against, when not set per-project. | none |
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
+| `BLAZE_WRITE_PORT` | Where a write goes: `fs`, `dual` or `db`. **Unset is not the same as `fs`** (BLZ-708): on a board whose `blaze.config.json` names `database.driver: "postgres"`, an unset value makes every file write refuse, naming this variable; an explicit `fs` states that a file write is deliberate. An empty or whitespace value counts as unset. Remote mode, `blaze db *` and `blaze init` are never refused. On any other board, unset behaves as `fs`. See [A Postgres board refuses file writes](../../AGENTS.md#a-postgres-board-refuses-file-writes). | unset |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
 | `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
 | `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the two is an error for every command. | unset |

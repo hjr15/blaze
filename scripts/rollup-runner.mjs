@@ -59,9 +59,13 @@ async function main() {
   }
   const id = positional[0] || null;
   const rs = await resolveReadStorage({ dataRoot, projectsDir });
-  let tickets;
-  try { tickets = [...(await rs.readStorage.listTickets(projectsDir))]; } finally { await rs.close(); }
-  const index = buildIndex(projectsDir, { tickets });
+  let tickets, sprints;
+  try {
+    tickets = [...(await rs.readStorage.listTickets(projectsDir))];
+    // BLZ-707 (review M5): the registry through the same reader, as reindex.mjs reads it.
+    sprints = (await rs.readStorage.sprintRegistry(dataRoot)).sprints;
+  } finally { await rs.close(); }
+  const index = buildIndex(projectsDir, { tickets, sprints });
   const lines = rollupLines(index, rollUp(index), id);
   console.log(lines.join("\n"));
 }

@@ -3,17 +3,23 @@
 // Thin CLI over model/sprints.mjs — logic lives there (covered); this file
 // is coverage-excluded (*-runner.mjs), matching new-runner.mjs's pattern.
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
-import { loadSprints, saveSprints, addSprint, setActive, formatSprintList,
-         unstampedRegistryWarning } from "./model/sprints.mjs";
+import { addSprint, setActive, formatSprintList, unstampedRegistryWarning } from "./model/sprints.mjs";
+// BLZ-707: the registry's source — sprints.json, or the sprint tables on a db-mode Postgres board
+// at schema v6. Every load and save below goes through it.
+import { openSprintSource } from "./model/sprint-store.mjs";
 
 /** BLZ-369: surfaced on the WRITE paths, because that is where the loss would occur — a read
- *  that never saves cannot destroy anything, and warning there would be noise on every render. */
-function warnIfUnstamped(registry) {
+ *  that never saves cannot destroy anything, and warning there would be noise on every render.
+ *  BLZ-707: file sources only. The warning is about an older engine rewriting sprints.json, which
+ *  no engine does to the sprint tables, and its text names the file. */
+function warnIfUnstamped(registry, source) {
+  if (source.kind !== "file") return;
   const w = unstampedRegistryWarning(registry);
   if (w) console.error(`blaze sprint: ${w}`);
 }
 
 import { assertWritable } from "./readonly.mjs";
+import { assertFsWriteAllowed } from "./model/fs-write-guard.mjs";
 
 const { dataRoot } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below —
@@ -31,13 +37,23 @@ catch (e) {
 
 const [sub, ...rest] = process.argv.slice(2);
 
+let source = null;
 try {
-  // BLZ-121 defence-in-depth, hoisted above the saveSprints() writes below —
-  // `saveSprints` writes sprints.json via direct node:fs calls, so the guard must run before
+  // BLZ-121 defence-in-depth, hoisted above the source.save() writes below —
+  // a file source writes sprints.json via direct node:fs calls, so the guard must run before
   // it; cli.mjs is still the primary gate. The whole try/catch
   // here already turns a thrown `blaze: …` Error into a clean message, so
   // this doesn't need its own catch.
   assertWritable("create/activate a sprint");
+  // After the guard, so a refused run opens no connection.
+  source = await openSprintSource({ dataRoot });
+  // BLZ-708: a file source on a postgres-driver board with BLAZE_WRITE_PORT unset would write
+  // sprints.json where the database never sees it. Reads (list) are not refused.
+  if (source.kind === "file" && (sub === "new" || sub === "active")) {
+    await assertFsWriteAllowed("create/activate a sprint", { dataRoot });
+  }
+  // File-mode output is byte-identical; the database names itself.
+  const at = source.kind === "postgres" ? ` (database: ${source.where})` : "";
   if (sub === "new") {
     const opts = { name: undefined, start: undefined, end: undefined };
     const positional = [];
@@ -56,16 +72,16 @@ try {
       console.error('usage: blaze sprint new "<name>" --start <YYYY-MM-DD> --end <YYYY-MM-DD>');
       process.exit(1);
     }
-    const before = loadSprints({ root: dataRoot });
-    warnIfUnstamped(before);
+    const before = await source.load();
+    warnIfUnstamped(before, source);
     const { registry, id } = addSprint(before, { name: opts.name, start: opts.start, end: opts.end });
-    saveSprints({ root: dataRoot }, registry);
-    console.log(`created ${id}`);   // BLZ-254: no commit
+    await source.save(registry);
+    console.log(`created ${id}${at}`);   // BLZ-254: no commit
   } else if (sub === "list") {
     for (const a of rest) {
       if (a.startsWith("--")) { console.error(`unknown flag: ${a}`); process.exit(1); }
     }
-    const registry = loadSprints({ root: dataRoot });
+    const registry = await source.load();
     console.log(formatSprintList(registry));
   } else if (sub === "active") {
     const positional = [];
@@ -75,16 +91,21 @@ try {
     }
     const [id] = positional;
     if (!id) { console.error("usage: blaze sprint active <id>"); process.exit(1); }
-    const before = loadSprints({ root: dataRoot });
-    warnIfUnstamped(before);
+    const before = await source.load();
+    warnIfUnstamped(before, source);
     const registry = setActive(before, id);
-    saveSprints({ root: dataRoot }, registry);
-    console.log(`active sprint: ${id}`);   // BLZ-254: no commit
+    await source.save(registry);
+    console.log(`active sprint: ${id}${at}`);   // BLZ-254: no commit
   } else {
     console.error("usage: blaze sprint <new|list|active> ...");
     process.exit(1);
   }
 } catch (e) {
   console.error(e.message.startsWith("blaze:") ? e.message : `blaze: ${e.message}`);
-  process.exit(1);
+  process.exitCode = 1;
+} finally {
+  // process.exit() inside the branches above still ends the run; a held connection cannot keep
+  // it alive, and a usage error never reaches a save.
+  await source?.close();
 }
+if (process.exitCode) process.exit(process.exitCode);
