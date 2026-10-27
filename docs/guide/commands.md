@@ -164,7 +164,9 @@ what it would change and writes nothing.
 changes only by an explicit `blaze move` (remote mode, on a deployed board), so `blaze reconcile`
 exits `1` with a message naming that rule, and does so on a dry run too: the preview of a board
 that never reconciles is noise. `GET /api/reconcile-preview` answers `409`, the page omits the
-Reconcile button, and `blaze start`'s reconcile loop refuses without publishing a feed event.
+Reconcile button, and `blaze start`'s reconcile loop refuses each pass without publishing a feed
+event (the loop's own "started" status still appears). In db mode `POST /control/reconcile/run`
+answers 204 and does nothing.
 
 PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub
 Enterprise Server only. On any other remote, `in-review` is unreachable and

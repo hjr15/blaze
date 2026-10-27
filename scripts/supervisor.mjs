@@ -302,9 +302,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         const refusal = fsWriteRefusal({ config: cfg, what: "reconcile" });
         if (refusal) throw new Error(refusal);
       }
-      // BLZ-670: the same rule as reconcile's CLI — only db mode opens a database port, fs and
-      // dual resolve a reader alone (dual unchanged). A resolver refusal lands in the catch.
-      ports = await (resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)({ dataRoot: root, projectsDir });
+      // BLZ-670: fs and dual resolve a reader alone (db mode is refused at the top of this
+      // function). A resolver refusal lands in the catch.
+      ports = await resolveReadStorage({ dataRoot: root, projectsDir });
       // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
