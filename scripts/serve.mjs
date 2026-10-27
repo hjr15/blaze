@@ -14,7 +14,7 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
-import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
+import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
 import { resolvePorts, withReadStorage } from "./model/write-port-resolve.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
@@ -23,6 +23,7 @@ import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
 import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
+import { ticketJson } from "./model/ticket-json.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
@@ -744,6 +745,61 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         });
       } catch {
         return json(500, { errors: ["panel render failed"] });
+      }
+    }
+    // BLZ-709 (spec D7): the remote CLI's reads — `blaze show` and `blaze list`. JSON for an
+    // agent with no board checkout. Every ticket goes out through `ticketJson`, an allowlist
+    // that drops the record's server path; every failure is logged here, with the path, and
+    // answered with a sentence that names none.
+    if (req.method === "GET" && u.pathname === "/api/ticket") {
+      const id = u.searchParams.get("id");
+      if (!id) return json(400, { ok: false, errors: ["id is required"] });
+      try {
+        return await reading(async (rs) => {
+          const r = await rs.getTicket(projectsDir, id);
+          if (r?.duplicates) {
+            return json(409, { ok: false, errors: [`${id} is ambiguous: ${r.duplicates.length} records carry it`] });
+          }
+          if (!r?.found) return json(404, { ok: false, errors: ["not found"] });
+          return json(200, { ok: true, ticket: ticketJson(r.found) });
+        });
+      } catch (e) {
+        console.error("blaze: /api/ticket could not read the board:", boardFailureReason(e));
+        return json(500, { errors: ["the board could not be read"] });
+      }
+    }
+    if (req.method === "GET" && u.pathname === "/api/tickets") {
+      const want = { project: u.searchParams.get("project"), status: u.searchParams.get("status"),
+                     type: u.searchParams.get("type") };
+      const num = (r) => Number(/-(\d+)$/.exec(String(r.frontmatter?.id ?? ""))?.[1] ?? 0);
+      const proj = (r) => String(r.frontmatter?.project ?? r.project ?? "");
+      try {
+        return await reading(async (rs) => {
+          const tickets = (await allTickets(rs))
+            .filter((r) => (!want.project || r.frontmatter?.project === want.project)
+              && (!want.status || r.status === want.status)
+              && (!want.type || r.frontmatter?.type === want.type))
+            .sort((a, b) => proj(a).localeCompare(proj(b)) || num(a) - num(b));
+          return json(200, { ok: true, tickets: tickets.map((r) => ticketJson(r, { body: false })) });
+        });
+      } catch (e) {
+        console.error("blaze: /api/tickets could not read the board:", boardFailureReason(e));
+        return json(500, { errors: ["the board could not be read"] });
+      }
+    }
+    if (req.method === "GET" && u.pathname === "/api/projects") {
+      // The taxonomy a caller needs to write a valid ticket, and nothing else: never
+      // `codeRepos` or `codeRepoPaths`, which are paths on this machine.
+      try {
+        return await reading(async () => json(200, { ok: true, projects: listProjects(cfgFor(root)).map((key) => {
+          const p = loadProject(key, { root, projectsDir, allowMissing: true });
+          return { key, labels: p.labels ?? [], components: p.components ?? [],
+                   requireLabels: Boolean(p.requireLabels), requireComponents: Boolean(p.requireComponents),
+                   requireWorklogBeforeTerminal: Boolean(p.requireWorklogBeforeTerminal) };
+        }) }));
+      } catch (e) {
+        console.error("blaze: /api/projects could not read the board:", boardFailureReason(e));
+        return json(500, { errors: ["the board could not be read"] });
       }
     }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {

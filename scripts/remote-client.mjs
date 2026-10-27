@@ -2,7 +2,8 @@
 //
 // When BLAZE_REMOTE_URL and BLAZE_TOKEN are BOTH set, cli.mjs sends `new`, `move`, `edit`,
 // `resolve`, `log` and `link` to the board server's matching `POST /api/*` endpoint and prints
-// what it answered. The verb's logic and its validation run ONCE, on the server, against the
+// what it answered; `show` and `list` (BLZ-709) send a `GET /api/ticket`, `/api/tickets` or
+// `/api/projects` and render the answer. The verb's logic and its validation run ONCE, on the server, against the
 // store the server owns — this module only turns argv into a request and a response into a
 // line. Every other command is refused in remote mode (cli.mjs), because it needs the board's
 // data on this machine; and a remote mode set half-way is an error, never a silent fallback to
@@ -24,6 +25,8 @@ export const REMOTE_TOKEN_ENV = "BLAZE_TOKEN";
 export const REMOTE_VERBS = {
   new: "/api/new", move: "/api/move", edit: "/api/edit",
   resolve: "/api/resolve", log: "/api/log", link: "/api/link",
+  // BLZ-709 (spec D7): the two reads. GETs, answered as JSON and rendered here.
+  show: "/api/ticket", list: "/api/tickets",
 };
 
 /**
@@ -78,11 +81,59 @@ const commaList = (v) => String(v ?? "").split(",").map((s) => s.trim()).filter(
  * non-numeric `--estimate` or `<minutes>` becomes `NaN`, as the local runners' `Number()`
  * does. JSON has no NaN, so it is sent as `null` — and the SERVER refuses that `422`, naming
  * the field. Validation stays on the server, in one place.
- * @returns { path, body } | { error }
+ *
+ * BLZ-709: a read (`show`, `list`) is a GET with its arguments in the query string, `read`
+ * naming the answer's shape for `renderRead`; a write is a POST with `read: false`.
+ * @returns { method, path, body, read, json } | { error }
  */
 export function requestFor(verb, argv) {
   const path = Object.hasOwn(REMOTE_VERBS, verb) ? REMOTE_VERBS[verb] : null;
   if (!path) return { error: `blaze: ${verb} is not available in remote mode` };
+  if (verb === "show" || verb === "list") return readRequestFor(verb, argv);
+  const r = writeRequestFor(verb, path, argv);
+  return r.error ? r : { method: "POST", path: r.path, body: r.body, read: false, json: false };
+}
+
+const LIST_FILTERS = { "--project": "project", "--status": "status", "--type": "type" };
+
+function readRequestFor(verb, argv) {
+  let json = false;
+  if (verb === "show") {
+    const pos = [];
+    for (const a of argv) {
+      if (a === "--json") { json = true; continue; }
+      if (a.startsWith("--")) return { error: `unknown flag: ${a}` };
+      pos.push(a);
+    }
+    if (!pos[0]) return { error: "usage: blaze show <id> [--json]" };
+    return { method: "GET", path: `/api/ticket?id=${encodeURIComponent(pos[0])}`, body: undefined,
+             read: "ticket", json };
+  }
+  const query = new URLSearchParams();
+  let projects = false;
+  for (let i = 0; i < argv.length; i++) {
+    const a = argv[i];
+    if (a === "--json") { json = true; continue; }
+    if (a === "--projects") { projects = true; continue; }
+    if (LIST_FILTERS[a]) {
+      if (argv[i + 1] === undefined) return { error: `blaze list: ${a} needs a value` };
+      query.set(LIST_FILTERS[a], argv[++i]); continue;
+    }
+    if (a.startsWith("--")) return { error: `unknown flag: ${a}` };
+    return { error: "usage: blaze list [--project K] [--status S] [--type T] [--json] | blaze list --projects [--json]" };
+  }
+  if (projects) {
+    if ([...query.keys()].length) {
+      return { error: "blaze list: --projects lists projects and takes no --project, --status or --type" };
+    }
+    return { method: "GET", path: "/api/projects", body: undefined, read: "projects", json };
+  }
+  const q = query.toString();
+  return { method: "GET", path: q ? `/api/tickets?${q}` : "/api/tickets", body: undefined, read: "tickets", json };
+}
+
+/** The six writes' argv → `{ path, body }`, unchanged from BLZ-684. */
+function writeRequestFor(verb, path, argv) {
   const plain = (n, usage, args = argv) => {
     const pos = [];
     for (const a of args) {
@@ -166,6 +217,32 @@ export function failureLine(prefix, origin, e) {
   return `${prefix}: no answer from ${origin} — ${cause}`;
 }
 
+const scalar = (v) => (Array.isArray(v) ? v.join(", ")
+  : v !== null && typeof v === "object" ? JSON.stringify(v) : String(v));
+const isEmpty = (v) => v === null || v === undefined || v === ""
+  || (Array.isArray(v) && v.length === 0);
+const headLine = (t) => [t.id, t.status, t.frontmatter?.type, t.frontmatter?.title]
+  .map((v) => v ?? "-").join("  ");
+
+/**
+ * BLZ-709: what a read prints on stdout. `--json` is the answer's payload, exactly; otherwise
+ * one line per ticket or project, or one ticket's header, fields and body. The count line is
+ * not here: `runRemote` writes it to stderr, so `--json` stdout stays parseable.
+ */
+export function renderRead(req, answer, origin) {
+  if (req.json) return JSON.stringify(answer.ticket ?? answer.tickets ?? answer.projects, null, 2);
+  if (req.read === "ticket") {
+    const t = answer.ticket;
+    const fields = Object.entries(t.frontmatter ?? {})
+      .filter(([k, v]) => !["id", "title", "type", "project"].includes(k) && !isEmpty(v))
+      .map(([k, v]) => `  ${k}: ${scalar(v)}`);
+    return [headLine(t), ...fields, "", t.body ?? ""].join("\n");
+  }
+  if (req.read === "tickets") return answer.tickets.map(headLine).join("\n");
+  return answer.projects.map((p) => `${p.key}  labels: ${(p.labels ?? []).join(", ") || "-"}  `
+    + `components: ${(p.components ?? []).join(", ") || "-"}`).join("\n");
+}
+
 /** The line a successful response prints — the local verb's wording, marked remote. */
 export function successLine(verb, body, answer, origin) {
   const at = `(remote: ${origin})`;
@@ -215,7 +292,7 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
   if (req.error) { err(req.error); return 1; }
   let res;
   try {
-    res = await requestRemote(cfg, "POST", req.path, req.body, { fetch: fetchImpl });
+    res = await requestRemote(cfg, req.method, req.path, req.body, { fetch: fetchImpl });
   } catch (e) {
     // A refused redirect or no answer at all — never a success (`failureLine`).
     err(failureLine(`blaze ${verb}`, cfg.origin, e));
@@ -228,6 +305,11 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
     return 1;
   }
   for (const w of Array.isArray(answer.warnings) ? answer.warnings : []) err(`warning: ${w}`);
-  out(successLine(verb, req.body, answer, cfg.origin));
+  if (!req.read) { out(successLine(verb, req.body, answer, cfg.origin)); return 0; }
+  // BLZ-709: a read. The rendering on stdout, the count on stderr.
+  const text = renderRead(req, answer, cfg.origin);
+  if (text !== "") out(text);
+  if (req.read === "tickets") err(`${answer.tickets.length} ticket(s) (remote: ${cfg.origin})`);
+  if (req.read === "projects") err(`${answer.projects.length} project(s) (remote: ${cfg.origin})`);
   return 0;
 }

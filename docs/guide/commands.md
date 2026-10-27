@@ -855,6 +855,9 @@ two machines creating at once never collide.
 | `blaze resolve <id> <resolution>` | `POST /api/resolve` |
 | `blaze log <id> <minutes> [--date] [--note]` | `POST /api/log` |
 | `blaze link [--rm] <id> <TYPE> <target>` | `POST /api/link` |
+| `blaze show <id> [--json]` | `GET /api/ticket?id=<id>` |
+| `blaze list [--project K] [--status S] [--type T] [--json]` | `GET /api/tickets` |
+| `blaze list --projects [--json]` | `GET /api/projects` |
 
 `POST /api/new` is answered only when the server runs the database write port
 (`BLAZE_WRITE_PORT=db`). On a file board it is refused `409` and `blaze new` prints that message:
@@ -865,7 +868,30 @@ The arguments are the local command's own. Each prints one line ending `(remote:
 or the server's refusal and exit `1`. Every **other** command — `audit`, `reconcile`, `db`,
 `import`, `sprint`, `board`, and the read verbs (`rollup`, `export`, `audit` …) — is refused with
 `blaze: <cmd> is not available in remote mode`: it needs the board's data on this machine.
-Read the board over `GET /api/live` or the page instead. A remote mode set **half-way** (only
+Read the board with `blaze show <id>` and `blaze list` (remote mode), or the page.
+
+**Reading the live board (BLZ-709).** `blaze show` and `blaze list` exist only in remote mode;
+run locally, they are refused (`… runs in remote mode only`) — read `projects/` or run
+`blaze board` instead. Any token that carries `read` will do, a `viewer`'s included.
+
+- `blaze show <id>` prints `<id>  <status>  <type>  <title>`, then each other frontmatter field
+  as `  <key>: <value>` (lists joined with `, `, empty fields skipped), a blank line, and the
+  body. An unknown id is the server's `404`, exit `1`.
+- `blaze list` prints one `<id>  <status>  <type>  <title>` line per ticket, sorted by project
+  and then id number. `--project`, `--status` and `--type` filter by exact match, and combine.
+- `blaze list --projects` prints one `<KEY>  labels: …  components: …` line per project: the
+  taxonomy a valid `blaze new` needs. It takes no filters.
+- `--json` prints the answer's payload instead (the ticket, the ticket array, or the project
+  array), and nothing else, so it pipes straight to `jq`. The count line
+  (`2 ticket(s) (remote: <origin>)`) goes to **stderr** in every form.
+
+Over HTTP, each route needs the `read` scope: `GET /api/ticket?id=` answers
+`{ ok, ticket: { id, project, status, frontmatter, body } }` (`400` without an id, `404` for an
+unknown one, `409` when a file board holds two records with that id);
+`GET /api/tickets?project=&status=&type=` answers `{ ok, tickets }`, each without its body; and
+`GET /api/projects` answers `{ ok, projects: [{ key, labels, components, requireLabels,
+requireComponents, requireWorklogBeforeTerminal }] }`. No answer carries a server filesystem
+path: a ticket's file and a project's `codeRepos` stay on the server. A remote mode set **half-way** (only
 one of the two variables) is an error for every command, never a silent fallback to writing
 locally. `BLAZE_READONLY` still refuses a write first.
 

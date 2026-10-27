@@ -83,6 +83,10 @@ const SUBCOMMANDS = {
   link: { file: "link-runner.mjs", desc: "add/remove a link between tickets", mutates: true },
   resolve: { file: "resolve-runner.mjs", desc: "set a ticket's resolution", mutates: true },
   log: { file: "log-runner.mjs", desc: "log worked minutes against a ticket", mutates: true },
+  // BLZ-709 (spec D7): reads of the LIVE board, over HTTP. No runner: in remote mode they go
+  // to remote-client.mjs like the six writes, and anywhere else they are refused below.
+  show: { file: null, desc: "show one ticket (remote mode — BLAZE_REMOTE_URL)", mutates: false, remoteOnly: true },
+  list: { file: null, desc: "list tickets, or --projects (remote mode — BLAZE_REMOTE_URL)", mutates: false, remoteOnly: true },
   rollup: { file: "rollup-runner.mjs", desc: "print rolled-up estimate/worklog totals", mutates: false },
   // BLZ-682: replaces blaze-pm's build_matrices.py. It writes files, so it mutates; `--check`
   // writes nothing and is that verb's read-only invocation (BLZ-499's mechanism).
@@ -163,7 +167,8 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
 }
 
 // BLZ-684 (spec §5.4): REMOTE MODE. With BLAZE_REMOTE_URL and BLAZE_TOKEN both set, the six
-// ticket verbs go to the board server over HTTP and nothing else runs here: every other command
+// ticket verbs and the two reads, `show` and `list` (BLZ-709), go to the board server over HTTP
+// and nothing else runs here: every other command
 // needs the board's data on this machine, so it is refused rather than run against whatever
 // local tree happens to be in the working directory. Half-set is an error for EVERY command —
 // never a silent fallback to writing locally. Decided after the read-only gate (a refused write
@@ -185,6 +190,13 @@ if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
     await new Promise((res) => process.stdout.write("", res));
     process.exit(process.exitCode);
   }
+}
+
+// BLZ-709: `show` and `list` read the live board through its server and have no local runner.
+// Outside remote mode they are refused by name rather than read from whatever tree is here.
+if (sub.remoteOnly) {
+  console.error(`blaze: ${key} reads the live board over HTTP and runs in remote mode only — set BLAZE_REMOTE_URL and BLAZE_TOKEN. Locally, read projects/ or run \`blaze board\`.`);
+  process.exit(1);
 }
 
 // BLZ-708 (G-engine): a board whose config names the postgres driver refuses a file write while
@@ -215,7 +227,8 @@ if (sub.mutates && !readOnlyInvocation && key !== "db" && key !== "init") {
 //            losing the whole hygiene report) and it stays closed.
 //   init   — runs BEFORE a board exists, so there is no config to validate.
 //
-// That leaves 20 of the 22 subcommands in `SUBCOMMANDS` running this check.
+// That leaves 22 of the 24 subcommands in `SUBCOMMANDS` running this check — of which
+// `show` and `list` (BLZ-709) never arrive, being remote-only and refused or sent above.
 //
 // The check is NOT in `ambientSchemaOverride`, and must never be: `TYPES` and
 // `WORKFLOWS` are module-scope constants resolved through it at IMPORT time, so a throw
