@@ -166,15 +166,15 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
   process.exit(1);
 }
 
-// BLZ-684 (spec §5.4): REMOTE MODE. With BLAZE_REMOTE_URL and BLAZE_TOKEN both set, the six
-// ticket verbs and the two reads, `show` and `list` (BLZ-709), go to the board server over HTTP
-// and nothing else runs here: every other command
+// BLZ-684 (spec §5.4): REMOTE MODE. With BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE,
+// BLZ-710) both set, the six ticket verbs and the two reads, `show` and `list` (BLZ-709), go to
+// the board server over HTTP and nothing else runs here: every other command
 // needs the board's data on this machine, so it is refused rather than run against whatever
 // local tree happens to be in the working directory. Half-set is an error for EVERY command —
 // never a silent fallback to writing locally. Decided after the read-only gate (a refused write
 // is refused in both modes) and before the schema preflight (there is no local board to judge).
-// Imported only when either variable is set, so a local invocation loads nothing new.
-if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
+// Imported only when any of the three is set, so a local invocation loads nothing new.
+if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN || process.env.BLAZE_TOKEN_FILE) {
   const { remoteFrom, runRemote, REMOTE_VERBS } = await import("./remote-client.mjs");
   const remote = remoteFrom(process.env);
   if (remote.error) { console.error(remote.error); process.exit(1); }
@@ -195,7 +195,7 @@ if (process.env.BLAZE_REMOTE_URL || process.env.BLAZE_TOKEN) {
 // BLZ-709: `show` and `list` read the live board through its server and have no local runner.
 // Outside remote mode they are refused by name rather than read from whatever tree is here.
 if (sub.remoteOnly) {
-  console.error(`blaze: ${key} reads the live board over HTTP and runs in remote mode only — set BLAZE_REMOTE_URL and BLAZE_TOKEN. Locally, read projects/ or run \`blaze board\`.`);
+  console.error(`blaze: ${key} reads the live board over HTTP and runs in remote mode only — set BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE). Locally, read projects/ or run \`blaze board\`.`);
   process.exit(1);
 }
 

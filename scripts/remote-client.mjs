@@ -1,8 +1,8 @@
 // scripts/remote-client.mjs — `blaze` in remote mode (BLZ-684, spec §5.4).
 //
-// When BLAZE_REMOTE_URL and BLAZE_TOKEN are BOTH set, cli.mjs sends `new`, `move`, `edit`,
-// `resolve`, `log` and `link` to the board server's matching `POST /api/*` endpoint and prints
-// what it answered; `show` and `list` (BLZ-709) send a `GET /api/ticket`, `/api/tickets` or
+// When BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE, BLZ-710) are BOTH set, cli.mjs
+// sends `new`, `move`, `edit`, `resolve`, `log` and `link` to the board server's matching
+// `POST /api/*` endpoint and prints what it answered; `show` and `list` (BLZ-709) send a `GET /api/ticket`, `/api/tickets` or
 // `/api/projects` and render the answer. The verb's logic and its validation run ONCE, on the server, against the
 // store the server owns — this module only turns argv into a request and a response into a
 // line. Every other command is refused in remote mode (cli.mjs), because it needs the board's
@@ -17,9 +17,11 @@
 //
 // Built-in `fetch` only: no dependency, and `fetch` is injectable so tests can watch every call.
 import { isLoopback } from "./model/serve-auth.mjs";
+import { readRegularFileSync } from "./model/regular-file.mjs";
 
 export const REMOTE_URL_ENV = "BLAZE_REMOTE_URL";
 export const REMOTE_TOKEN_ENV = "BLAZE_TOKEN";
+export const REMOTE_TOKEN_FILE_ENV = "BLAZE_TOKEN_FILE";
 
 /** The verbs remote mode forwards, and the endpoint each one calls. */
 export const REMOTE_VERBS = {
@@ -29,17 +31,29 @@ export const REMOTE_VERBS = {
   show: "/api/ticket", list: "/api/tickets",
 };
 
+/** "The credential" in a message: either source counts (BLZ-710). */
+const CREDENTIAL = `${REMOTE_TOKEN_ENV} (or ${REMOTE_TOKEN_FILE_ENV})`;
+
 /**
  * Is remote mode on, and is it configured sanely?
+ *
+ * BLZ-710: the token is `BLAZE_TOKEN` when that is non-blank; otherwise, when
+ * `BLAZE_TOKEN_FILE` names a path, the trimmed content of that file (mode 0600, so an agent's
+ * shell never holds the token itself). The file is read as a REGULAR file only — a FIFO or a
+ * directory is refused, never opened and waited on. Its CONTENT never appears in any message
+ * here: a refusal names the variable, the path and an error code, nothing read from the file.
  * @returns { remote: false } | { remote: true, origin, token } | { error }
  */
-export function remoteFrom(env = process.env) {
+export function remoteFrom(env = process.env, { readFile = (p) => readRegularFileSync(p, "utf8") } = {}) {
   const url = String(env[REMOTE_URL_ENV] ?? "").trim();
-  const token = String(env[REMOTE_TOKEN_ENV] ?? "").trim();
-  if (!url && !token) return { remote: false };
-  if (!url || !token) {
-    const [set, unset] = url ? [REMOTE_URL_ENV, REMOTE_TOKEN_ENV] : [REMOTE_TOKEN_ENV, REMOTE_URL_ENV];
-    return { error: `blaze: remote mode needs both ${REMOTE_URL_ENV} and ${REMOTE_TOKEN_ENV}; `
+  const envToken = String(env[REMOTE_TOKEN_ENV] ?? "").trim();
+  const tokenPath = envToken ? "" : String(env[REMOTE_TOKEN_FILE_ENV] ?? "").trim();
+  const credential = envToken || tokenPath;
+  if (!url && !credential) return { remote: false };
+  if (!url || !credential) {
+    const [set, unset] = url ? [REMOTE_URL_ENV, CREDENTIAL]
+      : [envToken ? REMOTE_TOKEN_ENV : REMOTE_TOKEN_FILE_ENV, REMOTE_URL_ENV];
+    return { error: `blaze: remote mode needs both ${REMOTE_URL_ENV} and ${CREDENTIAL}; `
       + `${set} is set and ${unset} is not. Refusing rather than writing to a local board — `
       + `set ${unset}, or unset ${set} to work locally.` };
   }
@@ -61,7 +75,18 @@ export function remoteFrom(env = process.env) {
     return { error: `blaze: ${REMOTE_URL_ENV} must be the board's origin only, e.g. ${u.origin} — `
       + "no path, query or fragment" };
   }
-  if (/\s/.test(token)) return { error: `blaze: ${REMOTE_TOKEN_ENV} contains whitespace` };
+  let token = envToken;
+  if (token) {
+    if (/\s/.test(token)) return { error: `blaze: ${REMOTE_TOKEN_ENV} contains whitespace` };
+  } else {
+    // The file's content stays out of every message below: path and code only.
+    const where = `${REMOTE_TOKEN_FILE_ENV} (${tokenPath})`;
+    try { token = String(readFile(tokenPath)).trim(); } catch (e) {
+      return { error: `blaze: ${where} could not be read (${e?.code ?? "error"})` };
+    }
+    if (!token) return { error: `blaze: ${where} is empty` };
+    if (/\s/.test(token)) return { error: `blaze: ${where} contains whitespace` };
+  }
   return { remote: true, origin: u.origin, token };
 }
 
@@ -204,6 +229,10 @@ function writeRequestFor(verb, path, argv) {
   return r.error ? r : { path, body: { id: r.pos[0], type: r.pos[1], target: r.pos[2], remove } };
 }
 
+/** BLZ-710: the `fetch` failure causes that mean "this machine does not trust the server's CA". */
+export const TLS_TRUST_CODES = new Set(["SELF_SIGNED_CERT_IN_CHAIN", "UNABLE_TO_VERIFY_LEAF_SIGNATURE",
+  "DEPTH_ZERO_SELF_SIGNED_CERT", "UNABLE_TO_GET_ISSUER_CERT_LOCALLY"]);
+
 /**
  * Why a request got no usable answer, as one line (BLZ-691). `redirect: "error"` makes fetch
  * reject a 3xx with `TypeError("fetch failed", { cause: "unexpected redirect" })`; the server
@@ -211,6 +240,13 @@ function writeRequestFor(verb, path, argv) {
  * fetch's error never carries the request headers, so the token cannot appear in it.
  */
 export function failureLine(prefix, origin, e) {
+  // BLZ-710: a private CA's certificate is the common first-run failure. Name the fix.
+  const code = e?.cause?.code;
+  if (TLS_TRUST_CODES.has(code)) {
+    return `${prefix}: ${origin}'s TLS certificate is not trusted on this machine (${code}). `
+      + "Point NODE_EXTRA_CA_CERTS at the CA certificate that signed it — e.g. "
+      + "NODE_EXTRA_CA_CERTS=/path/to/ca.crt — and run again.";
+  }
   const cause = String(e?.cause?.message ?? e?.message ?? e);
   if (cause === "unexpected redirect") {
     return `${prefix}: refused a redirect from ${origin} — the token is sent to that origin only, never on to where it points`;

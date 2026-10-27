@@ -841,8 +841,10 @@ this page is the reference.
 
 ## Remote mode
 
-With **both** `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` set, `blaze` writes to a board server over
-HTTP instead of to a local tree (BLZ-684). This is how a second machine writes to the live
+With **both** `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` (or `BLAZE_TOKEN_FILE`) set, `blaze` writes
+to a board server over HTTP instead of to a local tree (BLZ-684). Running a deployed board —
+config, admin verbs, one token per machine, backups — is in
+[Running a live board](../operations/live-board.md). This is how a second machine writes to the live
 board once it is on Postgres (spec §5.4): the verb runs once, on the server, against the store
 the server owns, and under `BLAZE_WRITE_PORT=db` the id comes from the database's counter, so
 two machines creating at once never collide.
@@ -895,13 +897,32 @@ path: a ticket's file and a project's `codeRepos` stay on the server. A remote m
 one of the two variables) is an error for every command, never a silent fallback to writing
 locally. `BLAZE_READONLY` still refuses a write first.
 
+**The token from a file (BLZ-710).** `BLAZE_TOKEN_FILE=/path/to/token` names a file (mode
+`0600`) holding the token; its content, trimmed, is used when `BLAZE_TOKEN` is unset or blank.
+`BLAZE_TOKEN` wins when both are set, and the URL plus the file alone is a complete remote mode.
+For the half-set rule either one counts as the credential: the file with no URL is refused
+(`remote mode needs both BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE)`). The file is
+read as a regular file only — a FIFO or a directory is refused, never waited on — and a file
+that cannot be read, is empty, or holds whitespace inside the token is refused with one line
+naming the variable and the path (`blaze: BLAZE_TOKEN_FILE (<path>) could not be read (ENOENT)`,
+`… is empty`, `… contains whitespace`), never its content.
+
+**A server behind a private CA.** When the certificate is not trusted on this machine
+(`SELF_SIGNED_CERT_IN_CHAIN`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `DEPTH_ZERO_SELF_SIGNED_CERT` or
+`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`), the failure line names the code and the fix:
+`blaze <verb>: <origin>'s TLS certificate is not trusted on this machine (<code>). Point
+NODE_EXTRA_CA_CERTS at the CA certificate that signed it — e.g.
+NODE_EXTRA_CA_CERTS=/path/to/ca.crt — and run again.` Every other network failure keeps
+`blaze <verb>: no answer from <origin> — <cause>`.
+
 **Scope the two variables to the command, never to your whole shell.** Exported, they turn every
 `blaze` write anywhere on the machine into a write to that server — an agent working on a
 local board, a script, anything. Prefer
-`BLAZE_REMOTE_URL=https://blaze.example.com BLAZE_TOKEN=$(cat ~/.blaze-token) blaze new …`,
+`BLAZE_REMOTE_URL=https://blaze.example.com BLAZE_TOKEN_FILE=/path/to/token blaze new …`,
 or a dedicated shell (or a `direnv` directory) that exists only to write to the server. The
-engine's own test suite deletes both before any test runs (`tests/setup/no-remote.mjs`), so an
-exported pair can never turn `npm test` into writes to a real board.
+engine's own test suite deletes all three (`BLAZE_TOKEN_FILE` included) before any test runs
+(`tests/setup/no-remote.mjs`), so an exported pair can never turn `npm test` into writes to a
+real board.
 
 The token is sent to `BLAZE_REMOTE_URL`'s origin and nowhere else: every request is built
 against that origin, a redirect is refused rather than followed (`blaze <verb>: refused a
@@ -944,7 +965,9 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | `BLAZE_WRITE_PORT` | Where a write goes: `fs`, `dual` or `db`. **Unset is not the same as `fs`** (BLZ-708): on a board whose `blaze.config.json` names `database.driver: "postgres"`, an unset value makes every file write refuse, naming this variable; an explicit `fs` states that a file write is deliberate. An empty or whitespace value counts as unset. Remote mode, `blaze db *` and `blaze init` are never refused. On any other board, unset behaves as `fs`. See [A Postgres board refuses file writes](../../AGENTS.md#a-postgres-board-refuses-file-writes). | unset |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
 | `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
-| `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the two is an error for every command. | unset |
+| `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the URL and the credential (this or `BLAZE_TOKEN_FILE`) is an error for every command. | unset |
+| `BLAZE_TOKEN_FILE` | A file (mode `0600`) holding remote mode's token, used when `BLAZE_TOKEN` is unset or blank (BLZ-710). Read as a regular file only; an unreadable, empty or whitespace-bearing file is refused naming the path, never the content. See [remote mode](#remote-mode). | unset |
+| `NODE_EXTRA_CA_CERTS` | Node's own: a PEM file of extra CA certificates to trust. Set it to the CA that signed a remote board's certificate when that CA is private; remote mode's TLS-trust failure names it. | unset |
 
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
 `blaze.config.json`, then 4321.
