@@ -154,11 +154,19 @@ what it would change and writes nothing.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--apply` | `--apply` writes the moves: to the ticket files on a file board (`fs`, `dual`), or to the database under `BLAZE_WRITE_PORT=db`. **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where. Reconcile never pushes either — push is hardcoded off. | off (dry-run) |
+| `--apply` | `--apply` writes the moves to the ticket files on a file board (`fs`, `dual`). **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where. Reconcile never pushes either — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
 | `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not write moves to fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
 | `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. | all tickets in scope |
 | `--quiet` | *Print only on change.* It gates whole-run lines only — never per-ticket output. Suppressed on a pass that decided nothing: `reconcile: no code-bound change found — nothing to do.`, `reconcile: no projects configured — nothing to reconcile.`, and `reconcile: scanned project(s): …` (that last one is printed anyway whenever `--project` was given, because a filtered run must never read as a whole-board one). Per-ticket `moved` / `would move` lines, the dry-run tail, and every `WARNING` / `FORGE UNREADABLE` / `FORGE DATA` / `NEEDS ATTENTION` line on stderr are printed under `--quiet` exactly as without it. | off |
+
+**A db-mode board refuses (BLZ-723).** Under `BLAZE_WRITE_PORT=db` (a deployed board) status
+changes only by an explicit `blaze move` (remote mode, on a deployed board), so `blaze reconcile`
+exits `1` with a message naming that rule, and does so on a dry run too: the preview of a board
+that never reconciles is noise. `GET /api/reconcile-preview` answers `409`, the page omits the
+Reconcile button, and `blaze start`'s reconcile loop refuses each pass without publishing a feed
+event (the loop's own "started" status still appears). In db mode `POST /control/reconcile/run`
+answers 204 and does nothing.
 
 PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub
 Enterprise Server only. On any other remote, `in-review` is unreachable and
@@ -841,8 +849,10 @@ this page is the reference.
 
 ## Remote mode
 
-With **both** `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` set, `blaze` writes to a board server over
-HTTP instead of to a local tree (BLZ-684). This is how a second machine writes to the live
+With **both** `BLAZE_REMOTE_URL` and `BLAZE_TOKEN` (or `BLAZE_TOKEN_FILE`) set, `blaze` writes
+to a board server over HTTP instead of to a local tree (BLZ-684). Running a deployed board —
+config, admin verbs, one token per machine, backups — is in
+[Running a live board](../operations/live-board.md). This is how a second machine writes to the live
 board once it is on Postgres (spec §5.4): the verb runs once, on the server, against the store
 the server owns, and under `BLAZE_WRITE_PORT=db` the id comes from the database's counter, so
 two machines creating at once never collide.
@@ -855,6 +865,9 @@ two machines creating at once never collide.
 | `blaze resolve <id> <resolution>` | `POST /api/resolve` |
 | `blaze log <id> <minutes> [--date] [--note]` | `POST /api/log` |
 | `blaze link [--rm] <id> <TYPE> <target>` | `POST /api/link` |
+| `blaze show <id> [--json]` | `GET /api/ticket?id=<id>` |
+| `blaze list [--project K] [--status S] [--type T] [--json]` | `GET /api/tickets` |
+| `blaze list --projects [--json]` | `GET /api/projects` |
 
 `POST /api/new` is answered only when the server runs the database write port
 (`BLAZE_WRITE_PORT=db`). On a file board it is refused `409` and `blaze new` prints that message:
@@ -865,17 +878,59 @@ The arguments are the local command's own. Each prints one line ending `(remote:
 or the server's refusal and exit `1`. Every **other** command — `audit`, `reconcile`, `db`,
 `import`, `sprint`, `board`, and the read verbs (`rollup`, `export`, `audit` …) — is refused with
 `blaze: <cmd> is not available in remote mode`: it needs the board's data on this machine.
-Read the board over `GET /api/live` or the page instead. A remote mode set **half-way** (only
+Read the board with `blaze show <id>` and `blaze list` (remote mode), or the page.
+
+**Reading the live board (BLZ-709).** `blaze show` and `blaze list` exist only in remote mode;
+run locally, they are refused (`… runs in remote mode only`) — read `projects/` or run
+`blaze board` instead. Any token that carries `read` will do, a `viewer`'s included.
+
+- `blaze show <id>` prints `<id>  <status>  <type>  <title>`, then each other frontmatter field
+  as `  <key>: <value>` (lists joined with `, `, empty fields skipped), a blank line, and the
+  body. An unknown id is the server's `404`, exit `1`.
+- `blaze list` prints one `<id>  <status>  <type>  <title>` line per ticket, sorted by project
+  and then id number. `--project`, `--status` and `--type` filter by exact match, and combine.
+- `blaze list --projects` prints one `<KEY>  labels: …  components: …` line per project: the
+  taxonomy a valid `blaze new` needs. It takes no filters.
+- `--json` prints the answer's payload instead (the ticket, the ticket array, or the project
+  array), and nothing else, so it pipes straight to `jq`. The count line
+  (`2 ticket(s) (remote: <origin>)`) goes to **stderr** in every form.
+
+Over HTTP, each route needs the `read` scope: `GET /api/ticket?id=` answers
+`{ ok, ticket: { id, project, status, frontmatter, body } }` (`400` without an id, `404` for an
+unknown one, `409` when a file board holds two records with that id);
+`GET /api/tickets?project=&status=&type=` answers `{ ok, tickets }`, each without its body, or `422` naming a project, status or type the board does not know (`blaze list` reports it and exits 1); and
+`GET /api/projects` answers `{ ok, projects: [{ key, labels, components, requireLabels,
+requireComponents, requireWorklogBeforeTerminal }] }`. No answer carries a server filesystem
+path: a ticket's file and a project's `codeRepos` stay on the server. A remote mode set **half-way** (only
 one of the two variables) is an error for every command, never a silent fallback to writing
 locally. `BLAZE_READONLY` still refuses a write first.
+
+**The token from a file (BLZ-710).** `BLAZE_TOKEN_FILE=/path/to/token` names a file (mode
+`0600`) holding the token; its content, trimmed, is used when `BLAZE_TOKEN` is unset or blank.
+`BLAZE_TOKEN` wins when both are set, and the URL plus the file alone is a complete remote mode.
+For the half-set rule either one counts as the credential: the file with no URL is refused
+(`remote mode needs both BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE)`). The file is
+read as a regular file only — a FIFO or a directory is refused, never waited on — and a file
+that cannot be read, is empty, or holds whitespace inside the token is refused with one line
+naming the variable and the path (`blaze: BLAZE_TOKEN_FILE (<path>) could not be read (ENOENT)`,
+`… is empty`, `… contains whitespace`), never its content.
+
+**A server behind a private CA.** When the certificate is not trusted on this machine
+(`SELF_SIGNED_CERT_IN_CHAIN`, `UNABLE_TO_VERIFY_LEAF_SIGNATURE`, `DEPTH_ZERO_SELF_SIGNED_CERT` or
+`UNABLE_TO_GET_ISSUER_CERT_LOCALLY`), the failure line names the code and the fix:
+`blaze <verb>: <origin>'s TLS certificate is not trusted on this machine (<code>). Point
+NODE_EXTRA_CA_CERTS at the CA certificate that signed it — e.g.
+NODE_EXTRA_CA_CERTS=/path/to/ca.crt — and run again.` Every other network failure keeps
+`blaze <verb>: no answer from <origin> — <cause>`.
 
 **Scope the two variables to the command, never to your whole shell.** Exported, they turn every
 `blaze` write anywhere on the machine into a write to that server — an agent working on a
 local board, a script, anything. Prefer
-`BLAZE_REMOTE_URL=https://blaze.example.com BLAZE_TOKEN=$(cat ~/.blaze-token) blaze new …`,
+`BLAZE_REMOTE_URL=https://blaze.example.com BLAZE_TOKEN_FILE=/path/to/token blaze new …`,
 or a dedicated shell (or a `direnv` directory) that exists only to write to the server. The
-engine's own test suite deletes both before any test runs (`tests/setup/no-remote.mjs`), so an
-exported pair can never turn `npm test` into writes to a real board.
+engine's own test suite deletes all three (`BLAZE_TOKEN_FILE` included) before any test runs
+(`tests/setup/no-remote.mjs`), so an exported pair can never turn `npm test` into writes to a
+real board.
 
 The token is sent to `BLAZE_REMOTE_URL`'s origin and nowhere else: every request is built
 against that origin, a redirect is refused rather than followed (`blaze <verb>: refused a
@@ -917,8 +972,10 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
 | `BLAZE_WRITE_PORT` | Where a write goes: `fs`, `dual` or `db`. **Unset is not the same as `fs`** (BLZ-708): on a board whose `blaze.config.json` names `database.driver: "postgres"`, an unset value makes every file write refuse, naming this variable; an explicit `fs` states that a file write is deliberate. An empty or whitespace value counts as unset. Remote mode, `blaze db *` and `blaze init` are never refused. On any other board, unset behaves as `fs`. See [A Postgres board refuses file writes](../../AGENTS.md#a-postgres-board-refuses-file-writes). | unset |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
-| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
-| `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the two is an error for every command. | unset |
+| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN` (or `BLAZE_TOKEN_FILE`). `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
+| `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the URL and the credential (this or `BLAZE_TOKEN_FILE`) is an error for every command. | unset |
+| `BLAZE_TOKEN_FILE` | A file (mode `0600`) holding remote mode's token, used when `BLAZE_TOKEN` is unset or blank (BLZ-710). Read as a regular file only; an unreadable, empty or whitespace-bearing file is refused naming the path, never the content. See [remote mode](#remote-mode). | unset |
+| `NODE_EXTRA_CA_CERTS` | Node's own: a PEM file of extra CA certificates to trust. Set it to the CA that signed a remote board's certificate when that CA is private; remote mode's TLS-trust failure names it. | unset |
 
 Port resolution order: `PORT` env, then `BLAZE_PORT` env, then `port` in
 `blaze.config.json`, then 4321.

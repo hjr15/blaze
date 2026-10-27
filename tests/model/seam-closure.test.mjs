@@ -1039,8 +1039,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // BLZ-690: `viewEnabled` is the configured-views rule — it reads the board config (memoised
   // `loadConfig`) and writes nothing.
   ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml", "viewEnabled"] }],
+  // BLZ-723: DB_BOARD_RECONCILE_REFUSAL is the db-board refusal text, a string constant.
   ["reconcile.mjs", { writes: ["buildBranchMap", "reconcile"], sanctioned: [],
-    inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
+    inert: ["DB_BOARD_RECONCILE_REFUSAL", "PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
       "idsFromSubject", "claimCorroborated", "prTitleClaim", "betterPr", "buildPrMap",
       "ambiguousDeliverers", "remoteHost", "classifyRemote", "parseRemoteUrls", "gatherPrs",
       "recordablePr"] }],
@@ -2027,9 +2028,9 @@ const WRITE_ALLOWED = new Map([
   // claim on it, and it must be the FIFO-safe primitive precisely because the operator may
   // point BLZ_MEASURE at anything. Named to that one member: a ticket write, or a second
   // primitive, appearing in reconcile still reddens.
-  // BLZ-670: the CLI resolves both ports in db mode (resolvePorts).
+  // BLZ-723: resolvePorts dropped — db mode is refused before the CLI resolves a port.
   // BLZ-254: commitOrQueue/stageFor removed — reconcile no longer stages its writes (spec §5.5).
-  ["reconcile.mjs", ["appendRegularFileSync", "fsStorage", "resolvePorts"]],
+  ["reconcile.mjs", ["appendRegularFileSync", "fsStorage"]],
   // BLZ-535 round 5, D3. The seven below take a WRITE PRIMITIVE off an allowlisted module —
   // `saveState`, `appendEntry`, `acquireLock` and their kin, each of which puts caller-chosen
   // bytes at a caller-chosen root. Round 4 could not see any of them, because it pinned one

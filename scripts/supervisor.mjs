@@ -10,7 +10,7 @@ import { pageHtml } from "./serve.mjs";
 import { viewEnvelope, viewEnabled, CSRF } from "./views/page.mjs";
 import { dbTransitions } from "./model/transitions-db.mjs";
 import { createBus } from "./event-bus.mjs";
-import { reconcile } from "./reconcile.mjs";
+import { reconcile, DB_BOARD_RECONCILE_REFUSAL } from "./reconcile.mjs";
 import { resolvePorts, resolveReadStorage, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
 import { groomOnce, groomOnceDb } from "./loops/groomer.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -289,6 +289,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
   // exists so a test can drive a genuine preview through this SAME publish path (the
   // timer and `/control/reconcile/run` both call this with no arguments, i.e. applying).
   async function runReconcile({ dryRun = false } = {}) {
+    // BLZ-723: a db-mode board moves tickets only by `blaze move`. Refused before any work and
+    // with no feed event: a standing refusal on a 60-second timer is not news.
+    if (resolveWriteMode() === "db") return { ok: false, error: DB_BOARD_RECONCILE_REFUSAL };
     if (!listProjects(cfg).length || loops.reconcile.busy) return;
     loops.reconcile.busy = true;
     let ports = null;
@@ -299,9 +302,9 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
         const refusal = fsWriteRefusal({ config: cfg, what: "reconcile" });
         if (refusal) throw new Error(refusal);
       }
-      // BLZ-670: the same rule as reconcile's CLI — only db mode opens a database port, fs and
-      // dual resolve a reader alone (dual unchanged). A resolver refusal lands in the catch.
-      ports = await (resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)({ dataRoot: root, projectsDir });
+      // BLZ-670: fs and dual resolve a reader alone (db mode is refused at the top of this
+      // function). A resolver refusal lands in the catch.
+      ports = await resolveReadStorage({ dataRoot: root, projectsDir });
       // BLZ-133: reconcile THIS app's board. Omitting root made it resolve the
       // ambient tree — the wrong board whenever the app was started against an
       // explicit root, and now a throw rather than silently reconciling nothing.
@@ -620,6 +623,7 @@ export function createApp(cfg, { root = resolveRoots().dataRoot, identity = load
       let html;
       try {
         html = await reading(async (rs, mode) => pageHtml({
+          reconcile: mode !== "db",
           transitions: await dbTransitions(rs, mode, u.searchParams.get("view") || "board", projectsDir,
             { enabled: viewEnabled(u.searchParams.get("view") || "board", undefined, projectsDir) }),
           project: u.searchParams.get("project") || "all",

@@ -14,8 +14,8 @@ import { createServer } from "node:http";
 import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
-import { loadConfig, listProjects, resolveRoots } from "./config.mjs";
-import { resolvePorts, withReadStorage } from "./model/write-port-resolve.mjs";
+import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
+import { resolvePorts, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
@@ -23,6 +23,9 @@ import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
 import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
+import { ticketJson } from "./model/ticket-json.mjs";
+import { WORKFLOWS } from "./model/workflows.mjs";
+import { isType } from "./model/schema.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
@@ -712,6 +715,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {
+      // BLZ-724: the Live view's data honours `views.live` like `/view/live` does. The feed is a
+      // local file, so a board served from elsewhere (a deployed db-mode board) turns it off.
+      if (!viewEnabled("live", views, projectsDir)) return json(404, { errors: ["the Live view is disabled on this board (views.live: false)"] });
       // BLZ-519. `liveModel` calls `buildIndex` on its second line, so a board file the
       // walk REFUSES — or one `parseTicket` throws on — arrives here, not just an
       // unreadable activity feed. Before this catch that throw ended the PROCESS.
@@ -746,7 +752,76 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         return json(500, { errors: ["panel render failed"] });
       }
     }
+    // BLZ-709 (spec D7): the remote CLI's reads — `blaze show` and `blaze list`. JSON for an
+    // agent with no board checkout. Every ticket goes out through `ticketJson`, an allowlist
+    // that drops the record's server path; every failure is logged here, with the path, and
+    // answered with a sentence that names none.
+    if (req.method === "GET" && u.pathname === "/api/ticket") {
+      const id = u.searchParams.get("id");
+      if (!id) return json(400, { ok: false, errors: ["id is required"] });
+      try {
+        return await reading(async (rs) => {
+          const r = await rs.getTicket(projectsDir, id);
+          if (r?.duplicates) {
+            return json(409, { ok: false, errors: [`${id} is ambiguous: ${r.duplicates.length} records carry it`] });
+          }
+          if (!r?.found) return json(404, { ok: false, errors: ["not found"] });
+          return json(200, { ok: true, ticket: ticketJson(r.found) });
+        });
+      } catch (e) {
+        console.error("blaze: /api/ticket could not read the board:", boardFailureReason(e));
+        return json(500, { errors: ["the board could not be read"] });
+      }
+    }
+    if (req.method === "GET" && u.pathname === "/api/tickets") {
+      const want = { project: u.searchParams.get("project"), status: u.searchParams.get("status"),
+                     type: u.searchParams.get("type") };
+      // BLZ-709 review M6: a value the board does not know is a refusal naming it, never an
+      // empty 200 an agent would read as "no such ticket" (ADR-0025). Statuses and types come
+      // from the same registries the rest of the engine validates against.
+      const knownStatuses = new Set(Object.values(WORKFLOWS).flatMap((w) => w.statuses));
+      const unknown = [];
+      if (want.project && !listProjects(cfgFor(root)).includes(want.project)) unknown.push(`unknown project: ${want.project}`);
+      if (want.status && !knownStatuses.has(want.status)) unknown.push(`unknown status: ${want.status}`);
+      if (want.type && !isType(want.type)) unknown.push(`unknown type: ${want.type}`);
+      if (unknown.length) return json(422, { ok: false, errors: unknown });
+      const num = (r) => Number(/-(\d+)$/.exec(String(r.frontmatter?.id ?? ""))?.[1] ?? 0);
+      const proj = (r) => String(r.frontmatter?.project ?? r.project ?? "");
+      try {
+        return await reading(async (rs) => {
+          const tickets = (await allTickets(rs))
+            .filter((r) => (!want.project || proj(r) === want.project)
+              && (!want.status || r.status === want.status)
+              && (!want.type || r.frontmatter?.type === want.type))
+            .sort((a, b) => proj(a).localeCompare(proj(b)) || num(a) - num(b));
+          return json(200, { ok: true, tickets: tickets.map((r) => ticketJson(r, { body: false })) });
+        });
+      } catch (e) {
+        console.error("blaze: /api/tickets could not read the board:", boardFailureReason(e));
+        return json(500, { errors: ["the board could not be read"] });
+      }
+    }
+    if (req.method === "GET" && u.pathname === "/api/projects") {
+      // The taxonomy a caller needs to write a valid ticket, and nothing else: never
+      // `codeRepos` or `codeRepoPaths`, which are paths on this machine.
+      try {
+        return await reading(async () => json(200, { ok: true, projects: listProjects(cfgFor(root)).map((key) => {
+          const p = loadProject(key, { root, projectsDir, allowMissing: true });
+          return { key, labels: p.labels ?? [], components: p.components ?? [],
+                   requireLabels: Boolean(p.requireLabels), requireComponents: Boolean(p.requireComponents),
+                   requireWorklogBeforeTerminal: Boolean(p.requireWorklogBeforeTerminal) };
+        }) }));
+      } catch (e) {
+        console.error("blaze: /api/projects could not read the board:", boardFailureReason(e));
+        return json(500, { errors: ["the board could not be read"] });
+      }
+    }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
+      // BLZ-723: a db-mode board moves tickets only by `blaze move`; there is nothing to preview.
+      if (resolveWriteMode() === "db") {
+        const { DB_BOARD_RECONCILE_REFUSAL } = await import("./reconcile.mjs");
+        return json(409, { ok: false, error: DB_BOARD_RECONCILE_REFUSAL, changes: [] });
+      }
       // BLZ-405: `reconcilePreview` is the one place this shape is built — see its own
       // comment for why `r.ok` matters and why `projects` is never passed here.
       // BLZ-670: a board whose ports cannot be resolved is a 503 (fixable), not a crash.
@@ -800,7 +875,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       let html;
       try {
         html = await reading(async (rs, mode) => pageHtml({ project, focus, flat, sprint, view, views,
-          projectsDir, nonce, tickets: await allTickets(rs),
+          projectsDir, nonce, reconcile: mode !== "db", tickets: await allTickets(rs),
           sprints: await rs.sprintRegistry(root),   // BLZ-707
           transitions: await dbTransitions(rs, mode, view, projectsDir,
                                            { enabled: viewEnabled(view, views, projectsDir) }) }));

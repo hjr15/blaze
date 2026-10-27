@@ -27,9 +27,13 @@ import { fsStorage } from "./model/storage.mjs";
 import { fsWritePort } from "./model/write-port.mjs";
 import { isType, workflowFor } from "./model/schema.mjs";
 import { isTerminal, resolutionForTerminal } from "./model/workflows.mjs";
-import { resolvePorts, resolveReadStorage, resolveWriteMode } from "./model/write-port-resolve.mjs";
+import { resolveReadStorage, resolveWriteMode } from "./model/write-port-resolve.mjs";
 import { appliedLine } from "./reconcile-apply-report.mjs";
 import { assertWritable } from "./readonly.mjs";
+
+// BLZ-723: a db-mode board moves tickets only by explicit `blaze move`; reconcile (dry run
+// included) refuses there. One text for the CLI, the board server, and the supervisor loop.
+export const DB_BOARD_RECONCILE_REFUSAL = "this board moves tickets explicitly — it runs on the database write port (BLAZE_WRITE_PORT=db), where status changes only by `blaze move` (remote mode, on a deployed board). Reconcile derives moves from branches and PRs on file boards only.";
 
 // BLZ-130: SELECTION precedence — deliberately NOT "how far along the PR is".
 // An OPEN PR outranks a MERGED one, because while any PR carrying the key is still
@@ -2535,8 +2539,14 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   // entirely, and this CLI block previously let the throw reach the top level unwrapped.
   // (`push` is gone as of BLZ-404: reconcile never pushed, and the parameter said it might.)
   let r;
-  // BLZ-670: resolve the board's ports once. Only db mode opens a database port; fs and dual
-  // resolve a reader alone (dual unchanged).
+  // BLZ-723: a db-mode board moves tickets only by `blaze move`. Refused before anything else,
+  // dry runs included: the preview of a board that never reconciles is noise.
+  if (resolveWriteMode() === "db") {
+    console.error(`reconcile: ${DB_BOARD_RECONCILE_REFUSAL}`);
+    process.exit(1);
+  }
+  // BLZ-670: resolve the board's ports once. fs and dual resolve a reader alone (db mode is
+  // refused above, so no database port is opened here).
   const roots = resolveRoots();
   let ports;
   // BLZ-708: --apply writes through fsWritePort when the mode is not db, never reaching
@@ -2546,7 +2556,7 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
     catch (e) { console.error(e.message); process.exit(1); }
   }
   try {
-    ports = await (apply && resolveWriteMode() === "db" ? resolvePorts : resolveReadStorage)(
+    ports = await resolveReadStorage(
       { dataRoot: roots.dataRoot, projectsDir: roots.projectsDir });
   }
   catch (e) { console.error(e.message); process.exit(1); }

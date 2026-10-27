@@ -109,8 +109,12 @@ ticket id is still the identity.
    re-open a ticket that already reached `done` — terminal status is sticky — see
    [how-it-works](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest).
    Goals and risks are always manual.
-   Never hand-move a delivery ticket through the reconcile-owned statuses once a
-   branch/PR exists for it — let reconcile own it.
+   **On a file board**, never hand-move a delivery ticket through the reconcile-owned
+   statuses once a branch/PR exists for it — let reconcile own it.
+   **On a db-mode board**, `blaze reconcile` refuses and reconcile applies to file boards
+   only, so tickets move by explicit `blaze move`: `in-progress` at start, `in-review`
+   when the PR opens, `blaze log` then `done` at merge, and `blaze resolve` for a
+   non-Done outcome. The `KEY-n` in the branch, commit and PR title is the join.
    Reconcile also moves a **bundled feature-child** — a delivery ticket with no
    branch/PR of its own, only a `<KEY>-<n>:` commit inside its feature's PR — to
    `done` once that commit is reachable from the code repo's default branch, so
@@ -191,7 +195,7 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
 - `worklog` — list of `{ date, minutes, note? }`, appended by `blaze log`; minutes
   round to the nearest whole minute.
 - `likelihood` / `impact` — risk-only fields.
-- `branch` / `pr` — filled by `reconcile`; don't hand-edit.
+- `branch` / `pr` — filled by `reconcile` on file boards only; don't hand-edit. On a db board they stay empty.
 - `links` — set via `blaze link`, see "Links" below.
 
 ## Links
@@ -267,6 +271,10 @@ board tracks). Consumer: the board's **Live** view (`scripts/model/activity.mjs`
 → `/api/live`), which tails the last N lines, groups by ticket, and marks a
 ticket active when its latest event is within a ~2-minute TTL. Malformed lines
 are skipped, never fatal. Read it yourself with `tail -f .blaze/activity.jsonl`.
+
+The feed is a local file written by a local hook, so a board served from another machine or
+from a database (a deployed db-mode board) has no Live view. Set `views.live: false` there,
+and `/api/live` answers 404 like `/view/live`.
 
 ## Derived caches
 
@@ -375,21 +383,29 @@ It cannot protect an engine older than 0.10.0, which has no guard. **Known gaps:
 
 When the board lives on a server — a deployed `blaze board`, typically on Postgres — set
 **both** `BLAZE_REMOTE_URL` (the server's origin, `https://…`) and `BLAZE_TOKEN` (a `member`
-API token from `blaze user add`). Then `blaze new`, `move`, `edit`, `resolve`, `log` and `link`
-take the same arguments as locally but run on the server, over HTTP, and print one line ending
-`(remote: <origin>)`. Nothing is written locally, so there is no worktree to
+API token from `blaze user add`) — or, instead of `BLAZE_TOKEN`, `BLAZE_TOKEN_FILE` naming a
+`0600` file that holds it (BLZ-710; `BLAZE_TOKEN` wins if both are set). Then `blaze new`,
+`move`, `edit`, `resolve`, `log` and `link` take the same arguments as locally but run on the
+server, over HTTP, and print one line ending `(remote: <origin>)`. Nothing is written locally, so there is no worktree to
 manage, and two agents on two machines creating tickets at once get distinct ids. Remote
 `blaze new` needs a **db-mode** board (`BLAZE_WRITE_PORT=db` on the server): on a file board
 the server refuses it `409`, because file ids come from git and are single-machine.
 
-Every other command is refused in remote mode (it needs the board's data on this machine);
-read the board over `GET /api/live` or the page. Setting only ONE of the two variables is an
-error for every command — never a silent local write. The token is only ever sent to
-`BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for a
-loopback host only (`127.x.x.x`, `[::1]` or `localhost`; with `NODE_USE_ENV_PROXY=1` set, keep
-loopback in `NO_PROXY` or the token goes to the proxy in clear). Set the two **per command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN=… blaze new …`)
-or in a shell used only for that — never as a global `export`, which would send every `blaze`
-write on the machine to the server. See
+`blaze show <id>` and `blaze list [--project K] [--status S] [--type T]` (or `list --projects`,
+for each project's labels and components) read the live board the same way, with any `read`
+token; `--json` prints parseable JSON on stdout, and the count goes to stderr. Both run in
+remote mode only. Every other command is refused in remote mode (it needs the board's data on
+this machine); read the board with these two, or the page. Setting only ONE of the URL and
+the credential is an error for every command — never a silent local write. The token is only
+ever sent to `BLAZE_REMOTE_URL`'s origin: redirects are refused, and plain `http://` is accepted for
+a loopback host only (`127.x.x.x`, `[::1]` or `localhost`; with `NODE_USE_ENV_PROXY=1` set,
+keep loopback in `NO_PROXY` or the token goes to the proxy in clear). Set the two **per
+command** (`BLAZE_REMOTE_URL=… BLAZE_TOKEN_FILE=… blaze new …`) or in a shell used only for
+that — never as a global `export`, which would send every `blaze` write on the machine to the
+server. A server behind a private CA needs `NODE_EXTRA_CA_CERTS=/path/to/ca.crt`; a TLS-trust
+failure says so. Operating a deployed board is in
+[Running a live board](https://github.com/hjr15/blaze/blob/main/docs/operations/live-board.md).
+See
 [the command reference](https://github.com/hjr15/blaze/blob/main/docs/guide/commands.md#remote-mode).
 
 ## Querying the board

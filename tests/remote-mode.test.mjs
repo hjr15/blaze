@@ -75,20 +75,22 @@ describe("remoteFrom — when remote mode is on, and when it refuses", () => {
 
 describe("requestFor — argv parsed as the local runner parses it", () => {
   test("each verb maps to its endpoint and body", () => {
+    // BLZ-709: a write is a POST with `read: false`; the reads are pinned in remote-reads.test.mjs.
+    const POST = { method: "POST", read: false, json: false };
     assert.deepEqual(requestFor("new", ["--project", "ENG", "--type", "task", "Do", "it", "--estimate", "30",
                                         "--labels", "a,b", "--parent", "ENG-1", "--not-before", "2026-11-01"]),
-      { path: "/api/new", body: { project: "ENG", type: "task", estimate: 30, labels: ["a", "b"],
-                                  parent: "ENG-1", not_before: "2026-11-01", title: "Do it" } });
-    assert.deepEqual(requestFor("move", ["ENG-1", "done"]), { path: "/api/move", body: { id: "ENG-1", to: "done" } });
+      { ...POST, path: "/api/new", body: { project: "ENG", type: "task", estimate: 30, labels: ["a", "b"],
+                                           parent: "ENG-1", not_before: "2026-11-01", title: "Do it" } });
+    assert.deepEqual(requestFor("move", ["ENG-1", "done"]), { ...POST, path: "/api/move", body: { id: "ENG-1", to: "done" } });
     assert.deepEqual(requestFor("edit", ["ENG-1", "title", "a", "--b"]),
-                     { path: "/api/edit", body: { id: "ENG-1", patch: { title: "a --b" } } });
+                     { ...POST, path: "/api/edit", body: { id: "ENG-1", patch: { title: "a --b" } } });
     assert.deepEqual(requestFor("resolve", ["ENG-1", "wont-do"]),
-                     { path: "/api/resolve", body: { id: "ENG-1", resolution: "wont-do" } });
+                     { ...POST, path: "/api/resolve", body: { id: "ENG-1", resolution: "wont-do" } });
     assert.deepEqual(requestFor("log", ["ENG-1", "25", "--date", "2026-10-01", "--note", "n"]),
-                     { path: "/api/log", body: { id: "ENG-1", minutes: 25, date: "2026-10-01", note: "n" } });
+                     { ...POST, path: "/api/log", body: { id: "ENG-1", minutes: 25, date: "2026-10-01", note: "n" } });
     assert.deepEqual(requestFor("link", ["--rm", "ENG-1", "Blocks", "ENG-2"]),
-                     { path: "/api/link", body: { id: "ENG-1", type: "Blocks", target: "ENG-2", remove: true } });
-    assert.deepEqual(Object.keys(REMOTE_VERBS), ["new", "move", "edit", "resolve", "log", "link"]);
+                     { ...POST, path: "/api/link", body: { id: "ENG-1", type: "Blocks", target: "ENG-2", remove: true } });
+    assert.deepEqual(Object.keys(REMOTE_VERBS), ["new", "move", "edit", "resolve", "log", "link", "show", "list"]);
   });
   test("BLZ-691: extra positionals are ignored, exactly as the local runners ignore them", () => {
     assert.deepEqual(requestFor("move", ["ENG-1", "done", "extra"]), requestFor("move", ["ENG-1", "done"]));

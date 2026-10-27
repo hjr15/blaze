@@ -37,6 +37,10 @@ export const ROUTE_SCOPES = {
   "POST /api/ac": "write",
   // BLZ-684: creating a ticket over HTTP — the remote CLI's `blaze new`.
   "POST /api/new": "write",
+  // BLZ-709: remote reads (spec D7) — the remote CLI's `blaze show` and `blaze list`.
+  "GET /api/ticket": "read",
+  "GET /api/tickets": "read",
+  "GET /api/projects": "read",
 
   // v4 (BLZ-323): artifact model, links, gates, baselines, custom fields, matrix and
   // coverage. POST /api/field is "admin", not "write": defining a filterable field
