@@ -8,10 +8,12 @@ deployment's own.
 ## Where the board runs
 
 A deployment runs `node scripts/serve.mjs` with `BLAZE_WRITE_PORT=db` and a `database` block
-in `blaze.config.json` naming `driver: "postgres"`. The tickets, the id counter, the sprint
-registry and the users all live in Postgres
-([ADR-0039](../decisions/0039-board-data-lives-in-postgres-board-config-in-the-platform-chart.md)).
-There is no ticket tree on the server's disk to edit, back up or commit.
+in `blaze.config.json` naming `driver: "postgres"`. The tickets and the id counter live in
+Postgres. Once the database is at schema v6 (after `blaze db migrate`,
+[ADR-0039](../decisions/0039-board-data-lives-in-postgres-board-config-in-the-platform-chart.md)),
+the sprint registry and the users live there too. Below v6, identity is still read from
+`identity.db` and sprints from `sprints.json`. There is no ticket tree on the server's disk to
+edit, back up or commit.
 
 ## Configuration
 
@@ -46,7 +48,9 @@ BLAZE_TOKEN_FILE=/path/to/token \
 ## Admin verbs run inside the deployment
 
 The commands that need the board's data on the machine — `user`, `sprint`, `db`, `audit`,
-`matrices` and `import` — run inside the deployment itself:
+`matrices` and `import` — run inside the deployment itself. The container's disk is
+temporary, so run `matrices` with `--check`, or with `--out <dir>` followed by `kubectl cp` to
+copy the files out:
 
 ```bash
 kubectl exec -n <namespace> deploy/<name> -- node scripts/cli.mjs <verb> …
@@ -69,8 +73,9 @@ scrollback or a chat:
 - The subshell keeps `umask 077` and `pipefail` out of your own shell, and the new file is
   created mode `0600`.
 - Only a line that is a single `blz_…` word goes to the file. Every other line of the output
-  goes to stderr, where you can read it: the user it created, its scopes, and the **NOTE** that
-  a server already running must be restarted before it accepts the new user.
+  goes to stderr, where you can read it: the user it created, its scopes, and a **NOTE** about
+  restarting. Tokens are checked on every request, so on a board that already has users the new
+  token works at once; a restart is needed only when this is the board's very first user.
 - The existing token file is replaced only when the whole pipeline succeeded **and** exactly
   one token line was found. A failed `kubectl exec`, a refusal, or output with no token leaves
   the old file untouched and removes the partial `token.new`.
