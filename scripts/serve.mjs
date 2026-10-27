@@ -713,6 +713,9 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     }
     if (req.method === "GET" && u.pathname === "/api/sync") return json(200, { ahead: aheadCount(root) });
     if (req.method === "GET" && u.pathname === "/api/live") {
+      // BLZ-724: the Live view's data honours `views.live` like `/view/live` does. The feed is a
+      // local file, so a board served from elsewhere (a deployed db-mode board) turns it off.
+      if (!viewEnabled("live", views, projectsDir)) return json(404, { errors: ["the Live view is disabled on this board (views.live: false)"] });
       // BLZ-519. `liveModel` calls `buildIndex` on its second line, so a board file the
       // walk REFUSES — or one `parseTicket` throws on — arrives here, not just an
       // unreadable activity feed. Before this catch that throw ended the PROCESS.

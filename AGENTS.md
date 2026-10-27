@@ -269,6 +269,10 @@ board tracks). Consumer: the board's **Live** view (`scripts/model/activity.mjs`
 ticket active when its latest event is within a ~2-minute TTL. Malformed lines
 are skipped, never fatal. Read it yourself with `tail -f .blaze/activity.jsonl`.
 
+The feed is a local file written by a local hook, so a board served from another machine or
+from a database (a deployed db-mode board) has no Live view. Set `views.live: false` there,
+and `/api/live` answers 404 like `/view/live`.
+
 ## Derived caches
 
 `.blaze/index.json` (the ticket index) and `.blaze/transitions.json` (status-move
