@@ -109,9 +109,12 @@ ticket id is still the identity.
    re-open a ticket that already reached `done` — terminal status is sticky — see
    [how-it-works](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest).
    Goals and risks are always manual.
-   On a db-mode board, `blaze reconcile` refuses — tickets move only by explicit `blaze move`.
-   Never hand-move a delivery ticket through the reconcile-owned statuses once a
-   branch/PR exists for it — let reconcile own it.
+   **On a file board**, never hand-move a delivery ticket through the reconcile-owned
+   statuses once a branch/PR exists for it — let reconcile own it.
+   **On a db-mode board**, `blaze reconcile` refuses and reconcile applies to file boards
+   only, so tickets move by explicit `blaze move`: `in-progress` at start, `in-review`
+   when the PR opens, `blaze log` then `done` at merge, and `blaze resolve` for a
+   non-Done outcome. The `KEY-n` in the branch, commit and PR title is the join.
    Reconcile also moves a **bundled feature-child** — a delivery ticket with no
    branch/PR of its own, only a `<KEY>-<n>:` commit inside its feature's PR — to
    `done` once that commit is reachable from the code repo's default branch, so
@@ -192,7 +195,7 @@ Field order as written by the engine: `id`, `title`, `type`, `project`,
 - `worklog` — list of `{ date, minutes, note? }`, appended by `blaze log`; minutes
   round to the nearest whole minute.
 - `likelihood` / `impact` — risk-only fields.
-- `branch` / `pr` — filled by `reconcile`; don't hand-edit.
+- `branch` / `pr` — filled by `reconcile` on file boards only; don't hand-edit. On a db board they stay empty.
 - `links` — set via `blaze link`, see "Links" below.
 
 ## Links

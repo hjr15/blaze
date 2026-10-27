@@ -71,6 +71,10 @@ The design and its decisions D1 to D10 are in
   `BLAZE_WRITE_PORT=dual` after a migrate authenticates from that stale file until it is removed, so
   a token revoked in Postgres since the migrate still works there.
 - The Live view reads local files only, so it shows nothing for a Postgres-only board (D10).
+  `GET /api/live` and `/view/live` are gated by `views.live` (BLZ-724).
+- On a db board `blaze reconcile` and `/api/reconcile-preview` refuse, so tickets move only by
+  explicit `blaze move` (D6, BLZ-723). Agents with no checkout read with remote `blaze show` and
+  `blaze list` (D7, BLZ-709).
 - A concurrent pair of `blaze sprint` saves on one board can lose an update, because the registry is
   read, changed and written without a table lock. BLZ-727 tracks it.
 
