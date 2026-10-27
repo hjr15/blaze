@@ -66,10 +66,10 @@ export function remoteFrom(env = process.env, { readFile = (p) => readRegularFil
   }
   if (u.protocol === "http:" && !isLoopback(u.hostname.replace(/^\[|\]$/g, ""))) {
     return { error: `blaze: ${REMOTE_URL_ENV} is plain http to ${u.hostname}, which would send `
-      + `${REMOTE_TOKEN_ENV} in the clear. Use https:// (http:// is accepted for a loopback host only).` };
+      + `the token from ${CREDENTIAL} in the clear. Use https:// (http:// is accepted for a loopback host only).` };
   }
   if (u.username || u.password) {
-    return { error: `blaze: ${REMOTE_URL_ENV} must not carry a user:password@ — the credential is ${REMOTE_TOKEN_ENV}` };
+    return { error: `blaze: ${REMOTE_URL_ENV} must not carry a user:password@ — the credential is ${CREDENTIAL}` };
   }
   if ((u.pathname !== "/" && u.pathname !== "") || u.search || u.hash) {
     return { error: `blaze: ${REMOTE_URL_ENV} must be the board's origin only, e.g. ${u.origin} — `

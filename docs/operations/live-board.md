@@ -57,11 +57,23 @@ send the token line straight into the machine's token file, so it never sits in 
 scrollback or a chat:
 
 ```bash
-umask 077
-kubectl exec -n <namespace> deploy/<name> -- node scripts/cli.mjs user add \
-    --email agent-1@example.com --role member \
-  | awk '/^ *blz_/ { print $1 }' > /path/to/token
+( umask 077; set -o pipefail
+  kubectl exec -n <namespace> deploy/<name> -- node scripts/cli.mjs user add \
+      --email agent-1@example.com --role member \
+    | awk '/^ *blz_[^ ]+ *$/ { print $1; n++; next }
+           { print > "/dev/stderr" }
+           END { exit n == 1 ? 0 : 1 }' > /path/to/token.new
+) && mv /path/to/token.new /path/to/token || rm -f /path/to/token.new
 ```
+
+- The subshell keeps `umask 077` and `pipefail` out of your own shell, and the new file is
+  created mode `0600`.
+- Only a line that is a single `blz_…` word goes to the file. Every other line of the output
+  goes to stderr, where you can read it: the user it created, its scopes, and the **NOTE** that
+  a server already running must be restarted before it accepts the new user.
+- The existing token file is replaced only when the whole pipeline succeeded **and** exactly
+  one token line was found. A failed `kubectl exec`, a refusal, or output with no token leaves
+  the old file untouched and removes the partial `token.new`.
 
 ## One token per machine
 

@@ -169,3 +169,15 @@ test("BLZ-710: BLAZE_TOKEN_FILE alone turns the CLI's remote gate on, and is ref
             "the gate saw the file: a half-set refusal, never a local run");
   assert.ok(!(r.stdout + r.stderr).includes(SECRET), "the token never reaches output");
 });
+
+test("BLZ-710 review: the plain-http and user:pass@ refusals name the file as a credential source too", () => {
+  const f = tokenFile(SECRET + "\n");
+  for (const [url, re] of [
+    ["http://blaze.example.com", /plain http to blaze\.example\.com, which would send the token from BLAZE_TOKEN \(or BLAZE_TOKEN_FILE\) in the clear/],
+    ["https://user:pw@blaze.example.com", /must not carry a user:password@ — the credential is BLAZE_TOKEN \(or BLAZE_TOKEN_FILE\)/],
+  ]) {
+    const { error } = remoteFrom({ BLAZE_REMOTE_URL: url, BLAZE_TOKEN_FILE: f });
+    assert.ok(typeof error === "string" && re.test(error), `${url}: names both sources`);
+    assert.ok(!error.includes(SECRET), `${url}: never the content`);
+  }
+});
