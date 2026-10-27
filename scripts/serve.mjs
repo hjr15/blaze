@@ -24,6 +24,8 @@ import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
 import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
 import { ticketJson } from "./model/ticket-json.mjs";
+import { WORKFLOWS } from "./model/workflows.mjs";
+import { isType } from "./model/schema.mjs";
 import { isReadonly } from "./readonly.mjs";
 import { boardModel, contentHash, liveModel } from "./views/data.mjs";
 import { panelHtml } from "./views/panel-content.mjs";
@@ -774,6 +776,15 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
     if (req.method === "GET" && u.pathname === "/api/tickets") {
       const want = { project: u.searchParams.get("project"), status: u.searchParams.get("status"),
                      type: u.searchParams.get("type") };
+      // BLZ-709 review M6: a value the board does not know is a refusal naming it, never an
+      // empty 200 an agent would read as "no such ticket" (ADR-0025). Statuses and types come
+      // from the same registries the rest of the engine validates against.
+      const knownStatuses = new Set(Object.values(WORKFLOWS).flatMap((w) => w.statuses));
+      const unknown = [];
+      if (want.project && !listProjects(cfgFor(root)).includes(want.project)) unknown.push(`unknown project: ${want.project}`);
+      if (want.status && !knownStatuses.has(want.status)) unknown.push(`unknown status: ${want.status}`);
+      if (want.type && !isType(want.type)) unknown.push(`unknown type: ${want.type}`);
+      if (unknown.length) return json(422, { ok: false, errors: unknown });
       const num = (r) => Number(/-(\d+)$/.exec(String(r.frontmatter?.id ?? ""))?.[1] ?? 0);
       const proj = (r) => String(r.frontmatter?.project ?? r.project ?? "");
       try {

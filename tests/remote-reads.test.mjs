@@ -164,8 +164,30 @@ test("BLZ-709: list filters by project, status and type", async () => {
     assert.deepEqual(await ids("?status=in-progress"), ["ENG-2"]);
     assert.deepEqual(await ids("?type=task"), ["ENG-1"]);
     assert.deepEqual(await ids("?project=ENG"), ["ENG-1", "ENG-2"]);
-    assert.deepEqual(await ids("?project=NOPE"), []);
     assert.deepEqual(await ids(""), ["ENG-1", "ENG-2"]);
+  });
+});
+
+test("BLZ-709 review M6: an unknown project, status or type is a 422 naming the value, never an empty 200", async () => {
+  await withDbBoard(async ({ url, viewer }) => {
+    for (const [q, name] of [["?project=eng", "eng"], ["?project=ENGX", "ENGX"],
+                             ["?status=inprogress", "inprogress"], ["?type=tsk", "tsk"],
+                             ["?project=ENG&status=nope", "nope"]]) {
+      const r = await get(url, `/api/tickets${q}`, viewer);
+      assert.equal(r.status, 422, q);
+      assert.equal(r.body.ok, false, q);
+      assert.ok(r.body.errors.some((e) => e.includes(name)), `${q}: the error names the value`);
+    }
+    assert.equal((await get(url, "/api/tickets?project=ENG&status=in-progress&type=bug", viewer)).status, 200);
+  });
+});
+
+test("BLZ-709 review M6: blaze list reports an unknown filter value as a failure, exit 1", async () => {
+  await withDbBoard(async ({ url, viewer }) => {
+    const r = await blaze(["list", "--project", "NOPE"], { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: viewer });
+    assert.equal(r.status, 1);
+    assert.ok(/answered 422/.test(r.stderr) && /NOPE/.test(r.stderr), "the 422 and the value are reported");
+    assert.equal(r.stdout, "");
   });
 });
 

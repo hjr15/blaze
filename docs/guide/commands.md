@@ -898,7 +898,7 @@ run locally, they are refused (`… runs in remote mode only`) — read `project
 Over HTTP, each route needs the `read` scope: `GET /api/ticket?id=` answers
 `{ ok, ticket: { id, project, status, frontmatter, body } }` (`400` without an id, `404` for an
 unknown one, `409` when a file board holds two records with that id);
-`GET /api/tickets?project=&status=&type=` answers `{ ok, tickets }`, each without its body; and
+`GET /api/tickets?project=&status=&type=` answers `{ ok, tickets }`, each without its body, or `422` naming a project, status or type the board does not know (`blaze list` reports it and exits 1); and
 `GET /api/projects` answers `{ ok, projects: [{ key, labels, components, requireLabels,
 requireComponents, requireWorklogBeforeTerminal }] }`. No answer carries a server filesystem
 path: a ticket's file and a project's `codeRepos` stay on the server. A remote mode set **half-way** (only
@@ -972,7 +972,7 @@ processes × 50 → 100 distinct ids, 100 rows, no gaps).
 | `BLAZE_READONLY` | Read-only guard: any value except unset/empty/`0`/`false` makes `blaze` refuse to run a mutating command (non-mutating `board` and `rollup` still work). An env guard for inspection-only runs, not a sandbox — code that writes files directly bypasses it. | unset (writes allowed) |
 | `BLAZE_WRITE_PORT` | Where a write goes: `fs`, `dual` or `db`. **Unset is not the same as `fs`** (BLZ-708): on a board whose `blaze.config.json` names `database.driver: "postgres"`, an unset value makes every file write refuse, naming this variable; an explicit `fs` states that a file write is deliberate. An empty or whitespace value counts as unset. Remote mode, `blaze db *` and `blaze init` are never refused. On any other board, unset behaves as `fs`. See [A Postgres board refuses file writes](../../AGENTS.md#a-postgres-board-refuses-file-writes). | unset |
 | `BLAZE_DB_DIR` | Directory for the derived `.blaze/` caches. | `.blaze/` under the data repo |
-| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN`. `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
+| `BLAZE_REMOTE_URL` | The board server's origin, e.g. `https://blaze.example.com` — turns on [remote mode](#remote-mode) together with `BLAZE_TOKEN` (or `BLAZE_TOKEN_FILE`). `https://` only (plain `http://` for `127.x.x.x`, `[::1]` or `localhost`); no path, query, fragment or `user:pass@`. | unset (local) |
 | `BLAZE_TOKEN` | The API token remote mode sends as `Authorization: Bearer`, to `BLAZE_REMOTE_URL`'s origin and nowhere else. Setting only one of the URL and the credential (this or `BLAZE_TOKEN_FILE`) is an error for every command. | unset |
 | `BLAZE_TOKEN_FILE` | A file (mode `0600`) holding remote mode's token, used when `BLAZE_TOKEN` is unset or blank (BLZ-710). Read as a regular file only; an unreadable, empty or whitespace-bearing file is refused naming the path, never the content. See [remote mode](#remote-mode). | unset |
 | `NODE_EXTRA_CA_CERTS` | Node's own: a PEM file of extra CA certificates to trust. Set it to the CA that signed a remote board's certificate when that CA is private; remote mode's TLS-trust failure names it. | unset |
