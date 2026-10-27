@@ -453,12 +453,12 @@ Rehearse steps 3–6 first on CNPG database `blaze_rehearsal`, loaded from `v4-s
 | 1 | Config three-way diff (D4). The chart PR F1 is merged. It puts the config in the chart once, puts `project.json` in the chart without `codeRepos`, drops `loops.reconcile`, and still has the hostPaths. | The board renders the same. `pod-blaze audit` shows no new `config-project-drift`. | `git revert` F1. ArgoCD resyncs. |
 | 2 | Verify the governance replacements in db mode (§8 table) against `blaze_rehearsal`. | Each row matches. | — (read-only) |
 | 3 | **Freeze** (operator go-ahead). No sessions write, and no token is issued. Take a manual `pg_dump` and verify it with `pg_restore --list`. | The dump is verified. | — |
-| 4 | Copy `v4-spine/sprints.json` into the pod with `kubectl cp`. Then run `pod-blaze db migrate --identity-from /data/.blaze/identity.db --sprints-from /tmp/sprints.json`. That is v5→v6, the `authoritative` row, the identity copy and the sprint import, all in **one transaction** with a row-level verify. | It exits 0, `SELECT value FROM blaze_meta WHERE key='schema_version'` returns `6`, and the printed per-table counts equal the SQLite counts. | Before commit, the transaction aborts on its own. After commit, `UPDATE blaze_meta SET value='5' WHERE key='schema_version'`: the engine falls back to the file sources, which are untouched. Sessions and tokens created after step 4 are lost, which is accepted. Rolling back to an image older than E1 also needs the stamp reverted first, because that engine refuses v6 as `newer`. |
+| 4 | Copy `v4-spine/sprints.json` into the pod with `kubectl cp`. Then run `pod-blaze db migrate --identity-from /data/.blaze/identity.db --sprints-from /tmp/sprints.json`. That is v5→v6, the `authoritative` row, the identity copy and the sprint import, all in **one transaction** with a row-level verify. | It exits 0, `SELECT value FROM blaze_meta WHERE key='schema_version'` returns `6`, and the printed per-table counts equal the SQLite counts. | Before commit, the transaction aborts on its own. After commit, `UPDATE blaze_meta SET value='5' WHERE key='schema_version'`: the engine falls back to the file sources, which are untouched. Sessions and tokens created after step 4 are lost, which is accepted. Rolling back to an image older than E1 also needs the stamp reverted first, because that engine refuses v6 as `newer`. Reverting the stamp leaves the v6 tables (`app_user` and the rest, `sprint`, `sprint_registry`) populated. A later re-run of `db migrate` then gets the "already imported" refusal, so clear those tables first, or restore the step-3 dump (E1 final review, 2026-10-27). |
 | 5 | `kubectl rollout restart deploy/blaze`. Identity is loaded at boot (D2). | An existing token works. An existing browser session survives. The gantt shows S1–S5. `blaze new --sprint S5` is accepted. `/api/new` from both machines works. | As for step 4 |
 | 6 | Unfreeze. Watch for one day: the nightly `blaze-pg-backup` must contain `app_user` and `sprint` (`pg_restore --list`). The backup directory must be mode 0700, because it now holds credential hashes. | The backup is verified, and so is the directory mode. | As for step 4, until step 7 |
 | 7 | Service-platform PR F2 is merged. It removes the three hostPaths, `GIT_*` env and `safe.directory`, and makes `/data` an `emptyDir` with read-only config (INF-933). It adds the `blaze-audit` CronJob and drops `BLAZE_PM_DIR` volumes from `k8s-up.sh` and the docs. It removes the dormant basic-auth (BLZ-697). | The pod has no hostPath (`kubectl get pod -o yaml`), and the step-5 smokes pass again. | `git revert` F2. The hostPaths come back, and the files are still there until step 9. |
 | 8 | Engine E2 is merged, if it isn't already (remote reads, token file, TLS hint). Then claude-config G (skill, wrapper, agents). Then the repo-move PRs (§7). | `rg -l blaze-pm` across claude-config, docs-central, k8s-posture-audit and service-platform finds only history, archive or changelog text. A fresh session creates and shows a ticket through `blaze-live`. | Revert each PR on its own. None of them touch data. |
-| 9 | Archive (D9 steps 1–5). The interim hook is removed. | The bundle is verified, the GitHub repo shows *Archived*, and no checkout remains on this machine. The second machine has none (OD4). | Un-archive on GitHub (it is reversible). The bundle restores everything. |
+| 9 | Archive (D9 steps 1–5). The interim hook is removed. **Gated on BLZ-729** (operator decision, 2026-10-27; see §7 row E3). | BLZ-729 is merged and deployed, and a ticket body and its acceptance criteria were written remotely on the live board. The bundle is verified, the GitHub repo shows *Archived*, and no checkout remains on this machine. The second machine has none (OD4). | Un-archive on GitHub (it is reversible). The bundle restores everything. |
 | 10 | Day 14: delete the retained `identity.db` copy (D9 step 4). BLZ-702 removes the smoke users. | — | — |
 
 After step 7, the engine's file fallback for identity and sprints is unreachable on the
@@ -504,7 +504,8 @@ One feature, split at repo and rollback boundaries, as BLZ-254 was:
 | H1 | obs-maturity-audit | `docs/legal/`, OMA spec and diagram moved in | Paired with H2 |
 | H2 | k8s-posture-audit | Path repoint for the test, template and docs | Merges after H1 |
 | H3 | docs-central | `gen_launchpad.py` and the exec-board memos | After G |
-| — | blaze-pm (operator push) | Final commit, push and archive (D9) | **Last** |
+| E3 — remote body authoring | blaze | BLZ-729: write a ticket's body and its acceptance criteria remotely on a db board (`new` and `edit` body input, plus a remote verb for `/api/ac`) | **Operator decision (2026-10-27): it blocks the archive.** Without it, a db board can hold only titles and fields once blaze-pm is gone. The E2 final review found this gap (it is in D7, and has existed since BLZ-254). |
+| — | blaze-pm (operator push) | Final commit, push and archive (D9) | **Last**, after E3 |
 
 ## 8. Governance replacements, verified in db mode before the archive
 
@@ -619,7 +620,8 @@ Children (type `task`, estimates in minutes):
 | 20 | Refuse `blaze reconcile` and `/api/reconcile-preview` on a db board; docs note moves are explicit (D6) | E2 | 90 |
 | 21 | Gate `GET /api/live` on `views.live`; document the Live feed as local-only (D10) | E2 | 45 |
 | 22 | Remove the `blaze-activity.sh` hook and its settings registration (D10) | G | 30 |
-| | **Total** | | **3,585** |
+| 23 | BLZ-729 (filed 2026-10-27): remote body and acceptance-criteria authoring on a db board. It blocks #18 (BLZ-721). | E3 | 480 |
+| | **Total** | | **4,065** |
 
 **Filed 2026-10-22 on the live board:** parent **BLZ-703** (under BLZ-2; Relates BLZ-254, BLZ-195); children #1–#22 are **BLZ-704 … BLZ-725** in table order.
 
