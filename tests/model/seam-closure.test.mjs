@@ -1039,8 +1039,9 @@ const SEAM_WRITE_PROVIDERS = new Map([
   // BLZ-690: `viewEnabled` is the configured-views rule — it reads the board config (memoised
   // `loadConfig`) and writes nothing.
   ["views/page.mjs", { writes: ["pageHtml", "renderView", "viewEnvelope"], sanctioned: [], inert: ["CSRF", "VIEW_NAMES", "chipbarHtml", "crumbsHtml", "sublineHtml", "viewEnabled"] }],
+  // BLZ-723: DB_BOARD_RECONCILE_REFUSAL is the db-board refusal text, a string constant.
   ["reconcile.mjs", { writes: ["buildBranchMap", "reconcile"], sanctioned: [],
-    inert: ["PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
+    inert: ["DB_BOARD_RECONCILE_REFUSAL", "PR_RANK", "shResult", "decide", "idFromSubject", "idsFromCommitMessage",
       "idsFromSubject", "claimCorroborated", "prTitleClaim", "betterPr", "buildPrMap",
       "ambiguousDeliverers", "remoteHost", "classifyRemote", "parseRemoteUrls", "gatherPrs",
       "recordablePr"] }],

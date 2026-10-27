@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 import { spawnSync } from "node:child_process";
 import { gzipSync } from "node:zlib";
 import { loadConfig, listProjects, loadProject, resolveRoots } from "./config.mjs";
-import { resolvePorts, withReadStorage } from "./model/write-port-resolve.mjs";
+import { resolvePorts, resolveWriteMode, withReadStorage } from "./model/write-port-resolve.mjs";
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
@@ -803,6 +803,11 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       }
     }
     if (req.method === "GET" && u.pathname === "/api/reconcile-preview") {
+      // BLZ-723: a db-mode board moves tickets only by `blaze move`; there is nothing to preview.
+      if (resolveWriteMode() === "db") {
+        const { DB_BOARD_RECONCILE_REFUSAL } = await import("./reconcile.mjs");
+        return json(409, { ok: false, error: DB_BOARD_RECONCILE_REFUSAL, changes: [] });
+      }
       // BLZ-405: `reconcilePreview` is the one place this shape is built — see its own
       // comment for why `r.ok` matters and why `projects` is never passed here.
       // BLZ-670: a board whose ports cannot be resolved is a 503 (fixable), not a crash.
@@ -856,7 +861,7 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
       let html;
       try {
         html = await reading(async (rs, mode) => pageHtml({ project, focus, flat, sprint, view, views,
-          projectsDir, nonce, tickets: await allTickets(rs),
+          projectsDir, nonce, reconcile: mode !== "db", tickets: await allTickets(rs),
           sprints: await rs.sprintRegistry(root),   // BLZ-707
           transitions: await dbTransitions(rs, mode, view, projectsDir,
                                            { enabled: viewEnabled(view, views, projectsDir) }) }));

@@ -45,6 +45,10 @@ import { assertWritable } from "./readonly.mjs";
 //
 // Type-independent on purpose. The ticket asks whether `story` shares the failure;
 // every delivery type does, because ranking never sees the type.
+// BLZ-723: a db-mode board moves tickets only by explicit `blaze move`; reconcile (dry run
+// included) refuses there. One text for the CLI, the board server, and the supervisor loop.
+export const DB_BOARD_RECONCILE_REFUSAL = "this board moves tickets explicitly — it runs on the database write port (BLAZE_WRITE_PORT=db), where status changes only by `blaze move` (remote mode, on a deployed board). Reconcile derives moves from branches and PRs on file boards only.";
+
 export const PR_RANK = { OPEN: 3, MERGED: 2, CLOSED: 1 };
 
 // --- shelling out, in two layers (BLZ-350) ------------------------------------
@@ -553,7 +557,7 @@ export function idsFromSubject(subject, key) {
   // claim a ticket BLZ-2026 that does not exist; nothing documented that latitude.
   const list = key + "-\\d+(?:(?:\\s*/\\s*(?:" + key + "-)?\\d+)|(?:\\s*[+,&]\\s*" + key + "-\\d+))*";
   // The manifest tail is OUTSIDE the captured list, so its count can never become an id.
-  const head = new RegExp("^(" + list + ")(?:\\s*\\+\\s*\\d+\\s+more)?(?=\\s*[:\u2014])", "i")
+  const head = new RegExp("^(" + list + ")(?:\\s*\\+\\s*\\d+\\s+more)?(?=\\s*[:—])", "i")
     .exec(String(subject || "").trim());
   if (!head) return [];
   const ids = [];
@@ -2537,6 +2541,12 @@ if (process.argv[1] && process.argv[1] === fileURLToPath(import.meta.url)) {
   let r;
   // BLZ-670: resolve the board's ports once. Only db mode opens a database port; fs and dual
   // resolve a reader alone (dual unchanged).
+  // BLZ-723: a db-mode board moves tickets only by `blaze move`. Refused before anything else,
+  // dry runs included: the preview of a board that never reconciles is noise.
+  if (resolveWriteMode() === "db") {
+    console.error(`reconcile: ${DB_BOARD_RECONCILE_REFUSAL}`);
+    process.exit(1);
+  }
   const roots = resolveRoots();
   let ports;
   // BLZ-708: --apply writes through fsWritePort when the mode is not db, never reaching

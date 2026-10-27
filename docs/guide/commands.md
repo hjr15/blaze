@@ -154,11 +154,17 @@ what it would change and writes nothing.
 
 | Flag | Meaning | Default |
 |---|---|---|
-| `--apply` | `--apply` writes the moves: to the ticket files on a file board (`fs`, `dual`), or to the database under `BLAZE_WRITE_PORT=db`. **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where. Reconcile never pushes either — push is hardcoded off. | off (dry-run) |
+| `--apply` | `--apply` writes the moves to the ticket files on a file board (`fs`, `dual`). **Reconcile never commits** (BLZ-254). On a file board, version the changed files yourself. The last line of an applied run says how many tickets moved and where. Reconcile never pushes either — push is hardcoded off. | off (dry-run) |
 | `--fetch` | Fetch the linked code repo before comparing. | off |
 | `--project KEY` | Restrict BOTH the scan and the write to the named project(s) — a session that owns three tickets should not write moves to fifteen it never touched (BLZ-394). Repeatable, comma-separated, and `--project=KEY`; all three spellings, because a filter that silently ignores the one you typed is worse than no filter. An **unknown** key refuses the whole run rather than scanning the subset it understood, and `--project=` with an empty value is a caller error, not an unfiltered run — `--project=$PROJ` with `$PROJ` unset used to reconcile the whole board silently. A filtered run always prints `reconcile: scanned project(s): …`, even under `--quiet`. | all configured projects |
 | `--ticket ID` | Finer than `--project`: restrict the run to the named ticket(s) (BLZ-451). Same three spellings — repeatable, comma-separated, and `--ticket=ID` — deliberately, since a second flag accepting a different subset would be worse again. A ticket id is `<KEY>-<number>`; the key half is a project key and is **refused, never normalised** ([ADR-0025](../decisions/0025-a-project-key-is-refused-never-normalised.md)), so `inf-1` names a project this board does not configure rather than being read as `INF-1`. Four refusals, each naming what is wrong: the flag given no id, a value that is not a ticket id, an id outside this run's projects, and an id no ticket on this board carries. | all tickets in scope |
 | `--quiet` | *Print only on change.* It gates whole-run lines only — never per-ticket output. Suppressed on a pass that decided nothing: `reconcile: no code-bound change found — nothing to do.`, `reconcile: no projects configured — nothing to reconcile.`, and `reconcile: scanned project(s): …` (that last one is printed anyway whenever `--project` was given, because a filtered run must never read as a whole-board one). Per-ticket `moved` / `would move` lines, the dry-run tail, and every `WARNING` / `FORGE UNREADABLE` / `FORGE DATA` / `NEEDS ATTENTION` line on stderr are printed under `--quiet` exactly as without it. | off |
+
+**A db-mode board refuses (BLZ-723).** Under `BLAZE_WRITE_PORT=db` (a deployed board) status
+changes only by an explicit `blaze move` (remote mode, on a deployed board), so `blaze reconcile`
+exits `1` with a message naming that rule, and does so on a dry run too: the preview of a board
+that never reconciles is noise. `GET /api/reconcile-preview` answers `409`, the page omits the
+Reconcile button, and `blaze start`'s reconcile loop refuses without publishing a feed event.
 
 PR state is read with the GitHub CLI (`gh`), which supports GitHub.com and GitHub
 Enterprise Server only. On any other remote, `in-review` is unreachable and

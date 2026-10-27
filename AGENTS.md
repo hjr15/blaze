@@ -109,6 +109,7 @@ ticket id is still the identity.
    re-open a ticket that already reached `done` — terminal status is sticky — see
    [how-it-works](https://github.com/hjr15/blaze/blob/main/docs/guide/how-it-works.md#two-rules-that-keep-the-board-honest).
    Goals and risks are always manual.
+   On a db-mode board, `blaze reconcile` refuses — tickets move only by explicit `blaze move`.
    Never hand-move a delivery ticket through the reconcile-owned statuses once a
    branch/PR exists for it — let reconcile own it.
    Reconcile also moves a **bundled feature-child** — a delivery ticket with no

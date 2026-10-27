@@ -170,6 +170,8 @@ export function pageHtml({
   views,
   tickets = null,
   sprints = null,
+  // BLZ-723: a db-mode board never reconciles, so its page omits the button.
+  reconcile = true,
 } = {}) {
   const pDir = _pDir ?? resolveRoots().projectsDir;
   const cfg = cfgFor(pDir);
@@ -333,7 +335,7 @@ export function pageHtml({
         `<button type="button" class="pill" data-view="${v}">${v.charAt(0).toUpperCase()}${v.slice(1)}</button>`
       ).join("\n      ")}
     </div>
-    <button type="button" id="reconcileBtn" class="pill reconcile-pill">Reconcile (dry-run)</button>
+    ${reconcile ? `<button type="button" id="reconcileBtn" class="pill reconcile-pill">Reconcile (dry-run)</button>` : ""}
     <span class="sub" id="live">live</span>
     <span class="sub" id="sync"></span>
   </header>
