@@ -139,7 +139,8 @@ test("db mode: /api/new takes its id from the counter and /api/link writes the r
       const r = await post(base, "/api/new", { project: "ENG", type: "task", title: "from afar", estimate: 15 }, token.token);
       const body = await r.json();
       assert.equal(r.status, 200, JSON.stringify(body));
-      assert.deepEqual(body, { ok: true, id: "ENG-2", warnings: body.warnings, db: true },
+      // BLZ-729: `bodyBytes`/`acItems` are always echoed (53 bytes: the template, 1 empty box).
+      assert.deepEqual(body, { ok: true, id: "ENG-2", warnings: body.warnings, db: true, bodyBytes: 53, acItems: 1 },
         "BLZ-254: no committed/queued — the server never commits");
       // A title whose file name would not fit is refused here too, and burns no number.
       const long = await post(base, "/api/new", { project: "ENG", type: "task", title: "x".repeat(300), estimate: 15 }, token.token);
@@ -243,6 +244,72 @@ test("BLZ-691: db mode — POST /api/new carries labels, priority and components
       const fm = rs.getTicket(null, body.id).found.frontmatter;
       assert.deepEqual([fm.priority, fm.labels, fm.components], ["high", ["alpha", "beta"], ["core"]]);
     } finally { rs.close(); }
+  } finally { stop(); }
+});
+
+const bodyOf = (roots, id) => {
+  const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+  try { return rs.getTicket(null, id).found.body; } finally { rs.close(); }
+};
+
+test("BLZ-729: /api/new stores a given body and AC list", async () => {
+  const { roots, token, base, stop } = await dbServer();
+  try {
+    const r = await post(base, "/api/new", { project: "ENG", type: "task", title: "authored", estimate: 30,
+                                             body: "## Context\r\n\r\nwhy\r\n", ac: ["one", "- [x] two"] }, token);
+    const res = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(res));
+    const stored = bodyOf(roots, res.id);
+    assert.equal(stored, "## Context\n\nwhy\n\n## Acceptance Criteria\n\n- [ ] one\n- [x] two\n");
+    assert.match(stored, /why/);
+    assert.match(stored, /- \[x\] two/);
+    assert.equal(res.bodyBytes, Buffer.byteLength(stored), "bodyBytes is the stored body's UTF-8 length");
+    assert.equal(res.acItems, 2);
+    // A body alone keeps its own AC section; AC alone fills the template's.
+    const b = await (await post(base, "/api/new", { project: "ENG", type: "task", title: "body only", estimate: 30,
+                                                    body: "## Acceptance Criteria\n\n- [ ] é\n" }, token)).json();
+    assert.deepEqual([bodyOf(roots, b.id), b.bodyBytes, b.acItems], ["## Acceptance Criteria\n\n- [ ] é\n", 33, 1]);
+    const a = await (await post(base, "/api/new", { project: "ENG", type: "task", title: "ac only", estimate: 30,
+                                                    ac: ["x", "y", "z"] }, token)).json();
+    assert.equal(bodyOf(roots, a.id), "## Context\n\n## Acceptance Criteria\n\n- [ ] x\n- [ ] y\n- [ ] z\n\n## Notes\n");
+    assert.equal(a.acItems, 3);
+  } finally { stop(); }
+});
+
+test("BLZ-729: /api/new without body keeps the template and still echoes bodyBytes", async () => {
+  const { roots, token, base, stop } = await dbServer();
+  try {
+    const r = await post(base, "/api/new", { project: "ENG", type: "task", title: "plain", estimate: 30 }, token);
+    const res = await r.json();
+    assert.equal(r.status, 200, JSON.stringify(res));
+    assert.equal(bodyOf(roots, res.id), "## Context\n\n## Acceptance Criteria\n\n- [ ] \n\n## Notes\n");
+    assert.equal(res.bodyBytes, 53);
+    assert.equal(res.acItems, 1, "the scaffold's empty box");
+  } finally { stop(); }
+});
+
+test("BLZ-729: a bad body or AC is 422 and burns no id", async () => {
+  const { token, base, stop, has } = await dbServer();
+  try {
+    const ok = { project: "ENG", type: "task", title: "t", estimate: 30 };
+    for (const [extra, why] of [
+      [{ body: "  " }, /body must not be blank/],
+      [{ body: 5 }, /body must be a string/],
+      [{ body: "a\0b" }, /body must not contain a NUL byte/],
+      [{ body: "x".repeat(131073) }, /body is 131073 bytes; the limit is 131072/],
+      [{ ac: [] }, /ac takes 1 to 100 items/],
+      [{ ac: "one" }, /ac must be an array of strings/],
+      [{ ac: ["ok", " "] }, /ac item 2 is blank/],
+      [{ ac: ["a\nb"] }, /ac item 1 spans more than one line/],
+      [{ ac: ["a\0b"] }, /ac item 1 must not contain a NUL byte/],
+    ]) {
+      const r = await post(base, "/api/new", { ...ok, ...extra }, token);
+      assert.equal(r.status, 422, JSON.stringify(extra).slice(0, 80));
+      assert.match((await r.json()).errors.join(" "), why);
+    }
+    assert.equal(has("ENG-2"), false);
+    const made = await post(base, "/api/new", ok, token);
+    assert.equal((await made.json()).id, "ENG-2", "no refused create consumed a number");
   } finally { stop(); }
 });
 

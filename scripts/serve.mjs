@@ -23,6 +23,7 @@ import { applyEdit, applyToggleAc } from "./edit.mjs";
 import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
 import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
+import { acItemCount } from "./model/ticket-body.mjs";
 import { ticketJson } from "./model/ticket-json.mjs";
 import { WORKFLOWS } from "./model/workflows.mjs";
 import { isType } from "./model/schema.mjs";
@@ -1000,7 +1001,10 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           throw e;
         }
         if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
-        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db" });
+        // BLZ-729: ALWAYS echo what was stored, so a client that sent a body or AC list can tell
+        // this server from one older than BLZ-729, which drops both and answers without these.
+        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db",
+                           bodyBytes: Buffer.byteLength(r.body, "utf8"), acItems: acItemCount(r.body) });
       }
       if (u.pathname === "/api/link") {
         // BLZ-684: classified `write` in ROUTE_SCOPES since BLZ-323, and answered by NO handler

@@ -13,6 +13,7 @@ import { EDITABLE_FIELDS, derivedFieldRefusal } from "./model/fields.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
 import { validateSprintFields } from "./model/sprints.mjs";
+import { AC_HEADING_RE } from "./model/ticket-body.mjs";
 
 function asArray(v) {
   if (Array.isArray(v)) return v;
@@ -104,7 +105,8 @@ export async function applyToggleAc(projectsDir, id, { index, checked }, opts = 
 
   const lines = found.body.split("\n");
   const isHeading = (l) => /^\s{0,3}#{1,6}\s/.test(l);
-  const start = lines.findIndex((l) => /^\s{0,3}#{1,6}\s+acceptance criteria\s*$/i.test(l));
+  // BLZ-729: the heading rule lives in ticket-body.mjs, so toggle, count and append agree.
+  const start = lines.findIndex((l) => AC_HEADING_RE.test(l));
   if (start === -1) return { ok: false, errors: ["ticket has no ## Acceptance Criteria section"] };
 
   const acLineIdx = [];

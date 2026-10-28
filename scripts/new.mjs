@@ -15,9 +15,13 @@ import { roundEstimate } from "./model/time.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
 import { validateSprintFields } from "./model/sprints.mjs";
+import { SCAFFOLD_BODY, withAcSection } from "./model/ticket-body.mjs";
 
 export async function applyNew(projectsDir, opts = {}) {
   const { project, type, title, priority = "medium", labels = [], today = null, extra = {},
+          // BLZ-729: a body and an AC list the caller supplies (already validated by
+          // bodyOrErrors / acItemsOrErrors at the boundary); null keeps the template.
+          body: givenBody = null, ac = null,
           storage = fsStorage, readStorage = fsReadStorage,
           // BLZ-667: the same allocator closure resolveWritePort's fs/dual branches build —
           // duplicated deliberately (see write-port-resolve.mjs). `title` arrives at call time.
@@ -72,7 +76,8 @@ export async function applyNew(projectsDir, opts = {}) {
   if (frontmatter.not_before === undefined) delete frontmatter.not_before;
   if (frontmatter.deadline === undefined) delete frontmatter.deadline;
 
-  const body = "## Context\n\n## Acceptance Criteria\n\n- [ ] \n\n## Notes\n";
+  const base = givenBody ?? SCAFFOLD_BODY;
+  const body = ac ? withAcSection(base, ac) : base;
   // INF-791: validate the parent for real. This previously passed NO lookup and
   // then filtered out `parent not found`, on the reasoning that a parent might be
   // created later — which meant canParent() was never reached and `blaze new`
@@ -138,5 +143,6 @@ export async function applyNew(projectsDir, opts = {}) {
   const { file } = await writePort.write(target,
     { create: true, actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
   const warnings = warnMissingRequired(frontmatter, project_cfg, { reason: extra.reason ?? null });
-  return { ok: true, id, type, project, status, file, claimFile, warnings };
+  // BLZ-729: `body` is what was written, so `/api/new` can echo its size and AC count.
+  return { ok: true, id, type, project, status, file, claimFile, warnings, body };
 }
