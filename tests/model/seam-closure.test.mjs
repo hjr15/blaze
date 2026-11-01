@@ -963,7 +963,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
     inert: ["CSRF", "boardModel", "contentHash", "liveModel", "pageHtml",
       "reconcilePreview"] }],
   ["new.mjs", { writes: ["applyNew"], sanctioned: [], inert: [] }],
-  ["edit.mjs", { writes: [], sanctioned: [], inert: ["applyEdit", "applyToggleAc"] }],
+  // BLZ-729: whole-body replace and AC append write through the injected port, like applyToggleAc.
+  ["edit.mjs", { writes: [], sanctioned: [], inert: ["applyEdit", "applyToggleAc", "applyBody", "applyAcAdd"] }],
   ["link.mjs", { writes: [], sanctioned: [], inert: ["applyLink"] }],
   ["log.mjs", { writes: [], sanctioned: [], inert: ["applyLog"] }],
   ["move.mjs", { writes: [], sanctioned: [], inert: ["applyMove"] }],

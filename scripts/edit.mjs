@@ -13,7 +13,9 @@ import { EDITABLE_FIELDS, derivedFieldRefusal } from "./model/fields.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
 import { validateSprintFields } from "./model/sprints.mjs";
-import { AC_HEADING_RE } from "./model/ticket-body.mjs";
+import { AC_HEADING_RE, BODY_MAX_BYTES, bodyOrErrors, acItemsOrErrors, withAcSection, withAcAppended,
+         acItemCount } from "./model/ticket-body.mjs";
+import { Buffer } from "node:buffer";
 
 function asArray(v) {
   if (Array.isArray(v)) return v;
@@ -126,5 +128,70 @@ export async function applyToggleAc(projectsDir, id, { index, checked }, opts = 
     project: found.project, status: found.status,
     frontmatter: fm, body: lines.join("\n"), currentFile: found.file,
   }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
-  return { ok: true, id, file };
+  return { ok: true, id, file, acItems: acLineIdx.length };
+}
+
+/** BLZ-729: the composed body's byte-cap refusal, or null. The cap is on what would be STORED
+ *  (body plus AC section), not only on what the caller sent — each part can be within its own
+ *  limit and the result over it. */
+function overCap(body) {
+  const bytes = Buffer.byteLength(body, "utf8");
+  return bytes > BODY_MAX_BYTES ? `the stored body would be ${bytes} bytes; the limit is ${BODY_MAX_BYTES}` : null;
+}
+
+/** BLZ-729: locate, validate the merged ticket with its NEW body, and write through the port as
+ *  applyToggleAc does. `compose(found)` → `{ body, ...extra }` or `{ errors }`. */
+async function writeBody(projectsDir, id, compose, opts) {
+  const { today = null, storage = fsStorage, readStorage = fsReadStorage,
+          writePort = fsWritePort(projectsDir, storage) } = opts;
+  const { found, duplicates } = await locateTicket(projectsDir, id, { storage: readStorage });
+  if (duplicates) return { ok: false, errors: [ambiguousIdError(id, duplicates)] };
+  if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
+  const c = compose(found);
+  if (c.errors) return { ok: false, errors: c.errors };
+  const cap = overCap(c.body);
+  if (cap) return { ok: false, errors: [cap] };
+
+  const fm = { ...found.frontmatter };
+  const all = new Map();
+  for (const t of await readStorage.listTickets(projectsDir)) all.set(t.frontmatter.id, { frontmatter: t.frontmatter, body: t.body });
+  all.set(id, { frontmatter: fm, body: c.body });
+  const config = loadConfig({ root: dirname(projectsDir) });
+  const { types } = loadProjectSchema(projectsDir, fm.project ?? id.split("-")[0], { config });
+  const errors = validateTicket({ frontmatter: fm, body: c.body }, (pid) => all.get(pid) || null, { types });
+  if (errors.length) return { ok: false, errors };
+
+  if (today) fm.updated = today;
+  const { file } = await writePort.write({
+    project: found.project, status: found.status,
+    frontmatter: fm, body: c.body, currentFile: found.file,
+  }, { actor: opts.actor ?? "unknown", source: opts.source ?? "cli" });
+  const { body: _b, ...extra } = c;
+  return { ok: true, id, file, bodyBytes: Buffer.byteLength(c.body, "utf8"), acItems: acItemCount(c.body), ...extra };
+}
+
+/** BLZ-729 (E3): replace a ticket's body, its AC section, or both. The new body is
+ *  `body ?? found.body`, then `withAcSection(…, ac)` when `ac` is given. Both shapes are checked
+ *  before anything is read, so `/api/body` and the CLI get the same refusals for free. */
+export async function applyBody(projectsDir, id, { body = null, ac = null } = {}, opts = {}) {
+  if (body == null && ac == null) return { ok: false, errors: ["give body, ac, or both"] };
+  const errors = [];
+  const b = body == null ? null : bodyOrErrors(body);
+  const a = ac == null ? null : acItemsOrErrors(ac);
+  if (b?.errors) errors.push(...b.errors);
+  if (a?.errors) errors.push(...a.errors);
+  if (errors.length) return { ok: false, errors };
+  return writeBody(projectsDir, id, (found) => {
+    const base = b ? b.body : found.body;
+    return { body: a ? withAcSection(base, a.items) : base };
+  }, opts);
+}
+
+/** BLZ-729 (E3): append one unchecked criterion. `index` is its 0-based ordinal — what
+ *  `/api/ac` toggles. */
+export async function applyAcAdd(projectsDir, id, { text } = {}, opts = {}) {
+  if (typeof text !== "string") return { ok: false, errors: ["text must be a string"] };
+  const a = acItemsOrErrors([text]);
+  if (a.errors) return { ok: false, errors: a.errors };
+  return writeBody(projectsDir, id, (found) => withAcAppended(found.body, a.items[0].text), opts);
 }

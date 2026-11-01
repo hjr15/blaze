@@ -37,6 +37,9 @@ export const ROUTE_SCOPES = {
   "POST /api/ac": "write",
   // BLZ-684: creating a ticket over HTTP — the remote CLI's `blaze new`.
   "POST /api/new": "write",
+  // BLZ-729: remote body and AC authoring (spec §7 E3, OD-B5)
+  "POST /api/body": "write",
+  "POST /api/ac/add": "write",
   // BLZ-709: remote reads (spec D7) — the remote CLI's `blaze show` and `blaze list`.
   "GET /api/ticket": "read",
   "GET /api/tickets": "read",
