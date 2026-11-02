@@ -90,7 +90,8 @@ describe("requestFor — argv parsed as the local runner parses it", () => {
                      { ...POST, path: "/api/log", body: { id: "ENG-1", minutes: 25, date: "2026-10-01", note: "n" } });
     assert.deepEqual(requestFor("link", ["--rm", "ENG-1", "Blocks", "ENG-2"]),
                      { ...POST, path: "/api/link", body: { id: "ENG-1", type: "Blocks", target: "ENG-2", remove: true } });
-    assert.deepEqual(Object.keys(REMOTE_VERBS), ["new", "move", "edit", "resolve", "log", "link", "show", "list"]);
+    assert.deepEqual(Object.keys(REMOTE_VERBS), ["new", "move", "edit", "resolve", "log", "link", "show", "list",
+      "ac"]);   // BLZ-729
   });
   test("BLZ-691: extra positionals are ignored, exactly as the local runners ignore them", () => {
     assert.deepEqual(requestFor("move", ["ENG-1", "done", "extra"]), requestFor("move", ["ENG-1", "done"]));

@@ -5,6 +5,8 @@ import { derivedFieldRefusal } from "./model/fields.mjs";
 import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { assertWritable } from "./readonly.mjs";
+import { readRegularFileSync } from "./model/regular-file.mjs";
+import { bodyOrErrors, acItemsOrErrors } from "./model/ticket-body.mjs";
 
 const { dataRoot, projectsDir } = resolveRoots();
 // Config-schema version guard (ADR-0002), hoisted before the mutation below:
@@ -35,6 +37,15 @@ try {
 const argv = process.argv.slice(2);
 
 const opts = { priority: "medium", labels: [], extra: {} };
+// BLZ-729: --body-file / --ac-file. The file is read as a regular file only, and a failure names
+// the flag, the path and the error code — never the content (the remote client's wording).
+let bodyText = null, acLines = null;
+function readFlagFile(flag, path) {
+  if (path === undefined) { console.error(`blaze new: ${flag} needs a value`); process.exit(1); }
+  try { return readRegularFileSync(path, "utf8"); } catch (e) {
+    console.error(`blaze new: cannot read ${flag} ${path}: ${e?.code ?? "error"}`); process.exit(1);
+  }
+}
 const positional = [];
 for (let i = 0; i < argv.length; i++) {
   const a = argv[i];
@@ -51,6 +62,8 @@ for (let i = 0; i < argv.length; i++) {
     case "--impact":   opts.extra.impact = argv[++i]; break;
     case "--reason":   opts.extra.reason = argv[++i]; break;
     case "--sprint":   opts.extra.sprint = argv[++i]; break;
+    case "--body-file": bodyText = readFlagFile(a, argv[++i]); break;
+    case "--ac-file":  acLines = readFlagFile(a, argv[++i]).split(/\r?\n/).filter((l) => l.trim() !== ""); break;
     // BLZ-386 / BLZ-360 §4.2: `start` and `due` are the scheduler's outputs under ADR-0022, so
     // they leave the create path with the edit path. The two constraints that drive them take
     // their place, and the refusal below names the replacement rather than just rejecting.
@@ -84,8 +97,19 @@ if (!opts.project || !opts.type || !opts.title) {
   console.error('  [--estimate m] [--likelihood l] [--impact i] [--sprint s]');
   console.error('  [--not-before YYYY-MM-DD] [--deadline YYYY-MM-DD]');
   console.error('  [--reason "<why a required field is blank>"]');
+  console.error('  [--body-file P] [--ac-file Q]   P: the ticket body; Q: one acceptance criterion per line');
   console.error('  --likelihood and --impact are REQUIRED for --type risk; --estimate for story/task/bug.');
   process.exit(1);
+}
+
+// BLZ-729: the same shape checks the server runs, before any id is allocated.
+{
+  const b = bodyText === null ? { body: null } : bodyOrErrors(bodyText);
+  const a = acLines === null ? { items: null } : acItemsOrErrors(acLines);
+  const errors = [...(b.errors ?? []), ...(a.errors ?? [])];
+  if (errors.length) { console.error(`blaze new failed:\n  ${errors.join("\n  ")}`); process.exit(1); }
+  opts.body = b.body;
+  opts.ac = a.items;
 }
 
 // BLZ-299: the port comes from BLAZE_WRITE_PORT, so a dual-write soak reaches the

@@ -277,6 +277,12 @@ rejected.
 | `--sprint <id>` | Assign the ticket to a sprint by id. | none |
 | `--start <date>` | Planned start date. | none |
 | `--due <date>` | Due date. | none |
+| `--body-file <path>` | The ticket body, read from a file (at most 131072 bytes, not blank, no NUL; CRLF is stored as LF). BLZ-729. | the template |
+| `--ac-file <path>` | The acceptance criteria, one per line; blank lines are skipped, and a leading `- `, `- [ ] ` or `- [x] ` is read as a checkbox. At most 100 items of 2000 bytes each. With a body that has an `## Acceptance Criteria` section the section is replaced; otherwise it is added before `## Notes`, or at the end. BLZ-729. | the template's one empty box |
+
+Both file flags work locally and in [remote mode](#remote-mode). A file that cannot be read is
+refused with the flag, the path and the error code (`blaze new: cannot read --body-file p.md: ENOENT`),
+never the file's content, and nothing is created.
 
 ## sprint
 
@@ -460,9 +466,16 @@ file into the target status directory. It makes no commit (BLZ-254).
 
 ```
 blaze edit <id> <field> <value>
+blaze edit <id> [--body-file <path>] [--ac-file <path>]
 ```
 
 In-place edit of one whitelisted field. Any other field name errors.
+
+The second form (BLZ-729) replaces the ticket's whole body (`--body-file`), or just its
+`## Acceptance Criteria` section (`--ac-file`, one criterion per line), or both. It prints
+`<id>: body replaced (<bytes> bytes, <n> criteria)`. The limits are `blaze new`'s. A file flag
+cannot be mixed with `<field> <value>` (`usage: blaze edit <id> <field> <value…> | blaze edit <id> [--body-file P] [--ac-file Q]`).
+The edit cannot take the stored body past 131072 bytes: the result is refused instead.
 
 | Arg | Meaning |
 |---|---|
@@ -520,6 +533,26 @@ Appends a worklog entry to a ticket.
 | `<minutes>` | Time spent, rounded to the nearest 1 minute. | — |
 | `--date YYYY-MM-DD` | Date of the entry. | today |
 | `--note "..."` | Free-text note on the entry. | none |
+
+## ac
+
+```
+blaze ac add <id> <text…>
+blaze ac toggle <id> <n> [--uncheck]
+```
+
+Remote mode only (BLZ-729): `ac` writes to the live board over HTTP, so without `BLAZE_REMOTE_URL`
+and a token it exits `1` with `blaze: ac writes to the live board over HTTP and runs in remote mode only`.
+`BLAZE_READONLY=1` refuses it as it refuses a remote `new`. Locally, edit the ticket file, or use
+`blaze edit <id> --ac-file`.
+
+| Subcommand | Meaning |
+|---|---|
+| `add <id> <text…>` | Appends one unchecked criterion (`POST /api/ac/add`). The scaffold's lone empty box is replaced rather than followed. Prints `<id>: criterion <n> added`. |
+| `toggle <id> <n>` | Checks criterion `<n>`, counting from 1 (`POST /api/ac`). `--uncheck` unchecks it. `<n>` must be a whole number from 1, else `blaze ac toggle: <n> must be a criterion number counting from 1`. Prints `<id>: criterion <n> checked` or `unchecked`. |
+
+`add` always appends unchecked: a `- [x]` prefix in the text is dropped. An append that would take
+the stored body past 131072 bytes is refused.
 
 ## import
 
@@ -862,6 +895,9 @@ two machines creating at once never collide.
 | `blaze new …` | `POST /api/new` (**needs a db-mode board** — see below) |
 | `blaze move <id> <status>` | `POST /api/move` |
 | `blaze edit <id> <field> <value>` | `POST /api/edit` |
+| `blaze edit <id> [--body-file P] [--ac-file Q]` | `POST /api/body` (BLZ-729) |
+| `blaze ac add <id> <text…>` | `POST /api/ac/add` (BLZ-729) |
+| `blaze ac toggle <id> <n> [--uncheck]` | `POST /api/ac` (BLZ-729) |
 | `blaze resolve <id> <resolution>` | `POST /api/resolve` |
 | `blaze log <id> <minutes> [--date] [--note]` | `POST /api/log` |
 | `blaze link [--rm] <id> <TYPE> <target>` | `POST /api/link` |
@@ -873,6 +909,16 @@ two machines creating at once never collide.
 (`BLAZE_WRITE_PORT=db`). On a file board it is refused `409` and `blaze new` prints that message:
 a file board allocates ids from git, which is single-machine, and the fetch would stall the
 server for every session. The other five verbs work on any board.
+
+**Body and criteria (BLZ-729).** `blaze new --body-file P --ac-file Q`, `blaze edit <id> --body-file P`
+and `blaze ac` need server 0.11.0 or newer. The client reads the files itself and refuses, before
+sending anything, a `--body-file` over 131072 bytes or a request over 262144 bytes (a body of quote
+characters JSON-escapes to twice its size). Against an older server:
+
+- `new` with a body: the old server drops `body` and `ac` and answers 200, so the client exits `1`
+  with `blaze new: <origin> created <id> but ignored the body and acceptance criteria — the server is older than BLZ-729 (0.11.0); <id> has the template body`.
+- `edit` with a file flag and `ac add`: the route is a 404, and the client says
+  `blaze <verb>: the server at <origin> has no <path> — it is older than BLZ-729 (0.11.0)`.
 
 The arguments are the local command's own. Each prints one line ending `(remote: <origin>)`,
 or the server's refusal and exit `1`. Every **other** command — `audit`, `reconcile`, `db`,

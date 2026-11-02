@@ -26,11 +26,13 @@ test("package identity", () => {
 // (BLZ-254 PR D) removes `blaze commit` and `blaze publish` — breaking, so the minor moves — and
 // the tree becomes 0.9.0, which is NOT published under this name: the line stays frozen at 0.8.0.
 // BLZ-711: 0.9.0 → 0.10.0 because a 0.9.0 engine refuses a v6 database as newer, so the two must be distinguishable (plan Finding 16).
-test("BLZ-711: this tree is 0.10.0 — DB schema v6 (BLZ-705) — and 0.8.0 stays the frozen release", async () => {
-  assert.equal(pkg.version, "0.10.0");
+// BLZ-729: 0.10.0 → 0.11.0 — the server gains /api/body and /api/ac/add and /api/new takes a body, so a
+// client that sends them must be able to tell an older server (plan Finding 15).
+test("BLZ-729: the version is 0.11.0 — and 0.8.0 stays the frozen release", async () => {
+  assert.equal(pkg.version, "0.11.0");
   const lock = JSON.parse(readFileSync(join(REPO, "package-lock.json"), "utf8"));
-  assert.equal(lock.version, "0.10.0", "package-lock.json's top-level version must move with it");
-  assert.equal(lock.packages[""].version, "0.10.0", "…and its root package entry");
+  assert.equal(lock.version, "0.11.0", "package-lock.json's top-level version must move with it");
+  assert.equal(lock.packages[""].version, "0.11.0", "…and its root package entry");
   assert.equal(pkg.scripts.commit, undefined, "the `npm run commit` script ran the deleted commit-runner");
   const { idsFromCommitMessage } = await import("../scripts/reconcile.mjs");
   assert.deepEqual(idsFromCommitMessage("BLZ-675: x (#9)\n\n* BLZ-674: y\n* BLZ-678: z", "BLZ"),
