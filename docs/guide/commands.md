@@ -377,14 +377,18 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
-| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. It judges every finding, whatever `--kind` narrowed the listing to. The plain report ends `fail-on <kinds>: N finding(s) — FAIL`, `— pass` or `— could not observe the whole board`; under `--json` the same verdict is `failOnVerdict` (`fail`, `pass`, `could-not-observe`, with the blinding kinds in `failOnBlind`), and a `fail` is also said on stderr. `ok` in the JSON is still the hard-kind verdict, not the gate's. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present, or an **empty read**: 0 tickets read across at least one resolved project), or when a kind is unknown. It judges every finding, whatever `--kind` narrowed the listing to. The plain report ends `fail-on <kinds>: N finding(s) — FAIL`, `— pass` or `— could not observe the whole board`; under `--json` the same verdict is `failOnVerdict` (`fail`, `pass`, `could-not-observe`, with the blinding kinds in `failOnBlind`, `"empty-read"` among them), and a `fail` is also said on stderr. `ok` in the JSON is still the hard-kind verdict, not the gate's. |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
 Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
 the corpus is empty — a run that measured nothing is never reported as a pass. With
 `--fail-on`, `1` means a finding of a named kind and nothing else, and `2` also covers a run
-that could not read the whole board.
+that could not read the whole board, including a run that read 0 tickets across a project it
+resolved (`blaze audit: --fail-on cannot pass — 0 tickets were read across <n> project(s); an
+empty read is not a clean board`, BLZ-714). Without `--fail-on` an empty board still exits `0`.
+Every `--json` report carries `ticketCount`, the number of tickets the run observed, with or
+without `--fail-on`, so a consumer can tell "no findings" from "nothing read".
 
 **Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
 resolved store, so it works under `fs`, `dual` and `db`. Each rule started as the script's own,
@@ -606,11 +610,13 @@ was a zero `diff -r` against that script's output for the live board.
 | Flag | Meaning | Default |
 |---|---|---|
 | `--project <KEY>` | One project only. The key must be one `blaze.config.json` lists or the store holds; anything else (a typo, the wrong case) is refused with exit `1`, naming the known projects, and nothing is written or checked. | every project in `blaze.config.json` |
-| `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
+| `--check` | Write nothing; exit `1` naming each file that differs from the tickets, and exit `2` when `--out` does not exist or is not a directory (nothing to compare against: render with `--out <dir>` first). Allowed under `BLAZE_READONLY`. | off |
 | `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
 
-Exit `2` when there are no projects to render — a run that rendered nothing never reports
-"in sync". Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
+Exit `2` when there are no projects to render, and under `--check` when the directory is
+missing (BLZ-714) — a run that rendered or compared nothing never reports "in sync", and a
+missing directory is never reported as drift. A db board keeps no committed copy, so there
+`--check` is not the gate: render with `--out <dir>` and require exit `0`. Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
 what the script produced when its `glob` happened to return paths sorted; on a filesystem that
 returned them in another order the script's ties came out differently, so the first
 `blaze matrices` run on such a board may reorder those rows once. Under `db` a ticket has no

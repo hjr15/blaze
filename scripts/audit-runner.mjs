@@ -412,6 +412,11 @@ const failing = failOn ? report.findings.filter((f) => failOn.has(f.kind)).lengt
 // never a clean 0.
 const BLIND_KINDS = ["unreadable-ticket-directory", "config-unloadable"];
 const blind = failOn ? BLIND_KINDS.filter((k) => report.findings.some((f) => f.kind === k)) : [];
+// BLZ-714: the observation check. A gate that read 0 tickets across a project it resolved
+// vouches for nothing: "no findings" over an empty read is not a clean board. Only under
+// --fail-on; the plain report of a new empty board still exits 0.
+const emptyRead = failOn && tickets.length === 0 && keys.length > 0;
+if (emptyRead) blind.push("empty-read");
 // BLZ-690: the gate's verdict, said in words in both outputs. Under --json, `failing: 0` beside
 // an exit of 2 — or `ok: true` (the HARD-kind verdict) beside an exit of 1 — read as a pass.
 const verdict = !failOn ? null : blind.length ? "could-not-observe" : failing ? "fail" : "pass";
@@ -419,6 +424,7 @@ const VERDICT_TEXT = { "could-not-observe": "could not observe the whole board",
 
 if (opts.json) {
   console.log(JSON.stringify({ ...report, findings,
+    ticketCount: tickets.length,
     ...(failOn ? { failOn: [...failOn], failing, failOnVerdict: verdict, failOnBlind: blind } : {}) }, null, 2));
   // stdout stays pure JSON; a failing gate also says so on stderr, in the plain report's words.
   if (verdict === "fail") {
@@ -455,7 +461,10 @@ if (opts.json) {
 // on a real board is well past the pipe buffer, so this is not theoretical — it truncated
 // at 64KB the first time it was piped.
 // BLZ-681: `blind` (above) — a --fail-on run that could not observe the whole board exits 2.
-if (blind.length) {
-  console.error(`blaze audit: --fail-on cannot pass — the run could not observe the whole board (${blind.join(", ")}); fix that first`);
+if (emptyRead) {
+  console.error(`blaze audit: --fail-on cannot pass — 0 tickets were read across ${keys.length} project(s); an empty read is not a clean board`);
+}
+if (blind.some((k) => k !== "empty-read")) {
+  console.error(`blaze audit: --fail-on cannot pass — the run could not observe the whole board (${blind.filter((k) => k !== "empty-read").join(", ")}); fix that first`);
 }
 process.exitCode = blind.length ? 2 : failOn ? (failing ? 1 : 0) : (report.ok ? 0 : 1);

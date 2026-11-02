@@ -7,8 +7,10 @@
 //   default   write `<KEY>-requirements-matrix.md` and `<KEY>-architecture-matrix.md` for each
 //             project into --out (default `<data root>/docs/matrices`)
 //   --check   write nothing; exit 1 naming every file that differs from what would be written —
-//             the script's CI gate, `matrices-in-sync`
-import { mkdirSync } from "node:fs";
+//             the script's CI gate, `matrices-in-sync`. Exit 2 when --out does not exist (or is
+//             not a directory): there is nothing to compare against, which is neither sync
+//             nor drift (BLZ-714)
+import { mkdirSync, statSync } from "node:fs";
 import { join, relative, resolve as resolvePath } from "node:path";
 import { readRegularFileSync, writeRegularFileSync } from "./model/regular-file.mjs";
 import { resolveRoots, loadConfig } from "./config.mjs";
@@ -21,7 +23,8 @@ const USAGE = `usage: blaze matrices [--project KEY] [--check] [--out DIR]
 
   Regenerate the requirements and architecture matrices — derived views of the tickets.
   --project KEY   one project only (default: every configured project)
-  --check         write nothing; exit 1 if a committed matrix differs from the tickets
+  --check         write nothing; exit 1 if a committed matrix differs from the tickets,
+                  exit 2 if DIR does not exist
   --out DIR       where the files live (default: <data root>/docs/matrices)`;
 
 const opts = { project: null, check: false, out: null };
@@ -83,6 +86,19 @@ if (!keys.length) {
 const pathOf = rs.mode === "db"
   ? (t) => relative(dataRoot, ticketPath(projectsDir, t.project, t.status, t.frontmatter.id, t.frontmatter.title))
   : (t) => relative(dataRoot, t.file);
+
+// BLZ-714: --check against a directory that is not there is "could not run", not drift (exit 1)
+// and certainly not sync. A db board keeps no committed copy, so a missing directory is the
+// normal misconfiguration, and 22 "drifted" files every night would hide it.
+if (opts.check) {
+  let isDir = false;
+  try { isDir = statSync(out).isDirectory(); } catch (e) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e; }
+  if (!isDir) {
+    console.error(`blaze matrices: --check has nothing to compare against — ${relative(process.cwd(), out) || out} `
+      + `does not exist; render with --out <dir> instead`);
+    process.exit(2);
+  }
+}
 
 const drift = [];
 if (!opts.check) mkdirSync(out, { recursive: true });
