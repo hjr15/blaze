@@ -278,7 +278,7 @@ rejected.
 | `--sprint <id>` | Assign the ticket to a sprint by id. | none |
 | `--start <date>` | Planned start date. | none |
 | `--due <date>` | Due date. | none |
-| `--body-file <path>` | The ticket body, read from a file (at most 131072 bytes, not blank, no NUL; CRLF is stored as LF). BLZ-729. | the template |
+| `--body-file <path>` | The ticket body, read from a file (not blank, no NUL; CRLF is stored as LF). The 131072-byte cap is on the **stored** body: the file plus the one trailing newline that is added when it has none (and the criteria section, if `--ac-file` is given). A 131072-byte file with no final newline is therefore refused (`the stored body would be 131073 bytes`); end it with a newline and keep it to 131072 bytes in all. BLZ-729. | the template |
 | `--ac-file <path>` | The acceptance criteria, one per line; blank lines are skipped, and a leading `- `, `- [ ] ` or `- [x] ` is read as a checkbox. At most 100 items of 2000 bytes each. With a body that has an `## Acceptance Criteria` section the section is replaced; otherwise it is added before `## Notes`, or at the end. BLZ-729. | the template's one empty box |
 
 Both file flags work locally and in [remote mode](#remote-mode). A file that cannot be read is
@@ -920,7 +920,7 @@ a file board allocates ids from git, which is single-machine, and the fetch woul
 server for every session. `move`, `edit` (both forms), `resolve`, `log`, `link` and `ac` work on any board.
 
 **Body and criteria (BLZ-729).** `blaze new --body-file P --ac-file Q`, `blaze edit <id> --body-file P`
-and `blaze ac` need server 0.11.0 or newer. The client reads the files itself and refuses, before
+and `blaze ac add` need server 0.11.0 or newer (`blaze ac toggle` uses `/api/ac`, which a 0.10.0 server already has). The client reads the files itself and refuses, before
 sending anything, a `--body-file` over 131072 bytes or a request over 262144 bytes (a body of quote
 characters JSON-escapes to twice its size). Against an older server:
 

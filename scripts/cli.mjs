@@ -79,12 +79,12 @@ const SUBCOMMANDS = {
   schedule: { file: "schedule-runner.mjs", desc: "migrate dates to constraints, or propose Precedes edges from Blocks", mutates: true },
   reindex: { file: "reindex.mjs", desc: "rebuild the derived index + transitions cache", mutates: true },
   move: { file: "move-runner.mjs", desc: "move a ticket to a new status", mutates: true },
-  edit: { file: "edit-runner.mjs", desc: "edit a ticket field", mutates: true },
+  edit: { file: "edit-runner.mjs", desc: "edit a ticket field, or replace its body or acceptance criteria (--body-file, --ac-file)", mutates: true },
   link: { file: "link-runner.mjs", desc: "add/remove a link between tickets", mutates: true },
   resolve: { file: "resolve-runner.mjs", desc: "set a ticket's resolution", mutates: true },
   log: { file: "log-runner.mjs", desc: "log worked minutes against a ticket", mutates: true },
   // BLZ-709 (spec D7): reads of the LIVE board, over HTTP. No runner: in remote mode they go
-  // to remote-client.mjs like the six writes, and anywhere else they are refused below.
+  // to remote-client.mjs like the writes, and anywhere else they are refused below.
   show: { file: null, desc: "show one ticket (remote mode — BLAZE_REMOTE_URL)", mutates: false, remoteOnly: true },
   list: { file: null, desc: "list tickets, or --projects (remote mode — BLAZE_REMOTE_URL)", mutates: false, remoteOnly: true },
   // BLZ-729: remote-only like `show`, but it WRITES — so `mutates`, and BLAZE_READONLY refuses it
@@ -170,7 +170,7 @@ if (isReadonly() && sub.mutates && !readOnlyInvocation) {
 }
 
 // BLZ-684 (spec §5.4): REMOTE MODE. With BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE,
-// BLZ-710) both set, the six ticket verbs and the two reads, `show` and `list` (BLZ-709), go to
+// BLZ-710) both set, the ticket verbs (`new`, `move`, `edit`, `resolve`, `log`, `link`, and `ac` since BLZ-729) and the two reads, `show` and `list` (BLZ-709), go to
 // the board server over HTTP and nothing else runs here: every other command
 // needs the board's data on this machine, so it is refused rather than run against whatever
 // local tree happens to be in the working directory. Half-set is an error for EVERY command —

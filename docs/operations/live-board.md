@@ -76,8 +76,8 @@ command. Written out: `BLAZE_REMOTE_URL=<board origin> BLAZE_TOKEN_FILE=/path/to
 - A server older than 0.11.0 does not know these. `new` with a body against one creates the
   ticket with the template body and the client then exits `1` saying so
   (`created ENG-9 but ignored the body … older than BLZ-729 (0.11.0)`), and `edit --body-file` or
-  `ac add` against one says `the server at <board origin> has no /api/body — it is older than
-  BLZ-729 (0.11.0)`. Upgrade the server; do not retry.
+  `ac add` against one says `the server at <board origin> has no <path> — it is older than
+  BLZ-729 (0.11.0)`, where `<path>` is `/api/body` or `/api/ac/add`. Upgrade the server; do not retry.
 
 ## Admin verbs run inside the deployment
 

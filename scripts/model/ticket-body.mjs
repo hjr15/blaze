@@ -1,6 +1,6 @@
 // scripts/model/ticket-body.mjs — BLZ-729 (E3): a ticket's body and its acceptance criteria,
-// as a caller with no checkout supplies them. Pure: the network boundary (`/api/new` today; the
-// body and AC-append routes next) validates through these BEFORE any id is allocated or any row
+// as a caller with no checkout supplies them. Pure: the network boundary (`/api/new`, `/api/body` and
+// `/api/ac/add`, and the local `new`/`edit` runners) validates through these BEFORE any id is allocated or any row
 // is written, so a refusal is a 422 that burns nothing.
 import { Buffer } from "node:buffer";
 

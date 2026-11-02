@@ -227,7 +227,7 @@ function readRequestFor(verb, argv) {
   return { method: "GET", path: q ? `/api/tickets?${q}` : "/api/tickets", body: undefined, read: "tickets", json };
 }
 
-/** The six writes' argv → `{ path, body }`, unchanged from BLZ-684. */
+/** The writes' argv → `{ path, body }`: the six of BLZ-684, plus `edit`'s files form and `ac` (BLZ-729). */
 function writeRequestFor(verb, path, argv, readFile) {
   const plain = (n, usage, args = argv) => {
     const pos = [];

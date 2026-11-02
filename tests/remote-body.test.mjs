@@ -14,6 +14,8 @@ import { fileURLToPath } from "node:url";
 import { startServer } from "../scripts/serve.mjs";
 import { addUser } from "../scripts/model/user-admin.mjs";
 import { runDb } from "../scripts/db-runner.mjs";
+import { openSqliteRead } from "../scripts/model/sqlite-storage.mjs";
+import { shadowDbPath } from "../scripts/model/write-port-resolve.mjs";
 import { requestFor, runRemote } from "../scripts/remote-client.mjs";
 import { dbBoard, QUIET } from "./helpers/db-board.mjs";
 import { scratchRegistry } from "./helpers/scratch.mjs";
@@ -392,4 +394,32 @@ test("BLZ-729: the request cap is exactly 262144 bytes", () => {
   assert.equal(Buffer.byteLength(JSON.stringify(at.body)), 262144);
   const over = requestFor("ac", ["add", "ENG-1", "x".repeat(262145 - base)]);
   assert.match(over.error ?? "", /the request is 262145 bytes/);
+});
+
+// ---- BLZ-729 branch-review fix round ----
+
+test("BLZ-729: local db-mode edit --body-file and --ac-file write through the database", async () => {
+  const roots = dbBoard();
+  assert.equal(await runDb(["init"], { ...QUIET, roots }), 0);
+  const dir = tmp();
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: roots.projectsDir, BLAZE_WRITE_PORT: "db" };
+  for (const k of SCRUB.filter((k) => k !== "BLAZE_PROJECTS_DIR" && k !== "BLAZE_WRITE_PORT")) delete env[k];
+  const run = (script, args) => spawnSync(process.execPath, [join(SCRIPTS, script), ...args], { encoding: "utf8", env });
+  const stored = (id) => {
+    const rs = openSqliteRead(shadowDbPath(roots.dataRoot));
+    try { return rs.getTicket(null, id).found.body; } finally { rs.close(); }
+  };
+  const b = put(dir, "b.md", "## Context\r\n\r\ndb body\r\n");
+  const a = put(dir, "a.txt", "first\n- [x] second\n");
+  const r1 = run("edit-runner.mjs", ["ENG-1", "--body-file", b]);
+  assert.equal(r1.status, 0, r1.stderr);
+  assert.match(r1.stdout, /ENG-1: body replaced \(\d+ bytes, 0 criteria\)/);
+  assert.equal(stored("ENG-1"), "## Context\n\ndb body\n");
+  const r2 = run("edit-runner.mjs", ["ENG-1", "--ac-file", a]);
+  assert.equal(r2.status, 0, r2.stderr);
+  assert.match(r2.stdout, /body replaced \(\d+ bytes, 2 criteria\)/);
+  assert.ok(stored("ENG-1").includes("db body") && stored("ENG-1").includes("- [ ] first\n- [x] second"), stored("ENG-1"));
+  const made = run("new-runner.mjs", ["--project", "ENG", "--type", "task", "Dbnew", "--estimate", "30", "--body-file", b, "--ac-file", a]);
+  assert.equal(made.status, 0, made.stderr);
+  assert.ok(stored("ENG-2").includes("db body") && stored("ENG-2").includes("- [x] second"), stored("ENG-2"));
 });

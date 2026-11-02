@@ -1,5 +1,5 @@
-// scripts/edit-runner.mjs — CLI entry for `blaze edit <id> <field> <value>`:
-// applyEdit against the resolved data tree and writes; it makes no commit (BLZ-254).
+// scripts/edit-runner.mjs — CLI entry for `blaze edit <id> <field> <value>` and, since BLZ-729,
+// `blaze edit <id> [--body-file P] [--ac-file Q]` (applyBody): applyEdit/applyBody against the resolved data tree and write; it makes no commit (BLZ-254).
 import { applyEdit, applyBody } from "./edit.mjs";
 import { readRegularFileSync } from "./model/regular-file.mjs";
 import { resolvePorts } from "./model/write-port-resolve.mjs";
