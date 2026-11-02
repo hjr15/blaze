@@ -310,3 +310,86 @@ test("BLZ-729: local new and edit take the body flags", () => {
   assert.match(mixed.stderr, /usage: blaze edit <id> <field> <value…> \| blaze edit <id> \[--body-file P\] \[--ac-file Q\]/);
   assert.ok(readdirSync(join(roots.projectsDir, "ENG", "defined")).length === 2, "no ticket was created by the bad calls");
 });
+
+// ---- BLZ-729 fix round 1 ----
+
+test("BLZ-729: /api/new and local new refuse a composed body over the cap, before an id is allocated", async () => {
+  // 131,072 bytes with no final newline stores as 131,073; edit refuses it, so new must too.
+  const edge = "x".repeat(131072);
+  await withServer(async ({ url, member }) => {
+    const dir = tmp();
+    const env = { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: member };
+    const big = put(dir, "big.md", edge);
+    const r = await blaze(["new", "--project", "ENG", "--type", "task", "Big", "--estimate", "30", "--body-file", big], env);
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /the stored body would be 131073 bytes; the limit is 131072/);
+    const ac = put(dir, "ac.txt", "one\ntwo\n");
+    const near = put(dir, "near.md", `${"x".repeat(131060)}\n`);
+    const r2 = await blaze(["new", "--project", "ENG", "--type", "task", "Big", "--estimate", "30",
+                            "--body-file", near, "--ac-file", ac], env);
+    assert.equal(r2.status, 1);
+    assert.match(r2.stderr, /the stored body would be \d+ bytes; the limit is 131072/);
+    // The same text edit refuses says the same words, and no id was burnt: the next create is ENG-2.
+    const ok = await blaze(["new", "--project", "ENG", "--type", "task", "Fine", "--estimate", "30"], env);
+    assert.match(ok.stdout, /created ENG-2 /, `an id was burnt: ${ok.stdout}`);
+  });
+  const roots = dbBoard();
+  assert.equal(spawnSync("git", ["-C", roots.dataRoot, "init", "-q"]).status, 0);
+  const dir = tmp();
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: roots.projectsDir };
+  for (const k of SCRUB.filter((k) => k !== "BLAZE_PROJECTS_DIR")) delete env[k];
+  const big = put(dir, "big.md", edge);
+  const r = spawnSync(process.execPath, [join(SCRIPTS, "new-runner.mjs"), "--project", "ENG", "--type", "task",
+    "Big", "--estimate", "30", "--body-file", big], { encoding: "utf8", env });
+  assert.equal(r.status, 1);
+  assert.match(r.stderr, /the stored body would be 131073 bytes; the limit is 131072/);
+  assert.equal(readdirSync(join(roots.projectsDir, "ENG", "defined")).length, 1, "nothing was created");
+});
+
+test("BLZ-729: ac toggle out of range is reported in criterion numbers counting from 1", async () => {
+  await withServer(async ({ url, member }) => {
+    const r = await blaze(["ac", "toggle", "ENG-1", "99"], { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: member });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /criterion 99 does not exist; ENG-1 has 1 criterion\b/);
+    assert.ok(!/index 98|0\.\./.test(r.stderr), `0-based text leaked: ${r.stderr}`);
+  });
+});
+
+test("BLZ-729: the older-server check also fires for an AC list alone", async () => {
+  await withStub(200, { ok: true, id: "ENG-9" }, async ({ url }) => {
+    const dir = tmp();
+    const a = put(dir, "a.txt", "one\n");
+    const r = await blaze(["new", "--project", "ENG", "--type", "task", "T", "--estimate", "30", "--ac-file", a],
+      { BLAZE_REMOTE_URL: url, BLAZE_TOKEN: "tok-stub" });
+    assert.equal(r.status, 1);
+    assert.match(r.stderr, /created ENG-9 but ignored the body/);
+  });
+});
+
+test("BLZ-729: the local edit runner refuses a file flag after a field, and bare edit shows both forms", () => {
+  const roots = dbBoard();
+  const dir = tmp();
+  const a = put(dir, "a.txt", "one\n");
+  const env = { ...process.env, BLAZE_PROJECTS_DIR: roots.projectsDir };
+  for (const k of SCRUB.filter((k) => k !== "BLAZE_PROJECTS_DIR")) delete env[k];
+  const run = (args) => spawnSync(process.execPath, [join(SCRIPTS, "edit-runner.mjs"), ...args], { encoding: "utf8", env });
+  const mixed = run(["ENG-1", "title", "x", "--ac-file", a]);
+  assert.equal(mixed.status, 1);
+  assert.match(mixed.stderr, /\[--body-file P\] \[--ac-file Q\]/);
+  assert.ok(!readFileSync(join(roots.projectsDir, "ENG", "defined", "ENG-1-a.md"), "utf8").includes("--ac-file"),
+    "the flag was not stored as part of a title");
+  const bare = run(["ENG-1"]);
+  assert.equal(bare.status, 1);
+  assert.match(bare.stderr, /\[--body-file P\] \[--ac-file Q\]/);
+  assert.deepEqual(requestFor("edit", ["ENG-1"]),
+    { error: "usage: blaze edit <id> <field> <value…> | blaze edit <id> [--body-file P] [--ac-file Q]" });
+});
+
+test("BLZ-729: the request cap is exactly 262144 bytes", () => {
+  const base = JSON.stringify({ id: "ENG-1", text: "" }).length;
+  const at = requestFor("ac", ["add", "ENG-1", "x".repeat(262144 - base)]);
+  assert.equal(at.error, undefined, "262144 bytes is accepted");
+  assert.equal(Buffer.byteLength(JSON.stringify(at.body)), 262144);
+  const over = requestFor("ac", ["add", "ENG-1", "x".repeat(262145 - base)]);
+  assert.match(over.error ?? "", /the request is 262145 bytes/);
+});

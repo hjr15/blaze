@@ -13,7 +13,7 @@ import { EDITABLE_FIELDS, derivedFieldRefusal } from "./model/fields.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy } from "./model/taxonomy.mjs";
 import { validateSprintFields } from "./model/sprints.mjs";
-import { AC_HEADING_RE, BODY_MAX_BYTES, bodyOrErrors, acItemsOrErrors, withAcSection, withAcAppended,
+import { AC_HEADING_RE, storedBodyCapError, bodyOrErrors, acItemsOrErrors, withAcSection, withAcAppended,
          acItemCount } from "./model/ticket-body.mjs";
 import { Buffer } from "node:buffer";
 
@@ -131,14 +131,6 @@ export async function applyToggleAc(projectsDir, id, { index, checked }, opts = 
   return { ok: true, id, file, acItems: acLineIdx.length };
 }
 
-/** BLZ-729: the composed body's byte-cap refusal, or null. The cap is on what would be STORED
- *  (body plus AC section), not only on what the caller sent — each part can be within its own
- *  limit and the result over it. */
-function overCap(body) {
-  const bytes = Buffer.byteLength(body, "utf8");
-  return bytes > BODY_MAX_BYTES ? `the stored body would be ${bytes} bytes; the limit is ${BODY_MAX_BYTES}` : null;
-}
-
 /** BLZ-729: locate, validate the merged ticket with its NEW body, and write through the port as
  *  applyToggleAc does. `compose(found)` → `{ body, ...extra }` or `{ errors }`. */
 async function writeBody(projectsDir, id, compose, opts) {
@@ -149,7 +141,7 @@ async function writeBody(projectsDir, id, compose, opts) {
   if (!found) return { ok: false, errors: [`ticket not found: ${id}`] };
   const c = compose(found);
   if (c.errors) return { ok: false, errors: c.errors };
-  const cap = overCap(c.body);
+  const cap = storedBodyCapError(c.body);
   if (cap) return { ok: false, errors: [cap] };
 
   const fm = { ...found.frontmatter };

@@ -284,7 +284,7 @@ function writeRequestFor(verb, path, argv, readFile) {
     if (id && Object.hasOwn(FILE_FLAGS, field)) return editFilesRequest(argv, readFile);
     if (field?.startsWith("--")) return { error: `unknown flag: ${field}` };
     if (value.some((v) => Object.hasOwn(FILE_FLAGS, v))) return { error: EDIT_USAGE };
-    if (!id || !field || !value.length) return { error: "usage: blaze edit <id> <field> <value>" };
+    if (!id || !field || !value.length) return { error: EDIT_USAGE };
     return { path, body: { id, patch: { [field]: value.join(" ") } } };
   }
   if (verb === "ac") return acRequest(argv);
@@ -307,6 +307,14 @@ function writeRequestFor(verb, path, argv, readFile) {
   const remove = argv[0] === "--rm";
   const r = plain(3, "usage: blaze link [--rm] <id> <TYPE> <target>", remove ? argv.slice(1) : argv);
   return r.error ? r : { path, body: { id: r.pos[0], type: r.pos[1], target: r.pos[2], remove } };
+}
+
+/** `AC index 98 out of range (0..0)` → `criterion 99 does not exist; ENG-1 has 1 criterion`. */
+function oneBased(message, body) {
+  const m = /^AC index (\d+) out of range \(0\.\.(-?\d+)\)$/.exec(String(message));
+  if (!m) return message;
+  const count = Number(m[2]) + 1;
+  return `criterion ${Number(m[1]) + 1} does not exist; ${body.id} has ${count} ${count === 1 ? "criterion" : "criteria"}`;
 }
 
 /** BLZ-710: the `fetch` failure causes that mean "this machine does not trust the server's CA". */
@@ -431,7 +439,9 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
     return 1;
   }
   if (!res.ok || !answer || answer.ok !== true) {
-    const errors = Array.isArray(answer?.errors) ? answer.errors : [`HTTP ${res.status} ${res.statusText}`.trim()];
+    let errors = Array.isArray(answer?.errors) ? answer.errors : [`HTTP ${res.status} ${res.statusText}`.trim()];
+    // BLZ-729: the server counts criteria from 0; `blaze ac toggle <n>` counts from 1.
+    if (verb === "ac") errors = errors.map((m) => oneBased(m, req.body));
     err(`blaze ${verb} failed (${cfg.origin} answered ${res.status}):\n  ${errors.join("\n  ")}`);
     return 1;
   }

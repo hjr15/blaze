@@ -66,6 +66,13 @@ export function acItemsOrErrors(v) {
   return errors.length ? { errors } : { items };
 }
 
+/** The composed body's byte-cap refusal, or null. The cap is on what would be STORED (body plus
+ *  AC section), not only on what the caller sent. Shared by create and edit (BLZ-729). */
+export function storedBodyCapError(body) {
+  const bytes = Buffer.byteLength(body, "utf8");
+  return bytes > BODY_MAX_BYTES ? `the stored body would be ${bytes} bytes; the limit is ${BODY_MAX_BYTES}` : null;
+}
+
 const acLine = ({ text, checked }) => `- [${checked ? "x" : " "}] ${text}`;
 
 /** The first AC heading's line index and the index of the next heading after it (or the

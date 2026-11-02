@@ -51,7 +51,7 @@ const filesForm = id && Object.hasOwn(FILE_FLAGS, field);
 if (!filesForm && field && field.startsWith("--")) { console.error(`unknown flag: ${field}`); process.exit(1); }
 if (!filesForm && valueParts.some((v) => Object.hasOwn(FILE_FLAGS, v))) { console.error(EDIT_USAGE); process.exit(1); }
 if (!id || !field || (!filesForm && valueParts.length === 0)) {
-  console.error("usage: blaze edit <id> <field> <value>"); process.exit(1);
+  console.error(EDIT_USAGE); process.exit(1);
 }
 const fileArgs = {};
 if (filesForm) {

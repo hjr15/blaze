@@ -51,8 +51,7 @@ An agent with no checkout gives a ticket its body and criteria from files (BLZ-7
 markdown; the criteria file holds one criterion per line:
 
 ```bash
-BLAZE_REMOTE_URL=<board origin> BLAZE_TOKEN_FILE=/path/to/token \
-  blaze-live new --project ENG --type task "Add the export" --estimate 60 \
+blaze-live new --project ENG --type task "Add the export" --estimate 60 \
     --body-file body.md --ac-file criteria.txt
 
 # replace the body (or only the criteria) of an existing ticket
@@ -65,7 +64,8 @@ blaze-live ac toggle ENG-12 2
 blaze-live ac toggle ENG-12 2 --uncheck
 ```
 
-(`blaze-live` is `blaze` with those two variables set; write it however your machine does.)
+(`blaze-live` is `blaze` with `BLAZE_REMOTE_URL=<board origin>` and `BLAZE_TOKEN_FILE=/path/to/token` set for that
+command. Written out: `BLAZE_REMOTE_URL=<board origin> BLAZE_TOKEN_FILE=/path/to/token blaze new …`.)
 
 - The body is capped at 128 KiB (131072 bytes) and a whole request at 256 KiB (262144 bytes).
   The client refuses an over-size file or request before sending, so a refusal is a clear line

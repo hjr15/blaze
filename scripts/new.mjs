@@ -15,7 +15,7 @@ import { roundEstimate } from "./model/time.mjs";
 import { loadConfig, loadProject } from "./config.mjs";
 import { validateTaxonomy, warnMissingRequired } from "./model/taxonomy.mjs";
 import { validateSprintFields } from "./model/sprints.mjs";
-import { SCAFFOLD_BODY, withAcSection } from "./model/ticket-body.mjs";
+import { SCAFFOLD_BODY, withAcSection, storedBodyCapError } from "./model/ticket-body.mjs";
 
 export async function applyNew(projectsDir, opts = {}) {
   const { project, type, title, priority = "medium", labels = [], today = null, extra = {},
@@ -78,6 +78,9 @@ export async function applyNew(projectsDir, opts = {}) {
 
   const base = givenBody ?? SCAFFOLD_BODY;
   const body = ac ? withAcSection(base, ac) : base;
+  // BLZ-729: the cap is on what is stored, as `edit` holds it — checked before any id is allocated.
+  const tooBig = storedBodyCapError(body);
+  if (tooBig) return { ok: false, errors: [tooBig] };
   // INF-791: validate the parent for real. This previously passed NO lookup and
   // then filtered out `parent not found`, on the reasoning that a parent might be
   // created later — which meant canParent() was never reached and `blaze new`

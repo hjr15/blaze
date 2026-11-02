@@ -16,10 +16,11 @@ version the changes yourself. See [commitMode (ignored)](#commitmode-ignored) an
 | [`sprint`](#sprint) | Sprint registry | yes (`new`); no (`list`/`active`) |
 | [`reindex`](#reindex) | Rebuild derived caches | no (cache-only) |
 | [`move`](#move) | Change a ticket's status | yes |
-| [`edit`](#edit) | Edit one field on a ticket | yes |
+| [`edit`](#edit) | Edit one field on a ticket, or replace its body or acceptance criteria from files | yes |
 | [`link`](#link) | Add/remove a typed link between tickets | yes |
 | [`resolve`](#resolve) | Set/override resolution without moving the file | yes |
 | [`log`](#log) | Append a worklog entry | yes |
+| [`ac`](#ac) | Add or toggle a ticket's acceptance criteria (remote mode only) | yes |
 | [`import`](#import) | Create or update tickets from a canonical or mapped CSV or a Markdown tree | with `--apply` |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
@@ -469,13 +470,13 @@ blaze edit <id> <field> <value>
 blaze edit <id> [--body-file <path>] [--ac-file <path>]
 ```
 
-In-place edit of one whitelisted field. Any other field name errors.
+Two forms. The first is an in-place edit of one whitelisted field; any other field name errors. The second (below) replaces the body or the acceptance criteria.
 
 The second form (BLZ-729) replaces the ticket's whole body (`--body-file`), or just its
 `## Acceptance Criteria` section (`--ac-file`, one criterion per line), or both. It prints
 `<id>: body replaced (<bytes> bytes, <n> criteria)`. The limits are `blaze new`'s. A file flag
 cannot be mixed with `<field> <value>` (`usage: blaze edit <id> <field> <value…> | blaze edit <id> [--body-file P] [--ac-file Q]`).
-The edit cannot take the stored body past 131072 bytes: the result is refused instead.
+Neither `edit` nor `new` can leave the stored body past 131072 bytes (body plus criteria): the result is refused with `the stored body would be <n> bytes; the limit is 131072`.
 
 | Arg | Meaning |
 |---|---|
@@ -908,7 +909,7 @@ two machines creating at once never collide.
 `POST /api/new` is answered only when the server runs the database write port
 (`BLAZE_WRITE_PORT=db`). On a file board it is refused `409` and `blaze new` prints that message:
 a file board allocates ids from git, which is single-machine, and the fetch would stall the
-server for every session. The other five verbs work on any board.
+server for every session. `move`, `edit` (both forms), `resolve`, `log`, `link` and `ac` work on any board.
 
 **Body and criteria (BLZ-729).** `blaze new --body-file P --ac-file Q`, `blaze edit <id> --body-file P`
 and `blaze ac` need server 0.11.0 or newer. The client reads the files itself and refuses, before
