@@ -97,7 +97,8 @@ test("BLZ-708: every mutating verb refuses on a postgres-driver board when BLAZE
   const help = run(board, ["--help"]).stdout;
   const names = [...help.matchAll(/^\s{2}([a-z][a-z-]*)\s{2,}/gm)].map((m) => m[1]);
   const READ_ONLY = ["board", "audit", "export", "rollup",
-    "show", "list"];   // BLZ-709: remote-only reads
+    "show", "list",    // BLZ-709: remote-only reads
+    "ac"];             // BLZ-729: remote-only WRITE — refused before the guard, so it never meets it
   const verbs = names.filter((n) => !READ_ONLY.includes(n) && n !== "db" && n !== "init");
   for (const must of ["new", "move", "edit", "link", "resolve", "log", "sprint", "user", "reindex", "import", "matrices"]) {
     assert.ok(verbs.includes(must), `derived verb list lacks ${must}: ${names.join(",")}`);

@@ -112,6 +112,10 @@ test("no module outside the seam stats or lists the projects tree directly", () 
     // "<dir-or-glob>" cannot be satisfied without a walk of the source, and
     // the walk is confined to `collectMarkdownFiles`.
     "model/import-markdown.mjs",
+    // BLZ-714: `matrices --check` stats its `--out` directory to exit 2 when it is not there.
+    // That is the RENDERED-OUTPUT directory, never the projects tree; the tickets it renders
+    // are read through `resolveReadStorage`, the seam.
+    "matrices-runner.mjs",
   ]);
   const offenders = [];
   for (const file of jsFiles(SCRIPTS)) {
@@ -963,7 +967,8 @@ const SEAM_WRITE_PROVIDERS = new Map([
     inert: ["CSRF", "boardModel", "contentHash", "liveModel", "pageHtml",
       "reconcilePreview"] }],
   ["new.mjs", { writes: ["applyNew"], sanctioned: [], inert: [] }],
-  ["edit.mjs", { writes: [], sanctioned: [], inert: ["applyEdit", "applyToggleAc"] }],
+  // BLZ-729: whole-body replace and AC append write through the injected port, like applyToggleAc.
+  ["edit.mjs", { writes: [], sanctioned: [], inert: ["applyEdit", "applyToggleAc", "applyBody", "applyAcAdd"] }],
   ["link.mjs", { writes: [], sanctioned: [], inert: ["applyLink"] }],
   ["log.mjs", { writes: [], sanctioned: [], inert: ["applyLog"] }],
   ["move.mjs", { writes: [], sanctioned: [], inert: ["applyMove"] }],

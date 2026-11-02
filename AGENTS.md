@@ -391,6 +391,15 @@ manage, and two agents on two machines creating tickets at once get distinct ids
 `blaze new` needs a **db-mode** board (`BLAZE_WRITE_PORT=db` on the server): on a file board
 the server refuses it `409`, because file ids come from git and are single-machine.
 
+Since 0.11.0 (BLZ-729) a ticket's body and criteria can be authored remotely too:
+`blaze new … --body-file P --ac-file Q` (`--ac-file` is one criterion per line),
+`blaze edit <id> --body-file P` and/or `--ac-file Q` (replaces the body or the AC section), and
+the remote-only `blaze ac add <id> <text…>` and `blaze ac toggle <id> <n> [--uncheck]` (`n` counts
+from 1). `--body-file` and `--ac-file` also work against a local board. The body is capped at
+131072 bytes and a request at 262144; the client refuses either before sending. Against a server
+older than 0.11.0 the client exits `1` naming BLZ-729 (a `new` whose body was dropped, or a 404
+from `/api/body` or `/api/ac/add`) rather than reporting success.
+
 `blaze show <id>` and `blaze list [--project K] [--status S] [--type T]` (or `list --projects`,
 for each project's labels and components) read the live board the same way, with any `read`
 token; `--json` prints parseable JSON on stdout, and the count goes to stderr. Both run in

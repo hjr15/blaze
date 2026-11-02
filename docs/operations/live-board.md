@@ -40,10 +40,44 @@ BLAZE_TOKEN_FILE=/path/to/token \
 - If the server's certificate comes from a private CA, point Node at that CA:
   `NODE_EXTRA_CA_CERTS=/path/to/ca.crt`. Without it, `blaze` reports the certificate as not
   trusted, names the TLS error code, and suggests exactly this.
-- `blaze show` and `blaze list` read; `blaze new`, `move`, `edit`, `resolve`, `log` and `link`
-  write. Every other command is refused in remote mode.
+- `blaze show` and `blaze list` read; `blaze new`, `move`, `edit`, `resolve`, `log`, `link` and
+  `ac` write. Every other command is refused in remote mode.
 - Scope the variables to the command (or a shell kept for the purpose), never a global
   `export`.
+
+## Writing a body and acceptance criteria
+
+An agent with no checkout gives a ticket its body and criteria from files (BLZ-729). The body is
+markdown; the criteria file holds one criterion per line:
+
+```bash
+blaze-live new --project ENG --type task "Add the export" --estimate 60 \
+    --body-file body.md --ac-file criteria.txt
+
+# replace the body (or only the criteria) of an existing ticket
+blaze-live edit ENG-12 --body-file body.md
+blaze-live edit ENG-12 --ac-file criteria.txt
+
+# add one criterion, then tick criterion 2 (counting from 1)
+blaze-live ac add ENG-12 "the export is documented"
+blaze-live ac toggle ENG-12 2
+blaze-live ac toggle ENG-12 2 --uncheck
+```
+
+(`blaze-live` is `blaze` with `BLAZE_REMOTE_URL=<board origin>` and `BLAZE_TOKEN_FILE=/path/to/token` set for that
+command. Written out: `BLAZE_REMOTE_URL=<board origin> BLAZE_TOKEN_FILE=/path/to/token blaze new …`.)
+
+- The body is capped at 128 KiB (131072 bytes) and a whole request at 256 KiB (262144 bytes).
+  The client refuses an over-size file or request before sending, so a refusal is a clear line
+  and never an opaque 400. A stored body cannot be grown past 128 KiB by an edit or an `ac add`
+  either: the server refuses it with the byte count.
+- `--body-file` replaces the **whole** body. To change one part of a body, read it with
+  `blaze show <id> --json`, edit the text and send the whole of it back.
+- A server older than 0.11.0 does not know these. `new` with a body against one creates the
+  ticket with the template body and the client then exits `1` saying so
+  (`created ENG-9 but ignored the body … older than BLZ-729 (0.11.0)`), and `edit --body-file` or
+  `ac add` against one says `the server at <board origin> has no <path> — it is older than
+  BLZ-729 (0.11.0)`, where `<path>` is `/api/body` or `/api/ac/add`. Upgrade the server; do not retry.
 
 ## Admin verbs run inside the deployment
 

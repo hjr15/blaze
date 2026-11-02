@@ -3,6 +3,7 @@
 // BEFORE any id is allocated.
 import { realpathSync } from "node:fs";
 import { slugify } from "./storage.mjs";
+import { bodyOrErrors, acItemsOrErrors } from "./ticket-body.mjs";
 
 /** The longest title `POST /api/new` accepts, in characters (Unicode code points, not UTF-16
  *  units — an emoji is one) — a sanity bound on what one request may carry. It is NOT what
@@ -75,13 +76,19 @@ export function newRequestOrErrors(payload, configuredProjects = []) {
       && !(typeof p.estimate === "number" && Number.isFinite(p.estimate) && p.estimate > 0 && p.estimate <= NEW_ESTIMATE_MAX)) {
     errors.push(`estimate must be a number of minutes above 0 and at most ${NEW_ESTIMATE_MAX}`);
   }
+  // BLZ-729: an optional body and AC list, checked here so a refusal burns no id. Each error
+  // names its field. Rebuilt into the request below: an unknown key is still dropped, so an
+  // older server drops these silently — which is why the answer echoes `bodyBytes`.
+  const b = p.body === undefined ? { body: null } : bodyOrErrors(p.body);
+  const a = p.ac === undefined ? { items: null } : acItemsOrErrors(p.ac);
+  errors.push(...(b.errors ?? []), ...(a.errors ?? []));
   if (errors.length) return { errors };
   const extra = {};
   for (const k of NEW_STRING_FIELDS) if (p[k] !== undefined) extra[k] = p[k];
   if (p.components !== undefined) extra.components = p.components;
   if (p.estimate !== undefined) extra.estimate = p.estimate;
   return { request: { project: p.project, type: p.type, title: p.title, priority: p.priority ?? "medium",
-                      labels: p.labels ?? [], extra } };
+                      labels: p.labels ?? [], extra, body: b.body, ac: a.items } };
 }
 
 /** A refusal sent to a remote caller names a ticket, never where the server keeps its files:

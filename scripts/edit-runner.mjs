@@ -1,6 +1,7 @@
-// scripts/edit-runner.mjs — CLI entry for `blaze edit <id> <field> <value>`:
-// applyEdit against the resolved data tree and writes; it makes no commit (BLZ-254).
-import { applyEdit } from "./edit.mjs";
+// scripts/edit-runner.mjs — CLI entry for `blaze edit <id> <field> <value>` and, since BLZ-729,
+// `blaze edit <id> [--body-file P] [--ac-file Q]` (applyBody): applyEdit/applyBody against the resolved data tree and write; it makes no commit (BLZ-254).
+import { applyEdit, applyBody } from "./edit.mjs";
+import { readRegularFileSync } from "./model/regular-file.mjs";
 import { resolvePorts } from "./model/write-port-resolve.mjs";
 import { loadConfig, resolveRoots, InvalidProjectKeyError } from "./config.mjs";
 import { assertWritable } from "./readonly.mjs";
@@ -42,9 +43,30 @@ const [id, field, ...valueParts] = process.argv.slice(2);
 // dispatch-level scan is NOT to be weakened to preserve this file's
 // freeform-value guarantee.
 if (id && id.startsWith("--")) { console.error(`unknown flag: ${id}`); process.exit(1); }
-if (field && field.startsWith("--")) { console.error(`unknown flag: ${field}`); process.exit(1); }
-if (!id || !field || valueParts.length === 0) {
-  console.error("usage: blaze edit <id> <field> <value>"); process.exit(1);
+// BLZ-729: `edit <id> [--body-file P] [--ac-file Q]` replaces the body and/or the AC section.
+// A file flag in the field position is the files form; one after a field is a mix, refused.
+const EDIT_USAGE = "usage: blaze edit <id> <field> <value…> | blaze edit <id> [--body-file P] [--ac-file Q]";
+const FILE_FLAGS = { "--body-file": "body", "--ac-file": "ac" };
+const filesForm = id && Object.hasOwn(FILE_FLAGS, field);
+if (!filesForm && field && field.startsWith("--")) { console.error(`unknown flag: ${field}`); process.exit(1); }
+if (!filesForm && valueParts.some((v) => Object.hasOwn(FILE_FLAGS, v))) { console.error(EDIT_USAGE); process.exit(1); }
+if (!id || !field || (!filesForm && valueParts.length === 0)) {
+  console.error(EDIT_USAGE); process.exit(1);
+}
+const fileArgs = {};
+if (filesForm) {
+  const rest = process.argv.slice(3);
+  for (let i = 0; i < rest.length; i++) {
+    const flag = rest[i];
+    if (!Object.hasOwn(FILE_FLAGS, flag)) { console.error(EDIT_USAGE); process.exit(1); }
+    if (rest[i + 1] === undefined) { console.error(`blaze edit: ${flag} needs a value`); process.exit(1); }
+    const path = rest[++i];
+    let text;
+    try { text = readRegularFileSync(path, "utf8"); } catch (e) {
+      console.error(`blaze edit: cannot read ${flag} ${path}: ${e?.code ?? "error"}`); process.exit(1);
+    }
+    fileArgs[FILE_FLAGS[flag]] = flag === "--ac-file" ? text.split(/\r?\n/).filter((l) => l.trim() !== "") : text;
+  }
 }
 const value = valueParts.join(" ");
 const today = new Date().toISOString().slice(0, 10);
@@ -65,7 +87,10 @@ const { writePort, readStorage, close: closePorts } = __wp;
 // malformed — a corrupt-file case `cli.mjs`'s preflight cannot see (it only validates the
 // board's OWN configured project set, not per-ticket values).
 let r;
-try { r = await applyEdit(projectsDir, id, { [field]: value }, { today, writePort, readStorage }); }
+try {
+  r = filesForm ? await applyBody(projectsDir, id, fileArgs, { today, writePort, readStorage })
+    : await applyEdit(projectsDir, id, { [field]: value }, { today, writePort, readStorage });
+}
 catch (e) {
   if (e instanceof InvalidProjectKeyError) { await closePorts(); console.error(e.message); process.exit(1); }
   await closePorts(); throw e;
@@ -74,4 +99,6 @@ await closePorts();
 if (!r.ok) { console.error(`blaze edit failed:\n  ${r.errors.join("\n  ")}`); process.exit(1); }
 
 // BLZ-254 (spec §5.5): the verb writes and stops — the board never commits.
-console.log(`${id}: ${field} = ${value}`);
+console.log(filesForm
+  ? `${id}: body replaced (${r.bodyBytes} bytes, ${r.acItems} criteria)`
+  : `${id}: ${field} = ${value}`);

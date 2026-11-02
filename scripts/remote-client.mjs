@@ -2,7 +2,7 @@
 //
 // When BLAZE_REMOTE_URL and BLAZE_TOKEN (or BLAZE_TOKEN_FILE, BLZ-710) are BOTH set, cli.mjs
 // sends `new`, `move`, `edit`, `resolve`, `log` and `link` to the board server's matching
-// `POST /api/*` endpoint and prints what it answered; `show` and `list` (BLZ-709) send a `GET /api/ticket`, `/api/tickets` or
+// `POST /api/*` endpoint and prints what it answered (BLZ-729: `ac add|toggle`, and `new`/`edit` with `--body-file`/`--ac-file`); `show` and `list` (BLZ-709) send a `GET /api/ticket`, `/api/tickets` or
 // `/api/projects` and render the answer. The verb's logic and its validation run ONCE, on the server, against the
 // store the server owns — this module only turns argv into a request and a response into a
 // line. Every other command is refused in remote mode (cli.mjs), because it needs the board's
@@ -18,6 +18,7 @@
 // Built-in `fetch` only: no dependency, and `fetch` is injectable so tests can watch every call.
 import { isLoopback } from "./model/serve-auth.mjs";
 import { readRegularFileSync } from "./model/regular-file.mjs";
+import { BODY_MAX_BYTES } from "./model/ticket-body.mjs";
 
 export const REMOTE_URL_ENV = "BLAZE_REMOTE_URL";
 export const REMOTE_TOKEN_ENV = "BLAZE_TOKEN";
@@ -29,7 +30,18 @@ export const REMOTE_VERBS = {
   resolve: "/api/resolve", log: "/api/log", link: "/api/link",
   // BLZ-709 (spec D7): the two reads. GETs, answered as JSON and rendered here.
   show: "/api/ticket", list: "/api/tickets",
+  // BLZ-729: `ac add|toggle`. The subverb chooses the path: /api/ac/add or /api/ac.
+  ac: "/api/ac",
 };
+
+/** The server reads at most this many request bytes (`readJsonBody`); a request over it is
+ *  refused here, before anything is sent, rather than as an opaque 400 (BLZ-729, review M4). */
+export const REQUEST_MAX_BYTES = 262144;
+const FILE_FLAGS = { "--body-file": "body", "--ac-file": "ac" };
+const EDIT_USAGE = "usage: blaze edit <id> <field> <value…> | blaze edit <id> [--body-file P] [--ac-file Q]";
+const AC_USAGE = "usage: blaze ac add <id> <text…> | blaze ac toggle <id> <n> [--uncheck]";
+/** A 404 from these paths means the server predates BLZ-729. */
+const BLZ729_PATHS = new Set(["/api/body", "/api/ac/add"]);
 
 /** "The credential" in a message: either source counts (BLZ-710). */
 const CREDENTIAL = `${REMOTE_TOKEN_ENV} (or ${REMOTE_TOKEN_FILE_ENV})`;
@@ -111,12 +123,69 @@ const commaList = (v) => String(v ?? "").split(",").map((s) => s.trim()).filter(
  * naming the answer's shape for `renderRead`; a write is a POST with `read: false`.
  * @returns { method, path, body, read, json } | { error }
  */
-export function requestFor(verb, argv) {
+export function requestFor(verb, argv, { readFile = (p) => readRegularFileSync(p, "utf8") } = {}) {
   const path = Object.hasOwn(REMOTE_VERBS, verb) ? REMOTE_VERBS[verb] : null;
   if (!path) return { error: `blaze: ${verb} is not available in remote mode` };
   if (verb === "show" || verb === "list") return readRequestFor(verb, argv);
-  const r = writeRequestFor(verb, path, argv);
-  return r.error ? r : { method: "POST", path: r.path, body: r.body, read: false, json: false };
+  const r = writeRequestFor(verb, path, argv, readFile);
+  if (r.error) return r;
+  // BLZ-729 (review M4): the server refuses a request over its cap with a bare 400. Say so first.
+  const bytes = Buffer.byteLength(JSON.stringify(r.body), "utf8");
+  if (bytes > REQUEST_MAX_BYTES) {
+    return { error: `blaze ${verb}: the request is ${bytes} bytes; the board accepts at most ${REQUEST_MAX_BYTES} — shorten the body or the criteria` };
+  }
+  return { method: "POST", path: r.path, body: r.body, read: false, json: false };
+}
+
+/**
+ * BLZ-729: read a `--body-file` / `--ac-file`. The body is the file's text; the criteria are its
+ * non-blank lines. A failure names the flag, the path and the error CODE only — never content.
+ * @returns { value } | { error }
+ */
+function readFileFlag(verb, flag, path, readFile) {
+  let text;
+  try { text = String(readFile(path)); } catch (e) {
+    return { error: `blaze ${verb}: cannot read ${flag} ${path}: ${e?.code ?? "error"}` };
+  }
+  if (flag === "--ac-file") return { value: text.split(/\r?\n/).filter((l) => l.trim() !== "") };
+  const bytes = Buffer.byteLength(text, "utf8");
+  if (bytes > BODY_MAX_BYTES) {
+    return { error: `blaze ${verb}: ${flag} ${path} is ${bytes} bytes; the limit is ${BODY_MAX_BYTES}` };
+  }
+  return { value: text };
+}
+
+/** `edit <id> --body-file P [--ac-file Q]` / `--ac-file Q` → `{ path, body }`. */
+function editFilesRequest(argv, readFile) {
+  const out = { id: argv[0] };
+  for (let i = 1; i < argv.length; i++) {
+    const flag = argv[i];
+    if (!Object.hasOwn(FILE_FLAGS, flag)) return { error: EDIT_USAGE };
+    if (argv[i + 1] === undefined) return { error: `blaze edit: ${flag} needs a value` };
+    const r = readFileFlag("edit", flag, argv[++i], readFile);
+    if (r.error) return r;
+    out[FILE_FLAGS[flag]] = r.value;
+  }
+  return { path: "/api/body", body: out };
+}
+
+/** `ac add <id> <text…>` / `ac toggle <id> <n> [--uncheck]` → `{ path, body }`. */
+function acRequest(argv) {
+  const [sub, id, ...rest] = argv;
+  if (sub === "add") {
+    return !id || !rest.length ? { error: AC_USAGE } : { path: "/api/ac/add", body: { id, text: rest.join(" ") } };
+  }
+  if (sub !== "toggle" || !id) return { error: AC_USAGE };
+  let uncheck = false;
+  const pos = [];
+  for (const a of rest) {
+    if (a === "--uncheck") { uncheck = true; continue; }
+    if (a.startsWith("--")) return { error: `unknown flag: ${a}` };
+    pos.push(a);
+  }
+  if (pos[0] === undefined) return { error: AC_USAGE };
+  if (!/^[1-9]\d*$/.test(pos[0])) return { error: "blaze ac toggle: <n> must be a criterion number counting from 1" };
+  return { path: "/api/ac", body: { id, index: Number(pos[0]) - 1, checked: !uncheck } };
 }
 
 const LIST_FILTERS = { "--project": "project", "--status": "status", "--type": "type" };
@@ -158,8 +227,8 @@ function readRequestFor(verb, argv) {
   return { method: "GET", path: q ? `/api/tickets?${q}` : "/api/tickets", body: undefined, read: "tickets", json };
 }
 
-/** The six writes' argv → `{ path, body }`, unchanged from BLZ-684. */
-function writeRequestFor(verb, path, argv) {
+/** The writes' argv → `{ path, body }`: the six of BLZ-684, plus `edit`'s files form and `ac` (BLZ-729). */
+function writeRequestFor(verb, path, argv, readFile) {
   const plain = (n, usage, args = argv) => {
     const pos = [];
     for (const a of args) {
@@ -181,6 +250,12 @@ function writeRequestFor(verb, path, argv) {
       if (NEW_VALUE_FLAGS[a]) {
         if (argv[i + 1] === undefined) return { error: `blaze new: ${a} needs a value` };
         body[NEW_VALUE_FLAGS[a]] = argv[++i]; continue;
+      }
+      if (Object.hasOwn(FILE_FLAGS, a)) {
+        if (argv[i + 1] === undefined) return { error: `blaze new: ${a} needs a value` };
+        const r = readFileFlag("new", a, argv[++i], readFile);
+        if (r.error) return r;
+        body[FILE_FLAGS[a]] = r.value; continue;
       }
       if (a.startsWith("--")) return { error: `unknown flag: ${a}` };
       title.push(a);
@@ -204,10 +279,15 @@ function writeRequestFor(verb, path, argv) {
     // Only the id/field selectors are flag-checked; the value is freeform, as edit-runner.mjs's is.
     const [id, field, ...value] = argv;
     if (id?.startsWith("--")) return { error: `unknown flag: ${id}` };
+    // BLZ-729: a file flag in the field position is the files form; one anywhere after a field is
+    // a mix, refused rather than stored as part of a title.
+    if (id && Object.hasOwn(FILE_FLAGS, field)) return editFilesRequest(argv, readFile);
     if (field?.startsWith("--")) return { error: `unknown flag: ${field}` };
-    if (!id || !field || !value.length) return { error: "usage: blaze edit <id> <field> <value>" };
+    if (value.some((v) => Object.hasOwn(FILE_FLAGS, v))) return { error: EDIT_USAGE };
+    if (!id || !field || !value.length) return { error: EDIT_USAGE };
     return { path, body: { id, patch: { [field]: value.join(" ") } } };
   }
+  if (verb === "ac") return acRequest(argv);
   if (verb === "log") {
     const body = {};
     const pos = [];
@@ -227,6 +307,14 @@ function writeRequestFor(verb, path, argv) {
   const remove = argv[0] === "--rm";
   const r = plain(3, "usage: blaze link [--rm] <id> <TYPE> <target>", remove ? argv.slice(1) : argv);
   return r.error ? r : { path, body: { id: r.pos[0], type: r.pos[1], target: r.pos[2], remove } };
+}
+
+/** `AC index 98 out of range (0..0)` → `criterion 99 does not exist; ENG-1 has 1 criterion`. */
+function oneBased(message, body) {
+  const m = /^AC index (\d+) out of range \(0\.\.(-?\d+)\)$/.exec(String(message));
+  if (!m) return message;
+  const count = Number(m[2]) + 1;
+  return `criterion ${Number(m[1]) + 1} does not exist; ${body.id} has ${count} ${count === 1 ? "criterion" : "criteria"}`;
 }
 
 /** BLZ-710: the `fetch` failure causes that mean "this machine does not trust the server's CA". */
@@ -286,7 +374,15 @@ export function successLine(verb, body, answer, origin) {
   switch (verb) {
     case "new": return `created ${answer.id} ${at}`;
     case "move": return `${body.id}: → ${body.to} ${at}`;
-    case "edit": { const [[f, v]] = Object.entries(body.patch); return `${body.id}: ${f} = ${v} ${at}`; }
+    case "edit": {
+      if (body.patch === undefined) { // BLZ-729: the files form
+        return `${body.id}: body replaced (${answer.bodyBytes} bytes, ${answer.acItems} criteria) ${at}`;
+      }
+      const [[f, v]] = Object.entries(body.patch); return `${body.id}: ${f} = ${v} ${at}`;
+    }
+    case "ac": return body.text !== undefined
+      ? `${body.id}: criterion ${answer.index + 1} added ${at}`
+      : `${body.id}: criterion ${body.index + 1} ${body.checked ? "checked" : "unchecked"} ${at}`;
     case "resolve": return `${body.id}: resolution = ${body.resolution} ${at}`;
     case "log": return `logged ${body.minutes}m to ${body.id} ${at}`;
     default: return `${body.id}: ${body.remove ? "removed" : "added"} ${body.type} → ${body.target} ${at}`;
@@ -321,11 +417,12 @@ export async function requestRemote(cfg, method, path, body, { fetch: fetchImpl 
  * @returns the process exit code: 0 done, 1 refused or failed
  */
 export async function runRemote(verb, argv, { env = process.env, fetch: fetchImpl = globalThis.fetch,
-                                              out = console.log, err = console.error } = {}) {
+                                              out = console.log, err = console.error,
+                                              readFile = (p) => readRegularFileSync(p, "utf8") } = {}) {
   const cfg = remoteFrom(env);
   if (cfg.error) { err(cfg.error); return 1; }
   if (!cfg.remote) { err("blaze: remote mode is not configured"); return 1; }
-  const req = requestFor(verb, argv);
+  const req = requestFor(verb, argv, { readFile });
   if (req.error) { err(req.error); return 1; }
   let res;
   try {
@@ -336,9 +433,23 @@ export async function runRemote(verb, argv, { env = process.env, fetch: fetchImp
     return 1;
   }
   const { answer } = res;
+  if (res.status === 404 && BLZ729_PATHS.has(req.path)) {
+    // BLZ-729: a server older than 0.11.0 has no such route.
+    err(`blaze ${verb}: the server at ${cfg.origin} has no ${req.path} — it is older than BLZ-729 (0.11.0)`);
+    return 1;
+  }
   if (!res.ok || !answer || answer.ok !== true) {
-    const errors = Array.isArray(answer?.errors) ? answer.errors : [`HTTP ${res.status} ${res.statusText}`.trim()];
+    let errors = Array.isArray(answer?.errors) ? answer.errors : [`HTTP ${res.status} ${res.statusText}`.trim()];
+    // BLZ-729: the server counts criteria from 0; `blaze ac toggle <n>` counts from 1.
+    if (verb === "ac") errors = errors.map((m) => oneBased(m, req.body));
     err(`blaze ${verb} failed (${cfg.origin} answered ${res.status}):\n  ${errors.join("\n  ")}`);
+    return 1;
+  }
+  // BLZ-729: an older server drops `body` and `ac` from /api/new without a word and answers 200.
+  // Only a server that stored them echoes `bodyBytes`, so its absence is the ticket having the template.
+  if (verb === "new" && (req.body.body !== undefined || req.body.ac !== undefined) && answer.bodyBytes === undefined) {
+    err(`blaze new: ${cfg.origin} created ${answer.id} but ignored the body and acceptance criteria — `
+      + `the server is older than BLZ-729 (0.11.0); ${answer.id} has the template body`);
     return 1;
   }
   for (const w of Array.isArray(answer.warnings) ? answer.warnings : []) err(`warning: ${w}`);

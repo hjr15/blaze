@@ -19,10 +19,11 @@ import { resolvePorts, resolveWriteMode, withReadStorage } from "./model/write-p
 import { applyMove } from "./move.mjs";
 import { applyResolve } from "./resolve.mjs";
 import { applyLog } from "./log.mjs";
-import { applyEdit, applyToggleAc } from "./edit.mjs";
+import { applyEdit, applyToggleAc, applyBody, applyAcAdd } from "./edit.mjs";
 import { applyNew } from "./new.mjs";
 import { applyLink } from "./link.mjs";
 import { newRequestOrErrors, withoutServerPaths } from "./model/new-request.mjs";
+import { acItemCount } from "./model/ticket-body.mjs";
 import { ticketJson } from "./model/ticket-json.mjs";
 import { WORKFLOWS } from "./model/workflows.mjs";
 import { isType } from "./model/schema.mjs";
@@ -969,8 +970,33 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
         return done(r);
       }
       if (u.pathname === "/api/ac") {
-        const r = await applyToggleAc(projectsDir, payload.id, { index: payload.index, checked: payload.checked }, { today, writePort, readStorage, actor, source: "api" });
-        return done(r);
+        // BLZ-729: the payload's shape is the caller's mistake (422), checked before any read —
+        // a string index used to reach the toggle and compare as one.
+        const p = payload && typeof payload === "object" ? payload : {};
+        const bad = [];
+        if (!Number.isInteger(p.index) || p.index < 0) bad.push("index must be a non-negative integer");
+        if (typeof p.checked !== "boolean") bad.push("checked must be true or false");
+        if (bad.length) return json(422, { errors: bad });
+        const r = await applyToggleAc(projectsDir, p.id, { index: p.index, checked: p.checked }, { today, writePort, readStorage, actor, source: "api" });
+        return done(r, { acItems: r.acItems });
+      }
+      if (u.pathname === "/api/body" || u.pathname === "/api/ac/add") {
+        // BLZ-729 (spec §7 E3, OD-B5): a remote agent replaces a ticket's body (or just its AC
+        // section), or appends one criterion. The id's shape is checked here; the body/AC shapes
+        // are checked by applyBody/applyAcAdd BEFORE they read anything, so every refusal is a 422
+        // that touched nothing. Then the composed body's byte cap and validateTicket. Any write
+        // mode, as /api/ac is: the write goes through the resolved port.
+        const p = payload && typeof payload === "object" ? payload : {};
+        if (typeof p.id !== "string" || !p.id) return json(422, { errors: ["id must be a non-empty string"] });
+        if (u.pathname === "/api/body") {
+          const r = await applyBody(projectsDir, p.id, { body: p.body ?? null, ac: p.ac ?? null },
+            { today, writePort, readStorage, actor, source: "api" });
+          if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
+          return json(200, { ok: true, bodyBytes: r.bodyBytes, acItems: r.acItems });
+        }
+        const r = await applyAcAdd(projectsDir, p.id, { text: p.text }, { today, writePort, readStorage, actor, source: "api" });
+        if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
+        return json(200, { ok: true, index: r.index, acItems: r.acItems });
       }
       if (u.pathname === "/api/new") {
         // BLZ-684 (final review): db mode only, refused BEFORE anything can allocate. A file
@@ -1000,7 +1026,10 @@ export function startServer({ projectsDir = resolveRoots().projectsDir, root = r
           throw e;
         }
         if (!r.ok) return json(422, { errors: withoutServerPaths(r.errors, { projectsDir }) });
-        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db" });
+        // BLZ-729: ALWAYS echo what was stored, so a client that sent a body or AC list can tell
+        // this server from one older than BLZ-729, which drops both and answers without these.
+        return json(200, { ok: true, id: r.id, warnings: r.warnings, db: mode === "db",
+                           bodyBytes: Buffer.byteLength(r.body, "utf8"), acItems: acItemCount(r.body) });
       }
       if (u.pathname === "/api/link") {
         // BLZ-684: classified `write` in ROUTE_SCOPES since BLZ-323, and answered by NO handler

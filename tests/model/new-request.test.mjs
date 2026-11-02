@@ -13,7 +13,14 @@ test("a well-formed body becomes applyNew's options, untouched", () => {
   assert.deepEqual(newRequestOrErrors({ project: "ENG", type: "task", title: "t", estimate: 30,
     labels: ["a"], components: ["c"], parent: "ENG-1", not_before: "2026-11-01" }, ["ENG"]),
     { request: { project: "ENG", type: "task", title: "t", priority: "medium", labels: ["a"],
-                 extra: { parent: "ENG-1", not_before: "2026-11-01", components: ["c"], estimate: 30 } } });
+                 extra: { parent: "ENG-1", not_before: "2026-11-01", components: ["c"], estimate: 30 },
+                 body: null, ac: null } }, "BLZ-729: no body and no AC is null for each — applyNew keeps the template");
+  // BLZ-729: a body and AC list arrive normalised, and their refusals join the rest.
+  const ok = { project: "ENG", type: "task", title: "t", estimate: 30 };
+  const r = newRequestOrErrors({ ...ok, body: "why\r\n", ac: ["- [x] a"] }, ["ENG"]).request;
+  assert.deepEqual([r.body, r.ac], ["why\n", [{ text: "a", checked: true }]]);
+  assert.deepEqual(newRequestOrErrors({ ...ok, priority: 2, body: "", ac: [] }, ["ENG"]).errors,
+    ["priority must be a string", "body must not be blank", "ac takes 1 to 100 items"]);
   assert.equal(newRequestOrErrors({ project: "NEW", type: "task", title: "t" }, []).request.project, "NEW",
     "a board that configures no projects keeps blaze new's own behaviour");
 });

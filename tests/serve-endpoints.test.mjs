@@ -166,7 +166,8 @@ test("POST /api/ac toggles an AC checkbox and creates no commit", async () => {
   const fx = repo();
   const { server, base } = await boot(fx);
   const before = headOf(fx.root);
-  await assertWroteNoCommit(fx, await post(base, "/api/ac", { id: "OBA-1", index: 0, checked: true }));
+  // BLZ-729: the 200 answer also counts the AC items, so a remote caller sees what it toggled.
+  await assertWroteNoCommit(fx, await post(base, "/api/ac", { id: "OBA-1", index: 0, checked: true }), { acItems: 1 });
   assert.match(readFileSync(join(fx.projects, "OBA", "in-review", "OBA-1.md"), "utf8"), /- \[x\] one/);
   assert.equal(headOf(fx.root), before, "the board server must not commit");
   server.close(); rmSync(fx.root, { recursive: true, force: true });

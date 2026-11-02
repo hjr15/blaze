@@ -16,10 +16,11 @@ version the changes yourself. See [commitMode (ignored)](#commitmode-ignored) an
 | [`sprint`](#sprint) | Sprint registry | yes (`new`); no (`list`/`active`) |
 | [`reindex`](#reindex) | Rebuild derived caches | no (cache-only) |
 | [`move`](#move) | Change a ticket's status | yes |
-| [`edit`](#edit) | Edit one field on a ticket | yes |
+| [`edit`](#edit) | Edit one field on a ticket, or replace its body or acceptance criteria from files | yes |
 | [`link`](#link) | Add/remove a typed link between tickets | yes |
 | [`resolve`](#resolve) | Set/override resolution without moving the file | yes |
 | [`log`](#log) | Append a worklog entry | yes |
+| [`ac`](#ac) | Add or toggle a ticket's acceptance criteria (remote mode only) | yes |
 | [`import`](#import) | Create or update tickets from a canonical or mapped CSV or a Markdown tree | with `--apply` |
 | [`rollup`](#rollup) | Print rolled-up time for a node or every goal/epic | no |
 | [`matrices`](#matrices) | Regenerate the requirements and architecture matrices | yes; no with `--check` |
@@ -277,6 +278,12 @@ rejected.
 | `--sprint <id>` | Assign the ticket to a sprint by id. | none |
 | `--start <date>` | Planned start date. | none |
 | `--due <date>` | Due date. | none |
+| `--body-file <path>` | The ticket body, read from a file (not blank, no NUL; CRLF is stored as LF). The 131072-byte cap is on the **stored** body: the file plus the one trailing newline that is added when it has none (and the criteria section, if `--ac-file` is given). A 131072-byte file with no final newline is therefore refused (`the stored body would be 131073 bytes`); end it with a newline and keep it to 131072 bytes in all. BLZ-729. | the template |
+| `--ac-file <path>` | The acceptance criteria, one per line; blank lines are skipped, and a leading `- `, `- [ ] ` or `- [x] ` is read as a checkbox. At most 100 items of 2000 bytes each. With a body that has an `## Acceptance Criteria` section the section is replaced; otherwise it is added before `## Notes`, or at the end. BLZ-729. | the template's one empty box |
+
+Both file flags work locally and in [remote mode](#remote-mode). A file that cannot be read is
+refused with the flag, the path and the error code (`blaze new: cannot read --body-file p.md: ENOENT`),
+never the file's content, and nothing is created.
 
 ## sprint
 
@@ -370,14 +377,20 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 |---|---|
 | `--projects A,B` | Audit only these project keys. Default: every project in the config. |
 | `--kind <kind>` | List every finding of one kind, with its detail, instead of the summary. |
-| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present), or when a kind is unknown. It judges every finding, whatever `--kind` narrowed the listing to. The plain report ends `fail-on <kinds>: N finding(s) — FAIL`, `— pass` or `— could not observe the whole board`; under `--json` the same verdict is `failOnVerdict` (`fail`, `pass`, `could-not-observe`, with the blinding kinds in `failOnBlind`), and a `fail` is also said on stderr. `ok` in the JSON is still the hard-kind verdict, not the gate's. |
+| `--fail-on <kind,…>` | Decide the exit code by these kinds only, hard or soft: `1` if any finding of one of them, else `0` — whatever else the run found. Exit `2` instead when the run could not observe the whole board (`unreadable-ticket-directory` or `config-unloadable` present, or an **empty read**: 0 tickets read across at least one resolved project), or when a kind is unknown. It judges every finding, whatever `--kind` narrowed the listing to. The plain report ends `fail-on <kinds>: N finding(s) — FAIL`, `— pass` or `— could not observe the whole board`; under `--json` the same verdict is `failOnVerdict` (`fail`, `pass`, `could-not-observe`, with the blinding kinds in `failOnBlind`, `"empty-read"` among them), and a `fail` is also said on stderr. `ok` in the JSON is still the hard-kind verdict, not the gate's. |
 | `--json` | Emit the full report as JSON. |
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
 Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
-the corpus is empty — a run that measured nothing is never reported as a pass. With
+no project resolves — a run that measured nothing is never reported as a pass. With
 `--fail-on`, `1` means a finding of a named kind and nothing else, and `2` also covers a run
-that could not read the whole board.
+that could not read the whole board, including a run that read 0 tickets across a project it
+resolved (`blaze audit: --fail-on cannot pass — 0 tickets were read across <n> project(s); an
+empty read is not a clean board`, BLZ-714). Without `--fail-on` an empty board still exits `0`.
+A `--json` report that reaches the report stage carries `ticketCount`, the number of in-scope
+tickets (those of the projects audited, after `--projects`) the run observed, with or without
+`--fail-on`, so a consumer can tell "no findings" from "nothing read". The early exits (no
+project resolves, an unreadable `project.json`, an unknown kind) print no JSON.
 
 **Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
 resolved store, so it works under `fs`, `dual` and `db`. Each rule started as the script's own,
@@ -460,9 +473,16 @@ file into the target status directory. It makes no commit (BLZ-254).
 
 ```
 blaze edit <id> <field> <value>
+blaze edit <id> [--body-file <path>] [--ac-file <path>]
 ```
 
-In-place edit of one whitelisted field. Any other field name errors.
+Two forms. The first is an in-place edit of one whitelisted field; any other field name errors. The second (below) replaces the body or the acceptance criteria.
+
+The second form (BLZ-729) replaces the ticket's whole body (`--body-file`), or just its
+`## Acceptance Criteria` section (`--ac-file`, one criterion per line), or both. It prints
+`<id>: body replaced (<bytes> bytes, <n> criteria)`. The limits are `blaze new`'s. A file flag
+cannot be mixed with `<field> <value>` (`usage: blaze edit <id> <field> <value…> | blaze edit <id> [--body-file P] [--ac-file Q]`).
+Neither `edit` nor `new` can leave the stored body past 131072 bytes (body plus criteria): the result is refused with `the stored body would be <n> bytes; the limit is 131072`.
 
 | Arg | Meaning |
 |---|---|
@@ -521,6 +541,26 @@ Appends a worklog entry to a ticket.
 | `--date YYYY-MM-DD` | Date of the entry. | today |
 | `--note "..."` | Free-text note on the entry. | none |
 
+## ac
+
+```
+blaze ac add <id> <text…>
+blaze ac toggle <id> <n> [--uncheck]
+```
+
+Remote mode only (BLZ-729): `ac` writes to the live board over HTTP, so without `BLAZE_REMOTE_URL`
+and a token it exits `1` with `blaze: ac writes to the live board over HTTP and runs in remote mode only`.
+`BLAZE_READONLY=1` refuses it as it refuses a remote `new`. Locally, edit the ticket file, or use
+`blaze edit <id> --ac-file`.
+
+| Subcommand | Meaning |
+|---|---|
+| `add <id> <text…>` | Appends one unchecked criterion (`POST /api/ac/add`). The scaffold's lone empty box is replaced rather than followed. Prints `<id>: criterion <n> added`. |
+| `toggle <id> <n>` | Checks criterion `<n>`, counting from 1 (`POST /api/ac`). `--uncheck` unchecks it. `<n>` must be a whole number from 1, else `blaze ac toggle: <n> must be a criterion number counting from 1`. Prints `<id>: criterion <n> checked` or `unchecked`. |
+
+`add` always appends unchecked: a `- [x]` prefix in the text is dropped. An append that would take
+the stored body past 131072 bytes is refused.
+
 ## import
 
 ```
@@ -572,11 +612,13 @@ was a zero `diff -r` against that script's output for the live board.
 | Flag | Meaning | Default |
 |---|---|---|
 | `--project <KEY>` | One project only. The key must be one `blaze.config.json` lists or the store holds; anything else (a typo, the wrong case) is refused with exit `1`, naming the known projects, and nothing is written or checked. | every project in `blaze.config.json` |
-| `--check` | Write nothing; exit `1` naming each file that differs from the tickets. Allowed under `BLAZE_READONLY`. | off |
+| `--check` | Write nothing; exit `1` naming each file that differs from the tickets, and exit `2` when `--out` does not exist, is not a directory or cannot be read (nothing to compare against: render with `--out <dir>` first). Allowed under `BLAZE_READONLY`. | off |
 | `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
 
-Exit `2` when there are no projects to render — a run that rendered nothing never reports
-"in sync". Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
+Exit `2` when there are no projects to render, and under `--check` when the directory is
+missing (BLZ-714) — a run that rendered or compared nothing never reports "in sync", and a
+missing directory is never reported as drift. A db board keeps no committed copy, so there
+`--check` is not the gate: render with `--out <dir>` and require exit `0`. Two rows that share a `ref` (or have none) are ordered by the ticket's path, which is
 what the script produced when its `glob` happened to return paths sorted; on a filesystem that
 returned them in another order the script's ties came out differently, so the first
 `blaze matrices` run on such a board may reorder those rows once. Under `db` a ticket has no
@@ -862,6 +904,9 @@ two machines creating at once never collide.
 | `blaze new …` | `POST /api/new` (**needs a db-mode board** — see below) |
 | `blaze move <id> <status>` | `POST /api/move` |
 | `blaze edit <id> <field> <value>` | `POST /api/edit` |
+| `blaze edit <id> [--body-file P] [--ac-file Q]` | `POST /api/body` (BLZ-729) |
+| `blaze ac add <id> <text…>` | `POST /api/ac/add` (BLZ-729) |
+| `blaze ac toggle <id> <n> [--uncheck]` | `POST /api/ac` (BLZ-729) |
 | `blaze resolve <id> <resolution>` | `POST /api/resolve` |
 | `blaze log <id> <minutes> [--date] [--note]` | `POST /api/log` |
 | `blaze link [--rm] <id> <TYPE> <target>` | `POST /api/link` |
@@ -872,7 +917,17 @@ two machines creating at once never collide.
 `POST /api/new` is answered only when the server runs the database write port
 (`BLAZE_WRITE_PORT=db`). On a file board it is refused `409` and `blaze new` prints that message:
 a file board allocates ids from git, which is single-machine, and the fetch would stall the
-server for every session. The other five verbs work on any board.
+server for every session. `move`, `edit` (both forms), `resolve`, `log`, `link` and `ac` work on any board.
+
+**Body and criteria (BLZ-729).** `blaze new --body-file P --ac-file Q`, `blaze edit <id> --body-file P`
+and `blaze ac add` need server 0.11.0 or newer (`blaze ac toggle` uses `/api/ac`, which a 0.10.0 server already has). The client reads the files itself and refuses, before
+sending anything, a `--body-file` over 131072 bytes or a request over 262144 bytes (a body of quote
+characters JSON-escapes to twice its size). Against an older server:
+
+- `new` with a body: the old server drops `body` and `ac` and answers 200, so the client exits `1`
+  with `blaze new: <origin> created <id> but ignored the body and acceptance criteria — the server is older than BLZ-729 (0.11.0); <id> has the template body`.
+- `edit` with a file flag and `ac add`: the route is a 404, and the client says
+  `blaze <verb>: the server at <origin> has no <path> — it is older than BLZ-729 (0.11.0)`.
 
 The arguments are the local command's own. Each prints one line ending `(remote: <origin>)`,
 or the server's refusal and exit `1`. Every **other** command — `audit`, `reconcile`, `db`,
