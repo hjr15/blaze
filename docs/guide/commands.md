@@ -382,13 +382,15 @@ The last four come from `scheduleFindings()` (ADR-0022, BLZ-379, BLZ-392) and ar
 | `projectsDir` | Audit a `projects/` tree outside the current board. |
 
 Exit code is `0` when clean or soft-only, `1` on any hard finding, and `2` when
-the corpus is empty — a run that measured nothing is never reported as a pass. With
+no project resolves — a run that measured nothing is never reported as a pass. With
 `--fail-on`, `1` means a finding of a named kind and nothing else, and `2` also covers a run
 that could not read the whole board, including a run that read 0 tickets across a project it
 resolved (`blaze audit: --fail-on cannot pass — 0 tickets were read across <n> project(s); an
 empty read is not a clean board`, BLZ-714). Without `--fail-on` an empty board still exits `0`.
-Every `--json` report carries `ticketCount`, the number of tickets the run observed, with or
-without `--fail-on`, so a consumer can tell "no findings" from "nothing read".
+A `--json` report that reaches the report stage carries `ticketCount`, the number of in-scope
+tickets (those of the projects audited, after `--projects`) the run observed, with or without
+`--fail-on`, so a consumer can tell "no findings" from "nothing read". The early exits (no
+project resolves, an unreadable `project.json`, an unknown kind) print no JSON.
 
 **Three kinds re-homed from blaze-pm's governance scripts** (BLZ-681). Each reads through the
 resolved store, so it works under `fs`, `dual` and `db`. Each rule started as the script's own,
@@ -610,7 +612,7 @@ was a zero `diff -r` against that script's output for the live board.
 | Flag | Meaning | Default |
 |---|---|---|
 | `--project <KEY>` | One project only. The key must be one `blaze.config.json` lists or the store holds; anything else (a typo, the wrong case) is refused with exit `1`, naming the known projects, and nothing is written or checked. | every project in `blaze.config.json` |
-| `--check` | Write nothing; exit `1` naming each file that differs from the tickets, and exit `2` when `--out` does not exist or is not a directory (nothing to compare against: render with `--out <dir>` first). Allowed under `BLAZE_READONLY`. | off |
+| `--check` | Write nothing; exit `1` naming each file that differs from the tickets, and exit `2` when `--out` does not exist, is not a directory or cannot be read (nothing to compare against: render with `--out <dir>` first). Allowed under `BLAZE_READONLY`. | off |
 | `--out <dir>` | Where the files live. | `<data root>/docs/matrices` |
 
 Exit `2` when there are no projects to render, and under `--check` when the directory is

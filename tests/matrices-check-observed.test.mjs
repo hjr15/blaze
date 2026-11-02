@@ -3,7 +3,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
+import { cpSync, symlinkSync, mkdtempSync, writeFileSync, readFileSync, existsSync, readdirSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join, dirname } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -60,4 +60,21 @@ test("BLZ-714: --check against a changed file is still drift, exit 1", () => {
   const r = matrices(root, ["--check", "--out", d]);
   assert.equal(r.status, 1, r.stderr);
   assert.match(r.stderr, /MATRIX DRIFT/);
+});
+
+test("BLZ-714: --check with a stat error other than ENOENT (a symlink loop) exits 2, not a stack trace", () => {
+  const root = copy();
+  const loop = join(root, "loop");
+  symlinkSync("loop", loop);
+  const r = matrices(root, ["--check", "--out", loop]);
+  assert.equal(r.status, 2, r.stdout + r.stderr);
+  assert.match(r.stderr, /--check has nothing to compare against/);
+  assert.doesNotMatch(r.stderr, /\n\s+at /, "no stack trace");
+});
+
+test("BLZ-714: project resolution comes first: --check --project TYPO --out missing exits 1", () => {
+  const root = copy();
+  const r = matrices(root, ["--check", "--project", "TYPO", "--out", join(root, "no-such-dir")]);
+  assert.equal(r.status, 1, r.stdout + r.stderr);
+  assert.match(r.stderr, /is not a project on this board/);
 });

@@ -60,3 +60,16 @@ test("BLZ-714 (prove-test-discriminates): one ticket makes the same --fail-on ru
   assert.equal(r.status, 0, r.stderr);
   assert.equal(JSON.parse(r.stdout).failOnVerdict, "pass");
 });
+
+test("BLZ-714: ticketCount counts the in-scope tickets, so --projects naming the empty project is an empty read", () => {
+  const projectsDir = board(3);
+  const dataRoot = dirname(projectsDir);
+  mkdirSync(join(projectsDir, "OPS", "defined"), { recursive: true });
+  writeFileSync(join(dataRoot, "blaze.config.json"), JSON.stringify({ projects: ["ENG", "OPS"] }));
+  const r = audit(projectsDir, ["--json", "--projects", "OPS", "--fail-on", "duplicate-status"]);
+  assert.equal(r.status, 2, r.stderr);
+  const j = JSON.parse(r.stdout);
+  assert.equal(j.ticketCount, 0, "ENG's 3 tickets are out of scope");
+  assert.ok(j.failOnBlind.includes("empty-read"));
+  assert.match(r.stderr, /0 tickets were read across 1 project/);
+});

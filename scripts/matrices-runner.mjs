@@ -92,10 +92,14 @@ const pathOf = rs.mode === "db"
 // normal misconfiguration, and 22 "drifted" files every night would hide it.
 if (opts.check) {
   let isDir = false;
-  try { isDir = statSync(out).isDirectory(); } catch (e) { if (e?.code !== "ENOENT" && e?.code !== "ENOTDIR") throw e; }
+  let why = "does not exist";
+  // Any stat failure (ENOENT, ENOTDIR, ELOOP, EACCES) means "could not run": exit 2, never a
+  // stack trace and exit 1, which is the drift code.
+  try { isDir = statSync(out).isDirectory(); if (!isDir) why = "is not a directory"; }
+  catch (e) { if (e?.code && e.code !== "ENOENT" && e.code !== "ENOTDIR") why = `cannot be read (${e.code})`; }
   if (!isDir) {
     console.error(`blaze matrices: --check has nothing to compare against — ${relative(process.cwd(), out) || out} `
-      + `does not exist; render with --out <dir> instead`);
+      + `${why}; render with --out <dir> instead`);
     process.exit(2);
   }
 }
